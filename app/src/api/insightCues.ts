@@ -30,6 +30,7 @@
 //          `label` for the tooltip.
 
 import type { ChartCue, ChartCueAnchor, ChartCuePolarity } from "./chartCues";
+import type { CellCue } from "./cellCues";
 import type { ChartSeriesSnapshot } from "./chartData";
 import type { Insight, InsightBundle } from "./insightsService";
 
@@ -53,27 +54,45 @@ function isIndex(v: unknown): v is number {
   return typeof v === "number" && Number.isInteger(v) && v >= 0;
 }
 
-/** The facts in a bundle's document, in Rust's kept (ranked) order; [] for anything malformed. */
-export function parseFacts(factsJson: string): FactRecord[] {
+/** The facts document: the facts plus the sheet row behind each dataset row. */
+export interface FactsDocument {
+  facts: FactRecord[];
+  /** `rowOrigins[i]` is the SHEET ROW of dataset row `i`; empty for a chart's series. */
+  rowOrigins: number[];
+  /** The sheet the dataset was read from, by name; null for a chart's series. */
+  sourceSheet: string | null;
+}
+
+const EMPTY_DOCUMENT: FactsDocument = { facts: [], rowOrigins: [], sourceSheet: null };
+
+/** The whole document; empty for anything malformed. */
+export function parseFactsDocument(factsJson: string): FactsDocument {
   let doc: unknown;
   try {
     doc = JSON.parse(factsJson);
   } catch {
-    return [];
+    return { ...EMPTY_DOCUMENT };
   }
-  if (!isRecord(doc) || !Array.isArray(doc.facts)) return [];
-  const out: FactRecord[] = [];
+  if (!isRecord(doc) || !Array.isArray(doc.facts)) return { ...EMPTY_DOCUMENT };
+  const sourceSheet = isRecord(doc.source) && typeof doc.source.sheet === "string" && doc.source.sheet !== "" ? doc.source.sheet : null;
+  const facts: FactRecord[] = [];
   for (const raw of doc.facts as unknown[]) {
     if (!isRecord(raw) || typeof raw.id !== "string" || !isRecord(raw.kind)) continue;
     if (typeof raw.kind.fact !== "string") continue;
-    out.push({
+    facts.push({
       id: raw.id,
       score: typeof raw.score === "number" ? raw.score : 0,
       evidenceA1: Array.isArray(raw.evidenceA1) ? (raw.evidenceA1 as string[]) : [],
       kind: raw.kind as FactRecord["kind"],
     });
   }
-  return out;
+  const rowOrigins = Array.isArray(doc.rowOrigins) ? (doc.rowOrigins as unknown[]).filter(isIndex) : [];
+  return { facts, rowOrigins, sourceSheet };
+}
+
+/** The facts in a bundle's document, in Rust's kept (ranked) order; [] for anything malformed. */
+export function parseFacts(factsJson: string): FactRecord[] {
+  return parseFactsDocument(factsJson).facts;
 }
 
 /** A subject's name: `{ type: "column" | "measure", name, … }`. */
@@ -345,6 +364,166 @@ export function cuesForChart(bundle: InsightBundle, snapshot: ChartSeriesSnapsho
     if (placed === 0 && firstFailure) dropped.push({ factId: fact.id, reason: firstFailure });
   }
 
+  return { cues, dropped };
+}
+
+// ============================================================================
+// Cells: the sheet and pivot targets (IO-4)
+// ============================================================================
+
+/** A column subject as Rust writes it: `{ type: "column", name, sheet, range }`. */
+function columnOf(v: unknown): { name: string; sheet: string; startCol: number } | null {
+  if (!isRecord(v) || v.type !== "column" || typeof v.name !== "string" || typeof v.sheet !== "string") return null;
+  const range = v.range;
+  if (!isRecord(range) || !isIndex(range.startCol)) return null;
+  return { name: v.name, sheet: v.sheet, startCol: range.startCol };
+}
+
+export type CellCueDropReason = "sheet-not-open" | "row-not-in-dataset" | "no-position-in-fact" | "malformed-fact";
+
+export interface CellCueDrop {
+  factId: string;
+  reason: CellCueDropReason;
+}
+
+export interface CellCueSet {
+  cues: CellCue[];
+  dropped: CellCueDrop[];
+}
+
+interface CellDraft {
+  tone: CueTone;
+  /** A dataset row (index into rowOrigins), or an absolute sheet row for kinds that carry one. */
+  row: { dataset: number } | { sheet: number };
+  col: number;
+  sheet: string;
+  description: string;
+}
+
+type CellRule = (kind: FactRecord["kind"]) => CellDraft[] | CellCueDropReason | null;
+
+/**
+ * The §4.3 table for cells: the kinds whose index names a dataset row become
+ * a cue on the cell at (that row's sheet row, the subject column). Summaries,
+ * correlation, seasonality point at nothing; `dominance` names a category
+ * value in a column the facts document does not locate; `errors` and
+ * `mixedTypes` name a column, not a row (a column-wide cue is a later kind).
+ */
+const CELL_RULES: Readonly<Record<string, CellRule>> = {
+  extremes: (k) => {
+    const c = columnOf(k.subject);
+    if (!c || !isIndex(k.bestIndex) || !isIndex(k.worstIndex)) return "malformed-fact";
+    return [
+      { tone: "high", row: { dataset: k.bestIndex }, col: c.startCol, sheet: c.sheet, description: `Highest ${c.name}` },
+      { tone: "low", row: { dataset: k.worstIndex }, col: c.startCol, sheet: c.sheet, description: `Lowest ${c.name}` },
+    ];
+  },
+  smoothedPeak: (k) => {
+    const c = columnOf(k.subject);
+    if (!c || !isIndex(k.peakIndex) || !isIndex(k.troughIndex)) return "malformed-fact";
+    return [
+      { tone: "high", row: { dataset: k.peakIndex }, col: c.startCol, sheet: c.sheet, description: `Peak of ${c.name} (smoothed)` },
+      { tone: "low", row: { dataset: k.troughIndex }, col: c.startCol, sheet: c.sheet, description: `Trough of ${c.name} (smoothed)` },
+    ];
+  },
+  outliers: (k) => {
+    const c = columnOf(k.subject);
+    if (!c || !Array.isArray(k.points)) return "malformed-fact";
+    const out: CellDraft[] = [];
+    for (const p of k.points as unknown[]) {
+      if (!isRecord(p) || !isIndex(p.index)) return "malformed-fact";
+      out.push({ tone: "attention", row: { dataset: p.index }, col: c.startCol, sheet: c.sheet, description: `Outlier in ${c.name}` });
+    }
+    return out;
+  },
+  changePoint: (k) => {
+    const c = columnOf(k.subject);
+    if (!c || !isIndex(k.atIndex)) return "malformed-fact";
+    return [{ tone: "attention", row: { dataset: k.atIndex }, col: c.startCol, sheet: c.sheet, description: `Level shift in ${c.name}` }];
+  },
+  crossover: (k) => {
+    const a = columnOf(k.a);
+    const b = columnOf(k.b);
+    if (!a || !b || !isIndex(k.atIndex)) return "malformed-fact";
+    const description = `${a.name} and ${b.name} cross`;
+    return [
+      { tone: "neutral", row: { dataset: k.atIndex }, col: a.startCol, sheet: a.sheet, description },
+      { tone: "neutral", row: { dataset: k.atIndex }, col: b.startCol, sheet: b.sheet, description },
+    ];
+  },
+  duplicates: (k) => {
+    // `exampleRow` is a SHEET row already (hygiene.rs: "must be the sheet row").
+    if (!isIndex(k.exampleRow)) return "malformed-fact";
+    return null; // needs the dataset's first column; handled by the caller with the source range
+  },
+  pareto: () => "no-position-in-fact",
+  dominance: () => "no-position-in-fact",
+};
+
+/** The fact kinds this table turns into cell cues. Exported for the tests. */
+export const CELL_CUE_FACT_KINDS: readonly string[] = Object.freeze(["extremes", "smoothedPeak", "outliers", "changePoint", "crossover"]);
+
+/**
+ * Every cell cue the bundle justifies, in rank order.
+ *
+ * `sheetIndexOf` turns a sheet NAME (what the facts carry) into the open
+ * workbook's index; a name that resolves to nothing drops the fact with
+ * `sheet-not-open` rather than marking a cell on whatever sheet is in front.
+ * A dataset row past `rowOrigins` — the bundle predates a change that shrank
+ * the range — drops with `row-not-in-dataset`.
+ */
+export function cuesForSheet(
+  bundle: InsightBundle,
+  sheetIndexOf: (sheetName: string) => number | null,
+): CellCueSet {
+  const cues: CellCue[] = [];
+  const dropped: CellCueDrop[] = [];
+  const { facts, rowOrigins } = parseFactsDocument(bundle.factsJson);
+  const insightsById = new Map(bundle.insights.map((i) => [i.id, i] as const));
+
+  for (const fact of facts) {
+    const rule = CELL_RULES[fact.kind.fact];
+    if (!rule) continue;
+    const drafts = rule(fact.kind);
+    if (drafts === null) continue;
+    if (typeof drafts === "string") {
+      dropped.push({ factId: fact.id, reason: drafts });
+      continue;
+    }
+    const insight = insightsById.get(fact.id);
+    const direction = directionOf(insight);
+    let firstFailure: CellCueDropReason | null = null;
+    let placed = 0;
+    for (const d of drafts) {
+      const sheetIndex = sheetIndexOf(d.sheet);
+      if (sheetIndex === null) {
+        firstFailure ??= "sheet-not-open";
+        continue;
+      }
+      let row: number;
+      if ("sheet" in d.row) {
+        row = d.row.sheet;
+      } else {
+        const origin = rowOrigins[d.row.dataset];
+        if (origin === undefined) {
+          firstFailure ??= "row-not-in-dataset";
+          continue;
+        }
+        row = origin;
+      }
+      cues.push({
+        factId: fact.id,
+        polarity: polarityFor(d.tone, direction),
+        description: d.description,
+        ...(insight && insight.text ? { label: insight.text } : {}),
+        sheetIndex,
+        row,
+        col: d.col,
+      });
+      placed++;
+    }
+    if (placed === 0 && firstFailure) dropped.push({ factId: fact.id, reason: firstFailure });
+  }
   return { cues, dropped };
 }
 

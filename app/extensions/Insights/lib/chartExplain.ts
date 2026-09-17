@@ -44,7 +44,7 @@ function withNote(bundle: InsightBundle, note: string): InsightBundle {
 
 /**
  * The `insights_for_series` request a snapshot becomes. One function, because
- * the overlay (chartCueSpike, later the pane's "Show on chart") must send
+ * the overlay (`overlay.ts`, behind the pane's "Show on chart") must send
  * EXACTLY what "Explain this chart" sends: the same numbers in, the same facts
  * out, one bundle behind both views.
  */
@@ -78,7 +78,7 @@ export async function explainChart(
   openPane: () => void,
 ): Promise<void> {
   openPane();
-  const token = beginRun("this chart");
+  const token = beginRun("this chart", { kind: "chart", chartId });
 
   let snapshot;
   try {

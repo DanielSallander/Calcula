@@ -40,6 +40,13 @@ export type InsightsSource = "selection" | "model";
 
 export type InsightsStatus = "idle" | "running" | "ready" | "error";
 
+/** What the shown bundle was computed FROM — enough to act on it, not only name it. */
+export type InsightsOrigin =
+  | { kind: "range"; request: RangeInsightsRequest }
+  | { kind: "pivot"; pivotId: string }
+  | { kind: "model"; connectionId: string }
+  | { kind: "chart"; chartId: string };
+
 export interface InsightsPaneState {
   /** The source switch's position. Never changes on its own. */
   source: InsightsSource;
@@ -50,6 +57,8 @@ export interface InsightsPaneState {
   error: string | null;
   /** What the shown bundle was computed FROM, e.g. "Sheet1!B2:D40". */
   originLabel: string | null;
+  /** The origin as something the pane can act on ("Show on chart"), or null. */
+  origin: InsightsOrigin | null;
   /** When it was computed (epoch ms). The model path renders this as "as of". */
   computedAt: number | null;
   /** The workbook's BI connections. Empty means there is no model path at all. */
@@ -66,6 +75,7 @@ const INITIAL: InsightsPaneState = {
   bundle: null,
   error: null,
   originLabel: null,
+  origin: null,
   computedAt: null,
   connections: [],
   connectionId: null,
@@ -214,10 +224,21 @@ export function describeSelection(): SelectionTarget | null {
  * has anything to send, and the pane should say it is working during that
  * resolution rather than sitting on the previous answer.
  */
-export function beginRun(originLabel: string): number {
+export function beginRun(originLabel: string, origin: InsightsOrigin | null = null): number {
   runToken += 1;
-  set({ status: "running", error: null, originLabel, expandedWhy: [] });
+  set({ status: "running", error: null, originLabel, origin, expandedWhy: [] });
   return runToken;
+}
+
+/**
+ * Replace the bundle in place when the SAME origin was recomputed — the
+ * overlay following a chart's data — without resetting the reader's expanded
+ * "why" lists. Ignored when the pane has moved on to another origin.
+ */
+export function refreshBundleFor(origin: InsightsOrigin, bundle: InsightBundle): void {
+  const current = state.origin;
+  if (!current || JSON.stringify(current) !== JSON.stringify(origin)) return;
+  set({ status: "ready", bundle, error: null, computedAt: Date.now() });
 }
 
 /** Publish a bundle, unless a newer run has already started. */
@@ -253,7 +274,7 @@ export async function analyzeSelection(): Promise<void> {
     failRun(token, "Select a range on the grid first, then analyse it.");
     return;
   }
-  const token = beginRun(target.label);
+  const token = beginRun(target.label, { kind: "range", request: target.request });
   try {
     const bundle = await analyzeRangeCommand(target.request);
     completeRun(token, bundle);
@@ -267,7 +288,7 @@ export async function analyzeModel(): Promise<void> {
   const connectionId = state.connectionId;
   const name =
     state.connections.find((c) => c.id === connectionId)?.name ?? connectionId ?? "the model";
-  const token = beginRun(name);
+  const token = beginRun(name, connectionId ? { kind: "model", connectionId } : null);
   if (!connectionId) {
     failRun(token, "This workbook has no semantic model to analyse.");
     return;

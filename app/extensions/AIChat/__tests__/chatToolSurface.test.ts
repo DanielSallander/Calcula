@@ -28,6 +28,7 @@ import {
   TOOLS, DRAFT_OBJECT_TYPES, TOOL_NAMES, AUTORUN_TOOLS, SYSTEM_PROMPT,
   CORE_TOOLS, CORE_TOOL_NAMES, buildSystemPrompt,
 } from "../lib/chatTools";
+import { CLIENT_TOOL_NAMES, runClientTool } from "../lib/clientTools";
 
 const REPO = path.resolve(__dirname, "../../../..");
 const AI_CHAT_RS = path.join(REPO, "app/src-tauri/src/ai/tools.rs");
@@ -80,6 +81,8 @@ function rustObjectTypes(): string[] {
 
 const ARMS = dispatcherArms();
 const DECLARED = TOOLS.map((t) => t.name);
+/** Tools served in the webview instead of by a Rust arm (`lib/clientTools.ts`). */
+const CLIENT = [...CLIENT_TOOL_NAMES];
 
 // ---------------------------------------------------------------------------
 
@@ -90,14 +93,24 @@ describe("in-app chat tool surface", () => {
     expect(DECLARED.length).toBeGreaterThan(20);
   });
 
-  it("declares no tool the Rust dispatcher cannot serve", () => {
-    const orphans = DECLARED.filter((n) => !ARMS.includes(n));
+  it("declares no tool that neither the Rust dispatcher nor a client handler can serve", () => {
+    const orphans = DECLARED.filter((n) => !ARMS.includes(n) && !CLIENT.includes(n));
     expect(orphans, `Declared to the model but unreachable: ${orphans.join(", ")}. ${FIX}`).toEqual([]);
   });
 
   it("dispatches no tool the model is never told about", () => {
     const unreachable = ARMS.filter((n) => !DECLARED.includes(n));
     expect(unreachable, `Dispatcher arms the model can never call: ${unreachable.join(", ")}. ${FIX}`).toEqual([]);
+  });
+
+  it("serves every client tool in exactly one place: declared, handled here, and NOT also a Rust arm", () => {
+    for (const n of CLIENT) {
+      expect(DECLARED, `client tool ${n} is not declared in TOOLS`).toContain(n);
+      expect(ARMS, `client tool ${n} also has a Rust arm — two servers for one name`).not.toContain(n);
+      expect(runClientTool(n, {}), `client tool ${n} has no handler`).not.toBeNull();
+    }
+    // And a name nobody owns is answered by null, so the Rust path stays the default.
+    expect(runClientTool("list_charts", {})).toBeNull();
   });
 
   it("declares every tool exactly once", () => {

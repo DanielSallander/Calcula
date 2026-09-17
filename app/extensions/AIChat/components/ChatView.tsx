@@ -43,6 +43,7 @@ import {
 } from "@api";
 import { aiChatBackend } from "../lib/aiChatBackend";
 import { TOOLS, TOOL_NAMES, AUTORUN_TOOLS, buildSystemPrompt } from "../lib/chatTools";
+import { runClientTool } from "../lib/clientTools";
 import {
   AI_STREAM_EVENT, STREAM_CANCELLED, TOOL_USE_TEMPERATURE,
   type ChatBlock, type ChatMessage, type ChatResponse, type StreamEvent,
@@ -721,10 +722,16 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
               continue;
             }
             const before = draftIdsRef.current.length;
-            const result = await aiChatBackend.invoke<string>("ai_chat_run_tool", {
-              name: tu.name,
-              input: tu.input ?? {},
-            });
+            // A tool that lives in the webview (the insight overlay) runs here;
+            // everything else is the backend's. `runClientTool` answers null
+            // for a name it does not own, so the Rust dispatcher stays the
+            // default and the surface test pins which names are which.
+            const result =
+              (await runClientTool(tu.name, tu.input)) ??
+              (await aiChatBackend.invoke<string>("ai_chat_run_tool", {
+                name: tu.name,
+                input: tu.input ?? {},
+              }));
             const ms = performance.now() - started;
             // Prefer the id delivered as DATA on mcp:script-draft; fall back to
             // the backend's own result sentence only if no event arrived.

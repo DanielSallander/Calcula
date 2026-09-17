@@ -2746,6 +2746,8 @@ export type {
   InsightEvidence,
   InsightProvenance,
   InsightsProvider,
+  PointsOfInterestTarget,
+  PointsOfInterestResult,
   ModelConnection,
   ModelInsightsRequest,
   RangeInsightsRequest,
@@ -2791,8 +2793,25 @@ export {
   clearChartCues,
   clearAllChartCues,
   getChartCues,
+  getChartOverlay,
   listChartsWithCues,
   onChartCuesChanged,
+  chartCueSteps,
+  getChartCueStep,
+  setChartCueStep,
+  stepChartCues,
+  visibleChartCues,
+  setSelectedChartCue,
+  getSelectedChartCue,
+  setChartComments,
+  getChartComments,
+  announceChartDataChanged,
+  onChartDataChanged,
+  registerChartCueHost,
+  getChartCueHost,
+  keepChartCue,
+  keepChartComment,
+  snapshotChart,
 } from "./chartCues";
 
 export type {
@@ -2804,11 +2823,50 @@ export type {
   ChartCueLevelAnchor,
   ChartCueKind,
   ChartCuePolarity,
+  ChartCueComment,
+  ChartCueStep,
+  ChartOverlayState,
+  ChartCueHost,
 } from "./chartCues";
 
-// The cue rules (IO-2): facts → cues, validated against the chart's snapshot.
-export { cuesForChart, stepsOf, parseFacts, polarityFor, directionOf, CHART_CUE_FACT_KINDS } from "./insightCues";
-export type { ChartCueSet, CueDrop, CueDropReason, CueTone, FactRecord } from "./insightCues";
+// The cue rules (IO-2, IO-4): facts → cues, validated against the chart's
+// snapshot or placed on the sheet rows the facts document names.
+export {
+  cuesForChart,
+  cuesForSheet,
+  stepsOf,
+  parseFacts,
+  parseFactsDocument,
+  polarityFor,
+  directionOf,
+  CHART_CUE_FACT_KINDS,
+  CELL_CUE_FACT_KINDS,
+} from "./insightCues";
+export type {
+  ChartCueSet,
+  CueDrop,
+  CueDropReason,
+  CueTone,
+  FactRecord,
+  FactsDocument,
+  CellCueSet,
+  CellCueDrop,
+  CellCueDropReason,
+} from "./insightCues";
+
+// Transient "points of interest" on CELLS (a range's or a pivot's), painted by
+// an over-selection cell decoration the Insights extension registers.
+export {
+  setCellCues,
+  clearCellCues,
+  clearAllCellCues,
+  getCellCues,
+  listCellCueOwners,
+  cellCuesAt,
+  hasAnyCellCues,
+  onCellCuesChanged,
+} from "./cellCues";
+export type { CellCue } from "./cellCues";
 
 export {
   registerChartContextMenuContribution,

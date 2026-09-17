@@ -26,7 +26,21 @@ import { AppEvents, onAppEvent } from "@api/events";
 import { insightsBackend } from "./lib/backend";
 import { createInsightsProvider } from "./lib/provider";
 import { registerChartExplain } from "./lib/chartExplain";
-import { RING_BEST_ON_SELECTED_CHART_COMMAND, ringBestOnSelectedChart } from "./lib/chartCueSpike";
+import { registerOverlayMenu } from "./lib/overlayMenu";
+import { followChartData, loadComments, resetOverlays, showOverlay, hideOverlay, isOverlayOn } from "./lib/overlay";
+import {
+  followSheetData,
+  hideSheetOverlay,
+  isSheetOverlayOn,
+  pivotRect,
+  registerCellCueDecoration,
+  resetSheetOverlays,
+  showSheetOverlay,
+  type SheetOverlayOwner,
+} from "./lib/sheetOverlay";
+import { getSelectedChartId } from "@api/chartData";
+import { getGridRegions } from "@api/gridOverlays";
+import { showToast } from "@api/notifications";
 import {
   analyzeSelection,
   refreshConnections,
@@ -37,8 +51,10 @@ import {
   INSIGHTS_ANALYZE_SELECTION_COMMAND,
   INSIGHTS_DATA_MENU_ITEM_ID,
   INSIGHTS_GRID_MENU_ITEM_ID,
+  INSIGHTS_GRID_OVERLAY_MENU_ITEM_ID,
   INSIGHTS_PANE_ID,
   INSIGHTS_PANE_TITLE,
+  INSIGHTS_TOGGLE_OVERLAY_COMMAND,
   InsightsManifest,
 } from "./manifest";
 
@@ -121,15 +137,80 @@ function activate(context: ExtensionContext): void {
   // 6. "Explain this chart" on the chart context menu.
   cleanupFns.push(registerChartExplain(openPane));
 
-  // 6b. IO-0 spike: a HIDDEN developer command (no menu, no button) that rings
-  //     Extremes.best on the selected chart, or clears the rings if it has
-  //     them. The user surfaces (context menu, pane) come with IO-3.
-  context.commands.register(RING_BEST_ON_SELECTED_CHART_COMMAND, async () => {
-    const result = await ringBestOnSelectedChart();
-    console.info("[Insights] ring best on selected chart:", result);
-    return result;
+  // 6b. The overlay: "Show points of interest" and the cue-scoped items on the
+  //     chart context menu; a command for the selected chart (palette,
+  //     keybinding, script); the data-changed subscription that keeps every
+  //     overlay object true; the persisted comments.
+  cleanupFns.push(registerOverlayMenu());
+  context.commands.register(INSIGHTS_TOGGLE_OVERLAY_COMMAND, async () => {
+    const chartId = getSelectedChartId();
+    if (!chartId) return { outcome: "refused", chartId: null, reason: "Select a chart first." };
+    if (isOverlayOn(chartId)) {
+      hideOverlay(chartId);
+      return { outcome: "hidden", chartId };
+    }
+    return showOverlay(chartId);
   });
-  cleanupFns.push(() => context.commands.unregister(RING_BEST_ON_SELECTED_CHART_COMMAND));
+  cleanupFns.push(() => context.commands.unregister(INSIGHTS_TOGGLE_OVERLAY_COMMAND));
+  cleanupFns.push(followChartData());
+  void loadComments();
+  const onInsightsRefresh = (): void => void loadComments();
+  window.addEventListener("insights:refresh", onInsightsRefresh);
+  cleanupFns.push(() => window.removeEventListener("insights:refresh", onInsightsRefresh));
+
+  // 6c. The overlay on cells: a range's or a pivot's points of interest, drawn
+  //     by an over-selection cell decoration (which the core replays after the
+  //     pivot overlay, so it reaches a pivot's cells too). One grid menu item,
+  //     scoped to a real rectangle or a click inside a pivot; it toggles.
+  cleanupFns.push(registerCellCueDecoration());
+  cleanupFns.push(followSheetData());
+  const sheetOwnerFor = (context: GridMenuContext): SheetOverlayOwner | null => {
+    const cell = context.clickedCell;
+    if (cell) {
+      const region = getGridRegions().find((r) => {
+        if (r.type !== "pivot" || r.data?.isEmpty) return false;
+        const g = r as unknown as { startRow: number; startCol: number; endRow: number; endCol: number };
+        return cell.row >= g.startRow && cell.row <= g.endRow && cell.col >= g.startCol && cell.col <= g.endCol;
+      });
+      const pivotId = region?.data?.pivotId;
+      if (typeof pivotId === "string" && pivotRect(pivotId)) return { kind: "pivot", pivotId };
+    }
+    if (!isMultiCellSelection(context)) return null;
+    const sel = context.selection!;
+    return {
+      kind: "range",
+      request: {
+        sheetIndex: context.sheetIndex,
+        startRow: Math.min(sel.startRow, sel.endRow),
+        startCol: Math.min(sel.startCol, sel.endCol),
+        endRow: Math.max(sel.startRow, sel.endRow),
+        endCol: Math.max(sel.startCol, sel.endCol),
+      },
+    };
+  };
+  gridExtensions.registerContextMenuItem({
+    id: INSIGHTS_GRID_OVERLAY_MENU_ITEM_ID,
+    label: (context: GridMenuContext) => {
+      const owner = sheetOwnerFor(context);
+      return owner && isSheetOverlayOn(owner) ? "Hide points of interest" : "Show points of interest";
+    },
+    group: GridMenuGroups.DATA,
+    order: 61,
+    visible: (context: GridMenuContext) => sheetOwnerFor(context) !== null,
+    onClick: (context: GridMenuContext) => {
+      const owner = sheetOwnerFor(context);
+      if (!owner) return;
+      if (isSheetOverlayOn(owner)) {
+        hideSheetOverlay(owner);
+        return;
+      }
+      void showSheetOverlay(owner).then((r) => {
+        if (r.outcome === "refused") showToast(r.reason, { variant: "warning" });
+        else if (r.cueSet.cues.length === 0) showToast("Nothing stands out here.", { variant: "info" });
+      });
+    },
+  });
+  cleanupFns.push(() => gridExtensions.unregisterContextMenuItem(INSIGHTS_GRID_OVERLAY_MENU_ITEM_ID));
 
   // 7. The document can be replaced under us (File > New / File > Open, and the
   //    .calp working-copy open that announces the same way). The previous
@@ -138,11 +219,16 @@ function activate(context: ExtensionContext): void {
   //    looking at.
   const onDocumentReplaced = (): void => {
     resetInsightsStore();
+    resetOverlays();
+    resetSheetOverlays();
     void refreshConnections();
   };
   for (const evt of [AppEvents.AFTER_OPEN, AppEvents.AFTER_NEW] as const) {
     cleanupFns.push(onAppEvent(evt, onDocumentReplaced));
   }
+  // The comments belong to the workbook that was opened; Charts clears the
+  // transient store on the same event, so they are re-pushed after it.
+  cleanupFns.push(onAppEvent(AppEvents.AFTER_OPEN, () => void loadComments()));
 
   // 8. Seed the connection cache `hasModel()` answers from.
   void refreshConnections();
@@ -164,6 +250,8 @@ function deactivate(): void {
   }
   cleanupFns.length = 0;
   resetInsightsStore();
+  resetOverlays();
+  resetSheetOverlays();
   isActivated = false;
   console.log("[Insights] Deactivated.");
 }

@@ -748,15 +748,28 @@ export const chartSpecJsonSchema: object = {
       },
       additionalProperties: false,
     },
+    MarkerMarkOptions: {
+      type: "object",
+      description: "Options for marker marks: a ring or an emphasis kept from an insight overlay on one datum. Used in layers.",
+      required: ["series", "x", "shape"],
+      properties: {
+        series: { type: "string", description: "The series the datum belongs to, by name." },
+        x: { type: "number", description: "Category index of the datum." },
+        shape: { type: "string", enum: ["ring", "emphasis"], description: "What to draw around the datum." },
+        color: { type: "string", description: "Stroke colour. Default: \"#0e639c\"." },
+        label: { type: "string", description: "A few words shown above the marker." },
+      },
+      additionalProperties: false,
+    },
     LayerSpec: {
       type: "object",
-      description: "A layer overlaid on the primary chart. Can be another chart type, a rule (reference line), or text annotation.",
+      description: "A layer overlaid on the primary chart. Can be another chart type, a rule (reference line), a text annotation, or a marker on one datum.",
       required: ["mark"],
       properties: {
         mark: {
           type: "string",
-          enum: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock", "boxPlot", "sunburst", "pareto", "rule", "text"],
-          description: "Mark type for this layer. Use \"rule\" for reference lines, \"text\" for annotations.",
+          enum: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock", "boxPlot", "sunburst", "pareto", "rule", "text", "marker"],
+          description: "Mark type for this layer. Use \"rule\" for reference lines, \"text\" for annotations, \"marker\" for a ring on one datum.",
         },
         data: {
           description: "Layer data source. If omitted, shares the parent chart's data.",
@@ -791,6 +804,7 @@ export const chartSpecJsonSchema: object = {
             { $ref: "#/definitions/ParetoMarkOptions" },
             { $ref: "#/definitions/RuleMarkOptions" },
             { $ref: "#/definitions/TextMarkOptions" },
+            { $ref: "#/definitions/MarkerMarkOptions" },
           ],
         },
         opacity: {

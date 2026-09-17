@@ -413,6 +413,24 @@ export interface TextMarkOptions {
   baseline?: "top" | "middle" | "bottom";
 }
 
+/**
+ * Options for marker marks: a ring or an emphasis KEPT from an insight overlay
+ * as a persisted annotation on one datum. Used in layers. Anchored the way
+ * `text` is — a series by name and a category index — never to pixels.
+ */
+export interface MarkerMarkOptions {
+  /** The series the datum belongs to, by name. */
+  series: string;
+  /** Category index (painter space at the time of keeping). */
+  x: number;
+  /** What to draw. */
+  shape: "ring" | "emphasis";
+  /** Stroke colour. Default: "#0e639c" */
+  color?: string;
+  /** A few words shown above the marker. */
+  label?: string;
+}
+
 /** Union of all mark-specific options. */
 export type MarkOptions =
   | BarMarkOptions
@@ -432,7 +450,8 @@ export type MarkOptions =
   | SunburstMarkOptions
   | ParetoMarkOptions
   | RuleMarkOptions
-  | TextMarkOptions;
+  | TextMarkOptions
+  | MarkerMarkOptions;
 
 /** How series data is oriented within the data range. */
 export type SeriesOrientation = "columns" | "rows";
@@ -724,7 +743,7 @@ export interface LegendSpec {
 // ============================================================================
 
 /** Mark types available in layers (chart marks + annotation marks). */
-export type LayerMarkType = ChartMark | "rule" | "text";
+export type LayerMarkType = ChartMark | "rule" | "text" | "marker";
 
 /** A layer overlaid on the primary chart. */
 export interface LayerSpec {

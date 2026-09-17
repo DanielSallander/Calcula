@@ -1,7 +1,8 @@
 # Insight overlays — points of interest drawn on charts, pivots and sheets
 
-Status: DESIGNED 2026-09-17; **IO-0, IO-1 and IO-2 BUILT 2026-09-17** (§5a, §5b and §5c record
-what each found), IO-3a..5 open.
+Status: DESIGNED 2026-09-17; **BUILT 2026-09-17, IO-0 through IO-5** (§5a–§5d record what each
+found). Open: the live proof in a running build (§6), the visual E2E snapshots, and the follow-ups
+listed at the end of §5d.
 A milestone of its own, built in its own session — the owner's decision. **Tier 0 throughout**: no
 model computes, places or colours anything here.
 Companion documents: `insights-strategy-layer.md` (the engine and the strategy this consumes; §14 is
@@ -11,11 +12,9 @@ this), `open-items.md` 2.AI.13.
 **Start here, next session.** Read §2 (what exists — the feature is two thirds built already, in
 pieces that have never been joined), then §3 (the seven gaps, each a one-line check), then §7 (the
 owner decisions; the IO-0 session took the doc's recommended answers without the owner live, so
-the IO-1 review took D-IO-8..10 with the owner live, see §4.8a). IO-0, IO-1 and IO-2 are BUILT —
-read §5a, §5b and §5c for what they found — so the next milestone is IO-3a (§5): the overlay as
-a user surface: context-menu entry, the stepper pill, cue hit-testing and the popover, comments as
-overlay objects, follow-the-data on invalidation, keep-as-annotation. §5c's "what IO-3a inherits"
-list is its starting point.
+the IO-1 review took D-IO-8..10 with the owner live, see §4.8a). Every milestone is BUILT — read
+§5a–§5d for what each found. What remains is §6's live proof in a running build and the visual E2E
+snapshots, then the follow-ups at the end of §5d.
 
 ## 0. The ask, and the one-sentence answer
 
@@ -326,21 +325,24 @@ seems to need judgement ("is this interesting?"), the answer is a new determinis
   from §4.5. Tests: every fact kind in Rust's pinned fixture maps to the expected cue kind; the
   **harmful-cue gate** — no cue may anchor to a datum the fact does not name; determinism; the
   withheld-direction case yields neutral.
-- **IO-3a — chart overlay, interactable.** (The seam, paint stage and transient store came with
-  IO-0.) The context-menu entry, the pane's "Show on chart", the notice; the stepper pill with
-  its deterministic description; cue hit-testing, hover and the popover; comments as overlay
-  objects in the Insights store; the follow-the-data re-resolution on invalidation with the three
-  outcomes of §4.8a; keep-as-annotation with the new `marker` layer. Visual E2E snapshots of a
-  chart with and without its overlay (comparator at 0.02 — the retuned threshold, never 0.2).
-- **IO-3b — the snapshot.** One click: chart + kept annotations + transient cues + comments to a
-  PNG on the clipboard, optionally a file; the ordinary export untouched. A test that the export
-  path paints NO transient cue and the snapshot path paints every visible one.
-- **IO-4 — pivot and sheet targets.** `setCellEmphasis` on the pivot seam and its painter, member
-  resolution through `getFieldUniqueValues`, the sheet decoration for range facts, the pivot
-  context-menu entry, the pane's "Show on pivot / sheet". E2E on the sales-star fixture.
-- **IO-5 — the chat tool, the records.** `show_points_of_interest` in the `analyze` and `chart`
-  specialists (with the specialists test's reachability rule), `insights-strategy-layer.md` §14.8,
-  `open-items.md` 2.AI.13 closed, memory.
+- **IO-3a — chart overlay, interactable.** BUILT, see §5d. (The seam, paint stage and transient
+  store came with IO-0.) The context-menu entry, the pane's "Show on chart", the notice; the
+  stepper pill with its deterministic description; cue hit-testing, hover and the popover (the
+  chart context menu, scoped to the selected cue); comments as overlay objects in the Insights
+  store; the follow-the-data re-resolution on invalidation with the three outcomes of §4.8a;
+  keep-as-annotation with the new `marker` layer. Visual E2E snapshots (comparator at 0.02) are
+  still owed.
+- **IO-3b — the snapshot.** BUILT, see §5d. One click: chart + kept annotations + transient cues
+  + comments to a PNG on the clipboard, optionally a file; the ordinary export untouched, and a
+  test that the export path paints NO transient cue and the snapshot path paints every visible
+  one.
+- **IO-4 — pivot and sheet targets.** BUILT, see §5d — as ONE mechanism: an over-selection cell
+  decoration reaches a pivot's cells, so no pivot seam; `rowOrigins` in the facts document
+  makes a fact's row a sheet row. The member-based pivot route and the E2E on the sales-star
+  fixture are still owed.
+- **IO-5 — the chat tool, the records.** BUILT, see §5d. `show_points_of_interest` in the
+  `analyze` and `chart` specialists, run in the webview; `insights-strategy-layer.md` §14.8;
+  `open-items.md` 2.AI.13 closed; memory.
 
 ## 5a. IO-0 — what was built, and what the spike found (2026-09-17)
 
@@ -536,6 +538,104 @@ What IO-3a inherits:
 - The stepper reads `stepsOf(cues)`; the active step lives in the transient store as one field.
 - Style literals in `CUE_STYLES` → skin tokens.
 - Pareto stays cue-less until the fact carries member positions (a small IO-1-style Rust change).
+
+## 5d. IO-3a, IO-3b, IO-4 and IO-5 — what was built, and what it found (2026-09-17)
+
+Built in one run after the owner's "all items in one go". What exists now, per milestone:
+
+**IO-3a — the overlay as a user surface.**
+
+- **The seam grew into the overlay's state** (`@api/chartCues`): per chart, `cues`, `comments`,
+  `step` (a fact index or `"all"`), `selectedFactId`; `setChartCues` keeps the reader on the same
+  fact across a replacement and resets when it is gone; `stepChartCues` wraps; `visibleChartCues`
+  is what the painter draws. `announceChartDataChanged` / `onChartDataChanged` is the
+  follow-the-data signal, called by `renderChartAsync` after every data re-resolution. A
+  `ChartCueHost` (IoC, the `chartParams` shape) is what only Charts can do: `keepCue`,
+  `keepComment`, `snapshot`.
+- **The stepper pill** (`Charts/rendering/cueChrome.ts`) sits top-right, `‹ 2 of 4 ›  Lowest
+  Cost`, computed and hit-tested per frame like the param widgets; `all` toggles show-all. Cues
+  are hit-tested through the datum they mark (`cueAtDatum`): hovering the ringed bar shows the
+  fact's sentence as the tooltip (`drawCueTooltip`), clicking selects the ring (heavier stroke),
+  a second click clears. **The popover is the chart context menu**, scoped to the selected cue
+  (`Insights/lib/overlayMenu.ts`): *Show/Hide points of interest*, *Add comment on this point…*
+  (through `promptAsync`), *Keep this mark in the chart*, *Snapshot with points of interest*. No
+  new component: the tooltip is the sentence, the menu is the actions.
+- **Comments** are overlay objects: `ChartCueComment { id, factId, text, anchor | null,
+  movedFrom? }`, persisted in the Insights extension-data blob (`calcula.insights`,
+  `{ comments: { [chartId]: [...] } }`) through `setExtensionDataUndoable`, re-read on
+  activation, File > Open and the new `insights:refresh` fan-out (`bootstrap.ts` objects domain)
+  after an undo. Drawn as boxes hanging off their cue; unattached ones in a tray at the chart's
+  bottom-left, never over a bar. **Follow-the-data** is `overlayComments.reanchorComments`, pure:
+  outcome (a) stays, (b) follows with `movedFrom` (kept as the ORIGINAL label across further
+  moves, cleared when home), (c) unattached. `Insights/lib/overlay.ts` owns it: on a
+  data-changed announcement for a chart whose overlay is on, recompute the bundle (debounced
+  250 ms per chart), replace the cues, re-anchor and re-persist the comments, refresh the pane's
+  bundle when it is on that chart.
+- **Keep in chart**: a datum cue becomes a `marker` layer (new: `MarkerMarkOptions { series, x,
+  shape, color?, label? }`, enum-closed schema, painted by `markerPainter.ts` through
+  `createBandScale` / `createPointScale` / `buildChromeYScale` so it sits where the bar sits — the
+  older `rule`/`text` painters divide the plot width by the category count and drift; the new
+  painter does not inherit that); a comment becomes a `text` layer at its datum's value.
+  **Not undoable today**: `updateChartSpec` schedules a save and enters no undo entry — true of
+  every chart spec edit, said in `chartOverlayHost.ts` rather than promised in §4.8a.
+- **The pane**: `InsightsPaneState.origin` (`range | pivot | model | chart`, with the request or
+  the id) replaces the label-only origin; a bundle from a chart shows a master toggle with the
+  tier notice beneath it and a per-card *Show on chart* that lands the stepper on that fact and
+  selects it; a bundle from a range or a pivot shows the same with *Show on sheet* (IO-4).
+- **The hidden IO-0 command is gone**; `insights.togglePointsOfInterest` (selected chart) is
+  the palette/keybinding/script entry.
+
+**IO-3b — the snapshot.** `Charts/lib/chartRaster.ts` is one renderer with one switch:
+`renderChartPng(chartId, { withOverlay })` paints the chart at 2×, and with the overlay also the
+visible cues and every comment at the export layout's own geometry. `chartExport.ts` calls it
+with `false` (D-IO-8: *Export as image* is the document's picture); the host's `snapshot` calls
+it with `true`, writes the PNG to the clipboard (`navigator.clipboard.write` with a
+`ClipboardItem`; no precedent in the repo, so it falls back to the save dialog when the platform
+refuses) and toasts. `chartRaster.test.ts` pins both directions with a fake `OffscreenCanvas`.
+
+**IO-4 — the sheet and pivot targets.** The design's `setCellEmphasis` pivot seam was NOT built,
+because reading the core renderer showed it unnecessary: an **over-selection cell decoration is
+replayed after the below-selection overlays (the pivot) and the selection chrome, before the
+above-selection overlays (charts)** (`gridRenderer/core.ts`), so one decoration reaches a pivot's
+cells and a plain range's alike. What exists: `@api/cellCues` (cues by OWNER — `range:…` or
+`pivot:<id>` — indexed per cell for the painter's per-frame lookup); `cuesForSheet(bundle,
+sheetIndexOf)` in `@api/insightCues`, which reads the new **`rowOrigins`** in the facts
+document — Rust now writes the SHEET ROW behind each dataset row (`FactsDocument.row_origins`,
+`core/insights/src/lib.rs`), so a fact's dataset index becomes a cell with the header and the
+hidden rows the plan excluded already accounted for, and `source.sheet` names the analysed sheet
+so a fact never lands on whatever sheet is in front; `Insights/lib/sheetOverlay.ts` analyses the
+target as a range (a pivot's rectangle from its grid region, never expanded), owns show/hide/
+narrow-to-one-fact, follows `CELL_VALUES_CHANGED` inside the rectangle and
+`PIVOT_REGIONS_UPDATED` (debounced), and registers the decoration (an inset frame per polarity, a
+dot when a cell carries several cues). The grid context menu gains *Show/Hide points of
+interest*, visible for a real rectangle or a click inside a pivot region. A BI pivot's facts are
+computed from the numbers it shows; the member-based route (a model fact's `topCategory` matched
+to header labels) is a follow-up, not built.
+
+**IO-5 — the chat tool.** `show_points_of_interest({ chart_id | pivot_id | rectangle })`, in the
+`analyze` and `chart` specialists (7 tools each, cap 8), auto-run (`AUTORUN_TOOLS`, D-IO-7: a
+lens the user can hide changes nothing in the workbook), and — the one structural novelty — a
+**client-side tool**: the overlay lives in TypeScript, so `AIChat/lib/clientTools.ts` runs it
+in the webview and `ChatView` asks it before the Rust dispatcher. It reaches the overlay through
+the seam (`InsightsProvider.showPointsOfInterest`, optional so a bare provider still satisfies
+the interface). `chatToolSurface.test.ts` now excludes `CLIENT_TOOL_NAMES` from the Rust-arm rule
+and pins that each client tool is declared, handled, and NOT also a Rust arm. With nothing named
+the tool uses the selected chart; with no selection it says what to pass. Its result names the
+chart and tells the model not to restate the numbers.
+
+**Tests added in this run:** `chartCues` (store, 12), `overlayComments` (5), `cueChrome` (8),
+`markerPainter` (5), `chartRaster` (6), `overlay` (10), `overlayMenu` (4), the pane (3),
+`cellCues` (4), `insightCuesSheet` (7), `sheetOverlay` (8), `clientTools` (5), plus the surface
+and schema tests extended. Full vitest, `check-types`, `lint:boundaries`, `check:line-endings`
+green; `cargo test -p insights` 105.
+
+**Not done, and why:** the visual E2E snapshots and the live proof in a running build (§6) need a
+Tauri build and a running app, which this run did not have; the clipboard image write is
+unverified on WebView2 for the same reason (it falls back to a file). Keyboard stepping was not
+added: the grid owns the arrow keys while a chart is selected, and a second binding would need a
+claim. Follow-ups: the pivot member-based route; undo for chart spec edits (Charts-wide); style
+literals in `CUE_STYLES` and the cell decoration → skin tokens; `rule` on a `level` anchor
+(`needs-scale`) through the rule painter; Pareto member positions in Rust.
 
 ## 6. Verification — the standard this repository holds a milestone to
 

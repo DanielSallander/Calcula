@@ -19,8 +19,14 @@ export const INSIGHTS_ANALYZE_SELECTION_COMMAND = "insights.analyzeSelection";
 /** Grid context-menu item id. */
 export const INSIGHTS_GRID_MENU_ITEM_ID = "insights.analyzeRange";
 
+/** Grid context-menu item id: show/hide points of interest on a range or a pivot. */
+export const INSIGHTS_GRID_OVERLAY_MENU_ITEM_ID = "insights.showPointsOfInterest";
+
 /** Data-menu item id. */
 export const INSIGHTS_DATA_MENU_ITEM_ID = "data:insights";
+
+/** Command id: show or hide the points-of-interest overlay on the selected chart. */
+export const INSIGHTS_TOGGLE_OVERLAY_COMMAND = "insights.togglePointsOfInterest";
 
 export const InsightsManifest: ExtensionManifest = {
   id: "calcula.insights",

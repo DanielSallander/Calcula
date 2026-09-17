@@ -33,6 +33,13 @@ export interface InsightCardProps {
   whyExpanded: boolean;
   onToggleWhy: (insightId: string) => void;
   onEvidenceClick: (evidence: InsightEvidence) => void;
+  /**
+   * "Show on chart": present only when the bundle came from a chart, so the
+   * button never opens onto nothing (the same rule as "Why?").
+   */
+  onShowOnChart?: (insightId: string) => void;
+  /** The button's words: "Show on chart" (default) or "Show on sheet". */
+  showOnLabel?: string;
 }
 
 const cardStyle: React.CSSProperties = {
@@ -153,9 +160,12 @@ export function InsightCard({
   whyExpanded,
   onToggleWhy,
   onEvidenceClick,
+  onShowOnChart,
+  showOnLabel = "Show on chart",
 }: InsightCardProps): React.ReactElement {
   const hasWhy = insight.provenance.length > 0;
   const whyListId = `insight-why-${insight.id}`;
+  const actionRowStyle: React.CSSProperties = { display: "flex", gap: 8, alignItems: "center" };
 
   return (
     <div style={cardStyle} data-testid="insight-card" data-insight-id={insight.id}>
@@ -205,17 +215,31 @@ export function InsightCard({
         </div>
       )}
 
-      {hasWhy && (
-        <button
-          type="button"
-          style={whyButtonStyle}
-          data-testid="insight-why-toggle"
-          aria-expanded={whyExpanded}
-          aria-controls={whyListId}
-          onClick={() => onToggleWhy(insight.id)}
-        >
-          {whyExpanded ? "Hide why" : "Why?"}
-        </button>
+      {(hasWhy || onShowOnChart) && (
+        <div style={actionRowStyle}>
+          {hasWhy && (
+            <button
+              type="button"
+              style={whyButtonStyle}
+              data-testid="insight-why-toggle"
+              aria-expanded={whyExpanded}
+              aria-controls={whyListId}
+              onClick={() => onToggleWhy(insight.id)}
+            >
+              {whyExpanded ? "Hide why" : "Why?"}
+            </button>
+          )}
+          {onShowOnChart && (
+            <button
+              type="button"
+              style={whyButtonStyle}
+              data-testid="insight-show-on-chart"
+              onClick={() => onShowOnChart(insight.id)}
+            >
+              {showOnLabel}
+            </button>
+          )}
+        </div>
       )}
 
       {hasWhy && whyExpanded && (

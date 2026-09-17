@@ -2374,28 +2374,27 @@ cache holds no model), so the pivot Design tab's row drafts without the strategy
 inclusion filter (`= ("x")`) compiles to no filter when the compiler has no member list, which is
 the existing report behaviour and is why grading uses the parsed form.
 
-**2.AI.13 — Insight overlays: points of interest drawn on charts, pivots and sheets. DESIGNED
-2026-09-17, NOT BUILT; a milestone of its own, in its own session (owner decision).** Design:
-`docs/design/insight-overlays.md` — start there. The owner's ask: charts over a Calcula model with
-a strategy, and a tool that superimposes visual cues — the bar with the highest revenue encircled
-in red, the pivot cell holding it marked. **Tier 0 throughout**: the finding is a fact the insights
-engine already computes (`FactKind::Extremes`, `core/insights/src/types.rs:281`), the colour is the
-strategy's declared direction (`direction_provenance`, `app/src-tauri/src/insights/model.rs:518`),
-the position is the datum geometry the chart renderer already computes for hit-testing
-(`dispatchComputeGeometry`, `app/extensions/Charts/rendering/chartDispatch.ts:450`), and the
-callout is the deterministic narrator's own sentence. Two thirds of the feature exists in pieces
-never joined — "Explain this chart" (`Insights/lib/chartExplain.ts:51` → `insights_for_series`,
-`commands.rs:172`) computes facts over the chart's own categories; chart
-`layers` already anchor text to a category index and a value (`chartSpecSchema.ts:736`); pivot cells
-carry a member path (`pivotTypes.ts:284`). Seven gaps, each a one-line check in the design's §3: the
-chart path is strategy-blind (`commands.rs:186-190`), most facts point by label not index, there is
-no datum-anchored point mark, a series fact has no click target, a pivot cell cannot be emphasised,
-every chart visual state is persisted state (no transient channel), and member labels are not
-member ids. Five milestones (IO-0 placement spike on the geometry hook FIRST, IO-1 Rust: indices +
-the strategy context on the series route, IO-2 pure cue rules with a harmful-cue gate, IO-3 the
-`@api/chartCues` seam + Charts paint stage + keep-as-annotation via a `marker` layer, IO-4 the
-pivot seam `setCellEmphasis` + sheet decorations, IO-5 the chat tool), seven owner decisions
-(D-IO-1…7) to take before code. Not started.
+**2.AI.13 — Insight overlays: points of interest drawn on charts, pivots and sheets. BUILT
+2026-09-17, IO-0 through IO-5, in one session; CLOSED here, with what is still owed listed.**
+Design and record: `docs/design/insight-overlays.md` (§5a–§5d are the per-milestone records;
+§4.8a the owner's interaction model). **Tier 0 throughout**, as designed: the finding is a fact
+`core/insights` computes, the colour is the strategy's declared direction (or neutral when it is
+withheld or absent — red is never inferred), the position is the chart's own hit geometry or the
+sheet row the facts document names, and the callout is the narrator's sentence. What was built:
+every fact index now counts the GAPS of the series as supplied (a latent one-row-early defect in
+change points and outliers, fixed); the chart route takes a strategy context for design-query
+charts (`series_strategy.rs`); the cue rules are data (`@api/insightCues`, harmful-cue gate,
+Rust-pinned fixture); the overlay is a transient lens (`@api/chartCues`, `@api/cellCues`) painted
+at composite time, stepped one point at a time with a deterministic description, hit-testable,
+with comments as overlay objects that FOLLOW THE DATA by fact id (the three outcomes of §4.8a);
+*Keep in chart* writes a `marker` or `text` layer; *Snapshot* copies chart + overlay to the
+clipboard while *Export* stays clean (D-IO-8); the sheet and pivot targets share one over-selection
+cell decoration (no pivot seam was needed); `show_points_of_interest` is the chat's first
+client-side tool. **Still owed**: the live proof in a running build and the visual E2E
+snapshots (§6), the member-based pivot route, undo for chart spec edits (Charts-wide), skin
+tokens for the cue colours, a value-axis `rule` through the rule painter, Pareto member positions.
+D-IO-10 (a comment follows the FACT, not the label) is built as proposed and not yet confirmed by
+the owner.
 
 ## 3. How to keep this file honest
 

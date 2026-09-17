@@ -23,10 +23,31 @@ import type {
   InsightsProvider,
   ModelConnection,
   ModelInsightsRequest,
+  PointsOfInterestResult,
+  PointsOfInterestTarget,
   RangeInsightsRequest,
 } from "@api/insightsService";
 import { analyzeModel, analyzeRange } from "./backend";
 import { getState, hasModel } from "./store";
+import { showOverlay } from "./overlay";
+import { showSheetOverlay } from "./sheetOverlay";
+
+/**
+ * The overlay, for a caller outside this extension — the chat's
+ * `show_points_of_interest`. It draws on the target and reports what it did;
+ * it does not touch the pane (the header's rule).
+ */
+export async function showPointsOfInterest(target: PointsOfInterestTarget): Promise<PointsOfInterestResult> {
+  if (target.kind === "chart") {
+    const r = await showOverlay(target.chartId);
+    if (r.outcome === "refused") return { outcome: "refused", count: 0, reason: r.reason };
+    return { outcome: "shown", count: new Set(r.cueSet.cues.map((c) => c.factId)).size, notice: r.notice };
+  }
+  const owner = target.kind === "pivot" ? { kind: "pivot" as const, pivotId: target.pivotId } : { kind: "range" as const, request: target.request };
+  const r = await showSheetOverlay(owner);
+  if (r.outcome === "refused") return { outcome: "refused", count: 0, reason: r.reason };
+  return { outcome: "shown", count: new Set(r.cueSet.cues.map((c) => c.factId)).size, notice: r.notice };
+}
 
 /**
  * Build the provider. One instance per activation, so the unregister returned
@@ -47,5 +68,6 @@ export function createInsightsProvider(): InsightsProvider {
     modelConnections(): readonly ModelConnection[] {
       return getState().connections;
     },
+    showPointsOfInterest,
   };
 }

@@ -17,8 +17,22 @@ import {
 } from "@api/gridOverlays";
 
 import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
-import { clearChartCues, getChartCues } from "@api/chartCues";
-import { paintChartCues } from "./cuePainter";
+import {
+  announceChartDataChanged,
+  chartCueSteps,
+  clearChartCues,
+  getChartOverlay,
+  visibleChartCues,
+  type ChartCue,
+} from "@api/chartCues";
+import { cueAtDatum, paintChartCues } from "./cuePainter";
+import {
+  computeCueStepper,
+  drawCueStepper,
+  paintChartComments,
+  type CommentBox,
+  type CueStepperControl,
+} from "./cueChrome";
 import { getChartById, getAllCharts, getActiveSheetIndex } from "../lib/chartStore";
 import { readChartDataResolved } from "../lib/chartDataReader";
 import { dispatchPaint, dispatchComputeLayout, dispatchComputeGeometry, extractBarRects, isComposed } from "./chartDispatch";
@@ -175,6 +189,17 @@ interface CachedChartData {
   widgetControls?: WidgetControl[];
   /** Resolved param values (widget>cell>literal) — for widget label + step base. */
   resolvedParams?: ReadonlyMap<string, FormulaValue>;
+  /** The insight-overlay stepper pill (computed during the sync render while the chart has cues). */
+  cueStepper?: CueStepperControl | null;
+  /** The comment boxes drawn in the last frame (canvas coords), for hit-testing. */
+  commentBoxes?: CommentBox[];
+}
+
+/** The cue under the pointer, if any: hovering the ringed bar addresses the ring. */
+let hoveredCue: { chartId: string; cue: ChartCue } | null = null;
+
+export function getHoveredCue(): { chartId: string; cue: ChartCue } | null {
+  return hoveredCue;
 }
 
 const chartDataCache = new Map<string, CachedChartData>();
@@ -360,6 +385,17 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
 
         const hitResult = hitTestGeometry(localX, localY, cachedData.hitGeometry, cachedData.layout);
 
+        // Hovering the ringed bar addresses the ring: the tooltip becomes the
+        // fact's sentence. Tracked beside hoverState so the datum tooltip
+        // still knows what it is over.
+        const isDatum = hitResult.type === "bar" || hitResult.type === "point" || hitResult.type === "slice";
+        const cueHit = isDatum ? cueAtDatum(visibleChartCues(chartId), hitResult) : null;
+        const nextHovered = cueHit ? { chartId, cue: cueHit } : null;
+        if ((nextHovered?.cue.factId ?? null) !== (hoveredCue?.cue.factId ?? null) || (nextHovered?.chartId ?? null) !== (hoveredCue?.chartId ?? null)) {
+          hoveredCue = nextHovered;
+          requestOverlayRedraw();
+        }
+
         if (hitResult.type === "bar" || hitResult.type === "point" || hitResult.type === "slice" || hitResult.type === "axis") {
           const changed =
             hoverState === null ||
@@ -408,6 +444,11 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
     }
   }
 
+  if (!foundHover && hoveredCue !== null) {
+    hoveredCue = null;
+    requestOverlayRedraw();
+  }
+
   if (!foundHover && hoverState !== null) {
     hoverState = null;
     requestOverlayRedraw();
@@ -422,8 +463,9 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
  * Clear hover state when mouse leaves the grid area.
  */
 export function handleChartMouseLeave(): void {
-  if (hoverState !== null) {
+  if (hoverState !== null || hoveredCue !== null) {
     hoverState = null;
+    hoveredCue = null;
     requestOverlayRedraw();
   }
 }
@@ -527,14 +569,31 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     }
   }
 
-  // 3a. Insight cues (IO-0): a transient lens from @api/chartCues, drawn over
-  //     the raster through the cached hit geometry — the same place and the
-  //     same geometry as the selection highlights, never the spec. A cue whose
-  //     anchor no longer matches the drawn datum is skipped by the painter.
+  // 3a. The insight overlay (IO-0..IO-3a): a transient lens from
+  //     @api/chartCues, drawn over the raster through the cached hit geometry
+  //     — the same place and the same geometry as the selection highlights,
+  //     never the spec. Only the active step's cues are drawn (or all, when
+  //     the reader asked); a cue whose anchor no longer matches the drawn
+  //     datum is skipped by the painter. Comments hang off their cues, the
+  //     unattached ones sit in the tray, and the stepper pill is computed here
+  //     so the click handler can hit-test it.
   if (cachedData) {
-    const cues = getChartCues(chartId);
-    if (cues.length > 0) {
-      paintChartCues(ctx, canvasX, canvasY, cachedData.hitGeometry, cachedData.data, cues);
+    const overlay = getChartOverlay(chartId);
+    if (overlay.cues.length > 0 || overlay.comments.length > 0) {
+      const shown = visibleChartCues(chartId);
+      paintChartCues(ctx, canvasX, canvasY, cachedData.hitGeometry, cachedData.data, shown, overlay.selectedFactId);
+      const byId = new Map(overlay.cues.map((c) => [c.factId, c] as const));
+      cachedData.commentBoxes = paintChartComments(
+        ctx, canvasX, canvasY, chartWidth, chartHeight, cachedData.hitGeometry, cachedData.data, overlay.comments, byId,
+      );
+      const steps = chartCueSteps(chartId);
+      const descriptions = steps.map((f) => byId.get(f)?.description ?? "");
+      const stepper = computeCueStepper(chartId, canvasX, canvasY, chartWidth, descriptions, overlay.step);
+      if (stepper) drawCueStepper(ctx, stepper, overlay.step === "all");
+      cachedData.cueStepper = stepper;
+    } else {
+      cachedData.cueStepper = null;
+      cachedData.commentBoxes = undefined;
     }
   }
 
@@ -597,8 +656,11 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     }
   }
 
-  // 6. Draw tooltip (always on top)
-  if (hoverState && hoverState.chartId === chartId &&
+  // 6. Draw tooltip (always on top). A hovered cue shows the fact's own
+  //    sentence instead of the datum's numbers.
+  if (hoveredCue && hoveredCue.chartId === chartId && hoverState && hoverState.chartId === chartId) {
+    drawCueTooltip(ctx, canvasX, canvasY, chartWidth, chartHeight, hoverState.canvasX, hoverState.canvasY, hoveredCue.cue);
+  } else if (hoverState && hoverState.chartId === chartId &&
     (hoverState.hitResult.type === "bar" || hoverState.hitResult.type === "point" || hoverState.hitResult.type === "slice")) {
     const tooltipChart = getChartById(chartId);
     if (!tooltipChart?.spec.tooltip || tooltipChart.spec.tooltip.enabled !== false) {
@@ -784,6 +846,11 @@ async function renderChartAsync(
       resolvedParams: resolved.params,
     });
 
+    // The chart's numbers may have changed (a filter, an edit, a param sweep):
+    // whoever keeps an overlay on this chart re-resolves it from here. Overlay
+    // objects are never dead (docs/design/insight-overlays.md §4.8a).
+    announceChartDataChanged(chartId);
+
     // Trigger a canvas redraw so the cached chart gets composited.
     requestOverlayRedraw();
     // Also emit grid refresh to ensure main canvas repaints
@@ -886,6 +953,75 @@ function drawChartErrorPlaceholder(
  * Draw semi-transparent overlays to dim non-selected elements and highlight selected ones.
  * Called during the sync render pass, drawn on top of the cached chart image.
  */
+/**
+ * The tooltip for a hovered cue: its short description on the first line and
+ * the fact's own sentence below, wrapped to a sane width, kept inside the chart.
+ */
+function drawCueTooltip(
+  ctx: CanvasRenderingContext2D,
+  chartX: number,
+  chartY: number,
+  chartWidth: number,
+  chartHeight: number,
+  pointerX: number,
+  pointerY: number,
+  cue: ChartCue,
+): void {
+  const font = "11px 'Segoe UI', system-ui, sans-serif";
+  const boldFont = "bold 11px 'Segoe UI', system-ui, sans-serif";
+  const maxWidth = 260;
+  const pad = 6;
+  const lineH = 14;
+  ctx.save();
+  ctx.font = font;
+  const lines: string[] = [];
+  const words = (cue.label ?? "").split(/\s+/).filter(Boolean);
+  let current = "";
+  for (const w of words) {
+    const candidate = current ? `${current} ${w}` : w;
+    if (ctx.measureText(candidate).width > maxWidth - 2 * pad && current) {
+      lines.push(current);
+      current = w;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) lines.push(current);
+  const title = cue.description ?? "";
+  ctx.font = boldFont;
+  const titleW = title ? ctx.measureText(title).width : 0;
+  ctx.font = font;
+  const bodyW = lines.reduce((m, l) => Math.max(m, ctx.measureText(l).width), 0);
+  const w = Math.min(maxWidth, Math.max(titleW, bodyW) + 2 * pad);
+  const h = (title ? lineH : 0) + lines.length * lineH + 2 * pad;
+  let x = pointerX + 12;
+  let y = pointerY + 12;
+  if (x + w > chartX + chartWidth) x = pointerX - 12 - w;
+  if (y + h > chartY + chartHeight) y = pointerY - 12 - h;
+  ctx.fillStyle = "rgba(255,255,255,0.96)";
+  ctx.strokeStyle = "#c8c8c8";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  let ty = y + pad;
+  if (title) {
+    ctx.font = boldFont;
+    ctx.fillStyle = "#222222";
+    ctx.fillText(title, x + pad, ty);
+    ty += lineH;
+  }
+  ctx.font = font;
+  ctx.fillStyle = "#333333";
+  for (const l of lines) {
+    ctx.fillText(l, x + pad, ty);
+    ty += lineH;
+  }
+  ctx.restore();
+}
+
 function drawSelectionHighlights(
   ctx: CanvasRenderingContext2D,
   chartX: number,

@@ -533,7 +533,10 @@ export function bootstrapShell(): void {
     // Protection commands are undoable, so an undo can flip the backend record
     // with no sheet change — without this the cache would stay stale and the
     // guard would wave edits through on a re-protected sheet.
-    objects: ["charts:refresh", "sparklines:refresh", AppEvents.TABLE_DEFINITIONS_UPDATED, "animation:refresh", "grid:refresh", "protection:refresh"],
+    // "insights:refresh": the Insights extension persists overlay comments in
+    // its extension-data blob undoably; an undo restores the blob and this is
+    // what tells the extension to re-read it.
+    objects: ["charts:refresh", "sparklines:refresh", AppEvents.TABLE_DEFINITIONS_UPDATED, "animation:refresh", "grid:refresh", "protection:refresh", "insights:refresh"],
     // The four backend-state refresh announcements, reached from the UNDO
     // direction. Their forward routes emit them from the IPC wrapper; undo
     // and redo do not go through those wrappers at all (one `undo` command

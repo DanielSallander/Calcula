@@ -37,7 +37,37 @@ import {
 } from "../lib/store";
 import { canSendToChat, sendBundleToChat } from "../lib/chatHandoff";
 import { createReportSheet } from "../lib/backend";
+import { hideOverlay, isOverlayOn, noticeFor, showOverlay } from "../lib/overlay";
+import {
+  hideSheetOverlay,
+  isSheetOverlayOn,
+  sheetOverlayNotice,
+  showSheetOverlay,
+  type SheetOverlayOwner,
+} from "../lib/sheetOverlay";
+import { onChartCuesChanged } from "@api/chartCues";
+import { onCellCuesChanged } from "@api/cellCues";
 import { InsightCard } from "./InsightCard";
+
+// The overlay's on/off state lives in the transient cue stores, not in this
+// pane's store; a version counter bumped on every change is enough for
+// useSyncExternalStore to re-read `isOverlayOn` / `noticeFor`.
+let overlayVersionCounter = 0;
+function subscribeOverlay(listener: () => void): () => void {
+  const bump = (): void => {
+    overlayVersionCounter += 1;
+    listener();
+  };
+  const offChart = onChartCuesChanged(bump);
+  const offCell = onCellCuesChanged(bump);
+  return () => {
+    offChart();
+    offCell();
+  };
+}
+function overlayVersionSnapshot(): number {
+  return overlayVersionCounter;
+}
 
 // ============================================================================
 // Styles
@@ -127,6 +157,17 @@ const errorStyle: React.CSSProperties = {
 const droppedStyle: React.CSSProperties = {
   fontSize: 11,
   color: "#777",
+};
+
+const overlayRowStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+};
+
+const overlayNoticeStyle: React.CSSProperties = {
+  fontSize: 11,
+  color: "#6A6A6A",
 };
 
 const notesStyle: React.CSSProperties = {
@@ -271,6 +312,65 @@ export function InsightsPane(_props: TaskPaneViewProps): React.ReactElement {
     void revealEvidence(evidence);
   }, []);
 
+  // The overlay, for a bundle that came from a chart, a range or a pivot. The
+  // master toggle turns the whole overlay on or off; a card's "Show on …"
+  // lands on that fact. Both re-read the transient stores, which is why the
+  // pane subscribes to them.
+  const chartOrigin = state.origin?.kind === "chart" ? state.origin.chartId : null;
+  const sheetOwner: SheetOverlayOwner | null =
+    state.origin?.kind === "range" ? { kind: "range", request: state.origin.request }
+    : state.origin?.kind === "pivot" ? { kind: "pivot", pivotId: state.origin.pivotId }
+    : null;
+  const overlayVersion = useSyncExternalStore(subscribeOverlay, overlayVersionSnapshot, overlayVersionSnapshot);
+  const overlayOn = chartOrigin !== null ? isOverlayOn(chartOrigin) : sheetOwner !== null && isSheetOverlayOn(sheetOwner);
+  const overlayNoticeText = chartOrigin !== null ? noticeFor(chartOrigin) : sheetOwner !== null ? sheetOverlayNotice(sheetOwner) : null;
+  const overlayTargetWord = chartOrigin !== null ? "chart" : "sheet";
+  const hasOverlayTarget = chartOrigin !== null || sheetOwner !== null;
+  void overlayVersion;
+
+  const onToggleOverlay = useCallback(() => {
+    if (chartOrigin !== null) {
+      if (isOverlayOn(chartOrigin)) {
+        hideOverlay(chartOrigin);
+        return;
+      }
+      void showOverlay(chartOrigin).then((r) => {
+        if (r.outcome === "refused") showToast(r.reason, { variant: "warning" });
+      });
+      return;
+    }
+    if (sheetOwner === null) return;
+    if (isSheetOverlayOn(sheetOwner)) {
+      hideSheetOverlay(sheetOwner);
+      return;
+    }
+    void showSheetOverlay(sheetOwner).then((r) => {
+      if (r.outcome === "refused") showToast(r.reason, { variant: "warning" });
+    });
+  }, [chartOrigin, sheetOwner]);
+
+  const onShowOnTarget = useCallback(
+    (insightId: string) => {
+      if (chartOrigin !== null) {
+        void showOverlay(chartOrigin, { stepToFactId: insightId }).then((r) => {
+          if (r.outcome === "refused") showToast(r.reason, { variant: "warning" });
+          else if (!r.cueSet.cues.some((c) => c.factId === insightId)) {
+            showToast("This fact has nothing to point at on the chart.", { variant: "info" });
+          }
+        });
+        return;
+      }
+      if (sheetOwner === null) return;
+      void showSheetOverlay(sheetOwner, { onlyFactId: insightId }).then((r) => {
+        if (r.outcome === "refused") showToast(r.reason, { variant: "warning" });
+        else if (!r.cueSet.cues.some((c) => c.factId === insightId)) {
+          showToast("This fact has nothing to point at on the sheet.", { variant: "info" });
+        }
+      });
+    },
+    [chartOrigin, sheetOwner],
+  );
+
   // The "as of" line belongs to the model path: a model answer is only as fresh
   // as the last refresh behind it, while a range answer describes cells the
   // reader is looking at right now.
@@ -368,6 +468,25 @@ export function InsightsPane(_props: TaskPaneViewProps): React.ReactElement {
           </div>
         )}
 
+        {bundle && hasOverlayTarget && (
+          <div style={overlayRowStyle} data-testid="insights-overlay-row">
+            <button
+              type="button"
+              style={switchButtonStyle(overlayOn)}
+              aria-pressed={overlayOn}
+              data-testid="insights-overlay-toggle"
+              onClick={onToggleOverlay}
+            >
+              {overlayOn ? "Points of interest: on" : `Show points of interest on the ${overlayTargetWord}`}
+            </button>
+            {overlayOn && overlayNoticeText && (
+              <span style={overlayNoticeStyle} data-testid="insights-overlay-notice">
+                {overlayNoticeText}
+              </span>
+            )}
+          </div>
+        )}
+
         {bundle &&
           bundle.insights.map((insight) => (
             <InsightCard
@@ -377,6 +496,7 @@ export function InsightsPane(_props: TaskPaneViewProps): React.ReactElement {
               whyExpanded={state.expandedWhy.includes(insight.id)}
               onToggleWhy={toggleWhy}
               onEvidenceClick={onEvidenceClick}
+              {...(hasOverlayTarget ? { onShowOnChart: onShowOnTarget, showOnLabel: `Show on ${overlayTargetWord}` } : {})}
             />
           ))}
 

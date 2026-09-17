@@ -197,6 +197,25 @@ export function cueContextOf(data: Pick<ParsedChartData, "series">): CueDataCont
   return { seriesNames: data.series.map((s) => s.name) };
 }
 
+/**
+ * The cue, among those on screen, whose datum a hit on (series, category)
+ * belongs to — hovering or clicking the ringed bar addresses the ring.
+ * A series-anchored emphasis matches any datum of its series.
+ */
+export function cueAtDatum(
+  cues: readonly ChartCue[],
+  hit: { seriesName?: string; categoryIndex?: number } | null | undefined,
+): ChartCue | null {
+  if (!hit || hit.seriesName === undefined) return null;
+  for (const c of cues) {
+    const a = c.anchor;
+    if (a.type === "datum" && a.series === hit.seriesName && a.categoryIndex === hit.categoryIndex) return c;
+    if (a.type === "series" && a.series === hit.seriesName) return c;
+    if (a.type === "span" && (a.series === undefined || a.series === hit.seriesName) && hit.categoryIndex !== undefined && hit.categoryIndex >= a.from && hit.categoryIndex <= a.to) return c;
+  }
+  return null;
+}
+
 // ============================================================================
 // Look (Charts decides)
 // ============================================================================
@@ -276,23 +295,25 @@ function calloutAnchorOf(chartX: number, chartY: number, target: CueTarget): { x
   }
 }
 
-function paintOne(ctx: CuePaintContext, chartX: number, chartY: number, cue: ChartCue, shape: CueShape): void {
+function paintOne(ctx: CuePaintContext, chartX: number, chartY: number, cue: ChartCue, shape: CueShape, selected: boolean): void {
   const style = CUE_STYLES[cue.polarity];
   ctx.strokeStyle = style.stroke;
   ctx.fillStyle = style.stroke;
   ctx.setLineDash([...style.dash]);
+  // A selected cue is drawn heavier, the way a selected bar gets its outline.
+  const extra = selected ? 2 : 0;
 
   switch (cue.kind) {
     case "ring": {
       if (shape.kind !== "one") return;
-      ctx.lineWidth = CUE_LINE_WIDTH;
+      ctx.lineWidth = CUE_LINE_WIDTH + extra;
       pathAround(ctx, chartX, chartY, shape.target, CUE_RING_PAD);
       ctx.stroke();
       return;
     }
     case "emphasis": {
       const targets = shape.kind === "one" ? [shape.target] : shape.kind === "many" ? shape.targets : [];
-      ctx.lineWidth = CUE_EMPHASIS_LINE_WIDTH;
+      ctx.lineWidth = CUE_EMPHASIS_LINE_WIDTH + extra;
       for (const t of targets) {
         pathAround(ctx, chartX, chartY, t, 1);
         ctx.stroke();
@@ -308,7 +329,7 @@ function paintOne(ctx: CuePaintContext, chartX: number, chartY: number, cue: Cha
     }
     case "callout": {
       if (shape.kind !== "one") return;
-      ctx.lineWidth = CUE_LINE_WIDTH;
+      ctx.lineWidth = CUE_LINE_WIDTH + extra;
       pathAround(ctx, chartX, chartY, shape.target, CUE_RING_PAD);
       ctx.stroke();
       const at = calloutAnchorOf(chartX, chartY, shape.target);
@@ -340,6 +361,7 @@ export function paintChartCues(
   geometry: HitGeometry,
   data: Pick<ParsedChartData, "series">,
   cues: readonly ChartCue[],
+  selectedFactId: string | null = null,
 ): number {
   if (cues.length === 0) return 0;
   const context = cueContextOf(data);
@@ -349,7 +371,7 @@ export function paintChartCues(
   for (const cue of cues) {
     const r = resolveCue(geometry, cue.anchor, context);
     if (!r.ok) continue;
-    paintOne(ctx, chartX, chartY, cue, r.shape);
+    paintOne(ctx, chartX, chartY, cue, r.shape, selectedFactId !== null && cue.factId === selectedFactId);
     drawn++;
   }
   ctx.setLineDash([]);

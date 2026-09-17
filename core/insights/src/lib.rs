@@ -375,6 +375,12 @@ struct FactsDocument<'a> {
     engine_version: u32,
     locale_id: &'a str,
     source: &'a SourceRef,
+    /// The SHEET ROW behind each dataset row, in dataset order -- so a fact's
+    /// index (a dataset position, gaps counted) becomes a cell a consumer can
+    /// mark without re-deriving header offsets or the hidden rows the plan
+    /// excluded. Empty for a dataset that came from no sheet (a chart's
+    /// series), where the index is the category index already.
+    row_origins: &'a [u32],
     facts: Vec<FactRecord<'a>>,
 }
 
@@ -387,6 +393,7 @@ fn build_facts_json(dataset: &Dataset, insights: &[Insight], locale: Locale) -> 
         engine_version: INSIGHTS_ENGINE_VERSION,
         locale_id: locale.locale_id(),
         source: &dataset.source,
+        row_origins: &dataset.row_origins,
         facts: insights
             .iter()
             .map(|i| FactRecord {

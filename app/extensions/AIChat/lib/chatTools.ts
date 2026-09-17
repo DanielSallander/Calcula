@@ -277,6 +277,21 @@ export const TOOLS: ChatToolDef[] = [
     },
   },
   {
+    name: "show_points_of_interest",
+    description:
+      "DRAW the points of interest on a chart, a pivot or a range: rings the highest and lowest points, outliers, level shifts and crossings, coloured by the model's declared direction when the chart has a strategy. Use it when the user wants to SEE where something is (\"show me where we lost money on this chart\") rather than read about it. Pass chart_id from list_charts, or pivot_id, or a rectangle; with nothing, the selected chart is used. Read-only: it changes nothing in the workbook, the overlay is a lens the user can hide.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chart_id: { type: "string", description: "A chart id from list_charts." },
+        pivot_id: { type: "string", description: "A pivot id from list_pivots." },
+        sheet_index: { type: "number", description: "0-based sheet index for a range. Omit for the active sheet." },
+        start_row: { type: "number" }, start_col: { type: "number" },
+        end_row: { type: "number" }, end_col: { type: "number" },
+      },
+    },
+  },
+  {
     name: "analyze_model",
     description:
       "Facts about a BI connection's MEASURES rather than cells, judged by the model's own strategy: whether a movement is material, whether a rise is favourable, which of the measure's own terms drove it and which dimension members it came from. Call list_bi_connections first for the connection_id, and leave measures empty to let the model's declared priority decide. Use run_bi_query when you want the numbers; use this when you want to know what happened. Read-only.",
@@ -480,6 +495,9 @@ export const AUTORUN_TOOLS: ReadonlySet<string> = new Set<string>([
   // have read, and nothing in the workbook changes.
   "analyze_range",
   "analyze_model",
+  // The overlay: a transient lens drawn from computed facts, cleared by the
+  // user; it neither writes a cell nor touches a spec (D-IO-7).
+  "show_points_of_interest",
   "list_script_drafts",
   "get_script_draft",
   "draft_object_script",

@@ -70,9 +70,12 @@ describe("chartSpecJsonSchema", () => {
     expect(drrDef.required).toContain("endCol");
   });
 
-  it("LayerSpec mark enum includes rule and text", () => {
+  it("LayerSpec mark enum includes rule, text and marker", () => {
     const layerDef = schema.definitions.LayerSpec;
     const markEnum: string[] = layerDef.properties.mark.enum;
+    expect(markEnum).toContain("marker");
+    const markerDef = schema.definitions.MarkerMarkOptions;
+    expect(markerDef.required).toEqual(["series", "x", "shape"]);
     expect(markEnum).toContain("rule");
     expect(markEnum).toContain("text");
     // Should also include all chart types
@@ -248,13 +251,14 @@ describe("chartSpecJsonSchema drift guard", () => {
     }
 
     // Each then-branch points at a real *MarkOptions definition, and every
-    // chart-type options def is referenced (Rule/Text are layer-only).
+    // chart-type options def is referenced (Rule/Text/Marker are layer-only).
     const narrowedDefs = rules.map((r) => r.then.properties.markOptions.$ref.replace("#/definitions/", ""));
     for (const def of narrowedDefs) {
       expect(DEFS[def]).toBeDefined();
     }
+    const LAYER_ONLY = new Set(["RuleMarkOptions", "TextMarkOptions", "MarkerMarkOptions"]);
     const chartTypeOptionDefs = Object.keys(DEFS).filter(
-      (d) => d.endsWith("MarkOptions") && d !== "RuleMarkOptions" && d !== "TextMarkOptions",
+      (d) => d.endsWith("MarkOptions") && !LAYER_ONLY.has(d),
     );
     for (const def of chartTypeOptionDefs) {
       expect(narrowedDefs).toContain(def);

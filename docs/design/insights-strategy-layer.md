@@ -976,6 +976,38 @@ for the window before an editor mounts. `pivotDslLanguage.ts` had no test file a
 nothing had ever said so; the registry and the whole suggestion decision are now in monaco-free
 modules with 35 tests, and the six guards were each sabotaged and each redded its own named test.
 
+### 14.8 Insight overlays — the facts drawn on the visual, 2026-09-17
+
+The fourth consumer, and the one that draws rather than writes: a point of interest — the highest
+month, an outlier, a level shift, a crossing — drawn ON the chart, the pivot or the range it was
+found in. `docs/design/insight-overlays.md` is the design and the record. Three things it settles
+for this document.
+
+**It is Tier 0 end to end, by the rule in §14.4.** The fact is the engine's (`FactKind`, now with
+an index on every kind that names a point, counting the gaps of the series as supplied); the
+colour is the strategy's declared direction, carried to the fact as provenance — on the chart path
+too, since `series_strategy.rs` resolves a design-query chart's measures through the same
+`resolve` the model route uses — and NEUTRAL when the direction is withheld or absent; the position
+is the chart's own hit geometry or the sheet row the facts document names (`rowOrigins`, new in
+the document for this); the words are the narrator's sentence, and the stepper's three-word
+description is a template over the fact kind and the subject. A 1.5B model was not asked, because
+an encircled wrong bar is the most invisible wrong answer there is. The notice above the overlay
+says which tier: "computed from the model's strategy — not guessed" or "computed from the
+numbers; no strategy declares which way is good".
+
+**One bundle, two views.** The overlay is never a second computation: "Explain this chart" and
+"Show points of interest" send the same request and the cues are traced to fact ids. The
+consequence that matters here is that a fact's `direction` provenance is now READ by something
+other than the pane's "why" list — a `lowerIsBetter` on a Cost measure turns a peak red — so
+`direction_provenance`'s honesty rule (withheld means withheld) is now load-bearing for a colour,
+and `series_strategy::judge` is where the chart path enforces it.
+
+**The chat reaches it as a tool.** `show_points_of_interest` is in the `analyze` and `chart`
+specialists, auto-run because it is a lens the user can hide, and it is the chat's first
+CLIENT-SIDE tool: the overlay lives in TypeScript, so `AIChat/lib/clientTools.ts` runs it in the
+webview and the surface test pins that such a tool is declared, handled, and not also a Rust arm.
+It is not in the ten-tool core set, for §14.2's reason: that set was measured.
+
 ## 15. The citation check — what has to exist before a model may narrate, 2026-09-11
 
 Step 4 of the AI programme is M6: let the on-board model write the sentences. This is not that. This

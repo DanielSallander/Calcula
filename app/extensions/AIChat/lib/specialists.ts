@@ -54,10 +54,10 @@ const SUBSETS: Record<Intent, readonly string[]> = {
   ],
   formula: ["get_sheet_summary", "read_cell_range", "set_cell_value", "set_cell_range"],
   analyze: [
-    "analyze_range", "analyze_model", "get_sheet_summary", "read_cell_range",
+    "analyze_range", "analyze_model", "show_points_of_interest", "get_sheet_summary", "read_cell_range",
     "list_bi_connections", "describe_bi_model",
   ],
-  chart: ["list_charts", "get_chart", "create_chart_from_spec", "get_sheet_summary", "read_cell_range", "list_tables"],
+  chart: ["list_charts", "get_chart", "create_chart_from_spec", "show_points_of_interest", "get_sheet_summary", "read_cell_range", "list_tables"],
   "bi-query": [
     "list_bi_connections", "describe_bi_model", "run_bi_query", "cube_value", "cube_kpi",
     "cube_members", "create_pivot", "analyze_model",
@@ -85,7 +85,8 @@ const ADDENDA: Record<Intent, string> = {
     "the one they have; write it into a cell only when asked to.",
   analyze:
     "\n\nTHIS REQUEST ASKS WHAT THE DATA SAYS. Call analyze_range (or analyze_model) and put its " +
-    "checked facts into words; derive no trend, outlier or correlation from raw values yourself.",
+    "checked facts into words; derive no trend, outlier or correlation from raw values yourself. " +
+    "When the user wants to SEE where something is on a chart, call show_points_of_interest instead of describing positions.",
   chart:
     "\n\nTHIS REQUEST IS ABOUT A CHART. Read the data it should show, then create or change the " +
     "chart; do not restate the numbers in prose.",

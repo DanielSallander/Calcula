@@ -1,6 +1,8 @@
 //! FILENAME: app/src/api/chartCues.ts
-// PURPOSE: The transient "points of interest" channel for charts — a cue is a
-//          mark drawn OVER a chart at a datum, on or off, never in the spec.
+// PURPOSE: The transient "points of interest" channel for charts — cues drawn
+//          OVER a chart at a datum, the step the reader is on, the cue they
+//          selected, and the comments beside the cues. On or off, never in
+//          the spec.
 // CONTEXT: Every visual state a chart has today is persisted state: layers and
 //          dataPointOverrides live in the spec, and `updateChartSpec` is a
 //          document mutation that dirties the file and enters undo. An insight
@@ -10,11 +12,14 @@
 //          document-scoped store, and read by the Charts painter at composite
 //          time — the same place selection highlights and tooltips are drawn.
 //
-//          THE SEAM RUNS ONE WAY. Insights (the consumer) says WHAT: a fact id,
-//          a datum, a polarity. Charts (the painter) decides HOW a ring looks on
-//          a bar, a line point or a pie slice through its own hit geometry, so
-//          a stacked or grouped bar is solved where hit-testing already solved
-//          it. Nothing here names pixels; nothing here imports an extension.
+//          THE SEAM RUNS ONE WAY, TWICE. Insights (the consumer) says WHAT: a
+//          fact id, a datum, a polarity, a comment's words. Charts (the
+//          painter) decides HOW a ring looks on a bar, a line point or a pie
+//          slice through its own hit geometry, and it is also the only thing
+//          that can write a kept cue INTO the spec or paint a snapshot — so it
+//          registers a `ChartCueHost` here (IoC, the `chartParams` shape) and
+//          Insights calls `keepChartCue` / `snapshotChart` without importing
+//          Charts. Nothing here names pixels; nothing here imports an extension.
 //
 //          THE ANCHOR CARRIES ITS OWN CHECK. `categoryIndex` is the painter-space
 //          index the snapshot (`@api/chartData`) reported, and `categoryLabel`
@@ -22,6 +27,12 @@
 //          to draw when the two disagree — a stale index after a filter or a
 //          data change is the encircled wrong bar, and a dropped ring is the
 //          only honest answer.
+//
+//          OVERLAY OBJECTS ARE NEVER DEAD (§4.8a). Charts announces every data
+//          re-resolution through `announceChartDataChanged`; Insights listens,
+//          recomputes, and re-anchors comments by fact id. A comment whose fact
+//          is gone is kept UNATTACHED (anchor null) and drawn in a tray, never
+//          left over the wrong bar.
 //
 //          THE VOCABULARY IS CLOSED (§4.2): five kinds, four anchors, and no
 //          sixth of either without a measured reason. `@api/insightCues` is
@@ -84,57 +95,266 @@ export interface ChartCue {
   description?: string;
 }
 
-type Listener = (chartId: string) => void;
+/**
+ * A reader's words beside a point of interest. Anchored to the FACT (the
+ * point of interest), which is why it can follow the ring when the data
+ * changes and why it can become unattached when the fact is gone.
+ */
+export interface ChartCueComment {
+  /** Stable id, so an edit or a removal names one comment. */
+  id: string;
+  factId: string;
+  text: string;
+  /** Where it is drawn now; `null` when its fact no longer exists (the tray). */
+  anchor: ChartCueDatumAnchor | null;
+  /** The label the fact named when the comment was written, when that has since changed. */
+  movedFrom?: string;
+}
 
-const cuesByChart = new Map<string, readonly ChartCue[]>();
+/** Which cues are on screen: one step (a fact's cues) or all of them. */
+export type ChartCueStep = number | "all";
+
+export interface ChartOverlayState {
+  cues: readonly ChartCue[];
+  comments: readonly ChartCueComment[];
+  step: ChartCueStep;
+  /** The fact of the cue the reader clicked, or null. */
+  selectedFactId: string | null;
+}
+
+type Listener = (chartId: string) => void;
+type DataListener = (chartId: string) => void;
+
+const overlays = new Map<string, ChartOverlayState>();
 const listeners = new Set<Listener>();
+const dataListeners = new Set<DataListener>();
+
+const EMPTY: ChartOverlayState = Object.freeze({
+  cues: Object.freeze([]) as readonly ChartCue[],
+  comments: Object.freeze([]) as readonly ChartCueComment[],
+  step: 0,
+  selectedFactId: null,
+});
 
 function notify(chartId: string): void {
   for (const l of [...listeners]) l(chartId);
 }
 
+function stateOf(chartId: string): ChartOverlayState {
+  return overlays.get(chartId) ?? EMPTY;
+}
+
+function freezeCues(cues: readonly ChartCue[]): readonly ChartCue[] {
+  return Object.freeze(cues.map((c) => ({ ...c, anchor: { ...c.anchor } })));
+}
+
+function freezeComments(comments: readonly ChartCueComment[]): readonly ChartCueComment[] {
+  return Object.freeze(comments.map((c) => ({ ...c, anchor: c.anchor ? { ...c.anchor } : null })));
+}
+
+/** Distinct fact ids in cue order — the steps. */
+function factOrder(cues: readonly ChartCue[]): string[] {
+  const out: string[] = [];
+  for (const c of cues) if (!out.includes(c.factId)) out.push(c.factId);
+  return out;
+}
+
+function put(chartId: string, next: ChartOverlayState): void {
+  if (next.cues.length === 0 && next.comments.length === 0) {
+    if (!overlays.delete(chartId)) return;
+  } else {
+    overlays.set(chartId, Object.freeze(next));
+  }
+  notify(chartId);
+}
+
+// ============================================================================
+// Cues
+// ============================================================================
+
 /**
- * Replace a chart's cues. An empty list clears the entry. The stored list is a
- * frozen copy, so a caller mutating its own array afterwards changes nothing.
+ * Replace a chart's cues. The step is kept if the fact it showed is still
+ * present (a re-resolution after a filter keeps the reader where they were),
+ * else reset to the first; the selection is kept on the same rule. The stored
+ * list is a frozen copy, so a caller mutating its own array afterwards changes
+ * nothing.
  */
 export function setChartCues(chartId: string, cues: readonly ChartCue[]): void {
-  if (cues.length === 0) {
-    clearChartCues(chartId);
-    return;
+  const prev = stateOf(chartId);
+  const prevFacts = factOrder(prev.cues);
+  const nextFacts = factOrder(cues);
+  let step: ChartCueStep = prev.step;
+  if (typeof step === "number") {
+    const shown = prevFacts[step];
+    const at = shown === undefined ? -1 : nextFacts.indexOf(shown);
+    step = at >= 0 ? at : 0;
   }
-  cuesByChart.set(chartId, Object.freeze(cues.map((c) => ({ ...c, anchor: { ...c.anchor } }))));
-  notify(chartId);
+  const selectedFactId = prev.selectedFactId && nextFacts.includes(prev.selectedFactId) ? prev.selectedFactId : null;
+  put(chartId, { ...prev, cues: freezeCues(cues), step, selectedFactId });
 }
 
-/** Drop one chart's cues. Notifies only if there was something to drop. */
+/** Drop one chart's cues, selection and step; comments stay (they may be unattached). */
 export function clearChartCues(chartId: string): void {
-  if (!cuesByChart.delete(chartId)) return;
-  notify(chartId);
+  const prev = stateOf(chartId);
+  if (prev.cues.length === 0 && prev.selectedFactId === null) return;
+  put(chartId, { ...prev, cues: EMPTY.cues, step: 0, selectedFactId: null });
 }
 
-/** Drop every chart's cues — document open/new, extension teardown. */
+/** Drop everything for every chart — document open/new, extension teardown. */
 export function clearAllChartCues(): void {
-  const ids = [...cuesByChart.keys()];
-  cuesByChart.clear();
+  const ids = [...overlays.keys()];
+  overlays.clear();
   for (const id of ids) notify(id);
 }
 
-const NONE: readonly ChartCue[] = Object.freeze([]);
-
 /** A chart's current cues, or an empty (frozen) list. */
 export function getChartCues(chartId: string): readonly ChartCue[] {
-  return cuesByChart.get(chartId) ?? NONE;
+  return stateOf(chartId).cues;
 }
 
-/** Chart ids that currently carry at least one cue. */
+/** The whole overlay state of a chart (frozen). */
+export function getChartOverlay(chartId: string): ChartOverlayState {
+  return stateOf(chartId);
+}
+
+/** Chart ids that currently carry at least one cue or comment. */
 export function listChartsWithCues(): string[] {
-  return [...cuesByChart.keys()];
+  return [...overlays.keys()];
 }
 
-/** Subscribe to per-chart changes. Returns the unsubscribe. */
+// ============================================================================
+// Stepping
+// ============================================================================
+
+/** The facts a chart's cues step through, in order (one step per fact). */
+export function chartCueSteps(chartId: string): string[] {
+  return factOrder(stateOf(chartId).cues);
+}
+
+export function getChartCueStep(chartId: string): ChartCueStep {
+  return stateOf(chartId).step;
+}
+
+/** Show one fact's cues (by step index, clamped) or all of them. */
+export function setChartCueStep(chartId: string, step: ChartCueStep): void {
+  const prev = stateOf(chartId);
+  if (prev.cues.length === 0) return;
+  const n = factOrder(prev.cues).length;
+  const next: ChartCueStep = step === "all" ? "all" : Math.min(Math.max(0, Math.floor(step)), n - 1);
+  if (next === prev.step) return;
+  put(chartId, { ...prev, step: next });
+}
+
+/** Move one step forward or back, wrapping. From "all", +1 goes to the first, -1 to the last. */
+export function stepChartCues(chartId: string, delta: 1 | -1): void {
+  const prev = stateOf(chartId);
+  const n = factOrder(prev.cues).length;
+  if (n === 0) return;
+  const next = prev.step === "all" ? (delta === 1 ? 0 : n - 1) : (prev.step + delta + n) % n;
+  setChartCueStep(chartId, next);
+}
+
+/** The cues on screen right now: the active step's, or all. */
+export function visibleChartCues(chartId: string): readonly ChartCue[] {
+  const s = stateOf(chartId);
+  if (s.step === "all") return s.cues;
+  const fact = factOrder(s.cues)[s.step];
+  return fact === undefined ? s.cues : s.cues.filter((c) => c.factId === fact);
+}
+
+// ============================================================================
+// Selection
+// ============================================================================
+
+export function setSelectedChartCue(chartId: string, factId: string | null): void {
+  const prev = stateOf(chartId);
+  const next = factId !== null && prev.cues.some((c) => c.factId === factId) ? factId : null;
+  if (next === prev.selectedFactId) return;
+  put(chartId, { ...prev, selectedFactId: next });
+}
+
+export function getSelectedChartCue(chartId: string): ChartCue | null {
+  const s = stateOf(chartId);
+  return s.selectedFactId === null ? null : (s.cues.find((c) => c.factId === s.selectedFactId) ?? null);
+}
+
+// ============================================================================
+// Comments
+// ============================================================================
+
+/** Replace a chart's comments (frozen copy). Insights owns their persistence. */
+export function setChartComments(chartId: string, comments: readonly ChartCueComment[]): void {
+  const prev = stateOf(chartId);
+  put(chartId, { ...prev, comments: freezeComments(comments) });
+}
+
+export function getChartComments(chartId: string): readonly ChartCueComment[] {
+  return stateOf(chartId).comments;
+}
+
+// ============================================================================
+// Change notification
+// ============================================================================
+
+/** Subscribe to per-chart overlay changes. Returns the unsubscribe. */
 export function onChartCuesChanged(listener: Listener): () => void {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
   };
+}
+
+/**
+ * Charts calls this after a chart's data has been re-resolved and repainted
+ * — a filter, an edit, a param sweep. The overlay's owner recomputes from it.
+ */
+export function announceChartDataChanged(chartId: string): void {
+  for (const l of [...dataListeners]) l(chartId);
+}
+
+export function onChartDataChanged(listener: DataListener): () => void {
+  dataListeners.add(listener);
+  return () => {
+    dataListeners.delete(listener);
+  };
+}
+
+// ============================================================================
+// The host: what only Charts can do (IoC, the chartParams shape)
+// ============================================================================
+
+export interface ChartCueHost {
+  /** Write a cue into the chart's spec as a persisted annotation (undoable). */
+  keepCue(chartId: string, cue: ChartCue): Promise<void>;
+  /** Write a comment into the chart's spec as a text annotation (undoable). */
+  keepComment(chartId: string, comment: ChartCueComment): Promise<void>;
+  /**
+   * The chart as a PNG WITH its visible cues and comments, on the clipboard
+   * and, when a path is asked for, in a file. Resolves to the saved path or
+   * null.
+   */
+  snapshot(chartId: string, options?: { saveToFile?: boolean }): Promise<string | null>;
+}
+
+let host: ChartCueHost | null = null;
+
+/** Called once by Charts in activate(), and with null on deactivate. */
+export function registerChartCueHost(impl: ChartCueHost | null): void {
+  host = impl;
+}
+
+export function getChartCueHost(): ChartCueHost | null {
+  return host;
+}
+
+export function keepChartCue(chartId: string, cue: ChartCue): Promise<void> {
+  return host ? host.keepCue(chartId, cue) : Promise.reject(new Error("Charts is not available."));
+}
+
+export function keepChartComment(chartId: string, comment: ChartCueComment): Promise<void> {
+  return host ? host.keepComment(chartId, comment) : Promise.reject(new Error("Charts is not available."));
+}
+
+export function snapshotChart(chartId: string, options?: { saveToFile?: boolean }): Promise<string | null> {
+  return host ? host.snapshot(chartId, options) : Promise.reject(new Error("Charts is not available."));
 }

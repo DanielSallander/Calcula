@@ -22,6 +22,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 const h = vi.hoisted(() => ({
   invoke: vi.fn(),
+  resolveSeries: vi.fn(),
   hasSink: vi.fn(() => false),
   openWithPrompt: vi.fn(() => true),
   setActiveSheet: vi.fn(async () => undefined),
@@ -62,9 +63,20 @@ vi.mock("@api/chatPromptService", () => ({
   hasChatPromptSink: () => h.hasSink(),
   openChatWithPrompt: (...args: unknown[]) => h.openWithPrompt(...(args as [])),
 }));
+vi.mock("@api/chartData", () => ({
+  CHART_SERIES_MAX_POINTS: 10_000,
+  getChartDataProvider: () => null,
+  resolveChartSeries: (...args: unknown[]) => h.resolveSeries(...args),
+}));
+vi.mock("@api/extensionData", () => ({
+  getExtensionData: vi.fn(async () => null),
+  setExtensionDataUndoable: vi.fn(async () => undefined),
+}));
 
 const { InsightsPane } = await import("../components/InsightsPane");
 const store = await import("../lib/store");
+const overlayLib = await import("../lib/overlay");
+const chartCues = await import("@api/chartCues");
 
 // ============================================================================
 // Fixtures
@@ -136,7 +148,76 @@ beforeEach(() => {
     selection: { startRow: 1, startCol: 1, endRow: 9, endCol: 3, type: "cells" },
     sheetContext: { activeSheetIndex: 0, activeSheetName: "Sheet1" },
   };
+  h.resolveSeries.mockReset();
+  chartCues.clearAllChartCues();
+  overlayLib.resetOverlays();
   store.reset();
+});
+
+/** Put a bundle on screen AS IF it came from a chart. */
+async function publishFromChart(b: unknown, chartId = "chart-1"): Promise<void> {
+  await act(async () => {
+    const token = store.beginRun("this chart", { kind: "chart", chartId });
+    store.completeRun(token, b as never, "Sales by month");
+  });
+}
+
+const chartSnapshot = {
+  chartId: "chart-1", name: "Chart 1", title: "Sales by month", sheetIndex: 0, mark: "bar",
+  categories: ["Jan", "Feb", "Mar"], categoryKind: "nominal" as const,
+  series: [{ name: "Sales", values: [100, 200, 300] }], truncated: false,
+};
+const EXT_ID = "extremes:c//Sales/A1:A4:";
+function chartBundle() {
+  return bundle({
+    insights: [insight({ id: EXT_ID, kind: "extremes", text: "Sales is highest at Mar." })],
+    factsJson: JSON.stringify({ facts: [{ id: EXT_ID, score: 0.6, evidenceA1: [], kind: {
+      fact: "extremes", subject: { type: "column", name: "Sales" }, bestLabel: "Mar", bestIndex: 2, best: 300, worstLabel: "Jan", worstIndex: 0, worst: 100,
+    } }] }),
+  });
+}
+
+describe("the overlay from the pane", () => {
+  it("offers no overlay controls for a range bundle, and both for a chart bundle", async () => {
+    await render();
+    await publish(bundle());
+    expect(one("insights-overlay-toggle")).toBeNull();
+    expect(all("insight-show-on-chart")).toEqual([]);
+
+    await publishFromChart(chartBundle());
+    expect(one("insights-overlay-toggle")).not.toBeNull();
+    expect(one("insights-overlay-toggle")?.getAttribute("aria-pressed")).toBe("false");
+    expect(all("insight-show-on-chart")).toHaveLength(1);
+    expect(one("insights-overlay-notice")).toBeNull();
+  });
+
+  it("the master toggle shows the overlay with a tier notice, and hides it again", async () => {
+    h.resolveSeries.mockResolvedValue(chartSnapshot);
+    h.invoke.mockResolvedValue(chartBundle());
+    await render();
+    await publishFromChart(chartBundle());
+
+    await act(async () => { (one("insights-overlay-toggle") as HTMLButtonElement).click(); });
+    for (let i = 0; i < 4; i++) await act(async () => { await Promise.resolve(); });
+    expect(one("insights-overlay-toggle")?.getAttribute("aria-pressed")).toBe("true");
+    expect(one("insights-overlay-notice")?.textContent).toContain("computed from the numbers");
+    expect(chartCues.getChartCues("chart-1")).toHaveLength(2);
+
+    await act(async () => { (one("insights-overlay-toggle") as HTMLButtonElement).click(); });
+    expect(one("insights-overlay-toggle")?.getAttribute("aria-pressed")).toBe("false");
+    expect(chartCues.getChartCues("chart-1")).toEqual([]);
+  });
+
+  it("a card's 'Show on chart' lands the stepper on that fact and selects it", async () => {
+    h.resolveSeries.mockResolvedValue(chartSnapshot);
+    h.invoke.mockResolvedValue(chartBundle());
+    await render();
+    await publishFromChart(chartBundle());
+    await act(async () => { (one("insight-show-on-chart") as HTMLButtonElement).click(); });
+    for (let i = 0; i < 4; i++) await act(async () => { await Promise.resolve(); });
+    expect(chartCues.getSelectedChartCue("chart-1")?.factId).toBe(EXT_ID);
+    expect(chartCues.getChartCueStep("chart-1")).toBe(0);
+  });
 });
 
 afterEach(async () => {

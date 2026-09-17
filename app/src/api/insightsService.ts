@@ -100,9 +100,32 @@ export interface ModelConnection {
   name: string;
 }
 
+/** What "show points of interest" is asked to draw on. */
+export type PointsOfInterestTarget =
+  | { kind: "chart"; chartId: string }
+  | { kind: "range"; request: RangeInsightsRequest }
+  | { kind: "pivot"; pivotId: string };
+
+export interface PointsOfInterestResult {
+  outcome: "shown" | "refused";
+  /** Distinct points of interest placed (0 when nothing stands out). */
+  count: number;
+  /** The tier notice, when shown. */
+  notice?: string;
+  /** Why not, when refused. */
+  reason?: string;
+}
+
 export interface InsightsProvider {
   /** Deterministic facts about a rectangle of cells. Needs no model and no AI. */
   analyzeRange(req: RangeInsightsRequest): Promise<InsightBundle>;
+  /**
+   * Draw the points of interest on a chart, a range or a pivot — the overlay
+   * (docs/design/insight-overlays.md). Read-only: it changes nothing in the
+   * document. Optional so a bare provider (a test double, a headless host)
+   * still satisfies the seam.
+   */
+  showPointsOfInterest?(target: PointsOfInterestTarget): Promise<PointsOfInterestResult>;
   /**
    * Facts about MEASURES, with declared direction, additivity and materiality.
    *

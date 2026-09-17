@@ -95,7 +95,22 @@ import { registerChartParamController } from "@api/chartParams";
 import { chartParamController } from "./lib/chartParamController";
 import { registerChartDataProvider } from "@api/chartData";
 import { chartDataProvider } from "./lib/chartDataProvider";
-import { clearAllChartCues, onChartCuesChanged } from "@api/chartCues";
+import {
+  chartCueSteps,
+  clearAllChartCues,
+  getChartCueStep,
+  getChartOverlay,
+  getSelectedChartCue,
+  onChartCuesChanged,
+  registerChartCueHost,
+  setChartCueStep,
+  setSelectedChartCue,
+  stepChartCues,
+  visibleChartCues,
+} from "@api/chartCues";
+import { cueAtDatum } from "./rendering/cuePainter";
+import { hitTestCommentBoxes, hitTestCueStepper } from "./rendering/cueChrome";
+import { chartOverlayHost } from "./lib/chartOverlayHost";
 import { validateChartSpec, validateMergedSpec } from "./lib/chartSpecValidate";
 import type { ChartSpec } from "./types";
 import { buildSeriesFormula } from "./lib/seriesFormula";
@@ -336,8 +351,10 @@ function activate(context: ExtensionContext): void {
   registerChartDataProvider(chartDataProvider);
 
   // Insight cues (@api/chartCues) are painted at composite time from the
-  // cached geometry, so a change needs a redraw, not a re-render.
+  // cached geometry, so a change needs a redraw, not a re-render. Charts is
+  // also the host for what only it can do: keep a cue in the spec, snapshot.
   cleanupFunctions.push(onChartCuesChanged(() => requestOverlayRedraw()));
+  registerChartCueHost(chartOverlayHost);
 
   console.log("[Chart Extension] Registering...");
 
@@ -1097,6 +1114,27 @@ function activate(context: ExtensionContext): void {
     const cachedData = getCachedChartData(click.chartId);
     if (!cachedData) return;
 
+    // The insight overlay's chrome: the stepper pill and the comment boxes
+    // (absolute canvas coords, drawn during the sync render). A cue itself is
+    // hit-tested below, after the buttons, where a datum click lands.
+    const stepperHit = hitTestCueStepper(click.canvasX, click.canvasY, cachedData.cueStepper);
+    if (stepperHit) {
+      if (stepperHit === "prev") stepChartCues(click.chartId, -1);
+      else if (stepperHit === "next") stepChartCues(click.chartId, 1);
+      else if (stepperHit === "all") setChartCueStep(click.chartId, getChartCueStep(click.chartId) === "all" ? 0 : "all");
+      // "step": the label itself; a click there selects the shown fact.
+      else setSelectedChartCue(click.chartId, chartCueSteps(click.chartId)[Number(getChartCueStep(click.chartId)) || 0] ?? null);
+      requestOverlayRedraw();
+      return;
+    }
+    const commentHit = hitTestCommentBoxes(click.canvasX, click.canvasY, cachedData.commentBoxes);
+    if (commentHit) {
+      const comment = getChartOverlay(click.chartId).comments.find((c) => c.id === commentHit);
+      if (comment) setSelectedChartCue(click.chartId, comment.factId);
+      requestOverlayRedraw();
+      return;
+    }
+
     // Check quick access buttons first (they are outside chart bounds)
     if (cachedData.quickAccessButtons && cachedData.quickAccessButtons.length > 0) {
       const qaBtnHit = hitTestQuickAccessButtons(
@@ -1137,6 +1175,19 @@ function activate(context: ExtensionContext): void {
         setWidgetValue(click.chartId, wHit.paramName, next);
         invalidateChartCache(click.chartId);
         context.events.emit(AppEvents.GRID_REFRESH);
+        return;
+      }
+    }
+
+    // A click on a ringed datum selects the ring (and a second click clears
+    // it), so the context menu can act on "this point of interest".
+    if (getChartOverlay(click.chartId).cues.length > 0) {
+      const datumHit = hitTestGeometry(local.localX, local.localY, cachedData.hitGeometry, cachedData.layout);
+      const cue = isDataHit(datumHit) ? cueAtDatum(visibleChartCues(click.chartId), datumHit) : null;
+      if (cue) {
+        const current = getSelectedChartCue(click.chartId);
+        setSelectedChartCue(click.chartId, current?.factId === cue.factId ? null : cue.factId);
+        requestOverlayRedraw();
         return;
       }
     }
@@ -1816,8 +1867,9 @@ function deactivate(): void {
   // Withdraw the resolved-series surface too: the store is reset below, so a
   // provider left registered would answer for charts that no longer exist.
   registerChartDataProvider(null);
-  // And the cues on charts that are about to stop existing.
+  // And the cues on charts that are about to stop existing, and the host.
   clearAllChartCues();
+  registerChartCueHost(null);
 
   // Tear down authored sandboxed marks (unregister shims + unmount workers).
   uninstallChartMarks();

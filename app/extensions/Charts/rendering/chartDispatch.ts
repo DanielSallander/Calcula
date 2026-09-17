@@ -35,6 +35,7 @@ import { paintSunburstChart, computeSunburstLayout, computeSunburstBarRects } fr
 import { paintParetoChart, computeParetoLayout, computeParetoBarRects, computeParetoHitGeometry } from "./paretoChartPainter";
 import { paintRule } from "./rulePainter";
 import { paintTextMark } from "./textMarkPainter";
+import { paintMarkerMark } from "./markerPainter";
 import { paintTrendlines } from "./trendlinePainter";
 import { paintDataLabels } from "./dataLabelPainter";
 import { paintErrorBars } from "./errorBarPainter";
@@ -133,6 +134,8 @@ export function dispatchPaint(
         paintRule(ctx, layerData, layer, spec, layout, theme);
       } else if (layer.mark === "text") {
         paintTextMark(ctx, layerData, layer, spec, layout, theme);
+      } else if (layer.mark === "marker") {
+        paintMarkerMark(ctx, layerData, layer, spec, layout, theme);
       } else {
         // Chart-type layer: build a temporary spec merging layer props with parent
         const layerSpec: ChartSpec = {
