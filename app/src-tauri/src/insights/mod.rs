@@ -22,6 +22,7 @@ pub mod model;
 pub mod model_commands;
 pub mod region;
 pub mod report;
+pub mod series_strategy;
 pub mod strategy;
 pub mod usage;
 pub mod wire;

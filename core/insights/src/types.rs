@@ -186,7 +186,9 @@ impl OutlierMethod {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutlierPoint {
-    /// Position within the analysed series (0-based), not a sheet row.
+    /// Position in the series AS SUPPLIED (0-based), counting the rows whose
+    /// value was missing -- not a sheet row, and not the gap-free analysed
+    /// position. See `timeseries::Series`.
     pub index: usize,
     pub label: String,
     pub value: f64,
@@ -278,19 +280,27 @@ pub enum FactKind {
         last: f64,
         pct: f64,
     },
+    /// Every `*_index` below is a position in the series AS SUPPLIED (gaps
+    /// counted), the same convention as `OutlierPoint::index`. The label is
+    /// what the sentence says; the index is what a mark is placed at, and a
+    /// consumer checks that the label at the index is the label in the fact.
     Extremes {
         subject: Subject,
         best_label: String,
+        best_index: usize,
         best: f64,
         worst_label: String,
+        worst_index: usize,
         worst: f64,
     },
     SmoothedPeak {
         subject: Subject,
         window: usize,
         peak_label: String,
+        peak_index: usize,
         peak: f64,
         trough_label: String,
+        trough_index: usize,
         trough: f64,
     },
     Seasonality {
@@ -301,6 +311,7 @@ pub enum FactKind {
     ChangePoint {
         subject: Subject,
         at_label: String,
+        /// Position in the series as supplied, gaps counted.
         at_index: usize,
         before_mean: f64,
         after_mean: f64,
@@ -324,6 +335,11 @@ pub enum FactKind {
         category: String,
         value: String,
         top_category: String,
+        /// The supplied row holding `top_category`, when it occurs in EXACTLY
+        /// one row. A category that appears in several rows was summed across
+        /// them and has no single row to point at, so this is `None` rather
+        /// than the first of them.
+        top_index: Option<usize>,
         top_share: f64,
         categories: usize,
     },

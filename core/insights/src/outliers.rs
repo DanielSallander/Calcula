@@ -41,7 +41,8 @@ pub fn outlier_fact(series: &Series) -> Option<FactKind> {
     for (i, &v) in values.iter().enumerate() {
         if v < low || v > high {
             flagged.push(OutlierPoint {
-                index: i,
+                // The supplied row, gaps counted -- see `Series::position`.
+                index: series.position(i),
                 label: series
                     .labels
                     .get(i)

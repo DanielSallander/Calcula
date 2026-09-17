@@ -1,11 +1,12 @@
 //! FILENAME: app/extensions/Insights/__tests__/cuePlacement.test.ts
-// PURPOSE: The fact-to-anchor mapper for IO-0: an `extremes` fact becomes a
-//          ring on its best label, and every way the mapping could lie is a
-//          refusal with a named reason.
+// PURPOSE: The fact-to-anchor mapper: an `extremes` fact becomes a ring at its
+//          `bestIndex`, the label and value at that index are the CHECK, the
+//          polarity comes from the fact's direction provenance, and every way
+//          the mapping could lie is a refusal with a named reason.
 
 import { describe, it, expect } from "vitest";
-import { extremesFacts, ringsOnBest } from "../lib/cuePlacement";
-import type { InsightBundle } from "@api/insightsService";
+import { extremesFacts, ringsOnBest, bestPolarity } from "../lib/cuePlacement";
+import type { InsightBundle, InsightProvenance } from "@api/insightsService";
 import type { ChartSeriesSnapshot } from "@api/chartData";
 
 /** A facts document the way `build_facts_json` (core/insights/src/lib.rs) writes it. */
@@ -13,7 +14,9 @@ function factsJson(facts: unknown[]): string {
   return JSON.stringify({ engineVersion: 1, localeId: "en-US", source: { label: "the chart" }, facts }, null, 2);
 }
 
-function extremes(series: string, bestLabel: string, best: number, worstLabel = "Jan", worst = 1): unknown {
+const ID = "extremes:c//Sales/A1:A6:";
+
+function extremes(series: string, bestLabel: string, bestIndex: number, best: number): unknown {
   return {
     id: `extremes:c//${series}/A1:A6:`,
     score: 0.6,
@@ -22,17 +25,29 @@ function extremes(series: string, bestLabel: string, best: number, worstLabel = 
       fact: "extremes",
       subject: { type: "column", name: series, sheet: "", range: { sheet: "", startRow: 0, startCol: 1, endRow: 0, endCol: 1 } },
       bestLabel,
+      bestIndex,
       best,
-      worstLabel,
-      worst,
+      worstLabel: "Jan",
+      worstIndex: 0,
+      worst: 1,
     },
   };
 }
 
-function bundle(facts: unknown[], texts: Record<string, string> = {}): InsightBundle {
+function bundle(
+  facts: unknown[],
+  insights: Array<{ id: string; text?: string; provenance?: InsightProvenance[] }> = [],
+): InsightBundle {
   return {
     source: "range",
-    insights: Object.entries(texts).map(([id, text]) => ({ id, kind: "extremes", score: 0.6, text, evidence: [], provenance: [] })),
+    insights: insights.map((i) => ({
+      id: i.id,
+      kind: "extremes",
+      score: 0.6,
+      text: i.text ?? "",
+      evidence: [],
+      provenance: i.provenance ?? [],
+    })),
     dropped: 0,
     markdown: "",
     factsJson: factsJson(facts),
@@ -54,31 +69,48 @@ function snapshot(categories: string[], series: Record<string, (number | null)[]
   };
 }
 
+const direction = (value: string): InsightProvenance => ({ attribute: "direction", value, source: "strategy" });
+
 describe("extremesFacts", () => {
-  it("reads the extremes facts and nothing else out of the facts document", () => {
+  it("reads the extremes facts, with their index, and nothing else", () => {
     const json = factsJson([
       { id: "trend:x", score: 1, evidenceA1: [], kind: { fact: "trend", subject: { type: "column", name: "Sales" }, slopePerStep: 1 } },
-      extremes("Sales", "Mar", 300),
+      extremes("Sales", "Mar", 2, 300),
     ]);
-    expect(extremesFacts(json)).toEqual([{ id: "extremes:c//Sales/A1:A6:", series: "Sales", bestLabel: "Mar", best: 300 }]);
+    expect(extremesFacts(json)).toEqual([{ id: ID, series: "Sales", bestLabel: "Mar", bestIndex: 2, best: 300 }]);
   });
 
-  it("answers [] for malformed input rather than throwing into a paint path", () => {
+  it("answers [] for malformed input, including a fact with no index, rather than throwing into a paint path", () => {
     expect(extremesFacts("not json")).toEqual([]);
     expect(extremesFacts("{}")).toEqual([]);
     expect(extremesFacts(JSON.stringify({ facts: [{ id: "x", kind: { fact: "extremes" } }] }))).toEqual([]);
+    const noIndex = { ...(extremes("Sales", "Mar", 2, 300) as { kind: Record<string, unknown> }) };
+    delete noIndex.kind.bestIndex;
+    expect(extremesFacts(factsJson([noIndex]))).toEqual([]);
+  });
+});
+
+describe("bestPolarity", () => {
+  it("follows the declared direction and is neutral for everything else", () => {
+    expect(bestPolarity({ provenance: [direction("higherIsBetter")] })).toBe("good");
+    expect(bestPolarity({ provenance: [direction("lowerIsBetter")] })).toBe("bad");
+    expect(bestPolarity({ provenance: [direction("withheld: covers only some members")] })).toBe("neutral");
+    expect(bestPolarity({ provenance: [direction("targetBand")] })).toBe("neutral");
+    expect(bestPolarity({ provenance: [direction("neutral")] })).toBe("neutral");
+    expect(bestPolarity({ provenance: [] })).toBe("neutral");
+    expect(bestPolarity(undefined)).toBe("neutral");
   });
 });
 
 describe("ringsOnBest", () => {
-  it("places a neutral ring at the best label's index, carrying the fact id and the narrated text", () => {
-    const b = bundle([extremes("Sales", "Mar", 300)], { "extremes:c//Sales/A1:A6:": "Sales is highest at Mar (300) and lowest at Jan (100)." });
+  it("places a ring at bestIndex, carrying the fact id and the narrated text, neutral with no strategy", () => {
+    const b = bundle([extremes("Sales", "Mar", 2, 300)], [{ id: ID, text: "Sales is highest at Mar (300) and lowest at Jan (100)." }]);
     const s = snapshot(["Jan", "Feb", "Mar", "Apr", "May"], { Sales: [100, 200, 300, 150, 250] });
     const { cues, dropped } = ringsOnBest(b, s);
     expect(dropped).toEqual([]);
     expect(cues).toEqual([
       {
-        factId: "extremes:c//Sales/A1:A6:",
+        factId: ID,
         kind: "ring",
         polarity: "neutral",
         anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" },
@@ -87,49 +119,66 @@ describe("ringsOnBest", () => {
     ]);
   });
 
-  it("maps every series' fact, each onto its own series", () => {
-    const b = bundle([extremes("Sales", "Mar", 300), extremes("Cost", "Feb", 120)]);
-    const s = snapshot(["Jan", "Feb", "Mar"], { Sales: [100, 200, 300], Cost: [80, 120, 90] });
-    const { cues } = ringsOnBest(b, s);
-    expect(cues.map((c) => [c.anchor.series, c.anchor.categoryIndex])).toEqual([["Sales", 2], ["Cost", 1]]);
+  it("colours the best point by the measure's declared direction: a Cost peak is BAD", () => {
+    const b = bundle([extremes("Cost", "Mar", 2, 300)], [{ id: "extremes:c//Cost/A1:A6:", provenance: [direction("lowerIsBetter")] }]);
+    const s = snapshot(["Jan", "Feb", "Mar"], { Cost: [100, 200, 300] });
+    expect(ringsOnBest(b, s).cues[0].polarity).toBe("bad");
+
+    const good = bundle([extremes("Sales", "Mar", 2, 300)], [{ id: ID, provenance: [direction("higherIsBetter")] }]);
+    expect(ringsOnBest(good, snapshot(["Jan", "Feb", "Mar"], { Sales: [100, 200, 300] })).cues[0].polarity).toBe("good");
   });
 
-  it("uses the snapshot's (painter-space) index, which is what a filtered chart paints", () => {
-    // Jan hidden: the snapshot the fact was computed on starts at Feb.
-    const b = bundle([extremes("Sales", "Mar", 300)]);
-    const s = snapshot(["Feb", "Mar", "Apr", "May"], { Sales: [200, 300, 150, 250] });
-    expect(ringsOnBest(b, s).cues[0].anchor.categoryIndex).toBe(1);
+  it("a withheld direction yields a neutral ring, never a guessed colour", () => {
+    const b = bundle([extremes("Sales", "Mar", 2, 300)], [{ id: ID, provenance: [direction("withheld: rule r1 covers only some members")] }]);
+    expect(ringsOnBest(b, snapshot(["Jan", "Feb", "Mar"], { Sales: [100, 200, 300] })).cues[0].polarity).toBe("neutral");
   });
 
-  it("refuses an ambiguous label — the Jan..Dec over two years case — rather than picking the first", () => {
-    const b = bundle([extremes("Sales", "Mar", 300)]);
+  it("uses the index to choose between two identical labels — the Jan..Dec over two years case", () => {
+    const b = bundle([extremes("Sales", "Mar", 5, 300)]);
     const s = snapshot(["Jan", "Feb", "Mar", "Jan", "Feb", "Mar"], { Sales: [1, 2, 3, 100, 200, 300] });
     const r = ringsOnBest(b, s);
-    expect(r.cues).toEqual([]);
-    expect(r.dropped).toEqual([{ factId: "extremes:c//Sales/A1:A6:", reason: "label-ambiguous" }]);
+    expect(r.dropped).toEqual([]);
+    expect(r.cues[0].anchor.categoryIndex).toBe(5);
   });
 
-  it("refuses a label the chart no longer has (the data changed under the bundle)", () => {
-    const b = bundle([extremes("Sales", "Mar", 300)]);
-    const s = snapshot(["Q1", "Q2", "Q3"], { Sales: [100, 300, 200] });
-    expect(ringsOnBest(b, s).dropped).toEqual([{ factId: "extremes:c//Sales/A1:A6:", reason: "label-not-found" }]);
+  it("the index counts gaps, so a blank month before the peak does not shift the ring", () => {
+    // Rust's Series drops the null and reports the SUPPLIED position (3).
+    const b = bundle([extremes("Sales", "Apr", 3, 300)]);
+    const s = snapshot(["Jan", "Feb", "Mar", "Apr"], { Sales: [100, null, 200, 300] });
+    const r = ringsOnBest(b, s);
+    expect(r.dropped).toEqual([]);
+    expect(r.cues[0].anchor).toEqual({ type: "datum", series: "Sales", categoryIndex: 3, categoryLabel: "Apr" });
   });
 
-  it("refuses when the value at the resolved index is not the fact's number", () => {
-    const b = bundle([extremes("Sales", "Mar", 300)]);
-    const s = snapshot(["Jan", "Feb", "Mar"], { Sales: [100, 200, 999] });
-    expect(ringsOnBest(b, s).dropped).toEqual([{ factId: "extremes:c//Sales/A1:A6:", reason: "value-mismatch" }]);
+  it("refuses an index whose label is not the fact's label (the data changed under the bundle)", () => {
+    const b = bundle([extremes("Sales", "Mar", 2, 300)]);
+    const s = snapshot(["Q1", "Q2", "Q3"], { Sales: [100, 200, 300] });
+    expect(ringsOnBest(b, s).dropped).toEqual([{ factId: ID, reason: "label-mismatch" }]);
+  });
+
+  it("refuses an index past the end of the snapshot", () => {
+    const b = bundle([extremes("Sales", "Mar", 9, 300)]);
+    expect(ringsOnBest(b, snapshot(["Jan", "Feb", "Mar"], { Sales: [100, 200, 300] })).dropped).toEqual([
+      { factId: ID, reason: "index-out-of-range" },
+    ]);
+  });
+
+  it("refuses when the value at the index is not the fact's number", () => {
+    const b = bundle([extremes("Sales", "Mar", 2, 300)]);
+    expect(ringsOnBest(b, snapshot(["Jan", "Feb", "Mar"], { Sales: [100, 200, 999] })).dropped).toEqual([
+      { factId: ID, reason: "value-mismatch" },
+    ]);
   });
 
   it("refuses a fact about a series the snapshot does not carry", () => {
-    const b = bundle([extremes("Profit", "Mar", 300)]);
-    const s = snapshot(["Jan", "Feb", "Mar"], { Sales: [100, 200, 300] });
-    expect(ringsOnBest(b, s).dropped).toEqual([{ factId: "extremes:c//Profit/A1:A6:", reason: "series-not-in-snapshot" }]);
+    const b = bundle([extremes("Profit", "Mar", 2, 300)]);
+    expect(ringsOnBest(b, snapshot(["Jan", "Feb", "Mar"], { Sales: [100, 200, 300] })).dropped).toEqual([
+      { factId: "extremes:c//Profit/A1:A6:", reason: "series-not-in-snapshot" },
+    ]);
   });
 
   it("never invents a fact: a bundle with no extremes yields no cue", () => {
     const b = bundle([{ id: "trend:x", score: 1, evidenceA1: [], kind: { fact: "trend", subject: { type: "column", name: "Sales" } } }]);
-    const s = snapshot(["Jan", "Feb", "Mar"], { Sales: [100, 200, 300] });
-    expect(ringsOnBest(b, s)).toEqual({ cues: [], dropped: [] });
+    expect(ringsOnBest(b, snapshot(["Jan", "Feb", "Mar"], { Sales: [100, 200, 300] }))).toEqual({ cues: [], dropped: [] });
   });
 });

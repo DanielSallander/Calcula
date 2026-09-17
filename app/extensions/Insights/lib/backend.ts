@@ -41,6 +41,15 @@ export interface SeriesInsightsSeries {
   values: readonly (number | null)[];
 }
 
+/**
+ * Which connection's strategy applies to which series. Mirrors
+ * `SeriesStrategyContext` in `app/src-tauri/src/insights/series_strategy.rs`.
+ */
+export interface SeriesStrategyContext {
+  connectionId: string;
+  measures: ReadonlyArray<{ series: string; measure: string }>;
+}
+
 /** The `insights_for_series` request. Mirrors `ChartSeriesSnapshot`'s data half. */
 export interface SeriesInsightsRequest {
   title: string;
@@ -48,6 +57,12 @@ export interface SeriesInsightsRequest {
   categoryKind: "nominal" | "quantitative" | "temporal";
   categoryValues?: readonly number[];
   series: readonly SeriesInsightsSeries[];
+  /**
+   * Absent for a chart that knows no strategy. Present, Rust attaches the
+   * measure's direction to facts about each bound series and withholds a
+   * change below the measure's materiality — the model route's own rules.
+   */
+  strategy?: SeriesStrategyContext;
 }
 
 /** What `insights_create_report_sheet` hands back. */

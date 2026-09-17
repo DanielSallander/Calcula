@@ -1,6 +1,7 @@
 # Insight overlays — points of interest drawn on charts, pivots and sheets
 
-Status: DESIGNED 2026-09-17; **IO-0 BUILT 2026-09-17** (§5a records what it found), IO-1..5 open.
+Status: DESIGNED 2026-09-17; **IO-0 and IO-1 BUILT 2026-09-17** (§5a and §5b record what each
+found), IO-2..5 open.
 A milestone of its own, built in its own session — the owner's decision. **Tier 0 throughout**: no
 model computes, places or colours anything here.
 Companion documents: `insights-strategy-layer.md` (the engine and the strategy this consumes; §14 is
@@ -10,9 +11,10 @@ this), `open-items.md` 2.AI.13.
 **Start here, next session.** Read §2 (what exists — the feature is two thirds built already, in
 pieces that have never been joined), then §3 (the seven gaps, each a one-line check), then §7 (the
 owner decisions; the IO-0 session took the doc's recommended answers without the owner live, so
-confirm them before IO-2). IO-0 is BUILT — read §5a for what it found, including the correction
-to §4.5 — so the next milestone is IO-1 (§5): indices on every fact kind and the strategy context
-on the chart route, in Rust.
+confirm them before IO-2). IO-0 and IO-1 are BUILT — read §5a and §5b for what they found,
+including the correction to §4.5 — so the next milestone is IO-2 (§5): the pure cue rules in
+`@api/insightCues`, the §4.3 table as data, the harmful-cue gate. §5b's "what IO-2 inherits" list
+is its starting point.
 
 ## 0. The ask, and the one-sentence answer
 
@@ -272,11 +274,11 @@ seems to need judgement ("is this interesting?"), the answer is a new determinis
   the chart fixtures the determinism suite already renders (`chart-determinism.test.ts`,
   `chart-edge-cases.test.ts`), including a FILTERED chart (the kept-index case). This is the only
   genuinely new thing in the milestone; if it fights back, everything after it is redesigned first.
-- **IO-1 — facts with positions, and the strategy on the chart path (Rust).** Indices on
-  `Extremes`, `SmoothedPeak`, `Dominance` (and a `category` on `Leader`); the optional strategy
-  context on `insights_for_series` (§4.4); the `wire.rs` field-name test extended; `core/insights`
-  unit tests for every changed kind; the narration fixtures still narrate every kind
-  (`every_fact_kind_has_a_fixture`).
+- **IO-1 — facts with positions, and the strategy on the chart path (Rust).** BUILT, see §5b.
+  Indices on `Extremes`, `SmoothedPeak`, `Dominance` (no `category` on `Leader` — §5b says why);
+  the optional strategy context on `insights_for_series` (§4.4); the request field names pinned
+  in `commands.rs`; `core/insights` unit tests for every changed kind; the narration fixtures
+  still narrate every kind (`every_fact_kind_has_a_fixture`).
 - **IO-2 — cues (pure TypeScript, `@api/insightCues.ts`).** `cuesFor(bundle, target) -> Cue[]`,
   the table in §4.3 as data, polarity from provenance, ranking and caps, the validation rule from
   §4.5. Tests: every fact kind in the insights fixtures maps to the expected cue kind; the
@@ -349,6 +351,79 @@ Found on the way, and worth the record:
   (one optional field on `ChartSeriesSnapshot`) so the mapper can translate instead of refuse.
 - **A pie's `SliceArc.seriesIndex` is the slice (category) index**, and the pie draws only
   `series[0]`; the resolver takes the painter's series names as context for exactly that reason.
+
+## 5b. IO-1 — what was built, and what it found (2026-09-17)
+
+Facts with positions, and the strategy on the chart path. What exists now:
+
+- **Every index a fact reports is a position in the series AS SUPPLIED, gaps counted.**
+  `timeseries::Series` (`core/insights/src/timeseries.rs`) now records `positions[i]` — the
+  supplied index behind analysed value `i` — and `Series::position(i)` is what every producer
+  reports. This was a latent defect, not just a missing field: `Series::new` DROPS non-finite
+  rows before analysis, so `ChangePoint.at_index` and `OutlierPoint.index` were positions in the
+  gap-free series, one row early for every blank before the point — the encircled wrong bar, on
+  any chart with a missing month. Both now count the gaps, and the doc comments on `types.rs`
+  say so. `Crossover.at_index` already walked the supplied arrays and was right.
+- **New fields:** `Extremes.best_index` / `worst_index`, `SmoothedPeak.peak_index` /
+  `trough_index`, `Dominance.top_index: Option<usize>` — `Some` only when the top category sits
+  in EXACTLY one supplied row (a category summed across several rows has no single row to point
+  at; `None` rather than the first of them, and `None` when the caller passed no positions).
+  `dominance_fact` takes a parallel `row_positions` slice and `composition_facts` supplies the
+  dataset rows, which the chart route makes category indices.
+- **`Leader` gained NO `category`, on purpose.** §3 gap 7 and §5 asked for one, but `Leader`
+  compares WHOLE SERIES by total (`relations::leader_fact`): its subject is the series, and a
+  consumer emphasises that series on a chart or that measure's value column on a pivot. There is
+  no category dimension to name. The gap-7 sentence conflated it with the category breakdowns
+  (`Dominance`/`Pareto`, which do carry `category`).
+- **`insights::analyze_with_policy(dataset, options, &mut |insight| -> bool)`** — the crate's
+  one new entry point. The policy sees each un-narrated insight BEFORE ranking, may fill its
+  provenance, and says whether it may be told. Before ranking is the only honest place: a fact
+  withheld later would still be in `markdown`/`facts_json`, or would leave a hole in the budget.
+  A withheld fact is not counted in `dropped` (that means "ranked below the cut").
+- **The strategy context on the chart route.** `SeriesInsightsRequest.strategy?: { connectionId,
+  measures: [{ series, measure }] }` (`commands.rs`; camelCase pinned by
+  `the_request_reads_the_seams_camel_case_with_and_without_a_strategy`). With it,
+  `insights_for_series` resolves each bound measure through the strategy layer's own `resolve`
+  (`series_strategy::bindings_for`: connections lock → base model → `strategy_doc` →
+  `facts_with_authored_kinds` → `resolve` at the whole-model `ScopePoint`; no query, no engine)
+  and runs `analyze_with_policy` with `series_strategy::judge`: (1) a `Change` on a bound series
+  that fails `clears_materiality` is withheld; (2) a kind in the measure's `suppressed_kinds` is
+  withheld; (3) every surviving single-subject fact about a bound series carries
+  `model::series_provenance` — direction (INCLUDING `withheld: …`) and materiality. Two-subject
+  facts (correlation, crossover) belong to no measure and are untouched. Withheld counts become
+  notes. Without `strategy` the route is byte-for-byte what it was. `ConnectionId` is a UUID
+  (`identity::EntityId`); a free-text id is refused at deserialisation.
+- **The Charts side fills it.** `ChartSeriesSnapshot.strategy?` (`@api/chartData`), set by
+  `chartDataProvider` for a `designQuery` source: `compileDesignQuerySource` (shared with the
+  reader, so both compile the same request) gives `valueFields`, and the pure
+  `designQuerySeriesBinding.bindSeriesToMeasures` maps each plotted series name to its measure —
+  exact caption or the last " - " part, the joiner `extractColumnNames` uses; never a substring,
+  never two matches. `seriesRequestFrom` forwards it, and omits the key entirely when nothing
+  bound.
+- **The IO-0 mapper now places by index and checks by label** (`Insights/lib/cuePlacement.ts`):
+  `bestIndex` is the mechanism, the label AND the value at that index are the check (the
+  Jan..Dec-over-two-years case now resolves instead of refusing), and polarity comes from the
+  fact's `direction` provenance — `higherIsBetter` → good, `lowerIsBetter` → bad, `withheld: …` /
+  `targetBand` / `neutral` / absent → neutral. A Cost chart's peak is now a red ring from the
+  hidden command, on a design-query chart whose strategy declares it.
+- **Tests.** `core/insights`: 104 (three new: positions across a gap for extremes and smoothed
+  peak; a change point across a gap; dominance `top_index` unique / summed / unknown). App crate
+  `insights::`: 351 (eight in `series_strategy`, two in `commands`). TypeScript: the binder (7),
+  the mapper (13), the provider forwarding (1). The core index guard was SABOTAGED (analysed
+  position instead of supplied) and reddened exactly the gap test, 1 of 104.
+
+What IO-2 inherits:
+
+- The §4.3 table can now be data: every kind it names carries an index (`Trend`/`Change` use the
+  last point, `n - 1` in supplied terms — note `Change` carries labels only; the last supplied
+  index is `categories.length - 1` on the snapshot, which is enough).
+- `Outliers.points[].index` and `ChangePoint.at_index` changed MEANING (supplied position). The
+  sheet target's "header offset applied once" rule (§4.5) now also covers blank cells in the
+  column, because the index already counts them.
+- The polarity rule for the remaining kinds (§4.3) reads the same `direction` attribute
+  `bestPolarity` reads; put it in one function and test the withheld case for every kind.
+- The sampled-snapshot hole from §5a still stands: above `CHART_SERIES_MAX_POINTS`, a snapshot
+  index is not a painter index. The label check refuses rather than misplaces.
 
 ## 6. Verification — the standard this repository holds a milestone to
 

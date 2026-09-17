@@ -32,7 +32,9 @@ use tauri::State;
 use insights::types::{Column, Dataset, Datum, RangeRef, SourceRef};
 use insights::AnalyzeOptions;
 
+use crate::bi::types::BiState;
 use crate::insights::region;
+use crate::insights::series_strategy::{self, SeriesStrategyContext};
 use crate::insights::wire::{self, BundleSource, WireBundle};
 use crate::AppState;
 
@@ -75,6 +77,11 @@ pub struct SeriesInsightsRequest {
     #[serde(default)]
     pub category_values: Option<Vec<f64>>,
     pub series: Vec<SeriesInput>,
+    /// The strategy behind the chart, when the chart knows it (a design-query
+    /// chart does; a range chart does not). Absent, the route behaves exactly
+    /// as before: plain facts, no direction, no materiality.
+    #[serde(default)]
+    pub strategy: Option<SeriesStrategyContext>,
 }
 
 /// The name given to the axis column of a chart dataset.
@@ -172,6 +179,7 @@ pub(crate) fn analyze_range_impl(
 pub fn insights_for_series(
     request: SeriesInsightsRequest,
     state: State<AppState>,
+    bi_state: State<BiState>,
     window: tauri::Window,
 ) -> Result<WireBundle, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -183,8 +191,33 @@ pub fn insights_for_series(
         .locale_id
         .clone();
 
-    let (dataset, notes) = dataset_from_series(&request);
-    let bundle = analyze_with_notes(&dataset, &locale_id, notes);
+    let (dataset, mut notes) = dataset_from_series(&request);
+
+    // WITH A STRATEGY, the facts about a bound series carry the measure's
+    // direction and are gated by its materiality -- the model route's own
+    // rules, applied through `analyze_with_policy` BEFORE ranking so nothing
+    // withheld leaks into the markdown or the facts. Without one, the plain
+    // analyser runs exactly as it always has.
+    let bundle = match request.strategy.as_ref() {
+        Some(context) => {
+            let bindings = series_strategy::bindings_for(&bi_state, context, &mut notes)?;
+            let mut withheld = series_strategy::Withheld::default();
+            let mut bundle = insights::analyze_with_policy(
+                &dataset,
+                &AnalyzeOptions::for_locale_id(&locale_id),
+                &mut |insight| {
+                    let verdict = series_strategy::judge(insight, &bindings);
+                    withheld.record(verdict);
+                    verdict.keeps()
+                },
+            );
+            notes.extend(withheld.notes());
+            notes.append(&mut bundle.notes);
+            bundle.notes = notes;
+            bundle
+        }
+        None => analyze_with_notes(&dataset, &locale_id, notes),
+    };
     // A chart's series live in no sheet, so there is no sheet name to resolve
     // and every fact's evidence is the series itself.
     Ok(wire::from_core(bundle, BundleSource::Range))
@@ -358,7 +391,55 @@ mod tests {
                     values: v,
                 })
                 .collect(),
+            strategy: None,
         }
+    }
+
+    #[test]
+    fn the_request_reads_the_seams_camel_case_with_and_without_a_strategy() {
+        // THE FIELD-NAME PIN for the request half. The seam's TypeScript sends
+        // `categoryKind` and, for a design-query chart, `strategy.connectionId`;
+        // a rename on either side fails here rather than in a running app.
+        let plain = r#"{"title":"T","categories":["Jan"],"categoryKind":"text","series":[{"name":"S","values":[1.0,null]}]}"#;
+        let req: SeriesInsightsRequest = serde_json::from_str(plain).expect("strategy is optional");
+        assert!(req.strategy.is_none());
+        assert_eq!(req.series[0].values, vec![Some(1.0), None]);
+
+        let with = r#"{"title":"T","categories":["Jan"],"categoryKind":"text","series":[],
+            "strategy":{"connectionId":"6f1c2a3e-9b8d-4c5e-8a7f-0123456789ab","measures":[{"series":"Cost","measure":"Total Cost"}]}}"#;
+        let req: SeriesInsightsRequest = serde_json::from_str(with).expect("camelCase strategy");
+        let strategy = req.strategy.expect("present");
+        assert_eq!(strategy.measures[0].series, "Cost");
+        assert_eq!(strategy.measures[0].measure, "Total Cost");
+    }
+
+    #[test]
+    fn an_extremes_fact_on_a_chart_series_carries_the_painter_index_of_its_label() {
+        // The chart route's whole reason for indices: a blank month before
+        // the peak must not shift the ring one bar left. M02 is blank, so the
+        // peak at M06 is analysed position 4 and supplied index 5.
+        let req = request(vec![vec![
+            Some(100.0),
+            None,
+            Some(120.0),
+            Some(130.0),
+            Some(140.0),
+            Some(190.0),
+            Some(150.0),
+        ]]);
+        let (dataset, _) = dataset_from_series(&req);
+        let bundle = insights::analyze(&dataset, &AnalyzeOptions::default());
+        let (label, index) = bundle
+            .insights
+            .iter()
+            .find_map(|i| match &i.kind {
+                FactKind::Extremes { best_label, best_index, .. } => Some((best_label.clone(), *best_index)),
+                _ => None,
+            })
+            .expect("seven points is enough for an extremes fact");
+        assert_eq!(label, "M06");
+        assert_eq!(index, 5, "the index must count the blank at M02");
+        assert_eq!(req.categories[index], label, "index and label name the same category");
     }
 
     #[test]
@@ -596,6 +677,7 @@ mod tests {
             category_kind: "text".to_string(),
             category_values: None,
             series: Vec::new(),
+            strategy: None,
         };
         let (dataset, _) = dataset_from_series(&request);
         let bundle = analyze_with_notes(&dataset, "en-US", Vec::new());

@@ -30,12 +30,29 @@ export interface ChartDataSummary {
   sourceKind: "range" | "pivot" | "designQuery" | "concat";
 }
 
+/**
+ * The strategy behind a chart, when the chart knows it.
+ *
+ * A design-query chart holds its connection and the DSL that names its
+ * measures, so each plotted series can be traced back to the measure it
+ * plots — and the measure's declared direction ("lower is better" for a cost)
+ * is what lets a fact about that series say "worst month" instead of "peak".
+ * A range chart has no such thing and leaves this absent.
+ */
+export interface ChartSeriesStrategy {
+  connectionId: string;
+  /** Plotted series name → the model measure it plots. Only series that resolve are listed. */
+  measures: ReadonlyArray<{ series: string; measure: string }>;
+}
+
 export interface ChartSeriesSnapshot {
   chartId: string;
   name: string;
   title: string | null;
   sheetIndex: number;
   mark: string;
+  /** Present for a design-query chart whose series map to model measures. */
+  strategy?: ChartSeriesStrategy;
   /** The category labels as drawn, in draw order. */
   categories: readonly string[];
   /** What the categories ARE, which decides whether time-series facts apply. */

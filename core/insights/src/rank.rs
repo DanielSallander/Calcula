@@ -245,8 +245,10 @@ mod tests {
                     FactKind::Extremes {
                         subject: Subject::measure(&format!("E{i}")),
                         best_label: "Mar".into(),
+                        best_index: 2,
                         best: 10.0,
                         worst_label: "Jan".into(),
+                        worst_index: 0,
                         worst: 1.0,
                     },
                     0.4,

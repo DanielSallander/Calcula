@@ -57,6 +57,12 @@ export function seriesRequestFrom(snapshot: ChartSeriesSnapshot): SeriesInsights
     ...(snapshot.categoryValues === undefined
       ? {}
       : { categoryValues: snapshot.categoryValues }),
+    // The strategy travels with the numbers: a design-query chart's series
+    // are measures, and Rust turns "a peak" into "the worst month" only when
+    // told which measure — and which connection's document — decides that.
+    ...(snapshot.strategy === undefined || snapshot.strategy.measures.length === 0
+      ? {}
+      : { strategy: snapshot.strategy }),
   };
 }
 

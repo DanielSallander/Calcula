@@ -72,6 +72,28 @@ pub fn analyze_grid(
 
 /// Analyse an already-extracted table.
 pub fn analyze(dataset: &Dataset, options: &AnalyzeOptions) -> InsightBundle {
+    analyze_with_policy(dataset, options, &mut |_| true)
+}
+
+/// Analyse, letting the caller JUDGE each fact before it is ranked.
+///
+/// The policy sees every un-narrated insight once -- kind, score and an empty
+/// provenance it may fill -- and answers whether the fact may be told at all.
+/// It runs BEFORE ranking and narration, which is the only place it can run
+/// honestly: a fact withheld after the bundle is built would still be in
+/// `markdown` and `facts_json`, and a fact withheld after ranking would leave a
+/// hole in the budget that a lower-ranked fact should have filled. A withheld
+/// fact is not counted in `dropped` either; `dropped` means "ranked below the
+/// cut", and a policy refusal is a different statement.
+///
+/// This crate still knows nothing about strategies. The one caller today is the
+/// chart route in the app crate, which attaches a measure's declared direction
+/// and materiality to facts about the series that plots it.
+pub fn analyze_with_policy(
+    dataset: &Dataset,
+    options: &AnalyzeOptions,
+    policy: &mut dyn FnMut(&mut Insight) -> bool,
+) -> InsightBundle {
     let narrator = narrate::narrator_for(options.locale);
     let mut notes: Vec<String> = Vec::new();
     let facts = collect_facts(dataset, &mut notes);
@@ -82,6 +104,7 @@ pub fn analyze(dataset: &Dataset, options: &AnalyzeOptions) -> InsightBundle {
             let score = rank::score(&kind);
             Insight::new(kind, score)
         })
+        .filter_map(|mut insight| policy(&mut insight).then_some(insight))
         .collect();
 
     let ranked = rank::rank(insights);
@@ -305,22 +328,30 @@ fn composition_facts(dataset: &Dataset) -> Vec<FactKind> {
         return Vec::new();
     };
 
-    let rows: Vec<(String, f64)> = (0..dataset.row_count())
-        .filter_map(|r| {
-            let name = category.cells.get(r)?.display();
-            if name.is_empty() {
-                return None;
-            }
-            let v = value.cells.get(r)?.as_number()?;
-            Some((name, v))
-        })
-        .collect();
+    // The dataset row each pair came from travels alongside it: a blank name
+    // or a non-numeric value is skipped here, so the pair's own index is NOT
+    // its row, and the dominance fact wants the row.
+    let mut rows: Vec<(String, f64)> = Vec::new();
+    let mut positions: Vec<usize> = Vec::new();
+    for r in 0..dataset.row_count() {
+        let Some(name) = category.cells.get(r).map(|c| c.display()) else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let Some(v) = value.cells.get(r).and_then(|c| c.as_number()) else {
+            continue;
+        };
+        rows.push((name, v));
+        positions.push(r);
+    }
     if rows.is_empty() {
         return Vec::new();
     }
 
     let mut out = Vec::new();
-    out.extend(relations::dominance_fact(&category.name, &value.name, &rows));
+    out.extend(relations::dominance_fact(&category.name, &value.name, &rows, &positions));
     out.extend(relations::pareto_fact(&category.name, &value.name, &rows));
     out
 }

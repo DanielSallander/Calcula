@@ -27,9 +27,17 @@ import type { ParsedChartData, DesignQueryDataSource } from "../types";
  * `DesignQueryRequest` → run it headlessly on the backend → extract categories
  * and series from the returned pivot view.
  */
-export async function readDesignQueryData(
+/**
+ * The compiled request behind a design-query source — the DSL against the
+ * connection's model, with @Name params substituted from the live controls.
+ *
+ * Shared by the reader (which runs it) and the data provider (which reads its
+ * `valueFields` to say which measure each plotted series is), so the two can
+ * never disagree about what the chart asked for.
+ */
+export async function compileDesignQuerySource(
   source: DesignQueryDataSource,
-): Promise<ParsedChartData> {
+): Promise<DesignQueryRequest> {
   if (!source.connectionId) {
     throw new Error("This design-query chart has no BI connection selected.");
   }
@@ -56,9 +64,16 @@ export async function readDesignQueryData(
       .join("\n");
     throw new Error(`Design query has errors (after @param substitution):\n${detail}`);
   }
+  return compiled.request;
+}
+
+export async function readDesignQueryData(
+  source: DesignQueryDataSource,
+): Promise<ParsedChartData> {
+  const request = await compileDesignQuerySource(source);
 
   const view = await chartsBackend.invoke<PivotViewResponse>("run_design_query", {
-    request: compiled.request satisfies DesignQueryRequest,
+    request: request satisfies DesignQueryRequest,
   });
   if (!view) {
     return { categories: [], series: [] };

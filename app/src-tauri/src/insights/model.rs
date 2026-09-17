@@ -534,6 +534,22 @@ fn direction_provenance(resolved: &ResolvedMeasure) -> Vec<AppliedAttr> {
     }
 }
 
+/// What a fact about a PLOTTED series of this measure may carry: the direction
+/// (or its withholding) and the materiality floor, when one is declared.
+///
+/// The chart route (`series_strategy.rs`) attaches this to `core/insights`
+/// facts computed over a chart's own categories. Additivity and target are
+/// deliberately absent: a series fact makes no share claim and no variance
+/// claim, so an attribute that decided nothing would be provenance for
+/// nothing.
+pub(crate) fn series_provenance(resolved: &ResolvedMeasure) -> Vec<AppliedAttr> {
+    let mut out = direction_provenance(resolved);
+    if let Some(m) = resolved.materiality.as_ref() {
+        out.push(attr("materiality", materiality_word(&m.value), &m.source));
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // The gates
 // ---------------------------------------------------------------------------

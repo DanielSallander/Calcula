@@ -13,18 +13,30 @@ use crate::types::{Direction, FactKind, Subject};
 
 /// An ordered numeric series with a label per point. `Series::new` drops the
 /// rows whose value is not finite, carrying the LABELS along with them so a
-/// gap can never shift a label onto the wrong value.
+/// gap can never shift a label onto the wrong value -- and carrying the
+/// POSITIONS too, so a fact can point back at the row as it was supplied.
+///
+/// EVERY INDEX A FACT REPORTS IS A POSITION IN THE SERIES AS SUPPLIED, counting
+/// the rows whose value was missing. The analysis runs over the gap-free
+/// `values`, but a consumer that places a mark -- a ring on a chart's third
+/// bar, a highlight on the third cell under a header -- indexes the thing it
+/// is looking at, and that thing still has its blanks. Reporting analysed
+/// positions instead would land one row early for every gap before the point,
+/// which is the encircled wrong bar (docs/design/insight-overlays.md, IO-1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Series {
     pub subject: Subject,
     pub labels: Vec<String>,
     pub values: Vec<f64>,
+    /// `positions[i]` is the index in the supplied slice that `values[i]` came from.
+    pub positions: Vec<usize>,
 }
 
 impl Series {
     pub fn new(subject: Subject, labels: &[String], values: &[f64]) -> Series {
         let mut kept_labels = Vec::new();
         let mut kept_values = Vec::new();
+        let mut kept_positions = Vec::new();
         for (i, v) in values.iter().enumerate() {
             if !v.is_finite() {
                 continue;
@@ -36,11 +48,13 @@ impl Series {
                     .unwrap_or_else(|| (i + 1).to_string()),
             );
             kept_values.push(*v);
+            kept_positions.push(i);
         }
         Series {
             subject,
             labels: kept_labels,
             values: kept_values,
+            positions: kept_positions,
         }
     }
 
@@ -57,6 +71,12 @@ impl Series {
             .get(i)
             .cloned()
             .unwrap_or_else(|| (i + 1).to_string())
+    }
+
+    /// The supplied-slice index behind analysed position `i`. Identity when
+    /// nothing was dropped before it.
+    pub fn position(&self, i: usize) -> usize {
+        self.positions.get(i).copied().unwrap_or(i)
     }
 }
 
@@ -168,8 +188,10 @@ pub fn extremes_fact(series: &Series) -> Option<FactKind> {
     Some(FactKind::Extremes {
         subject: series.subject.clone(),
         best_label: series.label(hi),
+        best_index: series.position(hi),
         best: series.values[hi],
         worst_label: series.label(lo),
+        worst_index: series.position(lo),
         worst: series.values[lo],
     })
 }
@@ -204,8 +226,10 @@ pub fn smoothed_peak_fact(series: &Series) -> Option<FactKind> {
         subject: series.subject.clone(),
         window: SMOOTHING_WINDOW,
         peak_label: series.label(hi.0),
+        peak_index: series.position(hi.0),
         peak: hi.1,
         trough_label: series.label(lo.0),
+        trough_index: series.position(lo.0),
         trough: lo.1,
     })
 }
@@ -290,11 +314,11 @@ pub fn change_point_facts(series: &Series) -> Vec<FactKind> {
     found
         .into_iter()
         .map(|(offset, fit)| {
-            let at_index = offset + fit.index;
+            let at = offset + fit.index;
             FactKind::ChangePoint {
                 subject: series.subject.clone(),
-                at_label: series.label(at_index),
-                at_index,
+                at_label: series.label(at),
+                at_index: series.position(at),
                 before_mean: fit.before_mean,
                 after_mean: fit.after_mean,
                 shift_sd: fit.shift_sd,
@@ -596,5 +620,61 @@ mod tests {
         let s = Series::new(Subject::measure("V"), &l, &[1.0, f64::NAN, 3.0]);
         assert_eq!(s.values, vec![1.0, 3.0]);
         assert_eq!(s.labels, vec!["Jan".to_string(), "Mar".to_string()]);
+        assert_eq!(s.positions, vec![0, 2]);
+        assert_eq!(s.position(1), 2, "analysed position 1 is supplied row 2");
+    }
+
+    #[test]
+    fn every_reported_index_counts_the_gaps_so_it_points_at_the_row_as_supplied() {
+        // A blank at row 1 and at row 4. The maximum sits at supplied row 6
+        // (analysed position 4); an index that ignored the gaps would say 4 and
+        // put a ring on the row labelled P5. Twenty rows, so every series fact
+        // clears its minimum.
+        let mut values = vec![10.0, f64::NAN, 12.0, 11.0, f64::NAN, 13.0, 90.0, 12.0, 11.0, 10.5];
+        values.extend((0..10).map(|i| 12.0 + (i % 3) as f64));
+        let s = series("Gapped", values);
+        assert_eq!(s.len(), 18);
+
+        match extremes_fact(&s).expect("eighteen points is enough") {
+            FactKind::Extremes { best_label, best_index, worst_label, worst_index, .. } => {
+                assert_eq!((best_index, best_label.as_str()), (6, "P7"));
+                assert_eq!((worst_index, worst_label.as_str()), (0, "P1"));
+            }
+            other => panic!("expected extremes, got {other:?}"),
+        }
+
+        match smoothed_peak_fact(&s).expect("eighteen points is enough") {
+            FactKind::SmoothedPeak { peak_label, peak_index, trough_label, trough_index, .. } => {
+                // The index and the label must name the SAME supplied row.
+                assert_eq!(format!("P{}", peak_index + 1), peak_label);
+                assert_eq!(format!("P{}", trough_index + 1), trough_label);
+            }
+            other => panic!("expected a smoothed peak, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_change_point_across_a_gap_is_indexed_by_the_supplied_row() {
+        // 15 low, then 15 high, with a blank inserted at supplied row 3: every
+        // analysed position after it is one less than its supplied row.
+        let mut values: Vec<f64> = Vec::new();
+        for i in 0..15 {
+            values.push(100.0 + (i % 3) as f64);
+            if i == 2 {
+                values.push(f64::NAN);
+            }
+        }
+        for i in 0..15 {
+            values.push(140.0 + (i % 3) as f64);
+        }
+        let s = series("Stepped", values);
+        let facts = change_point_facts(&s);
+        match &facts[0] {
+            FactKind::ChangePoint { at_index, at_label, .. } => {
+                assert_eq!(format!("P{}", at_index + 1), *at_label, "index and label disagree");
+                assert!(at_index.abs_diff(16) <= 1, "the step is at supplied row 16, got {at_index}");
+            }
+            other => panic!("expected a change point, got {other:?}"),
+        }
     }
 }

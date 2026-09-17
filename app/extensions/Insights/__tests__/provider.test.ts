@@ -191,6 +191,32 @@ describe("Explain this chart", () => {
     expect(request.request.series[0].values).toEqual([10, null, 30]);
   });
 
+  it("forwards the chart's strategy to Rust when the snapshot carries one, and omits it otherwise", async () => {
+    h.resolveSeries.mockResolvedValue({
+      ...snapshot,
+      strategy: { connectionId: "conn-1", measures: [{ series: "Revenue", measure: "Net Revenue" }] },
+    });
+    h.invoke.mockResolvedValue(bundle());
+
+    await explainChart("chart-1", () => undefined);
+    await flush();
+
+    const sent = h.invoke.mock.calls[0][1] as { request: Record<string, unknown> };
+    expect(sent.request.strategy).toEqual({
+      connectionId: "conn-1",
+      measures: [{ series: "Revenue", measure: "Net Revenue" }],
+    });
+
+    // An empty binding list is no strategy at all: the request must not carry
+    // a `strategy` key for Rust to look up a connection for nothing.
+    h.invoke.mockClear();
+    h.resolveSeries.mockResolvedValue({ ...snapshot, strategy: { connectionId: "conn-1", measures: [] } });
+    await explainChart("chart-1", () => undefined);
+    await flush();
+    const bare = h.invoke.mock.calls[0][1] as { request: Record<string, unknown> };
+    expect("strategy" in bare.request).toBe(false);
+  });
+
   it("says so rather than analysing nothing when the chart has no single series set", async () => {
     h.resolveSeries.mockResolvedValue(null);
 

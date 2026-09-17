@@ -39,9 +39,11 @@ import {
 import { getAllCharts, getChartById } from "./chartStore";
 import { readChartDataResolved } from "./chartDataReader";
 import { resolveDataSource } from "./dataSourceResolver";
+import { compileDesignQuerySource } from "./designQueryChartDataReader";
+import { bindSeriesToMeasures } from "./designQuerySeriesBinding";
 import { getCurrentChartId } from "../handlers/selectionHandler";
 import { isDesignQueryDataSource, isPivotDataSource } from "../types";
-import type { ChartSpec, ParsedChartData } from "../types";
+import type { ChartSpec, DesignQueryDataSource, ParsedChartData } from "../types";
 
 // ============================================================================
 // Public shape
@@ -256,6 +258,38 @@ function pick<T>(source: readonly T[], indices: readonly number[]): T[] {
 }
 
 // ============================================================================
+// The strategy behind a design-query chart
+// ============================================================================
+
+/**
+ * Which measure each plotted series is, for a design-query chart.
+ *
+ * Recompiles the DSL rather than reading anything off the rendered data,
+ * because the rendered data carries captions and the strategy layer is keyed
+ * by MEASURE NAME; the compiled request's `valueFields` is the only place both
+ * are known. Absent (not an error) when nothing binds: a chart whose series
+ * cannot be traced to a measure gets plain facts, which is the same answer a
+ * range chart gets and never a wrong direction.
+ */
+async function strategyFor(
+  source: DesignQueryDataSource,
+  seriesNames: readonly string[],
+): Promise<ChartSeriesSnapshot["strategy"]> {
+  if (!source.connectionId) return undefined;
+  let valueFields: Array<{ measureName: string; customName?: string }>;
+  try {
+    valueFields = (await compileDesignQuerySource(source)).valueFields;
+  } catch {
+    // The chart itself already drew (or failed visibly); a strategy that
+    // cannot be established is simply not claimed.
+    return undefined;
+  }
+  const measures = bindSeriesToMeasures(seriesNames, valueFields);
+  if (measures.length === 0) return undefined;
+  return { connectionId: source.connectionId, measures };
+}
+
+// ============================================================================
 // resolveSeries
 // ============================================================================
 
@@ -321,6 +355,12 @@ async function resolveSeries(
     assumptions.push(COMPOSED_ASSUMPTION);
   }
 
+  // A design-query chart knows which measure each series plots, which is what
+  // lets a fact about a Cost series be judged by Cost's declared direction.
+  const strategy = isDesignQueryDataSource(spec.data)
+    ? await strategyFor(spec.data, data.series.map((s) => s.name))
+    : undefined;
+
   // Sampling happens LAST so it applies to whichever numbers won above, and to
   // the categories and their typed positions in lockstep.
   const cap = Number.isFinite(maxPoints) && maxPoints > 0
@@ -342,6 +382,7 @@ async function resolveSeries(
     title: titleOf(spec),
     sheetIndex: chart.sheetIndex,
     mark: spec.mark,
+    ...(strategy ? { strategy } : {}),
     categories,
     categoryKind: data.categoryField?.type ?? "nominal",
     ...(categoryValues ? { categoryValues } : {}),

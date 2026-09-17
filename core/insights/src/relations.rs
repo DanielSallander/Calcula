@@ -99,7 +99,36 @@ fn shareable_total(totals: &[(String, f64)]) -> Option<f64> {
     }
 }
 
-pub fn dominance_fact(category: &str, value: &str, rows: &[(String, f64)]) -> Option<FactKind> {
+/// The supplied row a category name sits in, when it sits in exactly one.
+///
+/// `row_positions[i]` is the supplied index of `rows[i]`; an empty slice means
+/// the caller does not know, and the answer is `None` rather than a guess.
+fn single_row_of(name: &str, rows: &[(String, f64)], row_positions: &[usize]) -> Option<usize> {
+    if row_positions.len() != rows.len() {
+        return None;
+    }
+    let mut found: Option<usize> = None;
+    for (i, (n, _)) in rows.iter().enumerate() {
+        if n != name {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(row_positions[i]);
+    }
+    found
+}
+
+/// `rows` are (category, value) pairs and `row_positions` says which supplied
+/// row each pair came from (same length, or empty when unknown), so the fact
+/// can point at the top category's row where there is exactly one.
+pub fn dominance_fact(
+    category: &str,
+    value: &str,
+    rows: &[(String, f64)],
+    row_positions: &[usize],
+) -> Option<FactKind> {
     let totals = category_totals(rows);
     if totals.len() < 2 || totals.len() > DOMINANCE_MAX_CATEGORIES {
         return None;
@@ -110,10 +139,12 @@ pub fn dominance_fact(category: &str, value: &str, rows: &[(String, f64)]) -> Op
     if top_share < DOMINANCE_MIN_SHARE {
         return None;
     }
+    let top_index = single_row_of(&top_name, rows, row_positions);
     Some(FactKind::Dominance {
         category: category.to_string(),
         value: value.to_string(),
         top_category: top_name,
+        top_index,
         top_share,
         categories: totals.len(),
     })
@@ -274,14 +305,16 @@ mod tests {
             ("B".to_string(), 15.0),
             ("C".to_string(), 15.0),
         ];
-        match dominance_fact("Region", "Sales", &lopsided).expect("70% is dominant") {
+        match dominance_fact("Region", "Sales", &lopsided, &[0, 1, 2]).expect("70% is dominant") {
             FactKind::Dominance {
                 top_category,
+                top_index,
                 top_share,
                 categories,
                 ..
             } => {
                 assert_eq!(top_category, "A");
+                assert_eq!(top_index, Some(0));
                 assert!((top_share - 0.7).abs() < 1e-9);
                 assert_eq!(categories, 3);
             }
@@ -294,7 +327,43 @@ mod tests {
             ("C".to_string(), 25.0),
             ("D".to_string(), 25.0),
         ];
-        assert!(dominance_fact("Region", "Sales", &even).is_none());
+        assert!(dominance_fact("Region", "Sales", &even, &[0, 1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn the_top_category_is_indexed_only_when_it_sits_in_exactly_one_row() {
+        // "A" occurs twice (summed to 70 of 100): no single row to point at.
+        let split = vec![
+            ("B".to_string(), 15.0),
+            ("A".to_string(), 40.0),
+            ("C".to_string(), 15.0),
+            ("A".to_string(), 30.0),
+        ];
+        match dominance_fact("Region", "Sales", &split, &[0, 1, 2, 3]).expect("70% is dominant") {
+            FactKind::Dominance { top_category, top_index, .. } => {
+                assert_eq!(top_category, "A");
+                assert_eq!(top_index, None, "two rows were summed; neither is THE row");
+            }
+            other => panic!("expected dominance, got {other:?}"),
+        }
+
+        // Supplied positions are honoured, not the pair's own index: the rows
+        // handed over were rows 3, 7 and 9 of something larger.
+        let sparse = vec![
+            ("B".to_string(), 15.0),
+            ("A".to_string(), 70.0),
+            ("C".to_string(), 15.0),
+        ];
+        match dominance_fact("Region", "Sales", &sparse, &[3, 7, 9]).expect("70% is dominant") {
+            FactKind::Dominance { top_index, .. } => assert_eq!(top_index, Some(7)),
+            other => panic!("expected dominance, got {other:?}"),
+        }
+
+        // A caller that does not know the positions gets no index, not a guess.
+        match dominance_fact("Region", "Sales", &sparse, &[]).expect("70% is dominant") {
+            FactKind::Dominance { top_index, .. } => assert_eq!(top_index, None),
+            other => panic!("expected dominance, got {other:?}"),
+        }
     }
 
     #[test]
@@ -305,7 +374,7 @@ mod tests {
             ("B".to_string(), 10.0),
         ];
         assert!(
-            dominance_fact("Region", "Sales", &with_refund).is_none(),
+            dominance_fact("Region", "Sales", &with_refund, &[0, 1, 2]).is_none(),
             "a share above 100% is worse than no share at all"
         );
     }

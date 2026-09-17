@@ -2782,7 +2782,7 @@ export {
   CHART_SERIES_MAX_POINTS,
 } from "./chartData";
 
-export type { ChartDataProvider, ChartDataSummary, ChartSeriesSnapshot } from "./chartData";
+export type { ChartDataProvider, ChartDataSummary, ChartSeriesSnapshot, ChartSeriesStrategy } from "./chartData";
 
 // Transient "points of interest" cues drawn over a chart (never in its spec).
 // Insights sets them; Charts paints them at composite time.

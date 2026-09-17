@@ -185,6 +185,7 @@ impl Narrator for EnNarrator {
                 best,
                 worst_label,
                 worst,
+                ..
             } => format!(
                 "{} is highest at {} ({}) and lowest at {} ({}).",
                 subject.label(),
@@ -201,6 +202,7 @@ impl Narrator for EnNarrator {
                 peak,
                 trough_label,
                 trough,
+                ..
             } => format!(
                 "Smoothed over {} points, {} peaks at {} ({}) and bottoms out at {} ({}).",
                 count(*window, loc),
@@ -282,6 +284,7 @@ impl Narrator for EnNarrator {
                 top_category,
                 top_share,
                 categories,
+                ..
             } => format!(
                 "{} accounts for {} of {}, out of {} {} values.",
                 top_category,
@@ -417,16 +420,20 @@ pub(crate) fn every_fact_kind_fixture() -> Vec<FactKind> {
         FactKind::Extremes {
             subject: col.clone(),
             best_label: "Aug".to_string(),
+            best_index: 7,
             best: 190.0,
             worst_label: "Feb".to_string(),
+            worst_index: 1,
             worst: 61.0,
         },
         FactKind::SmoothedPeak {
             subject: col.clone(),
             window: 3,
             peak_label: "Jul".to_string(),
+            peak_index: 6,
             peak: 175.5,
             trough_label: "Feb".to_string(),
+            trough_index: 1,
             trough: 64.0,
         },
         FactKind::Seasonality {
@@ -465,6 +472,7 @@ pub(crate) fn every_fact_kind_fixture() -> Vec<FactKind> {
             category: "Region".to_string(),
             value: "Revenue".to_string(),
             top_category: "North".to_string(),
+            top_index: Some(0),
             top_share: 0.62,
             categories: 5,
         },
