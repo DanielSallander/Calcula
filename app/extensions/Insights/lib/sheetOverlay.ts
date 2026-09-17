@@ -27,6 +27,7 @@ import { AppEvents, emitAppEvent, onAppEvent, type CellValuesChangedPayload } fr
 import { getGridStateSnapshot } from "@api/grid";
 import { getGridRegions } from "@api/gridOverlays";
 import { cuesForSheet, parseFactsDocument, type CellCueSet } from "@api/insightCues";
+import { overlayStyleFor, resolveOverlayStyle } from "@api/insightStyle";
 import type { InsightBundle, RangeInsightsRequest } from "@api/insightsService";
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
 import { analyzeRange } from "./backend";
@@ -230,27 +231,21 @@ export function followSheetData(): () => void {
 // Painting
 // ============================================================================
 
-const STYLES: Readonly<Record<CellCue["polarity"], { stroke: string; dash: readonly number[] }>> = {
-  good: { stroke: "#1e8e3e", dash: [] },
-  bad: { stroke: "#d93025", dash: [] },
-  attention: { stroke: "#e37400", dash: [4, 3] },
-  neutral: { stroke: "#0e639c", dash: [2, 2] },
-};
-
 /** Draw the cues on one cell: an inset frame per polarity, a corner dot when several. Pure over the context. */
 export function drawCellCues(context: CellDecorationContext, cues: readonly CellCue[]): void {
   if (cues.length === 0) return;
   const { ctx, cellLeft, cellTop, cellRight, cellBottom } = context;
   const first = cues[0];
-  const style = STYLES[first.polarity];
+  // The document's style (the publisher's, in a published application).
+  const style = overlayStyleFor(first.polarity);
   ctx.save();
-  ctx.strokeStyle = style.stroke;
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = style.color;
+  ctx.lineWidth = resolveOverlayStyle().lineWidth;
   ctx.setLineDash([...style.dash]);
   ctx.strokeRect(cellLeft + 1.5, cellTop + 1.5, Math.max(0, cellRight - cellLeft - 3), Math.max(0, cellBottom - cellTop - 3));
   if (cues.length > 1) {
     ctx.setLineDash([]);
-    ctx.fillStyle = style.stroke;
+    ctx.fillStyle = style.color;
     ctx.beginPath();
     ctx.arc(cellRight - 5, cellTop + 5, 2.5, 0, Math.PI * 2);
     ctx.fill();

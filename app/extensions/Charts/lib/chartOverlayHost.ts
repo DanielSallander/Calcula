@@ -22,7 +22,7 @@ import { showToast } from "@api/notifications";
 import type { LayerSpec, MarkerMarkOptions, TextMarkOptions } from "../types";
 import { getChartById, updateChartSpec } from "./chartStore";
 import { getCachedChartData, invalidateChartCache } from "../rendering/chartRenderer";
-import { CUE_STYLES } from "../rendering/cuePainter";
+import { cueStyleFor } from "../rendering/cuePainter";
 import { ChartEvents } from "./chartEvents";
 import { renderChartPng } from "./chartRaster";
 import { defaultImageName, savePngViaDialog } from "./chartExport";
@@ -39,7 +39,9 @@ export function layerForCue(cue: ChartCue): LayerSpec | null {
     series: cue.anchor.series,
     x: cue.anchor.categoryIndex,
     shape: cue.kind === "emphasis" ? "emphasis" : "ring",
-    color: CUE_STYLES[cue.polarity].stroke,
+    // The colour at the moment of keeping — the document's style, so a kept
+    // mark in a published application carries the publisher's colour.
+    color: cueStyleFor(cue.polarity).stroke,
     ...(cue.description ? { label: cue.description } : {}),
   };
   return { mark: "marker", markOptions };

@@ -27,6 +27,7 @@
 //          `needs-scale` and is IO-3a's to draw through the rule painter.
 
 import type { ChartCue, ChartCueAnchor, ChartCueDatumAnchor, ChartCuePolarity } from "@api/chartCues";
+import { DEFAULT_OVERLAY_STYLE, overlayStyleFor, resolveOverlayStyle } from "@api/insightStyle";
 import type { BarRect, HitGeometry, ParsedChartData, PointMarker, SliceArc } from "../types";
 
 // ============================================================================
@@ -222,20 +223,28 @@ export function cueAtDatum(
 
 /**
  * Colour AND shape per polarity, so a colour-blind reader still tells good
- * from bad. Literals for now; IO-3a binds these to the skin's tokens.
+ * from bad. THE DEFAULTS: what a document that declares no style gets. The
+ * live answer is `cueStyleFor(polarity)`, which reads the document's style
+ * through `@api/insightStyle` (the publisher's, in a published application).
  */
 export const CUE_STYLES: Readonly<Record<ChartCuePolarity, { stroke: string; dash: readonly number[] }>> = {
-  good: { stroke: "#1e8e3e", dash: [] },
-  bad: { stroke: "#d93025", dash: [] },
-  attention: { stroke: "#e37400", dash: [6, 4] },
-  neutral: { stroke: "#0e639c", dash: [2, 3] },
+  good: { stroke: DEFAULT_OVERLAY_STYLE.polarity.good.color, dash: DEFAULT_OVERLAY_STYLE.polarity.good.dash },
+  bad: { stroke: DEFAULT_OVERLAY_STYLE.polarity.bad.color, dash: DEFAULT_OVERLAY_STYLE.polarity.bad.dash },
+  attention: { stroke: DEFAULT_OVERLAY_STYLE.polarity.attention.color, dash: DEFAULT_OVERLAY_STYLE.polarity.attention.dash },
+  neutral: { stroke: DEFAULT_OVERLAY_STYLE.polarity.neutral.color, dash: DEFAULT_OVERLAY_STYLE.polarity.neutral.dash },
 };
+
+/** The colour and dash for a polarity, as the open document declares them (else the defaults). */
+export function cueStyleFor(polarity: ChartCuePolarity): { stroke: string; dash: readonly number[] } {
+  const s = overlayStyleFor(polarity);
+  return { stroke: s.color, dash: s.dash };
+}
 
 /** Clearance between a datum's edge and its ring, in logical pixels. */
 export const CUE_RING_PAD = 4;
-export const CUE_LINE_WIDTH = 2;
+export const CUE_LINE_WIDTH = DEFAULT_OVERLAY_STYLE.lineWidth;
 export const CUE_EMPHASIS_LINE_WIDTH = 3;
-export const CUE_BAND_ALPHA = 0.12;
+export const CUE_BAND_ALPHA = DEFAULT_OVERLAY_STYLE.bandOpacity;
 export const CUE_CALLOUT_FONT = "11px 'Segoe UI', system-ui, sans-serif";
 
 /** The drawing surface the painter needs; a stub in tests, the grid canvas live. */
@@ -296,7 +305,8 @@ function calloutAnchorOf(chartX: number, chartY: number, target: CueTarget): { x
 }
 
 function paintOne(ctx: CuePaintContext, chartX: number, chartY: number, cue: ChartCue, shape: CueShape, selected: boolean): void {
-  const style = CUE_STYLES[cue.polarity];
+  const style = cueStyleFor(cue.polarity);
+  const live = resolveOverlayStyle();
   ctx.strokeStyle = style.stroke;
   ctx.fillStyle = style.stroke;
   ctx.setLineDash([...style.dash]);
@@ -306,14 +316,14 @@ function paintOne(ctx: CuePaintContext, chartX: number, chartY: number, cue: Cha
   switch (cue.kind) {
     case "ring": {
       if (shape.kind !== "one") return;
-      ctx.lineWidth = CUE_LINE_WIDTH + extra;
+      ctx.lineWidth = live.lineWidth + extra;
       pathAround(ctx, chartX, chartY, shape.target, CUE_RING_PAD);
       ctx.stroke();
       return;
     }
     case "emphasis": {
       const targets = shape.kind === "one" ? [shape.target] : shape.kind === "many" ? shape.targets : [];
-      ctx.lineWidth = CUE_EMPHASIS_LINE_WIDTH + extra;
+      ctx.lineWidth = live.lineWidth + 1 + extra;
       for (const t of targets) {
         pathAround(ctx, chartX, chartY, t, 1);
         ctx.stroke();
@@ -322,14 +332,14 @@ function paintOne(ctx: CuePaintContext, chartX: number, chartY: number, cue: Cha
     }
     case "band": {
       if (shape.kind !== "xspan") return;
-      ctx.globalAlpha = CUE_BAND_ALPHA;
+      ctx.globalAlpha = live.bandOpacity;
       ctx.fillRect(chartX + shape.x0, chartY + shape.y0, shape.x1 - shape.x0, shape.y1 - shape.y0);
       ctx.globalAlpha = 1;
       return;
     }
     case "callout": {
       if (shape.kind !== "one") return;
-      ctx.lineWidth = CUE_LINE_WIDTH + extra;
+      ctx.lineWidth = live.lineWidth + extra;
       pathAround(ctx, chartX, chartY, shape.target, CUE_RING_PAD);
       ctx.stroke();
       const at = calloutAnchorOf(chartX, chartY, shape.target);

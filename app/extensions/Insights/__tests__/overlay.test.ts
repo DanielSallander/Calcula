@@ -182,6 +182,33 @@ describe("comments", () => {
     expect(cues.getChartComments("chart-1")).toEqual([c]);
   });
 
+  it("the overlay style persists in the same blob, undoably, becomes what painters read, and reloads", async () => {
+    const style = await import("@api/insightStyle");
+    await overlay.showOverlay("chart-1");
+    const c = await overlay.addComment("chart-1", EXT, "note");
+    await overlay.saveOverlayStyle(style.normalizeOverlayStyle({ polarity: { bad: { color: "#800000", dash: [] } } }));
+    expect(style.overlayStyleFor("bad").color).toBe("#800000");
+    const [id, payload, description] = h.setExtensionDataUndoable.mock.calls.at(-1)!;
+    expect(id).toBe("calcula.insights");
+    expect(description).toBe("Change overlay style");
+    expect((payload as { comments: unknown; style: { polarity: { bad: { color: string } } } }).comments).toEqual({ "chart-1": [c] });
+    expect((payload as { style: { polarity: { bad: { color: string } } } }).style.polarity.bad.color).toBe("#800000");
+    // A later comment write carries the style along rather than dropping it.
+    await overlay.addComment("chart-1", EXT, "second");
+    expect((h.setExtensionDataUndoable.mock.calls.at(-1)![1] as { style?: unknown }).style).toBeTruthy();
+
+    await overlay.saveOverlayStyle(null);
+    expect(style.getDocumentOverlayStyle()).toBeNull();
+    expect((h.setExtensionDataUndoable.mock.calls.at(-1)![1] as { style?: unknown }).style).toBeUndefined();
+
+    h.getExtensionData.mockResolvedValue({ comments: {}, style: { polarity: { good: { color: "lime", dash: [] } }, lineWidth: 99 } });
+    await overlay.loadComments();
+    expect(style.overlayStyleFor("good").color).toBe("lime");
+    expect(style.resolveOverlayStyle().lineWidth).toBe(style.DEFAULT_OVERLAY_STYLE.lineWidth); // 99 refused, the rest kept
+    overlay.resetOverlays();
+    expect(style.getDocumentOverlayStyle()).toBeNull();
+  });
+
   it("hide clears the cues but keeps the comments; reset drops everything", async () => {
     await overlay.showOverlay("chart-1");
     await overlay.addComment("chart-1", EXT, "note");

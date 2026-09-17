@@ -39,8 +39,10 @@ import {
   type ChartCueComment,
 } from "@api/chartCues";
 import { CHART_SERIES_MAX_POINTS, resolveChartSeries, type ChartSeriesSnapshot } from "@api/chartData";
+import { AppEvents, emitAppEvent } from "@api/events";
 import { getExtensionData, setExtensionDataUndoable } from "@api/extensionData";
 import { cuesForChart, type ChartCueSet } from "@api/insightCues";
+import { normalizeOverlayStyle, setDocumentOverlayStyle, type OverlayStyle } from "@api/insightStyle";
 import type { InsightBundle } from "@api/insightsService";
 import { analyzeSeries } from "./backend";
 import { seriesRequestFrom } from "./chartExplain";
@@ -70,9 +72,18 @@ export const RECOMPUTE_DEBOUNCE_MS = 250;
 
 interface PersistShape {
   comments?: Record<string, ChartCueComment[]>;
+  /** The publisher's overlay style (§4.10); absent means the defaults. */
+  style?: unknown;
 }
 
 const EXTENSION_ID = InsightsManifest.id;
+
+/** The document's overlay style as last loaded or saved; null = defaults. */
+let persistedStyle: OverlayStyle | null = null;
+
+function persistPayload(): PersistShape {
+  return { comments: commentsByChart, ...(persistedStyle ? { style: persistedStyle } : {}) };
+}
 
 // ============================================================================
 // Showing and hiding
@@ -205,8 +216,28 @@ export function followChartData(): () => void {
 // ============================================================================
 
 async function persistComments(description: string): Promise<void> {
-  const payload: PersistShape = { comments: commentsByChart };
-  await setExtensionDataUndoable(EXTENSION_ID, payload, description);
+  await setExtensionDataUndoable(EXTENSION_ID, persistPayload(), description);
+}
+
+// ============================================================================
+// The overlay style (the publisher's, in a published application)
+// ============================================================================
+
+/**
+ * Save the document's overlay style (null restores the defaults), undoably,
+ * and make every painter use it at once. It rides in the same blob as the
+ * comments, so it is published and pulled with the application.
+ */
+export async function saveOverlayStyle(style: OverlayStyle | null): Promise<void> {
+  persistedStyle = style === null ? null : normalizeOverlayStyle(style);
+  setDocumentOverlayStyle(persistedStyle);
+  await setExtensionDataUndoable(EXTENSION_ID, persistPayload(), style === null ? "Reset overlay style" : "Change overlay style");
+  emitAppEvent(AppEvents.GRID_REFRESH);
+}
+
+/** The document's declared style, or null (the defaults). */
+export function documentOverlayStyle(): OverlayStyle | null {
+  return persistedStyle;
 }
 
 /** Add a comment on a fact of a chart, anchored where its cue is now. */
@@ -261,6 +292,10 @@ export async function loadComments(): Promise<void> {
       if (Array.isArray(list)) commentsByChart[chartId] = list.filter(isComment);
     }
   }
+  // The style travels with the workbook: what the file declares, normalised
+  // field by field, becomes what every painter draws with.
+  persistedStyle = stored && stored.style !== undefined && stored.style !== null ? normalizeOverlayStyle(stored.style) : null;
+  setDocumentOverlayStyle(persistedStyle);
   for (const chartId of new Set([...Object.keys(commentsByChart), ...activeChartIdsWithComments()])) {
     setChartComments(chartId, commentsByChart[chartId] ?? []);
   }
@@ -280,4 +315,6 @@ export function resetOverlays(): void {
   for (const t of pending.values()) clearTimeout(t);
   pending.clear();
   commentsByChart = {};
+  persistedStyle = null;
+  setDocumentOverlayStyle(null);
 }

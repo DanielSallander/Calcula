@@ -288,6 +288,39 @@ paint" reading of §4.6; nothing in IO-0/IO-1 changes.
   wrong bar. Rule (b) is the one judgement call; the owner may invert it to "a comment follows
   the label".
 
+### 4.10 The overlay's look is the publisher's (owner, 2026-09-17; D-IO-11)
+
+Raised after the live proof: the style must be customisable, and in a published application the
+PUBLISHER controls it for every subscriber. The design follows from where a published application
+lives: it is its workbook. So the style is a **document setting**, not an app-skin setting —
+stored in the Insights extension-data blob beside the comments (`{ comments, style }` under
+`calcula.insights`), which the `.cala` persists, `publish.rs` writes as `extension_data.json`,
+and `pull.rs` reads back on the subscriber's side. Precedence is two-level and has no per-user
+tier on purpose: the document's style when it declares one, else the built-in defaults; a
+subscriber who edited it locally is overwritten by the next pull, which is the distribution
+model's own rule for every piece of extension state.
+
+- **`@api/insightStyle.ts`** is the one place a painter asks "what colour is bad?":
+  `OverlayStyle { polarity: { good | bad | attention | neutral: { color, dash } }, lineWidth,
+  bandOpacity }`, `DEFAULT_OVERLAY_STYLE`, `normalizeOverlayStyle` (the boundary — a field it
+  cannot accept falls back ALONE, so a mistyped colour costs that colour and nothing else; colours
+  are canvas colours only, no `url(`), `setDocumentOverlayStyle` / `resolveOverlayStyle` /
+  `overlayStyleFor`, `onOverlayStyleChanged`. Semantic, never pixel: it says what a polarity looks
+  like, not where anything is drawn.
+- **Every painter reads it live**: the chart cues and callouts (`cueStyleFor`), the comment
+  boxes, the cell frames, and a KEPT mark captures the document's colour at the moment of keeping,
+  so a `marker` layer in a published application carries the publisher's colour.
+- **The pane's "Overlay style…" section** (`OverlayStyleSection.tsx`) is offered whether or not a
+  bundle is on screen — a publisher styles the report before anyone asks it anything — and edits a
+  DRAFT until *Apply*, which saves once, undoably ("Change overlay style"); *Reset to defaults*
+  saves null, so a later change to the defaults reaches the document too.
+- **Shape still carries polarity.** The defaults keep the four dashes distinct so a style that
+  gives two polarities one colour still reads; the pane offers solid/dashed/dotted per polarity.
+  One consequence, caught by the stored baseline: the cell frames had carried their own dash
+  patterns (`[4,3]` / `[2,2]`) and now share the chart's (`[6,4]` / `[2,3]`), so the
+  `region-insight-overlay-cells.png` baseline was re-recorded and re-confirmed — the journey's
+  comparator did its job on a deliberate change.
+
 ### 4.8 The chat
 
 The `analyze` route already computes the Tier-0 bundle before the model sees the message
@@ -664,9 +697,9 @@ cold comparison runs (48 s each), per the E2E plan's rules 5 and 7.
 **Not done, and why:** the clipboard image write is unverified on WebView2 (it falls back to a
 file). Keyboard stepping was not added: the grid owns
 the arrow keys while a chart is selected, and a second binding would need a claim. Follow-ups:
-the pivot member-based route; undo for chart spec edits (Charts-wide); style literals in
-`CUE_STYLES` and the cell decoration → skin tokens; `rule` on a `level` anchor (`needs-scale`)
-through the rule painter; Pareto member positions in Rust.
+the pivot member-based route; undo for chart spec edits (Charts-wide); `rule` on a `level` anchor
+(`needs-scale`) through the rule painter; Pareto member positions in Rust. (The style literals
+became the document setting of §4.10.)
 
 ## 6. Verification — the standard this repository holds a milestone to
 
@@ -711,6 +744,9 @@ Taken 2026-09-17 with the owner, after IO-1 (§4.8a is the design they produced)
 - **Overlay objects are never dead**: they re-resolve on every chart invalidation, including a
   filter change, and an object that cannot be re-resolved is shown as unattached rather than left
   in place. — DECIDED (the owner's requirement).
+- **D-IO-11 — the overlay's style is a document setting the publisher owns** (§4.10): stored with
+  the workbook, published and pulled with the application, no per-user override; the pane edits
+  it. — DECIDED 2026-09-17 (the owner's requirement after the live proof), BUILT.
 
 ## 8. Risks, and what answers each
 

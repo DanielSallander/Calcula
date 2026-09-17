@@ -147,6 +147,27 @@ describe("following the data", () => {
   });
 });
 
+describe("the decoration's colours", () => {
+  it("come from the document's style when one is declared", async () => {
+    const style = await import("@api/insightStyle");
+    const { drawCellCues } = sheet;
+    const strokes: string[] = [];
+    const ctx = { save: () => {}, restore: () => {}, strokeRect: () => {}, setLineDash: () => {}, beginPath: () => {}, arc: () => {}, fill: () => {}, fillStyle: "", lineWidth: 0, set strokeStyle(v: string) { strokes.push(v); }, get strokeStyle() { return strokes.at(-1) ?? ""; } };
+    const cue = { factId: "f", polarity: "attention" as const, description: "d", sheetIndex: 0, row: 1, col: 1 };
+    const context = { ctx, row: 1, col: 1, cellLeft: 0, cellTop: 0, cellRight: 40, cellBottom: 20 } as unknown as Parameters<typeof drawCellCues>[0];
+    try {
+      style.setDocumentOverlayStyle(style.normalizeOverlayStyle({ polarity: { attention: { color: "purple", dash: [] } }, lineWidth: 3 }));
+      drawCellCues(context, [cue]);
+      expect(strokes.at(-1)).toBe("purple");
+      expect(ctx.lineWidth).toBe(3);
+    } finally {
+      style.setDocumentOverlayStyle(null);
+    }
+    drawCellCues(context, [cue]);
+    expect(strokes.at(-1)).toBe(style.DEFAULT_OVERLAY_STYLE.polarity.attention.color);
+  });
+});
+
 describe("the decoration", () => {
   it("is registered over the selection and draws only cells that carry a cue on the active sheet", async () => {
     const off = sheet.registerCellCueDecoration();

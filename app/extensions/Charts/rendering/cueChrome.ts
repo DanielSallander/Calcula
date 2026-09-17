@@ -18,7 +18,7 @@
 
 import type { ChartCue, ChartCueComment, ChartCueStep } from "@api/chartCues";
 import type { HitGeometry, ParsedChartData } from "../types";
-import { resolveCueTarget, cueContextOf, CUE_STYLES, type CueTarget, type CuePaintContext } from "./cuePainter";
+import { resolveCueTarget, cueContextOf, cueStyleFor, type CueTarget, type CuePaintContext } from "./cuePainter";
 
 // ============================================================================
 // The stepper pill
@@ -228,7 +228,7 @@ export function paintChartComments(
     const above = at.y - height - 6;
     const y = above < chartY + COMMENT_TOP_RESERVED ? at.y + 6 : above;
     const polarity = cuesById.get(comment.factId)?.polarity ?? "neutral";
-    const stroke = CUE_STYLES[polarity].stroke;
+    const stroke = cueStyleFor(polarity).stroke;
 
     ctx.strokeStyle = stroke;
     ctx.lineWidth = 1;

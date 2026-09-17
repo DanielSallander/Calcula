@@ -2854,6 +2854,22 @@ export type {
   CellCueDropReason,
 } from "./insightCues";
 
+// How the overlay looks: the document's (publisher's) style, else the defaults.
+export {
+  DEFAULT_OVERLAY_STYLE,
+  DASH_PRESETS,
+  POLARITIES,
+  normalizeOverlayStyle,
+  isOverlayColor,
+  isDefaultOverlayStyle,
+  setDocumentOverlayStyle,
+  getDocumentOverlayStyle,
+  resolveOverlayStyle,
+  overlayStyleFor,
+  onOverlayStyleChanged,
+} from "./insightStyle";
+export type { OverlayStyle, OverlayPolarityStyle } from "./insightStyle";
+
 // Transient "points of interest" on CELLS (a range's or a pivot's), painted by
 // an over-selection cell decoration the Insights extension registers.
 export {

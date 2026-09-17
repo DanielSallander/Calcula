@@ -77,6 +77,7 @@ const { InsightsPane } = await import("../components/InsightsPane");
 const store = await import("../lib/store");
 const overlayLib = await import("../lib/overlay");
 const chartCues = await import("@api/chartCues");
+const extensionData = await import("@api/extensionData");
 
 // ============================================================================
 // Fixtures
@@ -152,6 +153,7 @@ beforeEach(() => {
   chartCues.clearAllChartCues();
   overlayLib.resetOverlays();
   store.reset();
+  vi.mocked(extensionData.setExtensionDataUndoable).mockClear();
 });
 
 /** Put a bundle on screen AS IF it came from a chart. */
@@ -176,6 +178,40 @@ function chartBundle() {
     } }] }),
   });
 }
+
+describe("the overlay style section", () => {
+  it("is offered without a bundle, edits a draft, saves once on Apply into the document, and resets to null", async () => {
+    const { getExtensionData, setExtensionDataUndoable } = await import("@api/extensionData");
+    const style = await import("@api/insightStyle");
+    void getExtensionData;
+    await render();
+    expect(one("insights-overlay-style-form")).toBeNull();
+    await act(async () => { (one("insights-overlay-style-toggle") as HTMLButtonElement).click(); });
+    expect(one("insights-overlay-style-form")).not.toBeNull();
+
+    // A draft change alone touches nothing.
+    const bad = one("insights-overlay-style-color-bad") as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(bad, "#800000");
+      bad.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(style.getDocumentOverlayStyle()).toBeNull();
+    expect(setExtensionDataUndoable).not.toHaveBeenCalled();
+
+    await act(async () => { (one("insights-overlay-style-apply") as HTMLButtonElement).click(); });
+    for (let i = 0; i < 4; i++) await act(async () => { await Promise.resolve(); });
+    expect(style.overlayStyleFor("bad").color).toBe("#800000");
+    expect(style.overlayStyleFor("good").color).toBe(style.DEFAULT_OVERLAY_STYLE.polarity.good.color);
+    expect(setExtensionDataUndoable).toHaveBeenCalledTimes(1);
+    expect((setExtensionDataUndoable as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][2]).toBe("Change overlay style");
+
+    await act(async () => { (one("insights-overlay-style-reset") as HTMLButtonElement).click(); });
+    for (let i = 0; i < 4; i++) await act(async () => { await Promise.resolve(); });
+    expect(style.getDocumentOverlayStyle()).toBeNull();
+    expect((setExtensionDataUndoable as unknown as { mock: { calls: unknown[][] } }).mock.calls[1][2]).toBe("Reset overlay style");
+  });
+});
 
 describe("the overlay from the pane", () => {
   it("offers no overlay controls for a range bundle, and both for a chart bundle", async () => {

@@ -109,6 +109,7 @@ import {
   visibleChartCues,
 } from "@api/chartCues";
 import { cueAtDatum } from "./rendering/cuePainter";
+import { onOverlayStyleChanged } from "@api/insightStyle";
 import { hitTestCommentBoxes, hitTestCueStepper } from "./rendering/cueChrome";
 import { chartOverlayHost } from "./lib/chartOverlayHost";
 import { validateChartSpec, validateMergedSpec } from "./lib/chartSpecValidate";
@@ -354,6 +355,7 @@ function activate(context: ExtensionContext): void {
   // cached geometry, so a change needs a redraw, not a re-render. Charts is
   // also the host for what only it can do: keep a cue in the spec, snapshot.
   cleanupFunctions.push(onChartCuesChanged(() => requestOverlayRedraw()));
+  cleanupFunctions.push(onOverlayStyleChanged(() => requestOverlayRedraw()));
   registerChartCueHost(chartOverlayHost);
 
   console.log("[Chart Extension] Registering...");

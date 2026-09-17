@@ -48,6 +48,7 @@ import {
 import { onChartCuesChanged } from "@api/chartCues";
 import { onCellCuesChanged } from "@api/cellCues";
 import { InsightCard } from "./InsightCard";
+import { OverlayStyleSection } from "./OverlayStyleSection";
 
 // The overlay's on/off state lives in the transient cue stores, not in this
 // pane's store; a version counter bumped on every change is enough for
@@ -515,6 +516,11 @@ export function InsightsPane(_props: TaskPaneViewProps): React.ReactElement {
             ))}
           </div>
         )}
+
+        {/* The overlay's look is a document setting, so it is offered whether
+            or not a bundle is on screen: a publisher styles the report before
+            anyone has asked it anything. */}
+        <OverlayStyleSection />
       </div>
 
       {bundle && (

@@ -459,6 +459,25 @@ describe("cue painting", () => {
     expect(resolveCue(g, { type: "span", series: "Sales", from: 1, to: 2 }, cueContextOf(data))).toEqual({ ok: false, reason: "not-drawable" });
   });
 
+  it("draws with the DOCUMENT's style when one is declared, and with the defaults when it is cleared", async () => {
+    const { setDocumentOverlayStyle, normalizeOverlayStyle } = await import("@api/insightStyle");
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar" }));
+    try {
+      setDocumentOverlayStyle(normalizeOverlayStyle({ polarity: { bad: { color: "#800000", dash: [1, 1] } }, lineWidth: 4 }));
+      const { ctx, styles, dashes } = recordingCtx();
+      paintChartCues(ctx, 0, 0, g, data, [cue(anchor("Sales"), "bad"), cue(anchor("Cost"), "good")]);
+      expect(styles).toEqual(["#800000", CUE_STYLES.good.stroke]); // bad restyled, good untouched
+      expect(dashes[0]).toEqual([1, 1]);
+      expect(ctx.lineWidth).toBe(4);
+    } finally {
+      setDocumentOverlayStyle(null);
+    }
+    const { ctx, styles } = recordingCtx();
+    paintChartCues(ctx, 0, 0, g, data, [cue(anchor("Sales"), "bad")]);
+    expect(styles).toEqual([CUE_STYLES.bad.stroke]);
+  });
+
   it("colour and dash follow polarity, so shape carries the meaning where colour cannot", () => {
     const data = makeData();
     const g = geometryFor(data, makeSpec({ mark: "bar" }));
