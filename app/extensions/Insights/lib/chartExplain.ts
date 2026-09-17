@@ -24,6 +24,7 @@ import {
   CHART_SERIES_MAX_POINTS,
   getChartDataProvider,
   resolveChartSeries,
+  type ChartSeriesSnapshot,
 } from "@api/chartData";
 import type { InsightBundle } from "@api/insightsService";
 import { analyzeSeries, type SeriesInsightsRequest } from "./backend";
@@ -39,6 +40,24 @@ const TRUNCATION_NOTE =
 function withNote(bundle: InsightBundle, note: string): InsightBundle {
   if (bundle.notes.includes(note)) return bundle;
   return { ...bundle, notes: [...bundle.notes, note] };
+}
+
+/**
+ * The `insights_for_series` request a snapshot becomes. One function, because
+ * the overlay (chartCueSpike, later the pane's "Show on chart") must send
+ * EXACTLY what "Explain this chart" sends: the same numbers in, the same facts
+ * out, one bundle behind both views.
+ */
+export function seriesRequestFrom(snapshot: ChartSeriesSnapshot): SeriesInsightsRequest {
+  return {
+    title: snapshot.title ?? snapshot.name,
+    categories: snapshot.categories,
+    categoryKind: snapshot.categoryKind,
+    series: snapshot.series.map((s) => ({ name: s.name, values: s.values })),
+    ...(snapshot.categoryValues === undefined
+      ? {}
+      : { categoryValues: snapshot.categoryValues }),
+  };
 }
 
 /**
@@ -72,15 +91,7 @@ export async function explainChart(
   }
 
   const label = snapshot.title ?? snapshot.name;
-  const request: SeriesInsightsRequest = {
-    title: label,
-    categories: snapshot.categories,
-    categoryKind: snapshot.categoryKind,
-    series: snapshot.series.map((s) => ({ name: s.name, values: s.values })),
-    ...(snapshot.categoryValues === undefined
-      ? {}
-      : { categoryValues: snapshot.categoryValues }),
-  };
+  const request = seriesRequestFrom(snapshot);
 
   try {
     const bundle = await analyzeSeries(request);

@@ -2784,6 +2784,19 @@ export {
 
 export type { ChartDataProvider, ChartDataSummary, ChartSeriesSnapshot } from "./chartData";
 
+// Transient "points of interest" cues drawn over a chart (never in its spec).
+// Insights sets them; Charts paints them at composite time.
+export {
+  setChartCues,
+  clearChartCues,
+  clearAllChartCues,
+  getChartCues,
+  listChartsWithCues,
+  onChartCuesChanged,
+} from "./chartCues";
+
+export type { ChartCue, ChartCueAnchor, ChartCueDatumAnchor, ChartCuePolarity } from "./chartCues";
+
 export {
   registerChartContextMenuContribution,
   getChartContextMenuContributions,

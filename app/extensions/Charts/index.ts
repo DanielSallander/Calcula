@@ -95,6 +95,7 @@ import { registerChartParamController } from "@api/chartParams";
 import { chartParamController } from "./lib/chartParamController";
 import { registerChartDataProvider } from "@api/chartData";
 import { chartDataProvider } from "./lib/chartDataProvider";
+import { clearAllChartCues, onChartCuesChanged } from "@api/chartCues";
 import { validateChartSpec, validateMergedSpec } from "./lib/chartSpecValidate";
 import type { ChartSpec } from "./types";
 import { buildSeriesFormula } from "./lib/seriesFormula";
@@ -333,6 +334,10 @@ function activate(context: ExtensionContext): void {
   // then re-reads a plain source range TYPED, so a blank cell arrives as `null`
   // rather than as the zero the display-string parse would substitute.
   registerChartDataProvider(chartDataProvider);
+
+  // Insight cues (@api/chartCues) are painted at composite time from the
+  // cached geometry, so a change needs a redraw, not a re-render.
+  cleanupFunctions.push(onChartCuesChanged(() => requestOverlayRedraw()));
 
   console.log("[Chart Extension] Registering...");
 
@@ -1285,6 +1290,9 @@ function activate(context: ExtensionContext): void {
       // don't survive into a freshly loaded workbook (kept across plain cell edits).
       clearAllPointSelections();
       clearAllWidgetValues();
+      // Insight cues are a lens on THIS document's charts; they never survive
+      // into the next one (the document-scoped-store lesson).
+      clearAllChartCues();
       invalidateAllChartCaches();
       syncChartRegions();
       context.events.emit(AppEvents.GRID_REFRESH);
@@ -1808,6 +1816,8 @@ function deactivate(): void {
   // Withdraw the resolved-series surface too: the store is reset below, so a
   // provider left registered would answer for charts that no longer exist.
   registerChartDataProvider(null);
+  // And the cues on charts that are about to stop existing.
+  clearAllChartCues();
 
   // Tear down authored sandboxed marks (unregister shims + unmount workers).
   uninstallChartMarks();

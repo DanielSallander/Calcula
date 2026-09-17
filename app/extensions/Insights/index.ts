@@ -26,6 +26,7 @@ import { AppEvents, onAppEvent } from "@api/events";
 import { insightsBackend } from "./lib/backend";
 import { createInsightsProvider } from "./lib/provider";
 import { registerChartExplain } from "./lib/chartExplain";
+import { RING_BEST_ON_SELECTED_CHART_COMMAND, ringBestOnSelectedChart } from "./lib/chartCueSpike";
 import {
   analyzeSelection,
   refreshConnections,
@@ -119,6 +120,16 @@ function activate(context: ExtensionContext): void {
 
   // 6. "Explain this chart" on the chart context menu.
   cleanupFns.push(registerChartExplain(openPane));
+
+  // 6b. IO-0 spike: a HIDDEN developer command (no menu, no button) that rings
+  //     Extremes.best on the selected chart, or clears the rings if it has
+  //     them. The user surfaces (context menu, pane) come with IO-3.
+  context.commands.register(RING_BEST_ON_SELECTED_CHART_COMMAND, async () => {
+    const result = await ringBestOnSelectedChart();
+    console.info("[Insights] ring best on selected chart:", result);
+    return result;
+  });
+  cleanupFns.push(() => context.commands.unregister(RING_BEST_ON_SELECTED_CHART_COMMAND));
 
   // 7. The document can be replaced under us (File > New / File > Open, and the
   //    .calp working-copy open that announces the same way). The previous

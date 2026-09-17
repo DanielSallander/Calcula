@@ -1,15 +1,18 @@
 # Insight overlays — points of interest drawn on charts, pivots and sheets
 
-Status: DESIGNED 2026-09-17, NOT BUILT. A milestone of its own, to be built in its own session —
-the owner's decision. **Tier 0 throughout**: no model computes, places or colours anything here.
+Status: DESIGNED 2026-09-17; **IO-0 BUILT 2026-09-17** (§5a records what it found), IO-1..5 open.
+A milestone of its own, built in its own session — the owner's decision. **Tier 0 throughout**: no
+model computes, places or colours anything here.
 Companion documents: `insights-strategy-layer.md` (the engine and the strategy this consumes; §14 is
 the consumers), `ai-intent-router.md` (the chat's `analyze` route, which is how a sentence reaches
 this), `open-items.md` 2.AI.13.
 
 **Start here, next session.** Read §2 (what exists — the feature is two thirds built already, in
 pieces that have never been joined), then §3 (the seven gaps, each a one-line check), then §7 (the
-owner decisions to take before writing code). Build IO-0 first (§5): a one-day spike that proves the
-one genuinely new thing, putting a ring on the right bar.
+owner decisions; the IO-0 session took the doc's recommended answers without the owner live, so
+confirm them before IO-2). IO-0 is BUILT — read §5a for what it found, including the correction
+to §4.5 — so the next milestone is IO-1 (§5): indices on every fact kind and the strategy context
+on the chart route, in Rust.
 
 ## 0. The ask, and the one-sentence answer
 
@@ -191,13 +194,18 @@ is the lookup from series name to measure and the plumbing of the optional field
 
 ### 4.5 Placement — the mapper (gaps 2, 4, 7)
 
-- **Chart.** Series by NAME → the snapshot's series index → the painter's series index through the
-  kept-index maps (`toAuthoringIndices` in reverse; a filtered chart is the case that bites).
-  Category by INDEX where the fact carries one; by label otherwise, and IO-1 adds an index to every
-  kind that lacks one so label lookup becomes a check, not the mechanism. A cue is VALIDATED before
-  it is drawn: the label at the resolved index must equal the fact's label, or the cue is dropped
-  and the pane says the chart changed. The overlay is recomputed on the chart's invalidation event
-  and cleared when the chart's series set changes shape.
+- **Chart.** Series by NAME (indices shift when a series is hidden; names do not). Category by
+  painter-space INDEX — **corrected by IO-0**: the snapshot `resolveChartSeries` returns is built
+  from the reader's RESOLVED data, i.e. painter space after filters, so an index taken from it is
+  already the painter's index and the kept-index maps are NOT walked for drawing (they are walked
+  only in reverse for keep-as-annotation, IO-3, because `dataPointOverrides` are authoring-space).
+  The case that bites on a filtered chart is the opposite mistake — an authoring-space index — and
+  the label check catches it (`cuePlacement.test.ts`, "an authoring-space index would land on
+  Apr"). Category by INDEX where the fact carries one; by label otherwise, and IO-1 adds an index
+  to every kind that lacks one so label lookup becomes a check, not the mechanism. A cue is
+  VALIDATED before it is drawn: the label at the resolved index must equal the fact's label, or the
+  cue is dropped and the pane says the chart changed. The overlay is recomputed on the chart's
+  invalidation event and cleared when the chart's series set changes shape.
 - **Pivot.** Fact dimension + member label → `[fieldIndex, valueId]` through `getFieldUniqueValues`;
   measure → the value column; the pair → the cell's `groupPath`, found in the current view
   (`getView`). A label the field does not contain, or one that resolves in two fields, produces NO
@@ -284,6 +292,63 @@ seems to need judgement ("is this interesting?"), the answer is a new determinis
 - **IO-5 — the chat tool, the records.** `show_points_of_interest` in the `analyze` and `chart`
   specialists (with the specialists test's reachability rule), `insights-strategy-layer.md` §14.8,
   `open-items.md` 2.AI.13 closed, memory.
+
+## 5a. IO-0 — what was built, and what the spike found (2026-09-17)
+
+The ring lands on the right datum, and nothing after IO-0 needs redesign. What exists now:
+
+- **`@api/chartCues.ts`** — the seam, ahead of IO-3's schedule because the spike needed a channel
+  the spec never sees: `setChartCues` / `clearChartCues` / `clearAllChartCues` / `getChartCues` /
+  `listChartsWithCues` / `onChartCuesChanged`. A frozen-copy store keyed by chart id. `ChartCue` is
+  `{ factId, kind: "ring", polarity, anchor: { type: "datum", series, categoryIndex, categoryLabel },
+  label? }` — the §4.2 shape narrowed to what IO-0 draws, plus `categoryLabel` on the anchor so the
+  painter can validate. Cleared by Charts on `AFTER_OPEN` / `AFTER_NEW` (`reloadCharts`), on chart
+  delete (`removeChartFromCache`) and on deactivate. Test: `app/src/api/__tests__/chartCues.test.ts`.
+- **`Charts/rendering/cuePainter.ts`** — `resolveCueTarget(geometry, anchor, ctx)` is PURE:
+  (series name, painter category index) → the `BarRect` / `PointMarker` / `SliceArc` from the hit
+  geometry, refused with a reason (`no-such-datum` | `label-mismatch` | `series-not-drawn`) when
+  the datum's own label differs from the fact's or when a pie is asked about a series it does not
+  draw. Composite geometry (combo, pareto, repeat, facet) is searched group by group, so small
+  multiples work with no special case. `paintChartCues` draws an ellipse round a bar, a circle round
+  a point, an arc along a slice's outer edge; colour AND dash per polarity (`CUE_STYLES` — literals
+  for now, IO-3 binds them to skin tokens).
+- **The paint stage is at COMPOSITE time**, in `chartRenderer.ts` `renderChart` step 3a, over the
+  cached raster through `chartDataCache.hitGeometry` — where selection highlights and tooltips are
+  drawn — and NOT inside `dispatchPaint` as §4.6 first suggested. Reasons: a cue change is then a
+  `requestOverlayRedraw`, not a raster re-render; the lens never reaches `chartExport` or the
+  capture surface, which is what "never an edit" means for a PNG; and `dispatchPaint` has no chart
+  id. IO-3 keeps this unless export of the overlay is asked for.
+- **`Insights/lib/cuePlacement.ts`** — `ringsOnBest(bundle, snapshot)`: reads `factsJson` (the
+  numbers Rust kept, keyed by the pane's own ids) for `extremes` facts and anchors each at its
+  `bestLabel`. Three refusals before a cue exists: the series must be in the snapshot, the label
+  must occur EXACTLY once among the categories (the Jan..Dec-over-two-years case, gap 2), and the
+  snapshot value at that index must equal the fact's `best`. Every refusal is returned with the
+  fact id and a reason; nothing is guessed. IO-2 grows this into `@api/insightCues` with the §4.3
+  table.
+- **The hidden command** `insights.dev.ringBestOnSelectedChart` (`Insights/lib/chartCueSpike.ts`):
+  resolves the selected chart, runs the SAME request "Explain this chart" runs
+  (`seriesRequestFrom`, now shared), maps, sets the cues; a second invocation clears them. No menu,
+  no button, by design — the user surfaces are IO-3's.
+- **Tests** — `Charts/rendering/__tests__/cuePlacement.test.ts` (20): grouped bar, stacked bar (the
+  Cost SEGMENT of the Mar stack, not the Sales one), horizontal bar, line (smallest `cy`), pie
+  (largest `percent`), small multiples (the Cost panel's cell), the FILTERED chart in both
+  directions, refusals, determinism, and the stroke coordinates translated by the chart's canvas
+  origin. `Insights/__tests__/cuePlacement.test.ts` (10): the mapper and each refusal. Both guards
+  were SABOTAGED (label check removed; ambiguity check disabled) and each reddened exactly its own
+  assertions — 4 of 30 — and nothing else.
+
+Found on the way, and worth the record:
+
+- **The determinism suite's `stacking: "stacked"` is a no-op.** The bar painter reads
+  `markOptions.stackMode`; the top-level `stacking` field in `chart-determinism.test.ts`'s
+  `makeSpec` stacks nothing, so that suite has been pinning GROUPED geometry under a "stacked"
+  name. Harmless for determinism, misleading as a fixture; the cue test sets `markOptions`.
+- **Sampled snapshots are a known hole.** Above `CHART_SERIES_MAX_POINTS` the snapshot is
+  stride-sampled, so a snapshot index is no longer a painter index; the label check will refuse
+  every such cue rather than misplace one. IO-2 should have the snapshot carry its sample indices
+  (one optional field on `ChartSeriesSnapshot`) so the mapper can translate instead of refuse.
+- **A pie's `SliceArc.seriesIndex` is the slice (category) index**, and the pie draws only
+  `series[0]`; the resolver takes the painter's series names as context for exactly that reason.
 
 ## 6. Verification — the standard this repository holds a milestone to
 

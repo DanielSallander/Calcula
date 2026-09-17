@@ -1,0 +1,395 @@
+//! FILENAME: app/extensions/Charts/rendering/__tests__/cuePlacement.test.ts
+// PURPOSE: IO-0, the placement spike's exit criterion: a ring anchored at
+//          (series name, painter category index, label) lands on the datum that
+//          holds the series' maximum, through the same hit geometry the
+//          painters compute — on a grouped bar, a stacked bar, a horizontal
+//          bar, a line, a pie, small multiples, and a FILTERED chart.
+// CONTEXT: The fixtures are the determinism suite's own (chart-determinism
+//          .test.ts makeData/makeSpec/makeLayout), so the geometry under test
+//          is the geometry that suite already pins. The filtered case is the
+//          one the design said would bite: the snapshot an insight is computed
+//          on is painter-space, so an index taken from it lands right, while an
+//          authoring-space index lands on the wrong category — and the label
+//          check refuses it. Both directions are asserted.
+
+import { describe, it, expect } from "vitest";
+// Importing chartDispatch runs the built-in mark registrations (module side-effect).
+import { dispatchComputeGeometry, dispatchComputeLayout } from "../chartDispatch";
+import { DEFAULT_CHART_THEME } from "../chartTheme";
+import { applyChartFilters } from "../../lib/chartFilters";
+import {
+  resolveCueTarget,
+  cueContextOf,
+  paintChartCues,
+  CUE_RING_PAD,
+  CUE_STYLES,
+  type CuePaintContext,
+} from "../cuePainter";
+import type { ChartCue, ChartCueDatumAnchor } from "@api/chartCues";
+import type { ParsedChartData, ChartSpec, ChartLayout, HitGeometry, BarRect } from "../../types";
+
+// ============================================================================
+// Fixtures (the determinism suite's shapes)
+// ============================================================================
+
+const CATEGORIES = ["Jan", "Feb", "Mar", "Apr", "May"];
+const SALES = [100, 200, 300, 150, 250]; // max 300 at Mar (index 2)
+const COST = [80, 120, 180, 90, 150]; // max 180 at Mar (index 2)
+
+function makeData(
+  categories: string[] = CATEGORIES,
+  seriesMap: Record<string, number[]> = { Sales: SALES, Cost: COST },
+): ParsedChartData {
+  return {
+    categories,
+    series: Object.entries(seriesMap).map(([name, values]) => ({ name, values, color: null })),
+  };
+}
+
+function makeSpec(overrides: Partial<ChartSpec> = {}): ChartSpec {
+  return {
+    mark: "bar",
+    data: { sheetIndex: 0, startRow: 0, startCol: 0, endRow: 5, endCol: 2 },
+    hasHeaders: true,
+    seriesOrientation: "columns",
+    categoryIndex: 0,
+    series: [],
+    title: null,
+    xAxis: { title: null, gridLines: false, showLabels: true, labelAngle: 0, min: null, max: null },
+    yAxis: { title: null, gridLines: true, showLabels: true, labelAngle: 0, min: null, max: null },
+    legend: { visible: true, position: "bottom" },
+    stacking: "none",
+    transforms: [],
+    encodings: {},
+    annotations: [],
+    dataPointOverrides: [],
+    filters: [],
+    gradientFill: null,
+    stylePreset: null,
+    ...overrides,
+  } as ChartSpec;
+}
+
+function makeLayout(): ChartLayout {
+  return {
+    width: 600,
+    height: 400,
+    margin: { top: 40, right: 20, bottom: 40, left: 60 },
+    plotArea: { x: 60, y: 40, width: 520, height: 320 },
+  };
+}
+
+const theme = DEFAULT_CHART_THEME;
+
+function geometryFor(data: ParsedChartData, spec: ChartSpec, layout: ChartLayout = makeLayout()): HitGeometry {
+  return dispatchComputeGeometry(data, spec, layout, theme);
+}
+
+/** The anchor an insight mapper would hand over for "Sales is highest at Mar". */
+function anchor(series = "Sales", categoryIndex = 2, categoryLabel = "Mar"): ChartCueDatumAnchor {
+  return { type: "datum", series, categoryIndex, categoryLabel };
+}
+
+/** The bar rect at (series, category) in a bars geometry, for comparison. */
+function rectAt(geometry: HitGeometry, seriesName: string, categoryIndex: number): BarRect {
+  expect(geometry.type).toBe("bars");
+  const r = (geometry as { rects: BarRect[] }).rects.find(
+    (b) => b.seriesName === seriesName && b.categoryIndex === categoryIndex,
+  );
+  if (!r) throw new Error(`no rect for ${seriesName}@${categoryIndex}`);
+  return r;
+}
+
+// ============================================================================
+// Cartesian marks
+// ============================================================================
+
+describe("cue placement: bars", () => {
+  it("grouped bar: the ring lands on the Sales bar for Mar, the tallest Sales bar", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar", stacking: "none" }));
+    const r = resolveCueTarget(g, anchor(), cueContextOf(data));
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.target.kind !== "rect") throw new Error("expected a rect");
+    expect(r.target.rect).toEqual(rectAt(g, "Sales", 2));
+    expect(r.target.rect.value).toBe(300);
+    expect(r.target.rect.categoryName).toBe("Mar");
+    // The tallest bar of its series, in pixels too.
+    const salesRects = (g as { rects: BarRect[] }).rects.filter((b) => b.seriesName === "Sales");
+    expect(Math.max(...salesRects.map((b) => b.height))).toBe(r.target.rect.height);
+  });
+
+  it("grouped bar: a cue on the Cost series lands on the Cost bar, not its neighbour", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar", stacking: "none" }));
+    const r = resolveCueTarget(g, anchor("Cost"), cueContextOf(data));
+    if (!r.ok || r.target.kind !== "rect") throw new Error("expected a rect");
+    expect(r.target.rect.seriesName).toBe("Cost");
+    expect(r.target.rect.value).toBe(180);
+    // Grouped: the Cost bar sits to the right of the Sales bar in the same group.
+    expect(r.target.rect.x).toBeGreaterThan(rectAt(g, "Sales", 2).x);
+  });
+
+  it("stacked bar: the ring lands on the Cost SEGMENT of the Mar stack", () => {
+    const data = makeData();
+    // Stacking is a mark option (`markOptions.stackMode`), not the top-level
+    // `stacking` field the determinism suite sets — that one the painter ignores.
+    const g = geometryFor(data, makeSpec({ mark: "bar", markOptions: { stackMode: "stacked" } }));
+    const r = resolveCueTarget(g, anchor("Cost"), cueContextOf(data));
+    if (!r.ok || r.target.kind !== "rect") throw new Error("expected a rect");
+    const sales = rectAt(g, "Sales", 2);
+    expect(r.target.rect.seriesName).toBe("Cost");
+    // Stacked: same x as the Sales segment, sitting on top of it.
+    expect(r.target.rect.x).toBe(sales.x);
+    expect(r.target.rect.y + r.target.rect.height).toBeCloseTo(sales.y, 6);
+  });
+
+  it("horizontal bar: the ring lands on the longest Sales bar", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "horizontalBar" }));
+    const r = resolveCueTarget(g, anchor(), cueContextOf(data));
+    if (!r.ok || r.target.kind !== "rect") throw new Error("expected a rect");
+    expect(r.target.rect.categoryName).toBe("Mar");
+    const salesRects = (g as { rects: BarRect[] }).rects.filter((b) => b.seriesName === "Sales");
+    expect(Math.max(...salesRects.map((b) => b.width))).toBe(r.target.rect.width);
+  });
+});
+
+describe("cue placement: line", () => {
+  it("the ring lands on the Mar point of the Sales line, the highest point", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "line" }));
+    const r = resolveCueTarget(g, anchor(), cueContextOf(data));
+    if (!r.ok || r.target.kind !== "point") throw new Error("expected a point");
+    expect(r.target.marker.seriesName).toBe("Sales");
+    expect(r.target.marker.categoryName).toBe("Mar");
+    expect(r.target.marker.value).toBe(300);
+    expect(g.type).toBe("points");
+    const salesMarkers = (g as { markers: Array<{ seriesName: string; cy: number }> }).markers.filter(
+      (m) => m.seriesName === "Sales",
+    );
+    // Canvas y grows downward: the highest value has the smallest cy.
+    expect(Math.min(...salesMarkers.map((m) => m.cy))).toBe(r.target.marker.cy);
+  });
+});
+
+describe("cue placement: pie", () => {
+  it("the cue lands on the Mar slice, the largest, of the first series", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "pie" }));
+    const r = resolveCueTarget(g, anchor(), cueContextOf(data));
+    if (!r.ok || r.target.kind !== "slice") throw new Error("expected a slice");
+    expect(r.target.arc.label).toBe("Mar");
+    expect(r.target.arc.value).toBe(300);
+    const arcs = (g as { arcs: Array<{ percent: number }> }).arcs;
+    expect(Math.max(...arcs.map((a) => a.percent))).toBe(r.target.arc.percent);
+  });
+
+  it("a cue about a series the pie does not draw is refused, not put on the first series' slice", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "pie" }));
+    const r = resolveCueTarget(g, anchor("Cost"), cueContextOf(data));
+    expect(r).toEqual({ ok: false, reason: "series-not-drawn" });
+  });
+});
+
+describe("cue placement: small multiples (composite geometry)", () => {
+  it("finds the Cost panel's Mar bar inside the composite, offset into its cell", () => {
+    const data = makeData();
+    const spec = makeSpec({ mark: "bar", repeat: { columns: 2 } });
+    const layout = dispatchComputeLayout(600, 400, spec, data, theme);
+    const g = geometryFor(data, spec, layout);
+    expect(g.type).toBe("composite");
+    const r = resolveCueTarget(g, anchor("Cost"), cueContextOf(data));
+    if (!r.ok || r.target.kind !== "rect") throw new Error("expected a rect");
+    expect(r.target.rect.seriesName).toBe("Cost");
+    expect(r.target.rect.categoryName).toBe("Mar");
+    // The Cost panel is the second cell, so its bar sits in the right half.
+    expect(r.target.rect.x).toBeGreaterThan(300);
+  });
+});
+
+// ============================================================================
+// The filtered chart — the case the design said would bite
+// ============================================================================
+
+describe("cue placement: filtered chart", () => {
+  const data = makeData();
+  // Hide Jan. Painter space is now [Feb, Mar, Apr, May]; Mar is painter index 1
+  // and authoring index 2.
+  const filtered = applyChartFilters(data, { hiddenSeries: [], hiddenCategories: [0] });
+
+  it("the filter really moved Mar from index 2 to index 1", () => {
+    expect(filtered.categories).toEqual(["Feb", "Mar", "Apr", "May"]);
+    expect(filtered.keptCategoryIndices).toEqual([1, 2, 3, 4]);
+  });
+
+  it("a painter-space index (what the snapshot reports) lands on Mar", () => {
+    const g = geometryFor(filtered, makeSpec({ mark: "bar" }));
+    const r = resolveCueTarget(g, anchor("Sales", 1, "Mar"), cueContextOf(filtered));
+    if (!r.ok || r.target.kind !== "rect") throw new Error("expected a rect");
+    expect(r.target.rect.categoryName).toBe("Mar");
+    expect(r.target.rect.value).toBe(300);
+  });
+
+  it("an authoring-space index would land on Apr, and the label check refuses it", () => {
+    const g = geometryFor(filtered, makeSpec({ mark: "bar" }));
+    // Index 2 in painter space is Apr — a real bar, the WRONG bar.
+    expect(rectAt(g, "Sales", 2).categoryName).toBe("Apr");
+    const r = resolveCueTarget(g, anchor("Sales", 2, "Mar"), cueContextOf(filtered));
+    expect(r).toEqual({ ok: false, reason: "label-mismatch" });
+  });
+
+  it("the same holds on a filtered line and a filtered pie", () => {
+    const line = geometryFor(filtered, makeSpec({ mark: "line" }));
+    expect(resolveCueTarget(line, anchor("Sales", 1, "Mar"), cueContextOf(filtered)).ok).toBe(true);
+    expect(resolveCueTarget(line, anchor("Sales", 2, "Mar"), cueContextOf(filtered))).toEqual({
+      ok: false,
+      reason: "label-mismatch",
+    });
+    const pie = geometryFor(filtered, makeSpec({ mark: "pie" }));
+    expect(resolveCueTarget(pie, anchor("Sales", 1, "Mar"), cueContextOf(filtered)).ok).toBe(true);
+    expect(resolveCueTarget(pie, anchor("Sales", 2, "Mar"), cueContextOf(filtered))).toEqual({
+      ok: false,
+      reason: "label-mismatch",
+    });
+  });
+});
+
+// ============================================================================
+// Refusals
+// ============================================================================
+
+describe("cue placement: refusals", () => {
+  it("a series the chart does not have resolves to nothing", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar" }));
+    expect(resolveCueTarget(g, anchor("Profit"), cueContextOf(data))).toEqual({ ok: false, reason: "no-such-datum" });
+  });
+
+  it("a category index past the end resolves to nothing", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar" }));
+    expect(resolveCueTarget(g, anchor("Sales", 9, "Mar"), cueContextOf(data))).toEqual({ ok: false, reason: "no-such-datum" });
+  });
+
+  it("a label that no longer matches the datum (the data changed) is refused", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar" }));
+    expect(resolveCueTarget(g, anchor("Sales", 2, "March"), cueContextOf(data))).toEqual({ ok: false, reason: "label-mismatch" });
+  });
+
+  it("is deterministic across repeated resolution", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar", markOptions: { stackMode: "stacked" } }));
+    const first = JSON.stringify(resolveCueTarget(g, anchor("Cost"), cueContextOf(data)));
+    for (let i = 0; i < 50; i++) {
+      expect(JSON.stringify(resolveCueTarget(g, anchor("Cost"), cueContextOf(data)))).toBe(first);
+    }
+  });
+});
+
+// ============================================================================
+// Painting — the ring is stroked where the datum is, offset into canvas space
+// ============================================================================
+
+interface Call { fn: string; args: unknown[] }
+
+function recordingCtx(): { ctx: CuePaintContext; calls: Call[]; styles: string[]; dashes: number[][] } {
+  const calls: Call[] = [];
+  const styles: string[] = [];
+  const dashes: number[][] = [];
+  const rec = (fn: string) => (...args: unknown[]) => { calls.push({ fn, args }); };
+  const ctx = {
+    save: rec("save"),
+    restore: rec("restore"),
+    beginPath: rec("beginPath"),
+    ellipse: rec("ellipse"),
+    arc: rec("arc"),
+    stroke: rec("stroke"),
+    setLineDash: (d: number[]) => { dashes.push([...d]); calls.push({ fn: "setLineDash", args: [d] }); },
+    lineWidth: 0,
+    _stroke: "" as string,
+    get strokeStyle() { return this._stroke; },
+    set strokeStyle(v: string) { this._stroke = v; styles.push(v); },
+  } as unknown as CuePaintContext & { _stroke: string };
+  return { ctx, calls, styles, dashes };
+}
+
+function cue(a: ChartCueDatumAnchor, polarity: ChartCue["polarity"] = "neutral"): ChartCue {
+  return { factId: `extremes:${a.series}`, kind: "ring", polarity, anchor: a };
+}
+
+describe("cue painting", () => {
+  it("strokes an ellipse around the resolved bar, translated by the chart's canvas origin", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar" }));
+    const rect = rectAt(g, "Sales", 2);
+    const { ctx, calls } = recordingCtx();
+
+    const drawn = paintChartCues(ctx, 1000, 500, g, data, [cue(anchor())]);
+
+    expect(drawn).toBe(1);
+    const ellipse = calls.find((c) => c.fn === "ellipse");
+    expect(ellipse).toBeDefined();
+    const [cx, cy, rx, ry] = ellipse!.args as number[];
+    expect(cx).toBeCloseTo(1000 + rect.x + rect.width / 2, 6);
+    expect(cy).toBeCloseTo(500 + rect.y + rect.height / 2, 6);
+    expect(rx).toBeCloseTo(rect.width / 2 + CUE_RING_PAD, 6);
+    expect(ry).toBeCloseTo(rect.height / 2 + CUE_RING_PAD, 6);
+    expect(calls.filter((c) => c.fn === "stroke")).toHaveLength(1);
+  });
+
+  it("strokes a circle around the resolved line point and an arc along the resolved slice", () => {
+    const data = makeData();
+    const line = geometryFor(data, makeSpec({ mark: "line" }));
+    const marker = (line as { markers: Array<{ seriesName: string; categoryIndex: number; cx: number; cy: number }> }).markers.find(
+      (m) => m.seriesName === "Sales" && m.categoryIndex === 2,
+    )!;
+    let rec = recordingCtx();
+    expect(paintChartCues(rec.ctx, 10, 20, line, data, [cue(anchor())])).toBe(1);
+    let arc = rec.calls.find((c) => c.fn === "arc")!;
+    expect((arc.args as number[])[0]).toBeCloseTo(10 + marker.cx, 6);
+    expect((arc.args as number[])[1]).toBeCloseTo(20 + marker.cy, 6);
+
+    const pie = geometryFor(data, makeSpec({ mark: "pie" }));
+    const slice = (pie as { arcs: Array<{ label: string; centerX: number; centerY: number; outerRadius: number; startAngle: number; endAngle: number }> }).arcs.find(
+      (a) => a.label === "Mar",
+    )!;
+    rec = recordingCtx();
+    expect(paintChartCues(rec.ctx, 10, 20, pie, data, [cue(anchor())])).toBe(1);
+    arc = rec.calls.find((c) => c.fn === "arc")!;
+    const [ax, ay, ar, a0, a1] = arc.args as number[];
+    expect(ax).toBeCloseTo(10 + slice.centerX, 6);
+    expect(ay).toBeCloseTo(20 + slice.centerY, 6);
+    expect(ar).toBeCloseTo(slice.outerRadius + CUE_RING_PAD, 6);
+    expect(a0).toBe(slice.startAngle);
+    expect(a1).toBe(slice.endAngle);
+  });
+
+  it("draws nothing for a cue that does not resolve, and says so in the count", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar" }));
+    const { ctx, calls } = recordingCtx();
+    const drawn = paintChartCues(ctx, 0, 0, g, data, [cue(anchor("Sales", 2, "March")), cue(anchor("Profit"))]);
+    expect(drawn).toBe(0);
+    expect(calls.some((c) => c.fn === "ellipse" || c.fn === "arc" || c.fn === "stroke")).toBe(false);
+  });
+
+  it("colour and dash follow polarity, so shape carries the meaning where colour cannot", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar" }));
+    const { ctx, styles, dashes } = recordingCtx();
+    paintChartCues(ctx, 0, 0, g, data, [
+      cue(anchor("Sales"), "good"),
+      cue(anchor("Cost"), "bad"),
+      cue(anchor("Sales", 0, "Jan"), "attention"),
+      cue(anchor("Cost", 0, "Jan"), "neutral"),
+    ]);
+    expect(styles).toEqual([CUE_STYLES.good.stroke, CUE_STYLES.bad.stroke, CUE_STYLES.attention.stroke, CUE_STYLES.neutral.stroke]);
+    // Solid, solid, dashed, dotted — then the trailing reset.
+    expect(dashes.slice(0, 4)).toEqual([[], [], [6, 4], [2, 3]]);
+    expect(dashes[dashes.length - 1]).toEqual([]);
+    expect(new Set(styles).size).toBe(4);
+  });
+});

@@ -17,6 +17,8 @@ import {
 } from "@api/gridOverlays";
 
 import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
+import { clearChartCues, getChartCues } from "@api/chartCues";
+import { paintChartCues } from "./cuePainter";
 import { getChartById, getAllCharts, getActiveSheetIndex } from "../lib/chartStore";
 import { readChartDataResolved } from "../lib/chartDataReader";
 import { dispatchPaint, dispatchComputeLayout, dispatchComputeGeometry, extractBarRects, isComposed } from "./chartDispatch";
@@ -145,6 +147,9 @@ export function removeChartFromCache(chartId: string): void {
   chartDataCache.delete(chartId);
   clearPointSelection(chartId);
   clearWidgetValues(chartId);
+  // A deleted chart's cues would otherwise outlive it and reappear on a chart
+  // that later reuses the id.
+  clearChartCues(chartId);
 }
 
 // ============================================================================
@@ -519,6 +524,17 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
       drawSelectionHighlights(ctx, canvasX, canvasY, cachedData, chart.spec, subSel.level, subSel.seriesIndex, subSel.categoryIndex);
     } else if (subSel.level === "axis" && subSel.axisType) {
       drawAxisSelectionHighlight(ctx, canvasX, canvasY, cachedData.layout, subSel.axisType);
+    }
+  }
+
+  // 3a. Insight cues (IO-0): a transient lens from @api/chartCues, drawn over
+  //     the raster through the cached hit geometry — the same place and the
+  //     same geometry as the selection highlights, never the spec. A cue whose
+  //     anchor no longer matches the drawn datum is skipped by the painter.
+  if (cachedData) {
+    const cues = getChartCues(chartId);
+    if (cues.length > 0) {
+      paintChartCues(ctx, canvasX, canvasY, cachedData.hitGeometry, cachedData.data, cues);
     }
   }
 
