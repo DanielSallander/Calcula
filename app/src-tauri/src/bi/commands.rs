@@ -3166,19 +3166,37 @@ pub async fn script_bi_sql(
             return Err("PermissionDenied: bi.sql not granted for this script".to_string());
         }
     }
-    let result = bi_sql_core(&bi_state, connection_id.clone(), &sql).await?;
+    // Audit (unified trail): persist a script-attributed bi.sql call — BOTH
+    // outcomes. Recording only successes tells a reviewer of the trail that a
+    // statement the source or the model refused went through. A short SQL
+    // PREFIX gives forensic context; never the full query.
+    let sql_prefix: String = sql.trim().chars().take(60).collect();
+    let detail = format!("connection {} — {}", connection_id, sql_prefix);
+    let result = match bi_sql_core(&bi_state, connection_id.clone(), &sql).await {
+        Ok(result) => result,
+        Err(e) => {
+            if let Some(sid) = script_id.as_deref() {
+                crate::net_commands::record_capability_call(
+                    &app_state.audit_log,
+                    "bi.sql",
+                    sid,
+                    false,
+                    Some(&detail),
+                    Some(&e),
+                );
+            }
+            return Err(e);
+        }
+    };
     log_info!("BI", "script_bi_sql: conn={}, returned {} rows", connection_id, result.row_count);
 
-    // Audit (unified trail): persist a script-attributed bi.sql call (success).
-    // Record a short SQL PREFIX for forensic context, never the full query.
     if let Some(sid) = script_id.as_deref() {
-        let sql_prefix: String = sql.trim().chars().take(60).collect();
         crate::net_commands::record_capability_call(
             &app_state.audit_log,
             "bi.sql",
             sid,
             true,
-            Some(&format!("connection {} — {}", connection_id, sql_prefix)),
+            Some(&detail),
             None,
         );
     }
@@ -3701,7 +3719,14 @@ pub async fn bi_refresh_connection(
     };
 
     if active_queries.is_empty() {
-        return Err("No active queries to refresh.".to_string());
+        // NOT an error, so not an `Err`: a connection may legitimately drive
+        // only pivot tables, or only the Model Editor. Reporting "nothing to
+        // do" as a failure is what forced the Connections pane to catch and
+        // ignore EVERY error from this command — which is how a security
+        // refusal became invisible — and what made the BI pane announce
+        // "Refresh failed" on a perfectly healthy connection. An empty result
+        // says nothing was refreshed without claiming anything went wrong.
+        return Ok(Vec::new());
     }
 
     let engine_arc = get_engine_arc(&bi_state, connection_id)?;

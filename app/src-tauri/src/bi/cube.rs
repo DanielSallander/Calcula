@@ -98,6 +98,42 @@ pub(crate) fn cube_err_message(e: CubeError) -> String {
         CubeError::Value => "Invalid member expression".to_string(),
         CubeError::NotAvailable => "No data available".to_string(),
         CubeError::Reference => "Invalid reference".to_string(),
+        CubeError::Refused => "Refused by the model's security: the active \"view as\" role \
+                              denies an object this formula reads"
+            .to_string(),
+    }
+}
+
+/// Record a script-attributed cube capability call — **both** outcomes.
+///
+/// A missing audit row is bad; a FALSE one is worse. Recording only successes
+/// tells a reviewer of the trail that a query the model refused went through,
+/// and because these commands are server-audited the broker deliberately
+/// writes nothing, so this is the only recorder.
+fn audit_cube_call<T>(
+    app_state: &crate::AppState,
+    script_id: Option<&str>,
+    detail: &str,
+    result: &Result<T, String>,
+) {
+    let Some(sid) = script_id else { return };
+    match result {
+        Ok(_) => crate::net_commands::record_capability_call(
+            &app_state.audit_log,
+            "bi.query",
+            sid,
+            true,
+            Some(detail),
+            None,
+        ),
+        Err(e) => crate::net_commands::record_capability_call(
+            &app_state.audit_log,
+            "bi.query",
+            sid,
+            false,
+            Some(detail),
+            Some(e),
+        ),
     }
 }
 
@@ -216,12 +252,12 @@ pub async fn cube_udf_value(
     let result = script_cube_value(&bi_state, &connection, &members)
         .await
         .map_err(cube_err_message);
-    if let (Some(sid), true) = (script_id.as_deref(), result.is_ok()) {
-        crate::net_commands::record_capability_call(
-            &app_state.audit_log, "bi.query", sid, true,
-            Some(&format!("cube.value connection {}", connection)), None,
-        );
-    }
+    audit_cube_call(
+        &app_state,
+        script_id.as_deref(),
+        &format!("cube.value connection {}", connection),
+        &result,
+    );
     result
 }
 
@@ -249,12 +285,12 @@ pub async fn cube_udf_kpi(
     let result = script_cube_kpi(&bi_state, &connection, &kpi, property)
         .await
         .map_err(cube_err_message);
-    if let (Some(sid), true) = (script_id.as_deref(), result.is_ok()) {
-        crate::net_commands::record_capability_call(
-            &app_state.audit_log, "bi.query", sid, true,
-            Some(&format!("cube.kpi connection {} kpi {}", connection, kpi)), None,
-        );
-    }
+    audit_cube_call(
+        &app_state,
+        script_id.as_deref(),
+        &format!("cube.kpi connection {} kpi {}", connection, kpi),
+        &result,
+    );
     result
 }
 
@@ -281,12 +317,12 @@ pub async fn cube_udf_members(
     let result = script_cube_members(&bi_state, &connection, &level)
         .await
         .map_err(cube_err_message);
-    if let (Some(sid), true) = (script_id.as_deref(), result.is_ok()) {
-        crate::net_commands::record_capability_call(
-            &app_state.audit_log, "bi.query", sid, true,
-            Some(&format!("cube.members connection {} level {}", connection, level)), None,
-        );
-    }
+    audit_cube_call(
+        &app_state,
+        script_id.as_deref(),
+        &format!("cube.members connection {} level {}", connection, level),
+        &result,
+    );
     result
 }
 
@@ -1049,17 +1085,32 @@ async fn run_query(
     super::commands::apply_connection_role(&mut engine, bi, conn_id.clone());
     match engine.query_auto_refresh(req).await {
         Ok((batches, _)) => Ok(super::commands::batches_to_result(&batches)),
-        Err(e) => {
-            // A CUBE cell has no channel for a message (Excel semantics: the
-            // cell shows #N/A), so a security refusal is at least visible in
-            // the log rather than indistinguishable from "no data".
-            let msg = e.to_string();
-            if msg.contains("object-level security") {
-                crate::log_warn!("BI", "CUBE query refused: {}", msg);
-            }
-            Err(CubeError::NotAvailable)
+        Err(e) if is_security_refusal(&e) => {
+            crate::log_warn!("BI", "CUBE query refused: {}", e);
+            Err(CubeError::Refused)
         }
+        Err(_) => Err(CubeError::NotAvailable),
     }
+}
+
+/// True when the engine refused this query for a SECURITY reason rather than
+/// failing to answer it: the active role denies an object (object-level
+/// security), its row filters cannot be enforced for this query (fail-closed
+/// row-level security), or the role itself is gone.
+///
+/// Matched on the TYPED error, never on message text. This codebase has been
+/// bitten twice by the other kind: `friendly_bi_query_error`'s two
+/// row-level-security branches matched Rust VARIANT names against `Display`
+/// output and were therefore dead for their whole life.
+fn is_security_refusal(e: &bi_engine::QueryError) -> bool {
+    matches!(
+        e,
+        bi_engine::QueryError::Engine(
+            bi_engine::EngineError::ObjectLevelSecurityDenied { .. }
+                | bi_engine::EngineError::RowLevelSecurityNotEnforceable { .. }
+                | bi_engine::EngineError::SecurityRoleNotFound(_)
+        )
+    )
 }
 
 /// Compute a single scalar measure value, optionally filtered to members.
@@ -1598,6 +1649,37 @@ mod tests {
         let members = parse_members("Geo[Country]=Sweden").unwrap();
         assert_eq!(default_caption(&members), "Sweden");
     }
+
+    #[test]
+    fn security_refusals_are_matched_by_type_never_by_message() {
+        use bi_engine::{EngineError, QueryError};
+        assert!(is_security_refusal(&QueryError::Engine(
+            EngineError::ObjectLevelSecurityDenied {
+                object: "Sales[amount]".into()
+            }
+        )));
+        assert!(is_security_refusal(&QueryError::Engine(
+            EngineError::RowLevelSecurityNotEnforceable {
+                table: "Geography".into(),
+                reason: "not single-hop".into()
+            }
+        )));
+        assert!(is_security_refusal(&QueryError::Engine(
+            EngineError::SecurityRoleNotFound("Gone".into())
+        )));
+
+        // An ordinary failure is not a refusal.
+        assert!(!is_security_refusal(&QueryError::InvalidQuery(
+            "no such measure".into()
+        )));
+        // And neither is one whose TEXT happens to contain the phrase — the
+        // exact trap `friendly_bi_query_error`'s two row-level-security
+        // branches fell into, where they matched Rust variant names against
+        // Display output and were dead for their whole life.
+        assert!(!is_security_refusal(&QueryError::InvalidQuery(
+            "object-level security".into()
+        )));
+    }
 }
 
 #[cfg(test)]
@@ -1664,8 +1746,51 @@ mod integration_tests {
             .unwrap()
     }
 
+    /// The fixture model plus an `Analyst` role that denies the column the
+    /// only measure reads, so any query for `Revenue` is refused by
+    /// object-level security.
+    fn build_model_with_denied_column() -> DataModel {
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("country", DataType::String),
+                        Column::new("amount", DataType::Float64),
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+            )
+            .add_measure(sum_measure("Revenue", "Sales", "amount"))
+            .add_security_role(
+                bi_engine::SecurityRole::new("Analyst")
+                    .with_denied_columns(vec!["Sales[amount]".to_string()]),
+            )
+            .build()
+            .unwrap()
+    }
+
     async fn make_state() -> (BiState, ConnectionId) {
-        let model = build_model();
+        state_from(build_model(), None, [7u8; 16]).await
+    }
+
+    /// The same shape with the denying role ACTIVE on the connection, which is
+    /// what `apply_connection_role` installs on the engine before every query.
+    async fn make_state_denied() -> (BiState, ConnectionId) {
+        state_from(
+            build_model_with_denied_column(),
+            Some("Analyst".to_string()),
+            [9u8; 16],
+        )
+        .await
+    }
+
+    async fn state_from(
+        model: DataModel,
+        active_role: Option<String>,
+        id_bytes: [u8; 16],
+    ) -> (BiState, ConnectionId) {
         let mut engine = Engine::new(model);
         let connector = InMemoryConnector::new().with_table("public", "sales", sales_batch());
         let idx = engine.add_in_memory_source(connector);
@@ -1680,7 +1805,7 @@ mod integration_tests {
             })
             .await;
 
-        let id = EntityId::from_bytes([7u8; 16]);
+        let id = EntityId::from_bytes(id_bytes);
         let conn = Connection {
             id,
             name: "Sales".into(),
@@ -1700,13 +1825,48 @@ mod integration_tests {
             is_connected: true,
             active_queries: HashMap::new(),
             package_data_source_id: None,
-            active_role: None,
+            active_role,
             base_model: None,
             calculated_measures: vec![],
         };
         let bi = BiState::new();
         bi.connections.lock().unwrap().insert(id, conn);
         (bi, id)
+    }
+
+    #[tokio::test]
+    async fn a_security_refusal_is_never_reported_as_no_value() {
+        // A CUBE cell reads #N/A either way — Excel's semantics, and a cell has
+        // nowhere to put a message. But every caller that CAN carry one must be
+        // able to tell a refusal from an empty result: `script_cube_value` folds
+        // only "no data" into `Ok(None)`, so a refusal that arrived as
+        // `NotAvailable` would reach the MCP and AI-chat tools as the string
+        // "(no value)" and the capability audit trail as a SUCCESSFUL call.
+        use engine::CellError;
+        let (bi, id) = make_state_denied().await;
+
+        assert_eq!(
+            query_scalar(&bi, &id, "Revenue", &[]).await.unwrap_err(),
+            CubeError::Refused
+        );
+        assert_eq!(
+            script_cube_value(&bi, "Sales", &["[Revenue]".to_string()])
+                .await
+                .unwrap_err(),
+            CubeError::Refused,
+            "a refusal must not fold into Ok(None)"
+        );
+        assert_ne!(
+            cube_err_message(CubeError::Refused),
+            cube_err_message(CubeError::NotAvailable),
+            "the two must not read the same to a script or an AI client"
+        );
+        // The cell is unchanged: #N/A, as before.
+        assert_eq!(CubeError::Refused.to_cell_error(), CellError::NA);
+
+        // Positive control: the same measure, no role active, answers.
+        let (bi, id) = make_state().await;
+        assert_eq!(query_scalar(&bi, &id, "Revenue", &[]).await.unwrap(), 225.0);
     }
 
     fn parse_args(formula: &str) -> Vec<Expression> {

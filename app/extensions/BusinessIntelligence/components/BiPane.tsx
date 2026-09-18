@@ -432,8 +432,15 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
       setStatus("Refreshing...");
 
       const results = await refreshConnection(selectedConnectionId);
-      const totalRows = results.reduce((sum, r) => sum + r.rowCount, 0);
-      setStatus(`Refreshed: ${totalRows} rows total`, "success");
+      if (results.length === 0) {
+        // Nothing to do, which is not a failure: this connection may drive
+        // only pivots or only the Model Editor. (It used to arrive here as an
+        // error and read "Refresh failed" on a perfectly healthy connection.)
+        setStatus("No grid queries on this connection to refresh.", "info");
+      } else {
+        const totalRows = results.reduce((sum, r) => sum + r.rowCount, 0);
+        setStatus(`Refreshed: ${totalRows} rows total`, "success");
+      }
 
       restoreFocusToGrid();
     } catch (error) {

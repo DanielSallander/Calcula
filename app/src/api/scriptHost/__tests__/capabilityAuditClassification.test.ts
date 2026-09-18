@@ -97,6 +97,45 @@ describe("capability-call audit classification", () => {
     cube_udf_members: "app/src-tauri/src/bi/cube.rs",
   };
 
+  /**
+   * Top-level arguments of every `record_capability_call(...)` in `code`.
+   * Walks parens and strings so a nested `format!("a, b")` is one argument,
+   * which a comma split gets wrong.
+   */
+  function recordCallArgs(code: string): string[][] {
+    const calls: string[][] = [];
+    const NAME = "record_capability_call";
+    for (let at = code.indexOf(NAME); at >= 0; at = code.indexOf(NAME, at + 1)) {
+      let i = code.indexOf("(", at + NAME.length);
+      if (i < 0) break;
+      let depth = 0;
+      let inStr = false;
+      let arg = "";
+      const args: string[] = [];
+      for (; i < code.length; i++) {
+        const c = code[i];
+        if (inStr) {
+          arg += c;
+          if (c === "\\") { arg += code[++i] ?? ""; continue; }
+          if (c === '"') inStr = false;
+          continue;
+        }
+        if (c === '"') { inStr = true; arg += c; continue; }
+        if (c === "(" || c === "[" || c === "{") { depth++; if (depth > 1) arg += c; continue; }
+        if (c === ")" || c === "]" || c === "}") {
+          depth--;
+          if (depth === 0) { args.push(arg.trim()); break; }
+          arg += c;
+          continue;
+        }
+        if (c === "," && depth === 1) { args.push(arg.trim()); arg = ""; continue; }
+        arg += c;
+      }
+      if (args.length) calls.push(args.filter((a) => a.length > 0));
+    }
+    return calls;
+  }
+
   it("every gate named in SERVER_AUDITED_METHODS is a file that calls record_capability_call", () => {
     // The gate name is the leading token of the reason string
     // ("script_bi_model (info)" -> "script_bi_model").
@@ -164,6 +203,82 @@ describe("capability-call audit classification", () => {
       `these reach a Rust gate that records the call itself, so the broker must not ` +
         `double-record them`,
     ).toEqual([]);
+  });
+
+  // --------------------------------------------------------------------------
+  // The gates record the OUTCOME, not just their own permission check.
+  // --------------------------------------------------------------------------
+  //
+  // "The file calls record_capability_call" was satisfied by the
+  // permission-denied branch alone, which every gate has — so a gate could
+  // record a call the MODEL refused (object-level security, a row filter that
+  // cannot be enforced) as a success, and the guard stayed green. A false
+  // audit row is worse than a missing one: it tells a reviewer of the trail
+  // that a refused query went through.
+  //
+  // The discriminator is the `error` argument. A permission-denied branch
+  // passes a FIXED string ("bi.query not granted"); recording the outcome of
+  // the call means passing the error VALUE, so the argument is a binding.
+
+  it("every gate records a REFUSED call, not only its own permission denial", () => {
+    const gates = [...new Set([...serverAudited.values()].map((v) => v.split(" ")[0]))].sort();
+    for (const gate of gates) {
+      const rel = GATE_SOURCES[gate];
+      const src = fs.readFileSync(path.join(REPO, rel), "utf8");
+      const code = src
+        .split("\n")
+        .filter((l) => !/^\s*\/\//.test(l))
+        .join("\n");
+      // ok=false (4th arg) AND a reason (6th) that is a runtime value.
+      const recordsOutcome = recordCallArgs(code).some(
+        (args) =>
+          args.length >= 6 &&
+          args[3] === "false" &&
+          args[5].startsWith("Some(") &&
+          !/^Some\(\s*"/.test(args[5]),
+      );
+      expect(
+        recordsOutcome,
+        `${rel} (the gate behind "${gate}") records only its own permission-denied branch, ` +
+          `whose reason is a fixed string. Nothing there records a call that was ATTEMPTED and ` +
+          `then refused — by object-level security, an unenforceable row filter, or the source. ` +
+          `Because this method is classified server-audited the broker writes nothing, so such ` +
+          `a call is either recorded as a SUCCESS or not at all. Add the failure arm: pass the ` +
+          `error value as the reason.`,
+      ).toBe(true);
+    }
+  });
+
+  it("the outcome-recording guard is not vacuous (a permission-only gate fails it)", () => {
+    // The shape the guard must REJECT: a fixed-string reason, which is what
+    // every gate had before the failure arms were added.
+    const permissionOnly = `
+      fn gate() {
+        record_capability_call(&s.audit_log, "bi.query", sid, false, None, Some("bi.query not granted"));
+        record_capability_call(&s.audit_log, "bi.query", sid, true, Some(&format!("x {}", y)), None);
+      }`;
+    const rejected = recordCallArgs(permissionOnly).some(
+      (args) =>
+        args.length >= 6 &&
+        args[3] === "false" &&
+        args[5].startsWith("Some(") &&
+        !/^Some\(\s*"/.test(args[5]),
+    );
+    expect(rejected, "the guard would pass a gate that records no real failure").toBe(false);
+
+    // And the shape it must ACCEPT, including a comma inside format!.
+    const withFailureArm = `
+      fn gate() {
+        record_capability_call(&s.audit_log, "bi.query", sid, false, Some(&format!("conn {}, q", c)), Some(&e));
+      }`;
+    const accepted = recordCallArgs(withFailureArm).some(
+      (args) =>
+        args.length >= 6 &&
+        args[3] === "false" &&
+        args[5].startsWith("Some(") &&
+        !/^Some\(\s*"/.test(args[5]),
+    );
+    expect(accepted, "the guard would reject a gate that does record a real failure").toBe(true);
   });
 
   it("cap.scheduleList stays BROKER-audited — its Rust arm records nothing", () => {

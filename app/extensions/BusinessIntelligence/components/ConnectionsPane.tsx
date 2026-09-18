@@ -20,6 +20,7 @@ import {
   updateConnection,
 } from "../../_shared/lib/bi-api";
 import { createModelPivot } from "../lib/modelPivot";
+import { summarizeRefresh } from "../lib/refreshOutcome";
 import { MODEL_DIALOG_ID } from "../manifest";
 import type { ConnectionInfo } from "../types";
 import { confirmAsync, promptAsync } from "@api/dialogs";
@@ -285,25 +286,27 @@ export function ConnectionsPane(
         setLoadingId(connectionId);
         setStatus("Refreshing...");
 
-        // Try refreshing active queries (BI grid queries)
+        // Every failure below is COLLECTED, never discarded: a refresh that
+        // keeps going past a failure is right, one that forgets what failed is
+        // not. `summarizeRefresh` then decides the single line to show, and it
+        // is the only thing that can produce the quiet "nothing to refresh".
+        const errors: string[] = [];
+
+        // Grid query regions.
         let queryCount = 0;
         let totalRows = 0;
-        let queryError: string | null = null;
         try {
           const results = await refreshConnection(connectionId);
           queryCount = results.length;
           totalRows = results.reduce((sum, r) => sum + r.rowCount, 0);
         } catch (err) {
-          // "No active queries" is the benign case — this connection may drive
-          // only pivots. Anything else (the active "view as" role denying a
-          // table or column, a source failure) must be SHOWN: reporting a
-          // refusal as "nothing to refresh" is how a security denial becomes
-          // invisible.
-          const message = String(err);
-          if (!message.includes("No active queries")) queryError = message;
+          // A connection with no grid queries returns an EMPTY LIST, not an
+          // error, so anything landing here is a real failure: the active
+          // "view as" role denying a table or column, or a dead source.
+          errors.push(String(err));
         }
 
-        // Also refresh any BI pivots connected to this connection
+        // BI pivots.
         let pivotCount = 0;
         try {
           const allPivots = await pivot.getAll();
@@ -311,25 +314,19 @@ export function ConnectionsPane(
             try {
               await pivot.refreshCache(p.id);
               pivotCount++;
-            } catch {
-              // Individual pivot refresh failure is non-fatal
+            } catch (err) {
+              // One pivot must not stop the others, but its reason is kept.
+              errors.push(`${p.name || p.id}: ${String(err)}`);
             }
           }
-        } catch {
-          // Pivot refresh errors are non-fatal
+        } catch (err) {
+          // Could not even LIST the pivots: "no pivots to refresh" would be a
+          // claim this code never established.
+          errors.push(`could not list pivot tables: ${String(err)}`);
         }
 
-        if (queryError) {
-          const also = pivotCount > 0 ? ` (${pivotCount} pivot table(s) did refresh)` : "";
-          setStatus(`Refresh failed: ${queryError}${also}`, "error");
-        } else if (queryCount > 0 || pivotCount > 0) {
-          const parts = [];
-          if (queryCount > 0) parts.push(`${queryCount} queries (${totalRows} rows)`);
-          if (pivotCount > 0) parts.push(`${pivotCount} pivot table(s)`);
-          setStatus(`Refreshed ${parts.join(" + ")}`, "success");
-        } else {
-          setStatus("No queries or pivot tables to refresh.", "info");
-        }
+        const status = summarizeRefresh({ queryCount, totalRows, pivotCount, errors });
+        setStatus(status.message, status.type);
 
         window.dispatchEvent(new Event("grid:refresh"));
         await loadConnections();

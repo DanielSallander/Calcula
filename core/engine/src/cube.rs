@@ -88,6 +88,15 @@ pub enum CubeError {
     NotAvailable,
     /// Bad reference (e.g. CUBERANKEDMEMBER rank out of range) -> #REF!
     Reference,
+    /// The model's security refused the query: the active "view as" role
+    /// denies an object the formula reads, or its row filters cannot be
+    /// enforced for it. Renders as `#N/A` like [`NotAvailable`](Self::NotAvailable)
+    /// — a cube cell has no channel for a message, and that is Excel's
+    /// semantics — but it is a DISTINCT variant on purpose: a refusal is not
+    /// "no data", and every non-cell caller (a script's `cube.value`, the AI
+    /// and MCP tools, the capability audit trail) must be able to tell them
+    /// apart instead of reporting a refusal as a successful empty answer.
+    Refused,
 }
 
 impl CubeError {
@@ -95,7 +104,9 @@ impl CubeError {
         match self {
             CubeError::Name => CellError::Name,
             CubeError::Value => CellError::Value,
-            CubeError::NotAvailable => CellError::NA,
+            // A refusal is #N/A in the CELL (see the variant's doc); the
+            // distinction survives everywhere a message can be carried.
+            CubeError::NotAvailable | CubeError::Refused => CellError::NA,
             CubeError::Reference => CellError::Ref,
         }
     }

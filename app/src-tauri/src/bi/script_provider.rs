@@ -118,6 +118,31 @@ impl HostModelProvider {
         );
     }
 
+    /// Run a capability call and audit BOTH outcomes.
+    ///
+    /// Recording only successes is worse than recording nothing: it tells a
+    /// reviewer of the trail that a query the model REFUSED went through.
+    /// These methods are server-audited, so the broker deliberately writes no
+    /// row for them and this is the only recorder.
+    fn audited<T>(
+        &self,
+        capability: &str,
+        surface: &str,
+        detail: &str,
+        run: impl FnOnce() -> Result<T, ModelProviderError>,
+    ) -> Result<T, ModelProviderError> {
+        match run() {
+            Ok(v) => {
+                self.audit_ok(capability, surface, detail);
+                Ok(v)
+            }
+            Err(e) => {
+                self.audit_failed(capability, surface, detail, &e.message);
+                Err(e)
+            }
+        }
+    }
+
     fn resolve_conn(&self, connection: &str) -> Result<ConnectionId, ModelProviderError> {
         let bi = self.app.state::<BiState>();
         conn_id_by_name(&bi, connection).ok_or_else(|| {
@@ -214,20 +239,25 @@ impl ModelDataProvider for HostModelProvider {
     fn model_info(&self, surface: &str, connection: &str) -> Result<String, ModelProviderError> {
         self.check_cap(surface, "bi.query")?;
         let conn_id = self.resolve_conn(connection)?;
-        let info = {
-            let bi = self.app.state::<BiState>();
-            self.block_on_bi(extract_connection_model_info(&bi, conn_id))?
-        };
-        let sanitized = sanitize_model_info(&info)
-            .map_err(|e| ModelProviderError::new(ModelProviderErrorKind::Query, e))?;
-        self.audit_ok(
+        self.audited(
             "bi.query",
             surface,
             &format!("model.info connection {}", conn_id),
-        );
-        serde_json::to_string(&sanitized).map_err(|e| {
-            ModelProviderError::new(ModelProviderErrorKind::Query, format!("Serialize failed: {}", e))
-        })
+            || {
+                let info = {
+                    let bi = self.app.state::<BiState>();
+                    self.block_on_bi(extract_connection_model_info(&bi, conn_id))?
+                };
+                let sanitized = sanitize_model_info(&info)
+                    .map_err(|e| ModelProviderError::new(ModelProviderErrorKind::Query, e))?;
+                serde_json::to_string(&sanitized).map_err(|e| {
+                    ModelProviderError::new(
+                        ModelProviderErrorKind::Query,
+                        format!("Serialize failed: {}", e),
+                    )
+                })
+            },
+        )
     }
 
     fn query(
@@ -265,29 +295,15 @@ impl ModelDataProvider for HostModelProvider {
             let joined = request.measures.join(", ");
             joined.chars().take(60).collect()
         };
-        let result = {
-            let bi = self.app.state::<BiState>();
-            match self.block_on_bi(bi_query_core(&bi, conn_id, &request)) {
-                Ok(result) => result,
-                Err(e) => {
-                    self.audit_failed(
-                        "bi.query",
-                        surface,
-                        &format!(
-                            "model.query connection {} — measures [{}]",
-                            conn_id, measures_summary
-                        ),
-                        &e.message,
-                    );
-                    return Err(e);
-                }
-            }
-        };
-        self.audit_ok(
+        let result = self.audited(
             "bi.query",
             surface,
             &format!("model.query connection {} — measures [{}]", conn_id, measures_summary),
-        );
+            || {
+                let bi = self.app.state::<BiState>();
+                self.block_on_bi(bi_query_core(&bi, conn_id, &request))
+            },
+        )?;
         Ok(result_to_table(result))
     }
 
@@ -299,18 +315,18 @@ impl ModelDataProvider for HostModelProvider {
     ) -> Result<ModelTable, ModelProviderError> {
         self.check_cap(surface, "bi.sql")?;
         let conn_id = self.resolve_conn(connection)?;
-        let result = {
-            let bi = self.app.state::<BiState>();
-            self.block_on_bi(bi_sql_core(&bi, conn_id, sql))?
-        };
         // Same redaction policy as script_bi_sql: a short prefix, never the
         // full query (it may carry literals the user considers sensitive).
         let sql_prefix: String = sql.trim().chars().take(60).collect();
-        self.audit_ok(
+        let result = self.audited(
             "bi.sql",
             surface,
             &format!("model.sql connection {} — {}", conn_id, sql_prefix),
-        );
+            || {
+                let bi = self.app.state::<BiState>();
+                self.block_on_bi(bi_sql_core(&bi, conn_id, sql))
+            },
+        )?;
         Ok(result_to_table(result))
     }
 
@@ -321,20 +337,19 @@ impl ModelDataProvider for HostModelProvider {
         members: &[String],
     ) -> Result<Option<f64>, ModelProviderError> {
         self.check_cap(surface, "bi.query")?;
-        let v = {
-            let bi = self.app.state::<BiState>();
-            self.block_on_bi(async {
-                script_cube_value(&bi, connection, members)
-                    .await
-                    .map_err(cube_err_message)
-            })?
-        };
-        self.audit_ok(
+        self.audited(
             "bi.query",
             surface,
             &format!("model.value connection {}", connection),
-        );
-        Ok(v)
+            || {
+                let bi = self.app.state::<BiState>();
+                self.block_on_bi(async {
+                    script_cube_value(&bi, connection, members)
+                        .await
+                        .map_err(cube_err_message)
+                })
+            },
+        )
     }
 
     fn cube_members(
@@ -344,20 +359,19 @@ impl ModelDataProvider for HostModelProvider {
         level: &str,
     ) -> Result<Vec<String>, ModelProviderError> {
         self.check_cap(surface, "bi.query")?;
-        let v = {
-            let bi = self.app.state::<BiState>();
-            self.block_on_bi(async {
-                script_cube_members(&bi, connection, level)
-                    .await
-                    .map_err(cube_err_message)
-            })?
-        };
-        self.audit_ok(
+        self.audited(
             "bi.query",
             surface,
             &format!("model.members connection {}", connection),
-        );
-        Ok(v)
+            || {
+                let bi = self.app.state::<BiState>();
+                self.block_on_bi(async {
+                    script_cube_members(&bi, connection, level)
+                        .await
+                        .map_err(cube_err_message)
+                })
+            },
+        )
     }
 
     fn cube_kpi(
@@ -368,20 +382,19 @@ impl ModelDataProvider for HostModelProvider {
         property: i64,
     ) -> Result<Option<f64>, ModelProviderError> {
         self.check_cap(surface, "bi.query")?;
-        let v = {
-            let bi = self.app.state::<BiState>();
-            self.block_on_bi(async {
-                script_cube_kpi(&bi, connection, kpi, property)
-                    .await
-                    .map_err(cube_err_message)
-            })?
-        };
-        self.audit_ok(
+        self.audited(
             "bi.query",
             surface,
             &format!("model.kpi connection {}", connection),
-        );
-        Ok(v)
+            || {
+                let bi = self.app.state::<BiState>();
+                self.block_on_bi(async {
+                    script_cube_kpi(&bi, connection, kpi, property)
+                        .await
+                        .map_err(cube_err_message)
+                })
+            },
+        )
     }
 }
 

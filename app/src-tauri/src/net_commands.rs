@@ -441,6 +441,17 @@ pub async fn script_http_fetch(
                 request.url,
                 e
             );
+            // Audit the OUTCOME, not only the policy checks above. A granted
+            // origin whose request then failed left no row at all, so the
+            // trail showed a script's reach without showing what came of it.
+            record_capability_call(
+                &app_state.audit_log,
+                "net.fetch",
+                &script_id,
+                false,
+                Some(&origin),
+                Some(&e.to_string()),
+            );
             return Err(format!("HostError: {}", e));
         }
     };
@@ -475,6 +486,14 @@ pub async fn script_http_fetch(
                         request.url,
                         status
                     );
+                    record_capability_call(
+                        &app_state.audit_log,
+                        "net.fetch",
+                        &script_id,
+                        false,
+                        Some(&origin),
+                        Some("response exceeds the 5MB cap"),
+                    );
                     return Err("ResponseTooLarge: exceeds 5MB".to_string());
                 }
                 buf.extend_from_slice(&chunk);
@@ -487,6 +506,14 @@ pub async fn script_http_fetch(
                     script_id,
                     request.url,
                     e
+                );
+                record_capability_call(
+                    &app_state.audit_log,
+                    "net.fetch",
+                    &script_id,
+                    false,
+                    Some(&origin),
+                    Some(&e.to_string()),
                 );
                 return Err(format!("HostError: {}", e));
             }
