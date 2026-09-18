@@ -182,11 +182,13 @@ is a primary update).
 A script may read the workbook's BI data two ways, deliberately split by trust:
 
 ### `bi.query` — structured, model-scoped (default)
-Reuses the exact cached engine path the app's own pivots use
-(`engine.query_auto_refresh` with `measures` / `groupBy` / `filters`). Scoped to
+Runs the engine's one aggregate query core — the same gates a pivot's
+`query_with_meta` runs (row- and object-level security, the multi-role union) —
+through `engine.query_auto_refresh` with `measures` / `groupBy` / `filters`. Scoped to
 the workbook's BI **model**; **no SQL-injection surface** (the script supplies
 measures/columns/filter-*values*, not SQL text); **no DB-wide access**. The
-executor calls the existing `bi_query` command. No Engine Lib change.
+executor calls the existing `bi_query` command; the gate parity itself lives in
+the engine (changelog entry "One aggregate query path", 2026-09-18).
 `cap.biListConnections` (also `bi.query`-gated) returns a **credential-sanitized**
 summary (`toBiConnectionSummary` whitelists `id`/`name`/`connectionType`/
 `isConnected`/`tableCount`/`measureCount` — never `connectionString`/`server`/

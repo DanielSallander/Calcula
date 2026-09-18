@@ -102,6 +102,22 @@ impl HostModelProvider {
         );
     }
 
+    /// Record a REFUSED capability call. A query the model's security turned
+    /// down is exactly what a reviewer of the trail wants to see; without this
+    /// the only recorded denial is "capability not granted". The reason is the
+    /// engine's own message (object names, never row data).
+    fn audit_failed(&self, capability: &str, surface: &str, detail: &str, reason: &str) {
+        let app_state = self.app.state::<crate::AppState>();
+        crate::net_commands::record_capability_call(
+            &app_state.audit_log,
+            capability,
+            surface,
+            false,
+            Some(detail),
+            Some(reason),
+        );
+    }
+
     fn resolve_conn(&self, connection: &str) -> Result<ConnectionId, ModelProviderError> {
         let bi = self.app.state::<BiState>();
         conn_id_by_name(&bi, connection).ok_or_else(|| {
@@ -245,13 +261,27 @@ impl ModelDataProvider for HostModelProvider {
                 })
                 .collect(),
         };
-        let result = {
-            let bi = self.app.state::<BiState>();
-            self.block_on_bi(bi_query_core(&bi, conn_id, &request))?
-        };
         let measures_summary: String = {
             let joined = request.measures.join(", ");
             joined.chars().take(60).collect()
+        };
+        let result = {
+            let bi = self.app.state::<BiState>();
+            match self.block_on_bi(bi_query_core(&bi, conn_id, &request)) {
+                Ok(result) => result,
+                Err(e) => {
+                    self.audit_failed(
+                        "bi.query",
+                        surface,
+                        &format!(
+                            "model.query connection {} — measures [{}]",
+                            conn_id, measures_summary
+                        ),
+                        &e.message,
+                    );
+                    return Err(e);
+                }
+            }
         };
         self.audit_ok(
             "bi.query",

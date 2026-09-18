@@ -36,12 +36,37 @@ impl PushdownPlanner {
             engine_core::compute::expression::Expression,
         )],
     ) -> QueryResult<(QueryPlan, PlanNode)> {
+        Self::plan_explained_with_cached(
+            request,
+            model,
+            registry,
+            &std::collections::HashSet::new(),
+            role_filters,
+            context_column_cases,
+        )
+    }
+
+    /// Like [`plan_explained`](Self::plan_explained), but treating the tables
+    /// in `cached_tables` as locally cached (the engine's auto-tiered set),
+    /// exactly as [`plan_with_cached`](Self::plan_with_cached) does — so the
+    /// explained plan is the plan the engine runs.
+    pub fn plan_explained_with_cached(
+        request: &QueryRequest,
+        model: &DataModel,
+        registry: &SourceRegistry,
+        cached_tables: &std::collections::HashSet<String>,
+        role_filters: &[FilterPredicate],
+        context_column_cases: &[(
+            crate::request::ColumnRef,
+            engine_core::compute::expression::Expression,
+        )],
+    ) -> QueryResult<(QueryPlan, PlanNode)> {
         let start = Instant::now();
         let (plan, projection) = Self::plan_with_cached_diagnostics(
             request,
             model,
             registry,
-            &std::collections::HashSet::new(),
+            cached_tables,
             role_filters,
             context_column_cases,
         )?;

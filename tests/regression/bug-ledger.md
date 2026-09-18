@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 113 | Open: 4 | Triaged: 0 | Fixed: 109 | Other: 0
+Total: 121 | Open: 2 | Triaged: 0 | Fixed: 119 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1280,13 +1280,15 @@ WITH A FREEZE OR A SPLIT ACTIVE, NO CELL BORDER RENDERS AT ALL. UNVERIFIED AGAIN
 A TIMELINE SLICER IS NEVER SAVED, HAS NO UNDO ARM, AND LEAKS INTO THE NEXT DOCUMENT. Insert Timeline is a shipped, one-click ribbon button on the PivotTable Analyze tab (app/extensions/Pivot/components/PivotAnalyzeSections.tsx:292-305 -> showDialog('timelineSlicer:insertDialog'); the extension is registered at app/extensions/manifest.ts:215), and TimelineSlicerState (managed at app/src-tauri/src/lib.rs:4839) reaches no save path at all. MEASURED with node: /timeline/i occurs ZERO times in app/src-tauri/src/persistence.rs and ZERO times in app/src-tauri/src/calp_commands.rs. THREE CONSEQUENCES, and only the first is named anywhere in the tree: (1) SILENT TOTAL LOSS. The user inserts a timeline, saves, reopens, and it is simply gone. assemble_workbook_for_save never reads the state. (2) NO UNDO RESTORE ARM, so a cascade delete records nothing to bring back (app/src-tauri/src/object_deps.rs:63-67 says so in a comment). (3) CROSS-DOCUMENT LEAK, which nobody has written down anywhere: reset_document_scoped_stores (app/src-tauri/src/persistence.rs:3803-3812) takes AppState, UserFilesState, SlicerState, RibbonFilterState, PaneControlState, ScriptState, PivotState and BiState -- TimelineSlicerState is NOT among them, and it is a separate managed Tauri state. So a timeline from document A survives File > New / Open into document B. That is the same class as the 2026-08-10 document-scoped-state defect, which was closed by adding exactly this function; this store was never enrolled in it. WHY IT WAS INVISIBLE: the gap is recorded ONLY in code comments (timeline_slicer/commands.rs:85-88, object_deps.rs:63-67) and in the 1.33 MB archive (docs/design/open-decisions-2026-08.md:8573-8576), which the project's own rules say must never be read as live status. docs/design/open-items.md does not mention it. A limitation documented only in a comment is invisible to the open-items list BY CONSTRUCTION.
 
 
-## BUG-0104 `[open]`
+## BUG-0104 `[fixed]`
 
 **Found:** 2026-08-18 (review)
 **Oracle:** cf-icon-sort-and-filter-silent-noop
 
 SORTING AND FILTERING BY CONDITIONAL-FORMATTING ICON ARE SILENT NO-OPS THAT REPORT SUCCESS. Both arms are stubs that return the wrong answer without saying so, and one of them is offered to the user by name in a dialog. (1) SORT: `SortOn::Icon` (app/src-tauri/src/commands/data.rs:5729-5740) carries the comment "Icon sorting not yet implemented - fall back to value comparison" and does exactly that — it sorts by VALUE and returns Ok. The Sorting extension offers it explicitly: app/extensions/Sorting/components/SortLevelRow.tsx:183 renders `<option value="icon">Conditional Formatting Icon</option>`. So a user picks 'Conditional Formatting Icon', the rows reorder (by value), and nothing anywhere says the request was not honoured. A sort that silently sorts by the wrong key is worse than one that refuses. (2) FILTER: `FilterOn::Icon` (app/src-tauri/src/autofilter.rs:884-889) has an EMPTY arm whose comment ends "For now, icon-filtered rows are always shown" — the predicate falls through to true, so the filter hides nothing at all and the sheet looks unfiltered while reporting a filter is applied. WHY IT MATTERS BEYOND THE FEATURE: this is the class where the product returns a plausible WRONG answer rather than an error, which is the hardest kind for a user to catch — the rows did move, so the operation looks like it worked. RECORDED NOWHERE until now: neither arm appears in docs/design/open-items.md or the ledger; the only trace was the two code comments quoted above, which are invisible to any status read.
 
+**Fix:** fixed — Both arms of the DEFECT are gone. The sort no longer falls back to value comparison, and the filter no longer falls through to true; each is implemented, and each REFUSES the shapes it genuinely cannot answer instead of guessing. The last dead half was the Sort dialog: it offered 'Conditional Formatting Icon' in Sort On and then showed 'A to Z' for the order, so it never set an icon and the backend refused every such sort with a correct message about a choice the UI never offered. The dialog now lists the icons the column actually shows, each as On Top / On Bottom, and forwards the chosen one.
+  Files: app/src-tauri/src/commands/data.rs (icon sorting implemented: build_icon_match_sets, compare_by_icon; validate_sort_fields replaced the blanket refusal and refuses only three genuinely unanswerable shapes, checking EVERY level rather than fields[0]), app/src-tauri/src/autofilter.rs (FilterOn::Icon implemented via resolve_filter_icons + icon_criteria_keeps, which FAILS CLOSED -- a criteria naming nothing HIDES the row rather than showing every one, because the whole auto_filters map is restored verbatim from .cala and re-enters state without passing the door validator; validate_icon_criteria refuses the three unhonourable shapes at the door), app/src-tauri/src/conditional_formatting.rs (resolve_icons: ONE cascade -- priority order, `enabled`, `stop_if_true`, first icon wins, index clamped to the set's own count -- keyed on by both sort and filter; NEW `get_range_icons` command so the Sort dialog's picker asks that same cascade), app/src-tauri/src/lib.rs (registers get_range_icons), app/src/api/backend.ts + index.ts + lib.ts (getRangeIcons), app/extensions/Sorting/types.ts (SortLevel.icon), lib/sortHelpers.ts (getUniqueIconsInColumn, encode/decodeIconOrderValue, iconLabel), components/SortLevelRow.tsx (icon gets its OWN order branch), components/SortDialog.tsx (icon: level.icon -- the one line that closes the loop)
 
 ## BUG-0105 `[fixed]`
 
@@ -1358,10 +1360,124 @@ A DISTRIBUTED MODULE SCRIPT RAN AT THE UNLOCKED TIER WITH LOCAL PROVENANCE. A .c
 **Fix:** fixed — Provenance is DERIVED from the stored record at every run path. scriptOrigin.ts (the BUG-0111 leaf) gains three siblings to scriptOriginForMount: scriptOriginForStoredRecord (source_package -> MountOrigin; a blank stamp is local, a non-empty one can never select the local kind), accessLevelForOrigin (a package origin caps the tier at restricted) and mountProvenanceForOrigin (the inverse -- the ONE place the string "local" is written into a mount). runObjectScriptOnce now resolves the artifact BEFORE mounting, from the module store, by BOTH keys with the stricter answer winning: by IDENTITY (a new scriptId option -- catches an EDITED distributed macro, since the library's Run sends the textarea's current text) and by CONTENT (exact source match -- catches a caller that omits the id), keeping distributed_module_refusal's escape hatch that a LOCAL record holding the same source authorises it. It FAILS CLOSED: if the store cannot be read the run is refused rather than assumed local. On tier it REFUSES A CONTRADICTION AND DERIVES AN ABSENCE -- a caller that explicitly passes "unlocked" for a package artifact gets a loud throw (silently downgrading would leave the caller's belief, and the code resting on it, intact and wrong), while a caller that says nothing gets the artifact's own answer. hostStartModuleScriptDebugSession derives both fields from the record it already loads. The macro library carries sourcePackage onto MacroModuleEntry, derives its tier request from it (macroRunAccessLevel) and passes scriptId; runMacroByRef forwards the record's package so a button on a distributed report cannot ask for a tier the publisher never earned. TRANSPARENCY: the list row gets a warning-coloured chip naming the application, the detail pane a line saying the user did not write it, and describeRunRoute stops promising an unlocked mount for distributed code. codeInventory reports per-function UDF provenance from the stamp the Rust merge writes. A drift guard walks src/api + extensions and fails on any provenance: "local" literal outside scriptOrigin.ts (the "distributed" direction is allowed -- it can only narrow).
   Files: app/src/api/scriptHost/scriptOrigin.ts, app/src/api/objectScriptRunner.ts, app/src/api/scriptHost/host.ts, app/src/api/codeInventory.ts, app/src/api/index.ts, app/extensions/MacroRecorder/lib/macroLibrary.ts, app/extensions/MacroRecorder/components/MacroLibraryDialog.tsx, app/extensions/MacroRecorder/components/styles.ts
 
-## BUG-0113 `[open]`
+## BUG-0113 `[fixed]`
 
 **Found:** 2026-09-05 (review)
 **Oracle:** ui-html-bridge-blocked-by-shipped-csp
 
 EVERY SHIPPED ui.html TEMPLATE THAT TALKS BACK IS INERT IN A BUILT APP. `render.setHtml` paints a script's HTML into an `allow-scripts` srcdoc iframe and injects an INLINE <script> as the postMessage bridge (extensions/_shared/scriptFrame/frameDocument.ts, formerly duplicated in shapeRenderer.ts and CustomControlHost.tsx). The app ships `script-src 'self' blob:` with no 'unsafe-inline', no nonce and no hash (app/src-tauri/tauri.conf.json), and a srcdoc child inherits its embedder's policy container — so the bridge is refused and `window.calcula` never exists. The frame still PAINTS, so a display-only template looks perfect; only the ones that talk back are dead. MEASURED against a release build (`tauri build --no-bundle`, rebuilt with src-tauri/tauri.e2e.conf.json which changes only withGlobalTauri) serving from http://tauri.localhost/: violations = ["script-src-elem blocked inline"], `window.calcula` absent, and a real click inside the frame reached the host through nothing. There is NO nonce-shaped fix: the shipped "Interactive Counter" template (extensions/Controls/Shape/shapeTemplateCatalog.ts) and the default custom-pane scaffold (extensions/ControlsPane/components/CustomControlHost.tsx) drive the bridge from inline `onclick=` ATTRIBUTES, which a nonce cannot rescue even in principle — the route is to serve app documents from a Rust custom URI scheme with their own origin and policy.
+
+**Fix:** fixed — A srcdoc child gets a CLONE of its embedder's policy container, so the app's `script-src 'self' blob:` (no 'unsafe-inline', no nonce, no hash) landed inside the frame and refused the inline bridge -- and `sandbox=allow-scripts` without allow-same-origin makes the frame's origin OPAQUE, so the inherited 'self' matched nothing either and an external <script src> from 'self' was refused for the same reason. There was no nonce-shaped fix: the shipped Interactive Counter and the default pane scaffold drive the bridge from inline onclick= ATTRIBUTES. The bridge is now a CONSTANT loader served from Rust over a custom URI scheme with its own Content-Security-Policy RESPONSE header, so the frame document gets its own policy container; the script's HTML is pushed to it afterwards. Isolation is unchanged -- the opaque origin comes from the sandbox, not the scheme -- and the app's own script-src is untouched and still pinned by srcdocBridgeCsp.test.ts.
+  Files: app/src-tauri/src/script_frame.rs (NEW: the loader document, its CSP, and the `calcula-frame` scheme constant. The loader IS the bridge -- an earlier design installed pushed content with document.open/write, whose steps erase every listener on the Window, so the loader would have lost its own `message` handler on the FIRST push and every interactive template would have painted its first state and frozen: this bug's own symptom, reproduced by its fix. Content therefore arrives as a BODY SWAP. It also mirrors the host router's identity check (`e.source !== parent`), without which a sandboxed sibling could post `calcula.setContent` at ANOTHER script's frame and have its markup installed there -- markup that passed neither that script's ui.html grant nor vHtml -- and then drive the victim's own sendMessage under the victim's id), app/src-tauri/src/lib.rs (register_uri_scheme_protocol for `calcula-frame`), app/src-tauri/tauri.conf.json (frame-src gains http://calcula-frame.localhost in BOTH csp and devCsp -- the PARENT's policy is consulted before the frame's own, so a missing entry refuses the frame before its CSP is ever read. script-src is UNCHANGED, which is the point), app/extensions/_shared/scriptFrame/frameDocument.ts (scriptFrameLoaderUrl + the ready/set-content contract + buildScriptFrameContent; buildScriptFrameDocument marked as having no production caller), app/extensions/_shared/scriptFrame/frameBridge.ts (router gains onReady; ready-gated delivery helpers, because the bridge is FETCHED now and a push sent before the listener exists is dropped in silence), app/extensions/Controls/Shape/shapeRenderer.ts + app/extensions/ControlsPane/components/CustomControlHost.tsx (both hosts: src= instead of srcdoc, content pushed on ready), app/e2e/tests/csp-srcdoc-bridge.spec.ts (the srcdoc half retired now that the loader is measured; a permanently-red test is how a suite acquires a known-failures list)
+
+## BUG-0114 `[fixed]`
+
+**Found:** 2026-09-15 (review)
+**Oracle:** omitted-optional-argument-rejected
+
+AN OMITTED OPTIONAL ARGUMENT IS REJECTED BY FIVE FUNCTIONS AND ACCEPTED BY TEN. Excel treats an empty argument slot as 'use the default': =SORT(range,,-1) sorts descending by column 1, and Microsoft's own SORT documentation writes it that way. Calcula answers #VALUE!. This is NOT a general parser gap — the empty slot is handled correctly by MATCH, ROUND, VLOOKUP, INDEX, FILTER, UNIQUE, SORTBY, TEXTSPLIT, IF and XLOOKUP — so it is per-function argument binding, and the inconsistency is the reason it survived: any single function a reviewer spot-checks is likely to be one of the ten that work.
+
+MEASURED against C:/Users/Salle/AppData/Local/calcula-target/release/examples/eval-formulas.exe (the binary that scored the bake-off), each probe run as a PAIR — the slot omitted, and the documented default typed out — so a difference can only be the binding, never the semantics:
+  =SORT(UNIQUE(A2:A8),,-1)  -> #VALUE!   while =SORT(UNIQUE(A2:A8),1,-1) -> spill 'Pear' x4
+  =SORT(A2:A8,,1)           -> #VALUE!   while =SORT(A2:A8,1,1)          -> spill 'Apple' x7
+  =SEQUENCE(B2,,B3,B4)      -> #VALUE!   while =SEQUENCE(B2,1,B3,B4)     -> spill 10 x4
+  =SUBSTITUTE(A2,"p","P",)  -> #VALUE!   while =SUBSTITUTE(A2,"p","P")   -> "APPle"
+  =WEEKDAY(D2,)             -> #VALUE!   while =WEEKDAY(D2,1)            -> 6
+
+USER IMPACT, which is larger than the eval impact: a person who types the Excel form of a descending sort gets an error in the product. The AI angle is secondary — a model that writes correct Excel is marked wrong — and is how this was found, not why it matters.
+
+
+## BUG-0115 `[fixed]`
+
+**Found:** 2026-09-15 (review)
+**Oracle:** criteria-date-literal-matches-nothing
+
+A DATE LITERAL INSIDE A CRITERIA STRING MATCHES NOTHING, AND THE NEGATED FORM KEEPS THE ROW IT WAS TOLD TO DROP. Measured over a column of three typed dates (2025-01-01, 2025-01-15, 2024-06-30) with amounts 100/200/400:
+  =COUNTIF(A2:A4,">=2025-01-01")        -> 0     Excel: 2
+  =SUMIF(A2:A4,">=2025-01-01",B2:B4)    -> 0     Excel: 300
+  =COUNTIF(A2:A4,"<>2025-01-15")        -> 3     Excel: 2   <-- THE WORST ONE
+The concatenated forms are all correct, which localises the defect to literal parsing rather than comparison:
+  =COUNTIF(A2:A4,">="&DATE(2025,1,1))   -> 2  OK
+  =COUNTIF(A2:A4,">="&F1)               -> 2  OK
+  =COUNTIF(A2:A4,">=45658")             -> 2  OK
+CONTROL THAT MAKES THIS A DEFECT RATHER THAN A DESIGN CHOICE: =ISNUMBER(A2) is TRUE, so a cell typed 2025-01-15 stores a NUMBER. The range side therefore holds numbers while the criteria side refuses to produce one.
+
+SUSPECTED CAUSE (reported by the finder, not re-derived here): ParsePolicy::CRITERIA sets dates: DateText::Reject (core/engine/src/number_text.rs:248-252), and parse_criteria (core/engine/src/evaluator.rs:6222-6305) then falls through to ExactText(whole string) at :6302 — a string no cell text ever equals. The policy's stated rationale is symmetry, 'a criteria and a cell must be read the same way', which is RIGHT for percent and currency where the cell really does store text, and INVERTS for dates, which do not.
+
+The negated case is the one to fix first: '<>that date' counting the row that IS that date is not a zero anyone notices, it is a total that silently keeps the row the user excluded.
+
+
+## BUG-0116 `[fixed]`
+
+**Found:** 2026-09-15 (review)
+**Oracle:** criteria-comparison-operators-ignore-text
+
+FOUR OF THE FIVE CRITERIA COMPARISON OPERATORS DO NOT COMPARE TEXT AT ALL. Measured over {"Mango","Apple","Zebra"}:
+  =COUNTIF(D2:D4,">=M")      -> 0     Excel: 2
+  =COUNTIF(D2:D4,"<M")       -> 0     Excel: 1
+  =COUNTIF(D2:D4,">Apple")   -> 0     Excel: 2
+<, <=, > and >= have a numeric arm only and answer 0 rather than an error when handed text.
+THE FAMILY IS INTERNALLY INCONSISTENT, which is the tell: <> DOES have a text arm (=COUNTIF(D2:D4,"<>Apple") -> 2, correct), and plain equality works (=COUNTIF(D2:D4,"Mango") -> 1). One of the five operators handles text and four do not.
+
+Alphabetic range criteria are ordinary spreadsheet usage — 'count the customers from M onwards', 'everything before Apple' — and they silently answer zero.
+
+
+## BUG-0117 `[fixed]`
+
+**Found:** 2026-09-15 (review)
+**Oracle:** criteria-argument-error-swallowed
+
+AN ERROR IN THE CRITERIA ARGUMENT IS SWALLOWED AND BECOMES A CONFIDENT ZERO.
+  =SUMIF(A2:A4,NA(),B2:B4)          -> 0     Excel: #N/A
+  =SUMIF(A2:A4,1/0,B2:B4)           -> 0     Excel: #DIV/0!
+  =SUMIFS(B2:B4,A2:A4,Nowhere)      -> 0     Excel: #NAME?   (Nowhere undefined)
+  =COUNTIF(A2:A4,Nowhere)           -> 0     Excel: #NAME?
+CONTROL: =SUM(Nowhere) correctly answers #NAME?, so the engine KNOWS the name is bad and discards that knowledge at the criteria boundary.
+THE TELL: =AVERAGEIFS(B2:B4,A2:A4,NA()) answers #DIV/0! rather than #N/A — the original error was consumed and a new one manufactured by dividing over an empty match set. That proves the error is not propagating rather than merely being reformatted.
+
+Reported cause: the catch-all `_ => CriteriaMatch::ExactText(String::new())` at core/engine/src/evaluator.rs:6304 maps every remaining EvalResult, errors included, to 'match nothing'.
+
+A mistyped range name or an upstream #N/A therefore turns a total into a zero that looks like a real answer, in a function family whose entire job is to total things.
+
+
+## BUG-0118 `[fixed]`
+
+**Found:** 2026-09-15 (review)
+**Oracle:** filter-one-argument-panics-the-evaluator
+
+A ONE-ARGUMENT `=FILTER(A2:A9)` PANICS THE FORMULA EVALUATOR. Not an error value — a Rust panic:
+  thread 'main' panicked at core/engine/src/evaluator.rs:9726:39:
+  index out of bounds: the len is 1 but the index is 1
+
+CAUSE, one line. `fn_filter` opened with
+    if args.is_empty() || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+which rejects zero arguments and four, and lets EXACTLY ONE through — and the next statement is `self.eval_flat(&args[1])`, an unconditional index. The guard's floor is two, not one: FILTER(array, include, [if_empty]).
+
+IT IS THE ONLY FUNCTION THAT DOES THIS. Forty-two variadic functions were probed one at a time, each in its own grader process so one panic could not hide another: SORTBY, XLOOKUP, VLOOKUP, HLOOKUP, INDEX, MATCH, SUMIF, COUNTIF, SUMIFS, AVERAGEIF, IFERROR, IFNA, TEXTJOIN, TEXTSPLIT, TEXTBEFORE, TEXTAFTER, SUBSTITUTE, REPLACE, MID, LEFT, ROUND, MROUND, LARGE, SMALL, RANK, PMT, NPV, SLOPE, CORREL, INTERCEPT, SEQUENCE, UNIQUE, SORT, CHOOSE, IF, DATEDIF, NETWORKDAYS, WORKDAY, EDATE, EOMONTH, YEARFRAC all answer #VALUE! when starved of arguments. FILTER was 1 of 42.
+
+WHY THIS IS WORSE THAN A WRONG ANSWER. A panic has no cell representation. In the eval harness it killed a 181-task batch; in the product it is an evaluator thread dying on a formula the user typed. `=FILTER(A1:A5)` is exactly what a person leaves behind when they start the formula and commit before typing the condition.
+
+
+## BUG-0119 `[fixed]`
+
+**Found:** 2026-09-17 (live-proof)
+**Oracle:** derived-measure-empty-home-table-refused-by-planner
+
+A DERIVED MEASURE — one whose expression reaches its fact table only through [Measure] references (`Margin = [Revenue] - [Cost]`, `MarginPct = DIVIDE([Margin], [Revenue])`, `% Revenue of Total = GVAR total = [Revenue] RETURN [Revenue] / total`) — could not be queried on ANY model the host loads. `Measure::cached_table` is #[serde(skip)] and re-inferred from the expression alone on deserialization; `infer_fact_table` cannot see through a measure reference; and of every way a model reaches an engine only `Engine::load_model` ran `resolve_measure_home_tables`. Every host load path (create_connection_core, the .cala restore, the .calp subscribe and refresh) does serde + validate() + Engine::new, so the planner's `measure_tables` listed "" and refused the whole query with `QueryError::SourceNotRegistered("")` — an error naming no table. Insights' model route then lost EVERY measure's facts (it propagated the first refusal with `?`), and the pivot field list showed `table=` for derived measures.
+
+
+## BUG-0120 `[fixed]`
+
+**Found:** 2026-09-17 (live-proof)
+**Oracle:** query-auto-refresh-skips-gvar-resolution
+
+`Engine::query_auto_refresh` — the entry point behind the host's bi_query, column values, refresh, insights, cube and MCP — applied only the calculation-group expansion before planning, while `query` / `query_with_cancellation` / `query_explained` also fold ISFILTERED markers and resolve query-scoped (GVAR) bindings. A GVAR measure therefore reached the executor unresolved on the auto-refresh path and failed its guard ('reached the executor with an unresolved query-scoped (GVAR) binding'), while the same measure worked in a pivot (query_with_meta -> query). Three hand-copied overlay chains had drifted; the explain path had already been caught drifting once before (changelog: 'Engine::query_explained now resolves GVARs').
+
+
+## BUG-0121 `[fixed]`
+
+**Found:** 2026-09-18 (design-critique)
+**Oracle:** ols-gate-ignores-scoped-filters
+
+`Engine::enforce_object_level_security` inspected only the bare `filters` / `in_filters` / `or_filters` lists. Every host filter travels as a SCOPED filter (`scoped_filters` / `scoped_in_filters`, with an optional owning table and a level) — pivot slicers, `bi_query`, MCP `run_bi_query` all build them — so a caller under a role that denies `Geography[region]` could run `Revenue WHERE Geography[region] = x` (table-qualified) and bisect the denied column's values: the standard OLS inference oracle the gate's own bare-filter heuristic was written to refuse. Pre-existing on `query` (pivots) as well as on the paths that had no OLS at all.
 

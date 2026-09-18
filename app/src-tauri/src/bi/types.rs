@@ -106,11 +106,14 @@ pub struct Connection {
     /// machinery (verify/save credentials) find and configure the SAME
     /// connection that pivots query. None for locally created connections.
     pub package_data_source_id: Option<String>,
-    /// The active "view as" row-level-security role for this connection, or
-    /// None for unrestricted. v1: at most ONE role — every Calcula query path
-    /// (bi_query / column-values / refresh go through query_auto_refresh, and
-    /// drill-through uses query_rows) fails closed under multiple roles, so a
-    /// single-role model keeps all paths uniformly enforceable. Re-applied on
+    /// The active "view as" security role for this connection, or None for
+    /// unrestricted. v1: at most ONE role. Every Calcula aggregate path
+    /// (pivots via `query_with_meta`; bi_query / column-values / refresh /
+    /// cube / insights / MCP via `query_auto_refresh`; the Model Editor's
+    /// plan preview via `query_explained`) runs the engine's one query core,
+    /// so row-level security, object-level security and the multi-role union
+    /// are enforced identically on all of them; drill-through (`query_rows`)
+    /// enforces RLS/OLS and fails closed under multiple roles. Re-applied on
     /// the (possibly shared) engine inside the query lock before every query so
     /// a sibling connection's role can never leak into this one's results.
     /// In-memory for now; not yet persisted across app restarts.

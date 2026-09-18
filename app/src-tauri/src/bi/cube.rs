@@ -1049,7 +1049,16 @@ async fn run_query(
     super::commands::apply_connection_role(&mut engine, bi, conn_id.clone());
     match engine.query_auto_refresh(req).await {
         Ok((batches, _)) => Ok(super::commands::batches_to_result(&batches)),
-        Err(_) => Err(CubeError::NotAvailable),
+        Err(e) => {
+            // A CUBE cell has no channel for a message (Excel semantics: the
+            // cell shows #N/A), so a security refusal is at least visible in
+            // the log rather than indistinguishable from "no data".
+            let msg = e.to_string();
+            if msg.contains("object-level security") {
+                crate::log_warn!("BI", "CUBE query refused: {}", msg);
+            }
+            Err(CubeError::NotAvailable)
+        }
     }
 }
 

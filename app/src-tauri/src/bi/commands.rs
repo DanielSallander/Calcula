@@ -688,24 +688,81 @@ pub(crate) async fn bi_tables_cache_warm(
     }
 }
 
-/// Map a BI query error to a user-facing message. Row-level-security failures
-/// get a friendly, actionable hint (the engine's raw variant is otherwise
-/// opaque to an end user); everything else keeps the caller's `context` prefix
-/// plus the engine detail.
+/// Map a BI query error to a user-facing message. Security failures get a
+/// friendly, actionable hint (the engine's raw text is otherwise opaque to an
+/// end user); everything else keeps the caller's `context` prefix plus the
+/// engine detail.
+///
+/// The matches are on the engine's DISPLAY text (`EngineError`'s `#[error]`
+/// strings), because every caller passes the error by `Display`. The two RLS
+/// branches used to match the Rust VARIANT names, which never occur in that
+/// text, so both were dead and every RLS failure fell through to the raw
+/// message — pinned by `error_mapping_tests`.
 pub(crate) fn friendly_bi_query_error(context: &str, e: &impl std::fmt::Display) -> String {
     let s = e.to_string();
-    if s.contains("SecurityRoleNotFound") {
+    if s.contains("Security role '") && s.contains("' not found") {
         "The selected security role no longer exists in this model. Pick a different \
          role in \"View as\"."
             .to_string()
-    } else if s.contains("RowLevelSecurityNotEnforceable") {
+    } else if s.contains("row-level security for the active role cannot be enforced") {
         "This security role can't be applied to this view — its row filters can't be \
          enforced through the model's relationships. Try a different role, or clear the \
          role in \"View as\"."
             .to_string()
+    } else if s.contains("object-level security") {
+        // "object-level security: the active role denies access to Table[col]"
+        // — keep the engine's naming of the object; add where to fix it.
+        format!(
+            "{}: {} (the role chosen in \"View as\" denies it; pick a different role or ask \
+             the model's author)",
+            context, s
+        )
     } else {
         format!("{}: {}", context, s)
     }
+}
+
+/// Build the distinct-values query the filter pane runs: `group_by` plus a
+/// placeholder measure, because the planner requires at least one measure.
+///
+/// The placeholder is the FIRST model measure the active role permits. The
+/// engine's object-level-security gate walks a requested measure's whole
+/// expression closure, so blindly taking `measures().first()` would refuse
+/// EVERY slicer on a connection whose first measure touches a denied column.
+/// Declared order is kept rather than any "cheapest measure" heuristic: the
+/// GROUP BY joins through the placeholder's fact table, so the surviving
+/// measure decides which members appear.
+///
+/// MUST be called inside the engine lock, AFTER `apply_connection_role`, so
+/// the probe and the query it builds see the same role (the role is sticky
+/// engine state shared by every connection on the same model). If no measure
+/// passes, the error is the gate's own: it names the column when the column
+/// itself is the denied object, else the first measure's denied reference.
+pub(crate) fn distinct_values_request(
+    engine: &bi_engine::Engine,
+    group_by: Vec<bi_engine::ColumnRef>,
+) -> Result<bi_engine::QueryRequest, String> {
+    let measures = engine.model().measures();
+    if measures.is_empty() {
+        return Err("No measures in model -- cannot query column values".to_string());
+    }
+    let mut first_refusal: Option<String> = None;
+    for measure in measures {
+        let request = bi_engine::QueryRequest {
+            measures: vec![measure.name().to_string()],
+            group_by: group_by.clone(),
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+        match engine.check_object_level_security(&request) {
+            Ok(()) => return Ok(request),
+            Err(e) => {
+                first_refusal.get_or_insert_with(|| friendly_bi_query_error("Query refused", &e));
+            }
+        }
+    }
+    Err(first_refusal.unwrap_or_else(|| "No measures in model".to_string()))
 }
 
 /// Capture per-connection "view as" RLS roles for saving into the workbook.
@@ -2116,6 +2173,133 @@ mod rls_mapping_tests {
 }
 
 #[cfg(test)]
+mod error_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn maps_the_engine_display_text_not_the_variant_names() {
+        let missing = bi_engine::QueryError::Engine(bi_engine::EngineError::SecurityRoleNotFound(
+            "Analyst".into(),
+        ));
+        assert!(
+            friendly_bi_query_error("Query failed", &missing).contains("no longer exists"),
+            "got: {}",
+            friendly_bi_query_error("Query failed", &missing)
+        );
+
+        let unenforceable = bi_engine::QueryError::Engine(
+            bi_engine::EngineError::RowLevelSecurityNotEnforceable {
+                table: "Geography".into(),
+                reason: "many-to-many".into(),
+            },
+        );
+        assert!(
+            friendly_bi_query_error("Query failed", &unenforceable)
+                .contains("can't be enforced through the model's relationships"),
+            "got: {}",
+            friendly_bi_query_error("Query failed", &unenforceable)
+        );
+
+        let denied = bi_engine::QueryError::Engine(
+            bi_engine::EngineError::ObjectLevelSecurityDenied {
+                object: "Sales[secret]".into(),
+            },
+        );
+        let msg = friendly_bi_query_error("Query failed", &denied);
+        assert!(msg.starts_with("Query failed: object-level security"), "got: {msg}");
+        assert!(msg.contains("Sales[secret]"), "got: {msg}");
+        assert!(msg.contains("View as"), "got: {msg}");
+
+        // Anything else keeps the context prefix + engine detail.
+        let other = bi_engine::QueryError::InvalidQuery("no such measure".into());
+        assert_eq!(
+            friendly_bi_query_error("Query failed", &other),
+            "Query failed: Invalid query: no such measure"
+        );
+    }
+}
+
+#[cfg(test)]
+mod distinct_values_request_tests {
+    use super::*;
+
+    /// `Sales(geo_id, amount, secret)` -> `Geography(id, region)`; the FIRST
+    /// measure reads the column the `Analyst` role denies, the second does
+    /// not; the role also denies `Geography[region]`.
+    fn engine_with_ols() -> bi_engine::Engine {
+        let in_mem = |t: bi_engine::Table| t.with_storage_mode(bi_engine::StorageMode::InMemory);
+        let model = bi_engine::DataModel::builder()
+            .add_table(in_mem(
+                bi_engine::Table::new(
+                    "Sales",
+                    vec![
+                        bi_engine::Column::new("geo_id", bi_engine::DataType::Int64),
+                        bi_engine::Column::new("amount", bi_engine::DataType::Float64),
+                        bi_engine::Column::new("secret", bi_engine::DataType::Float64),
+                    ],
+                )
+                .unwrap(),
+            ))
+            .add_table(in_mem(
+                bi_engine::Table::new(
+                    "Geography",
+                    vec![
+                        bi_engine::Column::new("id", bi_engine::DataType::Int64),
+                        bi_engine::Column::new("region", bi_engine::DataType::String),
+                    ],
+                )
+                .unwrap(),
+            ))
+            .add_relationship(bi_engine::Relationship::many_to_one(
+                "Sales_Geo",
+                "Sales",
+                "geo_id",
+                "Geography",
+                "id",
+            ))
+            .add_measure(bi_engine::sum_measure("SecretSum", "Sales", "secret"))
+            .add_measure(bi_engine::sum_measure("Revenue", "Sales", "amount"))
+            .add_security_role(
+                bi_engine::SecurityRole::new("Analyst")
+                    .with_denied_columns(vec!["Sales[secret]".into(), "Geography[region]".into()]),
+            )
+            .build()
+            .unwrap();
+        bi_engine::Engine::new(model)
+    }
+
+    #[test]
+    fn picks_the_first_measure_the_role_permits() {
+        let mut engine = engine_with_ols();
+        let group_by = || vec![bi_engine::ColumnRef::new("Geography", "id")];
+
+        // No role: the first declared measure, as before.
+        let request = distinct_values_request(&engine, group_by()).unwrap();
+        assert_eq!(request.measures, vec!["SecretSum".to_string()]);
+
+        // Under the role the first measure's closure is denied: skip to the
+        // next, so the slicer still loads.
+        engine.set_active_role(Some("Analyst".into()));
+        let request = distinct_values_request(&engine, group_by()).unwrap();
+        assert_eq!(request.measures, vec!["Revenue".to_string()]);
+        assert_eq!(request.group_by, group_by());
+    }
+
+    #[test]
+    fn names_the_column_when_the_column_itself_is_denied() {
+        let mut engine = engine_with_ols();
+        engine.set_active_role(Some("Analyst".into()));
+        let err = distinct_values_request(
+            &engine,
+            vec![bi_engine::ColumnRef::new("Geography", "region")],
+        )
+        .unwrap_err();
+        assert!(err.contains("object-level security"), "got: {err}");
+        assert!(err.contains("Geography[region]"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
 mod calc_group_mapping_tests {
     use super::*;
 
@@ -2839,7 +3023,26 @@ pub async fn bi_query(
         request.group_by.iter().map(|g| format!("{}.{}", g.table, g.column)).collect::<Vec<_>>()
     );
 
-    let result = bi_query_core(&bi_state, connection_id.clone(), &request).await?;
+    // A refusal is audited too, not only a denial of the capability itself:
+    // a script that exercised bi.query and was refused by the model's
+    // security is exactly what a reviewer of the trail wants to see. The
+    // recorded reason is the engine's own message (object names, never data).
+    let result = match bi_query_core(&bi_state, connection_id.clone(), &request).await {
+        Ok(result) => result,
+        Err(e) => {
+            if let Some(sid) = script_id.as_deref() {
+                crate::net_commands::record_capability_call(
+                    &app_state.audit_log,
+                    "bi.query",
+                    sid,
+                    false,
+                    Some(&format!("connection {}", connection_id)),
+                    Some(&e),
+                );
+            }
+            return Err(e);
+        }
+    };
 
     // Audit (unified trail): persist a script-attributed bi.query call (success).
     // Trusted built-in callers carry no script_id and are not audited (avoid
@@ -3088,27 +3291,14 @@ pub async fn bi_get_column_values(
         auto_bind_tables_on_connection(&bi_state, connection_id, &table_refs).await?;
     }
 
-    // The BI engine requires at least one measure. Pick the first available.
-    let first_measure = {
-        let engine_arc = get_engine_arc(&bi_state, connection_id)?;
-        let engine = engine_arc.lock().await;
-        engine.model().measures().first()
-            .map(|m| m.name().to_string())
-            .ok_or_else(|| "No measures in model -- cannot query column values".to_string())?
-    };
-
-    let query_request = bi_engine::QueryRequest {
-        measures: vec![first_measure],
-        group_by: vec![bi_engine::ColumnRef::new(&table, &column)],
-        filters: vec![],
-        lookups: vec![],
-        ..Default::default()
-    };
-
+    // Role, placeholder-measure probe and query under ONE lock: the probe
+    // must see the role the query runs under (see `distinct_values_request`).
     let engine_arc = get_engine_arc(&bi_state, connection_id)?;
     let (batches, refreshed_tables) = {
         let mut engine = engine_arc.lock().await;
         apply_connection_role(&mut engine, &bi_state, connection_id);
+        let query_request =
+            distinct_values_request(&engine, vec![bi_engine::ColumnRef::new(&table, &column)])?;
         engine.query_auto_refresh(query_request).await
             .map_err(|e| friendly_bi_query_error("Query failed", &e))?
     };
@@ -3171,32 +3361,19 @@ pub async fn bi_get_column_available_values(
         auto_bind_tables_on_connection(&bi_state, connection_id, &table_refs).await?;
     }
 
-    let first_measure = {
-        let engine_arc = get_engine_arc(&bi_state, connection_id)?;
-        let engine = engine_arc.lock().await;
-        engine.model().measures().first()
-            .map(|m| m.name().to_string())
-            .ok_or_else(|| "No measures in model".to_string())?
-    };
-
     // Build GROUP BY: target column + all cross-filter columns
     let mut group_by = vec![bi_engine::ColumnRef::new(&table, &column)];
     for cf in &cross_filters {
         group_by.push(bi_engine::ColumnRef::new(&cf.table, &cf.column));
     }
 
-    let query_request = bi_engine::QueryRequest {
-        measures: vec![first_measure],
-        group_by,
-        filters: vec![],
-        lookups: vec![],
-        ..Default::default()
-    };
-
+    // Role, placeholder-measure probe and query under ONE lock: the probe
+    // must see the role the query runs under (see `distinct_values_request`).
     let engine_arc = get_engine_arc(&bi_state, connection_id)?;
     let (batches, refreshed_tables) = {
         let mut engine = engine_arc.lock().await;
         apply_connection_role(&mut engine, &bi_state, connection_id);
+        let query_request = distinct_values_request(&engine, group_by)?;
         engine.query_auto_refresh(query_request).await
             .map_err(|e| friendly_bi_query_error("Query failed", &e))?
     };
@@ -3537,11 +3714,28 @@ pub async fn bi_refresh_connection(
     // a formula may read both.
     let mut rewritten_regions: Vec<(usize, u32, u32, u32, u32)> = Vec::new();
 
-    // Clear query cache so refreshed queries hit the database for fresh data
+    // Clear query cache so refreshed queries hit the database for fresh data.
+    // In the same lock, refuse up front when the active "view as" role denies
+    // an object ANY of these queries touches: the loop below rewrites one grid
+    // block per query and recalculates dependents only afterwards, so a
+    // refusal discovered mid-loop would leave earlier blocks rewritten with
+    // their formulas holding the previous refresh's numbers. The check is pure
+    // (no source I/O) and must run under the same lock as the role it tests.
     {
-        let engine = engine_arc.lock().await;
+        let mut engine = engine_arc.lock().await;
         engine.clear_query_cache();
+        apply_connection_role(&mut engine, &bi_state, connection_id);
+        for active_query in &active_queries {
+            engine
+                .check_object_level_security(&build_engine_query(&active_query.request))
+                .map_err(|e| friendly_bi_query_error("Refresh refused", &e))?;
+        }
     }
+
+    // A query that fails AFTER earlier blocks were rewritten (a source error,
+    // say) stops the loop but must not skip PHASE B: the failure is carried
+    // past the recalculation and returned at the end.
+    let mut failure: Option<String> = None;
 
     for active_query in &active_queries {
         let query_request = build_engine_query(&active_query.request);
@@ -3549,8 +3743,13 @@ pub async fn bi_refresh_connection(
         let (batches, refreshed_tables) = {
             let mut engine = engine_arc.lock().await;
             apply_connection_role(&mut engine, &bi_state, connection_id);
-            engine.query_auto_refresh(query_request).await
-                .map_err(|e| friendly_bi_query_error("Refresh query failed", &e))?
+            match engine.query_auto_refresh(query_request).await {
+                Ok(v) => v,
+                Err(e) => {
+                    failure = Some(friendly_bi_query_error("Refresh query failed", &e));
+                    break;
+                }
+            }
         };
 
         // DEV: Log data source (cache vs database)
@@ -3805,6 +4004,12 @@ pub async fn bi_refresh_connection(
                 &off_sheets,
             );
         }
+    }
+
+    // Reported only now: the blocks that DID refresh are on the grid with
+    // their dependents recalculated, which is the state the user is looking at.
+    if let Some(err) = failure {
+        return Err(err);
     }
 
     Ok(results)

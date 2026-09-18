@@ -282,3 +282,33 @@ async fn measure_filter_with_rollup_totals_fails_closed() {
     };
     assert!(msg.contains("ROLLUP"), "got: {msg}");
 }
+
+// --- Measure-value filters are honoured on every aggregate entry point ---
+
+#[tokio::test]
+async fn measure_filter_is_honoured_on_auto_refresh_explain_and_auto_tier() {
+    // `query_auto_refresh` used to plan on its own and silently DROPPED
+    // `measure_filters`: Revenue > 100 returned BOTH products. Every entry
+    // point now peels the filter exactly as `query` does.
+    let mut engine = having_engine();
+    let filtered = || {
+        request_with(vec![MeasureFilter::new(
+            "Revenue",
+            FilterOperator::GreaterThan,
+            100.0,
+        )])
+    };
+
+    let (batches, _refreshed) = engine.query_auto_refresh(filtered()).await.unwrap();
+    let r = grouped(&batches, "Revenue");
+    assert_eq!(r.len(), 1, "auto-refresh must drop Helmets (60): {r:?}");
+    assert!((r["Bikes"] - 130.0).abs() < 1e-9);
+
+    let (batches, _plan) = engine.query_explained(filtered()).await.unwrap();
+    let r = grouped(&batches, "Revenue");
+    assert_eq!(r.len(), 1, "explain must drop Helmets (60): {r:?}");
+
+    let (batches, _tiered) = engine.query_auto_tier(filtered()).await.unwrap();
+    let r = grouped(&batches, "Revenue");
+    assert_eq!(r.len(), 1, "auto-tier must drop Helmets (60): {r:?}");
+}

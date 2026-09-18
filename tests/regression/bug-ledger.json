@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 121,
+  "nextId": 122,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4472,6 +4472,31 @@
       },
       "fix": "One shared pre-plan chain, `Engine::resolve_pre_plan_overlays` (ISFILTERED fold -> GVAR resolution -> calculation-group expansion, borrowing the model and request when nothing applies — pinned by the_pre_plan_chain_borrows_when_nothing_applies), used by query_with_cancellation, query_explained and query_auto_refresh so they cannot drift again. `query_auto_tier` is deliberately unchanged and still fails closed (gvar_via_auto_tier_fails_closed stays as is); making query_auto_refresh literally refresh_stale + query_with_cancellation (which would also bring object-level security, rank_by, top_n, measure_filters and the multi-role union to that path) is a security-visible change recorded in docs/design/open-items.md §2.1 for its own review.",
       "notes": "Found by the same regression module as BUG-0119 (derived_measure_tests.rs: a_gvar_measure_over_a_measure_ref_queries_on_the_auto_refresh_path fails first on the empty home table, then on this guard once that is fixed)."
+    },
+    {
+      "id": "BUG-0121",
+      "status": "fixed",
+      "discovered": "2026-09-18",
+      "source": {
+        "kind": "design-critique",
+        "seed": null,
+        "runId": "ultracode critique (security lens) of the one-aggregate-query-path design, before it was built"
+      },
+      "violation": {
+        "oracleId": "ols-gate-ignores-scoped-filters",
+        "message": "`Engine::enforce_object_level_security` inspected only the bare `filters` / `in_filters` / `or_filters` lists. Every host filter travels as a SCOPED filter (`scoped_filters` / `scoped_in_filters`, with an optional owning table and a level) — pivot slicers, `bi_query`, MCP `run_bi_query` all build them — so a caller under a role that denies `Geography[region]` could run `Revenue WHERE Geography[region] = x` (table-qualified) and bisect the denied column's values: the standard OLS inference oracle the gate's own bare-filter heuristic was written to refuse. Pre-existing on `query` (pivots) as well as on the paths that had no OLS at all."
+      },
+      "whyNobodyNoticed": "Every OLS test drove group_by, lookups, order_by, the measure closure or a BARE filter; `security_tests.rs` had zero tests naming a scoped filter. The scoped shape was added for filter levels after the OLS gate was written, and nothing tied the two together.",
+      "repro": {
+        "kind": "unit",
+        "steps": [
+          "model-engine-lib: `cargo test -p bi-engine ols_denied_column_in_a_scoped_filter_is_refused_on_every_aggregate_path` (crates/engine/src/security_tests.rs) — the `ols_engine` fixture (Analyst denies Category and Geography[region]), a request `Revenue` with `scoped_filters: [Geography[region] = West]` (qualified and unqualified) and `scoped_in_filters: [Geography[region] IN (West)]`, on query / query_auto_refresh / query_explained / query_auto_tier.",
+          "EXPECTED: every call refused with `object-level security: the active role denies access to Geography[region]`; without the role the qualified filter restricts to West (130); a scoped filter on the permitted sibling Geography[id] is still allowed.",
+          "ACTUAL (before the fix): every call succeeded and returned the West-restricted total, i.e. the denied column was usable as a predicate."
+        ]
+      },
+      "fix": "The gate now walks `scoped_filters` and `scoped_in_filters`: a table-qualified one is checked exactly like a group-by column (`col_denied(table, column)`), an unqualified one falls back to the existing conservative bare-name match. Landed inside the \"One aggregate query path\" change (model-engine-lib changelog), so the same gate now runs on every aggregate entry point.",
+      "notes": "Found by the security critic while trying to refute the design that routes query_auto_refresh / query_auto_tier / query_explained through query_with_cancellation (the open-items row filed with BUG-0120). Companion hole closed in the same change, no ledger entry (no host caller): query_auto_tier ran a multi-role request with EMPTY role filters because it never called reject_multi_role."
     }
   ]
 }

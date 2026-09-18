@@ -279,7 +279,10 @@ pub struct Engine {
     auto_tier_config: AutoTierConfig,
     /// Runtime state for auto-tiering (which tables are cached/rejected).
     /// Mutated only by `&mut self` paths ([`Engine::query_auto_tier`],
-    /// [`Engine::auto_tier_remaining`]), so no interior mutability is needed.
+    /// [`Engine::auto_tier_remaining`]), so no interior mutability is needed;
+    /// READ by every planner call (`plan_and_execute`, the multi-role union
+    /// probe, `query_explained`), so once a table is tiered every path plans
+    /// it as local.
     auto_tier_state: AutoTierState,
     /// LRU cache for query results.
     ///
@@ -515,6 +518,180 @@ fn measure_filter_passes(lhs: f64, op: FilterOperator, rhs: f64) -> bool {
         FilterOperator::GreaterThanOrEqual => lhs >= rhs,
         FilterOperator::LessThanOrEqual => lhs <= rhs,
     }
+}
+
+/// The outermost post-aggregation step a request carries, peeled off by
+/// [`peel_post_aggregation`] and re-applied to the inner query's rows by
+/// [`apply_post_aggregation`].
+///
+/// Precedence, outermost first: `rank_by` (RANKX-style measure ranking), then
+/// `top_n` (tie-inclusive top-N groups, DAX `TOPN`), then `measure_filters`
+/// (a post-aggregation HAVING). A ranked request ranks the top-N result, which
+/// is itself taken over the HAVING-filtered rows — each step runs the inner
+/// query with **no** row limit (so every group is present and already
+/// ordered), transforms the rows, then applies the limit, composing
+/// `order_by` + `limit` + the step into "top N by measure".
+///
+/// One peel shared by every aggregate entry point (`query_with_cancellation`,
+/// `query_explained`, and through the former the auto-refresh and auto-tier
+/// paths) so a step can never be silently dropped on one path and honoured
+/// on another — which is exactly what `query_auto_refresh` used to do.
+#[derive(Debug, Clone)]
+enum PostAggregation {
+    Rank(RankBy),
+    TopN(TopN),
+    MeasureFilters(Vec<MeasureFilter>),
+}
+
+impl PostAggregation {
+    /// The explain-plan node label for this step.
+    fn label(&self) -> &'static str {
+        match self {
+            PostAggregation::Rank(_) => "Post-aggregation: rank by measure",
+            PostAggregation::TopN(_) => "Post-aggregation: top-N groups",
+            PostAggregation::MeasureFilters(_) => "Post-aggregation: measure-value filter",
+        }
+    }
+
+    /// The step's parameters, for the explain-plan node's `step` property.
+    fn describe(&self) -> String {
+        match self {
+            PostAggregation::Rank(rank) => format!("rank_by {rank:?}"),
+            PostAggregation::TopN(topn) => format!("top_n {topn:?}"),
+            PostAggregation::MeasureFilters(filters) => format!("measure_filters {filters:?}"),
+        }
+    }
+}
+
+/// Peel the outermost post-aggregation step off `request`.
+///
+/// Returns `None` when the request carries none (the common case). Otherwise
+/// the step, the inner request with that step removed and its row limit
+/// taken, and the limit to re-apply after the step. The step's shape is
+/// validated the same way on every path: unsupported combinations (ROLLUP
+/// totals, a calculation group) and references to measures or partition
+/// columns the request does not carry fail closed with a typed
+/// [`QueryError::InvalidQuery`] rather than mislead.
+fn peel_post_aggregation(
+    request: &QueryRequest,
+) -> QueryResult<Option<(PostAggregation, QueryRequest, Option<usize>)>> {
+    let has_measure = |name: &str| request.measures.iter().any(|m| m.eq_ignore_ascii_case(name));
+    let partitions_in_group_by = |partition_by: &[ColumnRef], what: &str| -> QueryResult<()> {
+        for pc in partition_by {
+            if !request
+                .group_by
+                .iter()
+                .any(|g| g.column.eq_ignore_ascii_case(&pc.column))
+            {
+                return Err(QueryError::InvalidQuery(format!(
+                    "{what} partition column '{}' must be one of the request's group_by columns",
+                    pc.column
+                )));
+            }
+        }
+        Ok(())
+    };
+
+    let step = if let Some(rank) = &request.rank_by {
+        if request.totals == TotalsMode::Rollup {
+            return Err(QueryError::InvalidQuery(
+                "rank_by is not supported with ROLLUP totals (ranking would order subtotal and \
+                 grand-total rows among the details); request the ranked detail and the totals \
+                 separately"
+                    .into(),
+            ));
+        }
+        if request.calculation_group.is_some() {
+            return Err(QueryError::InvalidQuery(
+                "rank_by is not supported together with a calculation group; apply the ranking in \
+                 a separate request"
+                    .into(),
+            ));
+        }
+        if !has_measure(&rank.measure) {
+            return Err(QueryError::InvalidQuery(format!(
+                "rank_by references measure '{}', which is not in the request's measures",
+                rank.measure
+            )));
+        }
+        partitions_in_group_by(&rank.partition_by, "rank_by")?;
+        PostAggregation::Rank(rank.clone())
+    } else if let Some(topn) = &request.top_n {
+        if request.totals == TotalsMode::Rollup {
+            return Err(QueryError::InvalidQuery(
+                "top_n is not supported with ROLLUP totals (it would rank subtotal/grand-total \
+                 rows among the details); request the top-N detail and the totals separately"
+                    .into(),
+            ));
+        }
+        if request.calculation_group.is_some() {
+            return Err(QueryError::InvalidQuery(
+                "top_n is not supported together with a calculation group; apply the top-N in a \
+                 separate request"
+                    .into(),
+            ));
+        }
+        if !has_measure(&topn.measure) {
+            return Err(QueryError::InvalidQuery(format!(
+                "top_n references measure '{}', which is not in the request's measures",
+                topn.measure
+            )));
+        }
+        partitions_in_group_by(&topn.partition_by, "top_n")?;
+        PostAggregation::TopN(topn.clone())
+    } else if !request.measure_filters.is_empty() {
+        if request.totals == TotalsMode::Rollup {
+            return Err(QueryError::InvalidQuery(
+                "measure-value filters are not supported with ROLLUP totals (a measure filter \
+                 would drop subtotal/grand-total rows by their aggregate value); request the \
+                 filtered detail and the totals separately"
+                    .into(),
+            ));
+        }
+        if request.calculation_group.is_some() {
+            return Err(QueryError::InvalidQuery(
+                "measure-value filters are not supported together with a calculation group; \
+                 apply the filter in a separate request"
+                    .into(),
+            ));
+        }
+        for mf in &request.measure_filters {
+            if !has_measure(&mf.measure) {
+                return Err(QueryError::InvalidQuery(format!(
+                    "measure-value filter references measure '{}', which is not in the request's \
+                     measures",
+                    mf.measure
+                )));
+            }
+        }
+        PostAggregation::MeasureFilters(request.measure_filters.clone())
+    } else {
+        return Ok(None);
+    };
+
+    let mut inner = request.clone();
+    match &step {
+        PostAggregation::Rank(_) => inner.rank_by = None,
+        PostAggregation::TopN(_) => inner.top_n = None,
+        PostAggregation::MeasureFilters(_) => inner.measure_filters = Vec::new(),
+    }
+    let limit = inner.limit.take();
+    Ok(Some((step, inner, limit)))
+}
+
+/// Re-apply a peeled post-aggregation step to the inner query's rows and
+/// then the row limit that was taken off the inner request.
+fn apply_post_aggregation(
+    step: &PostAggregation,
+    batches: &[RecordBatch],
+    limit: Option<usize>,
+) -> QueryResult<Vec<RecordBatch>> {
+    let rows = match step {
+        PostAggregation::Rank(rank) => apply_ranking(batches, rank)?,
+        PostAggregation::TopN(topn) => apply_topn_with_ties(batches, topn)?,
+        PostAggregation::MeasureFilters(filters) => apply_measure_value_filters(batches, filters)?,
+    };
+    Ok(truncate_batches_to_limit(rows, limit))
 }
 
 /// Keep only the result rows whose measure columns satisfy every `MeasureFilter`
@@ -1323,7 +1500,21 @@ impl Engine {
         if removed {
             self.query_cache.lock().invalidate_all();
         }
+        // The auto-tiered set tells every planner call which tables are
+        // local; a dropped table is not, so it leaves the set with its rows.
+        // Otherwise the planner would keep treating it as local (passing,
+        // for one, the filter-context time-intelligence gate) while the
+        // executor fetches it from the source with the request's filters.
+        self.forget_auto_tiered(table_name);
         removed
+    }
+
+    /// Remove `table_name` from the auto-tiered set (case-insensitively);
+    /// the next `query_auto_tier` may tier it again.
+    fn forget_auto_tiered(&mut self, table_name: &str) {
+        self.auto_tier_state
+            .cached
+            .retain(|t| !t.eq_ignore_ascii_case(table_name));
     }
 
     /// Drop a table's cached rows **and every table computed from them**.
@@ -1932,15 +2123,16 @@ impl Engine {
         Ok(())
     }
 
-    /// Fail closed when more than one role is active on a query path that does
-    /// not yet implement the union (auto-refresh, auto-tier, explain,
-    /// drillthrough). The main `query` path handles the union itself.
+    /// Fail closed when more than one role is active on the one query path
+    /// that does not implement the union: drillthrough (`query_rows`, whose
+    /// [`DetailRequest`] has no `or_filters` to rewrite into). Every aggregate
+    /// entry point — `query`, `query_with_cancellation`, `query_explained`,
+    /// `query_auto_refresh`, `query_auto_tier` — runs the union rewrite.
     fn reject_multi_role(&self) -> QueryResult<()> {
         if self.active_roles.len() > 1 {
             return Err(QueryError::InvalidQuery(
-                "multiple active security roles (role union) are supported on query() / \
-                 query_with_cancellation only in this version; this path requires a single \
-                 active role"
+                "multiple active security roles (role union) are supported on the aggregate \
+                 query paths only in this version; drillthrough requires a single active role"
                     .into(),
             ));
         }
@@ -1970,18 +2162,30 @@ impl Engine {
             ));
         }
 
-        let mut conditions: Vec<FilterCondition> = Vec::new();
-        let mut union_table: Option<String> = None;
+        // Resolve EVERY role's predicates before deciding anything, so the
+        // outcome does not depend on the order the roles were activated in: an
+        // unrestricted role anywhere in the set means the union permits every
+        // row, whatever shape the other roles have. (Resolving dynamic
+        // predicates to the runtime identity up front — failing closed if it
+        // is unset — also keeps a placeholder out of the union.)
+        let mut resolved: Vec<(&String, Vec<FilterPredicate>)> =
+            Vec::with_capacity(self.active_roles.len());
         for name in &self.active_roles {
             let role = self.model.security_role(name).map_err(QueryError::Engine)?;
-            // Resolve dynamic predicates to the runtime identity up front (fail
-            // closed if unset) so the union never carries a placeholder value.
-            let preds = self.substitute_identity_in_predicates(role.table_filters())?;
-            if preds.is_empty() {
-                // A role with no filters permits every row → the union permits
-                // every row → no restriction at all.
-                return Ok(request);
-            }
+            resolved.push((
+                name,
+                self.substitute_identity_in_predicates(role.table_filters())?,
+            ));
+        }
+        if resolved.iter().any(|(_, preds)| preds.is_empty()) {
+            // A role with no filters permits every row → the union permits
+            // every row → no restriction at all.
+            return Ok(request);
+        }
+
+        let mut conditions: Vec<FilterCondition> = Vec::new();
+        let mut union_table: Option<String> = None;
+        for (name, preds) in &resolved {
             if preds.len() != 1 {
                 return Err(QueryError::InvalidQuery(format!(
                     "multi-role union (v1) supports one predicate per role; role '{name}' has {} \
@@ -2009,10 +2213,18 @@ impl Engine {
         // refuses (RowLevelSecurityNotEnforceable for a non-single-hop-equi
         // table), refuse too rather than risk leaving the fact unrestricted.
         // The predicates are substituted (concrete identity) before planning.
+        // The probe sees the same table locality as the real plan (the
+        // auto-tiered set), so it cannot refuse a shape the plan would run.
         if let Some(name) = self.active_roles.first() {
             let role = self.model.security_role(name).map_err(QueryError::Engine)?;
             let preds = self.substitute_identity_in_predicates(role.table_filters())?;
-            PushdownPlanner::plan(&request, &self.model, &self.registry, &preds)?;
+            PushdownPlanner::plan_with_cached(
+                &request,
+                &self.model,
+                &self.registry,
+                &self.auto_tier_state.cached,
+                &preds,
+            )?;
         }
 
         let mut rewritten = request;
@@ -2105,11 +2317,6 @@ impl Engine {
         Ok(Some((overlay, expanded)))
     }
 
-    /// Resolve the active role to its filter predicates (an empty slice when
-    /// no role is active). Caller must have run
-    /// [`validate_active_role`](Self::validate_active_role) first; an unknown
-    /// role here degrades safely to an empty slice (no enforcement), but
-    /// validation guarantees that case never reaches a query.
     /// Object-level security (OLS) gate: refuse a query that references a
     /// table or column any ACTIVE role denies (`SecurityRole::denied_tables`
     /// / `denied_columns`). Runs before planning on every aggregate query.
@@ -2121,7 +2328,11 @@ impl Engine {
     /// `or_filters`) carry no table qualifier, so they are matched
     /// conservatively: a bare name that matches ANY denied column's name, or
     /// that exists on a denied table, is refused (fail closed — a false deny
-    /// beats a leak).
+    /// beats a leak). Scoped filters (`scoped_filters` / `scoped_in_filters`,
+    /// the shape every host filter arrives in) are checked like a group-by
+    /// column when table-qualified and like a bare filter when not — the gap
+    /// that let a denied column be bisected through `WHERE T[col] = x`
+    /// (BUG-0121).
     ///
     /// With multiple active roles a denial from ANY of them refuses the query
     /// (v1: denials do not un-union; stricter than Power BI's permissive
@@ -2269,7 +2480,55 @@ impl Engine {
                 return deny(object);
             }
         }
+
+        // Scoped filters — the shape every host filter arrives in (pivot
+        // slicers, `bi_query`, MCP). A table-qualified one is checked like a
+        // group-by column; an unqualified one falls back to the conservative
+        // bare-name match. Without this a caller could bisect a denied
+        // column's values through `WHERE Employees[Salary] > x`.
+        for f in &request.scoped_filters {
+            match &f.table {
+                Some(t) => {
+                    if col_denied(t, &f.condition.column) {
+                        return deny(format!("{t}[{}]", f.condition.column));
+                    }
+                }
+                None => {
+                    if let Some(object) = bare_denied(&f.condition.column) {
+                        return deny(object);
+                    }
+                }
+            }
+        }
+        for f in &request.scoped_in_filters {
+            match &f.table {
+                Some(t) => {
+                    if col_denied(t, &f.filter.column) {
+                        return deny(format!("{t}[{}]", f.filter.column));
+                    }
+                }
+                None => {
+                    if let Some(object) = bare_denied(&f.filter.column) {
+                        return deny(object);
+                    }
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// The object-level-security gate as a public check: `Ok(())` when the
+    /// active role(s) deny nothing `request` touches, else the same
+    /// [`EngineError::ObjectLevelSecurityDenied`] the query paths return —
+    /// or [`EngineError::SecurityRoleNotFound`] when an active role is not
+    /// defined by the model, exactly as a query would fail (the probe must
+    /// never report "permitted" for a role it could not look up). Pure
+    /// (`&self`, no I/O, no cache write). A host uses it to choose a request
+    /// the active role permits — Calcula's filter pane probes a placeholder
+    /// measure with it — inside the same lock it queries under.
+    pub fn check_object_level_security(&self, request: &QueryRequest) -> QueryResult<()> {
+        self.validate_active_role()?;
+        self.enforce_object_level_security(request)
     }
 
     /// OLS gate for drillthrough: same denial sets as
@@ -2339,12 +2598,19 @@ impl Engine {
         Ok(())
     }
 
+    /// Resolve the active role to its filter predicates: a single role's
+    /// predicates, or EMPTY when no role is active — and also empty under
+    /// multiple roles, because by the time an aggregate path calls this the
+    /// role set has been rewritten into the request's `or_filters` by
+    /// `build_role_union_request` (the only other multi-role caller,
+    /// drillthrough, fails closed first via `reject_multi_role`). Caller must
+    /// have run [`validate_active_role`](Self::validate_active_role) first; an
+    /// unknown role here degrades safely to an empty slice (no enforcement),
+    /// but validation guarantees that case never reaches a query.
     fn active_role_filters(&self) -> QueryResult<Vec<FilterPredicate>> {
-        // Single-role enforcement. The multi-role union is handled separately
-        // (see `build_role_union_request`) and never reaches a path that calls
-        // this, so returning a single role's predicates here is safe. Dynamic
-        // predicates are substituted to the runtime identity (fail closed if
-        // unset) so every consumer sees concrete, owned static predicates.
+        // Dynamic predicates are substituted to the runtime identity (fail
+        // closed if unset) so every consumer sees concrete, owned static
+        // predicates.
         let preds: &[FilterPredicate] = match self.active_roles.first() {
             Some(name) if self.active_roles.len() == 1 => self
                 .model
@@ -2853,29 +3119,16 @@ impl Engine {
         // cache work when the active role denies an object this query touches.
         self.enforce_object_level_security(&request)?;
 
-        // Measure-value ranking (RANKX) is the OUTERMOST post-aggregation step:
-        // run the underlying query (which may itself apply a HAVING filter),
-        // append the rank column, then apply the row limit. Handled before
-        // caching/planning so it composes with every execution path.
-        if request.rank_by.is_some() {
-            return self.query_with_ranking(request, token).await;
-        }
-
-        // Top-N groups (tie-inclusive, DAX `TOPN`) is an outer post-aggregation
-        // step like RANKX: run the underlying query (which may apply a HAVING
-        // filter first), keep the top-N groups by measure, then re-apply the row
-        // limit. Handled before caching/planning so it composes with every path.
-        if request.top_n.is_some() {
-            return self.query_with_topn(request, token).await;
-        }
-
-        // Measure-value filters (HAVING) are handled here — before caching and
-        // planning — so they compose uniformly with every execution path. Run
-        // the underlying query without them (and without the row limit), then
-        // filter the result rows by measure value and apply the limit. The inner
-        // query is cached normally; the filtered result is cheap to recompute.
-        if !request.measure_filters.is_empty() {
-            return self.query_with_measure_filters(request, token).await;
+        // Post-aggregation steps — measure-value ranking (RANKX), top-N groups
+        // (TOPN) and measure-value filters (HAVING), outermost first — are
+        // peeled here, before caching and planning, so they compose with every
+        // execution path: the inner request (step removed, no row limit) runs
+        // through this same method recursively, the rows are transformed, and
+        // the limit is re-applied. The inner query is cached normally; the
+        // transformed result is cheap to recompute.
+        if let Some((step, inner, limit)) = peel_post_aggregation(&request)? {
+            let batches = Box::pin(self.query_with_cancellation(inner, token)).await?;
+            return apply_post_aggregation(&step, &batches, limit);
         }
 
         // Multi-role row-level-security union: rewrite the role set into an
@@ -2883,10 +3136,16 @@ impl Engine {
         // WITHOUT roles. The OR rides the same enforceable single-hop propagation
         // as a single role; unsupported shapes (cross-table roles, multi-predicate
         // roles, a non-enforceable table) fail closed inside the builder.
-        let request = if self.active_roles.len() > 1 {
-            self.build_role_union_request(request)?
+        //
+        // The request as the CALLER wrote it is kept: a role predicate is
+        // sealed security, not a user filter, so `ISFILTERED` must not see the
+        // injected `or_filters` (it does not see a single role's predicates
+        // either, which live in `role_filters`). Cloned only on this rare path.
+        let (request, user_request) = if self.active_roles.len() > 1 {
+            let rewritten = self.build_role_union_request(request.clone())?;
+            (rewritten, Some(request))
         } else {
-            request
+            (request, None)
         };
 
         // Check the query cache first. The guard is dropped before any
@@ -2917,7 +3176,12 @@ impl Engine {
         // calculation-group expansion), shared with `query_explained` and
         // `query_auto_refresh` so the three cannot drift; see the helper.
         let (model, effective_request) = self
-            .resolve_pre_plan_overlays(&request, &role_filters, &token)
+            .resolve_pre_plan_overlays(
+                &request,
+                user_request.as_ref().unwrap_or(&request),
+                &role_filters,
+                &token,
+            )
             .await?;
 
         let batches = self
@@ -2956,17 +3220,20 @@ impl Engine {
         let context_column_cases = self
             .resolve_pushable_context_columns(context_request, token)
             .await?;
-        let plan = if context_column_cases.is_empty() {
-            PushdownPlanner::plan(plan_request, model, &self.registry, role_filters)?
-        } else {
-            PushdownPlanner::plan_with_context_columns(
-                plan_request,
-                model,
-                &self.registry,
-                role_filters,
-                &context_column_cases,
-            )?
-        };
+        // Auto-tiered dimension tables are local for pushdown decisions, like
+        // in-memory tables. The set is empty unless `query_auto_tier` tiered
+        // something, so every other caller plans exactly as before; with it
+        // here, the auto-tier path runs through this one core (and a GVAR
+        // inner query sees the tiered set too).
+        let plan = PushdownPlanner::plan_with_cached_diagnostics(
+            plan_request,
+            model,
+            &self.registry,
+            &self.auto_tier_state.cached,
+            role_filters,
+            &context_column_cases,
+        )?
+        .0;
         map_script_error(
             QueryExecutor::execute_with_cancellation(
                 &plan,
@@ -2992,6 +3259,12 @@ impl Engine {
     ///    downstream path (pushed and local) plans on a plain boolean. The
     ///    fold's request context is identical between the original and a
     ///    calculation-group-expanded request, so it runs on the original.
+    ///    It reads `user_request` — the request as the CALLER wrote it —
+    ///    rather than `request`, because the multi-role union injects the
+    ///    active roles' predicates as `or_filters`: a role predicate is
+    ///    sealed security, not a user filter, and a single role's predicates
+    ///    (which travel in `role_filters`) are not visible to `ISFILTERED`
+    ///    either. The two are the same request unless a union was rewritten.
     /// 2. Query-scoped (GVAR) resolution. For each requested — or
     ///    transitively referenced — measure whose top-level block declares
     ///    `GVAR` bindings, evaluate each `GVAR` ONCE (under the outer
@@ -3011,26 +3284,27 @@ impl Engine {
     /// Returns the model to plan against and the request to plan; both are
     /// BORROWED when nothing applied, so the common case clones nothing. Run
     /// AFTER the query-cache check: GVAR resolution executes inner queries and
-    /// must stay free on a cache hit. `query_auto_tier` deliberately does not
-    /// use this: it still fails closed on GVAR
-    /// (`gvar_tests::gvar_via_auto_tier_fails_closed`).
+    /// must stay free on a cache hit.
     ///
-    /// Shared by `query_with_cancellation`, `query_explained` and
-    /// `query_auto_refresh`: the last of these used to run only step 3, so a
-    /// GVAR measure reached the executor unresolved on the host's `bi_query` /
-    /// insights / refresh / cube / MCP path while the same measure worked in a
-    /// pivot (`query_with_meta`).
+    /// Shared by `query_with_cancellation` (and through it `query_auto_refresh`
+    /// and `query_auto_tier`, which compose their refresh / tiering step with
+    /// that method) and `query_explained`. `query_auto_refresh` used to run
+    /// only step 3, so a GVAR measure reached the executor unresolved on the
+    /// host's `bi_query` / insights / refresh / cube / MCP path while the same
+    /// measure worked in a pivot (`query_with_meta`); `query_auto_tier` used to
+    /// do the same and fail closed.
     async fn resolve_pre_plan_overlays<'a>(
         &'a self,
         request: &'a QueryRequest,
+        user_request: &QueryRequest,
         role_filters: &[FilterPredicate],
         token: &CancellationToken,
     ) -> QueryResult<(Cow<'a, DataModel>, Cow<'a, QueryRequest>)> {
-        let base: Cow<'a, DataModel> = match Self::resolve_is_filtered_markers(request, &self.model)
-        {
-            Some(folded) => Cow::Owned(folded),
-            None => Cow::Borrowed(&self.model),
-        };
+        let base: Cow<'a, DataModel> =
+            match Self::resolve_is_filtered_markers(user_request, &self.model) {
+                Some(folded) => Cow::Owned(folded),
+                None => Cow::Borrowed(&self.model),
+            };
         let base: Cow<'a, DataModel> = match self
             .resolve_query_scoped_bindings(request, &base, role_filters, token)
             .await?
@@ -3389,190 +3663,6 @@ impl Engine {
             Some(b) => expr_literal_from_arrow(b.column(0).as_ref(), 0).map_err(QueryError::Engine),
             None => Ok(Expression::Blank),
         }
-    }
-
-    /// Evaluate a query carrying a measure-value ranking (`RANKX`-style).
-    ///
-    /// Runs the underlying query with the ranking removed and **no** row limit
-    /// (so every group is ranked), appends the rank column, then applies the
-    /// limit — composing `order_by` + `limit` + rank into "top N by measure".
-    /// The inner query (including any HAVING measure filter) is evaluated by
-    /// [`query_with_cancellation`](Self::query_with_cancellation); only the rank
-    /// append + limit are added here. Unsupported combinations (ROLLUP totals,
-    /// calculation groups) fail closed rather than mislead.
-    async fn query_with_ranking(
-        &self,
-        request: QueryRequest,
-        token: CancellationToken,
-    ) -> QueryResult<Vec<RecordBatch>> {
-        // Safe: the caller (`query_with_cancellation`) only routes here when set.
-        let rank = request
-            .rank_by
-            .clone()
-            .expect("query_with_ranking is only called when rank_by is set");
-
-        if request.totals == TotalsMode::Rollup {
-            return Err(QueryError::InvalidQuery(
-                "rank_by is not supported with ROLLUP totals (ranking would order subtotal and \
-                 grand-total rows among the details); request the ranked detail and the totals \
-                 separately"
-                    .into(),
-            ));
-        }
-        if request.calculation_group.is_some() {
-            return Err(QueryError::InvalidQuery(
-                "rank_by is not supported together with a calculation group; apply the ranking in \
-                 a separate request"
-                    .into(),
-            ));
-        }
-        if !request
-            .measures
-            .iter()
-            .any(|m| m.eq_ignore_ascii_case(&rank.measure))
-        {
-            return Err(QueryError::InvalidQuery(format!(
-                "rank_by references measure '{}', which is not in the request's measures",
-                rank.measure
-            )));
-        }
-        for pc in &rank.partition_by {
-            if !request
-                .group_by
-                .iter()
-                .any(|g| g.column.eq_ignore_ascii_case(&pc.column))
-            {
-                return Err(QueryError::InvalidQuery(format!(
-                    "rank_by partition column '{}' must be one of the request's group_by columns",
-                    pc.column
-                )));
-            }
-        }
-
-        let mut inner = request.clone();
-        inner.rank_by = None;
-        let limit = inner.limit.take();
-        let batches = Box::pin(self.query_with_cancellation(inner, token)).await?;
-
-        let ranked = apply_ranking(&batches, &rank)?;
-        Ok(truncate_batches_to_limit(ranked, limit))
-    }
-
-    /// Evaluate a query carrying measure-value filters (a `HAVING` clause).
-    ///
-    /// Runs the underlying query with the filters removed and **no** row limit
-    /// (so every group that could pass is present and already ordered), then
-    /// keeps only the rows whose measures satisfy the filters and applies the
-    /// limit — composing `order_by` + `limit` + filters into top-N-over-
-    /// threshold. Unsupported combinations (ROLLUP totals, calculation groups)
-    /// fail closed rather than mislead.
-    async fn query_with_measure_filters(
-        &self,
-        request: QueryRequest,
-        token: CancellationToken,
-    ) -> QueryResult<Vec<RecordBatch>> {
-        if request.totals == TotalsMode::Rollup {
-            return Err(QueryError::InvalidQuery(
-                "measure-value filters are not supported with ROLLUP totals (a measure filter \
-                 would drop subtotal/grand-total rows by their aggregate value); request the \
-                 filtered detail and the totals separately"
-                    .into(),
-            ));
-        }
-        if request.calculation_group.is_some() {
-            return Err(QueryError::InvalidQuery(
-                "measure-value filters are not supported together with a calculation group; \
-                 apply the filter in a separate request"
-                    .into(),
-            ));
-        }
-        for mf in &request.measure_filters {
-            if !request
-                .measures
-                .iter()
-                .any(|m| m.eq_ignore_ascii_case(&mf.measure))
-            {
-                return Err(QueryError::InvalidQuery(format!(
-                    "measure-value filter references measure '{}', which is not in the request's \
-                     measures",
-                    mf.measure
-                )));
-            }
-        }
-
-        let mut inner = request.clone();
-        inner.measure_filters = Vec::new();
-        let limit = inner.limit.take();
-        let batches = Box::pin(self.query_with_cancellation(inner, token)).await?;
-
-        let filtered = apply_measure_value_filters(&batches, &request.measure_filters)?;
-        Ok(truncate_batches_to_limit(filtered, limit))
-    }
-
-    /// Evaluate a query carrying a top-N filter (DAX `TOPN`, tie-inclusive).
-    ///
-    /// Runs the underlying query with the top-N removed and **no** row limit
-    /// (every group present and already ordered), keeps the top-N groups by
-    /// measure — every group tied at the boundary value included — then applies
-    /// the limit. The inner query (including any HAVING measure filter) is
-    /// evaluated by [`query_with_cancellation`](Self::query_with_cancellation), so
-    /// measure filters apply **before** the top-N. Unsupported combinations
-    /// (ROLLUP totals, calculation groups) fail closed rather than mislead.
-    async fn query_with_topn(
-        &self,
-        request: QueryRequest,
-        token: CancellationToken,
-    ) -> QueryResult<Vec<RecordBatch>> {
-        // Safe: the caller (`query_with_cancellation`) only routes here when set.
-        let topn = request
-            .top_n
-            .clone()
-            .expect("query_with_topn is only called when top_n is set");
-
-        if request.totals == TotalsMode::Rollup {
-            return Err(QueryError::InvalidQuery(
-                "top_n is not supported with ROLLUP totals (it would rank subtotal/grand-total \
-                 rows among the details); request the top-N detail and the totals separately"
-                    .into(),
-            ));
-        }
-        if request.calculation_group.is_some() {
-            return Err(QueryError::InvalidQuery(
-                "top_n is not supported together with a calculation group; apply the top-N in a \
-                 separate request"
-                    .into(),
-            ));
-        }
-        if !request
-            .measures
-            .iter()
-            .any(|m| m.eq_ignore_ascii_case(&topn.measure))
-        {
-            return Err(QueryError::InvalidQuery(format!(
-                "top_n references measure '{}', which is not in the request's measures",
-                topn.measure
-            )));
-        }
-        for pc in &topn.partition_by {
-            if !request
-                .group_by
-                .iter()
-                .any(|g| g.column.eq_ignore_ascii_case(&pc.column))
-            {
-                return Err(QueryError::InvalidQuery(format!(
-                    "top_n partition column '{}' must be one of the request's group_by columns",
-                    pc.column
-                )));
-            }
-        }
-
-        let mut inner = request.clone();
-        inner.top_n = None;
-        let limit = inner.limit.take();
-        let batches = Box::pin(self.query_with_cancellation(inner, token)).await?;
-
-        let topped = apply_topn_with_ties(&batches, &topn)?;
-        Ok(truncate_batches_to_limit(topped, limit))
     }
 
     /// Return the **raw fact rows** behind a pivot cell (drillthrough /
@@ -3994,9 +4084,25 @@ impl Engine {
 
     /// Execute a query, automatically refreshing any stale in-memory tables first.
     ///
-    /// This is equivalent to calling [`Engine::refresh_stale`] followed by
-    /// [`Engine::query`]. Tables whose cached data has exceeded their configured
-    /// `refresh_interval` are re-fetched from their source before the query runs.
+    /// This is [`Engine::refresh_stale`] followed by [`Engine::query`] —
+    /// literally: after the refresh the request runs through
+    /// [`query_with_cancellation`](Self::query_with_cancellation), so this path
+    /// enforces object-level security, honours `rank_by` / `top_n` /
+    /// `measure_filters`, runs the multi-role union, resolves pushable context
+    /// columns and applies the pre-planning overlays exactly as `query` does.
+    /// (It used to plan on its own and silently dropped the first three — on
+    /// the host's bi_query / column-values / refresh / cube / insights / MCP
+    /// path — while a pivot on the same connection refused.) Tables whose
+    /// cached data has exceeded their configured `refresh_interval` are
+    /// re-fetched from their source before the query runs.
+    ///
+    /// The request is validated — unregistered UDFs, an unknown active role,
+    /// an object-level-security denial, a malformed post-aggregation step —
+    /// BEFORE the refresh, so a request one of those refuses triggers no
+    /// source fetch and no cache write (see
+    /// [`validate_before_source_io`](Self::validate_before_source_io) for the
+    /// one class of refusal, the multi-role union's shape, that still follows
+    /// the refresh).
     ///
     /// Returns both the query results and the list of tables that were
     /// refreshed. The query proceeds even when some refreshes failed; the
@@ -4009,13 +4115,7 @@ impl Engine {
         &mut self,
         request: QueryRequest,
     ) -> QueryResult<(Vec<RecordBatch>, Vec<String>)> {
-        self.validate_request_udfs(&request)?;
-        self.validate_active_role()?;
-        // Multi-role union is implemented only on the concurrent `query` path
-        // (it rewrites the request before planning). This path uses the raw
-        // per-role filters, which are empty under multi-role — fail closed
-        // rather than run with no row-level restriction.
-        self.reject_multi_role()?;
+        self.validate_before_source_io(&request)?;
 
         let refreshed = self
             .refresh_stale()
@@ -4023,67 +4123,90 @@ impl Engine {
             .map_err(crate::QueryError::Engine)?
             .refreshed;
 
-        // Check query cache (after refresh — stale data was already
-        // invalidated). The guard is dropped before any await. The active
-        // role is part of the key (cross-role isolation). The key uses the
-        // ORIGINAL request, which carries the calculation-group application.
-        let (cache_key, cached) = {
-            let mut query_cache = self.query_cache.lock();
-            let key = query_cache::query_cache_key(
-                &request,
-                query_cache.model_version(),
-                self.effective_udfs.identity_hash(),
-                self.role_cache_key().as_deref(),
-            );
-            let cached = query_cache.get(key);
-            (key, cached)
-        };
-        if let Some(cached) = cached {
-            return Ok((cached, refreshed));
-        }
-
-        let role_filters = self.active_role_filters()?;
-        let token = CancellationToken::new();
-        // Mirror `query`: this path used to apply only the calculation-group
-        // expansion, so a GVAR measure reached the executor unresolved and
-        // failed its guard here — on the host's bi_query / insights / refresh /
-        // cube / MCP path — while the same measure worked in a pivot
-        // (`query_with_meta`). One shared chain now, so it cannot drift again.
-        let (model, effective_request) = self
-            .resolve_pre_plan_overlays(&request, &role_filters, &token)
+        // Refreshed tables bumped the query cache's model version, so the
+        // cache lookup inside the shared path can never serve a pre-refresh
+        // result. No host caller passes a token here; the refresh phase is
+        // not cancellable either way.
+        let batches = self
+            .query_with_cancellation(request, CancellationToken::new())
             .await?;
-        let plan =
-            PushdownPlanner::plan(&effective_request, &model, &self.registry, &role_filters)?;
-        let batches = map_script_error(
-            QueryExecutor::execute(
-                &plan,
-                &model,
-                &self.registry,
-                Some(&self.cache),
-                Some(self.max_inline_in_values),
-                Some(self.effective_udfs.as_ref()),
-                &role_filters,
-            )
-            .await,
-        )?;
-
-        self.query_cache.lock().put(cache_key, batches.clone());
         Ok((batches, refreshed))
+    }
+
+    /// The validations every `&mut self` query path runs BEFORE it touches a
+    /// source: unregistered UDF calls, an unknown active role, an
+    /// object-level-security denial, and a malformed post-aggregation step
+    /// (`rank_by` / `top_n` / `measure_filters` naming a measure the request
+    /// does not carry, or combined with ROLLUP totals / a calculation group).
+    /// A request one of these will refuse must trigger no fetch and no
+    /// engine-cache write (which would also bump the query cache's model
+    /// version for every other caller). The multi-role union's SHAPE refusals
+    /// (cross-table roles, a multi-predicate role) are the one class still
+    /// raised after the refresh: the builder plans to prove enforceability.
+    /// [`query_with_cancellation`](Self::query_with_cancellation) re-runs the
+    /// same checks; they are idempotent and cheap.
+    fn validate_before_source_io(&self, request: &QueryRequest) -> QueryResult<()> {
+        self.validate_request_udfs(request)?;
+        self.validate_active_role()?;
+        self.enforce_object_level_security(request)?;
+        peel_post_aggregation(request).map(drop)
     }
 
     /// Execute a query and return results with an execution plan.
     ///
     /// Like [`Engine::query`], but also returns an [`ExecutionPlan`] describing
-    /// each phase of execution with timing and decision metadata.
+    /// each phase of execution with timing and decision metadata. The same
+    /// gates and rewrites as `query` apply — object-level security, the
+    /// post-aggregation peel (`rank_by` / `top_n` / `measure_filters`), the
+    /// multi-role union, the pre-planning overlays and context-column
+    /// pushdown — so the rows match what `query` returns and the plan is the
+    /// one it runs. A peeled post-aggregation step is applied to the rows on
+    /// top of the INNER query's plan (the step itself is a row transform
+    /// after aggregation, not a plan phase). Bypasses the query cache.
     pub async fn query_explained(
         &self,
         request: QueryRequest,
     ) -> QueryResult<(Vec<RecordBatch>, ExecutionPlan)> {
         self.validate_request_udfs(&request)?;
         self.validate_active_role()?;
-        // Explain reports the single-role plan; the multi-role union rewrite is
-        // only applied on the `query` path. Fail closed here.
-        self.reject_multi_role()?;
+        self.enforce_object_level_security(&request)?;
+
+        // Same peel as `query_with_cancellation`: explain the inner query,
+        // then transform its rows. Explain used to drop these silently. The
+        // step is reported as one more child of the root, with the row counts
+        // before/after and the limit it re-applied, so the plan describes the
+        // rows actually returned.
+        if let Some((step, inner, limit)) = peel_post_aggregation(&request)? {
+            let (batches, mut plan) = Box::pin(self.query_explained(inner)).await?;
+            let rows_in: usize = batches.iter().map(|b| b.num_rows()).sum();
+            let started = Instant::now();
+            let rows = apply_post_aggregation(&step, &batches, limit)?;
+            let step_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let rows_out: usize = rows.iter().map(|b| b.num_rows()).sum();
+            let mut node = PlanNode::new(PlanOperation::PostAggregation, step.label())
+                .with_property("step", PlanValue::Text(step.describe()))
+                .with_property("rows_in", PlanValue::Number(rows_in as f64))
+                .with_property("rows_out", PlanValue::Number(rows_out as f64));
+            node.duration.ms = step_ms;
+            if let Some(limit) = limit {
+                node.add_property("limit", PlanValue::Number(limit as f64));
+            }
+            plan.root.add_child(node);
+            plan.root.duration.ms += step_ms;
+            plan.total_duration.ms += step_ms;
+            return Ok((rows, plan));
+        }
+
+        // Same multi-role union rewrite as `query_with_cancellation`; the
+        // explain then reports the plan of the rewritten (role-free,
+        // OR-sliced) request, which is the plan `query` runs. The caller's
+        // own request is kept for the ISFILTERED fold (see the helper).
+        let (request, user_request) = if self.active_roles.len() > 1 {
+            let rewritten = self.build_role_union_request(request.clone())?;
+            (rewritten, Some(request))
+        } else {
+            (request, None)
+        };
 
         let start = Instant::now();
 
@@ -4093,17 +4216,23 @@ impl Engine {
         // The same pre-planning overlays as `query`, so the explain output
         // reports the plan the query would actually run (see the helper).
         let (model, effective_request) = self
-            .resolve_pre_plan_overlays(&request, &role_filters, &token)
+            .resolve_pre_plan_overlays(
+                &request,
+                user_request.as_ref().unwrap_or(&request),
+                &role_filters,
+                &token,
+            )
             .await?;
 
         // Resolve pushable context-column CASEs (host-only, over `self.model`).
         let context_column_cases = self
             .resolve_pushable_context_columns(&request, &token)
             .await?;
-        let (query_plan, pushdown_node) = PushdownPlanner::plan_explained(
+        let (query_plan, pushdown_node) = PushdownPlanner::plan_explained_with_cached(
             &effective_request,
             &model,
             &self.registry,
+            &self.auto_tier_state.cached,
             &role_filters,
             &context_column_cases,
         )?;
@@ -4176,6 +4305,12 @@ impl Engine {
         self.model = model;
         self.rebuild_effective_udfs();
         self.query_cache.lock().invalidate_all();
+        // A tiered table the new model no longer has (or now declares
+        // in-memory itself) must not stay in the planner's local set.
+        let model = &self.model;
+        self.auto_tier_state
+            .cached
+            .retain(|t| model.table(t).is_ok_and(|table| !table.is_in_memory()));
         match &self.script_build_error {
             Some(e) => Err(clone_script_error(e)),
             None => Ok(()),

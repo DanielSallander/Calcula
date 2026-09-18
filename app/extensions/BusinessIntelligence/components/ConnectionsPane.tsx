@@ -288,12 +288,19 @@ export function ConnectionsPane(
         // Try refreshing active queries (BI grid queries)
         let queryCount = 0;
         let totalRows = 0;
+        let queryError: string | null = null;
         try {
           const results = await refreshConnection(connectionId);
           queryCount = results.length;
           totalRows = results.reduce((sum, r) => sum + r.rowCount, 0);
-        } catch {
-          // No active queries — that's OK if there are pivots
+        } catch (err) {
+          // "No active queries" is the benign case — this connection may drive
+          // only pivots. Anything else (the active "view as" role denying a
+          // table or column, a source failure) must be SHOWN: reporting a
+          // refusal as "nothing to refresh" is how a security denial becomes
+          // invisible.
+          const message = String(err);
+          if (!message.includes("No active queries")) queryError = message;
         }
 
         // Also refresh any BI pivots connected to this connection
@@ -312,7 +319,10 @@ export function ConnectionsPane(
           // Pivot refresh errors are non-fatal
         }
 
-        if (queryCount > 0 || pivotCount > 0) {
+        if (queryError) {
+          const also = pivotCount > 0 ? ` (${pivotCount} pivot table(s) did refresh)` : "";
+          setStatus(`Refresh failed: ${queryError}${also}`, "error");
+        } else if (queryCount > 0 || pivotCount > 0) {
           const parts = [];
           if (queryCount > 0) parts.push(`${queryCount} queries (${totalRows} rows)`);
           if (pivotCount > 0) parts.push(`${pivotCount} pivot table(s)`);

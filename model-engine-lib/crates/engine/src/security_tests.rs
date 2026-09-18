@@ -940,6 +940,14 @@ fn union_engine() -> Engine {
             "id",
         ))
         .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        // Discloses only when the USER filtered the region column. A role
+        // predicate on that column must not count as such a filter, however
+        // the role set is enforced (single role or multi-role union).
+        .add_measure(crate::expression_measure(
+            "RegionGated",
+            crate::parse_measure("IF(ISFILTERED(Geography[region]), SUM(Sales[amount]), 0.0 - 1.0)")
+                .unwrap(),
+        ))
         .add_security_role(SecurityRole::new("WestOnly").with_filter(
             "Geography",
             "region",
@@ -1760,6 +1768,9 @@ fn ols_engine() -> Engine {
             "id",
         ))
         .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        // Reaches the denied column ONLY through its own expression, so a
+        // request grouping by a permitted column still has to be refused.
+        .add_measure(crate::count_measure("RegionCount", "Geography", "region"))
         .add_security_role(
             SecurityRole::new("Analyst")
                 .with_denied_tables(vec!["Category".to_string()])
@@ -1905,4 +1916,473 @@ fn ols_denials_validated_at_build() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("Table[column]"), "got: {err}");
+}
+
+// --- One aggregate query path: OLS and the multi-role union on every entry point ---
+//
+// `query_auto_refresh` (the host's bi_query / column-values / refresh / cube /
+// insights / MCP route), `query_auto_tier` and `query_explained` used to plan
+// on their own: no object-level security, and either a fail-closed multi-role
+// refusal (auto-refresh, explain) or — worse — a multi-role run with EMPTY
+// role filters (auto-tier). They now run the same path as `query`.
+
+#[tokio::test]
+async fn ols_denied_table_refuses_auto_refresh_and_no_role_allows_it() {
+    let mut engine = ols_engine();
+    let request = || QueryRequest {
+        measures: vec!["Revenue".into()],
+        group_by: vec![ColumnRef::new("Category", "name")],
+        ..Default::default()
+    };
+
+    // Positive control: without the role the auto-refresh path answers.
+    let (batches, _) = engine.query_auto_refresh(request()).await.unwrap();
+    assert_eq!(grouped(&batches, "name", "Revenue").len(), 2);
+
+    engine.set_active_role(Some("Analyst".into()));
+    let err = engine
+        .query_auto_refresh(request())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("object-level security"), "got: {err}");
+    assert!(err.contains("Category"), "got: {err}");
+
+    // A denied column referenced only through the requested MEASURE's
+    // closure is refused too — the group-by column here is PERMITTED, so
+    // only the closure walk can refuse this (the host's filter pane queries
+    // a placeholder measure, so this is the shape that matters there).
+    let err = engine
+        .query_auto_refresh(QueryRequest {
+            measures: vec!["RegionCount".into()],
+            group_by: vec![ColumnRef::new("Geography", "id")],
+            ..Default::default()
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Geography[region]"), "got: {err}");
+    assert!(
+        err.contains("referenced by measure 'RegionCount'"),
+        "the refusal must name the measure whose closure reached it: {err}"
+    );
+}
+
+#[tokio::test]
+async fn ols_refusal_on_auto_refresh_happens_before_any_refresh() {
+    // A request that will be refused must trigger no source I/O: the
+    // validations run BEFORE `refresh_stale`, so the refresh report is never
+    // written. (`refresh_stale` always stores a report, even an empty one.)
+    let mut engine = ols_engine();
+    engine.set_active_role(Some("Analyst".into()));
+    assert!(engine.last_refresh_report().is_none());
+
+    let _ = engine
+        .query_auto_refresh(QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Category", "name")],
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        engine.last_refresh_report().is_none(),
+        "the refusal must come before refresh_stale runs"
+    );
+
+    // Positive control: a permitted request DOES run the refresh step.
+    let (_, refreshed) = engine
+        .query_auto_refresh(QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Geography", "id")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(refreshed.is_empty(), "cache-served tables have nothing to refresh");
+    assert!(engine.last_refresh_report().is_some());
+}
+
+#[tokio::test]
+async fn ols_denied_table_refuses_explain_and_auto_tier() {
+    let mut engine = ols_engine();
+    let request = || QueryRequest {
+        measures: vec!["Revenue".into()],
+        group_by: vec![ColumnRef::new("Category", "name")],
+        ..Default::default()
+    };
+
+    // Positive controls.
+    let (batches, _plan) = engine.query_explained(request()).await.unwrap();
+    assert_eq!(grouped(&batches, "name", "Revenue").len(), 2);
+    let (batches, _tiered) = engine.query_auto_tier(request()).await.unwrap();
+    assert_eq!(grouped(&batches, "name", "Revenue").len(), 2);
+
+    engine.set_active_role(Some("Analyst".into()));
+    let err = engine.query_explained(request()).await.unwrap_err().to_string();
+    assert!(err.contains("object-level security"), "explain: {err}");
+    let err = engine.query_auto_tier(request()).await.unwrap_err().to_string();
+    assert!(err.contains("object-level security"), "auto-tier: {err}");
+}
+
+#[tokio::test]
+async fn multi_role_union_runs_on_auto_refresh_explain_and_auto_tier() {
+    // West ∪ East = 190 on every aggregate entry point — never 230 (no
+    // restriction) and never the old "single active role" refusal.
+    let mut engine = union_engine();
+    engine.set_active_roles(vec!["WestOnly".into(), "EastOnly".into()]);
+    let request = || QueryRequest {
+        measures: vec!["Revenue".into()],
+        ..Default::default()
+    };
+
+    let (batches, _) = engine.query_auto_refresh(request()).await.unwrap();
+    assert!(
+        (scalar(&batches, "Revenue") - 190.0).abs() < 1e-9,
+        "auto-refresh: {}",
+        scalar(&batches, "Revenue")
+    );
+    let (batches, _) = engine.query_explained(request()).await.unwrap();
+    assert!(
+        (scalar(&batches, "Revenue") - 190.0).abs() < 1e-9,
+        "explain: {}",
+        scalar(&batches, "Revenue")
+    );
+    let (batches, _) = engine.query_auto_tier(request()).await.unwrap();
+    assert!(
+        (scalar(&batches, "Revenue") - 190.0).abs() < 1e-9,
+        "auto-tier: {}",
+        scalar(&batches, "Revenue")
+    );
+}
+
+#[tokio::test]
+async fn multi_role_union_unsupported_shape_fails_closed_on_every_aggregate_path() {
+    // The cross-table shape is refused by the union builder on `query`; the
+    // other entry points share that builder now, so they refuse the same way
+    // (and auto-tier no longer runs it with empty role filters).
+    let mut engine = union_engine_with_cross_table_role();
+    engine.set_active_roles(vec!["WestOnly".into(), "BikesOnly".into()]);
+    let request = || QueryRequest {
+        measures: vec!["Revenue".into()],
+        ..Default::default()
+    };
+
+    for (path, err) in [
+        (
+            "auto-refresh",
+            engine.query_auto_refresh(request()).await.unwrap_err(),
+        ),
+        ("explain", engine.query_explained(request()).await.unwrap_err()),
+        ("auto-tier", engine.query_auto_tier(request()).await.unwrap_err()),
+    ] {
+        let QueryError::InvalidQuery(msg) = &err else {
+            panic!("{path}: expected InvalidQuery, got {err:?}");
+        };
+        assert!(msg.contains("same table"), "{path}: {msg}");
+    }
+}
+
+/// `union_engine`'s star schema with a second role on a DIFFERENT table, so a
+/// two-role set is not a single-table OR.
+fn union_engine_with_cross_table_role() -> Engine {
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("geo_id", DataType::Int64),
+                    Column::new("cat_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Geography",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("region", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Category",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("name", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Geo",
+            "Sales",
+            "geo_id",
+            "Geography",
+            "id",
+        ))
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Cat",
+            "Sales",
+            "cat_id",
+            "Category",
+            "id",
+        ))
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_security_role(SecurityRole::new("WestOnly").with_filter(
+            "Geography",
+            "region",
+            ComparisonOp::Equal,
+            "West",
+        ))
+        .add_security_role(SecurityRole::new("BikesOnly").with_filter(
+            "Category",
+            "name",
+            ComparisonOp::Equal,
+            "Bikes",
+        ))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine.bind_table("Geography", 0, SourceBinding::new("public", "geography"));
+    engine.bind_table("Category", 0, SourceBinding::new("public", "category"));
+    engine.cache.store("Sales", sales_batch()).unwrap();
+    engine.cache.store("Geography", geo_batch()).unwrap();
+    engine.cache.store("Category", cat_batch()).unwrap();
+    engine
+}
+
+#[tokio::test]
+async fn ols_denied_column_in_a_scoped_filter_is_refused_on_every_aggregate_path() {
+    // Every host filter arrives as a SCOPED filter (pivot slicers, bi_query,
+    // MCP). The gate used to inspect only the bare `filters` / `in_filters` /
+    // `or_filters` lists, so a caller under a role that denies
+    // Geography[region] could bisect its values through
+    // `WHERE Geography[region] = x`. Qualified and unqualified, scalar and
+    // IN-list, on all four aggregate entry points.
+    let mut engine = ols_engine();
+    let qualified = || QueryRequest {
+        measures: vec!["Revenue".into()],
+        scoped_filters: vec![crate::ScopedFilter {
+            table: Some("Geography".into()),
+            condition: crate::FilterCondition::new("region", crate::FilterOperator::Equal, "West"),
+            level: 1,
+        }],
+        ..Default::default()
+    };
+    let unqualified = || QueryRequest {
+        measures: vec!["Revenue".into()],
+        scoped_filters: vec![crate::ScopedFilter {
+            table: None,
+            condition: crate::FilterCondition::new("region", crate::FilterOperator::Equal, "West"),
+            level: 1,
+        }],
+        ..Default::default()
+    };
+    let in_list = || QueryRequest {
+        measures: vec!["Revenue".into()],
+        scoped_in_filters: vec![crate::ScopedInFilter {
+            table: Some("Geography".into()),
+            filter: crate::InFilter::new("region", ["West"]),
+            level: 1,
+        }],
+        ..Default::default()
+    };
+
+    // Positive control: without the role the scoped filter restricts to West.
+    let batches = engine.query(qualified()).await.unwrap();
+    assert!((scalar(&batches, "Revenue") - 130.0).abs() < 1e-9);
+
+    engine.set_active_role(Some("Analyst".into()));
+    for (path, err) in [
+        ("query/qualified", engine.query(qualified()).await.unwrap_err()),
+        ("query/unqualified", engine.query(unqualified()).await.unwrap_err()),
+        ("query/in-list", engine.query(in_list()).await.unwrap_err()),
+        (
+            "auto-refresh",
+            engine.query_auto_refresh(qualified()).await.unwrap_err(),
+        ),
+        ("explain", engine.query_explained(qualified()).await.unwrap_err()),
+        ("auto-tier", engine.query_auto_tier(qualified()).await.unwrap_err()),
+    ] {
+        let msg = err.to_string();
+        assert!(msg.contains("object-level security"), "{path}: {msg}");
+        assert!(msg.contains("Geography[region]"), "{path}: {msg}");
+    }
+
+    // Not over-refusing: a scoped filter on the permitted sibling column.
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            scoped_filters: vec![crate::ScopedFilter {
+                table: Some("Geography".into()),
+                condition: crate::FilterCondition::new("id", crate::FilterOperator::Equal, "1"),
+                level: 1,
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!((scalar(&batches, "Revenue") - 130.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn multi_role_union_composes_with_rank_by_on_auto_refresh() {
+    // Ordering pin: the post-aggregation peel runs OUTERMOST and the union
+    // rewrite INNERMOST. The union builder refuses a request that already
+    // carries `or_filters`, so if the union ran first the peeled inner call
+    // would refuse itself. West ∪ East by Category: Bikes 100, Helmets 90 —
+    // ranked 1, 2 — never the unrestricted 125 / 105.
+    let mut engine = union_engine();
+    engine.set_active_roles(vec!["WestOnly".into(), "EastOnly".into()]);
+    let (batches, _) = engine
+        .query_auto_refresh(QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Category", "name")],
+            rank_by: Some(crate::RankBy::new("Revenue", "Rank")),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let revenue = grouped(&batches, "name", "Revenue");
+    assert!((revenue["Bikes"] - 100.0).abs() < 1e-9, "{revenue:?}");
+    assert!((revenue["Helmets"] - 90.0).abs() < 1e-9, "{revenue:?}");
+    let rank = grouped(&batches, "name", "Rank");
+    assert_eq!(rank["Bikes"] as i64, 1, "{rank:?}");
+    assert_eq!(rank["Helmets"] as i64, 2, "{rank:?}");
+}
+
+#[tokio::test]
+async fn isfiltered_ignores_the_multi_role_unions_injected_predicates() {
+    // A role predicate is sealed security, not a user filter. Under ONE role
+    // `ISFILTERED(Geography[region])` folds FALSE (the predicate travels in
+    // `role_filters`, which the fold never sees); the union of two roles on
+    // that column injects the predicates as request `or_filters`, and the
+    // fold used to read THOSE — so a measure gating disclosure on ISFILTERED
+    // disclosed under two roles and blanked under one. The fold now reads the
+    // request as the caller wrote it, on every aggregate entry point.
+    let mut engine = union_engine();
+    let req = || QueryRequest {
+        measures: vec!["RegionGated".into()],
+        ..Default::default()
+    };
+
+    engine.set_active_role(Some("WestOnly".into()));
+    let single = scalar(&engine.query(req()).await.unwrap(), "RegionGated");
+    assert!(
+        (single + 1.0).abs() < 1e-9,
+        "one role must not count as a user filter; got {single}"
+    );
+
+    engine.set_active_roles(vec!["WestOnly".into(), "EastOnly".into()]);
+    for (path, batches) in [
+        ("query", engine.query(req()).await.unwrap()),
+        (
+            "auto-refresh",
+            engine.query_auto_refresh(req()).await.unwrap().0,
+        ),
+        ("explain", engine.query_explained(req()).await.unwrap().0),
+        ("auto-tier", engine.query_auto_tier(req()).await.unwrap().0),
+    ] {
+        let v = scalar(&batches, "RegionGated");
+        assert!(
+            (v + 1.0).abs() < 1e-9,
+            "{path}: the union's injected predicates must not fold ISFILTERED TRUE; got {v}"
+        );
+    }
+
+    // Positive control: a USER filter on the same column does fold it TRUE.
+    engine.set_active_role(None);
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["RegionGated".into()],
+            filters: vec![crate::FilterCondition::new(
+                "region",
+                crate::FilterOperator::Equal,
+                "West",
+            )],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        (scalar(&batches, "RegionGated") - 130.0).abs() < 1e-9,
+        "a user filter must fold it TRUE"
+    );
+}
+
+#[tokio::test]
+async fn multi_role_union_is_order_independent() {
+    // The builder used to validate each role's SHAPE as it walked the set and
+    // to return "unrestricted" the moment it met a role with no filters, so
+    // {two-predicate role, unrestricted role} refused in one activation order
+    // and returned every row in the other — while the cache key sorts the set
+    // precisely so that order cannot matter. Every role's predicates are
+    // resolved before any shape decision now.
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("region", DataType::String),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_security_role(
+            SecurityRole::new("WestBig")
+                .with_filter("Sales", "region", ComparisonOp::Equal, "West")
+                .with_filter("Sales", "amount", ComparisonOp::GreaterThan, "50"),
+        )
+        .add_security_role(SecurityRole::new("Everything"))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine
+        .cache
+        .store(
+            "Sales",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("region", ArrowType::Utf8, true),
+                    Field::new("amount", ArrowType::Float64, true),
+                ])),
+                vec![
+                    Arc::new(StringArray::from(vec!["West", "East"])),
+                    Arc::new(Float64Array::from(vec![100.0, 60.0])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    for order in [
+        vec!["WestBig".to_string(), "Everything".to_string()],
+        vec!["Everything".to_string(), "WestBig".to_string()],
+    ] {
+        engine.set_active_roles(order.clone());
+        let batches = engine
+            .query(QueryRequest {
+                measures: vec!["Revenue".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap_or_else(|e| panic!("{order:?} was refused: {e}"));
+        assert!(
+            (scalar(&batches, "Revenue") - 160.0).abs() < 1e-9,
+            "{order:?}: an unrestricted role in the set means every row"
+        );
+    }
 }

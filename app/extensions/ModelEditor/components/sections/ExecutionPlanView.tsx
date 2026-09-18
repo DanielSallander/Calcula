@@ -27,6 +27,7 @@ const OP_CONFIG: Record<string, { color: string; badge: string }> = {
   ContextResolution: { color: "#06b6d4", badge: "CTX" },
   MeasureEvaluation: { color: "#ec4899", badge: "CALC" },
   CalculatedColumnMaterialization: { color: "#d97706", badge: "COL" },
+  PostAggregation: { color: "#0ea5e9", badge: "POST" },
 };
 /* eslint-enable @typescript-eslint/naming-convention */
 const OP_FALLBACK = { color: ME.text3, badge: "OP" };

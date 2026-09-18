@@ -126,6 +126,10 @@ pub enum PlanOperation {
     DataFusionExecution,
     /// Multiple measure groups evaluated independently and combined.
     MultiGroupAggregation,
+    /// A post-aggregation row transform applied by the facade on top of the
+    /// aggregate result: measure ranking (`rank_by`), top-N groups (`top_n`)
+    /// or a measure-value filter (`measure_filters`), then the row limit.
+    PostAggregation,
 }
 
 /// A key-value property attached to a plan node.

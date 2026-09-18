@@ -320,7 +320,7 @@ Dimension tables are typically small (thousands to a few hundred thousand rows) 
 
 **TTL-based staleness.** Auto-tiered tables have a configurable TTL (default: 1 hour). When the TTL expires, the table is re-fetched. If it has grown beyond the row threshold, it's evicted from cache and rejected.
 
-**Planner awareness.** The pushdown planner is informed of auto-tiered tables via `plan_with_cached()`, ensuring they are treated as local data (forcing `LocalAggregation` rather than attempting to push aggregation to the source). The pipeline serves any table present in the cache, regardless of its `StorageMode` setting in the model.
+**Planner awareness.** Every planner call is informed of the auto-tiered set — `plan_with_cached_diagnostics` in the facade's `plan_and_execute` (so `query` / `query_with_cancellation` and, through them, `query_auto_refresh` and `query_auto_tier`), `plan_explained_with_cached` in `query_explained`, and `plan_with_cached` in the multi-role union's enforceability probe — ensuring tiered tables are treated as local data (forcing `LocalAggregation` rather than attempting to push aggregation to the source). Once a table is tiered, a plain `&self` `query()` plans it as local too; only `query_auto_tier` TTL-refreshes it. The set is kept truthful: `drop_table_cache` and `set_model` remove tables whose rows are gone. The pipeline serves any table present in the cache, regardless of its `StorageMode` setting in the model.
 
 **Discoverability.** `auto_tiered_tables()` and `auto_tier_rejected_tables()` let the host application show the user which tables were automatically cached and which were skipped.
 

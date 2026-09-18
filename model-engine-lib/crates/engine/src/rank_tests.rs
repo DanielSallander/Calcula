@@ -371,3 +371,106 @@ async fn rank_with_rollup_fails_closed() {
         "got {err:?}"
     );
 }
+
+// --- Ranking is honoured on every aggregate entry point ---
+
+#[tokio::test]
+async fn rank_is_honoured_on_auto_refresh_and_explain() {
+    // `query_auto_refresh` used to plan on its own and silently DROPPED
+    // `rank_by` (the rank column was simply absent); `query_explained` did the
+    // same. Both now peel the ranking exactly as `query` does.
+    let mut engine = rank_engine();
+    let (batches, _refreshed) = engine
+        .query_auto_refresh(base_request(Some(RankBy::new("Revenue", "Rank"))))
+        .await
+        .unwrap();
+    let r = ranks_by_product(&batches, "Rank");
+    assert_eq!(r["Bikes"], 1);
+    assert_eq!(r["Helmets"], 2);
+    assert_eq!(r["Tires"], 2);
+    assert_eq!(r["Widgets"], 4);
+
+    let (batches, _plan) = engine
+        .query_explained(base_request(Some(RankBy::new("Revenue", "Rank").dense())))
+        .await
+        .unwrap();
+    let r = ranks_by_product(&batches, "Rank");
+    assert_eq!(r["Bikes"], 1);
+    assert_eq!(r["Widgets"], 3, "dense ranking through explain");
+
+    // The auto-tier path too (no candidate is tiered: the tables are cached).
+    let (batches, _tiered) = engine
+        .query_auto_tier(base_request(Some(
+            RankBy::new("Revenue", "Rank").ascending(),
+        )))
+        .await
+        .unwrap();
+    let r = ranks_by_product(&batches, "Rank");
+    assert_eq!(r["Widgets"], 1, "ascending ranking through auto-tier");
+    assert_eq!(r["Bikes"], 4);
+}
+
+#[tokio::test]
+async fn rank_validation_fails_closed_on_auto_refresh_before_any_refresh() {
+    // The same shape checks as `query`: an unknown measure is a typed refusal,
+    // never a silent drop. And the check runs BEFORE `refresh_stale`, so a
+    // request that cannot be answered polls no source and writes no refresh
+    // report — `refresh_stale` always stores one, even an empty one, which is
+    // what makes its absence the ordering proof.
+    let mut engine = rank_engine();
+    assert!(engine.last_refresh_report().is_none());
+
+    let err = engine
+        .query_auto_refresh(base_request(Some(RankBy::new("Cost", "Rank"))))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, QueryError::InvalidQuery(m) if m.contains("not in the request's measures")),
+        "got {err:?}"
+    );
+    assert!(
+        engine.last_refresh_report().is_none(),
+        "the shape refusal must come before refresh_stale runs"
+    );
+
+    // Positive control: a well-shaped request DOES reach the refresh step.
+    engine
+        .query_auto_refresh(base_request(Some(RankBy::new("Revenue", "Rank"))))
+        .await
+        .unwrap();
+    assert!(engine.last_refresh_report().is_some());
+}
+
+#[tokio::test]
+async fn a_peeled_result_is_never_cached_under_the_plain_request_key() {
+    // `query_cache_key` hashes none of rank_by / top_n / measure_filters, so
+    // the contract that keeps the cache honest is: only the INNER request's
+    // rows are ever stored. Ranked first, then plain: the plain request must
+    // not be served the cached ranked rows — and the reverse order still
+    // ranks on top of the cached inner rows.
+    let mut engine = rank_engine();
+    engine.set_query_cache_config(crate::QueryCacheConfig {
+        enabled: true,
+        ..Default::default()
+    });
+
+    let ranked = engine
+        .query(base_request(Some(RankBy::new("Revenue", "Rank"))))
+        .await
+        .unwrap();
+    assert_eq!(ranks_by_product(&ranked, "Rank")["Bikes"], 1);
+
+    let plain = engine.query(base_request(None)).await.unwrap();
+    assert!(
+        plain.iter().all(|b| b.schema().index_of("Rank").is_err()),
+        "the plain request was served the cached RANKED rows"
+    );
+
+    let ranked_again = engine
+        .query(base_request(Some(RankBy::new("Revenue", "Rank").dense())))
+        .await
+        .unwrap();
+    let r = ranks_by_product(&ranked_again, "Rank");
+    assert_eq!(r["Bikes"], 1);
+    assert_eq!(r["Widgets"], 3, "dense ranking applied on top of the cached inner rows");
+}

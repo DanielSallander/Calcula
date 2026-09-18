@@ -16,10 +16,11 @@
 //! any other way.
 //!
 //! The GVAR case covers a SECOND gap: `query_auto_refresh` — the entry point
-//! the host's `bi_query`, insights and MCP use — skipped the facade's
+//! the host's `bi_query`, insights and MCP use — used to skip the facade's
 //! query-scoped-binding resolution that `query` / `query_with_cancellation` /
 //! `query_explained` run, so a GVAR measure reached the executor unresolved
-//! on that path alone.
+//! on that path alone. It is now literally `refresh_stale` followed by
+//! `query_with_cancellation`, so the two cannot drift again.
 //!
 //! Fixture (the GVAR tests'): `Sales(prod_id, amount, cost)` -> `Product(id,
 //! name)`; per product SUM(amount): Bikes 130, Helmets 60; SUM(cost): Bikes 75,
@@ -343,9 +344,14 @@ async fn a_derived_measure_carrying_isfiltered_queries() {
     // Grouped by Product[name]: the marker folds to TRUE -> Revenue.
     let r = grouped(&engine.query(request("Flag")).await.unwrap(), "Flag");
     assert!(close(r["Bikes"], 130.0) && close(r["Helmets"], 60.0), "{r:?}");
-    // The same through the auto-refresh path (the query cache is off by
-    // default, so this plans again rather than replaying the result above).
+    // The same through the auto-refresh and auto-tier paths (the query cache
+    // is off by default, so each plans again rather than replaying the result
+    // above). Both used to run their own pre-plan chain; they are the shared
+    // one now, which is what makes the ISFILTERED fold reach them at all.
     let (batches, _) = engine.query_auto_refresh(request("Flag")).await.unwrap();
+    let r = grouped(&batches, "Flag");
+    assert!(close(r["Bikes"], 130.0) && close(r["Helmets"], 60.0), "{r:?}");
+    let (batches, _) = engine.query_auto_tier(request("Flag")).await.unwrap();
     let r = grouped(&batches, "Flag");
     assert!(close(r["Bikes"], 130.0) && close(r["Helmets"], 60.0), "{r:?}");
     // No group-by: the marker folds to FALSE -> Cost, one scalar row.
@@ -367,7 +373,7 @@ async fn the_pre_plan_chain_borrows_when_nothing_applies() {
     let req = request("Margin");
     let token = tokio_util::sync::CancellationToken::new();
     let (model, effective) = engine
-        .resolve_pre_plan_overlays(&req, &[], &token)
+        .resolve_pre_plan_overlays(&req, &req, &[], &token)
         .await
         .unwrap();
     assert!(matches!(model, std::borrow::Cow::Borrowed(_)), "the model was cloned for nothing");

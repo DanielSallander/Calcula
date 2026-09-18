@@ -296,8 +296,10 @@ clean. Those counts are a historical receipt, not a current figure — the
   refresh`, editable in the Tables section for InMemory tables): `Interval`,
   `ContainsCurrentDate`, `DailyAfter`, `SourceQuery`, plus an incremental
   `refresh_filter`. The engine already honored these — `query_auto_refresh`
-  (which Calcula's CUBE/pivot path uses) evaluates them on each query and
-  re-fetches stale tables from source — they simply weren't editable in-app.
+  (Calcula's bi_query / CUBE / filter-pane / insights / MCP path; pivots run
+  `query_with_meta` after their own one-time refresh loop) evaluates them on
+  each query and re-fetches stale tables from source — they simply weren't
+  editable in-app.
 - **Monaco richness.** `bi_model_function_catalog` exposes the engine catalog;
   `measureLanguage.ts` now has context-aware completion (functions + tables +
   columns + measures), function hover, and signature help, fed from the model

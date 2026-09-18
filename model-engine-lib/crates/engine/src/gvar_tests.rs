@@ -578,11 +578,22 @@ async fn gvar_with_multiple_roles_fails_closed() {
 }
 
 #[tokio::test]
-async fn gvar_via_auto_tier_fails_closed() {
-    // query_auto_tier does not resolve GVARs; a GVAR measure must FAIL CLOSED
-    // there (forced local + executor guard), never be pushed to source or
-    // silently mis-rendered.
+async fn gvar_resolves_on_auto_tier_path() {
+    // `query_auto_tier` used to skip GVAR resolution and fail closed at the
+    // executor's guard (this test pinned that as `gvar_via_auto_tier_fails_closed`).
+    // It now runs the one aggregate query path — the same pre-plan chain as
+    // `query` — so the GVAR measure evaluates. No candidate is tiered here:
+    // auto-tiering is disabled by default and the tables are cache-served.
     let mut engine = gvar_engine();
+    let (batches, tiered) = engine.query_auto_tier(request("PctOfTotal")).await.unwrap();
+    assert!(tiered.is_empty());
+    let r = grouped(&batches, "PctOfTotal");
+    assert!((r["Bikes"] - 130.0 / 190.0).abs() < 1e-9, "got {:?}", r);
+    assert!((r["Helmets"] - 60.0 / 190.0).abs() < 1e-9, "got {:?}", r);
+
+    // And the GVAR + multi-role guard applies on this path as on `query`:
+    // auto-tier used to run a multi-role request with EMPTY role filters.
+    engine.set_active_roles(vec!["BikesOnly".into(), "HelmetsOnly".into()]);
     let err = engine
         .query_auto_tier(request("PctOfTotal"))
         .await
@@ -590,7 +601,7 @@ async fn gvar_via_auto_tier_fails_closed() {
     let QueryError::InvalidQuery(msg) = &err else {
         panic!("expected InvalidQuery, got {err:?}");
     };
-    assert!(msg.contains("GVAR"), "got: {msg}");
+    assert!(msg.contains("multiple active roles"), "got: {msg}");
 }
 
 // --- Regression tests for the post-commit review fixes ---
@@ -747,4 +758,43 @@ async fn gvar_resolves_on_auto_refresh_path() {
     let doubled = grouped(&batches, "PctOfTotal [Doubled]");
     assert!((current["Bikes"] - 130.0 / 190.0).abs() < 1e-9, "got {:?}", current);
     assert!((doubled["Bikes"] - 2.0 * 130.0 / 190.0).abs() < 1e-9, "got {:?}", doubled);
+}
+
+#[tokio::test]
+async fn gvar_with_multiple_roles_fails_closed_on_every_aggregate_path() {
+    // The refusal is the GVAR resolver's own (its inner scalar query would
+    // otherwise bypass the single-role RLS enforceability gate). Now that
+    // every aggregate entry point resolves GVARs and runs the multi-role
+    // union, the refusal has to hold on all of them.
+    let mut engine = gvar_engine();
+    engine.set_active_roles(vec!["BikesOnly".into(), "HelmetsOnly".into()]);
+    for (path, err) in [
+        ("query", engine.query(request("PctOfTotal")).await.unwrap_err()),
+        (
+            "auto-refresh",
+            engine
+                .query_auto_refresh(request("PctOfTotal"))
+                .await
+                .unwrap_err(),
+        ),
+        (
+            "explain",
+            engine
+                .query_explained(request("PctOfTotal"))
+                .await
+                .unwrap_err(),
+        ),
+        (
+            "auto-tier",
+            engine
+                .query_auto_tier(request("PctOfTotal"))
+                .await
+                .unwrap_err(),
+        ),
+    ] {
+        let QueryError::InvalidQuery(msg) = &err else {
+            panic!("{path}: expected InvalidQuery, got {err:?}");
+        };
+        assert!(msg.contains("multiple active roles"), "{path}: {msg}");
+    }
 }

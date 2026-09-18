@@ -376,3 +376,107 @@ async fn topn_output_column_collision_fails_closed() {
         .unwrap_err();
     assert!(matches!(err, QueryError::InvalidQuery(_)), "got: {err:?}");
 }
+
+// --- Top-N is honoured on every aggregate entry point ---
+
+#[tokio::test]
+async fn topn_is_honoured_on_auto_refresh_explain_and_auto_tier() {
+    // `query_auto_refresh` used to plan on its own and silently DROPPED
+    // `top_n`: all four products came back. Every entry point now peels the
+    // top-N exactly as `query` does (tie-inclusive: three rows for top 2).
+    let mut engine = topn_engine();
+    let top2 = || req(&[("Product", "name")], Some(TopN::new("Revenue", 2)));
+
+    let (batches, _refreshed) = engine.query_auto_refresh(top2()).await.unwrap();
+    assert_eq!(products(&batches), vec!["Bikes", "Helmets", "Tires"], "auto-refresh");
+
+    let (batches, _plan) = engine.query_explained(top2()).await.unwrap();
+    assert_eq!(products(&batches), vec!["Bikes", "Helmets", "Tires"], "explain");
+
+    let (batches, _tiered) = engine.query_auto_tier(top2()).await.unwrap();
+    assert_eq!(products(&batches), vec!["Bikes", "Helmets", "Tires"], "auto-tier");
+}
+
+#[tokio::test]
+async fn explain_reports_the_peeled_topn_as_a_post_aggregation_node() {
+    // The explained plan is the INNER query's plan plus one child describing
+    // the peeled step, so the plan accounts for the rows actually returned
+    // (4 groups in, 3 out for a tie-inclusive top-2).
+    let engine = topn_engine();
+    let (batches, plan) = engine
+        .query_explained(req(&[("Product", "name")], Some(TopN::new("Revenue", 2))))
+        .await
+        .unwrap();
+    assert_eq!(products(&batches), vec!["Bikes", "Helmets", "Tires"]);
+    let node = plan
+        .root
+        .children
+        .iter()
+        .find(|c| c.operation == crate::PlanOperation::PostAggregation)
+        .expect("a PostAggregation node under the root");
+    let prop = |key: &str| {
+        node.properties
+            .iter()
+            .find(|p| p.key == key)
+            .map(|p| p.value.clone())
+    };
+    assert_eq!(prop("rows_in"), Some(crate::PlanValue::Number(4.0)));
+    assert_eq!(prop("rows_out"), Some(crate::PlanValue::Number(3.0)));
+    assert!(
+        matches!(prop("step"), Some(crate::PlanValue::Text(s)) if s.contains("top_n")),
+        "{:?}",
+        prop("step")
+    );
+
+    // A request with no post-aggregation step reports no such node.
+    let (_, plan) = engine
+        .query_explained(req(&[("Product", "name")], None))
+        .await
+        .unwrap();
+    assert!(plan
+        .root
+        .children
+        .iter()
+        .all(|c| c.operation != crate::PlanOperation::PostAggregation));
+}
+
+#[tokio::test]
+async fn explain_reports_the_limit_the_post_aggregation_re_applied() {
+    // The row limit is taken OFF the inner query (so every group is present
+    // and ordered before the step) and applied once after it; the plan node
+    // reports it, so the plan accounts for the rows actually returned — 4
+    // groups in, tie-inclusive top-2 = 3, truncated to 2.
+    let engine = topn_engine();
+    let mut request = req(&[("Product", "name")], Some(TopN::new("Revenue", 2)));
+    request.limit = Some(2);
+    let (batches, plan) = engine.query_explained(request).await.unwrap();
+    assert_eq!(products(&batches).len(), 2, "the limit truncates the top-2");
+    let node = plan
+        .root
+        .children
+        .iter()
+        .find(|c| c.operation == crate::PlanOperation::PostAggregation)
+        .expect("a PostAggregation node under the root");
+    let prop = |key: &str| {
+        node.properties
+            .iter()
+            .find(|p| p.key == key)
+            .map(|p| p.value.clone())
+    };
+    assert_eq!(prop("limit"), Some(crate::PlanValue::Number(2.0)));
+    assert_eq!(prop("rows_in"), Some(crate::PlanValue::Number(4.0)));
+    assert_eq!(prop("rows_out"), Some(crate::PlanValue::Number(2.0)));
+
+    // No limit on the request → no `limit` property on the node.
+    let (_, plan) = engine
+        .query_explained(req(&[("Product", "name")], Some(TopN::new("Revenue", 2))))
+        .await
+        .unwrap();
+    let node = plan
+        .root
+        .children
+        .iter()
+        .find(|c| c.operation == crate::PlanOperation::PostAggregation)
+        .expect("a PostAggregation node under the root");
+    assert!(node.properties.iter().all(|p| p.key != "limit"));
+}

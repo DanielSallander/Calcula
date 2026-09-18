@@ -948,9 +948,9 @@ Written with a plain `VAR grand = …`, `grand` would be re-evaluated per group 
 - A `GVAR` binding must be a **scalar** — `QUERY`, window (`WINDOW`/`OFFSET`/`INDEX`/`RANK`) and time-intelligence expressions are rejected.
 - A `GVAR` binding may reference another measure (`GVAR total = [Revenue]`), an earlier `GVAR`, or a constant expression of earlier `GVAR`s (`GVAR half = total / 2`).
 - A **constant** binding with no table reference also works when built from literals, arithmetic, `DIVIDE`, `COALESCE`, and the date functions `TODAY()` / `DATE(y,m,d)` / `DATEADD(...)` / `DATETRUNC(...)` — e.g. `GVAR from_date = DATEADD(TODAY(), -30, "DAY")` (folded once with the same local clock as incremental refresh filters; `NOW()` is not supported in a table-less binding).
-- `GVAR` is a measure feature only (not calculated columns, model global variables, or calculation items) and is resolved by the query engine facade (`Engine::query` / `query_with_meta`). A `GVAR` that resolves to `BLANK` (e.g. an aggregate over an empty context) propagates `BLANK` — it is not an error.
+- `GVAR` is a measure feature only (not calculated columns, model global variables, or calculation items) and is resolved by the query engine facade on every aggregate entry point (`Engine::query` / `query_with_meta` / `query_with_cancellation`, `query_auto_refresh`, `query_auto_tier`, `query_explained`). A `GVAR` that resolves to `BLANK` (e.g. an aggregate over an empty context) propagates `BLANK` — it is not an error.
 - `GVAR` is only a keyword in full declaration position (`GVAR <name> =`): an expression that merely begins with a column/measure/global reference named `gvar` (e.g. `gvar + 1`) still parses as before, and `gvar` remains usable as a binding name.
-- **Not yet supported (fails closed):** `GVAR` together with a calculation group; `GVAR` under **multiple active RLS roles** (query under a single role); and evaluation through `query_auto_tier` / `query_explained` / `query_auto_refresh` (use `Engine::query` / `query_with_meta`).
+- **Not yet supported (fails closed):** `GVAR` together with a calculation group; `GVAR` under **multiple active RLS roles** (query under a single role); and evaluation through the lower-level in-memory `MeasureEngine`.
 
 ### QUERY-in-VAR (Two-Stage Aggregation)
 

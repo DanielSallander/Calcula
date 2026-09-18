@@ -9,8 +9,8 @@ use arrow::record_batch::RecordBatch;
 use futures::stream::{self, StreamExt};
 
 use crate::{
-    query_cache, Cardinality, Engine, EngineError, EngineResult, FetchRequest, PushdownPlanner,
-    QueryError, QueryExecutor, QueryRequest, QueryResult, SourceRegistry, MAX_CONCURRENT_FETCHES,
+    CancellationToken, Cardinality, Engine, EngineError, EngineResult, FetchRequest, QueryError,
+    QueryRequest, QueryResult, SourceRegistry, MAX_CONCURRENT_FETCHES,
 };
 
 // ---------------------------------------------------------------------------
@@ -51,8 +51,9 @@ impl Default for AutoTierConfig {
 /// Tracks auto-tier state for the engine.
 #[derive(Debug, Default)]
 pub(crate) struct AutoTierState {
-    /// Tables that have been auto-tiered (successfully cached).
-    cached: HashSet<String>,
+    /// Tables that have been auto-tiered (successfully cached). Read by the
+    /// facade's `plan_and_execute` so the planner treats them as local.
+    pub(crate) cached: HashSet<String>,
     /// Tables that were checked and rejected (too large). Not re-checked
     /// until the engine is restarted or the model changes.
     rejected: HashSet<String>,
@@ -341,8 +342,14 @@ impl Engine {
     ///
     /// Before executing the query, dimension tables needed by **this** query
     /// that are eligible for auto-tiering are cached, and stale auto-tiered
-    /// tables are refreshed. The query is then served from the query-result
-    /// cache when possible, otherwise executed against the sources.
+    /// tables are refreshed. The query then runs through the one aggregate
+    /// path ([`query_with_cancellation`](Self::query_with_cancellation)): the
+    /// query-result cache when possible, otherwise object-level security, the
+    /// `rank_by` / `top_n` / `measure_filters` peel, the multi-role union,
+    /// the pre-planning overlays (ISFILTERED, GVAR, calculation groups) and
+    /// a planner that treats the auto-tiered set as local. The request is
+    /// validated (UDFs, role, object-level security) before any dimension is
+    /// fetched.
     ///
     /// Returns the query results and the names of tables that were
     /// auto-tiered for this query.
@@ -386,10 +393,9 @@ impl Engine {
         &mut self,
         request: QueryRequest,
     ) -> QueryResult<(Vec<RecordBatch>, Vec<String>)> {
-        // Fail fast (with a clear error) on unregistered UDF calls and an
-        // unknown active role.
-        self.validate_request_udfs(&request)?;
-        self.validate_active_role()?;
+        // Fail fast — unregistered UDF calls, an unknown active role, an
+        // object-level-security denial — BEFORE any dimension is fetched.
+        self.validate_before_source_io(&request)?;
 
         // Auto-tier tables needed by this specific query. Remaining
         // candidates are deliberately NOT fetched here — hosts pre-warm them
@@ -404,64 +410,17 @@ impl Engine {
             .await
             .map_err(QueryError::Engine)?;
 
-        // Check query cache. The guard is dropped before any await. The full
-        // security context — every active role AND the runtime identity
-        // (USERNAME()/CUSTOMDATA()) — is part of the key, so a result restricted
-        // for one user/role-set is never served to another. (Using
-        // `active_role()` here would key on only the first role name and omit the
-        // identity, cross-serving rows across users and multi-role unions.)
-        let (cache_key, cached) = {
-            let mut query_cache = self.query_cache.lock();
-            let key = query_cache::query_cache_key(
-                &request,
-                query_cache.model_version(),
-                self.effective_udfs.identity_hash(),
-                self.role_cache_key().as_deref(),
-            );
-            let cached = query_cache.get(key);
-            (key, cached)
-        };
-        if let Some(cached) = cached {
-            return Ok((cached, tiered));
-        }
-
-        // Resolve any calculation-group application: yields an overlay model
-        // (self.model + ephemeral synthetic measures) and an expanded request
-        // (synthetic measure names). Without this, a calc-group request on the
-        // auto-tier path would be silently ignored and return only the base
-        // measures.
-        let overlay = self.resolve_calculation_group(&request, &self.model)?;
-        let (model, effective_request) = match &overlay {
-            Some((overlay_model, expanded)) => (overlay_model, expanded),
-            None => (&self.model, &request),
-        };
-
-        // Execute the query — tell the planner that auto-tiered tables are
-        // local, and thread the active role's predicates so a cached
-        // (auto-tiered) dimension is restricted just like a connector-fetched
-        // one.
-        let role_filters = self.active_role_filters()?;
-        let plan = PushdownPlanner::plan_with_cached(
-            effective_request,
-            model,
-            &self.registry,
-            &self.auto_tier_state.cached,
-            &role_filters,
-        )?;
-        let batches = crate::map_script_error(
-            QueryExecutor::execute(
-                &plan,
-                model,
-                &self.registry,
-                Some(&self.cache),
-                Some(self.max_inline_in_values),
-                Some(self.effective_udfs.as_ref()),
-                &role_filters,
-            )
-            .await,
-        )?;
-
-        self.query_cache.lock().put(cache_key, batches.clone());
+        // Then the one aggregate query path: query cache (keyed on the full
+        // security context), the post-aggregation peel, the multi-role union,
+        // the pre-planning overlays, context-column pushdown, and a planner
+        // told that the auto-tiered set is local (`plan_and_execute` passes
+        // `self.auto_tier_state.cached`). This path used to plan on its own
+        // and applied only the calculation-group expansion — no OLS, no GVAR
+        // (it failed closed), no rank/top-N/HAVING, and a multi-role request
+        // ran with EMPTY role filters.
+        let batches = self
+            .query_with_cancellation(request, CancellationToken::new())
+            .await?;
 
         Ok((batches, tiered))
     }
@@ -762,5 +721,332 @@ mod tests {
         // Auto-tier disabled (default): no candidates, no fetch attempts.
         let tiered = engine.auto_tier_remaining().await.unwrap();
         assert!(tiered.is_empty());
+    }
+
+    // -- The tiered set reaches EVERY planner call --
+
+    /// Days since the Unix epoch for `y-m-1` (Arrow `Date32`), Howard
+    /// Hinnant's `days_from_civil` (no chrono dependency).
+    fn first_of_month_days(y: i64, m: i64) -> i32 {
+        let d = 1i64;
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        (era * 146097 + doe - 719468) as i32
+    }
+
+    /// `fact_sales(date_id, region, amount)` (in-memory) -> `dim_date(date_id,
+    /// datekey, year, quarter, month)` MARKED as the date table but stored
+    /// DirectQuery — the shape of a dimension auto-tiering would cache.
+    /// `Ytd = YTD(SUM(fact_sales[amount]))` is filter-context time
+    /// intelligence once no date column is on the axis. Two single-predicate
+    /// roles on `fact_sales[region]` give the multi-role union something to
+    /// probe. Rows: 2023 month m -> east 10*m / west 20*m; 2024 -> m / 2m.
+    fn ti_engine_with_direct_query_date_table() -> Engine {
+        use crate::{expression_measure, parse_measure_expression, ComparisonOp, DateRole, SecurityRole};
+        let model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "dim_date",
+                    vec![
+                        Column::new("date_id", DataType::Int64),
+                        Column::new("datekey", DataType::Date).with_date_role(DateRole::DateKey),
+                        Column::new("year", DataType::Int64).with_date_role(DateRole::Year),
+                        Column::new("quarter", DataType::Int64).with_date_role(DateRole::Quarter),
+                        Column::new("month", DataType::Int64).with_date_role(DateRole::Month),
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::DirectQuery),
+            )
+            .add_table(
+                Table::new(
+                    "fact_sales",
+                    vec![
+                        Column::new("date_id", DataType::Int64),
+                        Column::new("region", DataType::String),
+                        Column::new("amount", DataType::Float64),
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "sales_date",
+                "fact_sales",
+                "date_id",
+                "dim_date",
+                "date_id",
+            ))
+            .add_measure(expression_measure(
+                "Ytd",
+                parse_measure_expression("YTD(SUM(fact_sales[amount]))").unwrap(),
+            ))
+            .mark_date_table("dim_date")
+            .add_security_role(SecurityRole::new("EastOnly").with_filter(
+                "fact_sales",
+                "region",
+                ComparisonOp::Equal,
+                "east",
+            ))
+            .add_security_role(SecurityRole::new("WestOnly").with_filter(
+                "fact_sales",
+                "region",
+                ComparisonOp::Equal,
+                "west",
+            ))
+            .build()
+            .unwrap();
+        let mut engine = Engine::new(model);
+        engine
+            .registry
+            .bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
+        engine
+            .registry
+            .bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+
+        use arrow::array::{Date32Array, Float64Array, Int64Array, StringArray};
+        use arrow::datatypes::{DataType as ArrowType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+        let (mut date_id, mut datekey, mut year, mut quarter, mut month) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut f_date_id, mut f_region, mut f_amount) = (Vec::new(), Vec::new(), Vec::new());
+        for y in [2023i64, 2024] {
+            for m in 1i64..=12 {
+                date_id.push(y * 100 + m);
+                datekey.push(first_of_month_days(y, m));
+                year.push(y);
+                quarter.push((m - 1) / 3 + 1);
+                month.push(m);
+                let east = if y == 2023 { (10 * m) as f64 } else { m as f64 };
+                for (r, a) in [("east", east), ("west", east * 2.0)] {
+                    f_date_id.push(y * 100 + m);
+                    f_region.push(r);
+                    f_amount.push(a);
+                }
+            }
+        }
+        let dim = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("date_id", ArrowType::Int64, true),
+                Field::new("datekey", ArrowType::Date32, true),
+                Field::new("year", ArrowType::Int64, true),
+                Field::new("quarter", ArrowType::Int64, true),
+                Field::new("month", ArrowType::Int64, true),
+            ])),
+            vec![
+                Arc::new(Int64Array::from(date_id)),
+                Arc::new(Date32Array::from(datekey)),
+                Arc::new(Int64Array::from(year)),
+                Arc::new(Int64Array::from(quarter)),
+                Arc::new(Int64Array::from(month)),
+            ],
+        )
+        .unwrap();
+        let fact = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("date_id", ArrowType::Int64, true),
+                Field::new("region", ArrowType::Utf8, true),
+                Field::new("amount", ArrowType::Float64, true),
+            ])),
+            vec![
+                Arc::new(Int64Array::from(f_date_id)),
+                Arc::new(StringArray::from(f_region)),
+                Arc::new(Float64Array::from(f_amount)),
+            ],
+        )
+        .unwrap();
+        // The rows of BOTH tables are in the engine cache from the start: what
+        // the test varies is only whether the planner is TOLD the date table
+        // is local (the tiered set), never whether its rows are present.
+        engine.cache.store("dim_date", dim).unwrap();
+        engine.cache.store("fact_sales", fact).unwrap();
+        engine
+    }
+
+    fn region_values(batches: &[arrow::record_batch::RecordBatch]) -> Vec<(String, f64)> {
+        use arrow::array::{Array, DictionaryArray, Float64Array, StringArray};
+        use arrow::datatypes::Int32Type;
+        let mut out = Vec::new();
+        for b in batches {
+            let r = b.column(b.schema().index_of("region").unwrap());
+            let v = b
+                .column(b.schema().index_of("Ytd").unwrap())
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for row in 0..b.num_rows() {
+                let key = if let Some(a) = r.as_any().downcast_ref::<StringArray>() {
+                    a.value(row).to_string()
+                } else if let Some(a) = r.as_any().downcast_ref::<DictionaryArray<Int32Type>>() {
+                    let values = a.values().as_any().downcast_ref::<StringArray>().unwrap();
+                    values.value(a.key(row).unwrap()).to_string()
+                } else {
+                    panic!("unexpected group array type: {:?}", r.data_type());
+                };
+                out.push((key, v.value(row)));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    #[tokio::test]
+    async fn a_tiered_dimension_is_local_on_the_plain_query_path() {
+        // The planner REFUSES filter-context time intelligence unless the date
+        // table is in-memory OR in the cached set it is told about (fail
+        // closed: a connector-fetched calendar would carry the request's date
+        // filter and shift into nothing). That makes the tiered set reaching a
+        // planner call OBSERVABLE: with `dim_date` tiered, the plain `&self`
+        // `query` path, `query_explained` and the multi-role union probe all
+        // plan and run; with the set withheld from any of them, that call
+        // refuses. YTD with no date filter is as-of 2024-12: east 78, west 156.
+        let mut engine = ti_engine_with_direct_query_date_table();
+        let request = || QueryRequest {
+            measures: vec!["Ytd".into()],
+            group_by: vec![crate::ColumnRef::new("fact_sales", "region")],
+            ..Default::default()
+        };
+
+        // Control: rows are in the cache, but nothing is tiered -> refused.
+        let err = engine.query(request()).await.unwrap_err().to_string();
+        assert!(err.contains("requires the date table"), "got: {err}");
+
+        engine.auto_tier_state.cached.insert("dim_date".to_string());
+
+        let batches = engine.query(request()).await.unwrap();
+        assert_eq!(
+            region_values(&batches),
+            vec![("east".to_string(), 78.0), ("west".to_string(), 156.0)],
+            "plain query path with the date table tiered"
+        );
+        let (batches, _plan) = engine.query_explained(request()).await.unwrap();
+        assert_eq!(region_values(&batches).len(), 2, "explain path with the date table tiered");
+
+        // The multi-role union probe plans one role with the SAME set (the
+        // union of both regions is every row, so the values are unchanged).
+        engine.set_active_roles(vec!["EastOnly".into(), "WestOnly".into()]);
+        let (batches, _tiered) = engine.query_auto_tier(request()).await.unwrap();
+        assert_eq!(
+            region_values(&batches),
+            vec![("east".to_string(), 78.0), ("west".to_string(), 156.0)],
+            "multi-role union over a tiered date table"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_tier_refuses_a_denied_request_before_fetching_any_dimension() {
+        // `dim_products` is an auto-tier candidate with a binding but NO
+        // registered connector, so any fetch attempt fails with a source
+        // error. The object-level-security refusal must come FIRST — a clean
+        // "object-level security" error and no tiering side effect — never
+        // after a dimension was fetched (or a fetch was attempted).
+        use crate::{ColumnRef, SecurityRole};
+        let model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "fact_sales",
+                    vec![
+                        Column::new("product_id", DataType::Int64),
+                        Column::new("amount", DataType::Float64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "dim_products",
+                    vec![
+                        Column::new("id", DataType::Int64),
+                        Column::new("name", DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "sales_products",
+                "fact_sales",
+                "product_id",
+                "dim_products",
+                "id",
+            ))
+            .add_measure(sum_measure("Revenue", "fact_sales", "amount"))
+            .add_security_role(
+                SecurityRole::new("Analyst").with_denied_tables(vec!["dim_products".into()]),
+            )
+            .build()
+            .unwrap();
+        let mut engine = Engine::new(model);
+        engine.set_auto_tier_config(AutoTierConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        engine
+            .registry
+            .bind("dim_products", 0, SourceBinding::new("public", "products"));
+        engine.set_active_role(Some("Analyst".into()));
+
+        let err = engine
+            .query_auto_tier(QueryRequest {
+                measures: vec!["Revenue".into()],
+                group_by: vec![ColumnRef::new("dim_products", "name")],
+                ..Default::default()
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("object-level security"), "got: {err}");
+        // The error text IS the ordering proof: `dim_products` has a binding
+        // but no registered connector, so a fetch would have failed with a
+        // source error long before any security message could be produced.
+        assert!(
+            engine.auto_tiered_tables().is_empty(),
+            "nothing may be tiered for a refused request"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_tiered_table_leaves_the_planners_local_set() {
+        // The tiered set tells EVERY planner call which tables are local. A
+        // dropped table that stayed in it would keep passing the planner's
+        // filter-context time-intelligence gate while the executor, which
+        // reads the REAL cache, fell through to a connector fetch carrying
+        // the request's date filter — the shifted-into-nothing answer that
+        // gate exists to refuse.
+        let mut engine = ti_engine_with_direct_query_date_table();
+        engine.auto_tier_state.cached.insert("dim_date".to_string());
+        let request = || QueryRequest {
+            measures: vec!["Ytd".into()],
+            group_by: vec![crate::ColumnRef::new("fact_sales", "region")],
+            ..Default::default()
+        };
+        assert_eq!(
+            region_values(&engine.query(request()).await.unwrap()).len(),
+            2,
+            "control: tiered, so it plans and runs"
+        );
+
+        assert!(engine.drop_table_cache("dim_date"));
+        assert!(
+            engine.auto_tiered_tables().is_empty(),
+            "a dropped table must leave the planner's local set"
+        );
+        let err = engine.query(request()).await.unwrap_err().to_string();
+        assert!(
+            err.contains("requires the date table"),
+            "the planner must refuse again, not plan local over rows that are gone: {err}"
+        );
+
+        // A model swap drops it too: a table the new model does not have (or
+        // that now declares itself in-memory) is not a tiered table.
+        engine.auto_tier_state.cached.insert("dim_date".to_string());
+        engine.set_model(make_star_schema_model()).unwrap();
+        assert!(
+            engine.auto_tiered_tables().is_empty(),
+            "set_model must drop tiered names the new model does not carry"
+        );
     }
 }
