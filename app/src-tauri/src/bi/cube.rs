@@ -1102,7 +1102,7 @@ async fn run_query(
 /// bitten twice by the other kind: `friendly_bi_query_error`'s two
 /// row-level-security branches matched Rust VARIANT names against `Display`
 /// output and were therefore dead for their whole life.
-fn is_security_refusal(e: &bi_engine::QueryError) -> bool {
+pub(crate) fn is_security_refusal(e: &bi_engine::QueryError) -> bool {
     matches!(
         e,
         bi_engine::QueryError::Engine(

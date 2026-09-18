@@ -22,6 +22,7 @@ import type {
   BiModelInfo,
 } from "../types";
 import { biGetModelInfo } from "@api/backend";
+import { announceUnderlyingDataChanged } from "@api/dataAftermath";
 import type { BiKpiInfo } from "@api/backend";
 import { computeKpiStatus, kpiStatusColor, type KpiStatusLevel } from "../lib/kpiStatus";
 
@@ -382,6 +383,15 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
           role ? `Viewing as role "${role}"` : "Viewing unrestricted (no role)",
           "success",
         );
+        // EVERY BI-derived cell on the grid was computed under the PREVIOUS
+        // role and is now wrong — pivot output cells, inserted query blocks,
+        // and CUBE formulas alike. The backend command only stores the role:
+        // it emits no event and touches no grid state, so nothing repainted.
+        // `forceCube` is not optional here: the session latch that gates the
+        // cube round-trip is armed only by TYPING a cube formula, so in a
+        // session where the user merely opened the workbook, not even F9
+        // would have refreshed those cells.
+        await announceUnderlyingDataChanged({ forceCube: true, context: "BI view-as" });
         if (queryResult) {
           await handleQuery();
         }

@@ -4966,6 +4966,8 @@ pub async fn drill_through_to_sheet(
     // grid-backed pivot reads its source rows from the grid now.
     let mut headers: Vec<String> = Vec::new();
     let mut row_data: Vec<Vec<engine::CellValue>> = Vec::new();
+    // What the user has to be told about the sheet they are about to get.
+    let mut notices: Vec<crate::pivot::types::PivotNotice> = Vec::new();
     let bi_drill: Option<(
         crate::bi::types::ConnectionId,
         bi_engine::DetailRequest,
@@ -5130,15 +5132,38 @@ pub async fn drill_through_to_sheet(
             crate::bi::commands::apply_connection_role(&mut engine, &bi_state, connection_id);
             match engine.query_rows(detail).await {
                 Ok(b) => b,
+                // A SECURITY refusal is never retried away. The bare request
+                // differs from the enriched one by exactly one thing — the
+                // dimension columns are emptied — and the engine's detail gate
+                // checks precisely those (`enforce_detail_object_level_security`
+                // walks `request.dimension_columns`). So retrying after a
+                // denial re-asks a question the gate WILL allow and presents
+                // the answer as the one that was asked: a silently narrower
+                // sheet, with the denial recorded nowhere but an info log.
+                // Drill-through is raw fact rows, the highest-leak surface
+                // there is; refuse instead, and let the caller say why.
+                Err(e) if crate::bi::cube::is_security_refusal(&e) => {
+                    return Err(crate::bi::commands::friendly_bi_query_error(
+                        "BI drillthrough failed",
+                        &e,
+                    ));
+                }
                 Err(e) => match fallback {
                     // Retry without dimension attributes — the enriched request
                     // hit a non-single-hop relationship the engine rejects.
+                    // Legitimate, and now SAID: the sheet is narrower than the
+                    // one the user (or the publisher's DrillQueryOverride)
+                    // asked for.
                     Some(bare) => {
                         log_info!(
                             "PIVOT",
                             "drillthrough with dimension attributes failed ({}); retrying without",
                             e
                         );
+                        notices.push(crate::pivot::types::PivotNotice::degraded(
+                            "Some dimension columns were left out: the model cannot join them to \
+                             this detail table in one hop.",
+                        ));
                         engine
                             .query_rows(bare)
                             .await
@@ -5229,6 +5254,7 @@ pub async fn drill_through_to_sheet(
         sheet_index: new_index,
         row_count: data_row_count,
         col_count,
+        notices,
     })
 }
 
@@ -6302,6 +6328,13 @@ pub async fn update_bi_pivot_fields(
         drop(pivot_tables);
 
         response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
+        // The field assignments were written and the document dirtied, so this
+        // returns Ok — but the user is looking at an EMPTY pivot that looks
+        // exactly like a successful field change. Say why.
+        response.notices.push(crate::pivot::types::PivotNotice::degraded(
+            "No data: this model has no measure to list members with. The field assignments \
+             were kept.",
+        ));
         finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
         // Same as the branch above: an empty cache replaced the records.
         record_pivot_definition_undo(
@@ -6872,6 +6905,22 @@ pub async fn update_bi_pivot_fields(
                 drop(pivot_tables);
 
                 response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
+                // Ok with an empty view is indistinguishable from a successful
+                // field change that happens to have no rows. Say which it is,
+                // and distinguish a REFUSAL (the user can act on it: pick a
+                // different "view as" role) from an ordinary failure — typed,
+                // never by matching the message text.
+                response.notices.push(if crate::bi::cube::is_security_refusal(&e) {
+                    crate::pivot::types::PivotNotice::refused(
+                        "No data: the role chosen in \"View as\" denies the measure this pivot \
+                         needs to list its members. The field assignments were kept.",
+                    )
+                } else {
+                    crate::pivot::types::PivotNotice::degraded(
+                        "No data: the query for this pivot's members failed. The field \
+                         assignments were kept.",
+                    )
+                });
                 finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
                 // The query failed but the FIELDS were still written, so this is
                 // a real document change and gets a real undo step — with the

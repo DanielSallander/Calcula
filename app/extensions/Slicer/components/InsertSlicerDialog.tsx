@@ -13,6 +13,7 @@ import {
   getAllTables,
   updateBiPivotFields,
 } from "@api/backend";
+import { surfacePivotNotices } from "@api/pivotNotices";
 import { createSlicerAsync } from "../lib/slicerStore";
 import type { SlicerSourceType } from "../lib/slicerTypes";
 
@@ -167,16 +168,19 @@ async function ensureBiFieldsInPivot(
     }
   }
 
-  // Re-query the BI engine with the updated field configuration
-  await updateBiPivotFields({
-    pivotId,
-    rowFields,
-    columnFields,
-    valueFields,
-    filterFields,
-    slicerFields,
-    lookupColumns: lookupCols,
-  });
+  // Re-query the BI engine with the updated field configuration. This path
+  // reaches the backend directly, so it surfaces any notice itself.
+  surfacePivotNotices(
+    await updateBiPivotFields({
+      pivotId,
+      rowFields,
+      columnFields,
+      valueFields,
+      filterFields,
+      slicerFields,
+      lookupColumns: lookupCols,
+    }),
+  );
 
   // Wait for pivot refresh event
   window.dispatchEvent(new Event("pivot:refresh"));

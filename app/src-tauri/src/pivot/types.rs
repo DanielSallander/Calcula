@@ -812,6 +812,57 @@ pub struct UpdatePivotLayoutRequest {
     pub layout: LayoutConfig,
 }
 
+/// Why a pivot response carries a notice.
+///
+/// TYPED, not a severity guessed from the message text: a refusal and a
+/// degradation must not read the same, and deciding which one a string is by
+/// substring is the anti-pattern this codebase has already been bitten by
+/// twice (`friendly_bi_query_error`'s two row-level-security branches matched
+/// Rust variant names against `Display` output and were dead for their whole
+/// life; see the scar comment on `bi::cube::is_security_refusal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PivotNoticeKind {
+    /// The model's security refused something this pivot needed — the active
+    /// "view as" role denies an object. The user can act on it (pick another
+    /// role, ask the model's author).
+    Refused,
+    /// The result is narrower or emptier than asked for, for a reason that is
+    /// not a refusal: a model that cannot answer, a query that failed.
+    Degraded,
+}
+
+/// One thing the user should be told about a pivot response.
+///
+/// Response-scoped on purpose. `get_pivot_view` recomputes from the stored
+/// definition and cache and never re-queries, so a notice produced while
+/// updating fields is gone by the next read — which makes a transient
+/// surface (a toast) honest and a persistent banner a lie. Making a notice
+/// DURABLE would put it in `PivotState`, i.e. saved state, i.e. a
+/// `Persisted<T>` + `DocumentEffect` decision; do not do that silently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotNotice {
+    pub kind: PivotNoticeKind,
+    pub message: String,
+}
+
+impl PivotNotice {
+    pub fn refused(message: impl Into<String>) -> Self {
+        Self {
+            kind: PivotNoticeKind::Refused,
+            message: message.into(),
+        }
+    }
+
+    pub fn degraded(message: impl Into<String>) -> Self {
+        Self {
+            kind: PivotNoticeKind::Degraded,
+            message: message.into(),
+        }
+    }
+}
+
 /// Response containing the pivot view data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -845,6 +896,11 @@ pub struct PivotViewResponse {
     /// ask the user for confirmation and undo if declined.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub overwritten_cell_count: u32,
+    /// What the user should be told about THIS response — a refusal by the
+    /// active security role, or a degradation. Empty on the ordinary path, so
+    /// the wire bytes are unchanged for every healthy pivot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<PivotNotice>,
 }
 
 /// Filter row metadata for frontend interaction
@@ -1378,6 +1434,12 @@ pub struct DrillThroughResponse {
     pub row_count: usize,
     /// Number of columns written
     pub col_count: usize,
+    /// What the user should be told about the sheet they just got — notably
+    /// that it is NARROWER than asked for because the model cannot join some
+    /// dimension columns to the detail table in one hop. Empty on the
+    /// ordinary path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<PivotNotice>,
 }
 
 use std::collections::HashMap;
@@ -2041,5 +2103,44 @@ mod filter_level_wire_tests {
         let req: ApplyPivotFilterRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.filter_level, 2);
         assert_eq!(req.slicer_id.as_deref(), Some("slicer-7"));
+    }
+}
+
+#[cfg(test)]
+mod pivot_notice_tests {
+    use super::*;
+
+    /// The wire shape a host reads. `kind` is a lowercase discriminator so the
+    /// frontend can switch on it — never on the message text.
+    #[test]
+    fn a_notice_serializes_with_a_typed_lowercase_kind() {
+        let refused = serde_json::to_string(&PivotNotice::refused("denied")).unwrap();
+        assert_eq!(refused, r#"{"kind":"refused","message":"denied"}"#);
+        let degraded = serde_json::to_string(&PivotNotice::degraded("narrower")).unwrap();
+        assert_eq!(degraded, r#"{"kind":"degraded","message":"narrower"}"#);
+        assert_ne!(PivotNoticeKind::Refused, PivotNoticeKind::Degraded);
+    }
+
+    /// The common case must not grow a byte: every healthy pivot response and
+    /// every ordinary drill-through omits the field entirely.
+    #[test]
+    fn an_empty_notice_list_is_absent_from_the_wire() {
+        let drill = DrillThroughResponse {
+            sheet_name: "Sheet2".into(),
+            sheet_index: 1,
+            row_count: 3,
+            col_count: 2,
+            notices: Vec::new(),
+        };
+        let json = serde_json::to_string(&drill).unwrap();
+        assert!(!json.contains("notices"), "got: {json}");
+
+        // ...and present the moment there is something to say.
+        let drill = DrillThroughResponse {
+            notices: vec![PivotNotice::degraded("some columns were left out")],
+            ..drill
+        };
+        let json = serde_json::to_string(&drill).unwrap();
+        assert!(json.contains(r#""kind":"degraded""#), "got: {json}");
     }
 }

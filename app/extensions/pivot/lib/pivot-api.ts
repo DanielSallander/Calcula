@@ -26,6 +26,7 @@ import {
   setInflightOperation,
 } from "./pivotViewStore";
 import { requestOverlayRedraw } from "@api/gridOverlays";
+import { surfacePivotNotices } from "@api/pivotNotices";
 import { emitAppEvent, AppEvents } from "@api";
 import { ask } from "@tauri-apps/plugin-dialog";
 import type { BiHierarchyMeta } from "@api/backend";
@@ -928,7 +929,14 @@ export async function ungroupPivotField(
 export async function drillThroughToSheet(
   request: DrillThroughRequest
 ): Promise<DrillThroughResponse> {
-  return apiDrillThroughToSheet<DrillThroughRequest, DrillThroughResponse>(request);
+  const response = await apiDrillThroughToSheet<DrillThroughRequest, DrillThroughResponse>(
+    request,
+  );
+  // The sheet may be NARROWER than the one asked for (dimension columns the
+  // model cannot join in one hop are dropped). Saying so here covers every
+  // caller of this wrapper.
+  surfacePivotNotices(response);
+  return response;
 }
 
 /**

@@ -680,6 +680,9 @@ pub(crate) fn view_to_response(
             window_start_row: Some(0),
             row_descriptors,
             overwritten_cell_count: 0,
+            // Filled after the fact by the producer that has something to say,
+            // exactly as `overwritten_cell_count` is.
+            notices: Vec::new(),
         }
     } else {
         // Small pivot: send everything (no windowing)
@@ -701,6 +704,7 @@ pub(crate) fn view_to_response(
             window_start_row: None,
             row_descriptors: Vec::new(),
             overwritten_cell_count: 0,
+            notices: Vec::new(),
         }
     }
 }

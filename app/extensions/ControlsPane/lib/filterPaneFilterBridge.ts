@@ -6,6 +6,7 @@
 
 import type { RibbonFilter } from "./filterPaneTypes";
 import { updateBiPivotFields } from "@api/backend";
+import { surfacePivotNotices } from "@api/pivotNotices";
 import { emitAppEvent, AppEvents } from "@api";
 import { filterPaneBackend } from "./filterPaneBackend";
 import { getAllFilters } from "./filterPaneStore";
@@ -127,15 +128,20 @@ async function ensureBiFieldsInPivotCache(
     // Add ALL missing fields as slicer fields in one rebuild
     const slicerFields = biFields.map((f) => parseBiFieldRef(f, []));
 
-    await updateBiPivotFields({
-      pivotId,
-      rowFields,
-      columnFields,
-      valueFields,
-      filterFields,
-      slicerFields,
-      lookupColumns: lookupCols,
-    });
+    // Slicer fields with no value fields send this down the pivot's
+    // synthetic-placeholder-measure branch; this path never touches the Pivot
+    // extension's own wrapper, so it surfaces any notice itself.
+    surfacePivotNotices(
+      await updateBiPivotFields({
+        pivotId,
+        rowFields,
+        columnFields,
+        valueFields,
+        filterFields,
+        slicerFields,
+        lookupColumns: lookupCols,
+      }),
+    );
 
     return true;
   } catch (err) {

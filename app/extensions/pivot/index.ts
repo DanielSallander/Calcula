@@ -1785,7 +1785,16 @@ function activate(context: ExtensionContext): void {
                 }
                 emitAppEvent(AppEvents.SHEET_CHANGED, { sheetIndex: resp.sheetIndex });
               } catch (error) {
+                // MUST be visible. The backend now REFUSES a drill whose
+                // dimension column the active "view as" role denies, instead
+                // of silently retrying without it — so without this toast a
+                // denied double-click would do nothing at all, with the
+                // reason only in devtools. That is verbatim the BUG-0096
+                // failure mode ("no drill, no fallback and no message") the
+                // comment above this handler exists to prevent. The same line
+                // also covers a failed getPivotDrillBehavior.
                 console.error("[Pivot Extension] Drill-through failed:", error);
+                showToast(String(error), { type: "error" });
               }
             })();
           }

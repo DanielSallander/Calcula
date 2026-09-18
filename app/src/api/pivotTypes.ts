@@ -330,6 +330,25 @@ export interface PivotRowDescriptorData {
   visible: boolean;
 }
 
+/**
+ * Why a pivot response carries a notice. TYPED, so that surfacing code never
+ * has to guess severity from the message text.
+ */
+export type PivotNoticeKind = "refused" | "degraded";
+
+/**
+ * One thing the user should be told about a pivot response.
+ *
+ * Response-scoped: `getPivotView` recomputes from the stored definition and
+ * cache and never re-queries, so a notice is gone by the next read. That is
+ * why these are shown transiently (a toast) rather than as a banner that
+ * would blank itself at an arbitrary later moment.
+ */
+export interface PivotNotice {
+  kind: PivotNoticeKind;
+  message: string;
+}
+
 /** Complete pivot view response */
 export interface PivotViewResponse {
   pivotId: PivotId;
@@ -354,6 +373,8 @@ export interface PivotViewResponse {
   rowDescriptors?: PivotRowDescriptorData[];
   /** Number of non-empty cells outside the previous pivot region that were overwritten. */
   overwrittenCellCount?: number;
+  /** What the user should be told about this response (a refusal, a degradation). */
+  notices?: PivotNotice[];
 }
 
 /** Response for a cell window fetch (scroll-triggered). */
@@ -1021,6 +1042,12 @@ export interface DrillThroughResponse {
   sheetIndex: number;
   rowCount: number;
   colCount: number;
+  /**
+   * What the user should be told about the sheet they just got — notably that
+   * it is NARROWER than asked for because the model cannot join some
+   * dimension columns to the detail table in one hop.
+   */
+  notices?: PivotNotice[];
 }
 
 // ---------------------------------------------------------------------------

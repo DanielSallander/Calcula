@@ -250,7 +250,10 @@ pub(crate) async fn compute_design_query_view(
         crate::bi::commands::apply_connection_role(&mut engine, bi_state, connection_id);
         engine.query_with_meta(query_request).await
     }
-    .map_err(|e| format!("BI query failed: {}", e))?;
+    // Through the shared mapper, so a design query gets the same actionable
+    // security message the pivot path does ("the role chosen in \"View as\"
+    // denies it …") rather than a raw engine string.
+    .map_err(|e| crate::bi::commands::friendly_bi_query_error("BI query failed", &e))?;
 
     // ---- Build the transient pivot cache + definition --------------------
     let pivot_id = identity::EntityId::from_bytes(identity::generate_uuid_v7()); // throwaway id — never stored

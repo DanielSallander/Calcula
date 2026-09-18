@@ -3,6 +3,7 @@
 
 import type { Slicer, SlicerConnection } from "./slicerTypes";
 import { updateBiPivotFields } from "@api/backend";
+import { surfacePivotNotices } from "@api/pivotNotices";
 import { emitAppEvent, AppEvents } from "@api";
 import { slicerBackend } from "./slicerBackend";
 
@@ -128,15 +129,21 @@ export async function ensureBiFieldInPivotCache(
       allSlicerFields.push(newSlicerField);
     }
 
-    await updateBiPivotFields({
-      pivotId,
-      rowFields,
-      columnFields,
-      valueFields,
-      filterFields,
-      slicerFields: allSlicerFields,
-      lookupColumns: lookupCols,
-    });
+    // A slicer field with NO value fields is exactly what sends this request
+    // down the pivot's synthetic-placeholder-measure branch, which is the
+    // likeliest producer of a notice — and this path never touches the Pivot
+    // extension's own wrapper, so it must surface them itself.
+    surfacePivotNotices(
+      await updateBiPivotFields({
+        pivotId,
+        rowFields,
+        columnFields,
+        valueFields,
+        filterFields,
+        slicerFields: allSlicerFields,
+        lookupColumns: lookupCols,
+      }),
+    );
 
     window.dispatchEvent(new Event("pivot:refresh"));
     return true;
