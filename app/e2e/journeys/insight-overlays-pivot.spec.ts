@@ -401,13 +401,22 @@ test.describe("Insight overlays on a BI pivot, live", () => {
     }))}`);
     console.log(`[overlay-pivot] provenance: ${JSON.stringify(bundle.insights.map((i) => [i.id, i.provenance.find((p) => p.attribute === "direction")?.value ?? null]))}`);
     console.log(`[overlay-pivot] notes: ${JSON.stringify(bundle.notes)}`);
-    // The defect this journey found on its first run: the fixture's derived
-    // measures (Margin, MarginPct) carry no home table, the planner refuses
-    // their series query, and the WHOLE analysis used to abort with it —
-    // Revenue's facts included. Now the refusal is a note and the run goes on.
+    // Two defects this journey found on its first run, in order. (1) The
+    // fixture's derived measures (Margin, MarginPct) carried no home table,
+    // the planner refused their series query, and the WHOLE analysis aborted
+    // with it — Revenue's facts included; the insights route now notes a
+    // refused measure and goes on (the red run of this assertion was the
+    // proof; its guard is the "was not analysed" note). (2) The engine then
+    // fixed the refusal itself (BUG-0119/BUG-0120: a derived measure resolves
+    // its home table on every load path), so on this fixture NOTHING is
+    // refused any more and Margin/MarginPct carry facts of their own —
+    // which is what a live run must show from here on.
     const refused = bundle.notes.filter((n) => /was not analysed: /.test(n));
-    expect(refused, "a refused measure is SAID in the notes, not fatal").not.toEqual([]);
-    expect(factsDoc.facts.some((f) => String((f.kind.measure ?? "") as string) === "Revenue" || f.id.includes("m/Revenue")), "…and the other measures' facts survive it").toBe(true);
+    expect(refused, "no measure of the sales-star model is refused by the engine any more").toEqual([]);
+    const measuresWithFacts = new Set(factsDoc.facts.map((f) => String((f.kind.measure ?? (f.kind.inner as { subject?: { name?: string } } | undefined)?.subject?.name ?? "") as string)));
+    console.log(`[overlay-pivot] measures with facts: ${JSON.stringify([...measuresWithFacts])}`);
+    expect(measuresWithFacts.has("Revenue"), "Revenue's facts").toBe(true);
+    expect(measuresWithFacts.has("Margin") || measuresWithFacts.has("MarginPct"), "a DERIVED measure now yields facts through the app (BUG-0119)").toBe(true);
     const mapped = await appPage.evaluate(
       async ({ id, bundle, pivotMod, cuesMod }) => {
         const p = (await (window as unknown as AppWindow).__appImport!(pivotMod)) as {

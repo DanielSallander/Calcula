@@ -715,3 +715,36 @@ fn reject_gvar_in_calculation_item_at_build() {
         "got: {err}"
     );
 }
+
+#[tokio::test]
+async fn gvar_resolves_on_auto_refresh_path() {
+    // `query_auto_refresh` — the host's bi_query / insights / refresh / cube /
+    // MCP route — used to apply only the calculation-group expansion before
+    // planning, so a GVAR measure reached the executor unresolved and tripped
+    // its guard while the same measure worked in a pivot (`query`). It now
+    // runs the shared pre-plan chain. `refresh_stale` is a no-op here: the
+    // in-memory tables carry no refresh strategy and are cache-served.
+    let mut engine = gvar_engine();
+    let (batches, _) = engine.query_auto_refresh(request("PctOfTotal")).await.unwrap();
+    let r = grouped(&batches, "PctOfTotal");
+    assert!((r["Bikes"] - 130.0 / 190.0).abs() < 1e-9, "got {:?}", r);
+    assert!((r["Helmets"] - 60.0 / 190.0).abs() < 1e-9, "got {:?}", r);
+
+    // The measure-reference shape too.
+    let (batches, _) = engine
+        .query_auto_refresh(request("PctViaMeasureRef"))
+        .await
+        .unwrap();
+    let r = grouped(&batches, "PctViaMeasureRef");
+    assert!((r["Bikes"] - 130.0 / 190.0).abs() < 1e-9, "got {:?}", r);
+
+    // GVAR resolution runs BEFORE calculation-group expansion on this path as
+    // on `query`: the item transforms the resolved literal, not the binding.
+    let mut req = request("PctOfTotal");
+    req.calculation_group = Some(CalculationGroupApplication::new("Time", vec![]));
+    let (batches, _) = engine.query_auto_refresh(req).await.unwrap();
+    let current = grouped(&batches, "PctOfTotal [Current]");
+    let doubled = grouped(&batches, "PctOfTotal [Doubled]");
+    assert!((current["Bikes"] - 130.0 / 190.0).abs() < 1e-9, "got {:?}", current);
+    assert!((doubled["Bikes"] - 2.0 * 130.0 / 190.0).abs() < 1e-9, "got {:?}", doubled);
+}

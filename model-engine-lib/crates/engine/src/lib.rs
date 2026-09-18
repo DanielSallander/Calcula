@@ -101,6 +101,8 @@ mod clear_reset_tests;
 #[cfg(test)]
 mod context_column_tests;
 #[cfg(test)]
+mod derived_measure_tests;
+#[cfg(test)]
 mod detail_tests;
 #[cfg(test)]
 mod disk_cache_tests;
@@ -133,6 +135,7 @@ mod transform_tests;
 #[cfg(test)]
 mod writeback_tests;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
@@ -1194,7 +1197,19 @@ impl Engine {
 
     /// Shared constructor: assemble the engine and build the effective UDF
     /// registry from the model's script functions.
-    fn build(model: DataModel, cache: InMemoryCache) -> Self {
+    ///
+    /// Derived measures (`[A] - [B]`) are given the home table of the measures
+    /// they build on; `model().measures()[i].table()` is therefore never empty
+    /// for a measure that reaches a table transitively.
+    fn build(mut model: DataModel, cache: InMemoryCache) -> Self {
+        // Install-time guarantee: every measure that CAN have a home table HAS
+        // one before the model is observable through `model()`. A model that
+        // arrived through serde + `validate()` (every host load path) never had
+        // its derived measures resolved — only `load_model` ran
+        // `reparse_measures_from_source`. Fill-only and idempotent; a constant
+        // measure keeps "". The query path does NOT depend on this (the planner
+        // resolves per request); this is for hosts reading `table()`.
+        model.resolve_measure_home_tables();
         let native = Arc::new(UdfRegistry::new());
         let config = ScriptSandboxConfig::default();
         let (effective, script_build_error) = build_effective_registry(&model, &native, &config);
@@ -2019,15 +2034,16 @@ impl Engine {
     /// application is present, or `Ok(None)` when it is not (the caller plans
     /// against `self.model` and the original request unchanged).
     ///
+    /// `model` is the model to expand against — usually `self.model`, but the
+    /// query paths pass their pre-resolved base (ISFILTERED-folded and/or
+    /// GVAR-resolved overlay) so the inlined synthetic expressions carry those
+    /// resolutions.
+    ///
     /// # Errors
     ///
     /// Wraps [`EngineError`] in [`QueryError::Engine`] for an unknown group,
     /// unknown item, unknown measure, or a synthetic-name collision with an
     /// existing model measure.
-    /// `model` is the model to expand against — usually `self.model`, but the
-    /// query paths pass their pre-resolved base (ISFILTERED-folded and/or
-    /// GVAR-resolved overlay) so the inlined synthetic expressions carry those
-    /// resolutions.
     fn resolve_calculation_group(
         &self,
         request: &QueryRequest,
@@ -2897,50 +2913,15 @@ impl Engine {
 
         let role_filters = self.active_role_filters()?;
 
-        // ISFILTERED literal fold. Any model measure carrying an
-        // `ISFILTERED(table[column])` marker is overlaid with the marker
-        // replaced by its literal answer for THIS request (on the group-by
-        // axis, or named by a query filter / IN slicer / OR slicer) — before
-        // planning, so every downstream path (pushed and local) plans on a
-        // plain boolean. `None` when no measure carries a marker. The fold's
-        // request context (group-by axis / filters / slicers) is identical
-        // between the original and a calculation-group-expanded request, so
-        // it runs on the original.
-        let isfiltered_model = Self::resolve_is_filtered_markers(&request, &self.model);
-        let base_model: &DataModel = isfiltered_model.as_ref().unwrap_or(&self.model);
-
-        // Query-scoped (GVAR) resolution. For each requested — or transitively
-        // referenced — measure whose top-level block declares `GVAR` bindings,
-        // evaluate each `GVAR` ONCE (under the outer filter/slicer context and
-        // active role, with NO group-by axis) and overlay the measure with the
-        // resulting scalar literals substituted in. Runs only on a cache miss;
-        // `None` when the query touches no GVAR measure — the common case.
-        //
-        // Runs BEFORE calculation-group expansion: the expansion inlines each
-        // base measure's expression into the item templates, which would bury
-        // a GVAR block non-top-level. Resolving first means the inlined
-        // expressions already carry the literals — matching the GVAR contract
-        // (evaluated once per query under the OUTER filter context, regardless
-        // of the item transforming each cell).
-        let gvar_model = self
-            .resolve_query_scoped_bindings(&request, base_model, &role_filters, &token)
+        // The pre-planning overlays (ISFILTERED fold -> GVAR resolution ->
+        // calculation-group expansion), shared with `query_explained` and
+        // `query_auto_refresh` so the three cannot drift; see the helper.
+        let (model, effective_request) = self
+            .resolve_pre_plan_overlays(&request, &role_filters, &token)
             .await?;
-        let base_model: &DataModel = gvar_model.as_ref().unwrap_or(base_model);
-
-        // Resolve any calculation-group application (a typed error for an
-        // unknown group/item/measure or a synthetic-name collision). When
-        // present this yields an overlay model (base model + ephemeral
-        // synthetic measures) and an expanded request asking for those
-        // synthetic measures by name; otherwise planning uses the base model
-        // and the original request unchanged.
-        let overlay = self.resolve_calculation_group(&request, base_model)?;
-        let (model, effective_request) = match &overlay {
-            Some((overlay_model, expanded)) => (overlay_model, expanded),
-            None => (base_model, &request),
-        };
 
         let batches = self
-            .plan_and_execute(&request, effective_request, model, &role_filters, &token)
+            .plan_and_execute(&request, &effective_request, &model, &role_filters, &token)
             .await?;
 
         // Store the result unless the cache version moved while executing
@@ -2999,6 +2980,68 @@ impl Engine {
             )
             .await,
         )
+    }
+
+    /// The pre-planning overlays EVERY concurrent-path entry point applies, in
+    /// this fixed order:
+    ///
+    /// 1. ISFILTERED literal fold. Any model measure carrying an
+    ///    `ISFILTERED(table[column])` marker is overlaid with the marker
+    ///    replaced by its literal answer for THIS request (on the group-by
+    ///    axis, or named by a query filter / IN slicer / OR slicer), so every
+    ///    downstream path (pushed and local) plans on a plain boolean. The
+    ///    fold's request context is identical between the original and a
+    ///    calculation-group-expanded request, so it runs on the original.
+    /// 2. Query-scoped (GVAR) resolution. For each requested — or
+    ///    transitively referenced — measure whose top-level block declares
+    ///    `GVAR` bindings, evaluate each `GVAR` ONCE (under the outer
+    ///    filter/slicer context and active role, with NO group-by axis) and
+    ///    overlay the measure with the resulting scalar literals substituted
+    ///    in. Runs BEFORE calculation-group expansion: the expansion inlines
+    ///    each base measure's expression into the item templates, which would
+    ///    bury a GVAR block non-top-level; resolving first means the inlined
+    ///    expressions already carry the literals — the GVAR contract
+    ///    (evaluated once per query under the OUTER filter context, regardless
+    ///    of the item transforming each cell).
+    /// 3. Calculation-group expansion (a typed error for an unknown
+    ///    group/item/measure or a synthetic-name collision): an overlay model
+    ///    with ephemeral synthetic measures and an expanded request asking for
+    ///    them by name.
+    ///
+    /// Returns the model to plan against and the request to plan; both are
+    /// BORROWED when nothing applied, so the common case clones nothing. Run
+    /// AFTER the query-cache check: GVAR resolution executes inner queries and
+    /// must stay free on a cache hit. `query_auto_tier` deliberately does not
+    /// use this: it still fails closed on GVAR
+    /// (`gvar_tests::gvar_via_auto_tier_fails_closed`).
+    ///
+    /// Shared by `query_with_cancellation`, `query_explained` and
+    /// `query_auto_refresh`: the last of these used to run only step 3, so a
+    /// GVAR measure reached the executor unresolved on the host's `bi_query` /
+    /// insights / refresh / cube / MCP path while the same measure worked in a
+    /// pivot (`query_with_meta`).
+    async fn resolve_pre_plan_overlays<'a>(
+        &'a self,
+        request: &'a QueryRequest,
+        role_filters: &[FilterPredicate],
+        token: &CancellationToken,
+    ) -> QueryResult<(Cow<'a, DataModel>, Cow<'a, QueryRequest>)> {
+        let base: Cow<'a, DataModel> = match Self::resolve_is_filtered_markers(request, &self.model)
+        {
+            Some(folded) => Cow::Owned(folded),
+            None => Cow::Borrowed(&self.model),
+        };
+        let base: Cow<'a, DataModel> = match self
+            .resolve_query_scoped_bindings(request, &base, role_filters, token)
+            .await?
+        {
+            Some(resolved) => Cow::Owned(resolved),
+            None => base,
+        };
+        match self.resolve_calculation_group(request, &base)? {
+            Some((overlay, expanded)) => Ok((Cow::Owned(overlay), Cow::Owned(expanded))),
+            None => Ok((base, Cow::Borrowed(request))),
+        }
     }
 
     /// Resolve query-scoped (`GVAR`) variables for every measure in `request`'s
@@ -3980,14 +4023,6 @@ impl Engine {
             .map_err(crate::QueryError::Engine)?
             .refreshed;
 
-        // Resolve any calculation-group application (overlay model + expanded
-        // request); plan against the original model/request otherwise.
-        let overlay = self.resolve_calculation_group(&request, &self.model)?;
-        let (model, effective_request) = match &overlay {
-            Some((overlay_model, expanded)) => (overlay_model, expanded),
-            None => (&self.model, &request),
-        };
-
         // Check query cache (after refresh — stale data was already
         // invalidated). The guard is dropped before any await. The active
         // role is part of the key (cross-role isolation). The key uses the
@@ -4008,11 +4043,21 @@ impl Engine {
         }
 
         let role_filters = self.active_role_filters()?;
-        let plan = PushdownPlanner::plan(effective_request, model, &self.registry, &role_filters)?;
+        let token = CancellationToken::new();
+        // Mirror `query`: this path used to apply only the calculation-group
+        // expansion, so a GVAR measure reached the executor unresolved and
+        // failed its guard here — on the host's bi_query / insights / refresh /
+        // cube / MCP path — while the same measure worked in a pivot
+        // (`query_with_meta`). One shared chain now, so it cannot drift again.
+        let (model, effective_request) = self
+            .resolve_pre_plan_overlays(&request, &role_filters, &token)
+            .await?;
+        let plan =
+            PushdownPlanner::plan(&effective_request, &model, &self.registry, &role_filters)?;
         let batches = map_script_error(
             QueryExecutor::execute(
                 &plan,
-                model,
+                &model,
                 &self.registry,
                 Some(&self.cache),
                 Some(self.max_inline_in_values),
@@ -4045,34 +4090,19 @@ impl Engine {
         let role_filters = self.active_role_filters()?;
         let token = CancellationToken::new();
 
-        // Mirror the `query` path's pre-planning overlays so the explain output
-        // reports the same plan the query would actually run: fold ISFILTERED
-        // markers to literals, resolve query-scoped (GVAR) bindings, THEN
-        // expand any calculation group — the expansion inlines the resolved
-        // expressions (without GVAR resolution a GVAR measure would reach the
-        // executor unresolved and fail its internal guard).
-        let isfiltered_model = Self::resolve_is_filtered_markers(&request, &self.model);
-        let base_model: &DataModel = isfiltered_model.as_ref().unwrap_or(&self.model);
-        let gvar_model = self
-            .resolve_query_scoped_bindings(&request, base_model, &role_filters, &token)
+        // The same pre-planning overlays as `query`, so the explain output
+        // reports the plan the query would actually run (see the helper).
+        let (model, effective_request) = self
+            .resolve_pre_plan_overlays(&request, &role_filters, &token)
             .await?;
-        let base_model: &DataModel = gvar_model.as_ref().unwrap_or(base_model);
-
-        // Resolve any calculation-group application (overlay model + expanded
-        // request); plan against the base model/original request otherwise.
-        let overlay = self.resolve_calculation_group(&request, base_model)?;
-        let (model, effective_request) = match &overlay {
-            Some((overlay_model, expanded)) => (overlay_model, expanded),
-            None => (base_model, &request),
-        };
 
         // Resolve pushable context-column CASEs (host-only, over `self.model`).
         let context_column_cases = self
             .resolve_pushable_context_columns(&request, &token)
             .await?;
         let (query_plan, pushdown_node) = PushdownPlanner::plan_explained(
-            effective_request,
-            model,
+            &effective_request,
+            &model,
             &self.registry,
             &role_filters,
             &context_column_cases,
@@ -4080,7 +4110,7 @@ impl Engine {
         let (batches, exec_node) = map_script_error(
             QueryExecutor::execute_explained(
                 &query_plan,
-                model,
+                &model,
                 &self.registry,
                 Some(&self.cache),
                 Some(self.max_inline_in_values),
@@ -4135,7 +4165,14 @@ impl Engine {
     /// the host can react eagerly; the same error otherwise surfaces on the
     /// next query. The model itself was already validated when it was built /
     /// loaded, so its scripts are known to compile.
-    pub fn set_model(&mut self, model: DataModel) -> EngineResult<()> {
+    ///
+    /// Derived measures (`[A] - [B]`) are given the home table of the measures
+    /// they build on; `model().measures()[i].table()` is therefore never empty
+    /// for a measure that reaches a table transitively.
+    pub fn set_model(&mut self, mut model: DataModel) -> EngineResult<()> {
+        // Same install-time guarantee as `build` (the host's `base + measures`
+        // overlay arrives here from a serde-loaded base).
+        model.resolve_measure_home_tables();
         self.model = model;
         self.rebuild_effective_udfs();
         self.query_cache.lock().invalidate_all();

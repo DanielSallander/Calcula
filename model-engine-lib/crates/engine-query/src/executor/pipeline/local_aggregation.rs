@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 use engine_connectors::{FilterCondition, FilterOperator, InFilterCondition};
 use engine_core::compute::context::ContextResolver;
 use engine_core::compute::expression::{
-    expand_global_variables, expand_measure_refs, expr_literal_from_scalar, infer_fact_table,
-    ComparisonOp, Expression, FilterPredicate,
+    expand_global_variables, expand_measure_refs, expr_literal_from_scalar, has_measure_ref,
+    infer_fact_table, ComparisonOp, Expression, FilterPredicate,
 };
 use engine_core::compute::measure::Measure;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
@@ -28,6 +28,22 @@ use crate::registry::SourceRegistry;
 use crate::request::{ColumnRef, OrderByClause, OrderTarget, TotalsMode};
 
 use super::bidirectional::{compute_bidirectional_filters, filter_batches_by_in_values};
+
+/// Whether the plan's measures must be rewritten (measure references inlined,
+/// global variables substituted) before SQL rendering. Keyed on the
+/// EXPRESSION, never on the home-table hint: the SQL renderer fails closed on
+/// an unexpanded `[Measure]` (`render/plain.rs`), and a derived measure can
+/// arrive WITH a home table (installed by the facade) yet unexpanded when a
+/// direct `QueryExecutor` caller bypasses the planner — `m.table().is_empty()`
+/// alone would switch expansion off for exactly the measures that need it.
+/// The planner already hands over resolved measures, so this is defense in
+/// depth, not the primary path.
+pub(super) fn needs_measure_expansion(measures: &[Measure], model: &DataModel) -> bool {
+    !model.global_variables().is_empty()
+        || measures
+            .iter()
+            .any(|m| has_measure_ref(m.expression()) || m.table().is_empty())
+}
 use super::fetch::{
     extract_column_values, filter_cached_batch, filter_cached_batch_or_groups,
     register_partitioned_table,
@@ -299,9 +315,7 @@ impl QueryExecutor {
             return Err(totals_unsupported("more than 31 group_by columns"));
         }
         // Expand measure references and global variable references.
-        let needs_expansion = measures
-            .iter()
-            .any(|m| m.table().is_empty() || !model.global_variables().is_empty());
+        let needs_expansion = needs_measure_expansion(measures, model);
         let expanded_measures: Vec<Measure> = if needs_expansion {
             measures
                 .iter()
@@ -2482,5 +2496,49 @@ impl QueryExecutor {
             .substitute_measure_refs(&env)
             .to_qualified_sql(&cc.table().to_lowercase())
             .map_err(crate::error::QueryError::Engine)
+    }
+}
+
+#[cfg(test)]
+mod needs_expansion_tests {
+    use super::*;
+    use engine_core::compute::measure::sum_measure;
+    use engine_core::model::{Column, Table};
+    use engine_core::types::DataType;
+
+    fn model() -> DataModel {
+        DataModel::builder()
+            .add_table(
+                Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap(),
+            )
+            .add_measure(sum_measure("TotalAmount", "Sales", "amount"))
+            .add_measure(Measure::new(
+                "Bonus",
+                Expression::MeasureRef("TotalAmount".to_string()),
+            ))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn resolved_derived_measure_still_needs_expansion() {
+        // A derived measure WITH a home table (the facade installs one) still
+        // carries a raw `[Measure]` the SQL renderer refuses; the old
+        // predicate keyed on the empty table and would have skipped it.
+        let mut installed = model();
+        installed.resolve_measure_home_tables();
+        let bonus = installed.measure("Bonus").unwrap().clone();
+        assert_eq!(bonus.table(), "Sales", "the premise: a resolved table");
+        assert!(needs_measure_expansion(&[bonus], &installed));
+
+        // A plain column measure needs nothing.
+        let plain = installed.measure("TotalAmount").unwrap().clone();
+        assert!(!needs_measure_expansion(&[plain], &installed));
+
+        // An unresolved derived measure (empty table) needs it too, as before.
+        let raw = model();
+        let bonus = raw.measure("Bonus").unwrap().clone();
+        assert_eq!(bonus.table(), "");
+        assert!(needs_measure_expansion(&[bonus], &raw));
     }
 }

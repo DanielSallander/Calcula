@@ -15966,13 +15966,17 @@ fn read_pulled_model(
         crate::log_warn!("CALP", "Skipping data source {}: {}", ds.definition.id, e);
         return None;
     }
-    let model: bi_engine::DataModel = match serde_json::from_value(model_json) {
+    let mut model: bi_engine::DataModel = match serde_json::from_value(model_json) {
         Ok(m) => m,
         Err(e) => {
             crate::log_warn!("CALP", "Failed to deserialize DataModel {}: {}", model_path, e);
             return None;
         }
     };
+    // A derived measure deserializes with an empty home table; the host's own
+    // copies (base_model, insights facts, the Model Editor listing) read it, so
+    // resolve here as `create_connection_core` does.
+    model.resolve_measure_home_tables();
     Some((json_value, model))
 }
 
@@ -17454,13 +17458,15 @@ pub async fn calp_refresh_data(
             crate::log_warn!("CALP", "Skipping data source {}: {}", ds.id, e);
             continue;
         }
-        let model: bi_engine::DataModel = match serde_json::from_value(actual_model_json) {
+        let mut model: bi_engine::DataModel = match serde_json::from_value(actual_model_json) {
             Ok(m) => m,
             Err(e) => {
                 crate::log_warn!("CALP", "Failed to parse model for {}: {}", ds.id, e);
                 continue;
             }
         };
+        // Derived measures' home tables (see `create_connection_core`).
+        model.resolve_measure_home_tables();
 
         // Create a temporary engine for this refresh
         let mut engine = bi_engine::Engine::new(model);
@@ -18370,8 +18376,12 @@ fn validate_published_strategies(
                 ds.name
             )
         })?;
-        let model: bi_engine::DataModel = serde_json::from_value(model_json.clone())
+        let mut model: bi_engine::DataModel = serde_json::from_value(model_json.clone())
             .map_err(|e| format!("The model '{}' could not be read: {e}", ds.name))?;
+        // A derived measure's fact table is only known after its references
+        // are resolved; without this the validator reports every analysis
+        // dimension of `[Revenue] - [Cost]` as "not directly related to ''".
+        model.resolve_measure_home_tables();
         let facts = facts_from_model(&model);
 
         let mut findings = validate(&facts, &doc);

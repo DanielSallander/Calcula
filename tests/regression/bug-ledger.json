@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 119,
+  "nextId": 121,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4422,6 +4422,56 @@
       },
       "fix": "core/engine/src/evaluator.rs fn_filter: the guard is now `args.len() < 2 || args.len() > 3`. Regression test `filter_with_too_few_arguments_returns_an_error_instead_of_panicking` in core/engine/src/array_semantics_tests.rs asserts the zero-, one- and four-argument forms all return #VALUE! AND that the two- and three-argument forms still produce their spills — a guard of `args.len() != 2` would satisfy the first half and silently break the if_empty form. Sabotaged by restoring the old guard: the test fails with the original panic at the original site. Both grader binaries rebuilt; 876 engine tests pass.",
       "notes": "The first sabotage attempt did not land — a blind string replace hit a different function's identical guard text and the test passed, which would have been recorded as 'verified'. The counts (20 `len() < 2` guards vs 10 `is_empty()` guards) are what exposed it. Related arity and parity defects found the same day: BUG-0114 (omitted optional arguments), BUG-0115/0116/0117 (criteria parser)."
+    },
+    {
+      "id": "BUG-0119",
+      "status": "fixed",
+      "discovered": "2026-09-17",
+      "source": {
+        "kind": "live-proof",
+        "seed": null,
+        "runId": "insight-overlays IO-6 live proof on tests/fixtures/model/sales_star.json through a CSV source, then a probe on the owner's AdventureWorks model over Postgres"
+      },
+      "violation": {
+        "oracleId": "derived-measure-empty-home-table-refused-by-planner",
+        "message": "A DERIVED MEASURE — one whose expression reaches its fact table only through [Measure] references (`Margin = [Revenue] - [Cost]`, `MarginPct = DIVIDE([Margin], [Revenue])`, `% Revenue of Total = GVAR total = [Revenue] RETURN [Revenue] / total`) — could not be queried on ANY model the host loads. `Measure::cached_table` is #[serde(skip)] and re-inferred from the expression alone on deserialization; `infer_fact_table` cannot see through a measure reference; and of every way a model reaches an engine only `Engine::load_model` ran `resolve_measure_home_tables`. Every host load path (create_connection_core, the .cala restore, the .calp subscribe and refresh) does serde + validate() + Engine::new, so the planner's `measure_tables` listed \"\" and refused the whole query with `QueryError::SourceNotRegistered(\"\")` — an error naming no table. Insights' model route then lost EVERY measure's facts (it propagated the first refusal with `?`), and the pivot field list showed `table=` for derived measures."
+      },
+      "whyNobodyNoticed": "The engine's own tests build models through the builder and query column-form measures; the one derived-measure query test uses a GVAR, whose facade overlay happens to inline references before planning. No test loaded a model from JSON and queried [A] - [B]. In the app, a Model Editor upsert incidentally resolves every empty-table measure, so a model edited once worked — until undo re-installed the unresolved base.",
+      "repro": {
+        "kind": "unit",
+        "steps": [
+          "model-engine-lib: `cargo test -p bi-engine derived_measure_tests` — a_json_loaded_derived_measure_queries_on_the_query_path builds a star through the builder, round-trips it through serde_json (the host's path), installs it with Engine::new and queries `Margin` grouped by product.",
+          "EXPECTED: Bikes 55, Helmets 25.",
+          "ACTUAL (before the fix): Err(SourceNotRegistered(\"\")). Five of the module's first seven tests were red on the unfixed engine, all with that error (an_installed_model_reports_a_derived_measures_home_table, a_json_loaded_derived_measure_queries_on_the_query_path, a_json_loaded_chained_derived_measure_resolves_transitively, a_json_loaded_derived_measure_queries_on_the_auto_refresh_path, a_gvar_measure_over_a_measure_ref_queries_on_the_auto_refresh_path); the module has since grown with the calculation-group, ISFILTERED and borrow cases."
+        ]
+      },
+      "fix": "Three layers, each owning one guarantee (model-engine-lib changelog entry 'Derived measures query on every load path'): the planner resolves every requested measure against the model before reading a table (`Measure::resolved_against`, new public API — references inlined, table re-inferred, metadata kept — so the pushed-join path gets a renderable expression too, and a constant measure is refused BY NAME instead of as \"\"); the executor keys reference expansion on the expression (`needs_measure_expansion`), never on the table hint, so an installed table can no longer switch expansion off; and `Engine::build` / `set_model` call `resolve_measure_home_tables` so hosts reading `model().measures()[i].table()` see the home table. Regression tests: crates/engine/src/derived_measure_tests.rs (plain, transitive, calc-group synthetic, ISFILTERED overlay, both entry points), planner and executor unit tests, `Measure::resolved_against` tests, the first-wins pin. Sabotaged per layer; the error TEXT was checked to change between the planner sabotage (SourceNotRegistered) and the expansion sabotage ('must be expanded').",
+      "notes": "Companion defect BUG-0120 (query_auto_refresh skipped GVAR resolution) was found by the same test module. The sheet-side Pareto gap and the auto-refresh OLS/rank/topN gap are recorded in docs/design/open-items.md, not here."
+    },
+    {
+      "id": "BUG-0120",
+      "status": "fixed",
+      "discovered": "2026-09-17",
+      "source": {
+        "kind": "live-proof",
+        "seed": null,
+        "runId": "insight-overlays IO-6 probe on the owner's AdventureWorks model: `% Revenue of Total` (a GVAR over [Revenue]) refused on the insights route while the same measure works in a pivot"
+      },
+      "violation": {
+        "oracleId": "query-auto-refresh-skips-gvar-resolution",
+        "message": "`Engine::query_auto_refresh` — the entry point behind the host's bi_query, column values, refresh, insights, cube and MCP — applied only the calculation-group expansion before planning, while `query` / `query_with_cancellation` / `query_explained` also fold ISFILTERED markers and resolve query-scoped (GVAR) bindings. A GVAR measure therefore reached the executor unresolved on the auto-refresh path and failed its guard ('reached the executor with an unresolved query-scoped (GVAR) binding'), while the same measure worked in a pivot (query_with_meta -> query). Three hand-copied overlay chains had drifted; the explain path had already been caught drifting once before (changelog: 'Engine::query_explained now resolves GVARs')."
+      },
+      "whyNobodyNoticed": "GVAR tests exercised `query` and `query_explained` only; the host's insights and bi_query routes had no test with a GVAR measure, and the pivot — where users see numbers — takes the path that worked.",
+      "repro": {
+        "kind": "unit",
+        "steps": [
+          "model-engine-lib: `cargo test -p bi-engine gvar_resolves_on_auto_refresh_path` (crates/engine/src/gvar_tests.rs) queries `PctOfTotal` (GVAR grand = SUM(Sales[amount]) RETURN DIVIDE(SUM(Sales[amount]), grand)) through query_auto_refresh.",
+          "EXPECTED: Bikes 130/190, Helmets 60/190 — the values `query` returns.",
+          "ACTUAL (before the fix): Err(InvalidQuery(\"internal: measure 'PctOfTotal' reached the executor with an unresolved query-scoped (GVAR) binding (it must be resolved at the Engine facade)\")) — the executor raises it as EngineError::InvalidExpression and the facade surfaces it as QueryError::InvalidQuery."
+        ]
+      },
+      "fix": "One shared pre-plan chain, `Engine::resolve_pre_plan_overlays` (ISFILTERED fold -> GVAR resolution -> calculation-group expansion, borrowing the model and request when nothing applies — pinned by the_pre_plan_chain_borrows_when_nothing_applies), used by query_with_cancellation, query_explained and query_auto_refresh so they cannot drift again. `query_auto_tier` is deliberately unchanged and still fails closed (gvar_via_auto_tier_fails_closed stays as is); making query_auto_refresh literally refresh_stale + query_with_cancellation (which would also bring object-level security, rank_by, top_n, measure_filters and the multi-role union to that path) is a security-visible change recorded in docs/design/open-items.md §2.1 for its own review.",
+      "notes": "Found by the same regression module as BUG-0119 (derived_measure_tests.rs: a_gvar_measure_over_a_measure_ref_queries_on_the_auto_refresh_path fails first on the empty home table, then on this guard once that is fixed)."
     }
   ]
 }

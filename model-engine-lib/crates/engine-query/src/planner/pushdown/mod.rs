@@ -574,12 +574,38 @@ impl PushdownPlanner {
         // Validate ROLLUP totals constraints (see `TotalsMode` docs).
         validate_totals(request)?;
 
-        // Resolve all measures.
+        // Resolve all measures. Plan input is the STORED measure resolved
+        // against the model: references inlined, home table re-inferred,
+        // metadata kept (`Measure::resolved_against`). Nothing below — nor the
+        // executor, which receives these via `QueryPlan::LocalAggregation::
+        // measures`, nor the pushed-join request, which clones the expression
+        // into the connector's `MeasureExpr` — may trust the table of a measure
+        // as the model stores it: a derived measure (`[Revenue] - [Cost]`)
+        // deserializes with `""`, which used to surface as
+        // `SourceNotRegistered("")`, an error naming no table, and a raw
+        // `MeasureRef` handed to a connector fails at SQL render. A measure
+        // whose resolved closure still names no table is a constant
+        // (`BLANK()`, `42`); no query has ever evaluated one, so refuse it by
+        // name rather than let `""` become a FROM table.
         let measures: Vec<Measure> = request
             .measures
             .iter()
-            .map(|name| model.measure(name).cloned())
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|name| -> QueryResult<Measure> {
+                let resolved = model
+                    .measure(name)
+                    .map_err(QueryError::Engine)?
+                    .resolved_against(model)
+                    .map_err(QueryError::Engine)?;
+                if resolved.table().is_empty() {
+                    return Err(QueryError::InvalidQuery(format!(
+                        "measure '{name}' references no table (a constant measure such as \
+                         BLANK() or a literal); constant measures cannot be evaluated by a \
+                         query in this version"
+                    )));
+                }
+                Ok(resolved)
+            })
+            .collect::<QueryResult<Vec<_>>>()?;
 
         // Effective ordering: explicit clauses, or the group-by columns
         // (ascending) when none were given. Targets are canonicalized to the
@@ -1588,6 +1614,151 @@ mod tests {
                 assert_eq!(request.table, "salesorderheader");
             }
             other => panic!("Expected PushedAggregation, got {other:?}"),
+        }
+    }
+
+    /// The star with a `cost` column and both spellings of margin: the derived
+    /// `[Revenue] - [Cost]` and its column form. Both built WITHOUT a source
+    /// text so their plans differ only by name.
+    fn star_with_margins() -> DataModel {
+        use engine_core::compute::parser::parse_measure_expression;
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("product_id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+                Column::new("cost", DataType::Float64),
+            ],
+        )
+        .unwrap();
+        let products = Table::new(
+            "Products",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("category", DataType::String),
+            ],
+        )
+        .unwrap();
+        DataModel::builder()
+            .add_table(sales)
+            .add_table(products)
+            .add_relationship(engine_core::model::Relationship::many_to_one(
+                "Sales_Products",
+                "Sales",
+                "product_id",
+                "Products",
+                "id",
+            ))
+            .add_measure(engine_core::compute::measure::sum_measure("Revenue", "Sales", "amount"))
+            .add_measure(engine_core::compute::measure::sum_measure("Cost", "Sales", "cost"))
+            .add_measure(Measure::new(
+                "Margin",
+                parse_measure_expression("[Revenue] - [Cost]").unwrap(),
+            ))
+            .add_measure(Measure::new(
+                "MarginInline",
+                parse_measure_expression("SUM(Sales[amount]) - SUM(Sales[cost])").unwrap(),
+            ))
+            .build()
+            .unwrap()
+    }
+
+    fn by_category(measure: &str) -> QueryRequest {
+        QueryRequest {
+            measures: vec![measure.into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            ..Default::default()
+        }
+    }
+
+    /// The column-form-equality oracle: a derived measure must plan EXACTLY
+    /// like its column form — pushed join on a single connector, local
+    /// aggregation across connectors — with its references inlined, so the
+    /// plan carries a real home table and never a raw `MeasureRef`. The
+    /// builder leaves the derived measure's table empty (pinned in
+    /// `measure_refs.rs`), which used to make this
+    /// `Err(SourceNotRegistered(""))`; a table-only half-fix would still hand
+    /// the connector a `MeasureRef`.
+    #[test]
+    fn derived_measure_plans_exactly_like_its_column_form() {
+        use engine_core::compute::expression::has_measure_ref;
+        let model = star_with_margins();
+        assert_eq!(model.measure("Margin").unwrap().table(), "", "the premise");
+
+        let registry = mock_registry_star(0);
+        let derived = PushdownPlanner::plan(&by_category("Margin"), &model, &registry, &[]).unwrap();
+        let column_form =
+            PushdownPlanner::plan(&by_category("MarginInline"), &model, &registry, &[]).unwrap();
+        assert!(matches!(derived, QueryPlan::PushedJoinAggregation { .. }), "{derived:?}");
+        let derived_text = format!("{derived:?}");
+        assert!(!derived_text.contains("MeasureRef"), "references must be inlined: {derived_text}");
+        assert_eq!(
+            derived_text,
+            format!("{column_form:?}").replace("MarginInline", "Margin"),
+        );
+
+        let cross = mock_registry_cross_source();
+        let derived = PushdownPlanner::plan(&by_category("Margin"), &model, &cross, &[]).unwrap();
+        let column_form =
+            PushdownPlanner::plan(&by_category("MarginInline"), &model, &cross, &[]).unwrap();
+        match (&derived, &column_form) {
+            (
+                QueryPlan::LocalAggregation { fetches: fa, measures: ma, .. },
+                QueryPlan::LocalAggregation { fetches: fb, measures: mb, .. },
+            ) => {
+                assert_eq!(ma[0].table(), "Sales");
+                assert!(!has_measure_ref(ma[0].expression()));
+                assert_eq!(
+                    format!("{:?}", ma[0].expression()),
+                    format!("{:?}", mb[0].expression())
+                );
+                assert_eq!(
+                    fa.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>(),
+                    fb.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>(),
+                );
+            }
+            other => panic!("expected two LocalAggregation plans, got {other:?}"),
+        }
+    }
+
+    /// A measure whose resolved closure names no table is a constant; it is
+    /// refused BY NAME at plan time, alone or beside a real measure, never as
+    /// `SourceNotRegistered("")`.
+    #[test]
+    fn constant_measure_is_refused_by_name() {
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+                Column::new("region", DataType::String),
+            ],
+        )
+        .unwrap();
+        let model = DataModel::builder()
+            .add_table(sales)
+            .add_measure(engine_core::compute::measure::sum_measure("TotalAmount", "Sales", "amount"))
+            .add_measure(Measure::new(
+                "Fixed",
+                engine_core::compute::expression::Expression::LiteralInt(42),
+            ))
+            .build()
+            .unwrap();
+        let registry = mock_registry_single(0);
+        let by_region = |measures: Vec<String>| QueryRequest {
+            measures,
+            group_by: vec![ColumnRef::new("Sales", "region")],
+            ..Default::default()
+        };
+        for request in [by_region(vec!["Fixed".into()]), by_region(vec!["TotalAmount".into(), "Fixed".into()])] {
+            match PushdownPlanner::plan(&request, &model, &registry, &[]) {
+                Err(QueryError::InvalidQuery(msg)) => {
+                    assert!(msg.contains("'Fixed'"), "{msg}");
+                    assert!(!msg.contains("TotalAmount"), "{msg}");
+                }
+                other => panic!("expected InvalidQuery naming Fixed, got {other:?}"),
+            }
         }
     }
 

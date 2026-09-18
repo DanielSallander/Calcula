@@ -807,8 +807,18 @@ contributions `dimension-not-in-pivot`: the refusals, in the log, are the ones t
    `?` — the pane and the overlay got NOTHING, Revenue included, while the dimension slices a few
    lines below already noted a refusal and went on. The series query now follows the same rule:
    "MarginPct was not analysed: …" in the notes, the other measures' facts survive (the journey
-   asserts both). The engine side — a derived measure resolving to an EMPTY home table — is a
-   separate finding for `model-engine-lib`, recorded in open-items, not fixed here.
+   asserts both). The engine side — a derived measure resolving to an EMPTY home table — was
+   then fixed in `model-engine-lib` the same day (BUG-0119, and BUG-0120 for the GVAR path;
+   changelog entry "Derived measures query on every load path"): the planner resolves every
+   requested measure against the model before reading a table, the executor keys expansion on
+   the expression, and `Engine::new` / `set_model` fill the home tables hosts read. The insights
+   note for MarginPct/Margin therefore no longer appears on the sales-star fixture; the
+   "say it and continue" rule stays, for the next refused measure. A probe through the app
+   then showed the host's OWN `base_model` clone (taken before the engine is built; what the
+   Model Editor lists and what `insights_analyze_model` builds its facts from) still carried
+   `""`, so the notes read "Product is not directly related to " — the host now resolves that
+   copy at its four deserialize sites too, and `Margin` gains its contribution facts by
+   category, region and product name, the slicing the fixture's strategy declares for it.
 2. **A filter applied through the pivot API announced nothing.** `PIVOT_REGIONS_UPDATED` fires
    only from the region sync, which the API paths (a filter from a script, a test, or the
    Model-Editor-driven field change) never run; the overlay's cue stayed in the column Doodads had
@@ -837,7 +847,9 @@ pairs than the pivot has axis fields (unit-pinned; sabotaged → only that test 
 then showed the Grand Total alone). Also seen: the contribution sentence reads " rose 16 614,3"
 for the blank member — a narrator nicety for `model.rs` ("(blank)"), noted in open-items; and the
 same `Table '' has no registered source` refusal for `% Revenue of Total`, a Block over a measure
-reference, which confirms the engine finding on a model the owner authored.
+reference, which confirmed the engine finding on a model the owner authored — fixed since
+(BUG-0119/BUG-0120; that measure also needed `query_auto_refresh` to resolve its GVAR, which the
+insights route uses and the pivot route did not).
 
 **Not done at this point:** the three follow-ups from §5d — built next, §5f.
 

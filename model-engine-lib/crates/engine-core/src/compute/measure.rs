@@ -9,7 +9,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::compute::aggregate::AggregateOp;
-use crate::compute::expression::{self as expr, infer_fact_table, Expression};
+use crate::compute::expression::{
+    self as expr, expand_measure_refs, has_measure_ref, infer_fact_table, Expression,
+};
 
 /// A named measure: a reusable aggregation expression over a table.
 ///
@@ -242,7 +244,12 @@ impl Measure {
     /// Returns the table this measure operates on.
     ///
     /// Inferred from qualified column references in the expression at
-    /// construction time.
+    /// construction time. A measure that reaches its fact only through
+    /// `[Measure]` references gets its table when the model is installed on
+    /// an `Engine` (`Engine::new` / `with_memory_budget` / `set_model` /
+    /// `load_model`) or via `DataModel::resolve_measure_home_tables`; until
+    /// then it is empty. The query planner never trusts this value — see
+    /// [`Measure::resolved_against`].
     pub fn table(&self) -> &str {
         &self.cached_table
     }
@@ -291,6 +298,35 @@ impl Measure {
     /// `infer_fact_table` cannot see through a `MeasureRef` without the model.
     pub(crate) fn set_home_table(&mut self, table: String) {
         self.cached_table = table;
+    }
+
+    /// This measure with its `[Measure]` references inlined against `model`
+    /// and the home table re-inferred from the result; every host-facing
+    /// field (name, group, source, format strings, detail rows, description,
+    /// hidden) is kept. A measure with no references comes back as a plain
+    /// clone.
+    ///
+    /// `cached_table` is a CONSTRUCTION-time cache: `infer_fact_table` cannot
+    /// see through a reference, and of all the ways a model arrives (builder,
+    /// serde, serde + validate, an overlay, a calculation-group synthetic)
+    /// only the engine facade fills it for a derived measure. A consumer that
+    /// reads `table()` on a stored measure is trusting the path it arrived
+    /// by; the query planner calls this instead. The resolved copy is
+    /// ephemeral plan input, never persisted — `source()` keeps the authored
+    /// reference text while the AST is the expansion (the pairing the
+    /// facade's GVAR overlay already uses). A closure that still infers no
+    /// table (a constant chain) legitimately keeps `""`.
+    pub fn resolved_against(
+        &self,
+        model: &crate::model::schema::DataModel,
+    ) -> crate::error::EngineResult<Measure> {
+        if !has_measure_ref(&self.expression) {
+            return Ok(self.clone());
+        }
+        let expanded = expand_measure_refs(&self.expression, model)?;
+        let mut resolved = self.clone();
+        resolved.set_expression(expanded);
+        Ok(resolved)
     }
 
     /// Rewrite every **measure reference** to `old` in this measure as `new`,
@@ -694,5 +730,91 @@ mod tests {
         let mut m = Measure::new("Bonus", expr).with_source("[Profit] + 1");
         assert!(!m.rename_measure_reference("Revenue", "Total Sales"));
         assert_eq!(m.source(), Some("[Profit] + 1"));
+    }
+}
+
+#[cfg(test)]
+mod resolved_against_tests {
+    use super::*;
+    use crate::compute::expression::has_measure_ref;
+    use crate::compute::measure::sum_measure;
+    use crate::compute::parser::parse_measure_expression;
+    use crate::model::column::Column;
+    use crate::model::schema::DataModel;
+    use crate::model::table::Table;
+    use crate::types::DataType;
+
+    fn model() -> DataModel {
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("amount", DataType::Float64),
+                        Column::new("cost", DataType::Float64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_measure_group(MeasureGroup::new("Financial"))
+            .add_measure(sum_measure("Revenue", "Sales", "amount"))
+            .add_measure(sum_measure("Cost", "Sales", "cost"))
+            .add_measure(
+                Measure::new("Margin", parse_measure_expression("[Revenue] - [Cost]").unwrap())
+                    .with_source("[Revenue] - [Cost]")
+                    .with_group("Financial")
+                    .with_format_string("#,##0")
+                    .with_format_string_expression("\"#,##0\"")
+                    .with_detail_rows(vec!["Sales[amount]".to_string()])
+                    .with_description("Revenue less cost")
+                    .hidden(),
+            )
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn resolved_against_inlines_references_and_infers_home_table_keeping_metadata() {
+        let model = model();
+        let margin = model.measure("Margin").unwrap();
+        // The stored measure: no column of its own, so no table.
+        assert_eq!(margin.table(), "");
+        assert!(has_measure_ref(margin.expression()));
+
+        let resolved = margin.resolved_against(&model).unwrap();
+        assert_eq!(resolved.table(), "Sales");
+        assert!(!has_measure_ref(resolved.expression()), "references are inlined");
+        // Every host-facing field survives; the authored text stays the source.
+        assert_eq!(resolved.name(), "Margin");
+        assert_eq!(resolved.source(), Some("[Revenue] - [Cost]"));
+        assert_eq!(resolved.group(), Some("Financial"));
+        assert_eq!(resolved.format_string(), Some("#,##0"));
+        assert_eq!(resolved.format_string_expression(), Some("\"#,##0\""));
+        assert_eq!(resolved.detail_rows(), margin.detail_rows());
+        assert_eq!(resolved.detail_rows().map(|d| d.len()), Some(1));
+        assert_eq!(resolved.description(), Some("Revenue less cost"));
+        assert!(resolved.is_hidden());
+        // The stored measure is untouched.
+        assert_eq!(margin.table(), "");
+    }
+
+    #[test]
+    fn a_reference_free_measure_resolves_to_an_equal_clone() {
+        let model = model();
+        let revenue = model.measure("Revenue").unwrap();
+        let resolved = revenue.resolved_against(&model).unwrap();
+        assert_eq!(resolved.name(), revenue.name());
+        assert_eq!(resolved.table(), revenue.table());
+        assert_eq!(
+            format!("{:?}", resolved.expression()),
+            format!("{:?}", revenue.expression())
+        );
+    }
+
+    #[test]
+    fn a_dangling_reference_is_an_error_not_a_panic() {
+        let model = model();
+        let dangling = Measure::new("Bad", parse_measure_expression("[Nope] * 2").unwrap());
+        assert!(dangling.resolved_against(&model).is_err());
     }
 }

@@ -22,8 +22,14 @@ pub fn has_measure_ref(expr: &Expression) -> bool {
         | Expression::Xor(left, right) => has_measure_ref(left) || has_measure_ref(right),
         Expression::Not(inner) | Expression::IsBlank(inner) => has_measure_ref(inner),
         Expression::Aggregate { operand, .. } => has_measure_ref(operand),
-        Expression::Keep { expr, .. }
-        | Expression::Clear { expr, .. }
+        // A KEEP condition may itself reference a measure (`Sales[amount] >
+        // [AvgAmount]`); `expand_measure_refs` inlines it there, so the
+        // presence check must see it too — a consumer that gates expansion on
+        // this answer would otherwise hand the SQL renderer a raw reference.
+        Expression::Keep {
+            expr, conditions, ..
+        } => has_measure_ref(expr) || conditions.iter().any(has_measure_ref),
+        Expression::Clear { expr, .. }
         | Expression::Reset { expr, .. }
         | Expression::ClearInner { expr, .. }
         | Expression::ClearOuter { expr, .. }
@@ -943,5 +949,94 @@ mod tests {
             None,
         );
         assert_eq!(infer_fact_table(&w), Some("fact_sales".into()));
+    }
+
+    /// A DELIBERATE LIMITATION, pinned rather than left implicit: a measure
+    /// that reaches two fact tables is homed on the FIRST one inference meets
+    /// — left before right, bindings before the result. A cross-fact derived
+    /// measure therefore plans as single-fact once its references are inlined;
+    /// widening the planner's fetch set to every table in the closure is a
+    /// separate decision.
+    /// A `[Measure]` inside a KEEP condition is a reference like any other:
+    /// `expand_measure_refs` inlines it, so the presence check must report it,
+    /// or `Measure::resolved_against` returns the measure unexpanded and the
+    /// planner ships a raw reference to the SQL renderer.
+    #[test]
+    fn has_measure_ref_sees_a_reference_inside_a_keep_condition() {
+        use crate::compute::aggregate::AggregateOp;
+
+        let keep = Expression::Keep {
+            expr: Box::new(agg(AggregateOp::Sum, qualified_col("Sales", "amount"))),
+            filters: vec![],
+            variables: vec![],
+            conditions: vec![Expression::Comparison {
+                left: Box::new(qualified_col("Sales", "amount")),
+                op: ComparisonOp::GreaterThan,
+                right: Box::new(Expression::MeasureRef("AvgAmount".to_string())),
+            }],
+            in_predicates: vec![],
+        };
+        assert!(has_measure_ref(&keep));
+
+        let plain = Expression::Keep {
+            expr: Box::new(agg(AggregateOp::Sum, qualified_col("Sales", "amount"))),
+            filters: vec![],
+            variables: vec![],
+            conditions: vec![Expression::Comparison {
+                left: Box::new(qualified_col("Sales", "amount")),
+                op: ComparisonOp::GreaterThan,
+                right: Box::new(Expression::LiteralInt(10)),
+            }],
+            in_predicates: vec![],
+        };
+        assert!(!has_measure_ref(&plain));
+    }
+
+    #[test]
+    fn infer_fact_table_is_first_wins_left_before_right_and_bindings_before_result() {
+        use crate::compute::aggregate::AggregateOp;
+
+        let cross_fact = Expression::BinaryOp {
+            left: Box::new(agg(AggregateOp::Sum, qualified_col("Sales", "a"))),
+            op: crate::compute::expression::ArithmeticOp::Subtract,
+            right: Box::new(agg(AggregateOp::Sum, qualified_col("Budget", "a"))),
+        };
+        assert_eq!(infer_fact_table(&cross_fact), Some("Sales".into()));
+
+        // A GVAR binding before the result.
+        let gvar_first = Expression::Block {
+            bindings: vec![],
+            query_scoped_bindings: vec![(
+                "t".to_string(),
+                agg(AggregateOp::Max, qualified_col("Product", "id")),
+            )],
+            result: Box::new(agg(AggregateOp::Sum, qualified_col("Sales", "a"))),
+        };
+        assert_eq!(infer_fact_table(&gvar_first), Some("Product".into()));
+
+        // A VAR binding before the result.
+        let var_first = Expression::Block {
+            bindings: vec![(
+                "t".to_string(),
+                agg(AggregateOp::Max, qualified_col("Product", "id")),
+            )],
+            query_scoped_bindings: vec![],
+            result: Box::new(agg(AggregateOp::Sum, qualified_col("Sales", "a"))),
+        };
+        assert_eq!(infer_fact_table(&var_first), Some("Product".into()));
+
+        // VAR bindings before GVAR bindings, when both are present.
+        let var_before_gvar = Expression::Block {
+            bindings: vec![(
+                "v".to_string(),
+                agg(AggregateOp::Max, qualified_col("Customer", "id")),
+            )],
+            query_scoped_bindings: vec![(
+                "g".to_string(),
+                agg(AggregateOp::Max, qualified_col("Product", "id")),
+            )],
+            result: Box::new(agg(AggregateOp::Sum, qualified_col("Sales", "a"))),
+        };
+        assert_eq!(infer_fact_table(&var_before_gvar), Some("Customer".into()));
     }
 }

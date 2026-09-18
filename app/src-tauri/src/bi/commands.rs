@@ -1071,13 +1071,16 @@ pub(crate) fn restore_local_bi_connections(
         } else {
             sc.model_json.clone()
         };
-        let model: bi_engine::DataModel = match serde_json::from_value(model_value) {
+        let mut model: bi_engine::DataModel = match serde_json::from_value(model_value) {
             Ok(m) => m,
             Err(e) => {
                 crate::log_warn!("BI", "restore connection {}: model parse failed: {}", sc.id, e);
                 continue;
             }
         };
+        // Same reason as `create_connection_core`: the `base_model` clone must
+        // carry derived measures' home tables, not only the engine's copy.
+        model.resolve_measure_home_tables();
         let conn_id = ConnectionId::parse(&sc.id)
             .unwrap_or_else(|| identity::EntityId::from_bytes(identity::generate_uuid_v7()));
         // Re-key the engine to the ORIGINAL model path so it finds the on-disk
@@ -2254,9 +2257,15 @@ async fn create_connection_core(
     };
 
     check_model_format_version(&model_json)?;
-    let model: bi_engine::DataModel = serde_json::from_value(model_json)
+    let mut model: bi_engine::DataModel = serde_json::from_value(model_json)
         .map_err(|e| format!("Failed to parse model: {}", e))?;
     model.validate().map_err(|e| format!("Model validation failed: {}", e))?;
+    // A derived measure (`[Revenue] - [Cost]`) deserializes with an EMPTY home
+    // table. The engine fills it when the model is installed, but the copy
+    // kept as `base_model` below is taken BEFORE that, and it is what the Model
+    // Editor lists, what `insights_analyze_model` builds its facts from, and
+    // what every later `set_model` starts from — so resolve it here too.
+    model.resolve_measure_home_tables();
 
     // Generated up front: the path-less cache key derives from it.
     let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
