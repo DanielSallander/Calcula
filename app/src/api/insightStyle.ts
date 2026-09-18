@@ -46,7 +46,12 @@ export const DEFAULT_OVERLAY_STYLE: OverlayStyle = Object.freeze({
     good: Object.freeze({ color: "#1e8e3e", dash: [] }),
     bad: Object.freeze({ color: "#d93025", dash: [] }),
     attention: Object.freeze({ color: "#e37400", dash: [6, 4] }),
-    neutral: Object.freeze({ color: "#0e639c", dash: [2, 3] }),
+    // Charcoal, not blue. The default bar is blue, so a blue cue on a bar chart
+    // is a mark the reader has to hunt for — the owner's own finding. Charcoal
+    // reads against every series colour and, unlike red, amber or green, says
+    // nothing about whether the number it marks is good news: this polarity is
+    // exactly the case where NOTHING declares a direction (D-IO-2).
+    neutral: Object.freeze({ color: "#3c4043", dash: [2, 3] }),
   }) as Record<ChartCuePolarity, OverlayPolarityStyle>,
   lineWidth: 2,
   bandOpacity: 0.12,

@@ -191,6 +191,7 @@ export function paintChartComments(
   geometry: HitGeometry,
   data: Pick<ParsedChartData, "series">,
   comments: readonly ChartCueComment[],
+  /** Keyed by CUE id, not fact id: a fact owns several cues with different polarities. */
   cuesById: ReadonlyMap<string, ChartCue>,
 ): CommentBox[] {
   const boxes: CommentBox[] = [];
@@ -227,7 +228,7 @@ export function paintChartComments(
     if (x + width > chartX + chartWidth - 4) x = at.x - 8 - width;
     const above = at.y - height - 6;
     const y = above < chartY + COMMENT_TOP_RESERVED ? at.y + 6 : above;
-    const polarity = cuesById.get(comment.factId)?.polarity ?? "neutral";
+    const polarity = cuesById.get(comment.cueId)?.polarity ?? "neutral";
     const stroke = cueStyleFor(polarity).stroke;
 
     ctx.strokeStyle = stroke;

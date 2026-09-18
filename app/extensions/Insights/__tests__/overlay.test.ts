@@ -56,6 +56,13 @@ function bundleFor(bestLabel: string, bestIndex: number, best: number, provenanc
   };
 }
 
+/** The chart's nth cue. `extremes` emits two: [0] = the highest, [1] = the lowest. */
+function cueOn(chartId: string, ordinal = 0) {
+  const c = cues.getChartCues(chartId)[ordinal];
+  if (!c) throw new Error(`no cue ${ordinal} on ${chartId}`);
+  return c;
+}
+
 async function flush(): Promise<void> {
   for (let i = 0; i < 8; i++) await Promise.resolve();
 }
@@ -130,7 +137,7 @@ describe("showOverlay", () => {
 describe("following the data", () => {
   it("recomputes once after a burst of data changes, and comments follow their fact", async () => {
     await overlay.showOverlay("chart-1");
-    await overlay.addComment("chart-1", EXT, "Launch month");
+    await overlay.addComment("chart-1", cueOn("chart-1"), "Launch month");
     expect(cues.getChartComments("chart-1")[0].anchor?.categoryLabel).toBe("Mar");
 
     // The data changed: the highest month is now Feb.
@@ -152,6 +159,34 @@ describe("following the data", () => {
     expect(comment.movedFrom).toBe("Mar");
   });
 
+  // The owner's live finding, end to end through the owner rather than the pure
+  // rule: `extremes` puts a ring on the highest bar AND on the lowest, both
+  // carrying one fact id. A comment written on the LOWEST must stay on the
+  // lowest — before the cue-identity fix it was written onto the highest, and
+  // every later recomputation dragged it along behind that bar.
+  it("a comment on the lowest bar stays on the lowest bar when the highest moves", async () => {
+    await overlay.showOverlay("chart-1");
+    const lowest = cueOn("chart-1", 1);
+    expect(lowest.anchor).toMatchObject({ categoryLabel: "Jan" });
+
+    await overlay.addComment("chart-1", lowest, "why so low?");
+    expect(cues.getChartComments("chart-1")[0].anchor?.categoryLabel).toBe("Jan");
+
+    // The data changed: the highest month is now Feb; the lowest is still Jan.
+    h.invoke.mockResolvedValue(bundleFor("Feb", 1, 200));
+    h.resolveSeries.mockResolvedValue({ ...snapshot, series: [{ name: "Sales", values: [100, 200, 150] }] });
+    const off = overlay.followChartData();
+    cues.announceChartDataChanged("chart-1");
+    await vi.advanceTimersByTimeAsync(overlay.RECOMPUTE_DEBOUNCE_MS + 10);
+    await flush();
+    off();
+
+    expect(cues.getChartCues("chart-1")[0].anchor).toMatchObject({ categoryLabel: "Feb" });
+    const comment = cues.getChartComments("chart-1")[0];
+    expect(comment.anchor?.categoryLabel).toBe("Jan");
+    expect(comment.movedFrom).toBeUndefined();
+  });
+
   it("ignores data changes on a chart whose overlay is off", async () => {
     const off = overlay.followChartData();
     cues.announceChartDataChanged("chart-9");
@@ -164,7 +199,7 @@ describe("following the data", () => {
 describe("comments", () => {
   it("persist undoably in the extension's own blob and reload from it", async () => {
     await overlay.showOverlay("chart-1");
-    const c = await overlay.addComment("chart-1", EXT, "Launch month");
+    const c = await overlay.addComment("chart-1", cueOn("chart-1"), "Launch month");
     expect(h.setExtensionDataUndoable).toHaveBeenCalledWith(
       "calcula.insights",
       { comments: { "chart-1": [c] } },
@@ -185,7 +220,7 @@ describe("comments", () => {
   it("the overlay style persists in the same blob, undoably, becomes what painters read, and reloads", async () => {
     const style = await import("@api/insightStyle");
     await overlay.showOverlay("chart-1");
-    const c = await overlay.addComment("chart-1", EXT, "note");
+    const c = await overlay.addComment("chart-1", cueOn("chart-1"), "note");
     await overlay.saveOverlayStyle(style.normalizeOverlayStyle({ polarity: { bad: { color: "#800000", dash: [] } } }));
     expect(style.overlayStyleFor("bad").color).toBe("#800000");
     const [id, payload, description] = h.setExtensionDataUndoable.mock.calls.at(-1)!;
@@ -194,7 +229,7 @@ describe("comments", () => {
     expect((payload as { comments: unknown; style: { polarity: { bad: { color: string } } } }).comments).toEqual({ "chart-1": [c] });
     expect((payload as { style: { polarity: { bad: { color: string } } } }).style.polarity.bad.color).toBe("#800000");
     // A later comment write carries the style along rather than dropping it.
-    await overlay.addComment("chart-1", EXT, "second");
+    await overlay.addComment("chart-1", cueOn("chart-1"), "second");
     expect((h.setExtensionDataUndoable.mock.calls.at(-1)![1] as { style?: unknown }).style).toBeTruthy();
 
     await overlay.saveOverlayStyle(null);
@@ -211,7 +246,7 @@ describe("comments", () => {
 
   it("hide clears the cues but keeps the comments; reset drops everything", async () => {
     await overlay.showOverlay("chart-1");
-    await overlay.addComment("chart-1", EXT, "note");
+    await overlay.addComment("chart-1", cueOn("chart-1"), "note");
     overlay.hideOverlay("chart-1");
     expect(overlay.isOverlayOn("chart-1")).toBe(false);
     expect(cues.getChartCues("chart-1")).toEqual([]);

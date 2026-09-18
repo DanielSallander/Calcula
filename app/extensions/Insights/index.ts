@@ -25,7 +25,7 @@ import { registerInsightsProvider } from "@api/insightsService";
 import { AppEvents, onAppEvent } from "@api/events";
 import { insightsBackend } from "./lib/backend";
 import { createInsightsProvider } from "./lib/provider";
-import { registerChartExplain } from "./lib/chartExplain";
+import { analyzeCurrentTarget, registerChartExplain } from "./lib/chartExplain";
 import { registerOverlayMenu } from "./lib/overlayMenu";
 import { followChartData, loadComments, resetOverlays, showOverlay, hideOverlay, isOverlayOn } from "./lib/overlay";
 import {
@@ -68,6 +68,30 @@ function isMultiCellSelection(context: GridMenuContext): boolean {
   return sel.startRow !== sel.endRow || sel.startCol !== sel.endCol;
 }
 
+/**
+ * True when the selection touches a pivot table's output.
+ *
+ * A pivot's cells are not a range of numbers — a grand total sits in the same
+ * column as the rows it sums, so the contribution fact reads it as a peer and
+ * says "Grand Total is 50% of all Revenue". The backend refuses such a range
+ * outright (`PIVOT_RANGE_REFUSAL`, the guard every caller shares); this is the
+ * matching courtesy in the menu, so the reader is not offered an action that
+ * can only be refused.
+ */
+function selectionTouchesAPivot(context: GridMenuContext): boolean {
+  const sel = context.selection;
+  if (!sel) return false;
+  const sr = Math.min(sel.startRow, sel.endRow);
+  const er = Math.max(sel.startRow, sel.endRow);
+  const sc = Math.min(sel.startCol, sel.endCol);
+  const ec = Math.max(sel.startCol, sel.endCol);
+  return getGridRegions().some((r) => {
+    if (r.type !== "pivot") return false;
+    const g = r as unknown as { startRow: number; startCol: number; endRow: number; endCol: number };
+    return g.startRow <= er && sr <= g.endRow && g.startCol <= ec && sc <= g.endCol;
+  });
+}
+
 function activate(context: ExtensionContext): void {
   if (isActivated) {
     console.warn("[Insights] Already activated, skipping.");
@@ -101,9 +125,12 @@ function activate(context: ExtensionContext): void {
 
   // 3. The command. Opens the pane and runs, so a keybinding or the command
   //    palette lands the reader on the answer rather than on an empty pane.
+  // A selected chart is the subject, ahead of the grid selection: the same rule
+  // the pane's own button follows, so the palette and the button never disagree
+  // about what "analyse" means right now.
   context.commands.register(INSIGHTS_ANALYZE_SELECTION_COMMAND, () => {
     openPane();
-    return analyzeSelection();
+    return analyzeCurrentTarget(openPane);
   });
   cleanupFns.push(() => context.commands.unregister(INSIGHTS_ANALYZE_SELECTION_COMMAND));
 
@@ -114,7 +141,7 @@ function activate(context: ExtensionContext): void {
     label: "Analyse this range…",
     group: GridMenuGroups.DATA,
     order: 60,
-    visible: isMultiCellSelection,
+    visible: (context: GridMenuContext) => isMultiCellSelection(context) && !selectionTouchesAPivot(context),
     onClick: () => {
       openPane();
       void analyzeSelection();
@@ -175,7 +202,9 @@ function activate(context: ExtensionContext): void {
       const pivotId = region?.data?.pivotId;
       if (typeof pivotId === "string" && pivotRect(pivotId)) return { kind: "pivot", pivotId };
     }
-    if (!isMultiCellSelection(context)) return null;
+    // A selection that reaches into a pivot is not a range either, even when
+    // the click that opened the menu landed outside one.
+    if (!isMultiCellSelection(context) || selectionTouchesAPivot(context)) return null;
     const sel = context.selection!;
     return {
       kind: "range",

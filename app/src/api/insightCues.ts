@@ -377,13 +377,18 @@ export function cuesForChart(bundle: InsightBundle, snapshot: ChartSeriesSnapsho
     const direction = directionOf(insight);
     let firstFailure: CueDropReason | null = null;
     let placed = 0;
-    for (const draft of drafts) {
+    for (const [ordinal, draft] of drafts.entries()) {
       const failure = validate(draft, snapshot);
       if (failure) {
         firstFailure ??= failure;
         continue;
       }
       cues.push({
+        // The DRAFT's ordinal, not the placed count: a rule emits its drafts in
+        // a fixed order (extremes = highest, then lowest), so cue `…#1` is the
+        // same point of interest whether or not `…#0` survived validation. A
+        // placed counter would renumber the survivor and move a comment.
+        cueId: `${fact.id}#${ordinal}`,
         factId: fact.id,
         kind: draft.kind,
         polarity: polarityFor(draft.tone, direction),

@@ -36,6 +36,7 @@ import {
   setChartCueStep,
   setChartCues,
   setSelectedChartCue,
+  type ChartCue,
   type ChartCueComment,
 } from "@api/chartCues";
 import { CHART_SERIES_MAX_POINTS, resolveChartSeries, type ChartSeriesSnapshot } from "@api/chartData";
@@ -142,7 +143,10 @@ export async function showOverlay(chartId: string, options: { stepToFactId?: str
     const at = steps.indexOf(options.stepToFactId);
     if (at >= 0) {
       setChartCueStep(chartId, at);
-      setSelectedChartCue(chartId, options.stepToFactId);
+      // The pane names a FACT; selection names a CUE. A fact can own several
+      // (extremes rings the highest and the lowest), so land on its first.
+      const first = entry.cueSet.cues.find((c) => c.factId === options.stepToFactId);
+      setSelectedChartCue(chartId, first ? first.cueId : null);
     }
   }
   return { outcome: "shown", chartId, cueSet: entry.cueSet, notice: overlayNotice(entry) };
@@ -240,11 +244,17 @@ export function documentOverlayStyle(): OverlayStyle | null {
   return persistedStyle;
 }
 
-/** Add a comment on a fact of a chart, anchored where its cue is now. */
-export async function addComment(chartId: string, factId: string, text: string): Promise<ChartCueComment> {
+/**
+ * Add a comment on ONE cue of a chart, anchored where that cue is now.
+ *
+ * It takes the cue, not a fact id: the reader clicked a particular ring, and a
+ * fact-keyed comment lands on that fact's FIRST cue instead — which is how a
+ * comment written on the 2023 bar was drawn on 2025.
+ */
+export async function addComment(chartId: string, cue: ChartCue, text: string): Promise<ChartCueComment> {
   commentSeq += 1;
   const id = `k${Date.now().toString(36)}-${commentSeq}`;
-  const comment = newComment(id, factId, text, getChartCues(chartId));
+  const comment = newComment(id, cue, text, getChartCues(chartId));
   const list = [...(commentsByChart[chartId] ?? []), comment];
   commentsByChart = { ...commentsByChart, [chartId]: list };
   setChartComments(chartId, list);
@@ -305,8 +315,15 @@ function activeChartIdsWithComments(): string[] {
   return [...active.keys()].filter((id) => getChartOverlay(id).comments.length > 0);
 }
 
+/**
+ * `cueId` is required, not optional. A comment saved without one can never
+ * re-anchor — `datumOfCue` would find nothing and it would sit in the tray
+ * forever, looking like the data changed when it is really a stale shape. We
+ * owe no backward compatibility, so such a record is dropped on load.
+ */
 function isComment(v: unknown): v is ChartCueComment {
-  return typeof v === "object" && v !== null && typeof (v as ChartCueComment).id === "string" && typeof (v as ChartCueComment).factId === "string" && typeof (v as ChartCueComment).text === "string";
+  const c = v as ChartCueComment;
+  return typeof v === "object" && v !== null && typeof c.id === "string" && typeof c.cueId === "string" && typeof c.factId === "string" && typeof c.text === "string";
 }
 
 /** Drop everything (File > New, deactivate). */

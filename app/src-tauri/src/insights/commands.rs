@@ -84,6 +84,46 @@ pub struct SeriesInsightsRequest {
     pub strategy: Option<SeriesStrategyContext>,
 }
 
+/// Why a range inside a pivot table is refused rather than analysed.
+///
+/// A pivot's cells look like a rectangle of numbers and are not one: a grand
+/// total is a row in the same column as the rows it sums, so the contribution
+/// fact reads it as a peer and says "Grand Total is 50% of all Revenue" — a
+/// sentence that is arithmetically true and means nothing. The same goes for
+/// subtotals, for a measure and its percentage laid side by side, and for a
+/// row-header column of member names read as a category.
+///
+/// Refusing is the honest answer, and the message names the route that does
+/// work: a pivot over a MODEL is analysed from the model's own facts, where a
+/// total is a total and a member is a member.
+pub(crate) const PIVOT_RANGE_REFUSAL: &str = "A pivot table's cells are not a range of numbers: its totals would be compared with the rows they summarise. For a pivot built on a model, right-click it and choose \"Show points of interest\" instead.";
+
+/// Do two inclusive rectangles on the same sheet touch at all?
+///
+/// Rows and columns are two independent one-dimensional tests; both must
+/// overlap for the rectangles to.
+fn rects_overlap(a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)) -> bool {
+    let (a_sr, a_sc, a_er, a_ec) = a;
+    let (b_sr, b_sc, b_er, b_ec) = b;
+    let rows_meet = a_sr <= b_er && b_sr <= a_er;
+    let cols_meet = a_sc <= b_ec && b_sc <= a_ec;
+    rows_meet && cols_meet
+}
+
+/// Refuse a rectangle that touches any of the sheet's pivot tables.
+///
+/// Takes the pivot rectangles as a snapshot so no lock is held across it: see
+/// [`crate::pivot::operations::pivot_rects_on_sheet`].
+fn refuse_if_in_a_pivot(
+    pivots: &[(u32, u32, u32, u32)],
+    rect: (u32, u32, u32, u32),
+) -> Result<(), String> {
+    if pivots.iter().any(|p| rects_overlap(*p, rect)) {
+        return Err(PIVOT_RANGE_REFUSAL.to_string());
+    }
+    Ok(())
+}
+
 /// The name given to the axis column of a chart dataset.
 pub const CATEGORY_COLUMN: &str = "Category";
 /// The name given to a numeric x axis carried alongside its labels.
@@ -135,6 +175,22 @@ pub(crate) fn analyze_range_impl(
     let hidden_rows: HashSet<u32> =
         crate::commands::nav::collect_hidden_rows_for_sheet(&state, target);
 
+    // A pivot's cells are refused, not analysed (see PIVOT_RANGE_REFUSAL). The
+    // rectangles are snapshotted here, with no other lock held, and the request
+    // is checked twice: once as asked, and again after `plan_region` has had its
+    // say -- a single cell beside a pivot EXPANDS into it, and the analysis
+    // would then be of the pivot under another name.
+    let pivots = crate::pivot::operations::pivot_rects_on_sheet(&state, target);
+    refuse_if_in_a_pivot(
+        &pivots,
+        (
+            request.start_row.min(request.end_row),
+            request.start_col.min(request.end_col),
+            request.start_row.max(request.end_row),
+            request.start_col.max(request.end_col),
+        ),
+    )?;
+
     let (plan, dataset, locale_id) = {
         let active_grid = state.grid.read().map_err(|e| e.to_string())?;
         let grids = state.grids.read().map_err(|e| e.to_string())?;
@@ -158,6 +214,17 @@ pub(crate) fn analyze_range_impl(
             request.expand_to_region,
             &hidden_rows,
         );
+        // `pivots` is an owned snapshot, so this takes no lock: `?` here simply
+        // returns, dropping the grid guards on the way out.
+        refuse_if_in_a_pivot(
+            &pivots,
+            (
+                plan.range.start_row,
+                plan.range.start_col,
+                plan.range.end_row,
+                plan.range.end_col,
+            ),
+        )?;
         let dataset = region::extract_dataset(grid, &styles, &locale, &sheet_name, &plan);
         (plan, dataset, locale.locale_id.clone())
     };
@@ -667,6 +734,191 @@ mod tests {
                 "a raw-grid fact declares no strategy provenance"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The pivot refusal
+    // -----------------------------------------------------------------------
+
+    /// A pivot at rows 5..=20, columns 2..=6.
+    fn a_pivot() -> Vec<(u32, u32, u32, u32)> {
+        vec![(5, 2, 20, 6)]
+    }
+
+    #[test]
+    fn a_range_inside_a_pivot_is_refused_and_the_message_names_the_route_that_works() {
+        let err = refuse_if_in_a_pivot(&a_pivot(), (7, 3, 9, 4)).unwrap_err();
+        assert_eq!(err, PIVOT_RANGE_REFUSAL);
+        assert!(
+            err.contains("Show points of interest"),
+            "the refusal must name what to do instead, not just say no: {err}"
+        );
+    }
+
+    #[test]
+    fn a_range_that_merely_clips_a_pivot_is_refused_too() {
+        // Reaching over the pivot's top-left corner from outside still reads its
+        // totals as peers of the rows above them.
+        for rect in [
+            (1, 1, 6, 3),   // down into the top-left corner
+            (18, 5, 30, 9), // up into the bottom-right corner
+            (0, 4, 40, 4),  // a whole column straight through it
+            (10, 0, 10, 99), // a whole row straight through it
+            (5, 2, 20, 6),  // exactly the pivot
+            (0, 0, 99, 99), // the pivot and everything around it
+        ] {
+            assert!(
+                refuse_if_in_a_pivot(&a_pivot(), rect).is_err(),
+                "{rect:?} touches the pivot and must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_range_beside_a_pivot_is_analysed_as_usual() {
+        // One row above, one row below, one column left, one column right, and a
+        // rectangle diagonally off the corner: none of them is the pivot.
+        for rect in [
+            (0, 2, 4, 6),
+            (21, 2, 30, 6),
+            (5, 0, 20, 1),
+            (5, 7, 20, 9),
+            (0, 0, 4, 1),
+            (21, 7, 30, 9),
+        ] {
+            assert!(
+                refuse_if_in_a_pivot(&a_pivot(), rect).is_ok(),
+                "{rect:?} is outside the pivot and must be analysed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sheet_with_no_pivots_refuses_nothing() {
+        assert!(refuse_if_in_a_pivot(&[], (0, 0, 1_000, 1_000)).is_ok());
+    }
+
+    #[test]
+    fn overlap_is_two_independent_one_dimensional_tests() {
+        // Rows meet, columns do not: no overlap. This is the pair a folded
+        // one-liner gets wrong, and it is the difference between refusing the
+        // pivot and refusing the whole sheet row it sits on.
+        assert!(!rects_overlap((5, 2, 20, 6), (5, 7, 20, 9)));
+        assert!(!rects_overlap((5, 2, 20, 6), (21, 2, 30, 6)));
+        assert!(rects_overlap((5, 2, 20, 6), (20, 6, 30, 9))); // one shared cell
+        assert!(rects_overlap((5, 2, 20, 6), (5, 2, 5, 2))); // the top-left cell alone
+    }
+
+    // -----------------------------------------------------------------------
+    // The pivot refusal, through the real command
+    // -----------------------------------------------------------------------
+
+    fn cell_number(n: f64) -> engine::cell::Cell {
+        engine::cell::Cell {
+            ast: None,
+            value: engine::cell::CellValue::Number(n),
+            style_index: 0,
+            rich_text: None,
+        }
+    }
+
+    fn cell_text(s: &str) -> engine::cell::Cell {
+        engine::cell::Cell {
+            ast: None,
+            value: engine::cell::CellValue::Text(s.to_string()),
+            style_index: 0,
+            rich_text: None,
+        }
+    }
+
+    /// One contiguous block, `Region | Revenue`, rows 0..=10 — a header and ten
+    /// data rows — with a `"pivot"` region declared over its lower half
+    /// (rows 6..=10), the shape a pivot dropped under a list of numbers makes.
+    fn state_with_a_pivot_below_a_block() -> AppState {
+        let state = crate::create_app_state();
+        {
+            let mut grid = state.grid.write(&crate::document_effect::test_seed_effect()).unwrap();
+            grid.set_cell(0, 0, cell_text("Region"));
+            grid.set_cell(0, 1, cell_text("Revenue"));
+            for i in 0..10u32 {
+                grid.set_cell(i + 1, 0, cell_text(&format!("R{:02}", i + 1)));
+                grid.set_cell(i + 1, 1, cell_number(100.0 + 7.0 * i as f64));
+            }
+        }
+        state.protected_regions.lock().unwrap().push(crate::ProtectedRegion {
+            id: "pivot-test".to_string(),
+            region_type: "pivot".to_string(),
+            owner_id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            sheet_index: 0,
+            start_row: 6,
+            start_col: 0,
+            end_row: 10,
+            end_col: 1,
+        });
+        state
+    }
+
+    fn request_for(start_row: u32, start_col: u32, end_row: u32, end_col: u32, expand: bool) -> RangeInsightsRequest {
+        RangeInsightsRequest {
+            sheet_index: 0,
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            expand_to_region: expand,
+        }
+    }
+
+    #[test]
+    fn analysing_a_pivots_cells_is_refused_by_the_command_itself() {
+        let state = state_with_a_pivot_below_a_block();
+        let err = analyze_range_impl(&state, &request_for(6, 0, 10, 1, false)).unwrap_err();
+        assert_eq!(err, PIVOT_RANGE_REFUSAL);
+    }
+
+    // The case a pre-check alone misses: the user clicks ONE cell above the
+    // pivot and asks for the surrounding block. `plan_region` expands into the
+    // pivot, and without the second check the analysis would be of the pivot's
+    // rows under the name of the cell that was clicked.
+    #[test]
+    fn a_single_cell_that_EXPANDS_into_a_pivot_is_refused_too() {
+        let state = state_with_a_pivot_below_a_block();
+        let request = request_for(2, 1, 2, 1, true);
+
+        // The premise: without expansion that very cell is analysed happily.
+        assert!(
+            analyze_range_impl(&state, &request_for(2, 1, 2, 1, false)).is_ok(),
+            "the cell itself is outside the pivot; only its EXPANSION reaches in"
+        );
+
+        let err = analyze_range_impl(&state, &request).unwrap_err();
+        assert_eq!(err, PIVOT_RANGE_REFUSAL);
+    }
+
+    #[test]
+    fn an_ordinary_range_on_a_sheet_that_has_a_pivot_is_still_analysed() {
+        let state = state_with_a_pivot_below_a_block();
+        let bundle = analyze_range_impl(&state, &request_for(0, 0, 5, 1, false))
+            .expect("a range that does not touch the pivot must be analysed");
+        assert!(
+            !bundle.insights.is_empty(),
+            "the positive control must actually produce facts, or it proves nothing"
+        );
+    }
+
+    #[test]
+    fn a_sheet_with_no_pivot_at_all_analyses_the_same_range() {
+        let state = crate::create_app_state();
+        {
+            let mut grid = state.grid.write(&crate::document_effect::test_seed_effect()).unwrap();
+            grid.set_cell(0, 0, cell_text("Region"));
+            grid.set_cell(0, 1, cell_text("Revenue"));
+            for i in 0..10u32 {
+                grid.set_cell(i + 1, 0, cell_text(&format!("R{:02}", i + 1)));
+                grid.set_cell(i + 1, 1, cell_number(100.0 + 7.0 * i as f64));
+            }
+        }
+        assert!(analyze_range_impl(&state, &request_for(6, 0, 10, 1, false)).is_ok());
     }
 
     #[test]

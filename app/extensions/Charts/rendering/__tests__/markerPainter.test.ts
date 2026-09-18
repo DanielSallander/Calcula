@@ -58,17 +58,28 @@ describe("markerBox", () => {
 });
 
 describe("paintMarkerMark", () => {
-  it("strokes an ellipse and writes the label; paints nothing it cannot place", () => {
+  // A KEPT mark looks like the cue it was kept from: a box on a bar, a circle
+  // on a line point. If the two ever diverge, pressing "Keep this mark" changes
+  // the picture the reader was looking at when they pressed it.
+  it("strokes a BOX on a bar and a circle on a line point, writes the label, and paints nothing it cannot place", () => {
     const calls: string[] = [];
     const ctx = {
       save: () => calls.push("save"), restore: () => calls.push("restore"), beginPath: () => calls.push("beginPath"),
       ellipse: () => calls.push("ellipse"), stroke: () => calls.push("stroke"), fillText: (t: string) => calls.push(`text:${t}`),
+      moveTo: () => calls.push("moveTo"), lineTo: () => calls.push("lineTo"),
       setLineDash: () => {}, strokeStyle: "", fillStyle: "", lineWidth: 0, globalAlpha: 1, font: "", textAlign: "", textBaseline: "",
     } as unknown as CanvasRenderingContext2D;
     const layer: LayerSpec = { mark: "marker", markOptions: { series: "Sales", x: 2, shape: "ring", label: "Highest Sales" } };
     paintMarkerMark(ctx, data, layer, spec("bar"), layout, DEFAULT_CHART_THEME);
-    expect(calls).toContain("ellipse");
+    expect(calls).not.toContain("ellipse");
+    expect(calls.filter((c) => c === "moveTo")).toHaveLength(1);
+    expect(calls.filter((c) => c === "lineTo")).toHaveLength(4);
     expect(calls).toContain("text:Highest Sales");
+
+    calls.length = 0;
+    paintMarkerMark(ctx, data, layer, spec("line"), layout, DEFAULT_CHART_THEME);
+    expect(calls).toContain("ellipse");
+    expect(calls).not.toContain("moveTo");
 
     calls.length = 0;
     paintMarkerMark(ctx, data, { mark: "marker", markOptions: { series: "Nope", x: 2, shape: "ring" } }, spec("bar"), layout, DEFAULT_CHART_THEME);

@@ -23,12 +23,14 @@ import { registerChartContextMenuContribution } from "@api/chartContextMenu";
 import {
   CHART_SERIES_MAX_POINTS,
   getChartDataProvider,
+  getSelectedChartId,
+  listChartsForData,
   resolveChartSeries,
   type ChartSeriesSnapshot,
 } from "@api/chartData";
 import type { InsightBundle } from "@api/insightsService";
 import { analyzeSeries, type SeriesInsightsRequest } from "./backend";
-import { beginRun, completeRun, describeError, failRun } from "./store";
+import { analyzeCurrentSource, beginRun, completeRun, describeError, failRun, getState } from "./store";
 
 export const EXPLAIN_CHART_CONTRIBUTION_ID = "insights.explainChart";
 export const EXPLAIN_CHART_LABEL = "Explain this chart";
@@ -109,6 +111,38 @@ export async function explainChart(
   } catch (err) {
     failRun(token, describeError(err));
   }
+}
+
+/**
+ * The chart the reader has selected, named as the pane should name it.
+ *
+ * `null` when no chart is selected, when Charts is not loaded, or when the
+ * selected chart is not one the data provider lists — in every one of those
+ * cases the grid selection is what Analyse is about.
+ */
+export function selectedChartTarget(): { chartId: string; label: string } | null {
+  const chartId = getSelectedChartId();
+  if (chartId === null) return null;
+  const summary = listChartsForData().find((c) => c.chartId === chartId);
+  return summary === undefined ? null : { chartId, label: summary.title ?? summary.name };
+}
+
+/**
+ * What the pane's Analyse button runs: a SELECTED CHART wins over the grid
+ * selection.
+ *
+ * The owner found this the obvious reading and the old behaviour the surprising
+ * one: with a chart selected, Analyse answered about whichever cell was last
+ * clicked — a rectangle the reader had stopped looking at. Selecting a chart is
+ * a deliberate act and the most recent one, so it names the subject.
+ *
+ * The model switch still wins over both: it is a position the reader set, not
+ * an incidental selection.
+ */
+export function analyzeCurrentTarget(openPane: () => void = () => undefined): Promise<void> {
+  if (getState().source === "model") return analyzeCurrentSource();
+  const chart = selectedChartTarget();
+  return chart === null ? analyzeCurrentSource() : explainChart(chart.chartId, openPane);
 }
 
 /**

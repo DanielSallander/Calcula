@@ -2803,6 +2803,7 @@ export {
   visibleChartCues,
   setSelectedChartCue,
   getSelectedChartCue,
+  firstCueOfFact,
   setChartComments,
   getChartComments,
   announceChartDataChanged,
@@ -2828,6 +2829,18 @@ export type {
   ChartOverlayState,
   ChartCueHost,
 } from "./chartCues";
+
+// The quick-access strip beside a selected chart: Charts draws it, anyone may
+// contribute a button to it (the Seam Rule — neither side imports the other).
+export {
+  registerChartQuickAction,
+  chartQuickActionsFor,
+  listChartQuickActions,
+  onChartQuickActionsChanged,
+  resetChartQuickActions,
+} from "./chartQuickActions";
+
+export type { ChartQuickAction, ChartQuickActionIcon } from "./chartQuickActions";
 
 // The cue rules (IO-2, IO-4): facts → cues, validated against the chart's
 // snapshot or placed on the sheet rows the facts document names.

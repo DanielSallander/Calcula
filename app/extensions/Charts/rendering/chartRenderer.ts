@@ -70,8 +70,8 @@ import {
   setHoveredButton,
   getHoveredButton,
   isInQuickAccessArea,
+  quickAccessButtonKey,
   type QuickAccessButton,
-  type QuickAccessButtonType,
 } from "./quickAccessButtons";
 
 // ============================================================================
@@ -391,7 +391,10 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
         const isDatum = hitResult.type === "bar" || hitResult.type === "point" || hitResult.type === "slice";
         const cueHit = isDatum ? cueAtDatum(visibleChartCues(chartId), hitResult) : null;
         const nextHovered = cueHit ? { chartId, cue: cueHit } : null;
-        if ((nextHovered?.cue.factId ?? null) !== (hoveredCue?.cue.factId ?? null) || (nextHovered?.chartId ?? null) !== (hoveredCue?.chartId ?? null)) {
+        // By cue, not by fact: moving from the highest bar to the lowest is a
+        // move between two cues of ONE fact, and a fact-keyed compare would
+        // leave the first one's tooltip up.
+        if ((nextHovered?.cue.cueId ?? null) !== (hoveredCue?.cue.cueId ?? null) || (nextHovered?.chartId ?? null) !== (hoveredCue?.chartId ?? null)) {
           hoveredCue = nextHovered;
           requestOverlayRedraw();
         }
@@ -426,8 +429,9 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
 
       const btnHit = hitTestQuickAccessButtons(canvasX, canvasY, cachedData.quickAccessButtons);
       if (btnHit) {
-        if (getHoveredButton() !== btnHit) {
-          setHoveredButton(btnHit);
+        const key = quickAccessButtonKey(btnHit);
+        if (getHoveredButton() !== key) {
+          setHoveredButton(key);
           requestOverlayRedraw();
         }
         foundHover = true;
@@ -581,17 +585,19 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     const overlay = getChartOverlay(chartId);
     if (overlay.cues.length > 0 || overlay.comments.length > 0) {
       const shown = visibleChartCues(chartId);
-      paintChartCues(ctx, canvasX, canvasY, cachedData.hitGeometry, cachedData.data, shown, overlay.selectedFactId, {
+      paintChartCues(ctx, canvasX, canvasY, cachedData.hitGeometry, cachedData.data, shown, overlay.selectedCueId, {
         spec: chart.spec,
         layout: cachedData.layout,
         data: cachedData.data,
       });
-      const byId = new Map(overlay.cues.map((c) => [c.factId, c] as const));
+      const byCue = new Map(overlay.cues.map((c) => [c.cueId, c] as const));
       cachedData.commentBoxes = paintChartComments(
-        ctx, canvasX, canvasY, chartWidth, chartHeight, cachedData.hitGeometry, cachedData.data, overlay.comments, byId,
+        ctx, canvasX, canvasY, chartWidth, chartHeight, cachedData.hitGeometry, cachedData.data, overlay.comments, byCue,
       );
       const steps = chartCueSteps(chartId);
-      const descriptions = steps.map((f) => byId.get(f)?.description ?? "");
+      // The stepper steps by FACT, so its label comes from that fact's FIRST
+      // cue. A fact-keyed Map would take the LAST one silently.
+      const descriptions = steps.map((f) => overlay.cues.find((c) => c.factId === f)?.description ?? "");
       const stepper = computeCueStepper(chartId, canvasX, canvasY, chartWidth, descriptions, overlay.step);
       if (stepper) drawCueStepper(ctx, stepper, overlay.step === "all");
       cachedData.cueStepper = stepper;
@@ -637,7 +643,7 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     drawResizeHandles(ctx, canvasX, canvasY, chartWidth, chartHeight);
 
     // Quick access buttons (to the right of chart)
-    const qaButtons = computeQuickAccessButtons(canvasX, canvasY, chartWidth, chartHeight);
+    const qaButtons = computeQuickAccessButtons(canvasX, canvasY, chartWidth, chartHeight, chartId);
     drawQuickAccessButtons(ctx, qaButtons);
 
     // Store for hit-testing
@@ -717,6 +723,9 @@ export function hitTestChart(hitCtx: OverlayHitTestContext): boolean {
     // (only when this chart is selected)
     const chartId = hitCtx.region.data?.chartId as string;
     if (chartId != null && isChartSelected(chartId)) {
+      // The strip can be taller than a short chart, so the envelope is sized
+      // from the buttons actually drawn for THIS chart.
+      const drawn = chartDataCache.get(chartId)?.quickAccessButtons?.length;
       return isInQuickAccessArea(
         hitCtx.canvasX,
         hitCtx.canvasY,
@@ -724,6 +733,7 @@ export function hitTestChart(hitCtx: OverlayHitTestContext): boolean {
         b.y,
         b.width,
         b.height,
+        drawn,
       );
     }
 

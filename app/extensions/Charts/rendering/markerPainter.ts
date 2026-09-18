@@ -17,23 +17,33 @@
 //          is a spec entry the user can see and delete in the editor; it is
 //          not silently moved onto another bar.
 
+import { DEFAULT_OVERLAY_STYLE } from "@api/insightStyle";
 import type { ChartSpec, ChartLayout, LayerSpec, MarkerMarkOptions, ParsedChartData } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { buildChromeYScale } from "./chartPainterUtils";
+import { pathRect } from "./cuePainter";
 import { createBandScale, createPointScale } from "./scales";
 
 const BAND_MARKS = new Set(["bar", "combo", "waterfall", "histogram", "boxPlot", "stock", "pareto"]);
 const POINT_MARKS = new Set(["line", "area", "scatter", "bubble"]);
 const BAR_PADDING = 0.3;
 const RING_PAD = 4;
+/** The neutral cue colour, for a kept mark whose layer declares none. */
+const DEFAULT_MARKER_COLOR = DEFAULT_OVERLAY_STYLE.polarity.neutral.color;
 
-/** The pixel box a marker sits around, or null when the datum cannot be placed. */
+/**
+ * The pixel box a marker sits around, or null when the datum cannot be placed.
+ *
+ * `shape` is how the overlay would have drawn it: a bar is a rectangle and gets
+ * a box, a line or scatter point is round and gets a circle. It travels with
+ * the box so the kept mark matches the cue the reader kept.
+ */
 export function markerBox(
   data: ParsedChartData,
   spec: ChartSpec,
   layout: ChartLayout,
   opts: MarkerMarkOptions,
-): { cx: number; cy: number; rx: number; ry: number } | null {
+): { cx: number; cy: number; rx: number; ry: number; shape: "box" | "round" } | null {
   const si = data.series.findIndex((s) => s.name === opts.series);
   if (si < 0) return null;
   const value = data.series[si].values[opts.x];
@@ -50,12 +60,12 @@ export function markerBox(
     const x0 = xScale.scaleIndex(opts.x) + si * (barWidth + 2);
     const top = Math.min(cy, zero);
     const bottom = Math.max(cy, zero);
-    return { cx: x0 + barWidth / 2, cy: (top + bottom) / 2, rx: barWidth / 2 + RING_PAD, ry: (bottom - top) / 2 + RING_PAD };
+    return { cx: x0 + barWidth / 2, cy: (top + bottom) / 2, rx: barWidth / 2 + RING_PAD, ry: (bottom - top) / 2 + RING_PAD, shape: "box" };
   }
   if (POINT_MARKS.has(spec.mark)) {
     const xScale = createPointScale(data.categories, [plotArea.x, plotArea.x + plotArea.width]);
     const r = 4 + RING_PAD + 2;
-    return { cx: xScale.scaleIndex(opts.x), cy, rx: r, ry: r };
+    return { cx: xScale.scaleIndex(opts.x), cy, rx: r, ry: r, shape: "round" };
   }
   return null;
 }
@@ -75,14 +85,18 @@ export function paintMarkerMark(
 
   ctx.save();
   if (layer.opacity !== undefined) ctx.globalAlpha = layer.opacity;
-  ctx.strokeStyle = opts.color ?? "#0e639c";
+  ctx.strokeStyle = opts.color ?? DEFAULT_MARKER_COLOR;
   ctx.lineWidth = opts.shape === "emphasis" ? 3 : 2;
   ctx.setLineDash([]);
   ctx.beginPath();
-  ctx.ellipse(box.cx, box.cy, box.rx, box.ry, 0, 0, Math.PI * 2);
+  if (box.shape === "box") {
+    pathRect(ctx, box.cx - box.rx, box.cy - box.ry, box.cx + box.rx, box.cy + box.ry);
+  } else {
+    ctx.ellipse(box.cx, box.cy, box.rx, box.ry, 0, 0, Math.PI * 2);
+  }
   ctx.stroke();
   if (opts.label) {
-    ctx.fillStyle = opts.color ?? "#0e639c";
+    ctx.fillStyle = opts.color ?? DEFAULT_MARKER_COLOR;
     ctx.font = "11px 'Segoe UI', system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";

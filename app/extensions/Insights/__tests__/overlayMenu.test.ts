@@ -33,6 +33,7 @@ const menu = await import("../lib/overlayMenu");
 const cues = await import("@api/chartCues");
 const overlay = await import("../lib/overlay");
 const { getChartContextMenuContributions, resetChartContextMenuContributions } = await import("@api/chartContextMenu");
+const quickActions = await import("@api/chartQuickActions");
 
 const snapshot = {
   chartId: "c1", name: "Chart", title: null, sheetIndex: 0, mark: "bar",
@@ -51,6 +52,7 @@ function visible(chartId: string): string[] {
 
 beforeEach(() => {
   resetChartContextMenuContributions();
+  quickActions.resetChartQuickActions();
   cues.clearAllChartCues();
   cues.registerChartCueHost(null);
   overlay.resetOverlays();
@@ -78,7 +80,7 @@ describe("the overlay's chart-menu items", () => {
     menu.registerOverlayMenu();
     await overlay.showOverlay("c1");
     expect(visible("c1")).toEqual([menu.HIDE_POINTS_LABEL, "Snapshot with points of interest"]);
-    cues.setSelectedChartCue("c1", EXT);
+    cues.setSelectedChartCue("c1", cues.getChartCues("c1")[0].cueId);
     expect(visible("c1")).toEqual([menu.HIDE_POINTS_LABEL, "Add comment on this point…", "Keep this mark in the chart", "Snapshot with points of interest"]);
   });
 
@@ -86,7 +88,7 @@ describe("the overlay's chart-menu items", () => {
     h.provider.current = {};
     menu.registerOverlayMenu();
     await overlay.showOverlay("c1");
-    cues.setSelectedChartCue("c1", EXT);
+    cues.setSelectedChartCue("c1", cues.getChartCues("c1")[0].cueId);
     const item = getChartContextMenuContributions().find((c) => c.id === menu.OVERLAY_COMMENT_CONTRIBUTION_ID)!;
 
     h.prompt.mockResolvedValue("   ");
@@ -106,7 +108,7 @@ describe("the overlay's chart-menu items", () => {
     menu.registerOverlayMenu();
     cues.registerChartCueHost({ keepCue: h.keep, keepComment: vi.fn(), snapshot: h.snapshot });
     await overlay.showOverlay("c1");
-    cues.setSelectedChartCue("c1", EXT);
+    cues.setSelectedChartCue("c1", cues.getChartCues("c1")[0].cueId);
     const keep = getChartContextMenuContributions().find((c) => c.id === menu.OVERLAY_KEEP_CONTRIBUTION_ID)!;
     keep.onSelect("c1");
     await Promise.resolve(); await Promise.resolve();
@@ -117,5 +119,92 @@ describe("the overlay's chart-menu items", () => {
     snap.onSelect("c1");
     await Promise.resolve(); await Promise.resolve();
     expect(h.toast).toHaveBeenCalledWith("no clipboard", { variant: "warning" });
+  });
+
+  // The owner's live finding, at the two menu items that write to the document.
+  // `extremes` rings the highest bar (Mar) and the lowest (Jan) under ONE fact
+  // id, so selecting the lowest and acting must reach the lowest — the comment
+  // must not land on Mar, and the kept mark must not be persisted onto Mar.
+  it("acts on the cue that is selected, not on its fact's first cue", async () => {
+    h.provider.current = {};
+    menu.registerOverlayMenu();
+    cues.registerChartCueHost({ keepCue: h.keep, keepComment: vi.fn(), snapshot: h.snapshot });
+    await overlay.showOverlay("c1");
+    const lowest = cues.getChartCues("c1")[1];
+    expect(lowest.anchor).toMatchObject({ categoryLabel: "Jan" });
+    cues.setSelectedChartCue("c1", lowest.cueId);
+
+    h.prompt.mockResolvedValue("why so low?");
+    getChartContextMenuContributions().find((c) => c.id === menu.OVERLAY_COMMENT_CONTRIBUTION_ID)!.onSelect("c1");
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    expect(overlay.commentsOf("c1")[0].anchor?.categoryLabel).toBe("Jan");
+
+    getChartContextMenuContributions().find((c) => c.id === menu.OVERLAY_KEEP_CONTRIBUTION_ID)!.onSelect("c1");
+    await Promise.resolve(); await Promise.resolve();
+    expect(h.keep).toHaveBeenCalledWith("c1", expect.objectContaining({ anchor: expect.objectContaining({ categoryIndex: 0 }) }));
+  });
+});
+
+// ============================================================================
+// The quick-access buttons (the owner asked for them beside the other icons)
+// ============================================================================
+
+describe("the overlay's quick-access buttons", () => {
+  function ids(chartId: string): string[] {
+    return quickActions.chartQuickActionsFor(chartId).map((a) => a.id);
+  }
+
+  it("registers nothing usable without Charts, and both buttons go away on dispose", () => {
+    const off = menu.registerOverlayMenu();
+    // No chart data provider: the toggle has nothing to analyse.
+    expect(ids("c1")).toEqual([]);
+    h.provider.current = {};
+    expect(ids("c1")).toEqual([menu.OVERLAY_TOGGLE_ACTION_ID]);
+    off();
+    expect(quickActions.listChartQuickActions()).toEqual([]);
+  });
+
+  it("shows the camera only once there is an overlay to snapshot, and the toggle reads the chart's state", async () => {
+    h.provider.current = {};
+    menu.registerOverlayMenu();
+
+    const toggle = quickActions.chartQuickActionsFor("c1")[0];
+    expect(toggle.tooltip("c1")).toBe(menu.SHOW_POINTS_LABEL);
+    expect(toggle.active?.("c1")).toBe(false);
+    expect(ids("c1")).not.toContain(menu.OVERLAY_SNAPSHOT_ACTION_ID);
+
+    await overlay.showOverlay("c1");
+    expect(toggle.tooltip("c1")).toBe(menu.HIDE_POINTS_LABEL);
+    expect(toggle.active?.("c1")).toBe(true);
+    expect(ids("c1")).toContain(menu.OVERLAY_SNAPSHOT_ACTION_ID);
+    // Another chart, with no overlay, is unaffected.
+    expect(toggle.tooltip("c2")).toBe(menu.SHOW_POINTS_LABEL);
+    expect(ids("c2")).not.toContain(menu.OVERLAY_SNAPSHOT_ACTION_ID);
+  });
+
+  it("the button toggles the same overlay the menu item does", async () => {
+    h.provider.current = {};
+    menu.registerOverlayMenu();
+    const toggle = quickActions.chartQuickActionsFor("c1")[0];
+
+    toggle.onSelect("c1");
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    expect(overlay.isOverlayOn("c1")).toBe(true);
+
+    toggle.onSelect("c1");
+    expect(overlay.isOverlayOn("c1")).toBe(false);
+  });
+
+  it("the camera goes through the host Charts registered", async () => {
+    h.provider.current = {};
+    menu.registerOverlayMenu();
+    cues.registerChartCueHost({ keepCue: h.keep, keepComment: vi.fn(), snapshot: h.snapshot });
+    await overlay.showOverlay("c1");
+
+    const camera = quickActions.chartQuickActionsFor("c1").find((a) => a.id === menu.OVERLAY_SNAPSHOT_ACTION_ID)!;
+    camera.onSelect("c1");
+    await Promise.resolve();
+    // `snapshotChart(chartId)` passes its optional options through as undefined.
+    expect(h.snapshot.mock.calls.map((c) => c[0])).toEqual(["c1"]);
   });
 });

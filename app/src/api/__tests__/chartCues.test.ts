@@ -18,6 +18,7 @@ import {
   visibleChartCues,
   setSelectedChartCue,
   getSelectedChartCue,
+  firstCueOfFact,
   setChartComments,
   getChartComments,
   getChartOverlay,
@@ -30,8 +31,9 @@ import {
   type ChartCueComment,
 } from "../chartCues";
 
-function ring(factId: string, categoryIndex = 2): ChartCue {
+function ring(factId: string, categoryIndex = 2, ordinal = 0): ChartCue {
   return {
+    cueId: `${factId}#${ordinal}`,
     factId,
     kind: "ring",
     polarity: "neutral",
@@ -39,8 +41,8 @@ function ring(factId: string, categoryIndex = 2): ChartCue {
   };
 }
 
-function comment(id: string, factId: string, attached = true): ChartCueComment {
-  return { id, factId, text: `note ${id}`, anchor: attached ? { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } : null };
+function comment(id: string, factId: string, attached = true, ordinal = 0): ChartCueComment {
+  return { id, cueId: `${factId}#${ordinal}`, factId, text: `note ${id}`, anchor: attached ? { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } : null };
 }
 
 beforeEach(() => {
@@ -101,7 +103,7 @@ describe("@api/chartCues cues", () => {
 
 describe("stepping", () => {
   it("steps one fact at a time, in cue order, wrapping, and 'all' shows everything", () => {
-    setChartCues("c1", [ring("a"), ring("a", 0), ring("b"), ring("c")]);
+    setChartCues("c1", [ring("a"), ring("a", 0, 1), ring("b"), ring("c")]);
     expect(chartCueSteps("c1")).toEqual(["a", "b", "c"]);
     expect(getChartCueStep("c1")).toBe(0);
     expect(visibleChartCues("c1").map((c) => c.factId)).toEqual(["a", "a"]);
@@ -147,20 +149,68 @@ describe("stepping", () => {
 });
 
 describe("selection", () => {
-  it("selects only a fact that has a cue, and survives a replacement that keeps it", () => {
+  it("selects only a cue that is on the chart, and survives a replacement that keeps it", () => {
     setChartCues("c1", [ring("a"), ring("b")]);
-    setSelectedChartCue("c1", "b");
+    setSelectedChartCue("c1", "b#0");
     expect(getSelectedChartCue("c1")?.factId).toBe("b");
     setSelectedChartCue("c1", "zzz");
     expect(getSelectedChartCue("c1")).toBeNull();
-    setSelectedChartCue("c1", "a");
+    setSelectedChartCue("c1", "a#0");
     setChartCues("c1", [ring("a")]);
     expect(getSelectedChartCue("c1")?.factId).toBe("a");
     setChartCues("c1", [ring("b")]);
     expect(getSelectedChartCue("c1")).toBeNull();
-    setSelectedChartCue("c1", "b");
+    setSelectedChartCue("c1", "b#0");
     clearChartCues("c1");
     expect(getSelectedChartCue("c1")).toBeNull();
+  });
+
+  // The defect the owner found live: `extremes` rings the highest bar AND the
+  // lowest, both carrying one fact id. Selection keyed by fact returned the
+  // FIRST of them whichever bar was clicked, so a comment written on 2023 was
+  // drawn on 2025 and "keep this mark" persisted the wrong bar.
+  it("tells two cues of ONE fact apart", () => {
+    const highest = ring("extremes", 4, 0); // 2025
+    const lowest = ring("extremes", 2, 1); // 2023
+    setChartCues("c1", [highest, lowest]);
+
+    setSelectedChartCue("c1", lowest.cueId);
+    expect(getSelectedChartCue("c1")?.anchor).toEqual(lowest.anchor);
+
+    setSelectedChartCue("c1", highest.cueId);
+    expect(getSelectedChartCue("c1")?.anchor).toEqual(highest.anchor);
+  });
+
+  // A filter can drop ONE of a fact's cues and keep the other. Keeping the
+  // selection because the FACT survived would silently move it to the surviving
+  // ring, and the context menu would then act on a point the reader never
+  // picked.
+  it("drops the selection when its cue goes, even though its fact stays", () => {
+    setChartCues("c1", [ring("extremes", 4, 0), ring("extremes", 2, 1)]);
+    setSelectedChartCue("c1", "extremes#1");
+    expect(getSelectedChartCue("c1")?.anchor).toMatchObject({ categoryIndex: 2 });
+
+    setChartCues("c1", [ring("extremes", 4, 0)]); // the lowest ring no longer validates
+    expect(getSelectedChartCue("c1")).toBeNull();
+
+    // And it is really gone, not merely unresolvable: when the filter is lifted
+    // and the lowest ring comes back, the selection does NOT come back with it.
+    setChartCues("c1", [ring("extremes", 4, 0), ring("extremes", 2, 1)]);
+    expect(getSelectedChartCue("c1")).toBeNull();
+  });
+
+  it("refuses a FACT id where a cue id belongs, rather than guessing a cue", () => {
+    setChartCues("c1", [ring("extremes", 4, 0), ring("extremes", 2, 1)]);
+    setSelectedChartCue("c1", "extremes");
+    expect(getSelectedChartCue("c1")).toBeNull();
+  });
+
+  // The stepper steps by fact, so it needs one sanctioned way to say "that
+  // fact's first cue" — the only place a fact may stand in for a cue.
+  it("resolves a fact to its FIRST cue for the stepper, and to null when it has none", () => {
+    setChartCues("c1", [ring("extremes", 4, 0), ring("extremes", 2, 1)]);
+    expect(firstCueOfFact("c1", "extremes")?.cueId).toBe("extremes#0");
+    expect(firstCueOfFact("c1", "absent")).toBeNull();
   });
 });
 

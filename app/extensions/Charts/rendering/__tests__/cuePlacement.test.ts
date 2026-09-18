@@ -329,11 +329,14 @@ function recordingCtx(): { ctx: CuePaintContext; calls: Call[]; styles: string[]
 }
 
 function cue(a: ChartCueDatumAnchor, polarity: ChartCue["polarity"] = "neutral"): ChartCue {
-  return { factId: `extremes:${a.series}`, kind: "ring", polarity, anchor: a };
+  return { cueId: `extremes:${a.series}#${a.categoryIndex}`, factId: `extremes:${a.series}`, kind: "ring", polarity, anchor: a };
 }
 
 describe("cue painting", () => {
-  it("strokes an ellipse around the resolved bar, translated by the chart's canvas origin", () => {
+  // A BAR gets a BOX, not an oval. An ellipse around a rectangle leaves four
+  // wedges of background inside the mark while its sides cut across the bar's,
+  // which is what made the cues hard to read on the owner's own chart.
+  it("strokes a box around the resolved bar, translated by the chart's canvas origin", () => {
     const data = makeData();
     const g = geometryFor(data, makeSpec({ mark: "bar" }));
     const rect = rectAt(g, "Sales", 2);
@@ -342,13 +345,22 @@ describe("cue painting", () => {
     const drawn = paintChartCues(ctx, 1000, 500, g, data, [cue(anchor())]);
 
     expect(drawn).toBe(1);
-    const ellipse = calls.find((c) => c.fn === "ellipse");
-    expect(ellipse).toBeDefined();
-    const [cx, cy, rx, ry] = ellipse!.args as number[];
-    expect(cx).toBeCloseTo(1000 + rect.x + rect.width / 2, 6);
-    expect(cy).toBeCloseTo(500 + rect.y + rect.height / 2, 6);
-    expect(rx).toBeCloseTo(rect.width / 2 + CUE_RING_PAD, 6);
-    expect(ry).toBeCloseTo(rect.height / 2 + CUE_RING_PAD, 6);
+    expect(calls.some((c) => c.fn === "ellipse"), "a bar is not round").toBe(false);
+
+    // Five points: four corners and back to the first, so all four sides stroke.
+    const path = calls.filter((c) => c.fn === "moveTo" || c.fn === "lineTo").map((c) => c.args as number[]);
+    const left = 1000 + rect.x - CUE_RING_PAD;
+    const right = 1000 + rect.x + rect.width + CUE_RING_PAD;
+    const top = 500 + rect.y - CUE_RING_PAD;
+    const bottom = 500 + rect.y + rect.height + CUE_RING_PAD;
+    expect(path).toHaveLength(5);
+    const corners: Array<[number, number]> = [
+      [left, top], [right, top], [right, bottom], [left, bottom], [left, top],
+    ];
+    path.forEach(([x, y], i) => {
+      expect(x).toBeCloseTo(corners[i][0], 6);
+      expect(y).toBeCloseTo(corners[i][1], 6);
+    });
     expect(calls.filter((c) => c.fn === "stroke")).toHaveLength(1);
   });
 
@@ -398,10 +410,12 @@ describe("cue painting", () => {
 
     const { ctx, calls } = recordingCtx();
     const drawn = paintChartCues(ctx, 0, 0, g, data, [
-      { factId: "leader", kind: "emphasis", polarity: "good", anchor: { type: "series", series: "Cost" } },
+      { cueId: "leader#0", factId: "leader", kind: "emphasis", polarity: "good", anchor: { type: "series", series: "Cost" } },
     ]);
     expect(drawn).toBe(1);
-    expect(calls.filter((c) => c.fn === "ellipse")).toHaveLength(5);
+    expect(calls.filter((c) => c.fn === "beginPath")).toHaveLength(5); // one box per bar
+    expect(calls.filter((c) => c.fn === "moveTo")).toHaveLength(5);
+    expect(calls.filter((c) => c.fn === "ellipse")).toHaveLength(0);
     expect(calls.filter((c) => c.fn === "stroke")).toHaveLength(5);
     expect(ctx.lineWidth).toBe(CUE_EMPHASIS_LINE_WIDTH);
     // A series the chart does not have is refused.
@@ -422,7 +436,7 @@ describe("cue painting", () => {
 
     const { ctx, calls } = recordingCtx();
     paintChartCues(ctx, 100, 50, g, data, [
-      { factId: "cp", kind: "band", polarity: "attention", anchor: { type: "span", series: "Sales", from: 2, to: 4 } },
+      { cueId: "cp#0", factId: "cp", kind: "band", polarity: "attention", anchor: { type: "span", series: "Sales", from: 2, to: 4 } },
     ]);
     const fill = calls.find((c) => c.fn === "fillRect")!;
     expect((fill.args as number[])[0]).toBeCloseTo(100 + mar.x, 6);
@@ -435,7 +449,7 @@ describe("cue painting", () => {
     const g = geometryFor(data, makeSpec({ mark: "line" }));
     const { ctx, calls } = recordingCtx();
     paintChartCues(ctx, 0, 0, g, data, [
-      { factId: "t", kind: "callout", polarity: "good", anchor: anchor("Sales", 4, "May"), description: "Sales rising" },
+      { cueId: "t#0", factId: "t", kind: "callout", polarity: "good", anchor: anchor("Sales", 4, "May"), description: "Sales rising" },
     ]);
     const text = calls.find((c) => c.fn === "fillText")!;
     expect(text.args[0]).toBe("Sales rising");
@@ -451,7 +465,7 @@ describe("cue painting", () => {
     const g = geometryFor(data, makeSpec({ mark: "bar" }));
     expect(resolveCue(g, { type: "level", series: "Sales", value: 180 }, cueContextOf(data))).toEqual({ ok: false, reason: "needs-scale" });
     const { ctx, calls } = recordingCtx();
-    expect(paintChartCues(ctx, 0, 0, g, data, [{ factId: "f", kind: "rule", polarity: "attention", anchor: { type: "level", value: 180 } }])).toBe(0);
+    expect(paintChartCues(ctx, 0, 0, g, data, [{ cueId: "f#0", factId: "f", kind: "rule", polarity: "attention", anchor: { type: "level", value: 180 } }])).toBe(0);
     expect(calls.some((c) => c.fn === "stroke" || c.fn === "fillRect")).toBe(false);
   });
 
@@ -504,7 +518,7 @@ describe("cue painting", () => {
 
 describe("level anchors", () => {
   const level = (value: number, series?: string): ChartCue => ({
-    factId: "outliers:Sales", kind: "rule", polarity: "attention", description: "Outlier fence for Sales",
+    cueId: `outliers:Sales#${value}`, factId: "outliers:Sales", kind: "rule", polarity: "attention", description: "Outlier fence for Sales",
     anchor: { type: "level", ...(series ? { series } : {}), value },
   });
 
@@ -556,5 +570,48 @@ describe("level anchors", () => {
     expect(calls.find((c) => c.fn === "fillText")?.args[0]).toBe("Outlier fence for Sales");
     // Without the scale the same cue paints nothing, and says so by count.
     expect(paintChartCues(recordingCtx().ctx, 100, 50, g, data, [level(180, "Sales")])).toBe(0);
+  });
+});
+
+// ============================================================================
+// Selection: ONE cue is heavier, not every cue of its fact
+// ============================================================================
+
+describe("the selected cue", () => {
+  /** A context that captures ctx.lineWidth as each stroke is issued. */
+  function widthRecordingCtx(): { ctx: CuePaintContext; widths: number[] } {
+    const widths: number[] = [];
+    const ctx = {
+      save: () => undefined, restore: () => undefined, beginPath: () => undefined,
+      ellipse: () => undefined, arc: () => undefined, fill: () => undefined,
+      fillRect: () => undefined, fillText: () => undefined,
+      moveTo: () => undefined, lineTo: () => undefined, setLineDash: () => undefined,
+      stroke() { widths.push((this as { lineWidth: number }).lineWidth); },
+      lineWidth: 0, globalAlpha: 1, fillStyle: "", strokeStyle: "",
+      font: "", textAlign: "left", textBaseline: "alphabetic",
+    } as unknown as CuePaintContext;
+    return { ctx, widths };
+  }
+
+  // `extremes` rings the highest bar AND the lowest under ONE fact id. Drawing
+  // both heavier tells the reader they picked something they did not, and it is
+  // the same confusion that put a comment on the wrong bar.
+  it("is heavier alone, even when its fact owns another cue", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar" }));
+    const highest: ChartCue = { ...cue(anchor("Sales", 4, "May")), cueId: "extremes:Sales#0" };
+    const lowest: ChartCue = { ...cue(anchor("Sales", 0, "Jan")), cueId: "extremes:Sales#1" };
+    expect(highest.factId).toBe(lowest.factId);
+
+    const { ctx, widths } = widthRecordingCtx();
+    expect(paintChartCues(ctx, 0, 0, g, data, [highest, lowest], lowest.cueId)).toBe(2);
+    expect(widths).toHaveLength(2);
+    expect(widths[0]).toBeLessThan(widths[1]); // the highest plain, the lowest heavier
+
+    // And with nothing selected, neither is.
+    const plain = widthRecordingCtx();
+    paintChartCues(plain.ctx, 0, 0, g, data, [highest, lowest], null);
+    expect(plain.widths[0]).toBe(plain.widths[1]);
+    expect(plain.widths[0]).toBe(widths[0]);
   });
 });

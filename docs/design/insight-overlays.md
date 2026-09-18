@@ -908,6 +908,123 @@ cold comparison runs (51 s each); the `cells` baseline was untouched and still m
 vitest, `check-types`, `lint:boundaries`, `check:line-endings` and `cargo test -p insights`
 (106) green.
 
+## 5g. The owner tested it live — five findings, and what each turned out to be (2026-09-18)
+
+The owner built a report, turned the overlay on and reported five things. One was a defect
+corrupting saved documents, one was a design mistake, and three were the feature not meeting the
+reader where they were. Each is below with what it actually turned out to be.
+
+### A comment landed on the wrong bar — cues had no identity of their own
+
+The owner commented on the 2023 bar and the comment appeared on 2025. The mechanism: an
+`extremes` fact emits **two** cues — a ring on the highest bar and another on the lowest — and
+both carried the same `factId`, which was the only identity a cue had. Clicking a bar stored
+`cue.factId`, so both bars stored the same value; `getSelectedChartCue` then returned the FIRST
+cue with that fact id. Every downstream act inherited the mistake: `primaryDatumOf` anchored the
+comment on the first cue, "Keep this mark in the chart" persisted a marker onto the wrong bar (an
+undoable document mutation), and `reanchorComments` — also fact-keyed — dragged a correct comment
+back there on the next data change.
+
+The fix is identity, not a patch at the creation step. `cuesForChart` now stamps a `cueId` of the
+fact's id and the cue's ordinal within that fact, taken from the DRAFT index: that is stable even
+when an earlier draft fails validation, so cue `…#1` is the same point of interest whether or not
+`…#0` survived. A placed-counter would have renumbered the survivor and moved the comment.
+
+`ChartOverlayState.selectedFactId` became `selectedCueId`; `ChartCueComment` carries `cueId`
+alongside `factId` (kept for grouping and wording, never for resolution); the comment painter, the
+hover compare and the selection highlight all key by cue. `setSelectedChartCue` REFUSES a fact id
+rather than guessing a cue, and `firstCueOfFact` is the one sanctioned place a fact stands in for a
+cue — the stepper, which steps by fact by design. A persisted comment without a `cueId` is dropped
+on load: it could never re-anchor, and it would sit in the tray forever looking like the data had
+changed.
+
+### Pivot tables were analysed as ranges — now refused, with the route that works
+
+"Grand total constitutes 50% of all revenue" is arithmetically true and means nothing: a grand
+total is a row in the same column as the rows it sums, so the contribution fact reads it as a
+peer. `insights_analyze_range` now refuses any rectangle that TOUCHES a pivot region
+(`PIVOT_RANGE_REFUSAL`), checked twice — as asked, and again after `plan_region` has expanded a
+single cell, because a click beside a pivot expands into it. The pivot rectangles are snapshotted
+from `protected_regions` with no other lock held, the discipline the module header already demands
+for the hidden-row sets. Only `"pivot"` regions: a `"bi"` region is a model REFRESH target, an
+ordinary rectangle of numbers and a reasonable thing to analyse.
+
+The guard is in Rust so it covers every caller at once — the pane, the palette, the grid menu,
+MCP, and the sheet overlay's fallback for a pivot that is not model-backed. The message names the
+route that does work, because a pivot over a MODEL is still analysed from the model's own facts,
+where a total is a total. The grid menu hides "Analyse this range…" over a pivot as a courtesy, so
+the reader is not offered an action that can only be refused.
+
+### Analyse answered about the last clicked cell while a chart was selected
+
+Selecting a chart is deliberate and it is the most recent act, so it names the subject.
+`analyzeCurrentTarget` prefers the selected chart over the grid selection, and the pane says so
+BEFORE the press — which is the whole point of the target line. The model switch still beats both:
+that is a position the reader SET. A chart id the data provider does not list falls back to the
+range rather than naming a chart whose numbers cannot be resolved.
+
+### The two overlay actions had no button — a new seam, `@api/chartQuickActions`
+
+The quick-access strip beside a selected chart (Elements, Styles, Filters) was a hard-coded array
+inside Charts, and the Facade Rule forbids Charts importing Insights. So the strip took a seam: a
+contributor declares an id, an icon from a CLOSED set, a per-chart tooltip, optional visibility and
+pressed predicates, and what to do; Charts decides size, position, hover, pressed look, hit area
+and the pixels of the icon. No `draw(ctx)` callback is accepted — a contributor handed the grid
+canvas could paint anywhere on it, and the buttons would drift apart the first time one was styled
+by hand. Every predicate is asked at paint time, because "points of interest" is a toggle whose
+state is per chart; a predicate that throws costs that one button, never the strip.
+
+Finding the buttons also fixed a latent bug beside them: `isInQuickAccessArea` clamped the click
+envelope to the CHART's height, so on a chart shorter than the strip the lowest buttons drew,
+hovered nothing and let the click fall through to the grid, deselecting the chart they belonged to.
+The envelope is now the taller of the chart and the strip — but only in the strip's column, because
+the cells under a chart belong to the grid.
+
+### Squares, and a colour that is not blue — but not red either
+
+The owner asked for red squares. The squares were right, for the reason given: a bar is a
+rectangle, and an oval around one leaves four wedges of background inside the mark while its sides
+cut across the bar's. The `rect` case of `pathAround` now traces a box — four lines from one
+`moveTo`, ending where it started, because `rect` and `closePath` stay OUT of `CuePaintContext`:
+the surface the painter needs is the surface a test has to double, and every method added to it is
+another one a stub can get silently wrong. A line or scatter point is still round; it is round.
+
+The red was declined and the owner accepted the pushback. Red is `bad` in this palette (`#d93025`),
+and the standing rule is that red is never inferred from a falling number: the default overlay is
+the case where NOTHING declares a direction, so it must say nothing about whether the marked number
+is good news. The neutral colour moved from `#0e639c` — the same blue as the default bar, which is
+what made the cues hard to see — to charcoal `#3c4043`. The KEPT-mark painter draws the same box,
+so pressing "Keep this mark" does not change the picture the reader was looking at when they
+pressed it.
+
+### Live, on the rebuilt binary
+
+Both overlay journeys were run on the 100%-scale display. The PIVOT journey passed unchanged and
+its baseline was not touched, which is the confirmation that the model route and its colours are
+independent of this change: its cues carry a strategy's declared direction, not the neutral
+polarity. The CHART journey stopped exactly where it should have — at its stored screenshot, 2514
+pixels different, a ratio of 0.02 — because the cues are no longer blue ovals.
+
+The two images were compared before anything was re-recorded. The old baseline shows why the owner
+asked: the ring on August is a tall ellipse that cuts across the bar and leaves its corners
+outside, the one on February floats mostly BELOW that short bar rather than enclosing it, and all
+of them are blue on blue. The new one shows a charcoal dotted box hugging each bar, the selected
+one heavier. `region-insight-overlay-chart-all.png` and `region-insight-overlay-cells.png` were
+re-recorded (the cells baseline changed too: the neutral cell frame on November is charcoal now,
+while the amber outlier frames are untouched), and both were confirmed by a cold comparison run
+that passed in 51 s.
+
+**Two harness traps cost a run each, both recorded.** The first journey attempt reported success
+while having failed: `CARGO_TARGET_DIR` is ambient shell state, this session's shell never set it,
+so the build went to the in-repo `target/` — the corrupt tree CLAUDE.md warns about — and died
+there; and `command | tail; echo "EXIT=$?"` reports TAIL's exit code, so a 300-second CDP timeout
+was announced as exit 0. The second attempt lost a build to `--update-snapshots e2e/…spec.ts`,
+where Playwright takes the file path as the flag's optional MODE argument; it needs
+`--update-snapshots=changed` with the filter separate.
+
+**Gates:** full vitest, `check-types`, `lint:boundaries`, `check:line-endings` and the app crate's
+`insights::` tests green; 17 sabotages across the round, each redding only its own guard.
+
 ## 6. Verification — the standard this repository holds a milestone to
 
 - Every rule in §4.3 is a unit test; the harmful-cue gate and determinism are CI tests over the

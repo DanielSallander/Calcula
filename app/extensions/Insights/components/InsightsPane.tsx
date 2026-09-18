@@ -25,8 +25,8 @@ import { ExtensionRegistry } from "@api/extensions";
 import { getGridStateSnapshot, navigateToRange } from "@api/grid";
 import { setActiveSheet } from "@api/lib";
 import { showToast } from "@api/notifications";
+import { AppEvents, onAppEvent } from "@api/events";
 import {
-  analyzeCurrentSource,
   describeSelection,
   getState,
   setConnectionId,
@@ -35,6 +35,7 @@ import {
   toggleWhy,
   type SelectionTarget,
 } from "../lib/store";
+import { analyzeCurrentTarget, selectedChartTarget } from "../lib/chartExplain";
 import { canSendToChat, sendBundleToChat } from "../lib/chatHandoff";
 import { createReportSheet } from "../lib/backend";
 import { hideOverlay, isOverlayOn, noticeFor, showOverlay } from "../lib/overlay";
@@ -265,6 +266,17 @@ export function InsightsPane(_props: TaskPaneViewProps): React.ReactElement {
     });
   }, []);
 
+  // A SELECTED CHART is what Analyse is about, ahead of the grid selection
+  // (see `analyzeCurrentTarget`). Read the same way the range is: watched so
+  // the button's label stays honest, never analysed on its own.
+  const [chartTarget, setChartTarget] = useState(() => selectedChartTarget());
+  useEffect(() => {
+    setChartTarget(selectedChartTarget());
+    return onAppEvent(AppEvents.CHART_SELECTION_CHANGED, () => {
+      setChartTarget(selectedChartTarget());
+    });
+  }, []);
+
   const [busyReport, setBusyReport] = useState(false);
 
   const bundle = state.bundle;
@@ -273,7 +285,7 @@ export function InsightsPane(_props: TaskPaneViewProps): React.ReactElement {
   const running = state.status === "running";
 
   const onAnalyse = useCallback(() => {
-    void analyzeCurrentSource();
+    void analyzeCurrentTarget();
   }, []);
 
   const onCopy = useCallback(() => {
@@ -378,7 +390,7 @@ export function InsightsPane(_props: TaskPaneViewProps): React.ReactElement {
   const asOf = bundle && bundle.source === "model" ? state.computedAt : null;
 
   const analyseLabel = running ? "Analysing…" : "Analyse";
-  const canAnalyse = !running && (isModel ? Boolean(state.connectionId) : Boolean(target));
+  const canAnalyse = !running && (isModel ? Boolean(state.connectionId) : Boolean(chartTarget) || Boolean(target));
 
   return (
     <div style={containerStyle} data-testid="insights-pane">
@@ -429,13 +441,18 @@ export function InsightsPane(_props: TaskPaneViewProps): React.ReactElement {
               </span>
               .
             </>
+          ) : chartTarget ? (
+            <>
+              Will analyse the chart <span style={targetStrongStyle}>{chartTarget.label}</span>. Click
+              a cell to analyse a range instead.
+            </>
           ) : target ? (
             <>
               Will analyse <span style={targetStrongStyle}>{target.label}</span>
               {target.expanded ? ", expanded to the block around it." : "."}
             </>
           ) : (
-            <>Select a range on the grid to analyse it.</>
+            <>Select a range on the grid, or a chart, to analyse it.</>
           )}
         </div>
 

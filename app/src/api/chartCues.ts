@@ -84,6 +84,14 @@ export type ChartCueAnchor =
   | ChartCueLevelAnchor;
 
 export interface ChartCue {
+  /**
+   * This cue, not its fact. One fact routinely emits SEVERAL cues — `extremes`
+   * emits a ring on the highest bar and another on the lowest — so a fact id
+   * does not name a cue, and anything that acts on "the cue the reader clicked"
+   * (selection, a comment, a kept mark) must carry this instead. Deterministic:
+   * the fact's id and the cue's ordinal within that fact.
+   */
+  cueId: string;
   /** The fact this cue is the picture of. A cue with no fact behind it is a defect. */
   factId: string;
   kind: ChartCueKind;
@@ -96,13 +104,16 @@ export interface ChartCue {
 }
 
 /**
- * A reader's words beside a point of interest. Anchored to the FACT (the
- * point of interest), which is why it can follow the ring when the data
- * changes and why it can become unattached when the fact is gone.
+ * A reader's words beside a point of interest. Anchored to the CUE (the one
+ * ring the reader was looking at), which is why it can follow that ring when
+ * the data changes and why it can become unattached when the cue is gone.
+ * `factId` is kept for grouping and for the tray's wording; it is never what
+ * re-anchoring resolves by, because a fact can own several cues.
  */
 export interface ChartCueComment {
   /** Stable id, so an edit or a removal names one comment. */
   id: string;
+  cueId: string;
   factId: string;
   text: string;
   /** Where it is drawn now; `null` when its fact no longer exists (the tray). */
@@ -118,8 +129,8 @@ export interface ChartOverlayState {
   cues: readonly ChartCue[];
   comments: readonly ChartCueComment[];
   step: ChartCueStep;
-  /** The fact of the cue the reader clicked, or null. */
-  selectedFactId: string | null;
+  /** The cue the reader clicked, or null. Never the fact: a fact owns many cues. */
+  selectedCueId: string | null;
 }
 
 type Listener = (chartId: string) => void;
@@ -133,7 +144,7 @@ const EMPTY: ChartOverlayState = Object.freeze({
   cues: Object.freeze([]) as readonly ChartCue[],
   comments: Object.freeze([]) as readonly ChartCueComment[],
   step: 0,
-  selectedFactId: null,
+  selectedCueId: null,
 });
 
 function notify(chartId: string): void {
@@ -189,15 +200,16 @@ export function setChartCues(chartId: string, cues: readonly ChartCue[]): void {
     const at = shown === undefined ? -1 : nextFacts.indexOf(shown);
     step = at >= 0 ? at : 0;
   }
-  const selectedFactId = prev.selectedFactId && nextFacts.includes(prev.selectedFactId) ? prev.selectedFactId : null;
-  put(chartId, { ...prev, cues: freezeCues(cues), step, selectedFactId });
+  const selectedCueId =
+    prev.selectedCueId !== null && cues.some((c) => c.cueId === prev.selectedCueId) ? prev.selectedCueId : null;
+  put(chartId, { ...prev, cues: freezeCues(cues), step, selectedCueId });
 }
 
 /** Drop one chart's cues, selection and step; comments stay (they may be unattached). */
 export function clearChartCues(chartId: string): void {
   const prev = stateOf(chartId);
-  if (prev.cues.length === 0 && prev.selectedFactId === null) return;
-  put(chartId, { ...prev, cues: EMPTY.cues, step: 0, selectedFactId: null });
+  if (prev.cues.length === 0 && prev.selectedCueId === null) return;
+  put(chartId, { ...prev, cues: EMPTY.cues, step: 0, selectedCueId: null });
 }
 
 /** Drop everything for every chart — document open/new, extension teardown. */
@@ -266,16 +278,27 @@ export function visibleChartCues(chartId: string): readonly ChartCue[] {
 // Selection
 // ============================================================================
 
-export function setSelectedChartCue(chartId: string, factId: string | null): void {
+/**
+ * Select ONE cue by its own id. A fact id is not accepted: passing one selects
+ * nothing, which is the honest outcome — the alternative is silently selecting
+ * the fact's first cue, and that is exactly how a comment on the 2023 bar
+ * landed on 2025.
+ */
+export function setSelectedChartCue(chartId: string, cueId: string | null): void {
   const prev = stateOf(chartId);
-  const next = factId !== null && prev.cues.some((c) => c.factId === factId) ? factId : null;
-  if (next === prev.selectedFactId) return;
-  put(chartId, { ...prev, selectedFactId: next });
+  const next = cueId !== null && prev.cues.some((c) => c.cueId === cueId) ? cueId : null;
+  if (next === prev.selectedCueId) return;
+  put(chartId, { ...prev, selectedCueId: next });
 }
 
 export function getSelectedChartCue(chartId: string): ChartCue | null {
   const s = stateOf(chartId);
-  return s.selectedFactId === null ? null : (s.cues.find((c) => c.factId === s.selectedFactId) ?? null);
+  return s.selectedCueId === null ? null : (s.cues.find((c) => c.cueId === s.selectedCueId) ?? null);
+}
+
+/** The first cue of a fact, for callers that step by FACT (the stepper). */
+export function firstCueOfFact(chartId: string, factId: string): ChartCue | null {
+  return stateOf(chartId).cues.find((c) => c.factId === factId) ?? null;
 }
 
 // ============================================================================

@@ -7,12 +7,23 @@
 //
 // Buttons are drawn on the main canvas (not OffscreenCanvas) so they appear
 // outside the chart bounds. Hit-testing extends beyond chart rect to cover buttons.
+//
+// A fourth kind, "action", is CONTRIBUTED: another extension registers it
+// through `@api/chartQuickActions` and this module decides everything about how
+// it looks and where it sits. That is how Insights puts "points of interest"
+// and its snapshot in the strip without either extension importing the other.
+//
+// THE STRIP IS AS TALL AS ITS BUTTONS. The click envelope used to be the
+// chart own height, which silently swallowed any button hanging below a short
+// chart; it is now computed from the buttons themselves.
+
+import { chartQuickActionsFor, type ChartQuickActionIcon } from "@api/chartQuickActions";
 
 // ============================================================================
 // Types
 // ============================================================================
 
-export type QuickAccessButtonType = "elements" | "styles" | "filters";
+export type QuickAccessButtonType = "elements" | "styles" | "filters" | "action";
 
 export interface QuickAccessButton {
   type: QuickAccessButtonType;
@@ -26,6 +37,22 @@ export interface QuickAccessButton {
   icon: string;
   /** Tooltip text */
   tooltip: string;
+  /** Set only on a contributed button: which registered action it runs. */
+  actionId?: string;
+  /** Which icon the painter draws for a contributed button. */
+  actionIcon?: ChartQuickActionIcon;
+  /** Drawn pressed, as an open popup is. */
+  active?: boolean;
+}
+
+/**
+ * What identifies a button for hover and popup state.
+ *
+ * The three built-ins are one of a kind, so their type is enough; a contributed
+ * button is one of many "action" buttons and is named by its action id.
+ */
+export function quickAccessButtonKey(button: QuickAccessButton): string {
+  return button.actionId ?? button.type;
 }
 
 /** State tracking which button popup is open */
@@ -41,22 +68,31 @@ const BUTTON_OFFSET_X = 8; // Gap between chart right edge and buttons
 
 /**
  * Compute button positions for the right side of a selected chart.
- * Returns 3 buttons positioned vertically: Elements, Styles, Filters.
+ *
+ * The three built-ins come first (Elements, Styles, Filters), followed by
+ * whatever `@api/chartQuickActions` has registered and says is visible for THIS
+ * chart, in its declared order. Every predicate is asked here, at paint time,
+ * because "points of interest" is a toggle whose pressed state is per chart.
+ *
+ * `chartId` is optional so the built-in geometry can still be computed without
+ * one; omitted, no contributed button is added.
  */
 export function computeQuickAccessButtons(
   chartCanvasX: number,
   chartCanvasY: number,
   chartWidth: number,
   _chartHeight: number,
+  chartId?: string,
 ): QuickAccessButton[] {
   const x = chartCanvasX + chartWidth + BUTTON_OFFSET_X;
   const startY = chartCanvasY + 4;
+  const at = (i: number): number => startY + (BUTTON_SIZE + BUTTON_GAP) * i;
 
-  return [
+  const buttons: QuickAccessButton[] = [
     {
       type: "elements",
       x,
-      y: startY,
+      y: at(0),
       width: BUTTON_SIZE,
       height: BUTTON_SIZE,
       icon: "+",
@@ -65,7 +101,7 @@ export function computeQuickAccessButtons(
     {
       type: "styles",
       x,
-      y: startY + BUTTON_SIZE + BUTTON_GAP,
+      y: at(1),
       width: BUTTON_SIZE,
       height: BUTTON_SIZE,
       icon: "\u{1F3A8}", // paintbrush
@@ -74,27 +110,67 @@ export function computeQuickAccessButtons(
     {
       type: "filters",
       x,
-      y: startY + (BUTTON_SIZE + BUTTON_GAP) * 2,
+      y: at(2),
       width: BUTTON_SIZE,
       height: BUTTON_SIZE,
       icon: "\u25BD", // funnel
       tooltip: "Chart Filters",
     },
   ];
+
+  if (chartId === undefined) return buttons;
+
+  // A contributor predicate that throws costs that ONE button, never the
+  // strip: the built-ins above are already in the array.
+  for (const action of chartQuickActionsFor(chartId)) {
+    let tooltip: string;
+    let active: boolean;
+    try {
+      tooltip = action.tooltip(chartId);
+      active = action.active !== undefined && action.active(chartId);
+    } catch {
+      continue;
+    }
+    buttons.push({
+      type: "action",
+      x,
+      y: at(buttons.length),
+      width: BUTTON_SIZE,
+      height: BUTTON_SIZE,
+      icon: "",
+      tooltip,
+      actionId: action.id,
+      actionIcon: action.icon,
+      active,
+    });
+  }
+
+  return buttons;
+}
+
+/** The strip full height for a given number of buttons, measured from the chart top edge. */
+export function quickAccessStripHeight(buttonCount: number): number {
+  if (buttonCount <= 0) return 0;
+  return 4 + buttonCount * BUTTON_SIZE + (buttonCount - 1) * BUTTON_GAP + 4;
 }
 
 // ============================================================================
 // Drawing
 // ============================================================================
 
-/** Currently hovered button type (for visual feedback) */
-let hoveredButton: QuickAccessButtonType | null = null;
+/**
+ * The hovered button KEY (see `quickAccessButtonKey`), for visual feedback.
+ *
+ * A key, not a type: every contributed button is of type "action", so hovering
+ * one of them would light up all of them.
+ */
+let hoveredButton: string | null = null;
 
-export function setHoveredButton(type: QuickAccessButtonType | null): void {
-  hoveredButton = type;
+export function setHoveredButton(key: string | null): void {
+  hoveredButton = key;
 }
 
-export function getHoveredButton(): QuickAccessButtonType | null {
+export function getHoveredButton(): string | null {
   return hoveredButton;
 }
 
@@ -108,8 +184,9 @@ export function drawQuickAccessButtons(
   ctx.save();
 
   for (const btn of buttons) {
-    const isHovered = hoveredButton === btn.type;
-    const isActive = activePopup?.buttonType === btn.type;
+    const key = quickAccessButtonKey(btn);
+    const isHovered = hoveredButton === key;
+    const isActive = btn.type === "action" ? btn.active === true : activePopup?.buttonType === btn.type;
     const r = 4; // border radius
 
     // Background
@@ -154,6 +231,10 @@ export function drawQuickAccessButtons(
     } else if (btn.type === "filters") {
       // Draw funnel icon
       drawFunnelIcon(ctx, btn.x + btn.width / 2, btn.y + btn.height / 2);
+    } else if (btn.actionIcon === "insight") {
+      drawInsightIcon(ctx, btn.x + btn.width / 2, btn.y + btn.height / 2);
+    } else if (btn.actionIcon === "camera") {
+      drawCameraIcon(ctx, btn.x + btn.width / 2, btn.y + btn.height / 2);
     }
 
     ctx.shadowColor = "transparent";
@@ -198,6 +279,68 @@ function drawBrushIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number): v
   ctx.restore();
 }
 
+/**
+ * "Points of interest": a datum ringed by the same box the overlay draws on a
+ * bar, with a spark beside it. The box is the literal shape of the cue this
+ * button turns on, so the button and its effect look like each other.
+ */
+function drawInsightIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number): void {
+  ctx.save();
+  ctx.strokeStyle = ctx.fillStyle;
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = "miter";
+
+  // Three bars, the middle one ringed.
+  ctx.beginPath();
+  ctx.moveTo(cx - 6, cy + 6);
+  ctx.lineTo(cx - 6, cy + 1);
+  ctx.moveTo(cx + 6, cy + 6);
+  ctx.lineTo(cx + 6, cy - 1);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.rect(cx - 3, cy - 4, 6, 10);
+  ctx.stroke();
+
+  // The spark above the marked bar.
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - 8);
+  ctx.lineTo(cx, cy - 6);
+  ctx.moveTo(cx - 4, cy - 7);
+  ctx.lineTo(cx - 3, cy - 6);
+  ctx.moveTo(cx + 4, cy - 7);
+  ctx.lineTo(cx + 3, cy - 6);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+/** "Snapshot": a camera body with a lens. */
+function drawCameraIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number): void {
+  ctx.save();
+  ctx.strokeStyle = ctx.fillStyle;
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = "round";
+
+  ctx.beginPath();
+  ctx.rect(cx - 7, cy - 4, 14, 10);
+  ctx.stroke();
+
+  // The viewfinder bump on top.
+  ctx.beginPath();
+  ctx.moveTo(cx - 3, cy - 4);
+  ctx.lineTo(cx - 2, cy - 7);
+  ctx.lineTo(cx + 2, cy - 7);
+  ctx.lineTo(cx + 3, cy - 4);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(cx, cy + 1, 3, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
 function drawFunnelIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number): void {
   ctx.save();
   ctx.strokeStyle = ctx.fillStyle;
@@ -230,7 +373,7 @@ export function hitTestQuickAccessButtons(
   canvasX: number,
   canvasY: number,
   buttons: QuickAccessButton[],
-): QuickAccessButtonType | null {
+): QuickAccessButton | null {
   for (const btn of buttons) {
     if (
       canvasX >= btn.x &&
@@ -238,7 +381,7 @@ export function hitTestQuickAccessButtons(
       canvasY >= btn.y &&
       canvasY <= btn.y + btn.height
     ) {
-      return btn.type;
+      return btn;
     }
   }
   return null;
@@ -247,6 +390,12 @@ export function hitTestQuickAccessButtons(
 /**
  * Check if a canvas position is within the extended chart area
  * (chart bounds + quick access button area to the right).
+ *
+ * The vertical extent is the TALLER of the chart and its button strip. It used
+ * to be the chart alone, so on a chart shorter than the strip the lowest
+ * buttons were drawn, hovered nothing and swallowed no clicks: the grid under
+ * them took the click instead and the chart was deselected. Three buttons made
+ * that a 90px-tall corner case; a contributed fourth and fifth make it ordinary.
  */
 export function isInQuickAccessArea(
   canvasX: number,
@@ -255,13 +404,18 @@ export function isInQuickAccessArea(
   chartCanvasY: number,
   chartWidth: number,
   chartHeight: number,
+  buttonCount = 3,
 ): boolean {
   const extendedWidth = chartWidth + BUTTON_OFFSET_X + BUTTON_SIZE + 4;
+  const extendedHeight = Math.max(chartHeight, quickAccessStripHeight(buttonCount));
+  const inStripColumn = canvasX > chartCanvasX + chartWidth;
   return (
     canvasX >= chartCanvasX &&
     canvasX <= chartCanvasX + extendedWidth &&
     canvasY >= chartCanvasY &&
-    canvasY <= chartCanvasY + chartHeight
+    // Only the strip column may reach below the chart: the cells under a chart
+    // belong to the grid, and claiming them would break clicking beside it.
+    canvasY <= chartCanvasY + (inStripColumn ? extendedHeight : chartHeight)
   );
 }
 

@@ -17,7 +17,7 @@
 //
 //          `paintChartCues` draws what resolved, at composite time over the
 //          cached raster, exactly where selection highlights are drawn. It
-//          decides HOW each kind looks on each mark (an ellipse round a bar, a
+//          decides HOW each kind looks on each mark (a BOX round a bar, a
 //          circle round a point, an arc along a slice; a translucent band; a
 //          few words beside a callout); the caller only said WHICH datum.
 //          Nothing here writes to the spec.
@@ -310,16 +310,43 @@ export type CuePaintContext = Pick<
   textBaseline: CanvasTextBaseline;
 };
 
+/**
+ * Trace a rectangle as four lines, ending back where it started.
+ *
+ * `rect` and `closePath` are deliberately NOT in `CuePaintContext`: the surface
+ * this painter needs is the surface a test has to double, and every method
+ * added to it is another one a stub can get silently wrong. Four `lineTo` calls
+ * are the whole shape, and the last one closes it.
+ *
+ * Exported so the KEPT-mark painter draws the same outline: a mark the reader
+ * chose to keep must look like the cue they were looking at when they chose it.
+ */
+export function pathRect(ctx: CuePaintContext, x0: number, y0: number, x1: number, y1: number): void {
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y0);
+  ctx.lineTo(x1, y1);
+  ctx.lineTo(x0, y1);
+  ctx.lineTo(x0, y0);
+}
+
 function pathAround(ctx: CuePaintContext, chartX: number, chartY: number, target: CueTarget, pad: number): void {
   ctx.beginPath();
   switch (target.kind) {
     case "rect": {
       const { rect } = target;
-      const cx = chartX + rect.x + rect.width / 2;
-      const cy = chartY + rect.y + rect.height / 2;
-      // An ellipse hugging the bar's box: reads as "encircled" on a tall bar
-      // and on a stacked segment alike, and never hides the bar it marks.
-      ctx.ellipse(cx, cy, rect.width / 2 + pad, rect.height / 2 + pad, 0, 0, Math.PI * 2);
+      // A RECTANGLE hugging the bar's box, not an ellipse. A bar is a
+      // rectangle, and an oval around one leaves four wedges of background
+      // inside the mark while its own sides cut across the bar's; the owner
+      // found the result hard to read against the bars themselves. A box
+      // parallel to the bar reads as "this one" at a glance and still never
+      // covers the bar it marks.
+      pathRect(
+        ctx,
+        chartX + rect.x - pad,
+        chartY + rect.y - pad,
+        chartX + rect.x + rect.width + pad,
+        chartY + rect.y + rect.height + pad,
+      );
       break;
     }
     case "point": {
@@ -431,7 +458,7 @@ export function paintChartCues(
   geometry: HitGeometry,
   data: Pick<ParsedChartData, "series">,
   cues: readonly ChartCue[],
-  selectedFactId: string | null = null,
+  selectedCueId: string | null = null,
   scale?: CueScaleSource,
 ): number {
   if (cues.length === 0) return 0;
@@ -442,7 +469,10 @@ export function paintChartCues(
   for (const cue of cues) {
     const r = resolveCue(geometry, cue.anchor, context);
     if (!r.ok) continue;
-    paintOne(ctx, chartX, chartY, cue, r.shape, selectedFactId !== null && cue.factId === selectedFactId);
+    // Selection highlights the ONE cue clicked, not every cue of its fact:
+    // `extremes` rings the highest and the lowest, and lighting both up says
+    // the reader picked something they did not.
+    paintOne(ctx, chartX, chartY, cue, r.shape, selectedCueId !== null && cue.cueId === selectedCueId);
     drawn++;
   }
   ctx.setLineDash([]);

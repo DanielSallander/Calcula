@@ -66,7 +66,7 @@ afterEach(() => {
 describe("renderChartPng", () => {
   it("export: paints the chart and NO cue, even while the chart carries an overlay", async () => {
     const calls = installFakeOffscreen();
-    setChartCues("c1", [{ factId: "f", kind: "ring", polarity: "bad", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } }]);
+    setChartCues("c1", [{ cueId: "f#0", factId: "f", kind: "ring", polarity: "bad", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } }]);
     const blob = await renderChartPng("c1", { withOverlay: false });
     expect(blob.type).toBe("image/png");
     expect(calls).toContain("fillRect"); // the chart was painted
@@ -76,19 +76,24 @@ describe("renderChartPng", () => {
   it("snapshot: paints the visible cues and the comments over the chart", async () => {
     const calls = installFakeOffscreen();
     setChartCues("c1", [
-      { factId: "f", kind: "ring", polarity: "bad", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" }, description: "Highest Sales" },
-      { factId: "g", kind: "ring", polarity: "good", anchor: { type: "datum", series: "Sales", categoryIndex: 0, categoryLabel: "Jan" }, description: "Lowest Sales" },
+      { cueId: "f#0", factId: "f", kind: "ring", polarity: "bad", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" }, description: "Highest Sales" },
+      { cueId: "g#0", factId: "g", kind: "ring", polarity: "good", anchor: { type: "datum", series: "Sales", categoryIndex: 0, categoryLabel: "Jan" }, description: "Lowest Sales" },
     ]);
-    setChartComments("c1", [{ id: "k", factId: "f", text: "Launch", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } }]);
+    setChartComments("c1", [{ id: "k", cueId: "f#0", factId: "f", text: "Launch", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } }]);
     await renderChartPng("c1", { withOverlay: true });
-    // One step shown by default: one ring. The comment draws a box (arc-rounded) and its text.
-    expect(calls.filter((c) => c === "ellipse")).toHaveLength(1);
+    // A bar's cue is a BOX, and the test above proves the chart itself strokes
+    // no ellipse — so no ellipse here means the cue really is square.
+    expect(calls).not.toContain("ellipse");
     expect(calls).toContain("fillText");
+    // The comment box and the chart both draw paths, so the honest measure of
+    // "one more cue" is the DELTA between one step and all of them.
+    const oneStep = calls.filter((c) => c === "moveTo").length;
 
     calls.length = 0;
     setChartCueStep("c1", "all");
     await renderChartPng("c1", { withOverlay: true });
-    expect(calls.filter((c) => c === "ellipse")).toHaveLength(2);
+    expect(calls.filter((c) => c === "moveTo").length - oneStep).toBe(1);
+    expect(calls).not.toContain("ellipse");
   });
 
   it("throws for a chart that does not exist", async () => {
@@ -100,19 +105,19 @@ describe("renderChartPng", () => {
 
 describe("keep in chart: the layers", () => {
   it("a datum ring becomes a marker layer anchored by series name and category index, coloured by polarity", () => {
-    const layer = layerForCue({ factId: "f", kind: "ring", polarity: "bad", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" }, description: "Highest Sales" });
+    const layer = layerForCue({ cueId: "f#0", factId: "f", kind: "ring", polarity: "bad", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" }, description: "Highest Sales" });
     expect(layer).toEqual({ mark: "marker", markOptions: { series: "Sales", x: 2, shape: "ring", color: "#d93025", label: "Highest Sales" } });
-    const emph = layerForCue({ factId: "f", kind: "emphasis", polarity: "good", anchor: { type: "datum", series: "Sales", categoryIndex: 0, categoryLabel: "Jan" } });
+    const emph = layerForCue({ cueId: "f#1", factId: "f", kind: "emphasis", polarity: "good", anchor: { type: "datum", series: "Sales", categoryIndex: 0, categoryLabel: "Jan" } });
     expect(emph?.markOptions).toMatchObject({ shape: "emphasis" });
   });
 
   it("a band, a rule or a whole-series emphasis cannot be kept as a marker", () => {
-    expect(layerForCue({ factId: "f", kind: "band", polarity: "attention", anchor: { type: "span", from: 1, to: 2 } })).toBeNull();
-    expect(layerForCue({ factId: "f", kind: "emphasis", polarity: "good", anchor: { type: "series", series: "Sales" } })).toBeNull();
+    expect(layerForCue({ cueId: "f#0", factId: "f", kind: "band", polarity: "attention", anchor: { type: "span", from: 1, to: 2 } })).toBeNull();
+    expect(layerForCue({ cueId: "f#0", factId: "f", kind: "emphasis", polarity: "good", anchor: { type: "series", series: "Sales" } })).toBeNull();
   });
 
   it("a comment becomes a text layer at its datum's value; an unattached one cannot be kept", () => {
-    const c = { id: "k", factId: "f", text: "Launch", anchor: { type: "datum" as const, series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } };
+    const c = { id: "k", cueId: "f#0", factId: "f", text: "Launch", anchor: { type: "datum" as const, series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } };
     expect(layerForComment(c, 300)).toEqual({ mark: "text", markOptions: { x: 2, y: 300, text: "Launch", anchor: "start", baseline: "bottom" } });
     expect(layerForComment({ ...c, anchor: null }, 300)).toBeNull();
     expect(layerForComment(c, null)).toBeNull();

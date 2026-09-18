@@ -64,9 +64,9 @@ export async function renderChartPng(chartId: string, options: RasterOptions = {
       // The overlay is drawn at the export layout's own geometry, in logical
       // pixels (the context is already scaled), chart origin at (0, 0).
       const geometry = dispatchComputeGeometry(data, spec, layout, theme);
-      paintChartCues(ctx, 0, 0, geometry, data, visibleChartCues(chartId), overlay.selectedFactId, { spec, layout, data });
-      const byId = new Map(overlay.cues.map((c) => [c.factId, c] as const));
-      paintChartComments(ctx, 0, 0, logicalWidth, logicalHeight, geometry, data, overlay.comments, byId);
+      paintChartCues(ctx, 0, 0, geometry, data, visibleChartCues(chartId), overlay.selectedCueId, { spec, layout, data });
+      const byCue = new Map(overlay.cues.map((c) => [c.cueId, c] as const));
+      paintChartComments(ctx, 0, 0, logicalWidth, logicalHeight, geometry, data, overlay.comments, byCue);
     }
   }
 

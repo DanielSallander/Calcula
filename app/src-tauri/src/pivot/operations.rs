@@ -821,6 +821,30 @@ pub(crate) fn check_pivot_overlap(
     Ok(())
 }
 
+/// Every pivot table's rectangle on one sheet, inclusive, as a SNAPSHOT.
+///
+/// The lock is taken and released here, so the caller can hold nothing else
+/// while asking — the discipline the insights commands already follow for the
+/// hidden-row sets, and the reason this returns owned rectangles rather than a
+/// guard: Tauri dispatches on a thread pool, and a caller that held the grid
+/// locks across this would be inventing a new lock order.
+///
+/// Only `"pivot"` regions, deliberately. A `"bi"` region is a model REFRESH
+/// target — a block of query results, which is an ordinary rectangle of numbers
+/// and a perfectly reasonable thing to analyse — and a `"report"` region is
+/// someone else's output, not a cross-tabulation.
+pub(crate) fn pivot_rects_on_sheet(state: &AppState, sheet_index: usize) -> Vec<(u32, u32, u32, u32)> {
+    let regions = match state.protected_regions.lock() {
+        Ok(r) => r,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    regions
+        .iter()
+        .filter(|r| r.region_type == "pivot" && r.sheet_index == sheet_index)
+        .map(|r| (r.start_row, r.start_col, r.end_row, r.end_col))
+        .collect()
+}
+
 /// Snapshot the workbook's sheet names.
 ///
 /// Callers that need to resolve a sheet name while holding `pivot_tables` must

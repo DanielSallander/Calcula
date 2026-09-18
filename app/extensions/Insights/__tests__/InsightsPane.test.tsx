@@ -34,6 +34,9 @@ const h = vi.hoisted(() => ({
       sheetContext: { activeSheetIndex: 0, activeSheetName: "Sheet1" },
     } as unknown,
   },
+  selectedChartId: { current: null as string | null },
+  charts: { current: [] as Array<{ chartId: string; name: string; title: string | null }> },
+  analyzeSeries: vi.fn(),
 }));
 
 vi.mock("@api/backendCommands", () => ({
@@ -67,6 +70,8 @@ vi.mock("@api/chartData", () => ({
   CHART_SERIES_MAX_POINTS: 10_000,
   getChartDataProvider: () => null,
   resolveChartSeries: (...args: unknown[]) => h.resolveSeries(...args),
+  getSelectedChartId: () => h.selectedChartId.current,
+  listChartsForData: () => h.charts.current,
 }));
 vi.mock("@api/extensionData", () => ({
   getExtensionData: vi.fn(async () => null),
@@ -150,6 +155,8 @@ beforeEach(() => {
     sheetContext: { activeSheetIndex: 0, activeSheetName: "Sheet1" },
   };
   h.resolveSeries.mockReset();
+  h.selectedChartId.current = null;
+  h.charts.current = [];
   chartCues.clearAllChartCues();
   overlayLib.resetOverlays();
   store.reset();
@@ -487,5 +494,45 @@ describe("the Insights pane", () => {
       await store.analyzeSelection();
     });
     expect(one("insights-error")?.textContent).toContain("Select a range on the grid");
+  });
+
+  // The owner selected a chart, pressed Analyse, and got facts about the cell
+  // they had last clicked. Selecting a chart is deliberate and it is the most
+  // recent act, so it names the subject — and the pane says so BEFORE the press,
+  // which is the whole point of the target line.
+  it("names the selected CHART as what Analyse will answer about, ahead of the grid selection", async () => {
+    h.selectedChartId.current = "chart-1";
+    h.charts.current = [{ chartId: "chart-1", name: "Chart 1", title: "Sales by month" }];
+    await render();
+
+    const text = one("insights-target")?.textContent ?? "";
+    expect(text).toContain("Sales by month");
+    expect(text).not.toContain("Sheet1!B2:D10");
+    expect((one("insights-analyse") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("goes back to the range as soon as no chart is selected", async () => {
+    h.selectedChartId.current = null;
+    h.charts.current = [{ chartId: "chart-1", name: "Chart 1", title: "Sales by month" }];
+    await render();
+    expect(one("insights-target")?.textContent).toContain("Sheet1!B2:D10");
+  });
+
+  // A chart id the data provider does not list is not a subject: falling back to
+  // the range beats naming a chart whose numbers cannot be resolved.
+  it("ignores a selected chart the data provider does not know", async () => {
+    h.selectedChartId.current = "ghost";
+    h.charts.current = [{ chartId: "chart-1", name: "Chart 1", title: "Sales by month" }];
+    await render();
+    expect(one("insights-target")?.textContent).toContain("Sheet1!B2:D10");
+  });
+
+  it("offers Analyse with a chart selected even when no range is", async () => {
+    h.gridState.current = null;
+    h.selectedChartId.current = "chart-1";
+    h.charts.current = [{ chartId: "chart-1", name: "Chart 1", title: null }];
+    await render();
+    expect((one("insights-analyse") as HTMLButtonElement).disabled).toBe(false);
+    expect(one("insights-target")?.textContent).toContain("Chart 1");
   });
 });

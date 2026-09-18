@@ -98,6 +98,7 @@ import { chartDataProvider } from "./lib/chartDataProvider";
 import {
   chartCueSteps,
   clearAllChartCues,
+  firstCueOfFact,
   getChartCueStep,
   getChartOverlay,
   getSelectedChartCue,
@@ -150,8 +151,9 @@ import {
   togglePopup,
   closePopup,
   getActivePopup,
-  type QuickAccessButtonType,
+  type QuickAccessButton,
 } from "./rendering/quickAccessButtons";
+import { listChartQuickActions } from "@api/chartQuickActions";
 import { hitTestBarChart, hitTestGeometry, hitTestRect } from "./rendering/chartHitTesting";
 import { isComposed } from "./rendering/chartDispatch";
 import {
@@ -1125,15 +1127,20 @@ function activate(context: ExtensionContext): void {
       if (stepperHit === "prev") stepChartCues(click.chartId, -1);
       else if (stepperHit === "next") stepChartCues(click.chartId, 1);
       else if (stepperHit === "all") setChartCueStep(click.chartId, getChartCueStep(click.chartId) === "all" ? 0 : "all");
-      // "step": the label itself; a click there selects the shown fact.
-      else setSelectedChartCue(click.chartId, chartCueSteps(click.chartId)[Number(getChartCueStep(click.chartId)) || 0] ?? null);
+      // "step": the label itself; a click there selects the shown fact's first
+      // cue (the stepper steps by fact, but a selection names ONE cue).
+      else {
+        const shownFact = chartCueSteps(click.chartId)[Number(getChartCueStep(click.chartId)) || 0];
+        const first = shownFact === undefined ? null : firstCueOfFact(click.chartId, shownFact);
+        setSelectedChartCue(click.chartId, first ? first.cueId : null);
+      }
       requestOverlayRedraw();
       return;
     }
     const commentHit = hitTestCommentBoxes(click.canvasX, click.canvasY, cachedData.commentBoxes);
     if (commentHit) {
       const comment = getChartOverlay(click.chartId).comments.find((c) => c.id === commentHit);
-      if (comment) setSelectedChartCue(click.chartId, comment.factId);
+      if (comment) setSelectedChartCue(click.chartId, comment.cueId);
       requestOverlayRedraw();
       return;
     }
@@ -1189,7 +1196,7 @@ function activate(context: ExtensionContext): void {
       const cue = isDataHit(datumHit) ? cueAtDatum(visibleChartCues(click.chartId), datumHit) : null;
       if (cue) {
         const current = getSelectedChartCue(click.chartId);
-        setSelectedChartCue(click.chartId, current?.factId === cue.factId ? null : cue.factId);
+        setSelectedChartCue(click.chartId, current?.cueId === cue.cueId ? null : cue.cueId);
         requestOverlayRedraw();
         return;
       }
@@ -1997,11 +2004,26 @@ function handlePivotFieldButtonClick(
  */
 function handleQuickAccessButtonClick(
   chartId: string,
-  buttonType: QuickAccessButtonType,
+  button: QuickAccessButton,
   canvasX: number,
   canvasY: number,
 ): void {
   const QA_OVERLAY_ID = "chart:quickAccessPopup";
+
+  // A CONTRIBUTED button runs its action and opens no popup: the contributor
+  // owns what happens next, and Charts owns only the button.
+  if (button.type === "action") {
+    const action = listChartQuickActions().find((a) => a.id === button.actionId);
+    if (!action) return;
+    try {
+      action.onSelect(chartId);
+    } catch (err) {
+      console.error("[Charts] a quick-access action threw", err);
+    }
+    emitAppEvent(AppEvents.GRID_REFRESH);
+    return;
+  }
+  const buttonType = button.type;
 
   if (!gridContainer) {
     gridContainer = document.querySelector("canvas")?.parentElement ?? null;

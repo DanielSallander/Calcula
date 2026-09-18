@@ -70,19 +70,19 @@ describe("hitTestQuickAccessButtons", () => {
   it("returns 'elements' when clicking on first button", () => {
     const btn = buttons[0];
     const result = hitTestQuickAccessButtons(btn.x + 5, btn.y + 5, buttons);
-    expect(result).toBe("elements");
+    expect(result?.type).toBe("elements");
   });
 
   it("returns 'styles' when clicking on second button", () => {
     const btn = buttons[1];
     const result = hitTestQuickAccessButtons(btn.x + 5, btn.y + 5, buttons);
-    expect(result).toBe("styles");
+    expect(result?.type).toBe("styles");
   });
 
   it("returns 'filters' when clicking on third button", () => {
     const btn = buttons[2];
     const result = hitTestQuickAccessButtons(btn.x + 5, btn.y + 5, buttons);
-    expect(result).toBe("filters");
+    expect(result?.type).toBe("filters");
   });
 
   it("returns null when clicking outside all buttons", () => {
@@ -102,8 +102,8 @@ describe("hitTestQuickAccessButtons", () => {
 
   it("detects hit at exact button edges", () => {
     const btn = buttons[0];
-    expect(hitTestQuickAccessButtons(btn.x, btn.y, buttons)).toBe("elements");
-    expect(hitTestQuickAccessButtons(btn.x + btn.width, btn.y + btn.height, buttons)).toBe("elements");
+    expect(hitTestQuickAccessButtons(btn.x, btn.y, buttons)?.type).toBe("elements");
+    expect(hitTestQuickAccessButtons(btn.x + btn.width, btn.y + btn.height, buttons)?.type).toBe("elements");
   });
 });
 

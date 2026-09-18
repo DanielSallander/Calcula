@@ -91,10 +91,11 @@ describe("the stepper pill", () => {
 
 describe("comments", () => {
   const ext = "extremes:x";
-  const cues = new Map<string, ChartCue>([[ext, { factId: ext, kind: "ring", polarity: "bad", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } }]]);
+  const cueId = `${ext}#0`;
+  const cues = new Map<string, ChartCue>([[cueId, { cueId, factId: ext, kind: "ring", polarity: "bad", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } }]]);
 
   it("hangs an attached comment off its datum, inside the chart, and hit-tests it", () => {
-    const comments: ChartCueComment[] = [{ id: "k1", factId: ext, text: "Launch month", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } }];
+    const comments: ChartCueComment[] = [{ id: "k1", cueId, factId: ext, text: "Launch month", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } }];
     const { ctx, texts } = ctxStub();
     const boxes = paintChartComments(ctx, 100, 50, 600, 400, geometry, data, comments, cues);
     expect(boxes).toHaveLength(1);
@@ -110,7 +111,7 @@ describe("comments", () => {
   it("a comment on a bar that reaches the chart's top hangs BELOW its attach point, out of the pill's strip", () => {
     // Mar (300) is the tallest bar: its top is at the plot's top, so a box
     // above it would sit under the stepper pill (found by the live proof).
-    const comments: ChartCueComment[] = [{ id: "k1", factId: ext, text: "Launch month", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } }];
+    const comments: ChartCueComment[] = [{ id: "k1", cueId, factId: ext, text: "Launch month", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } }];
     const { ctx } = ctxStub();
     const boxes = paintChartComments(ctx, 100, 50, 600, 400, geometry, data, comments, cues);
     expect(boxes).toHaveLength(1);
@@ -119,14 +120,14 @@ describe("comments", () => {
     expect(boxes[0].y).toBeGreaterThan(50 + tallest.y); // below the bar's top, not above it
 
     // A short bar keeps the box ABOVE its top.
-    const low: ChartCueComment[] = [{ id: "k2", factId: ext, text: "Low", anchor: { type: "datum", series: "Sales", categoryIndex: 0, categoryLabel: "Jan" } }];
+    const low: ChartCueComment[] = [{ id: "k2", cueId, factId: ext, text: "Low", anchor: { type: "datum", series: "Sales", categoryIndex: 0, categoryLabel: "Jan" } }];
     const short = (geometry as { rects: Array<{ categoryIndex: number; y: number }> }).rects.find((r) => r.categoryIndex === 0)!;
     const lowBoxes = paintChartComments(ctxStub().ctx, 100, 50, 600, 400, geometry, data, low, cues);
     expect(lowBoxes[0].y + lowBoxes[0].height).toBeLessThan(50 + short.y);
   });
 
   it("writes the 'was Mar' badge on a comment that followed its fact", () => {
-    const comments: ChartCueComment[] = [{ id: "k1", factId: ext, text: "Launch month", movedFrom: "Mar", anchor: { type: "datum", series: "Sales", categoryIndex: 4, categoryLabel: "May" } }];
+    const comments: ChartCueComment[] = [{ id: "k1", cueId, factId: ext, text: "Launch month", movedFrom: "Mar", anchor: { type: "datum", series: "Sales", categoryIndex: 4, categoryLabel: "May" } }];
     const { ctx, texts } = ctxStub();
     paintChartComments(ctx, 0, 0, 600, 400, geometry, data, comments, cues);
     expect(texts).toContain("was Mar");
@@ -134,8 +135,8 @@ describe("comments", () => {
 
   it("puts an unattached comment, and one whose anchor no longer resolves, in the tray at the bottom", () => {
     const comments: ChartCueComment[] = [
-      { id: "k1", factId: "gone", text: "old note", anchor: null, movedFrom: "Mar" },
-      { id: "k2", factId: ext, text: "stale", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "March" } },
+      { id: "k1", cueId: "gone#0", factId: "gone", text: "old note", anchor: null, movedFrom: "Mar" },
+      { id: "k2", cueId, factId: ext, text: "stale", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "March" } },
     ];
     const { ctx, texts, calls } = ctxStub();
     const boxes = paintChartComments(ctx, 0, 0, 600, 400, geometry, data, comments, cues);

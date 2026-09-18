@@ -163,10 +163,10 @@ function diffCount(a: number[], b: number[]): number {
 }
 
 interface OverlayView {
-  cues: Array<{ factId: string; kind: string; polarity: string; description?: string; anchor: Record<string, unknown> }>;
-  comments: Array<{ id: string; factId: string; text: string; anchor: Record<string, unknown> | null; movedFrom?: string }>;
+  cues: Array<{ cueId: string; factId: string; kind: string; polarity: string; description?: string; anchor: Record<string, unknown> }>;
+  comments: Array<{ id: string; cueId: string; factId: string; text: string; anchor: Record<string, unknown> | null; movedFrom?: string }>;
   step: number | "all";
-  selectedFactId: string | null;
+  selectedCueId: string | null;
   visible: number;
 }
 
@@ -312,15 +312,17 @@ test.describe("Insight overlays, live", () => {
 
     // --- A COMMENT on the highest month, through the menu and the in-app prompt
     await appPage.evaluate(
-      async ({ chartId, mod, factId }) => {
+      async ({ chartId, mod, cueId }) => {
         const m = (await (window as unknown as AppWindow).__appImport!(mod)) as {
-          setSelectedChartCue: (id: string, f: string | null) => void;
+          setSelectedChartCue: (id: string, c: string | null) => void;
           setChartCueStep: (id: string, s: number | "all") => void;
         };
         m.setChartCueStep(chartId, "all");
-        m.setSelectedChartCue(chartId, factId);
+        // By CUE id: `extremes` rings the highest month AND the lowest under one
+        // fact id, and a fact id now selects nothing rather than guessing.
+        m.setSelectedChartCue(chartId, cueId);
       },
-      { chartId, mod: CHART_CUES, factId: highest!.factId },
+      { chartId, mod: CHART_CUES, cueId: highest!.cueId },
     );
     await appPage.waitForTimeout(300);
     await chartMenu(appPage, box, "Add comment on this point…");
@@ -330,7 +332,7 @@ test.describe("Insight overlays, live", () => {
     await prompt.locator("button", { hasText: /^OK$/ }).click();
     await appPage.waitForTimeout(800);
     overlay = await overlayOf(appPage, chartId);
-    expect(overlay.comments.map((c) => [c.text, c.factId, c.anchor?.categoryLabel])).toEqual([["Launch month", highest!.factId, "Aug"]]);
+    expect(overlay.comments.map((c) => [c.text, c.cueId, c.anchor?.categoryLabel])).toEqual([["Launch month", highest!.cueId, "Aug"]]);
     const commented = await pixels(appPage, box);
     expect(diffCount(on, commented), "the comment box must be painted").toBeGreaterThan(20);
 
@@ -358,12 +360,12 @@ test.describe("Insight overlays, live", () => {
     expect(await backendLayers(), "no layer before keeping").toEqual([]);
     const selectedBeforeKeep = await appPage.evaluate(
       async ({ chartId, mod }) => {
-        const m = (await (window as unknown as AppWindow).__appImport!(mod)) as { getSelectedChartCue: (id: string) => { factId: string } | null };
-        return m.getSelectedChartCue(chartId)?.factId ?? null;
+        const m = (await (window as unknown as AppWindow).__appImport!(mod)) as { getSelectedChartCue: (id: string) => { cueId: string } | null };
+        return m.getSelectedChartCue(chartId)?.cueId ?? null;
       },
       { chartId, mod: CHART_CUES },
     );
-    expect(selectedBeforeKeep, "a cue must be selected for Keep to have a subject").toBe(highest!.factId);
+    expect(selectedBeforeKeep, "a cue must be selected for Keep to have a subject").toBe(highest!.cueId);
     await chartMenu(appPage, box, "Keep this mark in the chart");
     // The store's 300 ms save debounce, then the backend round trip; poll
     // rather than sleep, and say what each side holds if it never lands.
@@ -461,7 +463,7 @@ test.describe("Insight overlays, live", () => {
     await waitForGridStable(appPage);
     console.log(`[overlay-journey] after the data change: ${JSON.stringify(overlay.cues.map((c) => [c.description, (c.anchor as { categoryLabel?: string }).categoryLabel]))}`);
     expect(movedHighest?.anchor, "the ring must follow the data to December").toMatchObject({ categoryIndex: 11, categoryLabel: "Dec" });
-    expect(overlay.comments[0]?.anchor?.categoryLabel, "the comment follows its FACT (D-IO-10)").toBe("Dec");
+    expect(overlay.comments[0]?.anchor?.categoryLabel, "the comment follows its CUE (D-IO-10)").toBe("Dec");
     expect(overlay.comments[0]?.movedFrom, "and says where it was").toBe("Aug");
 
     // --- HIDE: the cues go, the comment stays, the pixels return -----------
