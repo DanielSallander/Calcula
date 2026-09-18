@@ -1439,9 +1439,26 @@ fn score_for(kind: &ModelFactKind, resolved: &ResolvedMeasure) -> f64 {
     let magnitude = |pct: Option<f64>, fallback: f64| -> f64 {
         pct.map(|p| p.abs().min(1.0)).unwrap_or(fallback)
     };
+    // THE BANDS, and the one invariant between them: a movement's EXPLANATION
+    // must never outrank the movement it explains. A contribution tops out at
+    // 0.70 (`0.50 + 0.20 * explained`), so a change STARTS at 0.71 — a reader
+    // needs "Revenue down 10%" before "Gadgets caused it". Variance keeps its
+    // 0.10 lead over change, as before.
+    //
+    // FOUND LIVE (2026-09-18, `insight-overlays-pivot.spec.ts`): the old bands
+    // were `change = 0.60 + 0.25*pct` against `contribution = 0.50 + 0.20*e`,
+    // which overlap. Setting them equal gives pct = 0.40, so for ANY movement
+    // under 40% a fully-explained contribution outranked its own change fact.
+    // On the sales-star fixture Revenue fell 10.4%: its three breakdowns
+    // scored 0.70 and its headline 0.626, `MAX_FACTS` cut the four lowest, and
+    // the bundle kept the explanations of a movement it never stated.
+    //
+    // Priority and weight are applied per MEASURE below, so they cancel
+    // between one measure's own facts and cannot reorder them. Only these
+    // bands can, which is why the invariant has to live here.
     let base = match kind {
-        ModelFactKind::Variance { pct, .. } => 0.70 + 0.25 * magnitude(*pct, 0.2),
-        ModelFactKind::Change { pct, .. } => 0.60 + 0.25 * magnitude(*pct, 0.2),
+        ModelFactKind::Variance { pct, .. } => 0.81 + 0.19 * magnitude(*pct, 0.2),
+        ModelFactKind::Change { pct, .. } => 0.71 + 0.19 * magnitude(*pct, 0.2),
         ModelFactKind::DefinitionalDriver { .. } => 0.58,
         ModelFactKind::Contribution { explained, .. } => 0.50 + 0.20 * explained.abs().min(1.0),
         ModelFactKind::MemberMove { .. } => 0.40,
@@ -3825,6 +3842,7 @@ mod tests {
     }
 
     #[test]
+
     fn a_rule_that_only_reaches_some_members_is_still_named_on_the_fact_it_touched() {
         // Guards the wiring between resolve.rs and this file: a rule that set
         // the direction must reach `provenance` as `rule:<id>`, not as
@@ -3862,4 +3880,115 @@ mod tests {
             .any(|p| p.attr == "direction"
                 && attr_source_id(&p.source) == "rule:nordics-floor"));
     }
+
+    // -----------------------------------------------------------------------
+    // The band invariant: an explanation never outranks what it explains.
+    // -----------------------------------------------------------------------
+
+    /// A bare `ResolvedMeasure` with no declared priority or rank weight, so
+    /// `score_for` returns the BAND alone — which is what the invariant is
+    /// about (priority and weight are per measure and cancel between a
+    /// measure's own facts).
+    fn unweighted_measure() -> crate::insights::strategy::resolve::ResolvedMeasure {
+        crate::insights::strategy::resolve::ResolvedMeasure {
+            measure: "Revenue".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_movement_always_outranks_its_own_explanation() {
+        // FOUND LIVE: with the old bands (change 0.60 + 0.25*pct against
+        // contribution 0.50 + 0.20*explained) a fully-explained contribution
+        // beat its own change fact for ANY movement under 40%, so the 12-fact
+        // budget kept three breakdowns of a fall it never stated.
+        let m = unweighted_measure();
+        let change = |pct: f64| {
+            score_for(
+                &ModelFactKind::Change {
+                    measure: "Revenue".into(),
+                    first_label: "2025-11".into(),
+                    last_label: "2025-12".into(),
+                    first: 1.0,
+                    last: 1.0,
+                    delta: -1.0,
+                    pct: Some(pct),
+                    favourability: None,
+                    band: None,
+                },
+                &m,
+            )
+        };
+        let contribution = |explained: f64| {
+            score_for(
+                &ModelFactKind::Contribution {
+                    measure: "Revenue".into(),
+                    dimension: "Product[Category]".into(),
+                    total_delta: -1.0,
+                    members: Vec::new(),
+                    others: None,
+                    explained,
+                },
+                &m,
+            )
+        };
+
+        // The live case: a 10.4% fall, fully explained. The headline must win.
+        assert!(
+            change(0.1036) > contribution(1.0),
+            "a 10% movement must outrank its own fully-explained breakdown: {} vs {}",
+            change(0.1036),
+            contribution(1.0),
+        );
+
+        // And at every magnitude, including no movement at all.
+        for pct in [0.0, 0.001, 0.05, 0.1036, 0.25, 0.39, 0.40, 0.75, 1.0] {
+            for explained in [0.5, 0.75, 0.9, 1.0] {
+                assert!(
+                    change(pct) > contribution(explained),
+                    "change({pct}) = {} must outrank contribution({explained}) = {}",
+                    change(pct),
+                    contribution(explained),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_variance_still_leads_a_change_of_the_same_size() {
+        // The pre-existing ordering the fix must not invert.
+        let m = unweighted_measure();
+        for pct in [0.0, 0.1, 0.5, 1.0] {
+            let variance = score_for(
+                &ModelFactKind::Variance {
+                    measure: "Revenue".into(),
+                    period_label: "2025-12".into(),
+                    value: 1.0,
+                    target: 2.0,
+                    delta: -1.0,
+                    pct: Some(pct),
+                    status: None,
+                    favourability: None,
+                    band: None,
+                },
+                &m,
+            );
+            let change = score_for(
+                &ModelFactKind::Change {
+                    measure: "Revenue".into(),
+                    first_label: "2025-11".into(),
+                    last_label: "2025-12".into(),
+                    first: 1.0,
+                    last: 1.0,
+                    delta: -1.0,
+                    pct: Some(pct),
+                    favourability: None,
+                    band: None,
+                },
+                &m,
+            );
+            assert!(variance > change, "variance {variance} must lead change {change} at pct {pct}");
+        }
+    }
+
 }

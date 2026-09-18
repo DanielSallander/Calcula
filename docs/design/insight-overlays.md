@@ -800,6 +800,11 @@ Gadgets column moves one step left and **the cue moves with it** — follow-the-
 live. Cost and Quantity facts were dropped `measure-not-in-pivot`, the Segment and Region
 contributions `dimension-not-in-pivot`: the refusals, in the log, are the ones the design names.
 
+**Re-proved 2026-09-18 on the 100% display, after it found two defects of its own.** The same seven cues, same cells — but only after both were fixed, and each was invisible to every unit test.
+(1) **A member cue lost the period it is about.** A contribution fact carries no period; the mapper borrows the measure's last period from another fact, and that anchor came from the **change fact alone**. The engine caps a run at `MAX_FACTS` = 12 by score, so once the derived-measure fix made Margin/MarginPct/Cost/Quantity analysable, `change:m/Revenue` fell out of the budget and every Revenue member cue silently moved from the 2025-12 row to that member's **Grand Total** — a number that had not moved, marked as the movement it is not. The cue was PLACED, not dropped, so no drop reason was emitted. The anchor now comes from any fact naming a period (change first, then variance).
+(2) **The explanation outranked the movement.** `change = 0.60 + 0.25*pct` and `contribution = 0.50 + 0.20*explained` OVERLAP; equal at pct = 0.40, so under a 40% movement a fully-explained contribution beat its own change fact. Priority and rank weight are per measure and cancel between a measure's own facts, so Revenue outranked itself: the budget cut "Revenue down 10%" and kept all three explanations of it. The owner's call — a movement's explanation must never outrank the movement — is now a band invariant: `variance = 0.81 + 0.19*pct`, `change = 0.71 + 0.19*pct`, both above the contribution ceiling of 0.70, with variance's 0.10 lead over change preserved.
+The lesson both share: **an anchor with a single source, and an order expressed by overlapping ranges, each hold only until something upstream shifts** — here the same engine fix that this very journey was re-run to verify.
+
 **Two product defects the live proof found, both fixed here, neither reachable by a unit test:**
 1. **One refused measure lost the whole model analysis.** The fixture's derived measures
    (`Margin = [Revenue] - [Cost]`, `MarginPct`) carry no home table, the planner refuses their
