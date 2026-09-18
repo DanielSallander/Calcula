@@ -129,6 +129,11 @@ const contribution = (measure: string, dimension: string, members: Array<[string
   kind: { fact: "contribution", measure, dimension, totalDelta: 40, members: members.map(([member, delta]) => ({ member, first: 0, last: 0, delta, share: delta / 40 })), others: null, explained: 1 },
 });
 
+const variance = (measure: string, favourability: string | null, periodLabel = "2024-Q2"): Fact => ({
+  id: `variance:m/${measure}`, direction: "higherIsBetter",
+  kind: { fact: "variance", measure, periodLabel, actual: 340, target: 400, delta: -60, pct: -0.15, favourability },
+});
+
 const memberMove = (measure: string, dimension: string, member: string, delta: number): Fact => ({
   id: `memberMove:m/${measure}/${dimension}/${member}`,
   kind: { fact: "memberMove", measure, dimension, member, first: 1, last: 1 + delta, delta },
@@ -199,6 +204,34 @@ describe("a contribution fact", () => {
     expect(pivotCuesFor(bundle(lower), v, ["[Cost]"]).cues.find((c) => c.factId.startsWith("contribution"))?.polarity).toBe("bad");
     const none = [{ ...change("Cost", null), direction: undefined }, contribution("Cost", "Product[Category]", [["Gadgets", 5]])];
     expect(pivotCuesFor(bundle(none), v, ["[Cost]"]).cues.find((c) => c.factId.startsWith("contribution"))?.polarity).toBe("neutral");
+  });
+
+  it("anchors to a VARIANCE fact's period when the bundle carries no change fact", () => {
+    // FOUND LIVE. The period anchor used to come from the change fact ALONE.
+    // The engine caps and ranks the bundle, so when derived measures began
+    // producing facts of their own, `change:m/Revenue` was ranked out of the
+    // budget while `variance:m/Revenue` survived — and every member fact
+    // silently lost its period requirement, matched on one pair, and landed on
+    // that member's GRAND TOTAL (a number that had not moved) instead of the
+    // period whose movement it describes. The cue was PLACED, not dropped, so
+    // nothing reported it.
+    const facts = [variance("Total Sales", "worse"), contribution("Total Sales", "Product[Category]", [["Gadgets", 50], ["Widgets", -10]])];
+    const set = pivotCuesFor(bundle(facts), categoryByQuarter(), ["[Total Sales]"]);
+    expect(set.dropped).toEqual([]);
+    const members = set.cues.filter((c) => c.factId.startsWith("contribution"));
+    // The 2024-Q2 cells of each member — NOT [1,3]/[2,3], their grand totals.
+    expect(members.map(at)).toEqual([[1, 2], [2, 2]]);
+  });
+
+  it("still prefers the CHANGE fact's period when the bundle carries both", () => {
+    const facts = [
+      change("Total Sales", "better", { lastLabel: "2024-Q1" }),
+      variance("Total Sales", "worse", "2024-Q2"),
+      contribution("Total Sales", "Product[Category]", [["Gadgets", 50]]),
+    ];
+    const set = pivotCuesFor(bundle(facts), categoryByQuarter(), ["[Total Sales]"]);
+    const member = set.cues.find((c) => c.factId.startsWith("contribution"));
+    expect(at(member!)).toEqual([1, 1]);
   });
 
   it("without a period axis lands on the member's own cell of the measure's column", () => {

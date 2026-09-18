@@ -278,9 +278,16 @@ function seriesDrafts(inner: Record<string, unknown>): PivotDraft[] | PivotCueDr
 }
 
 /**
- * The rules. `lastLabelOf` answers "which period does this measure's change
- * fact end at", so a member fact can land on the member's LAST-period cell when
- * the pivot has that period, and on the member alone when it has not.
+ * The rules. `lastLabelOf` answers "which period does this measure's reporting
+ * end at" — from its change fact, else its variance fact — so a member fact
+ * lands on the member's LAST-PERIOD cell when the pivot shows that period, and
+ * on the member alone when it has not (a totals pivot).
+ *
+ * KNOWN RESIDUAL: when NO fact of the measure names a period, a member fact
+ * still falls back to the member-alone cell, which on a pivot that DOES have a
+ * period axis is that member's grand total — the wrong cell, placed silently.
+ * Widening the anchor removed the case that occurs in practice; see
+ * `docs/design/open-items.md`.
  */
 function draftsFor(kind: FactRecord["kind"], lastLabelOf: (measure: string) => string | null): PivotDraft[] | PivotCueDropReason | null {
   switch (kind.fact) {
@@ -379,17 +386,36 @@ export function pivotCuesFor(bundle: InsightBundle, view: PivotViewResponse, val
   const insightsById = new Map(bundle.insights.map((i) => [i.id, i] as const));
   const index = indexView(view, valueFields);
 
-  // The change fact of each measure: where its period ends and which direction judged it.
+  // Where each measure's period ENDS, so a member fact can be anchored to the
+  // cell of the period it is about, and which direction judged the measure.
+  //
+  // The anchor is taken from ANY fact of that measure that names a period, not
+  // from one kind alone. A single source was a real defect, found live: the
+  // bundle is CAPPED (the engine ranks facts and truncates), so when derived
+  // measures began producing facts of their own, `change:m/Revenue` was ranked
+  // out of the budget while `variance:m/Revenue` survived. Every member fact
+  // then silently lost its period requirement, matched on one pair, and landed
+  // on that member's GRAND TOTAL — marking a total that did not move as the
+  // movement it is not. Nothing reported it: the cue was placed, not dropped.
   const lastLabelByMeasure = new Map<string, string>();
   const directionByMeasure = new Map<string, string>();
   for (const fact of facts) {
     const measure = measureOf(fact.kind);
     if (measure === null) continue;
+    // A change fact IS the last period, so it wins where both exist.
     if (fact.kind.fact === "change" && typeof fact.kind.lastLabel === "string" && !lastLabelByMeasure.has(measure)) {
       lastLabelByMeasure.set(measure, fact.kind.lastLabel);
     }
     const direction = directionOf(insightsById.get(fact.id));
     if (direction !== null && !directionByMeasure.has(measure)) directionByMeasure.set(measure, direction);
+  }
+  // Fall back to a variance fact, which names the period it reports on. Second
+  // pass so a change fact anywhere in the bundle still takes precedence.
+  for (const fact of facts) {
+    if (fact.kind.fact !== "variance" || typeof fact.kind.periodLabel !== "string") continue;
+    const measure = measureOf(fact.kind);
+    if (measure === null || lastLabelByMeasure.has(measure)) continue;
+    lastLabelByMeasure.set(measure, fact.kind.periodLabel);
   }
 
   for (const fact of facts) {
