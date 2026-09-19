@@ -125,9 +125,42 @@ prefetch is present, falling back to `#N/A` only when there is nothing to keep.
 - Whole-column/row **dependents** may show a stale value on an unrelated edit;
   they refresh on a direct edit.
 
-Out of scope (follow-ups): a member browser / Insert-CUBE-formula dialog /
-pivot→CUBE conversion; MDX syntax; member-value existence validation in
-CUBEMEMBER; full MDX set algebra; a `#GETTING_DATA` async placeholder.
+Out of scope (follow-ups): pivot→CUBE conversion; MDX syntax; member-value
+existence validation in CUBEMEMBER; full MDX set algebra; a `#GETTING_DATA`
+async placeholder.
+
+### 2.x Authoring: the builder lives inside `fx`, not in a menu
+
+A guided builder exists — `CubeFormulaBuilderPanel` in the `CubeFormulas`
+extension — and it is reached exactly where every other function is reached:
+the **fx** button on the formula bar, Insert Function, pick a `CUBE*` function,
+Insert. That is Excel's two-step "Insert Function → Function Arguments", and the
+second step is the panel. The panel reads the live model (`biGetModelInfo`,
+`biGetColumnValues`) so measures, columns, values and KPIs are PICKED rather
+than typed, which matters because a mistyped member expression is a silent
+`#N/A` rather than an error.
+
+It used to hang off its own **Formulas ▸ "Insert CUBE Formula..."** item. That
+item is **gone**. It made CUBE the only function in the product with a private
+front door — invisible from `fx`, where a user actually goes looking for a
+function, and discoverable only by someone who already knew it was there.
+
+The shell may not import an extension, so the panel crosses the boundary through
+a seam: **`app/src/api/functionBuilders.ts`**. An extension registers a React
+component against a set of catalog function names; the fx dialog looks the
+selected function up and renders the panel in place of the signature box. Any
+other function whose arguments only its owning extension can spell can use the
+same seam. Two rules it enforces:
+
+- **The builder does not insert.** It reports the assembled formula through
+  `onFormulaChange`; the host owns the Insert button and commits through
+  `commitEdit`, so the commit guards, the R1C1 rewrite and the grouped-sheet
+  replication all still run. The old standalone dialog called `updateCell`
+  itself and skipped all three.
+- **No builder is not an error.** `findFunctionBuilder` returns null for almost
+  every function, and for a `CUBE*` function when the extension is disabled. The
+  dialog then falls back to the ordinary template path — a disabled extension
+  costs the user the guided panel, never the ability to type `=CUBEVALUE(`.
 
 ---
 

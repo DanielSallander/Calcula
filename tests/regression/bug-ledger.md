@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 121 | Open: 2 | Triaged: 0 | Fixed: 119 | Other: 0
+Total: 122 | Open: 2 | Triaged: 0 | Fixed: 120 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1481,3 +1481,15 @@ A DERIVED MEASURE — one whose expression reaches its fact table only through [
 
 `Engine::enforce_object_level_security` inspected only the bare `filters` / `in_filters` / `or_filters` lists. Every host filter travels as a SCOPED filter (`scoped_filters` / `scoped_in_filters`, with an optional owning table and a level) — pivot slicers, `bi_query`, MCP `run_bi_query` all build them — so a caller under a role that denies `Geography[region]` could run `Revenue WHERE Geography[region] = x` (table-qualified) and bisect the denied column's values: the standard OLS inference oracle the gate's own bare-filter heuristic was written to refuse. Pre-existing on `query` (pivots) as well as on the paths that had no OLS at all.
 
+
+## BUG-0122 `[fixed]`
+
+**Found:** 2026-09-19 (manual)
+**Oracle:** insert-function-category-filter-dead
+
+Two of the Insert Function dialog's seven category buttons filtered the list to EMPTY. The filter compared a hard-coded id against a normalized category string, and the normalization disagreed with the ids it was written for: `"Date & Time".toLowerCase().replace(/[& ]/g, "_")` is `date___time` (space, ampersand, space — each replaced separately), not the `date_time` the id spelled, and `"Lookup & Reference"` became `lookup___reference` against an id of `lookup`. The equality fallback (`category.toLowerCase() === id`) missed for the same reason. Separately, the hard-coded list named 8 of the catalog's 15 categories, so Cube, Engineering, Dynamic Array, Information, Database, Writeback, UI and Matrix had no button at all.
+
+**Repro:** app: `npx vitest run src/shell/FormulaBar/__tests__/insertFunctionDialog.test.tsx` — "actually filters on the ampersand categories that used to filter to nothing". Manually: open the fx dialog, click "Date & Time" or "Lookup & Reference"; pre-fix the list is empty.
+**Triage:** app (confidence high) — Two independent spellings of the same category — an id written by hand in the dialog and a string shipped by the Rust catalog — kept in agreement by a normalizer that was never run against real category names.
+**Fix:** fixed — The category list is DERIVED from the catalog `get_all_functions` returns and filters on exact string equality, so the label and the value it filters on are the same string and cannot drift. Every category the backend ships now gets a button; `null` means no filter, replacing a sentinel id. A small label map renames only `Math` -> `Math & Trig` and `UI` -> `Interface`.
+  Files: app/src/shell/FormulaBar/InsertFunctionDialog.tsx, app/src/shell/FormulaBar/__tests__/insertFunctionDialog.test.tsx

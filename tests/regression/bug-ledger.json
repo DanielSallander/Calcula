@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 122,
+  "nextId": 123,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4497,6 +4497,40 @@
       },
       "fix": "The gate now walks `scoped_filters` and `scoped_in_filters`: a table-qualified one is checked exactly like a group-by column (`col_denied(table, column)`), an unqualified one falls back to the existing conservative bare-name match. Landed inside the \"One aggregate query path\" change (model-engine-lib changelog), so the same gate now runs on every aggregate entry point.",
       "notes": "Found by the security critic while trying to refute the design that routes query_auto_refresh / query_auto_tier / query_explained through query_with_cancellation (the open-items row filed with BUG-0120). Companion hole closed in the same change, no ledger entry (no host caller): query_auto_tier ran a multi-role request with EMPTY role filters because it never called reject_multi_role."
+    },
+    {
+      "id": "BUG-0122",
+      "status": "fixed",
+      "discovered": "2026-09-19",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "review of why CUBE formulas had a private Formulas-menu command, while auditing what the generic fx dialog could already do"
+      },
+      "violation": {
+        "oracleId": "insert-function-category-filter-dead",
+        "message": "Two of the Insert Function dialog's seven category buttons filtered the list to EMPTY. The filter compared a hard-coded id against a normalized category string, and the normalization disagreed with the ids it was written for: `\"Date & Time\".toLowerCase().replace(/[& ]/g, \"_\")` is `date___time` (space, ampersand, space — each replaced separately), not the `date_time` the id spelled, and `\"Lookup & Reference\"` became `lookup___reference` against an id of `lookup`. The equality fallback (`category.toLowerCase() === id`) missed for the same reason. Separately, the hard-coded list named 8 of the catalog's 15 categories, so Cube, Engineering, Dynamic Array, Information, Database, Writeback, UI and Matrix had no button at all.",
+        "severity": "low"
+      },
+      "whyNobodyNoticed": "A dead category filter is indistinguishable from a category that happens to hold no functions: the dialog renders its ordinary \"No functions found\" message either way. No test rendered the dialog, and the ids were reviewed against the LABELS next to them (\"Date & Time\" / `date_time` reads correct) rather than against the catalog strings they were actually compared with.",
+      "repro": {
+        "kind": "unit",
+        "description": "app: `npx vitest run src/shell/FormulaBar/__tests__/insertFunctionDialog.test.tsx` — \"actually filters on the ampersand categories that used to filter to nothing\". Manually: open the fx dialog, click \"Date & Time\" or \"Lookup & Reference\"; pre-fix the list is empty."
+      },
+      "triage": {
+        "verdict": "app",
+        "confidence": "high",
+        "rootCauseHypothesis": "Two independent spellings of the same category — an id written by hand in the dialog and a string shipped by the Rust catalog — kept in agreement by a normalizer that was never run against real category names."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "The category list is DERIVED from the catalog `get_all_functions` returns and filters on exact string equality, so the label and the value it filters on are the same string and cannot drift. Every category the backend ships now gets a button; `null` means no filter, replacing a sentinel id. A small label map renames only `Math` -> `Math & Trig` and `UI` -> `Interface`.",
+        "filesChanged": [
+          "app/src/shell/FormulaBar/InsertFunctionDialog.tsx",
+          "app/src/shell/FormulaBar/__tests__/insertFunctionDialog.test.tsx"
+        ]
+      },
+      "notes": "Found while removing the separate \"Insert CUBE Formula...\" menu command in favour of routing CUBE through fx: the Cube category needed a button before fx could be the one way in. Test sabotaged (old collapsing normalizer restored) and confirmed to fail with `expected [] to deeply equal [ \"TODAY\" ]`."
     }
   ]
 }

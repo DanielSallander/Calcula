@@ -1168,6 +1168,25 @@ export type {
 } from "./cellEditors";
 
 // ============================================================================
+// Function Argument Builders API
+// ============================================================================
+// The second step of Insert Function, for a function whose arguments only the
+// owning extension can spell (see functionBuilders.ts).
+
+export {
+  registerFunctionBuilder,
+  findFunctionBuilder,
+  hasFunctionBuilder,
+  subscribeToFunctionBuilders,
+  resetFunctionBuilders,
+} from "./functionBuilders";
+export type {
+  FunctionBuilderContext,
+  FunctionBuilderProps,
+  FunctionBuilderRegistration,
+} from "./functionBuilders";
+
+// ============================================================================
 // Locale / Regional Settings API
 // ============================================================================
 

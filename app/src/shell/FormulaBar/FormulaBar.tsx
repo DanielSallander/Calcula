@@ -205,9 +205,58 @@ export function FormulaBar(): React.ReactElement {
     setShowFunctionDialog(false);
   }, [editing, updateValue]);
 
+  /**
+   * A function-argument builder produced a COMPLETE formula, so unlike a
+   * template there is nothing left for the user to fill in and the cell is
+   * committed for them — Excel's Function Arguments OK button.
+   *
+   * WHY THIS COMMITS ON A LATER RENDER INSTEAD OF RIGHT HERE.
+   * `commitEdit` commits `editing.value` out of its own closure — it is a
+   * useCallback with `editing` in its deps — and `editing` is React state, so
+   * `updateValue(formula); commitEdit();` in one handler writes the formula
+   * into the editor and then commits a value from an EARLIER render: "=", the
+   * seed the fx button started the session with, or nothing at all when the
+   * handler's own closure is older still. Measured, not assumed: sabotaging
+   * this into the same-tick form commits "<not editing>". So the formula is
+   * parked, and the effect below commits once the dispatch has landed.
+   *
+   * It must also go through `commitEdit` rather than straight to `updateCell`,
+   * which is what the old standalone builder dialog did: only the commit path
+   * runs the commit guards, the R1C1 rewrite and the grouped-sheet replication,
+   * and a cell written around them is a cell that skipped its own validation.
+   */
+  const pendingCommitRef = useRef<string | null>(null);
+
+  const handleFunctionBuilt = useCallback((formula: string) => {
+    setShowFunctionDialog(false);
+    pendingCommitRef.current = formula;
+    updateValue(formula);
+  }, [updateValue]);
+
+  useEffect(() => {
+    if (pendingCommitRef.current === null) return;
+    // The edit session went away underneath us (Esc, a click elsewhere):
+    // abandon the commit rather than resurrecting it into whatever is
+    // selected now.
+    if (!editing) {
+      pendingCommitRef.current = null;
+      return;
+    }
+    if (editing.value !== pendingCommitRef.current) return;
+    pendingCommitRef.current = null;
+    void commitEdit();
+  }, [editing, commitEdit]);
+
   const handleDialogClose = useCallback(() => {
     setShowFunctionDialog(false);
   }, []);
+
+  // Where a built formula will land. `editing` is authoritative once the fx
+  // button's startEditing has resolved; the selection anchor covers the window
+  // before that, so the builder is never handed (0,0) by accident.
+  const builderAnchor = editing
+    ? { row: editing.row, col: editing.col }
+    : { row: state.selection?.startRow ?? 0, col: state.selection?.startCol ?? 0 };
 
   const barHeight = expanded
     ? editorHeight + FORMULA_BAR_EXPANDED_CHROME_HEIGHT
@@ -279,6 +328,8 @@ export function FormulaBar(): React.ReactElement {
       {showFunctionDialog && (
         <InsertFunctionDialog
           onSelect={handleFunctionSelect}
+          onBuilt={handleFunctionBuilt}
+          anchor={builderAnchor}
           onClose={handleDialogClose}
         />
       )}

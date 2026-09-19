@@ -16,11 +16,16 @@ export const Overlay = styled.div`
   z-index: 1000;
 `;
 
-export const DialogContainer = styled.div`
+interface DialogContainerProps {
+  /** The argument-builder step needs more room than the function list does. */
+  $wide?: boolean;
+}
+
+export const DialogContainer = styled.div<DialogContainerProps>`
   background-color: ${v('--dialog-bg')};
   border-radius: 4px;
   box-shadow: 0 4px 20px ${v('--dialog-shadow')};
-  width: 500px;
+  width: ${props => (props.$wide ? '580px' : '500px')};
   max-height: 80vh;
   display: flex;
   flex-direction: column;
@@ -169,12 +174,49 @@ export const FunctionFullDescription = styled.div`
   color: ${v('--dialog-function-full-description')};
 `;
 
+/** Marks a function whose arguments an extension can assemble for the user. */
+export const BuilderBadge = styled.div`
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 6px;
+  border: 1px solid ${v('--dialog-category-border')};
+  border-radius: 3px;
+  font-size: 11px;
+  color: ${v('--dialog-function-description')};
+  background-color: ${v('--dialog-category-bg')};
+`;
+
+/** Scroll host for a registered argument builder (step 2 of Insert Function). */
+export const BuilderBody = styled.div`
+  flex: 1;
+  overflow: auto;
+  min-height: 200px;
+  padding: 12px 16px;
+`;
+
+/** The formula the host will actually insert — rendered by the host, never the
+ *  builder, so what is previewed and what is committed cannot disagree. */
+export const BuilderPreview = styled.div`
+  padding: 12px 16px;
+  border-top: 1px solid ${v('--dialog-border')};
+  background-color: ${v('--dialog-details-bg')};
+  font-family: monospace;
+  font-size: 12px;
+  color: ${v('--dialog-function-signature')};
+  word-break: break-all;
+`;
+
 export const Footer = styled.div`
   padding: 12px 16px;
   border-top: 1px solid ${v('--dialog-border')};
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+`;
+
+/** Pushes Back to the left so it reads as navigation, not as a third action. */
+export const FooterSpacer = styled.div`
+  flex: 1;
 `;
 
 export const CancelButton = styled.button`
