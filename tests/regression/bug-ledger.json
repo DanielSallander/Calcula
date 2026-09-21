@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 123,
+  "nextId": 126,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4531,6 +4531,113 @@
         ]
       },
       "notes": "Found while removing the separate \"Insert CUBE Formula...\" menu command in favour of routing CUBE through fx: the Cube category needed a button before fx could be the one way in. Test sabotaged (old collapsing normalizer restored) and confirmed to fail with `expected [] to deeply equal [ \"TODAY\" ]`."
+    },
+    {
+      "id": "BUG-0123",
+      "status": "fixed",
+      "discovered": "2026-09-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "CI-12 chart-furniture inventory: auditing every AxisSpec field for a painter that reads it"
+      },
+      "violation": {
+        "oracleId": "chart-axis-reverse-menu-writes-dead-field",
+        "message": "\"Reverse Axis\" in a chart's axis context menu was a visible no-op. AxisContextMenu.tsx wrote a TOP-LEVEL `axis.reverse` (`toggleAxisProp(\"reverse\", (axis as any).reverse)`), but the only reader of a reverse flag anywhere in the repository is `createScaleFromSpec` in rendering/scales.ts, which reads `axis.scale.reverse`. Clicking the item dirtied the workbook, saved the dead field into the .cala, repainted the chart unchanged, and left its own checkmark unlit because the checkmark read the same dead field. It also disagreed with ChartFormatPane's \"Values in reverse order\", which writes `scale.reverse` and works: the two controls for one setting could never agree, and neither showed the other's state.",
+        "severity": "low"
+      },
+      "whyNobodyNoticed": "The cast `(axis as any).reverse` switched off the one check that would have caught it, and AxisSpec genuinely declared a top-level `reverse?: boolean` beside ScaleSpec's, so the field existed, type-checked, round-tripped through save/load and appeared in the JSON spec editor. A no-op menu item looks identical to a setting whose effect is subtle, and no test rendered this menu. The same audit found four more AxisSpec fields in the same state (majorUnit, minorUnit, minorTickMark, crossesAt/crossesAtValue) with a full ChartFormatPane editor behind them and no painter reading any of them.",
+      "repro": {
+        "kind": "unit",
+        "description": "app: `npx vitest run extensions/Charts/rendering/__tests__/furnitureAxisReverse.test.tsx` — \"patches scale.reverse, and NOT a top-level axis.reverse\". Manually: right-click a chart's value axis, click \"Reverse Axis\"; pre-fix the chart is unchanged and reopening the menu shows no checkmark, while Format Axis > \"Values in reverse order\" does reverse it."
+      },
+      "triage": {
+        "verdict": "app",
+        "confidence": "high",
+        "rootCauseHypothesis": "Two spellings of one fact: AxisSpec.reverse and ScaleSpec.reverse both existed, only the nested one had a reader, and an `as any` cast at the single writer hid the mismatch from the compiler."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "The menu reads and writes `axis.scale.reverse` — the flag the scale factory reads and the format pane writes — and the dead top-level `AxisSpec.reverse` is REMOVED from types.ts and from the JSON schema, so the gate now refuses it instead of persisting it. The `as any` is gone. Filed as part of CI-12, which also implemented the four other dead AxisSpec fields (majorUnit/minorUnit/minorTickMark/crossesAt) in drawCartesianAxes rather than removing them, since they have a working editor.",
+        "filesChanged": [
+          "app/extensions/Charts/components/AxisContextMenu.tsx",
+          "app/extensions/Charts/types.ts",
+          "app/extensions/Charts/lib/chartSpecSchema.ts",
+          "app/extensions/Charts/lib/__tests__/chartSpecSchema.test.ts",
+          "app/extensions/Charts/rendering/__tests__/furnitureAxisReverse.test.tsx"
+        ]
+      },
+      "notes": "Sabotage confirmed: restoring the top-level write (`updateSpec({ [axisKey]: { ...axis, reverse: !scaleReversed } })`) fails all four tests in furnitureAxisReverse.test.tsx, the first with \"expected false to be true\" on `\"reverse\" in yAxis`. The test is two-ended — it asserts the patch shape AND feeds that patch to the real `createScaleFromSpec` — so a third spelling cannot be papered over by editing the first assertion."
+    },
+    {
+      "id": "BUG-0124",
+      "status": "fixed",
+      "discovered": "2026-09-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "CI-10 chart keyboard wave: walking the Delete branch after the title editor landed"
+      },
+      "violation": {
+        "oracleId": "chart-delete-twice-on-cleared-title-deletes-chart",
+        "message": "Delete pressed TWICE on a selected chart title deleted the whole chart. The listener branched on whether a WRITE had happened -- `if (handleChartTextDelete(chartId)) { ...; return; }` -- and fell through to `performChartDelete` when it returned false. `clearChartText` (app/extensions/Charts/handlers/chartTextEditing.ts:303) returns false when the title is ALREADY null (:306), and the reader reaches that state with the FIRST Delete, because nothing moves the selection off a cleared title: `revalidateSubSelection` (app/extensions/Charts/handlers/selectionHandler.ts:428) only ever re-checks the `series` and `dataPoint` rungs. So the second press -- the \"did that work?\" reflex, on a title that had visibly just vanished -- destroyed the chart, its spec, its per-point overrides and its data references.",
+        "severity": "high"
+      },
+      "whyNobodyNoticed": "The first Delete does exactly the right thing, so the gesture reads as working. The second press is a reflex rather than a deliberate act, and the chart it destroys is the thing the reader was looking at -- there is no error, no toast and no refusal, only an object that is suddenly gone. The return value was also a reasonable-looking contract: `handleChartTextDelete` genuinely answers \"did I take this keystroke\" for every OTHER case, and it is only the already-cleared title that makes \"I wrote nothing\" and \"this is not mine\" two different statements. Nothing in the tree tested the listener, only the helper.",
+      "repro": {
+        "kind": "manual",
+        "description": "Insert a chart that has a title. Click it once to select the chart, click its TITLE to select the title, press Delete (the title disappears -- correct), press Delete again. Pre-fix the whole chart is deleted. The helper half is pinned by a unit test: app: `npx vitest run extensions/Charts/handlers/__tests__/chartTextEditing.test.ts` -- \"declines a second time - an already-absent title is not a write\" (:622) asserts `handleChartTextDelete` returns FALSE on the second call, which is precisely the value the listener must NOT branch on."
+      },
+      "triage": {
+        "verdict": "app",
+        "confidence": "high",
+        "rootCauseHypothesis": "A keystroke-ownership question was answered with a did-I-write-anything boolean. The two coincide everywhere except on an idempotent clear, and that is the one place where guessing wrong costs the document."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "THE SUBJECT DECIDES WHO OWNS THE KEYSTROKE, NOT WHETHER A WRITE HAPPENED. `handleDeleteKey` now consumes the keystroke whenever the sub-selection is at `level: \"element\"` on a text element (`isChartTextElement`), calling `preventDefault`/`stopPropagation` and returning BEFORE the write is attempted; the return value is used only to decide whether to re-announce and repaint (app/extensions/Charts/index.ts:2161-2169). The legend branch immediately below it (:2178-2198) was written with the same shape for the same reason, so a selected legend is never a route to deleting the chart either, whether or not the spec actually changed.",
+        "filesChanged": [
+          "app/extensions/Charts/index.ts",
+          "app/extensions/Charts/handlers/chartTextEditing.ts",
+          "app/extensions/Charts/handlers/__tests__/chartTextEditing.test.ts"
+        ]
+      },
+      "notes": "Documented in docs/design/chart-interaction.md section 6.2 together with BUG-0125, which is the other half of the same Delete ladder."
+    },
+    {
+      "id": "BUG-0125",
+      "status": "fixed",
+      "discovered": "2026-09-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "CI-9/CI-10 chart Format pane: clicking a tab and then pressing Delete"
+      },
+      "violation": {
+        "oracleId": "chart-delete-with-task-pane-button-focused-deletes-chart",
+        "message": "Delete pressed while focus sat on a BUTTON in the chart's own Format task pane deleted the chart. The extension's capture-phase Delete listener asked only two questions -- `isKeyClaimed(e)` (a pointer claim, which is a GRID-OVERLAY concept and which a task-pane control does not and cannot carry) and `isTextEntryTarget(e.target)` (INPUT / TEXTAREA / contentEditable, none of which a `<button>` or a `<select>` is). Both said the keystroke was the chart's, so a Delete aimed at a tab button destroyed the chart. Three clicks from a fresh selection: select the chart, click a part of it to open the pane, click a tab.",
+        "severity": "high"
+      },
+      "whyNobodyNoticed": "The two guards that were present look exhaustive -- one covers widgets stacked on the grid and the other covers typing -- and between them they had covered every case the extension had, because before CI-9 the chart's own UI was a ribbon strip the reader clicked and immediately left. The Format pane widened that to a whole task pane of focusable controls that the reader works INSIDE, which is what made the gap reachable. The missing question is not about the keystroke's target at all but about whether the grid is the subject at ALL, and Core already owned that predicate; the extension simply never asked it.",
+      "repro": {
+        "kind": "unit",
+        "description": "app: `npx vitest run extensions/Charts/handlers/__tests__/chartKeyboardOwnership.test.ts` -- \"REFUSES a Delete aimed at a focused <button> in a task pane (the data-loss case)\" (:94), plus \":112\" for a `<select>` and \":117\" for the ribbon Design-panel button, against \":127\" as the positive control (the grid container itself holds focus). Manually: select a chart, press Ctrl+1 to open the Format pane, click any tab button in it, press Delete -- pre-fix the chart is deleted."
+      },
+      "triage": {
+        "verdict": "app",
+        "confidence": "high",
+        "rootCauseHypothesis": "A pointer claim answers \"does a widget on the grid own this?\" and a text-entry test answers \"is the reader typing?\". Neither answers \"is the grid the subject?\", and a focusable control that is neither an input nor an overlay falls through both."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "A third rung, in the middle: `chartOwnsKeystroke` (app/extensions/Charts/handlers/selectionHandler.ts:472) is now ONE predicate -- `isKeyClaimed` -> `isGridFocused` -> `isTextEntryTarget` -- read by all three of the extension's capture-phase key listeners (Delete at app/extensions/Charts/index.ts:2142, the insight-cue arrow step at :2228, the element walk at :2286), because the question is the same for every one of them and a per-listener copy is a copy that drifts. `isGridFocused` is imported from Core's own `@api/keybindings` rather than re-derived: a second spelling of the `[data-focus-container=\"spreadsheet\"]` lookup inside an extension would drift on the first change to that attribute.",
+        "filesChanged": [
+          "app/extensions/Charts/handlers/selectionHandler.ts",
+          "app/extensions/Charts/index.ts",
+          "app/extensions/Charts/handlers/__tests__/chartKeyboardOwnership.test.ts"
+        ]
+      },
+      "notes": "Documented in docs/design/chart-interaction.md section 6.2, which states the final Delete precedence order. The claim is deliberately asked TWICE -- once at each listener's door and again inside `chartOwnsKeystroke` -- because the census in app/src/core/lib/globalInputListeners.ts requires a claim-guarded file to consult a claim predicate where its listener lives, and globalInputListeners.test.ts enforces it."
     }
   ]
 }

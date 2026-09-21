@@ -427,7 +427,9 @@ export const chartSpecJsonSchema: object = {
         labelPosition: { type: "string", enum: ["nextToAxis", "high", "low", "none"], description: "Axis label position. Default: \"nextToAxis\"." },
         crossesAt: { type: "string", enum: ["auto", "min", "max", "value"], description: "Where the perpendicular axis crosses. Default: \"auto\"." },
         crossesAtValue: { type: "number", description: "Custom value where the axis crosses (when crossesAt is \"value\")." },
-        reverse: { type: "boolean", description: "Reverse the axis direction." },
+        // NO top-level `reverse` here: reversing an axis is `scale.reverse` and
+        // nothing else. A second spelling existed, nothing read it, and the
+        // axis context menu wrote it — see AxisSpec in ../types (BUG-0123).
         lineColor: { type: "string", description: "Axis line color override. Omit to use theme color." },
         lineWidth: { type: "number", minimum: 0, description: "Axis line width in pixels. Default: 1." },
         lineDash: { type: "array", items: { type: "number" }, description: "Axis line dash pattern [dashLength, gapLength]. Omit for solid." },
@@ -445,6 +447,11 @@ export const chartSpecJsonSchema: object = {
           type: "string",
           enum: ["top", "bottom", "left", "right"],
           description: "Legend position relative to the chart.",
+        },
+        hiddenEntries: {
+          type: "array",
+          items: { type: "integer", minimum: 0 },
+          description: "Legend rows to omit while the data stays PLOTTED (Excel's \"delete a legend entry\"). Series indices for a cartesian legend, category indices for a pie/donut one.",
         },
       },
       additionalProperties: false,
@@ -1172,6 +1179,22 @@ export const chartSpecJsonSchema: object = {
       },
       additionalProperties: false,
     },
+    PatternFill: {
+      type: "object",
+      description: "A pattern fill specification: foreground ink over a background in a repeating cell.",
+      required: ["type", "foreground"],
+      properties: {
+        type: {
+          type: "string",
+          enum: ["horizontal", "vertical", "diagonalUp", "diagonalDown", "grid", "diagonalGrid", "dots", "checker"],
+          description: "Pattern geometry.",
+        },
+        foreground: { type: "string", description: "Foreground (pattern ink) color (hex)." },
+        background: { type: "string", description: "Background color behind the pattern. Default: the datum's resolved fill." },
+        size: { type: "number", minimum: 1, description: "Repeating cell size in pixels. Default: 8." },
+      },
+      additionalProperties: false,
+    },
     TrendlineSpec: {
       type: "object",
       description: "A trendline drawn over a chart series.",
@@ -1234,12 +1257,24 @@ export const chartSpecJsonSchema: object = {
       properties: {
         seriesIndex: { type: "integer", minimum: 0, description: "Index of the series this override applies to." },
         categoryIndex: { type: "integer", minimum: 0, description: "Index of the category (data point) within the series." },
+        key: { type: "string", description: "Datum identity captured when the override was written: series name and category label joined by U+001F. Matched BEFORE the index pair, so inserting a row keeps the formatting on the same datum." },
         color: { type: "string", description: "Override fill color (hex)." },
         opacity: { type: "number", minimum: 0, maximum: 1, description: "Override opacity (0-1)." },
         borderColor: { type: "string", description: "Override border/stroke color." },
         borderWidth: { type: "number", minimum: 0, description: "Override border/stroke width." },
         exploded: { type: "number", description: "For pie/donut charts: pull out this slice by the given offset in pixels." },
         gradientFill: { $ref: "#/definitions/GradientFill", description: "Gradient fill override for this data point." },
+        patternFill: { $ref: "#/definitions/PatternFill", description: "Pattern fill override for this data point, painted over the resolved fill." },
+        invertIfNegative: { type: "boolean", description: "Excel's \"Invert if negative\": when the value is below zero the fill becomes white. Default: false." },
+        markerStyle: {
+          type: "string",
+          enum: ["none", "circle", "square", "diamond", "triangle", "cross", "star"],
+          description: "Marker shape for this one point (line/area/scatter/radar/bubble). \"none\" hides just this marker.",
+        },
+        markerSize: { type: "number", minimum: 0, description: "Marker radius in pixels for this one point." },
+        markerFill: { type: "string", description: "Marker fill color for this one point (hex)." },
+        markerBorderColor: { type: "string", description: "Marker border/stroke color for this one point (hex)." },
+        markerBorderWidth: { type: "number", minimum: 0, description: "Marker border/stroke width in pixels for this one point." },
       },
       additionalProperties: false,
     },
@@ -1280,7 +1315,7 @@ export function generateSpecReference(): string {
   lines.push("| trendlines | TrendlineSpec[] | Trendlines overlaid on series (linear, polynomial, movingAverage, ...) |");
   lines.push("| dataTable | DataTableOptions | Data table grid below the plot area |");
   lines.push("| filters | ChartFilters | Non-destructive hide of series/categories |");
-  lines.push("| dataPointOverrides | DataPointOverride[] | Per-point color/opacity/border/explode overrides |");
+  lines.push("| dataPointOverrides | DataPointOverride[] | Per-point fill/border/gradient/pattern/marker/explode overrides, keyed by datum identity |");
   lines.push("| encoding | EncodingSpec | Channel description (x/y/color); compiled to the series model |");
   lines.push("");
 
@@ -1329,6 +1364,43 @@ export function generateSpecReference(): string {
   lines.push("|----------|------|-------------|");
   lines.push("| visible | boolean | Show the legend |");
   lines.push("| position | string | top, bottom, left, or right |");
+  lines.push("| hiddenEntries | integer[] | Legend rows to omit while the data stays plotted (series indices; category indices for pie/donut) |");
+  lines.push("");
+
+  lines.push("## DataPointOverride");
+  lines.push("");
+  lines.push("Formats ONE data point independently of its series. Matched by `key` first");
+  lines.push("and by the index pair second, so inserting a row into the plotted range keeps");
+  lines.push("the formatting on the datum it was written for.");
+  lines.push("");
+  lines.push("| Property | Type | Description |");
+  lines.push("|----------|------|-------------|");
+  lines.push("| seriesIndex | integer | Series index, in authoring (pre-filter) space |");
+  lines.push("| categoryIndex | integer | Category index, in authoring (pre-filter) space |");
+  lines.push("| key | string | Datum identity: series name + U+001F + category label. Matched before the indices |");
+  lines.push("| color | string | Fill color (hex) |");
+  lines.push("| opacity | number | Opacity (0-1) |");
+  lines.push("| borderColor | string | Border/stroke color |");
+  lines.push("| borderWidth | number | Border/stroke width (px) |");
+  lines.push("| exploded | number | Pie/donut: pull this slice out by N px |");
+  lines.push("| gradientFill | GradientFill | Gradient fill for this point |");
+  lines.push("| patternFill | PatternFill | Pattern fill painted over the resolved fill |");
+  lines.push("| invertIfNegative | boolean | Negative value paints white (Excel's \"Invert if negative\") |");
+  lines.push("| markerStyle | string | none, circle, square, diamond, triangle, cross, or star |");
+  lines.push("| markerSize | number | Marker radius for this one point (px) |");
+  lines.push("| markerFill | string | Marker fill color (hex) |");
+  lines.push("| markerBorderColor | string | Marker border color (hex) |");
+  lines.push("| markerBorderWidth | number | Marker border width (px) |");
+  lines.push("");
+
+  lines.push("## PatternFill");
+  lines.push("");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| type | string | - | horizontal, vertical, diagonalUp, diagonalDown, grid, diagonalGrid, dots, or checker |");
+  lines.push("| foreground | string | - | Pattern ink color (hex) |");
+  lines.push("| background | string | datum fill | Color behind the pattern |");
+  lines.push("| size | number | 8 | Repeating cell size (px) |");
   lines.push("");
 
   lines.push("## Mark Options by Chart Type");

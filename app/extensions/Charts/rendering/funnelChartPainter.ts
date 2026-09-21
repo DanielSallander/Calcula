@@ -6,6 +6,8 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, FunnelMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { applyFillStyle } from "./gradientFill";
 import {
   computeRadialLayout,
   drawChartBackground,
@@ -88,7 +90,19 @@ export function paintFunnelChart(
     const bottomLeft = cx - bottomWidth / 2;
     const bottomRight = cx + bottomWidth / 2;
 
-    const color = getSeriesColor(spec.palette, i, null);
+    // A funnel section IS a category of the first series, so it resolves its
+    // per-point style through the ONE shared resolver (key first, index
+    // fallback, painter -> authoring translation inside).
+    const style = resolveDatumStyle(spec, data, 0, i, {
+      fill: getSeriesColor(spec.palette, i, null),
+    });
+    const color = style.fill;
+
+    const hasAlpha = style.opacity !== null;
+    if (hasAlpha) {
+      ctx.save();
+      ctx.globalAlpha = style.opacity as number;
+    }
 
     ctx.beginPath();
     ctx.moveTo(topLeft, y);
@@ -96,13 +110,26 @@ export function paintFunnelChart(
     ctx.lineTo(bottomRight, y + sectionHeight);
     ctx.lineTo(bottomLeft, y + sectionHeight);
     ctx.closePath();
-    ctx.fillStyle = color;
+    // Gradient bounds are the trapezoid's bounding box: the wider of the two
+    // parallel edges, over the section's own height.
+    applyFillStyle(
+      ctx,
+      color,
+      style.gradientFill ?? undefined,
+      Math.min(topLeft, bottomLeft),
+      y,
+      Math.max(topWidth, bottomWidth),
+      sectionHeight,
+    );
     ctx.fill();
 
-    // Subtle stroke for definition
-    ctx.strokeStyle = "rgba(0,0,0,0.1)";
-    ctx.lineWidth = 1;
+    // Subtle stroke for definition (an override may ask for its own)
+    ctx.strokeStyle = style.borderColor ?? "rgba(0,0,0,0.1)";
+    ctx.lineWidth = style.borderWidth ?? 1;
     ctx.stroke();
+
+    // The per-point opacity is the SECTION's, not its caption's.
+    if (hasAlpha) ctx.restore();
 
     // 3. Labels
     if (showLabels) {
@@ -196,9 +223,24 @@ export function computeFunnelBarRects(
 // Helpers
 // ============================================================================
 
+/**
+ * Perceived brightness of a fill, used to pick black or white label text.
+ * A per-point override may supply a 3-digit hex or a non-hex colour, which the
+ * old 6-digit-only slicing turned into NaN; NaN > 150 is false, so such a datum
+ * already got white text. Returning 0 keeps exactly that outcome, explicitly.
+ */
 function getBrightness(hex: string): number {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return (r * 299 + g * 587 + b * 114) / 1000;
+  if (/^#[0-9a-f]{6}$/i.test(hex)) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return (r * 299 + g * 587 + b * 114) / 1000;
+  }
+  if (/^#[0-9a-f]{3}$/i.test(hex)) {
+    const r = parseInt(hex[1] + hex[1], 16);
+    const g = parseInt(hex[2] + hex[2], 16);
+    const b = parseInt(hex[3] + hex[3], 16);
+    return (r * 299 + g * 587 + b * 114) / 1000;
+  }
+  return 0;
 }

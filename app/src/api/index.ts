@@ -445,6 +445,32 @@ export {
 export { registerCellDoubleClickInterceptor } from "./cellDoubleClickInterceptors";
 
 // ============================================================================
+// Overlay Text Editor
+// ============================================================================
+// ONE in-place text editor over the grid canvas, owned by Core. An extension
+// that wants the user to type on the canvas (a chart title, an object caption)
+// asks for a session and answers `getRect()`; the mount into the canvas layer,
+// the MANDATORY pointer claim, the per-frame reposition and the blur rules are
+// the seam's, not the caller's.
+
+export {
+  openOverlayTextEditor,
+  getActiveOverlayTextEditor,
+  isOverlayTextEditorOpen,
+  isOverlayTextEditorElement,
+  getGridCanvasLayer,
+  GRID_CANVAS_LAYER_SELECTOR,
+  OVERLAY_TEXT_EDITOR_ATTR,
+} from "./overlayTextEditor";
+export type {
+  OverlayTextEditorOptions,
+  OverlayTextEditorHandle,
+  OverlayTextEditorRect,
+  OverlayTextEditorFont,
+  OverlayTextAlign,
+} from "./overlayTextEditor";
+
+// ============================================================================
 // Formula Reference Interceptors
 // ============================================================================
 
@@ -1243,6 +1269,13 @@ export {
   formatCombo,
   eventToCombo,
   handleGlobalKeyDown,
+  // The question an extension's OWN global key listener has to ask before it
+  // acts on the document. A pointer claim answers "is a grid-overlay widget
+  // focused"; this answers "is the GRID the subject at all", which is what a
+  // focused <button> in a task pane or on the ribbon makes false. Charts'
+  // Delete had only the INPUT/TEXTAREA/contentEditable tag list and so deleted
+  // the chart from inside its own Format pane.
+  isGridFocused,
   subscribeToKeybindingChanges,
   addCustomKeybinding,
   removeCustomKeybinding,
@@ -2804,6 +2837,38 @@ export {
 } from "./chartData";
 
 export type { ChartDataProvider, ChartDataSummary, ChartSeriesSnapshot, ChartSeriesStrategy } from "./chartData";
+
+// The right-clicked SUBJECT inside a chart, published by Charts' context menu
+// so a contributed item knows what it was invoked on. Subpath-imported until
+// now, which made it look private; @api/chartCues and @api/chartQuickActions
+// are both re-exported here, so the chart seams are barrel-visible as a set.
+export {
+  CHART_TARGET_ELEMENTS,
+  setChartRightClickTarget,
+  getChartRightClickTarget,
+} from "./chartData";
+
+export type { ChartRightClickTarget, ChartTargetElement } from "./chartData";
+
+// What inside a chart is selected right now, and what it is called. Written by
+// Charts (the one write door), read by the Format pane, the shell's Name Box
+// and anything else that needs the rung without importing the extension.
+export {
+  CHART_SELECTION_ELEMENT_IDS,
+  EMPTY_CHART_SELECTION,
+  chartSelectionDisplayName,
+  publishChartSelection,
+  getChartSelection,
+  onChartSelectionChanged,
+  resetChartSelectionRegistry,
+} from "./chartSelection";
+
+export type {
+  ChartSelectionElementId,
+  ChartSelectionLevelName,
+  ChartSelectionSnapshot,
+  ChartSelectionTarget,
+} from "./chartSelection";
 
 // Transient "points of interest" cues drawn over a chart (never in its spec).
 // Insights sets them; Charts paints them at composite time.

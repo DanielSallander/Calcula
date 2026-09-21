@@ -3,9 +3,12 @@
 // CONTEXT: Shows running totals with increase (green), decrease (red), and total (blue) bars.
 //          Each bar starts where the previous one ended. Connector lines link bars.
 
-import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, WaterfallMarkOptions } from "../types";
+import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, WaterfallMarkOptions, ChartElementRect } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { applyFillStyle } from "./gradientFill";
+import { strokeDatumBorderRect } from "./barChartPainter";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -16,6 +19,7 @@ import {
   drawTitle,
   drawLegend,
   drawRoundedRect,
+  recordLegendElementRects,
 } from "./chartPainterUtils";
 
 // Default waterfall colors
@@ -89,8 +93,8 @@ export function paintWaterfallChart(
     drawHorizontalGridLines(ctx, yScale, plotArea, theme);
   }
 
-  // 4. Axes
-  drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme);
+  // 4. Axes — `layout` passed for the measured element-rect write-back.
+  drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme, layout);
 
   // 5. Bars and connectors
   ctx.save();
@@ -118,13 +122,21 @@ export function paintWaterfallChart(
       color = decreaseColor;
     }
 
-    ctx.fillStyle = color;
+    // A waterfall bar is series 0, category i — the same identity
+    // computeWaterfallBarRects reports, so an override written from a hit on
+    // that bar resolves back to it.
+    const style = resolveDatumStyle(spec, data, 0, i, { fill: color });
+
+    if (style.opacity != null) ctx.globalAlpha = style.opacity;
+    applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, x, topY, barWidth, barHeight);
     if (theme.barBorderRadius > 0 && barHeight > theme.barBorderRadius * 2) {
       drawRoundedRect(ctx, x, topY, barWidth, barHeight, theme.barBorderRadius);
       ctx.fill();
     } else {
       ctx.fillRect(x, topY, barWidth, barHeight);
     }
+    strokeDatumBorderRect(ctx, style, x, topY, barWidth, barHeight, theme.barBorderRadius);
+    if (style.opacity != null) ctx.globalAlpha = 1;
 
     // Connector line to next bar
     if (showConnectors && i < bars.length - 1) {
@@ -249,15 +261,34 @@ function drawWaterfallLegend(
   totalWidth += gap * (measured.length - 1);
 
   const y = layout.height - theme.legendFontSize - 4;
-  let x = (layout.width - totalWidth) / 2;
+  const startX = (layout.width - totalWidth) / 2;
+  let x = startX;
 
-  for (const item of measured) {
+  // This legend is the waterfall's OWN, so drawLegendItems never runs for it and
+  // nothing wrote its rects back: without this the Increase/Decrease/Total
+  // entries are unhittable. Item height matches the shared legend (tall enough
+  // to contain the swatch).
+  const itemHeight = Math.max(theme.legendFontSize, swatchSize);
+  const itemRects: Array<{ seriesIndex: number; rect: ChartElementRect }> = [];
+
+  for (let i = 0; i < measured.length; i++) {
+    const item = measured[i];
     ctx.fillStyle = item.color;
     ctx.fillRect(x, y - swatchSize / 2, swatchSize, swatchSize);
     ctx.fillStyle = theme.legendTextColor;
     ctx.fillText(item.name, x + swatchSize + padding, y);
+    itemRects.push({
+      seriesIndex: i,
+      rect: { x, y: y - itemHeight / 2, width: item.width, height: itemHeight },
+    });
     x += item.width + gap;
   }
+
+  recordLegendElementRects(
+    layout,
+    { x: startX, y: y - itemHeight / 2, width: totalWidth, height: itemHeight },
+    itemRects,
+  );
 }
 
 // ============================================================================

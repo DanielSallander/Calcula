@@ -4,9 +4,12 @@
 //          Left Y axis = values (bars), Right Y axis = cumulative % (line, 0-100%).
 //          Bars auto-sort from largest to smallest.
 
-import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, PointMarker, HitGeometry, ParetoMarkOptions } from "../types";
+import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, PointMarker, HitGeometry, ParetoMarkOptions, ChartElementRect } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { applyFillStyle } from "./gradientFill";
+import { strokeDatumBorderRect } from "./barChartPainter";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -17,6 +20,8 @@ import {
   drawTitle,
   drawLegend,
   drawRoundedRect,
+  reflowChartElements,
+  recordLegendElementRects,
   formatTickValue,
 } from "./chartPainterUtils";
 
@@ -63,6 +68,27 @@ function prepareParetoData(data: ParsedChartData): ParetoData {
   return { categories, values, cumulativePercents, total };
 }
 
+/**
+ * The data a Pareto chart RESOLVES PER-POINT OVERRIDES AGAINST: one series,
+ * categories in sorted (descending-value) order.
+ *
+ * Exported because BOTH ends of an override need it. The painter resolves bar
+ * `i` at `(0, i)` against this view, and the write path has to stamp the
+ * identity key from the SAME view — it used to read `data.categories[i]`, the
+ * UNSORTED label, so clicking the tallest bar stamped the name of whichever
+ * category happened to be first in the source range. `buildOverrideIndex` then
+ * honoured that key faithfully and painted a DIFFERENT bar, while the pane
+ * read the override back by index and showed the colour as if it had landed.
+ * One builder, one answer.
+ */
+export function paretoResolveView(data: ParsedChartData): ParsedChartData {
+  const pareto = prepareParetoData(data);
+  return {
+    categories: pareto.categories,
+    series: [{ name: data.series.length > 0 ? data.series[0].name : "Values", values: pareto.values, color: null }],
+  };
+}
+
 // ============================================================================
 // Layout
 // ============================================================================
@@ -84,6 +110,12 @@ export function computeParetoLayout(
     layout.width - layout.margin.left - layout.margin.right,
     10,
   );
+
+  // The margin just moved, and every element rect except chartArea/title is a
+  // function of it — a right-hand legend in particular would still be anchored
+  // 50px into the percentage axis. Reflow BEFORE anything paints (a reflow after
+  // paint would throw away the painters' measured rects).
+  reflowChartElements(layout, spec, data, theme);
 
   return layout;
 }
@@ -153,8 +185,8 @@ export function paintParetoChart(
     drawHorizontalGridLines(ctx, yScale, plotArea, theme);
   }
 
-  // 4. Left axis and X axis
-  drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme);
+  // 4. Left axis and X axis — `layout` passed for the measured rect write-back.
+  drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme, layout);
 
   // 5. Right axis (percentage)
   drawPercentageAxis(ctx, pctScale, plotArea, theme);
@@ -162,6 +194,17 @@ export function paintParetoChart(
   // 6. Bars
   const zeroY = yScale.scale(0);
   const barWidth = xScale.bandwidth;
+
+  // A Pareto chart RE-ORDERS its categories, so the painter's `i` is a SORTED
+  // position and has nothing to do with data.categories[i]. Resolve overrides
+  // against the sorted view: the key matches the datum by name so it survives a
+  // re-sort, and the index fallback matches the sorted position — which is
+  // exactly the categoryIndex computeParetoBarRects hands the hit-tester, so an
+  // override written from a click on a bar resolves back to that same bar.
+  // `paretoResolveView` is SHARED with the write path (`datumAddress`), because
+  // a key stamped from the unsorted data names a different bar than the one
+  // that was clicked.
+  const paretoView = paretoResolveView(data);
 
   for (let i = 0; i < pareto.categories.length; i++) {
     const value = pareto.values[i];
@@ -175,8 +218,12 @@ export function paintParetoChart(
     const clippedHeight = clippedBottom - clippedY;
     if (clippedHeight <= 0) continue;
 
-    const color = getSeriesColor(spec.palette, i, null);
-    ctx.fillStyle = color;
+    const style = resolveDatumStyle(spec, paretoView, 0, i, {
+      fill: getSeriesColor(spec.palette, i, null),
+    });
+
+    if (style.opacity != null) ctx.globalAlpha = style.opacity;
+    applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, barX, clippedY, barWidth, clippedHeight);
 
     if (borderRadius > 0 && clippedHeight > borderRadius * 2) {
       drawRoundedRect(ctx, barX, clippedY, barWidth, clippedHeight, borderRadius);
@@ -184,6 +231,8 @@ export function paintParetoChart(
     } else {
       ctx.fillRect(barX, clippedY, barWidth, clippedHeight);
     }
+    strokeDatumBorderRect(ctx, style, barX, clippedY, barWidth, clippedHeight, borderRadius);
+    if (style.opacity != null) ctx.globalAlpha = 1;
   }
 
   // 7. 80% reference line
@@ -348,7 +397,16 @@ function drawParetoLegend(
 
   let x = startX;
 
-  for (const item of items) {
+  // Pareto draws its OWN legend (bar series + cumulative line), so
+  // drawLegendItems never runs for it and nothing recorded its rects: without
+  // this write-back the legend is unhittable. Entries are indexed 0 = the bar
+  // series, 1 = "Cumulative %".
+  const itemHeight = Math.max(fontSize, swatchSize);
+  const itemRects: Array<{ seriesIndex: number; rect: ChartElementRect }> = [];
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const itemStartX = x;
     if (item.type === "rect") {
       ctx.fillStyle = item.color;
       ctx.fillRect(x, startY - swatchSize / 2, swatchSize, swatchSize);
@@ -370,8 +428,24 @@ function drawParetoLegend(
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
     ctx.fillText(item.name, x, startY);
-    x += ctx.measureText(item.name).width + itemGap;
+    const textWidth = ctx.measureText(item.name).width;
+    itemRects.push({
+      seriesIndex: i,
+      rect: {
+        x: itemStartX,
+        y: startY - itemHeight / 2,
+        width: swatchSize + swatchGap + textWidth,
+        height: itemHeight,
+      },
+    });
+    x += textWidth + itemGap;
   }
+
+  recordLegendElementRects(
+    layout,
+    { x: startX, y: startY - itemHeight / 2, width: totalWidth, height: itemHeight },
+    itemRects,
+  );
 }
 
 // ============================================================================

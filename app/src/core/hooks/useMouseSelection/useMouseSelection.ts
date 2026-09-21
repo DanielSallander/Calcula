@@ -940,8 +940,22 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       const mouseX = (event.clientX - rect.left) / zoom;
       const mouseY = (event.clientY - rect.top) / zoom;
 
-      // Check if double-click is on a floating overlay (e.g., chart) - block editing
-      if (overlayMoveHandlers.checkOverlayBody(mouseX, mouseY)) {
+      // A double-click on a floating overlay (e.g. a chart) never opens the cell
+      // editor hidden underneath it. The overlay OWNER, though, may want the
+      // gesture -- and until this branch existed it had no way to get it: the
+      // @api/cellDoubleClickInterceptors seam is consulted only once a CELL has
+      // been resolved (useSpreadsheetSelection.handleDoubleClickEvent, behind its
+      // `if (cell)` gate), and this function returns null before any cell exists.
+      // So the region under the point is resolved once, offered to its owner, and
+      // the answer is swallowed either way.
+      //
+      // BOTH ANSWERS RETURN null, deliberately. Over a floating object there is
+      // nothing to fall through TO: the cells below it are covered, so "the owner
+      // declined" and "no owner registered" must both end in today's behaviour.
+      // The boolean says whether the gesture was taken, not what Core does next.
+      const overlayHit = overlayMoveHandlers.checkOverlayBody(mouseX, mouseY);
+      if (overlayHit) {
+        overlayMoveHandlers.handleOverlayDoubleClick(overlayHit.region, mouseX, mouseY, event);
         return null;
       }
 

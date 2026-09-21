@@ -7,7 +7,8 @@ import type { ChartSpec, ParsedChartData, BarRect, ChartLayout, HitGeometry, Bar
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { resolvePointColor, resolvePointOpacity, resolveSeriesEncoding, seriesPaletteIndex } from "../lib/encodingResolver";
-import { buildOverrideMap, getOverrideFromMap, toAuthoringIndices } from "../lib/dataPointOverrides";
+import type { ResolvedDatumStyle } from "../lib/dataPointOverrides";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
 import { applyFillStyle } from "./gradientFill";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
@@ -24,6 +25,50 @@ import {
 // Re-export for backwards compatibility and formatTickValue for tooltip
 export type BarChartLayout = ChartLayout;
 export { formatTickValue } from "./chartPainterUtils";
+
+// ============================================================================
+// Per-point border
+// ============================================================================
+
+/**
+ * Stroke ONE datum's per-point border.
+ *
+ * `DataPointOverride.borderColor` / `borderWidth` are written by the Format Data
+ * Point dialog and, until now, painted by nothing at all: every bar painter
+ * filled and never stroked, so a user who set a border on a single bar saw the
+ * spec change and the chart not. This is that stroke.
+ *
+ * A border exists when `borderColor` is set; the width defaults to 1, and an
+ * explicit width of 0 (or below) means "no border". A datum with no border
+ * colour makes NO context calls, so a chart without per-point borders paints
+ * byte-identically to before.
+ *
+ * Lives here because the five bar-family painters are its only callers today;
+ * it belongs beside `drawRoundedRect` in chartPainterUtils as soon as a non-bar
+ * painter needs it (see the handoff notes).
+ */
+export function strokeDatumBorderRect(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  style: ResolvedDatumStyle,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  cornerRadius: number,
+): void {
+  if (!style.borderColor) return;
+  const width = style.borderWidth ?? 1;
+  if (width <= 0) return;
+
+  ctx.strokeStyle = style.borderColor;
+  ctx.lineWidth = width;
+  if (cornerRadius > 0 && h > cornerRadius * 2 && w > cornerRadius * 2) {
+    drawRoundedRect(ctx, x, y, w, h, cornerRadius);
+    ctx.stroke();
+  } else {
+    ctx.strokeRect(x, y, w, h);
+  }
+}
 
 // ============================================================================
 // Layout
@@ -93,8 +138,9 @@ export function paintBarChart(
     drawHorizontalGridLines(ctx, yScale, plotArea, theme);
   }
 
-  // 4. Axes
-  drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme);
+  // 4. Axes — `layout` passed so the axis titles, the display-unit label and the
+  //    y-label band replace their layout ESTIMATES with measured rects.
+  drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme, layout);
 
   // 5. Bars
   if (isStacked) {
@@ -195,7 +241,7 @@ function drawBars(
   const barWidth = baseBarWidth;
 
   const zeroY = yScale.scale(0);
-  const overrideMap = buildOverrideMap(spec.dataPointOverrides);
+  const markGradient = (spec.markOptions as BarMarkOptions | undefined)?.fill ?? null;
 
   for (let ci = 0; ci < data.categories.length; ci++) {
     const groupX = xScale.scaleIndex(ci);
@@ -205,12 +251,16 @@ function drawBars(
       const category = data.categories[ci] ?? "";
       const encoding = resolveSeriesEncoding(spec, data.series[si].name);
       const sel = { seriesName: data.series[si].name, selection: data.selection };
-      let color = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), data.series[si].color, value, category, sel);
+      const seriesColor = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), data.series[si].color, value, category, sel);
 
-      // Apply data point override (keyed in authoring space — translate first)
-      const a = toAuthoringIndices(data, si, ci);
-      const override = getOverrideFromMap(overrideMap, a.seriesIndex, a.categoryIndex);
-      if (override?.color) color = override.color;
+      // ONE shared resolver: key-then-index matching, the authoring-space
+      // translation and invert-if-negative all live inside it. si/ci are
+      // PAINTER-space loop counters and must NOT be pre-translated.
+      const style = resolveDatumStyle(spec, data, si, ci, {
+        fill: seriesColor,
+        opacity: resolvePointOpacity(encoding, value, category, sel),
+        gradientFill: markGradient,
+      });
 
       const barX = groupX + si * effectiveBarStep;
       const barTop = yScale.scale(value);
@@ -224,13 +274,10 @@ function drawBars(
 
       if (clippedHeight <= 0) continue;
 
-      let pointOpacity = resolvePointOpacity(encoding, value, category, sel);
-      if (override?.opacity !== undefined) pointOpacity = override.opacity;
-      if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
+      if (style.opacity != null) ctx.globalAlpha = style.opacity;
 
-      // Apply gradient fill: per-point override > mark-level > solid color
-      const gradientFill = override?.gradientFill ?? (spec.markOptions as BarMarkOptions | undefined)?.fill;
-      applyFillStyle(ctx, color, gradientFill, barX, clippedY, barWidth, clippedHeight);
+      // Fill: per-point gradient override > mark-level gradient > solid color.
+      applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, barX, clippedY, barWidth, clippedHeight);
 
       if (theme.barBorderRadius > 0 && clippedHeight > theme.barBorderRadius * 2) {
         drawRoundedRect(
@@ -245,7 +292,8 @@ function drawBars(
       } else {
         ctx.fillRect(barX, clippedY, barWidth, clippedHeight);
       }
-      if (pointOpacity != null) ctx.globalAlpha = 1;
+      strokeDatumBorderRect(ctx, style, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
+      if (style.opacity != null) ctx.globalAlpha = 1;
     }
   }
 }
@@ -288,7 +336,14 @@ function drawStackedBars(
       const category = data.categories[ci] ?? "";
       const encoding = resolveSeriesEncoding(spec, data.series[si].name);
       const sel = { seriesName: data.series[si].name, selection: data.selection };
-      const color = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), data.series[si].color, rawValue, category, sel);
+      const seriesColor = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), data.series[si].color, rawValue, category, sel);
+
+      // A stacked segment IS a data point: before this, drawStackedBars built no
+      // override map at all, so a stacked bar could not be individually coloured.
+      const style = resolveDatumStyle(spec, data, si, ci, {
+        fill: seriesColor,
+        opacity: resolvePointOpacity(encoding, rawValue, category, sel),
+      });
 
       let value = rawValue;
       if (stackMode === "percentStacked" && categoryTotal > 0) {
@@ -320,9 +375,8 @@ function drawStackedBars(
 
       if (clippedHeight <= 0) continue;
 
-      const pointOpacity = resolvePointOpacity(encoding, rawValue, category, sel);
-      if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
-      ctx.fillStyle = color;
+      if (style.opacity != null) ctx.globalAlpha = style.opacity;
+      applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, barX, clippedY, barWidth, clippedHeight);
 
       if (theme.barBorderRadius > 0 && clippedHeight > theme.barBorderRadius * 2) {
         drawRoundedRect(ctx, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
@@ -330,7 +384,8 @@ function drawStackedBars(
       } else {
         ctx.fillRect(barX, clippedY, barWidth, clippedHeight);
       }
-      if (pointOpacity != null) ctx.globalAlpha = 1;
+      strokeDatumBorderRect(ctx, style, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
+      if (style.opacity != null) ctx.globalAlpha = 1;
     }
   }
 }

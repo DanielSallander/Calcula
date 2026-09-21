@@ -6,9 +6,13 @@ import type { ChartSpec, ParsedChartData, BarRect, ChartLayout, HitGeometry, Bar
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { resolvePointColor, resolvePointOpacity, resolveSeriesEncoding, seriesPaletteIndex } from "../lib/encodingResolver";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { applyFillStyle } from "./gradientFill";
+import { strokeDatumBorderRect } from "./barChartPainter";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
+  computeCartesianElementRects,
   drawChartBackground,
   drawPlotBackground,
   drawVerticalGridLines,
@@ -46,7 +50,7 @@ export function computeHorizontalBarLayout(
   const currentLeft = layout.margin.left;
   const newLeft = currentLeft + extraLeft;
 
-  return {
+  const relaid: ChartLayout = {
     width: layout.width,
     height: layout.height,
     margin: {
@@ -62,6 +66,13 @@ export function computeHorizontalBarLayout(
       height: layout.plotArea.height,
     },
   };
+
+  // This is a DERIVED layout object: it does not inherit `elements`, and
+  // carrying the parent's rects over would anchor every axis band and the
+  // legend to a left margin 60px away from the one we actually paint at. Derive
+  // them from the NEW margins instead (the reflow contract, applied at birth).
+  relaid.elements = computeCartesianElementRects(relaid, spec, data, theme);
+  return relaid;
 }
 
 // ============================================================================
@@ -145,8 +156,9 @@ export function paintHorizontalBarChart(
     drawVerticalGridLines(ctx, xScale, plotArea, theme);
   }
 
-  // 4. Axes (categories on Y, values on X)
-  drawHorizontalAxes(ctx, xScale, yScale, plotArea, spec, theme);
+  // 4. Axes (categories on Y, values on X) — `layout` passed so the axis titles
+  //    replace their layout estimates with measured rects.
+  drawHorizontalAxes(ctx, xScale, yScale, plotArea, spec, theme, layout);
 
   // 5. Bars
   if (isStacked) {
@@ -197,7 +209,14 @@ function drawHorizontalBars(
       const category = data.categories[ci] ?? "";
       const encoding = resolveSeriesEncoding(spec, data.series[si].name);
       const sel = { seriesName: data.series[si].name, selection: data.selection };
-      const color = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), data.series[si].color, value, category, sel);
+      const seriesColor = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), data.series[si].color, value, category, sel);
+
+      // This painter referenced dataPointOverrides NOWHERE before: a horizontal
+      // bar simply could not be individually formatted. si/ci are painter-space.
+      const style = resolveDatumStyle(spec, data, si, ci, {
+        fill: seriesColor,
+        opacity: resolvePointOpacity(encoding, value, category, sel),
+      });
 
       const barY = groupY + si * (barHeight + theme.barGap);
       const barEnd = xScale.scale(value);
@@ -211,9 +230,8 @@ function drawHorizontalBars(
 
       if (clippedWidth <= 0) continue;
 
-      const pointOpacity = resolvePointOpacity(encoding, value, category, sel);
-      if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
-      ctx.fillStyle = color;
+      if (style.opacity != null) ctx.globalAlpha = style.opacity;
+      applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, clippedX, barY, clippedWidth, barHeight);
 
       if (theme.barBorderRadius > 0 && clippedWidth > theme.barBorderRadius * 2) {
         drawRoundedRect(
@@ -228,7 +246,8 @@ function drawHorizontalBars(
       } else {
         ctx.fillRect(clippedX, barY, clippedWidth, barHeight);
       }
-      if (pointOpacity != null) ctx.globalAlpha = 1;
+      strokeDatumBorderRect(ctx, style, clippedX, barY, clippedWidth, barHeight, theme.barBorderRadius);
+      if (style.opacity != null) ctx.globalAlpha = 1;
     }
   }
 }
@@ -270,7 +289,12 @@ function drawStackedHorizontalBars(
       const category = data.categories[ci] ?? "";
       const encoding = resolveSeriesEncoding(spec, data.series[si].name);
       const sel = { seriesName: data.series[si].name, selection: data.selection };
-      const color = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), data.series[si].color, rawValue, category, sel);
+      const seriesColor = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), data.series[si].color, rawValue, category, sel);
+
+      const style = resolveDatumStyle(spec, data, si, ci, {
+        fill: seriesColor,
+        opacity: resolvePointOpacity(encoding, rawValue, category, sel),
+      });
 
       let value = rawValue;
       if (stackMode === "percentStacked" && categoryTotal > 0) {
@@ -299,9 +323,8 @@ function drawStackedHorizontalBars(
       const clippedWidth = clippedRight - clippedX;
       if (clippedWidth <= 0) continue;
 
-      const pointOpacity = resolvePointOpacity(encoding, rawValue, category, sel);
-      if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
-      ctx.fillStyle = color;
+      if (style.opacity != null) ctx.globalAlpha = style.opacity;
+      applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, clippedX, barY, clippedWidth, barHeight);
 
       if (theme.barBorderRadius > 0 && clippedWidth > theme.barBorderRadius * 2) {
         drawRoundedRect(ctx, clippedX, barY, clippedWidth, barHeight, theme.barBorderRadius);
@@ -309,7 +332,8 @@ function drawStackedHorizontalBars(
       } else {
         ctx.fillRect(clippedX, barY, clippedWidth, barHeight);
       }
-      if (pointOpacity != null) ctx.globalAlpha = 1;
+      strokeDatumBorderRect(ctx, style, clippedX, barY, clippedWidth, barHeight, theme.barBorderRadius);
+      if (style.opacity != null) ctx.globalAlpha = 1;
     }
   }
 }

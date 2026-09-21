@@ -3,7 +3,16 @@
 // CONTEXT: Extracted from barChartPainter to avoid duplication across chart types.
 //          Includes title, legend, axis, grid line, and geometry helpers.
 
-import type { ChartSpec, ParsedChartData, ChartLayout } from "../types";
+import type {
+  ChartSpec,
+  ParsedChartData,
+  ChartLayout,
+  ChartElementRect,
+  ChartElementRects,
+  ChartElementKey,
+  AxisSpec,
+  TickMarkType,
+} from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { seriesPaletteIndex } from "../lib/encodingResolver";
@@ -15,6 +24,38 @@ import { timeTicks } from "../lib/chartFieldTypes";
 // ============================================================================
 // Layout Computation (shared for cartesian charts)
 // ============================================================================
+
+/**
+ * Width the y-axis tick-label band needs. ESTIMATED at ~7px per character —
+ * shared by the margin arithmetic and the element rect so the two can never
+ * disagree about where the band is.
+ */
+function estimateYLabelBandWidth(data: ParsedChartData): number {
+  const allValues = data.series.flatMap((s) => s.values);
+  const maxVal = Math.max(...allValues, 0);
+  const minVal = Math.min(...allValues, 0);
+  const maxLabel = formatTickValue(maxVal);
+  const minLabel = formatTickValue(minVal);
+  const longestLabel = maxLabel.length >= minLabel.length ? maxLabel : minLabel;
+  // Approximate width: ~7px per character at typical label font size
+  return Math.max(longestLabel.length * 7, 20) + 4;
+}
+
+/**
+ * Height the x-axis tick-label band needs, by label angle. Shared by the margin
+ * arithmetic and the element rect (see {@link estimateYLabelBandWidth}).
+ */
+function estimateXLabelBandHeight(
+  spec: ChartSpec,
+  data: ParsedChartData,
+  theme: ChartRenderTheme,
+): number {
+  if (spec.xAxis.labelAngle === 0) return theme.labelFontSize + 8;
+  if (spec.xAxis.labelAngle === 45) return 30;
+  // 90 degrees
+  const maxLen = Math.max(...data.categories.map((c) => c.length), 3);
+  return Math.min(maxLen * 5, 60);
+}
 
 /**
  * Compute the layout (margins and plot area) for a cartesian chart.
@@ -39,14 +80,7 @@ export function computeCartesianLayout(
 
   // Y-axis labels (estimate max label width from actual data values)
   if (spec.yAxis.showLabels) {
-    const allValues = data.series.flatMap((s) => s.values);
-    const maxVal = Math.max(...allValues, 0);
-    const minVal = Math.min(...allValues, 0);
-    const maxLabel = formatTickValue(maxVal);
-    const minLabel = formatTickValue(minVal);
-    const longestLabel = maxLabel.length >= minLabel.length ? maxLabel : minLabel;
-    // Approximate width: ~7px per character at typical label font size
-    left += Math.max(longestLabel.length * 7, 20) + 4;
+    left += estimateYLabelBandWidth(data);
   }
   if (spec.yAxis.title) {
     left += theme.axisTitleFontSize + 6;
@@ -54,15 +88,7 @@ export function computeCartesianLayout(
 
   // X-axis labels
   if (spec.xAxis.showLabels) {
-    if (spec.xAxis.labelAngle === 0) {
-      bottom += theme.labelFontSize + 8;
-    } else if (spec.xAxis.labelAngle === 45) {
-      bottom += 30;
-    } else {
-      // 90 degrees
-      const maxLen = Math.max(...data.categories.map((c) => c.length), 3);
-      bottom += Math.min(maxLen * 5, 60);
-    }
+    bottom += estimateXLabelBandHeight(spec, data, theme);
   }
   if (spec.xAxis.title) {
     bottom += theme.axisTitleFontSize + 6;
@@ -90,7 +116,9 @@ export function computeCartesianLayout(
     height: Math.max(height - top - bottom, 10),
   };
 
-  return { width, height, margin: { top, right, bottom, left }, plotArea };
+  const layout: ChartLayout = { width, height, margin: { top, right, bottom, left }, plotArea };
+  layout.elements = computeCartesianElementRects(layout, spec, data, theme);
+  return layout;
 }
 
 /**
@@ -136,7 +164,397 @@ export function computeRadialLayout(
     height: Math.max(height - top - bottom, 10),
   };
 
-  return { width, height, margin: { top, right, bottom, left }, plotArea };
+  const layout: ChartLayout = { width, height, margin: { top, right, bottom, left }, plotArea };
+  layout.elements = computeRadialElementRects(layout, spec, data, theme);
+  return layout;
+}
+
+// ============================================================================
+// Element Rects (hit-testable boxes for title / axes / legend)
+// ============================================================================
+//
+// See ChartElementRects in ../types for the full two-stage contract. In short:
+// the functions BELOW derive estimated rects from the margins; the PAINTERS
+// further down overwrite the ones they can measure via recordChartElementRect.
+// Any stage that mutates layout.margin / layout.plotArea after layout (the data
+// table in chartDispatch, pivot field buttons in chartRenderer, the secondary
+// axis in combo/pareto, the horizontal-bar relayout) must call
+// reflowChartElements afterwards and BEFORE painting.
+
+/** Rough text width with no canvas context. ~0.55em per character. */
+function estimateTextWidth(text: string, fontSize: number): number {
+  return text.length * fontSize * 0.55;
+}
+
+/** The bare canvas rect, used whenever `elements` has to be created from nothing. */
+function chartAreaRect(layout: ChartLayout): ChartElementRect {
+  return { x: 0, y: 0, width: layout.width, height: layout.height };
+}
+
+/**
+ * Estimated title rect. `drawTitle` paints the title centered on the canvas at
+ * y = 10 with a "top" baseline, ANCHORED TO THE CANVAS TOP EDGE — not to
+ * `margin.top` — so this rect is the one thing a later margin change cannot
+ * invalidate.
+ */
+function estimateTitleRect(layout: ChartLayout, title: string, theme: ChartRenderTheme): ChartElementRect {
+  const w = estimateTextWidth(title, theme.titleFontSize);
+  return { x: layout.width / 2 - w / 2, y: TITLE_TOP_Y, width: w, height: theme.titleFontSize };
+}
+
+/** The y coordinate `drawTitle` paints at (top baseline). */
+const TITLE_TOP_Y = 10;
+
+/**
+ * Estimated legend box and per-entry rects, mirroring the arithmetic in
+ * {@link drawLegendItems}. `labels` is the series names for a cartesian legend
+ * and the category names for a radial one; the entry's `seriesIndex` is that
+ * list's PAINTER-space index either way.
+ *
+ * `spec.legend.hiddenEntries` removes ROWS from the legend without removing the
+ * data from the plot, so the surviving rows keep their ORIGINAL indices: the
+ * rect for series 2 still says 2 after series 1 is hidden. Renumbering them
+ * would make a click on the legend select the wrong series, which is the whole
+ * reason the index travels with the rect instead of being the array position.
+ */
+function estimateLegendRects(
+  layout: ChartLayout,
+  spec: ChartSpec,
+  labels: string[],
+  theme: ChartRenderTheme,
+): { legend: ChartElementRect; legendItems: Array<{ seriesIndex: number; rect: ChartElementRect }> } | undefined {
+  const fs = theme.legendFontSize;
+  const h = legendItemHeight(theme);
+  const entries = visibleLegendEntries(spec, labels).map((e) => ({
+    seriesIndex: e.seriesIndex,
+    width: LEGEND_SWATCH + LEGEND_PADDING + estimateTextWidth(e.label, fs),
+  }));
+  if (entries.length === 0) return undefined;
+
+  if (spec.legend.position === "bottom" || spec.legend.position === "top") {
+    const y = horizontalLegendCenterY(layout, spec, theme);
+    return layOutHorizontalLegend(layout, entries, y, h);
+  }
+  const x = verticalLegendX(layout, spec);
+  return layOutVerticalLegend(layout, entries, x, theme, h);
+}
+
+/**
+ * The legend rows that survive `spec.legend.hiddenEntries`, each still carrying
+ * the index it had before anything was hidden. ONE filter, shared by the layout
+ * estimate and the painter — two copies of this predicate would drift the first
+ * time one of them learned about a new way to hide a row.
+ */
+function visibleLegendEntries(
+  spec: ChartSpec,
+  labels: string[],
+): Array<{ seriesIndex: number; label: string }> {
+  const hidden = spec.legend.hiddenEntries;
+  const out: Array<{ seriesIndex: number; label: string }> = [];
+  for (let i = 0; i < labels.length; i++) {
+    if (hidden && hidden.includes(i)) continue;
+    out.push({ seriesIndex: i, label: labels[i] });
+  }
+  return out;
+}
+
+/** Swatch square size, text padding and inter-item gap used by the legend. */
+const LEGEND_SWATCH = 10;
+const LEGEND_PADDING = 4;
+const LEGEND_GAP = 16;
+
+/** Row height of one legend entry — tall enough to contain the swatch. */
+function legendItemHeight(theme: ChartRenderTheme): number {
+  return Math.max(theme.legendFontSize, LEGEND_SWATCH);
+}
+
+/** The text/swatch CENTER y of a horizontal (top/bottom) legend. */
+function horizontalLegendCenterY(layout: ChartLayout, spec: ChartSpec, theme: ChartRenderTheme): number {
+  return spec.legend.position === "bottom"
+    ? layout.height - theme.legendFontSize - 4
+    : layout.margin.top - theme.legendFontSize - 12;
+}
+
+/** The left edge of a vertical (left/right) legend. */
+function verticalLegendX(layout: ChartLayout, spec: ChartSpec): number {
+  return spec.legend.position === "right"
+    ? layout.plotArea.x + layout.plotArea.width + 16
+    : 8;
+}
+
+/** One legend row to place: the index it addresses and how wide it draws. */
+type LegendEntryWidth = { seriesIndex: number; width: number };
+
+/** Place a horizontal legend's entries from their item widths. */
+function layOutHorizontalLegend(
+  layout: ChartLayout,
+  entries: LegendEntryWidth[],
+  centerY: number,
+  itemHeight: number,
+): { legend: ChartElementRect; legendItems: Array<{ seriesIndex: number; rect: ChartElementRect }> } {
+  const totalWidth = entries.reduce((a, e) => a + e.width, 0) + LEGEND_GAP * (entries.length - 1);
+  const startX = (layout.width - totalWidth) / 2;
+  const items: Array<{ seriesIndex: number; rect: ChartElementRect }> = [];
+  let x = startX;
+  for (const entry of entries) {
+    items.push({
+      seriesIndex: entry.seriesIndex,
+      rect: { x, y: centerY - itemHeight / 2, width: entry.width, height: itemHeight },
+    });
+    x += entry.width + LEGEND_GAP;
+  }
+  return {
+    legend: { x: startX, y: centerY - itemHeight / 2, width: totalWidth, height: itemHeight },
+    legendItems: items,
+  };
+}
+
+/** Place a vertical legend's entries from their item widths. */
+function layOutVerticalLegend(
+  layout: ChartLayout,
+  entries: LegendEntryWidth[],
+  x: number,
+  theme: ChartRenderTheme,
+  itemHeight: number,
+): { legend: ChartElementRect; legendItems: Array<{ seriesIndex: number; rect: ChartElementRect }> } {
+  const step = theme.legendFontSize + 6;
+  const firstCenterY = layout.plotArea.y + 4;
+  const items: Array<{ seriesIndex: number; rect: ChartElementRect }> = [];
+  let widest = 0;
+  for (let row = 0; row < entries.length; row++) {
+    const entry = entries[row];
+    if (entry.width > widest) widest = entry.width;
+    items.push({
+      seriesIndex: entry.seriesIndex,
+      // The ROW the entry occupies, not its series index: hiding series 1 must
+      // close the gap it left rather than leave a hole in the legend.
+      rect: { x, y: firstCenterY + row * step - itemHeight / 2, width: entry.width, height: itemHeight },
+    });
+  }
+  return {
+    legend: {
+      x,
+      y: firstCenterY - itemHeight / 2,
+      width: widest,
+      height: (entries.length - 1) * step + itemHeight,
+    },
+    legendItems: items,
+  };
+}
+
+/**
+ * Derive the element rects for a CARTESIAN layout from its margins and plot
+ * area. Pure — call it again after any margin change (see
+ * {@link reflowChartElements}).
+ */
+export function computeCartesianElementRects(
+  layout: ChartLayout,
+  spec: ChartSpec,
+  data: ParsedChartData,
+  theme: ChartRenderTheme,
+): ChartElementRects {
+  const pa = layout.plotArea;
+  const els: ChartElementRects = {
+    family: "cartesian",
+    chartArea: chartAreaRect(layout),
+    measured: [],
+  };
+
+  if (spec.title) els.title = estimateTitleRect(layout, spec.title, theme);
+
+  if (spec.xAxis.showLabels) {
+    els.xAxisBand = {
+      x: pa.x,
+      y: pa.y + pa.height,
+      width: pa.width,
+      height: estimateXLabelBandHeight(spec, data, theme),
+    };
+  }
+  if (spec.yAxis.showLabels) {
+    const w = estimateYLabelBandWidth(data);
+    els.yAxisBand = { x: pa.x - w, y: pa.y, width: w, height: pa.height };
+  }
+
+  if (spec.xAxis.title) {
+    // drawCartesianAxes paints it centered under the plot with a "bottom"
+    // baseline, so the box ends at that y.
+    const baselineY = pa.y + pa.height + (spec.xAxis.showLabels ? 30 : 16);
+    const w = estimateTextWidth(spec.xAxis.title, theme.axisTitleFontSize);
+    els.xAxisTitle = {
+      x: pa.x + pa.width / 2 - w / 2,
+      y: baselineY - theme.axisTitleFontSize,
+      width: w,
+      height: theme.axisTitleFontSize,
+    };
+  }
+  if (spec.yAxis.title) {
+    // Rotated -90deg about (14, plot vertical centre) with a "top" baseline:
+    // the glyph run becomes a TALL box one font-size wide.
+    const w = estimateTextWidth(spec.yAxis.title, theme.axisTitleFontSize);
+    els.yAxisTitle = {
+      x: Y_AXIS_TITLE_X,
+      y: pa.y + pa.height / 2 - w / 2,
+      width: theme.axisTitleFontSize,
+      height: w,
+    };
+  }
+
+  if (spec.yAxis.displayUnit && spec.yAxis.displayUnit !== "none" && spec.yAxis.showDisplayUnitLabel) {
+    const fs = theme.labelFontSize - 1;
+    const w = estimateTextWidth(getDisplayUnitLabel(spec.yAxis.displayUnit), fs);
+    els.displayUnitLabel = { x: pa.x + 2, y: pa.y - 2 - fs, width: w, height: fs };
+  }
+
+  if (spec.legend.visible) {
+    const legend = estimateLegendRects(layout, spec, data.series.map((s) => s.name), theme);
+    if (legend) {
+      els.legend = legend.legend;
+      els.legendItems = legend.legendItems;
+    }
+  }
+
+  return els;
+}
+
+/** The x coordinate the rotated y-axis title is translated to. */
+const Y_AXIS_TITLE_X = 14;
+
+/**
+ * Derive the element rects for a RADIAL layout. No axes — title and a
+ * category-keyed legend only.
+ */
+export function computeRadialElementRects(
+  layout: ChartLayout,
+  spec: ChartSpec,
+  data: ParsedChartData,
+  theme: ChartRenderTheme,
+): ChartElementRects {
+  const els: ChartElementRects = {
+    family: "radial",
+    chartArea: chartAreaRect(layout),
+    measured: [],
+  };
+  if (spec.title) els.title = estimateTitleRect(layout, spec.title, theme);
+  if (spec.legend.visible) {
+    const legend = estimateLegendRects(layout, spec, data.categories, theme);
+    if (legend) {
+      els.legend = legend.legend;
+      els.legendItems = legend.legendItems;
+    }
+  }
+  return els;
+}
+
+/**
+ * RECOMPUTE every element rect from the layout's CURRENT margins and plot area,
+ * discarding any measured write-backs.
+ *
+ * Call this from any stage that mutates `layout.margin` or `layout.plotArea`
+ * after the layout was computed — the data table folded into `margin.bottom`
+ * (chartDispatch), pivot field buttons (chartRenderer), the secondary axis
+ * (combo/pareto), the horizontal-bar relayout. Call it BEFORE painting: a
+ * reflow after paint throws away the exact rects the painters measured.
+ *
+ * A layout with no `elements` yet (hand-built in a test) gets a fresh set; the
+ * family is taken from the existing rects, defaulting to cartesian.
+ */
+export function reflowChartElements(
+  layout: ChartLayout,
+  spec: ChartSpec,
+  data: ParsedChartData,
+  theme: ChartRenderTheme,
+): void {
+  layout.elements = layout.elements?.family === "radial"
+    ? computeRadialElementRects(layout, spec, data, theme)
+    : computeCartesianElementRects(layout, spec, data, theme);
+}
+
+/**
+ * Ensure `layout.elements` exists so a painter can write a measured rect back
+ * onto it. Preserves the family when the rects are already there.
+ */
+function ensureChartElements(layout: ChartLayout): ChartElementRects {
+  if (!layout.elements) {
+    layout.elements = { family: "cartesian", chartArea: chartAreaRect(layout), measured: [] };
+  }
+  return layout.elements;
+}
+
+/**
+ * Write a MEASURED element rect back onto the layout, replacing the layout's
+ * estimate and marking the key as truth. Painters call this as they paint —
+ * `drawTitle` knows its own box exactly and `drawLegendItems` measures every
+ * entry, so throwing those measurements away and keeping a ~6px/char guess
+ * would be a hit-test that misses the thing the user clicked.
+ */
+export function recordChartElementRect(
+  layout: ChartLayout,
+  key: ChartElementKey,
+  rect: ChartElementRect,
+): void {
+  const els = ensureChartElements(layout);
+  switch (key) {
+    case "chartArea": els.chartArea = rect; break;
+    case "title": els.title = rect; break;
+    case "xAxisTitle": els.xAxisTitle = rect; break;
+    case "yAxisTitle": els.yAxisTitle = rect; break;
+    case "xAxisBand": els.xAxisBand = rect; break;
+    case "yAxisBand": els.yAxisBand = rect; break;
+    case "legend": els.legend = rect; break;
+    case "displayUnitLabel": els.displayUnitLabel = rect; break;
+    case "dataTable": els.dataTable = rect; break;
+  }
+  if (!els.measured.includes(key)) els.measured.push(key);
+}
+
+/** Write the measured legend box AND its per-entry rects back onto the layout. */
+export function recordLegendElementRects(
+  layout: ChartLayout,
+  legend: ChartElementRect,
+  items: Array<{ seriesIndex: number; rect: ChartElementRect }>,
+): void {
+  const els = ensureChartElements(layout);
+  els.legendItems = items;
+  recordChartElementRect(layout, "legend", legend);
+}
+
+// ---------------------------------------------------------------------------
+// Collection recorders (the furniture that is MANY rects under one name)
+// ---------------------------------------------------------------------------
+//
+// REPLACE, NEVER APPEND. Each painter builds its complete list in one pass and
+// hands it over once. Appending would double every entry on the second paint of
+// the same layout (a cached chart repainted on hover does exactly that), and a
+// half-written list is worse than none: a hit test that answers a rect nothing
+// drew sends the format pane at an element the user cannot see.
+
+/** Write back the polylines of every trendline painted on this layout. */
+export function recordTrendlineGeometry(
+  layout: ChartLayout,
+  trendlines: Array<{ seriesIndex: number; trendlineIndex: number; points: Array<{ x: number; y: number }> }>,
+): void {
+  ensureChartElements(layout).trendlines = trendlines;
+}
+
+/** Write back one rect per drawn error bar. Identity is the SERIES, not the point. */
+export function recordErrorBarRects(
+  layout: ChartLayout,
+  bars: Array<{ seriesIndex: number; rect: ChartElementRect }>,
+): void {
+  ensureChartElements(layout).errorBars = bars;
+}
+
+/** Write back one rect per painted data label. */
+export function recordDataLabelRects(
+  layout: ChartLayout,
+  labels: Array<{ seriesIndex: number; pointIndex: number; rect: ChartElementRect }>,
+): void {
+  ensureChartElements(layout).dataLabels = labels;
+}
+
+/** Whether a chart-local point falls inside a rect (edges inclusive). */
+export function rectContains(rect: ChartElementRect, x: number, y: number): boolean {
+  return x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
 }
 
 // ============================================================================
@@ -153,7 +571,16 @@ export function drawTitle(
   ctx.font = `600 ${theme.titleFontSize}px ${theme.fontFamily}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
-  ctx.fillText(title, layout.width / 2, 10);
+  ctx.fillText(title, layout.width / 2, TITLE_TOP_Y);
+
+  // Write-back: this is the exact box, not the layout's ~0.55em/char estimate.
+  const w = ctx.measureText(title).width;
+  recordChartElementRect(layout, "title", {
+    x: layout.width / 2 - w / 2,
+    y: TITLE_TOP_Y,
+    width: w,
+    height: theme.titleFontSize,
+  });
 }
 
 // ============================================================================
@@ -217,56 +644,153 @@ function drawLegendItems(
   ctx.textBaseline = "middle";
   ctx.textAlign = "left";
 
-  const swatchSize = 10;
-  const gap = 16;
-  const padding = 4;
-
-  if (spec.legend.position === "bottom" || spec.legend.position === "top") {
-    // Horizontal legend centered below/above the plot
-    let totalWidth = 0;
-    const measured: Array<{ name: string; color: string; width: number }> = [];
-    for (const item of items) {
-      const textWidth = ctx.measureText(item.name).width;
-      const itemWidth = swatchSize + padding + textWidth;
-      measured.push({ ...item, width: itemWidth });
-      totalWidth += itemWidth;
-    }
-    totalWidth += gap * (measured.length - 1);
-
-    const y = spec.legend.position === "bottom"
-      ? layout.height - theme.legendFontSize - 4
-      : layout.margin.top - theme.legendFontSize - 12;
-
-    let x = (layout.width - totalWidth) / 2;
-
-    for (const item of measured) {
-      ctx.fillStyle = item.color;
-      ctx.fillRect(x, y - swatchSize / 2, swatchSize, swatchSize);
-      ctx.fillStyle = theme.legendTextColor;
-      ctx.fillText(item.name, x + swatchSize + padding, y);
-      x += item.width + gap;
-    }
-  } else {
-    // Vertical legend on the right or left
-    const x = spec.legend.position === "right"
-      ? layout.plotArea.x + layout.plotArea.width + 16
-      : 8;
-    let y = layout.plotArea.y + 4;
-
-    for (const item of items) {
-      ctx.fillStyle = item.color;
-      ctx.fillRect(x, y - swatchSize / 2, swatchSize, swatchSize);
-      ctx.fillStyle = theme.legendTextColor;
-      ctx.fillText(item.name, x + swatchSize + padding, y);
-      y += theme.legendFontSize + 6;
-    }
+  // A deleted legend ENTRY removes the row and nothing else — the series stays
+  // plotted, which is the whole point of the element being separately
+  // addressable. The surviving rows keep their original indices.
+  const visible = visibleLegendEntries(spec, items.map((it) => it.name));
+  if (visible.length === 0) {
+    // Every row hidden: there is no legend box to record, and leaving a stale
+    // one behind would keep a click selecting a legend that is not painted.
+    const els = ensureChartElements(layout);
+    els.legend = undefined;
+    els.legendItems = [];
+    return;
   }
+
+  // MEASURED widths — the layout only had ~6px/char to work with. The placement
+  // itself is the shared helper the layout estimate uses, so the drawn boxes and
+  // the recorded boxes cannot drift apart.
+  const entries = visible.map((e) => ({
+    seriesIndex: e.seriesIndex,
+    width: LEGEND_SWATCH + LEGEND_PADDING + ctx.measureText(e.label).width,
+  }));
+  const itemHeight = legendItemHeight(theme);
+  const placed = spec.legend.position === "bottom" || spec.legend.position === "top"
+    ? layOutHorizontalLegend(layout, entries, horizontalLegendCenterY(layout, spec, theme), itemHeight)
+    : layOutVerticalLegend(layout, entries, verticalLegendX(layout, spec), theme, itemHeight);
+
+  for (let row = 0; row < placed.legendItems.length; row++) {
+    const { seriesIndex, rect } = placed.legendItems[row];
+    const centerY = rect.y + rect.height / 2;
+    ctx.fillStyle = items[seriesIndex].color;
+    ctx.fillRect(rect.x, centerY - LEGEND_SWATCH / 2, LEGEND_SWATCH, LEGEND_SWATCH);
+    ctx.fillStyle = theme.legendTextColor;
+    ctx.fillText(items[seriesIndex].name, rect.x + LEGEND_SWATCH + LEGEND_PADDING, centerY);
+  }
+
+  recordLegendElementRects(layout, placed.legend, placed.legendItems);
+}
+
+// ============================================================================
+// Axis tick values — Excel's majorUnit / minorUnit / crossesAt
+// ============================================================================
+//
+// These five AxisSpec fields (majorUnit, minorUnit, minorTickMark, crossesAt,
+// crossesAtValue) round-tripped into saved workbooks for a long time with a
+// full editor behind them in ChartFormatPane and NO painter reading any of
+// them: setting "Major unit: 250" changed the file and never changed a pixel.
+// The readers are below. They are the ONLY readers, and `axisTickValues` feeds
+// both the tick marks and the tick labels from one call so the two cannot
+// disagree about where a tick is.
+//
+// SCOPE, stated rather than implied: this is the vertical-value-axis family
+// (`drawCartesianAxes`). `drawHorizontalAxes` — the horizontal-bar variant,
+// whose VALUE axis is X — honours `majorUnit` on that axis and nothing else,
+// because it draws no tick marks at all and has no tick-mark code to extend.
+
+/** Hard cap on generated ticks: a majorUnit of 1e-9 must not hang the painter. */
+const MAX_AXIS_TICKS = 1000;
+
+/** Values at `step` intervals across a domain, from the first multiple inside it. */
+function stepValues(domain: [number, number], step: number): number[] {
+  const lo = Math.min(domain[0], domain[1]);
+  const hi = Math.max(domain[0], domain[1]);
+  const out: number[] = [];
+  const start = Math.ceil(lo / step) * step;
+  for (let i = 0; i < MAX_AXIS_TICKS; i++) {
+    // Indexed, not accumulated: `v += step` a hundred times drifts far enough
+    // to drop the last tick of a 0.1-step axis.
+    const v = start + i * step;
+    if (v > hi + step * 1e-9) break;
+    out.push(Math.round(v * 1e10) / 1e10);
+  }
+  return out;
+}
+
+/**
+ * The MAJOR tick values for a value axis: `majorUnit` when the user pinned one,
+ * otherwise the scale's own nice ticks at `tickCount`.
+ */
+export function axisTickValues(scale: LinearScale, axis: AxisSpec): number[] {
+  const unit = axis.majorUnit;
+  if (unit == null || !Number.isFinite(unit) || unit <= 0) {
+    return scale.ticks(axis.tickCount ?? 5);
+  }
+  return stepValues(scale.domain, unit);
+}
+
+/**
+ * The MINOR tick values for a value axis — empty unless `minorTickMark` asks
+ * for marks, because Excel draws no minor ticks by default and a minorUnit
+ * alone is not a request to show them.
+ *
+ * `minorUnit` defaults to HALF the major step (Excel's own default is a fifth,
+ * but our default major step comes from a nice-ticks algorithm rather than a
+ * round unit, so a fifth of it is not a round number either; a half always
+ * lands between two majors). Values that coincide with a major tick are
+ * dropped: drawing both would paint a double-width tick on every major.
+ */
+export function axisMinorTickValues(scale: LinearScale, axis: AxisSpec, major: number[]): number[] {
+  if ((axis.minorTickMark ?? "none") === "none") return [];
+
+  const majorStep = axis.majorUnit != null && Number.isFinite(axis.majorUnit) && axis.majorUnit > 0
+    ? axis.majorUnit
+    : major.length >= 2
+      ? Math.abs(major[1] - major[0])
+      : 0;
+
+  const unit = axis.minorUnit != null && Number.isFinite(axis.minorUnit) && axis.minorUnit > 0
+    ? axis.minorUnit
+    : majorStep / 2;
+  if (!Number.isFinite(unit) || unit <= 0) return [];
+
+  const majorSet = new Set(major);
+  return stepValues(scale.domain, unit).filter((v) => !majorSet.has(v));
+}
+
+/**
+ * The pixel row the HORIZONTAL axis sits on — Excel's "Vertical axis crosses".
+ * Clamped into the plot, so `crossesAt: "value"` with a value off the scale
+ * parks the axis on the nearest edge instead of drawing outside the plot.
+ */
+export function axisCrossingY(
+  yScale: LinearScale,
+  axis: AxisSpec,
+  plotArea: { x: number; y: number; width: number; height: number },
+): number {
+  const bottom = plotArea.y + plotArea.height;
+  let value: number;
+  switch (axis.crossesAt ?? "auto") {
+    case "min": value = Math.min(yScale.domain[0], yScale.domain[1]); break;
+    case "max": value = Math.max(yScale.domain[0], yScale.domain[1]); break;
+    case "value": value = axis.crossesAtValue ?? 0; break;
+    default: return bottom; // "auto" — the plot's bottom edge
+  }
+  const y = yScale.scale(value);
+  if (!Number.isFinite(y)) return bottom;
+  return Math.max(plotArea.y, Math.min(bottom, y));
 }
 
 // ============================================================================
 // Drawing: Axes (for cartesian charts)
 // ============================================================================
 
+/**
+ * `layout` is OPTIONAL and exists only for the element-rect write-back: when a
+ * painter passes it, the axis titles, the display-unit label and the y-label
+ * band replace the layout's character-count estimates with their measured
+ * boxes. Omitting it paints exactly as before and leaves the estimates in place.
+ */
 export function drawCartesianAxes(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   xScale: BandScale,
@@ -274,8 +798,13 @@ export function drawCartesianAxes(
   plotArea: { x: number; y: number; width: number; height: number },
   spec: ChartSpec,
   theme: ChartRenderTheme,
+  layout?: ChartLayout,
 ): void {
-  const xAxisY = plotArea.y + plotArea.height;
+  // Where the horizontal axis sits. "auto" is the plot's bottom edge; a
+  // `crossesAt` moves the LINE, its tick marks and its tick labels together,
+  // because in Excel they are one object.
+  const xAxisY = axisCrossingY(yScale, spec.yAxis, plotArea);
+  const plotBottom = plotArea.y + plotArea.height;
 
   // -- Axis Lines --
 
@@ -291,25 +820,35 @@ export function drawCartesianAxes(
     ctx.setLineDash([]);
   }
 
-  // Y axis line
+  // Y axis line — always the FULL height of the plot. It used to stop at
+  // `xAxisY`, which was the same pixel while the X axis was pinned to the
+  // bottom; once the X axis can cross in the middle, stopping there would cut
+  // the value axis in half.
   if (spec.yAxis.showLine !== false) {
     ctx.strokeStyle = spec.yAxis.lineColor ?? theme.axisColor;
     ctx.lineWidth = spec.yAxis.lineWidth ?? 1;
     ctx.setLineDash(spec.yAxis.lineDash ?? []);
     ctx.beginPath();
     ctx.moveTo(plotArea.x - 0.5, plotArea.y);
-    ctx.lineTo(plotArea.x - 0.5, xAxisY);
+    ctx.lineTo(plotArea.x - 0.5, plotBottom);
     ctx.stroke();
     ctx.setLineDash([]);
   }
 
   // -- Tick Marks --
-  const yTicks = yScale.ticks(spec.yAxis.tickCount ?? 5);
-  drawTickMarks(ctx, spec.yAxis, yTicks.map((t) => yScale.scale(t)), "y", plotArea, theme);
+  const yTicks = axisTickValues(yScale, spec.yAxis);
+  drawTickMarks(
+    ctx, spec.yAxis,
+    yTicks.map((t) => yScale.scale(t)),
+    axisMinorTickValues(yScale, spec.yAxis, yTicks).map((t) => yScale.scale(t)),
+    "y", theme, plotArea.x,
+  );
   drawTickMarks(
     ctx, spec.xAxis,
     xScale.domain.map((_, ci) => xScale.scaleIndex(ci) + xScale.bandwidth / 2),
-    "x", plotArea, theme,
+    // A category axis has no minor unit — minor ticks subdivide a VALUE.
+    [],
+    "x", theme, xAxisY,
   );
 
   // -- Display Unit Factor --
@@ -366,6 +905,22 @@ export function drawCartesianAxes(
       }
       ctx.restore();
     }
+
+    // The layout estimated this band at the plot's bottom edge. When the axis
+    // CROSSED somewhere else the labels went with it, so that estimate now
+    // points at empty pixels — record where they actually landed. Left alone in
+    // the ordinary case so every existing chart keeps the estimate it had.
+    if (layout && xAxisY !== plotBottom) {
+      const bandHeight = angle === 0
+        ? theme.labelFontSize + 8
+        : widestLabelWidth(ctx, xScale.domain) * Math.abs(Math.sin(angleRad)) + 8;
+      recordChartElementRect(layout, "xAxisBand", {
+        x: plotArea.x,
+        y: xAxisY,
+        width: plotArea.width,
+        height: bandHeight,
+      });
+    }
   }
 
   // X axis title
@@ -374,14 +929,15 @@ export function drawCartesianAxes(
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    ctx.fillText(
-      spec.xAxis.title,
-      plotArea.x + plotArea.width / 2,
-      plotArea.y + plotArea.height + (spec.xAxis.showLabels ? 30 : 16),
-    );
+    const baselineY = plotArea.y + plotArea.height + (spec.xAxis.showLabels ? 30 : 16);
+    ctx.fillText(spec.xAxis.title, plotArea.x + plotArea.width / 2, baselineY);
+    if (layout) {
+      recordXAxisTitleRect(ctx, layout, spec.xAxis.title, plotArea, baselineY, theme);
+    }
   }
 
   // -- Y Axis Labels --
+  let widestYLabel = 0;
   if (spec.yAxis.showLabels && spec.yAxis.labelPosition !== "none") {
     ctx.fillStyle = theme.axisLabelColor;
     ctx.font = `${theme.labelFontSize}px ${theme.fontFamily}`;
@@ -396,17 +952,40 @@ export function drawCartesianAxes(
       const label = spec.yAxis.tickFormat
         ? formatTickValueWithFormat(displayValue, spec.yAxis.tickFormat)
         : formatTickValue(displayValue);
+      const w = ctx.measureText(label).width;
+      if (w > widestYLabel) widestYLabel = w;
       ctx.fillText(label, plotArea.x - 6, y);
+    }
+    if (layout) {
+      // Labels are right-aligned at plotArea.x - 6, so the band runs from the
+      // widest label's left edge to the axis line.
+      const bandWidth = widestYLabel + 6;
+      recordChartElementRect(layout, "yAxisBand", {
+        x: plotArea.x - bandWidth,
+        y: plotArea.y,
+        width: bandWidth,
+        height: plotArea.height,
+      });
     }
   }
 
   // Y axis display unit label
   if (spec.yAxis.displayUnit && spec.yAxis.displayUnit !== "none" && spec.yAxis.showDisplayUnitLabel) {
+    const fs = theme.labelFontSize - 1;
     ctx.fillStyle = theme.axisLabelColor;
-    ctx.font = `italic ${theme.labelFontSize - 1}px ${theme.fontFamily}`;
+    ctx.font = `italic ${fs}px ${theme.fontFamily}`;
     ctx.textAlign = "left";
     ctx.textBaseline = "bottom";
-    ctx.fillText(getDisplayUnitLabel(spec.yAxis.displayUnit), plotArea.x + 2, plotArea.y - 2);
+    const label = getDisplayUnitLabel(spec.yAxis.displayUnit);
+    ctx.fillText(label, plotArea.x + 2, plotArea.y - 2);
+    if (layout) {
+      recordChartElementRect(layout, "displayUnitLabel", {
+        x: plotArea.x + 2,
+        y: plotArea.y - 2 - fs,
+        width: ctx.measureText(label).width,
+        height: fs,
+      });
+    }
   }
 
   // Y axis title
@@ -414,57 +993,123 @@ export function drawCartesianAxes(
     ctx.save();
     ctx.fillStyle = theme.axisTitleColor;
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
-    ctx.translate(14, plotArea.y + plotArea.height / 2);
+    ctx.translate(Y_AXIS_TITLE_X, plotArea.y + plotArea.height / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.fillText(spec.yAxis.title, 0, 0);
+    // Measure BEFORE restore: restore() puts the previous font back, and
+    // measuring under the wrong font is how a "measured" rect becomes fiction.
+    const titleWidth = ctx.measureText(spec.yAxis.title).width;
     ctx.restore();
+    if (layout) {
+      recordYAxisTitleRect(layout, plotArea, titleWidth, theme);
+    }
   }
+}
+
+/**
+ * Write back the X axis title's measured box. It is painted centered on the
+ * plot with a "bottom" baseline, so the box ENDS at `baselineY`.
+ */
+function recordXAxisTitleRect(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  layout: ChartLayout,
+  title: string,
+  plotArea: { x: number; y: number; width: number; height: number },
+  baselineY: number,
+  theme: ChartRenderTheme,
+): void {
+  const w = ctx.measureText(title).width;
+  recordChartElementRect(layout, "xAxisTitle", {
+    x: plotArea.x + plotArea.width / 2 - w / 2,
+    y: baselineY - theme.axisTitleFontSize,
+    width: w,
+    height: theme.axisTitleFontSize,
+  });
+}
+
+/**
+ * Write back the Y axis title's measured box. It is painted rotated -90deg
+ * about (Y_AXIS_TITLE_X, plot vertical centre) with a "top" baseline: local +x
+ * runs UP the canvas and local +y runs RIGHT, so the glyph run becomes a TALL
+ * box one font-size wide and `w` (the measured text width) tall.
+ */
+function recordYAxisTitleRect(
+  layout: ChartLayout,
+  plotArea: { x: number; y: number; width: number; height: number },
+  w: number,
+  theme: ChartRenderTheme,
+): void {
+  recordChartElementRect(layout, "yAxisTitle", {
+    x: Y_AXIS_TITLE_X,
+    y: plotArea.y + plotArea.height / 2 - w / 2,
+    width: theme.axisTitleFontSize,
+    height: w,
+  });
 }
 
 // ============================================================================
 // Tick Mark Drawing
 // ============================================================================
 
+/**
+ * Draw an axis's tick marks.
+ *
+ * `anchor` is the pixel the axis LINE sits on — the y of the horizontal axis
+ * (which `crossesAt` can move) or the x of the vertical one. It is passed in
+ * rather than derived from the plot area, because deriving it here is exactly
+ * how the ticks would stay at the bottom after the line moved.
+ *
+ * Minor ticks are drawn at 60% of the major length, Excel's proportion, and
+ * with the same inside/outside/cross rule read from `minorTickMark`.
+ */
 function drawTickMarks(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  axisSpec: import("../types").AxisSpec,
+  axisSpec: AxisSpec,
   positions: number[],
+  minorPositions: number[],
   axis: "x" | "y",
-  plotArea: { x: number; y: number; width: number; height: number },
   theme: ChartRenderTheme,
+  anchor: number,
 ): void {
   const majorType = axisSpec.majorTickMark ?? "outside";
-  if (majorType === "none") return;
+  const minorType = axisSpec.minorTickMark ?? "none";
+  if (majorType === "none" && minorType === "none") return;
 
   ctx.strokeStyle = axisSpec.lineColor ?? theme.axisColor;
   ctx.lineWidth = 1;
-  const tickLen = 5;
+  const majorLen = 5;
+  const minorLen = 3;
 
-  ctx.beginPath();
-  for (const pos of positions) {
+  const stroke = (pos: number, type: TickMarkType, len: number) => {
     if (axis === "x") {
-      const y = plotArea.y + plotArea.height;
-      if (majorType === "outside" || majorType === "cross") {
-        ctx.moveTo(pos, y);
-        ctx.lineTo(pos, y + tickLen);
+      if (type === "outside" || type === "cross") {
+        ctx.moveTo(pos, anchor);
+        ctx.lineTo(pos, anchor + len);
       }
-      if (majorType === "inside" || majorType === "cross") {
-        ctx.moveTo(pos, y);
-        ctx.lineTo(pos, y - tickLen);
+      if (type === "inside" || type === "cross") {
+        ctx.moveTo(pos, anchor);
+        ctx.lineTo(pos, anchor - len);
       }
     } else {
-      const x = plotArea.x;
-      if (majorType === "outside" || majorType === "cross") {
-        ctx.moveTo(x, pos);
-        ctx.lineTo(x - tickLen, pos);
+      if (type === "outside" || type === "cross") {
+        ctx.moveTo(anchor, pos);
+        ctx.lineTo(anchor - len, pos);
       }
-      if (majorType === "inside" || majorType === "cross") {
-        ctx.moveTo(x, pos);
-        ctx.lineTo(x + tickLen, pos);
+      if (type === "inside" || type === "cross") {
+        ctx.moveTo(anchor, pos);
+        ctx.lineTo(anchor + len, pos);
       }
     }
+  };
+
+  ctx.beginPath();
+  if (majorType !== "none") {
+    for (const pos of positions) stroke(pos, majorType, majorLen);
+  }
+  if (minorType !== "none") {
+    for (const pos of minorPositions) stroke(pos, minorType, minorLen);
   }
   ctx.stroke();
 }
@@ -530,6 +1175,9 @@ export function formatTickValueWithFormat(value: number, format: string): string
 
 /**
  * Draw horizontal axes for horizontal bar chart (categories on Y, values on X).
+ *
+ * `layout` is OPTIONAL and exists only for the element-rect write-back (see
+ * {@link drawCartesianAxes}). Omitting it paints exactly as before.
  */
 export function drawHorizontalAxes(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
@@ -538,6 +1186,7 @@ export function drawHorizontalAxes(
   plotArea: { x: number; y: number; width: number; height: number },
   spec: ChartSpec,
   theme: ChartRenderTheme,
+  layout?: ChartLayout,
 ): void {
   ctx.strokeStyle = theme.axisColor;
   ctx.lineWidth = 1;
@@ -555,9 +1204,11 @@ export function drawHorizontalAxes(
   ctx.lineTo(plotArea.x - 0.5, xAxisY);
   ctx.stroke();
 
-  // X axis labels (values, at bottom)
+  // X axis labels (values, at bottom). This painter's VALUE axis is X, so
+  // `xAxis.majorUnit` is the one that pins its ticks. It draws no tick marks
+  // and no crossing, so minorTickMark / crossesAt have nothing to act on here.
   if (spec.xAxis.showLabels) {
-    const ticks = xScale.ticks(5);
+    const ticks = axisTickValues(xScale, spec.xAxis);
     ctx.fillStyle = theme.axisLabelColor;
     ctx.font = `${theme.labelFontSize}px ${theme.fontFamily}`;
     ctx.textAlign = "center";
@@ -600,22 +1251,26 @@ export function drawHorizontalAxes(
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    ctx.fillText(
-      spec.xAxis.title,
-      plotArea.x + plotArea.width / 2,
-      plotArea.y + plotArea.height + (spec.xAxis.showLabels ? 26 : 16),
-    );
+    const baselineY = plotArea.y + plotArea.height + (spec.xAxis.showLabels ? 26 : 16);
+    ctx.fillText(spec.xAxis.title, plotArea.x + plotArea.width / 2, baselineY);
+    if (layout) {
+      recordXAxisTitleRect(ctx, layout, spec.xAxis.title, plotArea, baselineY, theme);
+    }
   }
   if (spec.yAxis.title) {
     ctx.save();
     ctx.fillStyle = theme.axisTitleColor;
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
-    ctx.translate(14, plotArea.y + plotArea.height / 2);
+    ctx.translate(Y_AXIS_TITLE_X, plotArea.y + plotArea.height / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.fillText(spec.yAxis.title, 0, 0);
+    const titleWidth = ctx.measureText(spec.yAxis.title).width;
     ctx.restore();
+    if (layout) {
+      recordYAxisTitleRect(layout, plotArea, titleWidth, theme);
+    }
   }
 }
 
@@ -767,7 +1422,7 @@ export function drawCartesianChrome(
   if (spec.yAxis.gridLines) {
     drawHorizontalGridLines(ctx, yScale, plotArea, theme);
   }
-  drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme);
+  drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme, layout);
   if (spec.title) {
     drawTitle(ctx, spec.title, layout, theme);
   }

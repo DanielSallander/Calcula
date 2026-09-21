@@ -139,6 +139,18 @@ export function AxisContextMenu({ onClose, data }: OverlayProps): React.ReactEle
     onClose();
   };
 
+  // Reversing an axis is `scale.reverse` — the flag `createScaleFromSpec`
+  // (rendering/scales.ts) actually reads, and the one the format pane's
+  // "Values in reverse order" writes. This menu item used to write a
+  // TOP-LEVEL `axis.reverse` that no painter has ever read: clicking it dirtied
+  // the workbook, redrew the chart unchanged, and left its own tick unlit,
+  // while disagreeing with the format pane about the same setting. (BUG-0123.)
+  const scaleReversed = axis.scale?.reverse === true;
+  const toggleScaleReverse = () => {
+    updateSpec({ [axisKey]: { ...axis, scale: { ...(axis.scale ?? {}), reverse: !scaleReversed } } });
+    onClose();
+  };
+
   return (
     <div ref={menuRef} className={styles.menu} style={{ left: screenX, top: screenY }}>
       <div className={styles.header}>{axisLabel} Axis</div>
@@ -198,8 +210,8 @@ export function AxisContextMenu({ onClose, data }: OverlayProps): React.ReactEle
         </>
       )}
 
-      <div className={styles.item} onClick={() => toggleAxisProp("reverse", (axis as any).reverse)}>
-        <span className={styles.itemCheck}>{(axis as any).reverse ? "\u2713" : ""}</span>
+      <div className={styles.item} onClick={toggleScaleReverse}>
+        <span className={styles.itemCheck}>{scaleReversed ? "\u2713" : ""}</span>
         <span className={styles.subLabel}>Reverse Axis</span>
       </div>
 

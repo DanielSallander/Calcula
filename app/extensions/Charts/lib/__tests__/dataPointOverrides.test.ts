@@ -1,16 +1,22 @@
 //! FILENAME: app/extensions/Charts/lib/__tests__/dataPointOverrides.test.ts
 // PURPOSE: Tests for data point override utility functions.
+// CONTEXT: This file used to spend ~40 of its tests on `getDataPointOverride`,
+//          `applyOverrideColor`, `applyOverrideOpacity`, `buildOverrideMap` and
+//          `getOverrideFromMap`. Once every painter went through
+//          `resolveDatumStyle`, a repo-wide grep found those five exports had no
+//          caller outside THIS file — the tests were the only thing keeping them
+//          alive, and they were an INDEX-ONLY route past the key matching and
+//          the authoring-space translation. They are gone, and what they were
+//          really asserting (an override's colour, opacity, border and explode
+//          offset reach the datum) is asserted here through the one resolver a
+//          painter is allowed to call.
 
 import { describe, it, expect } from "vitest";
 import {
-  getDataPointOverride,
-  applyOverrideColor,
-  applyOverrideOpacity,
   getExplodeOffset,
-  buildOverrideMap,
-  getOverrideFromMap,
+  resolveDatumStyle,
 } from "../dataPointOverrides";
-import type { ChartSpec, DataPointOverride } from "../../types";
+import type { ChartSpec, DataPointOverride, ParsedChartData } from "../../types";
 
 // ============================================================================
 // Helpers
@@ -33,96 +39,17 @@ function makeSpec(overrides?: DataPointOverride[]): ChartSpec {
   } as ChartSpec;
 }
 
-// ============================================================================
-// getDataPointOverride
-// ============================================================================
-
-describe("getDataPointOverride", () => {
-  it("returns undefined when no overrides exist", () => {
-    const spec = makeSpec();
-    expect(getDataPointOverride(spec, 0, 0)).toBeUndefined();
-  });
-
-  it("returns undefined when overrides is empty array", () => {
-    const spec = makeSpec([]);
-    expect(getDataPointOverride(spec, 0, 0)).toBeUndefined();
-  });
-
-  it("finds a matching override", () => {
-    const spec = makeSpec([
-      { seriesIndex: 0, categoryIndex: 2, color: "#FF0000" },
-    ]);
-    const result = getDataPointOverride(spec, 0, 2);
-    expect(result).toBeDefined();
-    expect(result!.color).toBe("#FF0000");
-  });
-
-  it("returns undefined for non-matching indices", () => {
-    const spec = makeSpec([
-      { seriesIndex: 0, categoryIndex: 2, color: "#FF0000" },
-    ]);
-    expect(getDataPointOverride(spec, 0, 0)).toBeUndefined();
-    expect(getDataPointOverride(spec, 1, 2)).toBeUndefined();
-  });
-
-  it("finds correct override among multiple", () => {
-    const spec = makeSpec([
-      { seriesIndex: 0, categoryIndex: 0, color: "#111111" },
-      { seriesIndex: 0, categoryIndex: 1, color: "#222222" },
-      { seriesIndex: 1, categoryIndex: 0, color: "#333333" },
-    ]);
-    expect(getDataPointOverride(spec, 0, 0)!.color).toBe("#111111");
-    expect(getDataPointOverride(spec, 0, 1)!.color).toBe("#222222");
-    expect(getDataPointOverride(spec, 1, 0)!.color).toBe("#333333");
-  });
-});
-
-// ============================================================================
-// applyOverrideColor
-// ============================================================================
-
-describe("applyOverrideColor", () => {
-  it("returns original color when no override", () => {
-    expect(applyOverrideColor("#4472C4", undefined)).toBe("#4472C4");
-  });
-
-  it("returns override color when present", () => {
-    const override: DataPointOverride = { seriesIndex: 0, categoryIndex: 0, color: "#FF0000" };
-    expect(applyOverrideColor("#4472C4", override)).toBe("#FF0000");
-  });
-
-  it("returns original color when override has no color", () => {
-    const override: DataPointOverride = { seriesIndex: 0, categoryIndex: 0, opacity: 0.5 };
-    expect(applyOverrideColor("#4472C4", override)).toBe("#4472C4");
-  });
-});
-
-// ============================================================================
-// applyOverrideOpacity
-// ============================================================================
-
-describe("applyOverrideOpacity", () => {
-  it("returns original opacity when no override", () => {
-    expect(applyOverrideOpacity(0.8, undefined)).toBe(0.8);
-    expect(applyOverrideOpacity(null, undefined)).toBeNull();
-  });
-
-  it("returns override opacity when present", () => {
-    const override: DataPointOverride = { seriesIndex: 0, categoryIndex: 0, opacity: 0.3 };
-    expect(applyOverrideOpacity(null, override)).toBe(0.3);
-    expect(applyOverrideOpacity(0.8, override)).toBe(0.3);
-  });
-
-  it("returns original when override has no opacity", () => {
-    const override: DataPointOverride = { seriesIndex: 0, categoryIndex: 0, color: "#FF0000" };
-    expect(applyOverrideOpacity(0.5, override)).toBe(0.5);
-  });
-
-  it("handles zero opacity override", () => {
-    const override: DataPointOverride = { seriesIndex: 0, categoryIndex: 0, opacity: 0 };
-    expect(applyOverrideOpacity(0.8, override)).toBe(0);
-  });
-});
+/** Three series x four categories, no filtering (painter space == authoring). */
+function makeData(): ParsedChartData {
+  return {
+    categories: ["Q1", "Q2", "Q3", "Q4"],
+    series: [
+      { name: "A", values: [10, 20, 30, 40], color: null },
+      { name: "B", values: [11, 21, 31, 41], color: null },
+      { name: "C", values: [12, 22, 32, 42], color: null },
+    ],
+  } as ParsedChartData;
+}
 
 // ============================================================================
 // getExplodeOffset
@@ -145,42 +72,63 @@ describe("getExplodeOffset", () => {
 });
 
 // ============================================================================
-// buildOverrideMap / getOverrideFromMap
+// Index-keyed overrides, through the ONE resolver
 // ============================================================================
 
-describe("buildOverrideMap", () => {
-  it("returns empty map for undefined overrides", () => {
-    const map = buildOverrideMap(undefined);
-    expect(map.size).toBe(0);
+describe("resolveDatumStyle — index-keyed overrides", () => {
+  const data = makeData();
+
+  it("leaves the painter's base style alone when no overrides exist", () => {
+    const style = resolveDatumStyle(makeSpec(), data, 0, 0, { fill: "#4472C4" });
+    expect(style.fill).toBe("#4472C4");
+    expect(style.opacity).toBeNull();
+    expect(style.matchedBy).toBe("none");
+    expect(style.override).toBeUndefined();
   });
 
-  it("returns empty map for empty array", () => {
-    const map = buildOverrideMap([]);
-    expect(map.size).toBe(0);
+  it("leaves the painter's base style alone for an empty overrides array", () => {
+    const style = resolveDatumStyle(makeSpec([]), data, 0, 0, { fill: "#4472C4" });
+    expect(style.fill).toBe("#4472C4");
+    expect(style.matchedBy).toBe("none");
   });
 
-  it("builds map from overrides", () => {
-    const overrides: DataPointOverride[] = [
-      { seriesIndex: 0, categoryIndex: 0, color: "#111" },
-      { seriesIndex: 0, categoryIndex: 3, color: "#222" },
-      { seriesIndex: 2, categoryIndex: 1, opacity: 0.5 },
-    ];
-    const map = buildOverrideMap(overrides);
-    expect(map.size).toBe(3);
-
-    expect(getOverrideFromMap(map, 0, 0)!.color).toBe("#111");
-    expect(getOverrideFromMap(map, 0, 3)!.color).toBe("#222");
-    expect(getOverrideFromMap(map, 2, 1)!.opacity).toBe(0.5);
+  it("applies the override at its index pair and nowhere else", () => {
+    const spec = makeSpec([{ seriesIndex: 0, categoryIndex: 2, color: "#FF0000" }]);
+    expect(resolveDatumStyle(spec, data, 0, 2, { fill: "#4472C4" }).fill).toBe("#FF0000");
+    expect(resolveDatumStyle(spec, data, 0, 0, { fill: "#4472C4" }).fill).toBe("#4472C4");
+    expect(resolveDatumStyle(spec, data, 1, 2, { fill: "#4472C4" }).fill).toBe("#4472C4");
   });
 
-  it("returns undefined for non-matching lookups", () => {
-    const overrides: DataPointOverride[] = [
-      { seriesIndex: 0, categoryIndex: 0, color: "#111" },
-    ];
-    const map = buildOverrideMap(overrides);
-    expect(getOverrideFromMap(map, 0, 1)).toBeUndefined();
-    expect(getOverrideFromMap(map, 1, 0)).toBeUndefined();
-    expect(getOverrideFromMap(map, 5, 5)).toBeUndefined();
+  it("picks the right override out of several", () => {
+    const spec = makeSpec([
+      { seriesIndex: 0, categoryIndex: 0, color: "#111111" },
+      { seriesIndex: 0, categoryIndex: 1, color: "#222222" },
+      { seriesIndex: 1, categoryIndex: 0, color: "#333333" },
+    ]);
+    expect(resolveDatumStyle(spec, data, 0, 0).fill).toBe("#111111");
+    expect(resolveDatumStyle(spec, data, 0, 1).fill).toBe("#222222");
+    expect(resolveDatumStyle(spec, data, 1, 0).fill).toBe("#333333");
+  });
+
+  it("keeps the base colour when the override sets only opacity", () => {
+    const spec = makeSpec([{ seriesIndex: 0, categoryIndex: 0, opacity: 0.5 }]);
+    const style = resolveDatumStyle(spec, data, 0, 0, { fill: "#4472C4" });
+    expect(style.fill).toBe("#4472C4");
+    expect(style.opacity).toBe(0.5);
+  });
+
+  it("keeps the base opacity when the override sets only a colour", () => {
+    const spec = makeSpec([{ seriesIndex: 0, categoryIndex: 0, color: "#FF0000" }]);
+    const style = resolveDatumStyle(spec, data, 0, 0, { fill: "#4472C4", opacity: 0.8 });
+    expect(style.fill).toBe("#FF0000");
+    expect(style.opacity).toBe(0.8);
+  });
+
+  it("honours a ZERO opacity override rather than falling through it", () => {
+    // `?? ` not `||`: an invisible datum is a legal thing to ask for, and the
+    // old applyOverrideOpacity had a dedicated test for exactly this.
+    const spec = makeSpec([{ seriesIndex: 0, categoryIndex: 0, opacity: 0 }]);
+    expect(resolveDatumStyle(spec, data, 0, 0, { fill: "#4472C4", opacity: 0.8 }).opacity).toBe(0);
   });
 });
 
@@ -189,7 +137,7 @@ describe("buildOverrideMap", () => {
 // ============================================================================
 
 describe("full override integration", () => {
-  it("handles override with all fields set", () => {
+  it("carries every field of a fully-populated override onto its datum", () => {
     const override: DataPointOverride = {
       seriesIndex: 1,
       categoryIndex: 3,
@@ -200,23 +148,17 @@ describe("full override integration", () => {
       exploded: 12,
     };
 
-    expect(applyOverrideColor("#4472C4", override)).toBe("#FF5500");
-    expect(applyOverrideOpacity(null, override)).toBe(0.7);
-    expect(getExplodeOffset(override)).toBe(12);
-    expect(override.borderColor).toBe("#000000");
-    expect(override.borderWidth).toBe(3);
-  });
+    const style = resolveDatumStyle(makeSpec([override]), makeData(), 1, 3, {
+      fill: "#4472C4",
+    });
 
-  it("handles map lookup for full override", () => {
-    const overrides: DataPointOverride[] = [
-      { seriesIndex: 1, categoryIndex: 3, color: "#FF5500", opacity: 0.7, exploded: 12 },
-    ];
-    const map = buildOverrideMap(overrides);
-    const found = getOverrideFromMap(map, 1, 3);
-    expect(found).toBeDefined();
-    expect(found!.color).toBe("#FF5500");
-    expect(found!.opacity).toBe(0.7);
-    expect(found!.exploded).toBe(12);
+    expect(style.fill).toBe("#FF5500");
+    expect(style.opacity).toBe(0.7);
+    expect(style.borderColor).toBe("#000000");
+    expect(style.borderWidth).toBe(3);
+    expect(style.explodeOffset).toBe(12);
+    expect(style.matchedBy).toBe("index");
+    expect(style.override).toBe(override);
   });
 
   it("serializes to JSON and back correctly", () => {
@@ -235,5 +177,24 @@ describe("full override integration", () => {
     expect(parsed[1].exploded).toBe(10);
     expect(parsed[2].borderColor).toBe("#000");
     expect(parsed[2].borderWidth).toBe(2);
+  });
+});
+
+// ============================================================================
+// The five deleted exports stay deleted
+// ============================================================================
+
+describe("the index-only helpers are gone", () => {
+  it("exports no route past the key matching and the authoring translation", async () => {
+    const mod = await import("../dataPointOverrides");
+    for (const name of [
+      "getDataPointOverride",
+      "applyOverrideColor",
+      "applyOverrideOpacity",
+      "buildOverrideMap",
+      "getOverrideFromMap",
+    ]) {
+      expect(mod).not.toHaveProperty(name);
+    }
   });
 });

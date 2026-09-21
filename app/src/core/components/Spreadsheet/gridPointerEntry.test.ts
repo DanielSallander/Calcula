@@ -14,22 +14,44 @@ import type React from "react";
 import {
   gridPointerMouseDown,
   gridPointerDoubleClick,
+  gridShouldTakeKeyboardFocus,
   type GridPointerEntryDeps,
 } from "./gridPointerEntry";
 import { claimPointer } from "../../lib/pointerClaims";
 
+interface GridDom {
+  /** `[data-focus-container="spreadsheet"]`, `tabIndex={0}` — as Spreadsheet.tsx renders it. */
+  focusContainer: HTMLElement;
+  gridArea: HTMLElement;
+  canvas: HTMLElement;
+  claimant: HTMLElement;
+  input: HTMLElement;
+  /** An on-canvas text field with NO claim — the Floating Range's own editor. */
+  onGridTextarea: HTMLTextAreaElement;
+  /** A focusable control OUTSIDE the grid — a task pane tab, a ribbon button. */
+  paneButton: HTMLButtonElement;
+}
+
 /** The DOM the grid actually has: a claimant appended beside the canvas. */
-function buildDom(): { gridArea: HTMLElement; canvas: HTMLElement; claimant: HTMLElement; input: HTMLElement } {
+function buildDom(): GridDom {
   document.body.innerHTML = "";
+  const focusContainer = document.createElement("div");
+  focusContainer.setAttribute("data-focus-container", "spreadsheet");
+  focusContainer.tabIndex = 0;
   const gridArea = document.createElement("div");
   const canvas = document.createElement("canvas");
   const claimant = document.createElement("div");
   const input = document.createElement("input");
+  const onGridTextarea = document.createElement("textarea");
+  const paneButton = document.createElement("button");
   claimant.appendChild(input);
   gridArea.appendChild(canvas);
   gridArea.appendChild(claimant);
-  document.body.appendChild(gridArea);
-  return { gridArea, canvas, claimant, input };
+  gridArea.appendChild(onGridTextarea);
+  focusContainer.appendChild(gridArea);
+  document.body.appendChild(focusContainer);
+  document.body.appendChild(paneButton);
+  return { focusContainer, gridArea, canvas, claimant, input, onGridTextarea, paneButton };
 }
 
 interface Press {
@@ -66,6 +88,8 @@ describe("the grid's pointer door", () => {
       splitCol: null,
       beginSplitDrag,
       onGridMouseDown,
+      focusContainerRef: { current: dom.focusContainer },
+      isEditing: () => false,
     };
   });
 
@@ -139,6 +163,113 @@ describe("the grid's pointer door", () => {
     gridPointerMouseDown(p.event, deps);
     expect(onGridMouseDown).toHaveBeenCalledTimes(1);
     expect(hitTestSplitBar).not.toHaveBeenCalled();
+  });
+
+  // =========================================================================
+  // THE GRID TOOK THE PRESS, SO THE GRID TAKES THE KEYBOARD
+  // =========================================================================
+  // The measured defect: a chart's own Format pane puts DOM focus on a
+  // `<button role="tab">`; clicking a bar then selected the bar while the
+  // keyboard stayed on the button, so `isGridFocused()` was false and every
+  // chart keystroke — Escape's level-up, the element walk, Delete — was refused
+  // by `chartOwnsKeystroke`. The reader sees a selected bar and a dead keyboard
+  // with nothing on screen to explain it.
+
+  it("a press the grid takes moves the keyboard back to the grid's focus container", () => {
+    dom.paneButton.focus();
+    expect(document.activeElement).toBe(dom.paneButton);
+    const p = press(dom.canvas);
+    gridPointerMouseDown(p.event, deps);
+    expect(document.activeElement).toBe(dom.focusContainer);
+  });
+
+  it("a CLAIMED press does not — the claimant and the browser own that press", () => {
+    claimPointer(dom.claimant, "placement-1");
+    dom.paneButton.focus();
+    const p = press(dom.input);
+    gridPointerMouseDown(p.event, deps);
+    expect(document.activeElement).toBe(dom.paneButton);
+  });
+
+  it("an open edit keeps its focus — clicking a cell mid-formula is how a reference is PICKED", () => {
+    deps.isEditing = () => true;
+    dom.paneButton.focus();
+    const p = press(dom.canvas);
+    gridPointerMouseDown(p.event, deps);
+    expect(document.activeElement).toBe(dom.paneButton);
+    // …and the press still reaches the grid: only the focus move is exempted.
+    expect(onGridMouseDown).toHaveBeenCalledTimes(1);
+  });
+
+  it("an on-canvas <textarea> with no claim keeps the press the browser is about to focus it with", () => {
+    dom.paneButton.focus();
+    const p = press(dom.onGridTextarea);
+    gridPointerMouseDown(p.event, deps);
+    expect(document.activeElement).toBe(dom.paneButton);
+  });
+
+  it("focus already inside the container is left exactly where it is", () => {
+    dom.onGridTextarea.focus();
+    expect(document.activeElement).toBe(dom.onGridTextarea);
+    const p = press(dom.canvas);
+    gridPointerMouseDown(p.event, deps);
+    expect(document.activeElement).toBe(dom.onGridTextarea);
+  });
+
+  it("the focus move happens even when the press starts a SPLIT drag", () => {
+    hitTestSplitBar.mockReturnValue("row");
+    deps.splitRow = 3;
+    dom.paneButton.focus();
+    const p = press(dom.canvas, 0, 90, 130);
+    gridPointerMouseDown(p.event, deps);
+    expect(beginSplitDrag).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(dom.focusContainer);
+  });
+});
+
+// ===========================================================================
+// The rule itself, stated once
+// ===========================================================================
+
+describe("gridShouldTakeKeyboardFocus", () => {
+  let dom: GridDom;
+
+  beforeEach(() => {
+    dom = buildDom();
+  });
+
+  it("says yes when focus is outside the grid and the target focuses nothing itself", () => {
+    expect(gridShouldTakeKeyboardFocus(dom.canvas, dom.paneButton, dom.focusContainer, false)).toBe(true);
+  });
+
+  it("says no with no focus container to give the keyboard to", () => {
+    expect(gridShouldTakeKeyboardFocus(dom.canvas, dom.paneButton, null, false)).toBe(false);
+  });
+
+  it("says no while an edit is open", () => {
+    expect(gridShouldTakeKeyboardFocus(dom.canvas, dom.paneButton, dom.focusContainer, true)).toBe(false);
+  });
+
+  it("says no when the container ITSELF already holds the keyboard", () => {
+    // `Node.contains` counts the node itself; without that this would answer
+    // yes on every press and re-focus the element on every click.
+    expect(gridShouldTakeKeyboardFocus(dom.canvas, dom.focusContainer, dom.focusContainer, false)).toBe(false);
+  });
+
+  it("says no for a self-focusing target inside the grid", () => {
+    expect(gridShouldTakeKeyboardFocus(dom.onGridTextarea, dom.paneButton, dom.focusContainer, false)).toBe(false);
+  });
+
+  it("does NOT treat the tabIndex=0 container as a self-focusing target", () => {
+    // The trap a `[tabindex]` selector would fall into: the focus container
+    // carries tabIndex={0}, so `closest("[tabindex]")` matches it from EVERY
+    // target inside the grid and the rule would never fire at all.
+    expect(gridShouldTakeKeyboardFocus(dom.focusContainer, dom.paneButton, dom.focusContainer, false)).toBe(true);
+  });
+
+  it("survives a target that is not an Element at all", () => {
+    expect(gridShouldTakeKeyboardFocus(null, dom.paneButton, dom.focusContainer, false)).toBe(true);
+    expect(gridShouldTakeKeyboardFocus(window, dom.paneButton, dom.focusContainer, false)).toBe(true);
   });
 });
 

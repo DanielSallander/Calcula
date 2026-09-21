@@ -7,7 +7,15 @@ import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, LineMarkOpti
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { seriesPaletteIndex } from "../lib/encodingResolver";
-import { buildOverrideMap, getOverrideFromMap, toAuthoringIndices } from "../lib/dataPointOverrides";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import {
+  paintDatumMarker,
+  recordXAxisTitleRect,
+  recordYAxisTitleRect,
+  recordYLabelBandRect,
+  xAxisTitleBaselineY,
+  Y_AXIS_TITLE_X,
+} from "./markerPainter";
 import { createLinearScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -80,8 +88,9 @@ export function paintLineChart(
     drawHorizontalGridLines(ctx, yScale, plotArea, theme);
   }
 
-  // 4. Axes
-  drawLineAxes(ctx, xAxis, yScale, plotArea, spec, theme);
+  // 4. Axes (the layout is passed so the axis titles and the y-label band
+  //    replace the layout's character-count estimates with measured boxes)
+  drawLineAxes(ctx, xAxis, yScale, plotArea, spec, theme, layout);
 
   // Pre-compute category totals for percent stacking
   const categoryTotals: number[] = [];
@@ -152,30 +161,27 @@ export function paintLineChart(
     }
     ctx.stroke();
 
-    // Draw markers (with per-point overrides)
+    // Draw markers (with per-point overrides). The style comes from the ONE
+    // shared resolver: it translates painter (si,ci) into authoring space and
+    // matches the datum's identity key before its index, so an override stays
+    // on the point the user formatted even after a filter or a row insert.
     if (showMarkers) {
-      const overrideMap = buildOverrideMap(spec.dataPointOverrides);
       for (let ci = 0; ci < points.length; ci++) {
         const pt = points[ci];
-        // Overrides are keyed in authoring space — translate the painter (si,ci).
-        const a = toAuthoringIndices(data, si, ci);
-        const override = getOverrideFromMap(overrideMap, a.seriesIndex, a.categoryIndex);
-        const markerColor = override?.color ?? color;
-        const markerOpacity = override?.opacity;
-
-        if (markerOpacity !== undefined) ctx.globalAlpha = markerOpacity;
-        ctx.fillStyle = markerColor;
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, markerRadius, 0, Math.PI * 2);
-        ctx.fill();
-
-        // White inner circle for hollow marker look
-        ctx.fillStyle = "#ffffff";
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, markerRadius * 0.5, 0, Math.PI * 2);
-        ctx.fill();
-
-        if (markerOpacity !== undefined) ctx.globalAlpha = 1;
+        const style = resolveDatumStyle(spec, data, si, ci, {
+          fill: color,
+          markerStyle: "circle",
+          markerSize: markerRadius,
+        });
+        paintDatumMarker(ctx, pt.x, pt.y, {
+          shape: style.markerStyle ?? "circle",
+          size: style.markerSize ?? markerRadius,
+          fill: style.markerFill ?? color,
+          borderColor: style.markerBorderColor,
+          borderWidth: style.markerBorderWidth,
+          opacity: style.opacity,
+          hollow: true,
+        });
       }
     }
   }
@@ -354,6 +360,12 @@ function drawStepLine(
 // Axes (adapted for PointScale)
 // ============================================================================
 
+/**
+ * `layout` is OPTIONAL and exists only for the element-rect write-back, exactly
+ * like `drawCartesianAxes`: passing it replaces the layout's estimates for the
+ * axis titles and the y-label band with their measured boxes. Omitting it
+ * paints identically and leaves the estimates alone.
+ */
 function drawLineAxes(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   xAxis: ScatterXAxis,
@@ -361,6 +373,7 @@ function drawLineAxes(
   plotArea: { x: number; y: number; width: number; height: number },
   spec: ChartSpec,
   theme: ChartRenderTheme,
+  layout?: ChartLayout,
 ): void {
   ctx.strokeStyle = theme.axisColor;
   ctx.lineWidth = 1;
@@ -416,14 +429,17 @@ function drawLineAxes(
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    ctx.fillText(
-      spec.xAxis.title,
-      plotArea.x + plotArea.width / 2,
-      plotArea.y + plotArea.height + (spec.xAxis.showLabels ? 30 : 16),
-    );
+    const baselineY = xAxisTitleBaselineY(plotArea, spec.xAxis.showLabels);
+    ctx.fillText(spec.xAxis.title, plotArea.x + plotArea.width / 2, baselineY);
+    if (layout) {
+      recordXAxisTitleRect(
+        layout, plotArea, ctx.measureText(spec.xAxis.title).width, baselineY, theme.axisTitleFontSize,
+      );
+    }
   }
 
   // Y axis labels
+  let widestYLabel = 0;
   if (spec.yAxis.showLabels) {
     const ticks = yScale.ticks(5);
     ctx.fillStyle = theme.axisLabelColor;
@@ -434,8 +450,12 @@ function drawLineAxes(
     for (const tick of ticks) {
       const y = yScale.scale(tick);
       if (y < plotArea.y || y > plotArea.y + plotArea.height) continue;
-      ctx.fillText(formatTickValue(tick), plotArea.x - 6, y);
+      const label = formatTickValue(tick);
+      const w = ctx.measureText(label).width;
+      if (w > widestYLabel) widestYLabel = w;
+      ctx.fillText(label, plotArea.x - 6, y);
     }
+    if (layout) recordYLabelBandRect(layout, plotArea, widestYLabel);
   }
 
   // Y axis title
@@ -443,12 +463,16 @@ function drawLineAxes(
     ctx.save();
     ctx.fillStyle = theme.axisTitleColor;
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
-    ctx.translate(14, plotArea.y + plotArea.height / 2);
+    ctx.translate(Y_AXIS_TITLE_X, plotArea.y + plotArea.height / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.fillText(spec.yAxis.title, 0, 0);
+    // Measure BEFORE restore: restore() puts the previous font back, and a rect
+    // measured under the wrong font is fiction that hit-testing would believe.
+    const titleWidth = ctx.measureText(spec.yAxis.title).width;
     ctx.restore();
+    if (layout) recordYAxisTitleRect(layout, plotArea, titleWidth, theme.axisTitleFontSize);
   }
 }
 

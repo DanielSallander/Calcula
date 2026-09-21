@@ -7,7 +7,15 @@ import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, ScatterMarkO
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { resolvePointColor, resolvePointOpacity, resolvePointSize, resolveSeriesEncoding, seriesPaletteIndex } from "../lib/encodingResolver";
-import { buildOverrideMap, getOverrideFromMap, toAuthoringIndices } from "../lib/dataPointOverrides";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import {
+  paintDatumMarker,
+  recordXAxisTitleRect,
+  recordYAxisTitleRect,
+  recordYLabelBandRect,
+  xAxisTitleBaselineY,
+  Y_AXIS_TITLE_X,
+} from "./markerPainter";
 import { createLinearScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -78,16 +86,15 @@ export function paintScatterChart(
     drawHorizontalGridLines(ctx, yScale, plotArea, theme);
   }
 
-  // 4. Axes
-  drawScatterAxes(ctx, xAxis, yScale, plotArea, spec, theme);
+  // 4. Axes (the layout is passed so the axis titles and the y-label band
+  //    replace the layout's character-count estimates with measured boxes)
+  drawScatterAxes(ctx, xAxis, yScale, plotArea, spec, theme, layout);
 
   // 5. Points
   ctx.save();
   ctx.beginPath();
   ctx.rect(plotArea.x, plotArea.y, plotArea.width, plotArea.height);
   ctx.clip();
-
-  const overrideMap = buildOverrideMap(spec.dataPointOverrides);
 
   for (let si = 0; si < data.series.length; si++) {
     const series = data.series[si];
@@ -97,24 +104,30 @@ export function paintScatterChart(
       const value = series.values[ci] ?? 0;
       const category = data.categories[ci] ?? "";
       const sel = { seriesName: series.name, selection: data.selection };
-      let color = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), series.color, value, category, sel);
+      const color = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), series.color, value, category, sel);
       const resolvedSize = resolvePointSize(encoding, value, category, sel) ?? pointSize;
-      let pointOpacity = resolvePointOpacity(encoding, value, category, sel);
+      const pointOpacity = resolvePointOpacity(encoding, value, category, sel);
 
-      // Apply data point override (keyed in authoring space — translate first)
-      const a = toAuthoringIndices(data, si, ci);
-      const override = getOverrideFromMap(overrideMap, a.seriesIndex, a.categoryIndex);
-      if (override?.color) color = override.color;
-      if (override?.opacity !== undefined) pointOpacity = override.opacity;
-
-      if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
-      ctx.fillStyle = color;
+      // Per-point override through the ONE shared resolver: it translates the
+      // painter (si,ci) into authoring space itself and matches the datum's
+      // identity key before its index.
+      const style = resolveDatumStyle(spec, data, si, ci, {
+        fill: color,
+        opacity: pointOpacity,
+        markerStyle: pointShape,
+        markerSize: resolvedSize,
+      });
 
       const x = xAxis.xOf(ci);
       const y = yScale.scale(value);
-      drawPoint(ctx, x, y, resolvedSize, pointShape);
-
-      if (pointOpacity != null) ctx.globalAlpha = 1;
+      paintDatumMarker(ctx, x, y, {
+        shape: style.markerStyle ?? pointShape,
+        size: style.markerSize ?? resolvedSize,
+        fill: style.markerFill ?? style.fill,
+        borderColor: style.markerBorderColor ?? style.borderColor,
+        borderWidth: style.markerBorderWidth ?? style.borderWidth,
+        opacity: style.opacity,
+      });
     }
   }
 
@@ -132,45 +145,15 @@ export function paintScatterChart(
 }
 
 // ============================================================================
-// Point Drawing
-// ============================================================================
-
-function drawPoint(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  x: number,
-  y: number,
-  size: number,
-  shape: string,
-): void {
-  ctx.beginPath();
-  switch (shape) {
-    case "square":
-      ctx.rect(x - size, y - size, size * 2, size * 2);
-      break;
-    case "diamond":
-      ctx.moveTo(x, y - size);
-      ctx.lineTo(x + size, y);
-      ctx.lineTo(x, y + size);
-      ctx.lineTo(x - size, y);
-      ctx.closePath();
-      break;
-    case "triangle":
-      ctx.moveTo(x, y - size);
-      ctx.lineTo(x + size, y + size);
-      ctx.lineTo(x - size, y + size);
-      ctx.closePath();
-      break;
-    default: // circle
-      ctx.arc(x, y, size, 0, Math.PI * 2);
-      break;
-  }
-  ctx.fill();
-}
-
-// ============================================================================
 // Axes
 // ============================================================================
 
+/**
+ * `layout` is OPTIONAL and exists only for the element-rect write-back, exactly
+ * like `drawCartesianAxes`: passing it replaces the layout's estimates for the
+ * axis titles and the y-label band with their measured boxes. Omitting it
+ * paints identically and leaves the estimates alone.
+ */
 function drawScatterAxes(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   xAxis: ScatterXAxis,
@@ -178,6 +161,7 @@ function drawScatterAxes(
   plotArea: { x: number; y: number; width: number; height: number },
   spec: ChartSpec,
   theme: ChartRenderTheme,
+  layout?: ChartLayout,
 ): void {
   ctx.strokeStyle = theme.axisColor;
   ctx.lineWidth = 1;
@@ -209,6 +193,7 @@ function drawScatterAxes(
   }
 
   // Y axis labels
+  let widestYLabel = 0;
   if (spec.yAxis.showLabels) {
     const ticks = yScale.ticks(5);
     ctx.fillStyle = theme.axisLabelColor;
@@ -219,8 +204,12 @@ function drawScatterAxes(
     for (const tick of ticks) {
       const y = yScale.scale(tick);
       if (y < plotArea.y || y > plotArea.y + plotArea.height) continue;
-      ctx.fillText(formatTickValue(tick), plotArea.x - 6, y);
+      const label = formatTickValue(tick);
+      const w = ctx.measureText(label).width;
+      if (w > widestYLabel) widestYLabel = w;
+      ctx.fillText(label, plotArea.x - 6, y);
     }
+    if (layout) recordYLabelBandRect(layout, plotArea, widestYLabel);
   }
 
   // Axis titles
@@ -229,22 +218,28 @@ function drawScatterAxes(
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    ctx.fillText(
-      spec.xAxis.title,
-      plotArea.x + plotArea.width / 2,
-      plotArea.y + plotArea.height + (spec.xAxis.showLabels ? 30 : 16),
-    );
+    const baselineY = xAxisTitleBaselineY(plotArea, spec.xAxis.showLabels);
+    ctx.fillText(spec.xAxis.title, plotArea.x + plotArea.width / 2, baselineY);
+    if (layout) {
+      recordXAxisTitleRect(
+        layout, plotArea, ctx.measureText(spec.xAxis.title).width, baselineY, theme.axisTitleFontSize,
+      );
+    }
   }
   if (spec.yAxis.title) {
     ctx.save();
     ctx.fillStyle = theme.axisTitleColor;
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
-    ctx.translate(14, plotArea.y + plotArea.height / 2);
+    ctx.translate(Y_AXIS_TITLE_X, plotArea.y + plotArea.height / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.fillText(spec.yAxis.title, 0, 0);
+    // Measure BEFORE restore: restore() puts the previous font back, and a rect
+    // measured under the wrong font is fiction that hit-testing would believe.
+    const titleWidth = ctx.measureText(spec.yAxis.title).width;
     ctx.restore();
+    if (layout) recordYAxisTitleRect(layout, plotArea, titleWidth, theme.axisTitleFontSize);
   }
 }
 

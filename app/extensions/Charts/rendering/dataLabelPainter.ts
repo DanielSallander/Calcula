@@ -7,6 +7,7 @@ import type {
   ChartSpec,
   ParsedChartData,
   ChartLayout,
+  ChartElementRect,
   HitGeometry,
   BarRect,
   PointMarker,
@@ -16,15 +17,27 @@ import type {
   DataLabelPosition,
 } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
-import { formatTickValue } from "./chartPainterUtils";
+import { formatTickValue, recordDataLabelRects } from "./chartPainterUtils";
 
 // ============================================================================
 // Public API
 // ============================================================================
 
+/** One painted label: the datum it belongs to and the box it occupies. */
+type RecordedLabel = { seriesIndex: number; pointIndex: number; rect: ChartElementRect };
+
 /**
  * Draw data labels on the chart using pre-computed hit geometry.
  * Should be called after the primary marks are painted.
+ *
+ * SELECTABILITY: every label drawn records its box onto
+ * `layout.elements.dataLabels` with BOTH indices, because Excel's data label
+ * is a per-point object (unlike error bars, which are per series). Composed
+ * geometry recurses into its groups and the labels of every group land in ONE
+ * list written back once at the end — recording per group would leave only the
+ * last group's labels on the layout, and a chart whose first panel's labels
+ * were unclickable is exactly the kind of "works on the example I tried" defect
+ * this wave exists to remove.
  */
 export function paintDataLabels(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
@@ -33,6 +46,24 @@ export function paintDataLabels(
   layout: ChartLayout,
   theme: ChartRenderTheme,
   geometry: HitGeometry,
+): void {
+  const dl = spec.dataLabels;
+  if (!dl || !dl.enabled) return;
+
+  const recorded: RecordedLabel[] = [];
+  paintDataLabelsInto(ctx, data, spec, layout, theme, geometry, recorded);
+  recordDataLabelRects(layout, recorded);
+}
+
+/** The recursive half: draws, and appends what it drew to `recorded`. */
+function paintDataLabelsInto(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  data: ParsedChartData,
+  spec: ChartSpec,
+  layout: ChartLayout,
+  theme: ChartRenderTheme,
+  geometry: HitGeometry,
+  recorded: RecordedLabel[],
 ): void {
   const dl = spec.dataLabels;
   if (!dl || !dl.enabled) return;
@@ -51,17 +82,17 @@ export function paintDataLabels(
 
   switch (geometry.type) {
     case "bars":
-      drawBarLabels(ctx, geometry.rects, data, spec, dl, contentFields, position, fontSize, separator, bgColor, minValue, seriesFilter, layout);
+      drawBarLabels(ctx, geometry.rects, data, spec, dl, contentFields, position, fontSize, separator, bgColor, minValue, seriesFilter, layout, recorded);
       break;
     case "points":
-      drawPointLabels(ctx, geometry.markers, data, spec, dl, contentFields, position, fontSize, separator, bgColor, minValue, seriesFilter, layout);
+      drawPointLabels(ctx, geometry.markers, data, spec, dl, contentFields, position, fontSize, separator, bgColor, minValue, seriesFilter, layout, recorded);
       break;
     case "slices":
-      drawSliceLabels(ctx, geometry.arcs, data, spec, dl, contentFields, fontSize, separator, bgColor, minValue);
+      drawSliceLabels(ctx, geometry.arcs, data, spec, dl, contentFields, fontSize, separator, bgColor, minValue, recorded);
       break;
     case "composite":
       for (const group of geometry.groups) {
-        paintDataLabels(ctx, data, spec, layout, theme, group);
+        paintDataLabelsInto(ctx, data, spec, layout, theme, group, recorded);
       }
       break;
   }
@@ -87,6 +118,7 @@ function drawBarLabels(
   minValue: number | null,
   seriesFilter: number[] | null,
   layout: ChartLayout,
+  recorded: RecordedLabel[],
 ): void {
   const { plotArea } = layout;
 
@@ -120,7 +152,8 @@ function drawBarLabels(
     y = Math.max(plotArea.y + fontSize, Math.min(y, plotArea.y + plotArea.height - 2));
 
     const color = dl.color ?? ((pos === "inside" || pos === "center") ? "#ffffff" : "#333333");
-    drawLabelText(ctx, text, x, y, color, fontSize, bgColor);
+    const box = drawLabelText(ctx, text, x, y, color, fontSize, bgColor);
+    recorded.push({ seriesIndex: rect.seriesIndex, pointIndex: rect.categoryIndex, rect: box });
   }
 }
 
@@ -142,6 +175,7 @@ function drawPointLabels(
   minValue: number | null,
   seriesFilter: number[] | null,
   layout: ChartLayout,
+  recorded: RecordedLabel[],
 ): void {
   const { plotArea } = layout;
 
@@ -173,7 +207,8 @@ function drawPointLabels(
     y = Math.max(plotArea.y + fontSize, Math.min(y, plotArea.y + plotArea.height - 2));
 
     const color = dl.color ?? "#333333";
-    drawLabelText(ctx, text, x, y, color, fontSize, bgColor);
+    const box = drawLabelText(ctx, text, x, y, color, fontSize, bgColor);
+    recorded.push({ seriesIndex: marker.seriesIndex, pointIndex: marker.categoryIndex, rect: box });
   }
 }
 
@@ -192,6 +227,7 @@ function drawSliceLabels(
   separator: string,
   bgColor: string | null,
   minValue: number | null,
+  recorded: RecordedLabel[],
 ): void {
   for (const arc of arcs) {
     if (minValue != null && Math.abs(arc.value) < minValue) continue;
@@ -209,8 +245,12 @@ function drawSliceLabels(
 
     ctx.save();
     ctx.textAlign = Math.cos(midAngle) >= 0 ? "left" : "right";
-    drawLabelText(ctx, text, x, y, color, fontSize, bgColor);
+    const box = drawLabelText(ctx, text, x, y, color, fontSize, bgColor);
     ctx.restore();
+    // A radial mark's series axis and category axis are the SAME axis, so both
+    // indices are the arc's own — the convention `hitTestSliceArcs` already
+    // answers for the slice itself.
+    recorded.push({ seriesIndex: arc.seriesIndex, pointIndex: arc.seriesIndex, rect: box });
   }
 }
 
@@ -279,6 +319,12 @@ function formatWithPattern(value: number, pattern: string): string {
   return prefix + formatted;
 }
 
+/**
+ * Draw one label and RETURN the box it occupies on screen — the padded plate
+ * when it has a background, the tight glyph box otherwise. The return value is
+ * what gets recorded for hit-testing, so the clickable area is by construction
+ * the area the reader can see, rather than a second guess at it.
+ */
 function drawLabelText(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   text: string,
@@ -287,20 +333,24 @@ function drawLabelText(
   color: string,
   fontSize: number,
   bgColor: string | null,
-): void {
+): ChartElementRect {
   ctx.textBaseline = "middle";
 
+  const textWidth = ctx.measureText(text).width;
+  const pad = bgColor ? 3 : 0;
+  const w = textWidth + pad * 2;
+  const h = fontSize + pad * 2;
+  // Anchoring follows textAlign, which the slice path flips per label.
+  const bx = ctx.textAlign === "center" ? x - w / 2 :
+             ctx.textAlign === "right" ? x - w : x;
+  const box: ChartElementRect = { x: bx, y: y - h / 2, width: w, height: h };
+
   if (bgColor) {
-    const metrics = ctx.measureText(text);
-    const pad = 3;
-    const w = metrics.width + pad * 2;
-    const h = fontSize + pad * 2;
-    const bx = ctx.textAlign === "center" ? x - w / 2 :
-               ctx.textAlign === "right" ? x - w : x;
     ctx.fillStyle = bgColor;
-    ctx.fillRect(bx, y - h / 2, w, h);
+    ctx.fillRect(box.x, box.y, box.width, box.height);
   }
 
   ctx.fillStyle = color;
   ctx.fillText(text, x, y);
+  return box;
 }

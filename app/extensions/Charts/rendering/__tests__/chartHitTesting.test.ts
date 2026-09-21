@@ -1,5 +1,9 @@
 //! FILENAME: app/extensions/Charts/rendering/__tests__/chartHitTesting.test.ts
-// PURPOSE: Tests for chart hit-testing logic (bars, points, slices, axes).
+// PURPOSE: Tests for chart hit-testing logic (data points, areas, axes).
+// CONTEXT: Asserts on `element` — Excel's ElementID — rather than on the legacy
+//          `type` mirror. The mirror has its own small block at the bottom,
+//          because while chartRenderer still reads it, a projection that drifts
+//          from the element it mirrors would break hover silently.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -7,6 +11,9 @@ import {
   hitTestBarChart,
   hitTestPoints,
   hitTestSlices,
+  hitTestDatum,
+  chartElementOf,
+  isDatumHit,
 } from "../chartHitTesting";
 import type { BarRect, PointMarker, SliceArc, ChartLayout, HitGeometry } from "../../types";
 
@@ -76,27 +83,31 @@ function makeSliceArc(overrides: Partial<SliceArc> = {}): SliceArc {
 describe("hitTestBarChart", () => {
   const layout = makeLayout();
 
-  it("returns bar hit when point is inside a bar", () => {
+  it("returns a datum hit when the point is inside a bar", () => {
     const rects = [makeBarRect({ x: 100, y: 50, width: 40, height: 200 })];
     const result = hitTestBarChart(120, 150, rects, layout);
-    expect(result.type).toBe("bar");
-    if (result.type === "bar") {
-      expect(result.seriesIndex).toBe(0);
-      expect(result.categoryIndex).toBe(0);
-      expect(result.value).toBe(500);
-    }
+    expect(result.element).toBe("datum");
+    expect(result.seriesIndex).toBe(0);
+    expect(result.pointIndex).toBe(0);
+    expect(result.value).toBe(500);
   });
 
   it("returns plotArea when point is in plot area but not on a bar", () => {
     const rects = [makeBarRect({ x: 100, y: 50, width: 40, height: 200 })];
-    const result = hitTestBarChart(300, 200, rects, layout);
-    expect(result.type).toBe("plotArea");
+    expect(hitTestBarChart(300, 200, rects, layout).element).toBe("plotArea");
   });
 
-  it("returns none when point is outside plot area and bars", () => {
+  it("returns chartArea — not nothing — for a pixel inside the object that matched nothing", () => {
+    // (5, 5) is the top-left margin: above the plot area and left of it, so it
+    // is neither axis band. It used to answer "none", which is how the top and
+    // right margins became dead pixels.
     const rects = [makeBarRect()];
-    const result = hitTestBarChart(5, 5, rects, layout);
-    expect(result.type).toBe("none");
+    expect(hitTestBarChart(5, 5, rects, layout).element).toBe("chartArea");
+  });
+
+  it("returns none only for a pixel OUTSIDE the chart object", () => {
+    expect(hitTestBarChart(-1, 200, [], layout).element).toBe("none");
+    expect(hitTestBarChart(300, 401, [], layout).element).toBe("none");
   });
 
   it("returns last drawn bar when bars overlap (reverse order test)", () => {
@@ -104,27 +115,19 @@ describe("hitTestBarChart", () => {
       makeBarRect({ seriesIndex: 0, x: 100, y: 50, width: 50, height: 200, seriesName: "A" }),
       makeBarRect({ seriesIndex: 1, x: 120, y: 80, width: 50, height: 170, seriesName: "B" }),
     ];
-    // Point at (130, 150) is in both bars; last bar (index 1) should win
     const result = hitTestBarChart(130, 150, rects, layout);
-    expect(result.type).toBe("bar");
-    if (result.type === "bar") {
-      expect(result.seriesIndex).toBe(1);
-    }
+    expect(result.element).toBe("datum");
+    expect(result.seriesIndex).toBe(1);
   });
 
-  it("returns bar hit at bar edge (boundary check)", () => {
+  it("returns a datum hit at a bar edge (boundary check)", () => {
     const rects = [makeBarRect({ x: 100, y: 50, width: 40, height: 200 })];
-    // Exactly on left edge
-    const result = hitTestBarChart(100, 50, rects, layout);
-    expect(result.type).toBe("bar");
-    // Exactly on right edge
-    const result2 = hitTestBarChart(140, 250, rects, layout);
-    expect(result2.type).toBe("bar");
+    expect(hitTestBarChart(100, 50, rects, layout).element).toBe("datum");
+    expect(hitTestBarChart(140, 250, rects, layout).element).toBe("datum");
   });
 
   it("returns plotArea when no bars exist and point is in plot area", () => {
-    const result = hitTestBarChart(200, 200, [], layout);
-    expect(result.type).toBe("plotArea");
+    expect(hitTestBarChart(200, 200, [], layout).element).toBe("plotArea");
   });
 });
 
@@ -135,28 +138,24 @@ describe("hitTestBarChart", () => {
 describe("hitTestPoints", () => {
   const layout = makeLayout();
 
-  it("returns point hit when within marker radius", () => {
+  it("returns a datum hit when within marker radius", () => {
     const markers = [makePointMarker({ cx: 150, cy: 100, radius: 4 })];
     const result = hitTestPoints(152, 100, markers, layout);
-    expect(result.type).toBe("point");
-    if (result.type === "point") {
-      expect(result.seriesIndex).toBe(0);
-      expect(result.value).toBe(500);
-    }
+    expect(result.element).toBe("datum");
+    expect(result.seriesIndex).toBe(0);
+    expect(result.value).toBe(500);
   });
 
-  it("returns point hit within bonus radius (3px extra)", () => {
+  it("returns a datum hit within bonus radius (3px extra)", () => {
     const markers = [makePointMarker({ cx: 150, cy: 100, radius: 4 })];
     // Distance = 7, which is within 4 + 3 = 7
-    const result = hitTestPoints(157, 100, markers, layout);
-    expect(result.type).toBe("point");
+    expect(hitTestPoints(157, 100, markers, layout).element).toBe("datum");
   });
 
   it("returns plotArea when beyond hit radius", () => {
     const markers = [makePointMarker({ cx: 150, cy: 100, radius: 4 })];
     // Distance = 10, which is beyond 4 + 3 = 7
-    const result = hitTestPoints(160, 100, markers, layout);
-    expect(result.type).toBe("plotArea");
+    expect(hitTestPoints(160, 100, markers, layout).element).toBe("plotArea");
   });
 
   it("returns last point when multiple overlap", () => {
@@ -165,57 +164,49 @@ describe("hitTestPoints", () => {
       makePointMarker({ seriesIndex: 1, cx: 152, cy: 101 }),
     ];
     const result = hitTestPoints(151, 100, markers, layout);
-    expect(result.type).toBe("point");
-    if (result.type === "point") {
-      expect(result.seriesIndex).toBe(1);
-    }
+    expect(result.element).toBe("datum");
+    expect(result.seriesIndex).toBe(1);
   });
 });
 
 // ============================================================================
-// hitTestSlices
+// hitTestSlices — arc-only by contract
 // ============================================================================
 
 describe("hitTestSlices", () => {
   const layout = makeLayout();
 
-  it("returns slice hit when point is within arc", () => {
-    // Slice from 0 to PI/2 (first quadrant), outer radius 100, center at (300, 200)
+  it("returns a datum hit when point is within arc", () => {
     const arcs = [makeSliceArc()];
-    // Point at (350, 230) is in first quadrant, ~50px from center
     const result = hitTestSlices(350, 230, arcs, layout);
-    expect(result.type).toBe("slice");
-    if (result.type === "slice") {
-      expect(result.seriesIndex).toBe(0);
-    }
+    expect(result.element).toBe("datum");
+    expect(result.seriesIndex).toBe(0);
+  });
+
+  it("reports a slice's own index as BOTH series and point — a slice is its category", () => {
+    const arcs = [makeSliceArc({ seriesIndex: 0, startAngle: 0, endAngle: Math.PI })];
+    const result = hitTestSlices(350, 230, arcs, layout);
+    expect(result.seriesIndex).toBe(0);
+    expect(result.pointIndex).toBe(0);
   });
 
   it("returns none when point is outside outer radius", () => {
     const arcs = [makeSliceArc({ outerRadius: 100 })];
-    // Point far from center
-    const result = hitTestSlices(500, 400, arcs, layout);
-    expect(result.type).toBe("none");
+    expect(hitTestSlices(500, 400, arcs, layout).element).toBe("none");
   });
 
   it("returns none when point is inside inner radius (donut hole)", () => {
     const arcs = [makeSliceArc({ innerRadius: 50, outerRadius: 100 })];
-    // Point at center
-    const result = hitTestSlices(300, 200, arcs, layout);
-    expect(result.type).toBe("none");
+    expect(hitTestSlices(300, 200, arcs, layout).element).toBe("none");
   });
 
   it("returns none for empty arcs array", () => {
-    const result = hitTestSlices(300, 200, [], layout);
-    expect(result.type).toBe("none");
+    expect(hitTestSlices(300, 200, [], layout).element).toBe("none");
   });
 
   it("returns none when angle is outside slice arc", () => {
-    // Slice covers only first quadrant (0 to PI/2)
     const arcs = [makeSliceArc({ startAngle: 0, endAngle: Math.PI / 2 })];
-    // Point at (250, 150) is in second quadrant (negative x from center, negative y)
-    // That's angle ~PI + atan(50/50) which is outside [0, PI/2]
-    const result = hitTestSlices(250, 150, arcs, layout);
-    expect(result.type).toBe("none");
+    expect(hitTestSlices(250, 150, arcs, layout).element).toBe("none");
   });
 
   it("detects correct slice among multiple", () => {
@@ -223,12 +214,9 @@ describe("hitTestSlices", () => {
       makeSliceArc({ seriesIndex: 0, startAngle: 0, endAngle: Math.PI, label: "A" }),
       makeSliceArc({ seriesIndex: 1, startAngle: Math.PI, endAngle: Math.PI * 2, label: "B" }),
     ];
-    // Point upper-left of center: angle ~3.93 rad, in (PI, 2*PI) range => second arc
     const result = hitTestSlices(250, 150, arcs, layout);
-    expect(result.type).toBe("slice");
-    if (result.type === "slice") {
-      expect(result.seriesIndex).toBe(1);
-    }
+    expect(result.element).toBe("datum");
+    expect(result.seriesIndex).toBe(1);
   });
 });
 
@@ -239,34 +227,31 @@ describe("hitTestSlices", () => {
 describe("hitTestGeometry", () => {
   const layout = makeLayout();
 
-  it("dispatches to bars handler for bars geometry", () => {
-    const geometry: HitGeometry = {
-      type: "bars",
-      rects: [makeBarRect({ x: 100, y: 50, width: 40, height: 200 })],
-    };
-    const result = hitTestGeometry(120, 150, geometry, layout);
-    expect(result.type).toBe("bar");
+  it("dispatches to bars", () => {
+    const geometry: HitGeometry = { type: "bars", rects: [makeBarRect({ x: 100, y: 50, width: 40, height: 200 })] };
+    expect(hitTestGeometry(120, 150, geometry, layout).element).toBe("datum");
   });
 
-  it("dispatches to points handler for points geometry", () => {
-    const geometry: HitGeometry = {
-      type: "points",
-      markers: [makePointMarker({ cx: 150, cy: 100, radius: 4 })],
-    };
-    const result = hitTestGeometry(150, 100, geometry, layout);
-    expect(result.type).toBe("point");
+  it("dispatches to points", () => {
+    const geometry: HitGeometry = { type: "points", markers: [makePointMarker({ cx: 150, cy: 100, radius: 4 })] };
+    expect(hitTestGeometry(150, 100, geometry, layout).element).toBe("datum");
   });
 
-  it("dispatches to slices handler for slices geometry", () => {
-    const geometry: HitGeometry = {
-      type: "slices",
-      arcs: [makeSliceArc()],
-    };
-    const result = hitTestGeometry(350, 230, geometry, layout);
-    expect(result.type).toBe("slice");
+  it("dispatches to slices", () => {
+    const geometry: HitGeometry = { type: "slices", arcs: [makeSliceArc()] };
+    expect(hitTestGeometry(350, 230, geometry, layout).element).toBe("datum");
   });
 
-  it("dispatches to composite handler and returns first data hit", () => {
+  it("gives a radial MISS the furniture answer, unlike hitTestSlices itself", () => {
+    // hitTestSlices is the low-level arc tester and answers "none"; the
+    // dispatch is the reader's whole question, and a click in the donut hole
+    // is a click on the plot area, as it is in Excel.
+    const geometry: HitGeometry = { type: "slices", arcs: [makeSliceArc({ innerRadius: 50 })] };
+    expect(hitTestSlices(300, 200, geometry.type === "slices" ? geometry.arcs : [], layout).element).toBe("none");
+    expect(hitTestGeometry(300, 200, geometry, layout).element).toBe("plotArea");
+  });
+
+  it("dispatches to composite and returns the first datum hit", () => {
     const geometry: HitGeometry = {
       type: "composite",
       groups: [
@@ -275,6 +260,7 @@ describe("hitTestGeometry", () => {
       ],
     };
     const result = hitTestGeometry(150, 100, geometry, layout);
+    expect(result.element).toBe("datum");
     expect(result.type).toBe("point");
   });
 
@@ -286,27 +272,105 @@ describe("hitTestGeometry", () => {
         { type: "points", markers: [] },
       ],
     };
-    const result = hitTestGeometry(200, 200, geometry, layout);
-    expect(result.type).toBe("plotArea");
+    expect(hitTestGeometry(200, 200, geometry, layout).element).toBe("plotArea");
   });
 
-  it("detects x-axis region hit", () => {
+  it("detects the x-axis region", () => {
     const geometry: HitGeometry = { type: "bars", rects: [] };
-    // Below plot area, within horizontal bounds
     const result = hitTestGeometry(200, 370, geometry, layout);
-    expect(result.type).toBe("axis");
-    if (result.type === "axis") {
-      expect(result.axisType).toBe("x");
-    }
+    expect(result.element).toBe("xAxis");
+    expect(result.axisType).toBe("x");
   });
 
-  it("detects y-axis region hit", () => {
+  it("detects the y-axis region", () => {
     const geometry: HitGeometry = { type: "bars", rects: [] };
-    // Left of plot area, within vertical bounds
     const result = hitTestGeometry(30, 200, geometry, layout);
-    expect(result.type).toBe("axis");
-    if (result.type === "axis") {
-      expect(result.axisType).toBe("y");
-    }
+    expect(result.element).toBe("yAxis");
+    expect(result.axisType).toBe("y");
+  });
+});
+
+// ============================================================================
+// hitTestDatum — the datum half on its own
+// ============================================================================
+
+describe("hitTestDatum", () => {
+  const layout = makeLayout();
+
+  it("answers null (not an element) when nothing is under the pixel", () => {
+    expect(hitTestDatum(300, 200, { type: "bars", rects: [] })).toBeNull();
+    // ...and the dispatch above it turns that null into the furniture answer.
+    expect(hitTestGeometry(300, 200, { type: "bars", rects: [] }, layout).element).toBe("plotArea");
+  });
+
+  it("walks composite groups in order", () => {
+    const geometry: HitGeometry = {
+      type: "composite",
+      groups: [
+        { type: "bars", rects: [makeBarRect({ seriesIndex: 7, x: 100, y: 50, width: 40, height: 200 })] },
+        { type: "points", markers: [makePointMarker({ seriesIndex: 9, cx: 120, cy: 150 })] },
+      ],
+    };
+    // The point sits ON the bar; the first group wins, and no panel index is
+    // invented for either (composed charts are inert at the panel level).
+    const hit = hitTestDatum(120, 150, geometry);
+    expect(hit?.seriesIndex).toBe(7);
+  });
+});
+
+// ============================================================================
+// Classification helpers
+// ============================================================================
+
+describe("chartElementOf / isDatumHit", () => {
+  it("reads the element straight off a modern result", () => {
+    expect(chartElementOf({ element: "legendEntry", type: "none" })).toBe("legendEntry");
+    expect(isDatumHit({ element: "datum", type: "bar" })).toBe(true);
+    expect(isDatumHit({ element: "plotArea", type: "plotArea" })).toBe(false);
+  });
+
+  it("derives the element from the legacy mirror when a fixture carries only that", () => {
+    expect(chartElementOf({ type: "bar" })).toBe("datum");
+    expect(chartElementOf({ type: "point" })).toBe("datum");
+    expect(chartElementOf({ type: "slice" })).toBe("datum");
+    expect(chartElementOf({ type: "plotArea" })).toBe("plotArea");
+    expect(chartElementOf({ type: "axis", axisType: "y" })).toBe("yAxis");
+    expect(chartElementOf({ type: "axis", axisType: "x" })).toBe("xAxis");
+    expect(chartElementOf({ type: "filterButton" })).toBe("filterButton");
+    expect(chartElementOf(null)).toBe("none");
+  });
+});
+
+// ============================================================================
+// The legacy mirror — one writer, so it cannot drift
+// ============================================================================
+
+describe("legacy type mirror (read by chartRenderer until it migrates)", () => {
+  const layout = makeLayout();
+
+  it("still spells the three mark kinds apart", () => {
+    expect(hitTestBarChart(120, 150, [makeBarRect()], layout).type).toBe("bar");
+    expect(hitTestPoints(150, 100, [makePointMarker()], layout).type).toBe("point");
+    expect(hitTestSlices(350, 230, [makeSliceArc()], layout).type).toBe("slice");
+  });
+
+  it("mirrors pointIndex onto categoryIndex", () => {
+    const hit = hitTestBarChart(120, 150, [makeBarRect({ categoryIndex: 4 })], layout);
+    expect(hit.pointIndex).toBe(4);
+    expect(hit.categoryIndex).toBe(4);
+  });
+
+  it("projects an element the old union could not name onto 'none'", () => {
+    // chartArea is new; the old code answered "none" for that pixel, so the
+    // mirror keeps answering "none" and hover behaves exactly as before.
+    const hit = hitTestBarChart(5, 5, [makeBarRect()], layout);
+    expect(hit.element).toBe("chartArea");
+    expect(hit.type).toBe("none");
+  });
+
+  it("keeps axisType beside the axis elements", () => {
+    const x = hitTestGeometry(200, 370, { type: "bars", rects: [] }, layout);
+    expect(x.type).toBe("axis");
+    expect(x.axisType).toBe("x");
   });
 });

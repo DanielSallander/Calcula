@@ -194,6 +194,24 @@ function EmptyPreviewHint(): React.ReactElement {
 
 type TabId = "data" | "design" | "spec";
 
+/**
+ * Which tab the dialog opens on.
+ *
+ * The chart context menu passes `initialTab` so that "Change Chart Type..."
+ * lands on DESIGN and "Select Data..." lands on DATA. Until now this component
+ * ignored the prop entirely and both items opened on Data, so the one menu item
+ * whose entire purpose is the mark picker put the user on the range editor.
+ *
+ * PIVOT MODE HAS NO DATA TAB (the tab is not even rendered — the pivot IS the
+ * source), so a request for it there degrades to Design rather than selecting a
+ * tab whose button does not exist and rendering an empty dialog body.
+ */
+export function resolveInitialTab(requested: unknown, isPivotMode: boolean): TabId {
+  if (requested === "design" || requested === "spec") return requested;
+  if (requested === "data") return isPivotMode ? "design" : "data";
+  return isPivotMode ? "design" : "data";
+}
+
 /** Starter DSL seeded when a chart first switches to the design-query source. */
 const DESIGN_QUERY_TEMPLATE =
   "# Design query — ROWS = categories, VALUES = series.\n" +
@@ -215,6 +233,11 @@ export function CreateChartDialog({
   // Edit mode: when opened with an editChartId, pre-populate from existing chart
   const editChartId = (dialogData?.editChartId as string) ?? null;
   const isEditMode = editChartId != null;
+
+  // Which tab the opener asked for. Kept as a PRIMITIVE beside the other
+  // dialog-data reads so it can sit in the open-effect's dependency list without
+  // `dialogData`'s object identity re-running the whole reset on every render.
+  const requestedTab = (dialogData?.initialTab as string) ?? null;
 
   // Active tab
   const [activeTab, setActiveTab] = useState<TabId>("data");
@@ -403,7 +426,7 @@ export function CreateChartDialog({
     if (isOpen) {
       setHasAutoDetected(false);
       setError(null);
-      setActiveTab(isPivotMode ? "design" : "data");
+      setActiveTab(resolveInitialTab(requestedTab, isPivotMode));
       setSpecFullView(false);
       setSpecOverlay({});
       setSourceMode("range");
@@ -474,7 +497,7 @@ export function CreateChartDialog({
         }).catch(() => {});
       }
     }
-  }, [isOpen, isPivotMode, pivotId, isEditMode, editChartId, currentSheetName]);
+  }, [isOpen, isPivotMode, pivotId, isEditMode, editChartId, currentSheetName, requestedTab]);
 
   // Use the user's selection as the data range. If the selection is a single
   // cell, auto-detect the surrounding data region; otherwise use the selection as-is.

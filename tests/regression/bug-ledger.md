@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 122 | Open: 2 | Triaged: 0 | Fixed: 120 | Other: 0
+Total: 125 | Open: 2 | Triaged: 0 | Fixed: 123 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1493,3 +1493,39 @@ Two of the Insert Function dialog's seven category buttons filtered the list to 
 **Triage:** app (confidence high) — Two independent spellings of the same category — an id written by hand in the dialog and a string shipped by the Rust catalog — kept in agreement by a normalizer that was never run against real category names.
 **Fix:** fixed — The category list is DERIVED from the catalog `get_all_functions` returns and filters on exact string equality, so the label and the value it filters on are the same string and cannot drift. Every category the backend ships now gets a button; `null` means no filter, replacing a sentinel id. A small label map renames only `Math` -> `Math & Trig` and `UI` -> `Interface`.
   Files: app/src/shell/FormulaBar/InsertFunctionDialog.tsx, app/src/shell/FormulaBar/__tests__/insertFunctionDialog.test.tsx
+
+## BUG-0123 `[fixed]`
+
+**Found:** 2026-09-21 (manual)
+**Oracle:** chart-axis-reverse-menu-writes-dead-field
+
+"Reverse Axis" in a chart's axis context menu was a visible no-op. AxisContextMenu.tsx wrote a TOP-LEVEL `axis.reverse` (`toggleAxisProp("reverse", (axis as any).reverse)`), but the only reader of a reverse flag anywhere in the repository is `createScaleFromSpec` in rendering/scales.ts, which reads `axis.scale.reverse`. Clicking the item dirtied the workbook, saved the dead field into the .cala, repainted the chart unchanged, and left its own checkmark unlit because the checkmark read the same dead field. It also disagreed with ChartFormatPane's "Values in reverse order", which writes `scale.reverse` and works: the two controls for one setting could never agree, and neither showed the other's state.
+
+**Repro:** app: `npx vitest run extensions/Charts/rendering/__tests__/furnitureAxisReverse.test.tsx` — "patches scale.reverse, and NOT a top-level axis.reverse". Manually: right-click a chart's value axis, click "Reverse Axis"; pre-fix the chart is unchanged and reopening the menu shows no checkmark, while Format Axis > "Values in reverse order" does reverse it.
+**Triage:** app (confidence high) — Two spellings of one fact: AxisSpec.reverse and ScaleSpec.reverse both existed, only the nested one had a reader, and an `as any` cast at the single writer hid the mismatch from the compiler.
+**Fix:** fixed — The menu reads and writes `axis.scale.reverse` — the flag the scale factory reads and the format pane writes — and the dead top-level `AxisSpec.reverse` is REMOVED from types.ts and from the JSON schema, so the gate now refuses it instead of persisting it. The `as any` is gone. Filed as part of CI-12, which also implemented the four other dead AxisSpec fields (majorUnit/minorUnit/minorTickMark/crossesAt) in drawCartesianAxes rather than removing them, since they have a working editor.
+  Files: app/extensions/Charts/components/AxisContextMenu.tsx, app/extensions/Charts/types.ts, app/extensions/Charts/lib/chartSpecSchema.ts, app/extensions/Charts/lib/__tests__/chartSpecSchema.test.ts, app/extensions/Charts/rendering/__tests__/furnitureAxisReverse.test.tsx
+
+## BUG-0124 `[fixed]`
+
+**Found:** 2026-09-21 (manual)
+**Oracle:** chart-delete-twice-on-cleared-title-deletes-chart
+
+Delete pressed TWICE on a selected chart title deleted the whole chart. The listener branched on whether a WRITE had happened -- `if (handleChartTextDelete(chartId)) { ...; return; }` -- and fell through to `performChartDelete` when it returned false. `clearChartText` (app/extensions/Charts/handlers/chartTextEditing.ts:303) returns false when the title is ALREADY null (:306), and the reader reaches that state with the FIRST Delete, because nothing moves the selection off a cleared title: `revalidateSubSelection` (app/extensions/Charts/handlers/selectionHandler.ts:428) only ever re-checks the `series` and `dataPoint` rungs. So the second press -- the "did that work?" reflex, on a title that had visibly just vanished -- destroyed the chart, its spec, its per-point overrides and its data references.
+
+**Repro:** Insert a chart that has a title. Click it once to select the chart, click its TITLE to select the title, press Delete (the title disappears -- correct), press Delete again. Pre-fix the whole chart is deleted. The helper half is pinned by a unit test: app: `npx vitest run extensions/Charts/handlers/__tests__/chartTextEditing.test.ts` -- "declines a second time - an already-absent title is not a write" (:622) asserts `handleChartTextDelete` returns FALSE on the second call, which is precisely the value the listener must NOT branch on.
+**Triage:** app (confidence high) — A keystroke-ownership question was answered with a did-I-write-anything boolean. The two coincide everywhere except on an idempotent clear, and that is the one place where guessing wrong costs the document.
+**Fix:** fixed — THE SUBJECT DECIDES WHO OWNS THE KEYSTROKE, NOT WHETHER A WRITE HAPPENED. `handleDeleteKey` now consumes the keystroke whenever the sub-selection is at `level: "element"` on a text element (`isChartTextElement`), calling `preventDefault`/`stopPropagation` and returning BEFORE the write is attempted; the return value is used only to decide whether to re-announce and repaint (app/extensions/Charts/index.ts:2161-2169). The legend branch immediately below it (:2178-2198) was written with the same shape for the same reason, so a selected legend is never a route to deleting the chart either, whether or not the spec actually changed.
+  Files: app/extensions/Charts/index.ts, app/extensions/Charts/handlers/chartTextEditing.ts, app/extensions/Charts/handlers/__tests__/chartTextEditing.test.ts
+
+## BUG-0125 `[fixed]`
+
+**Found:** 2026-09-21 (manual)
+**Oracle:** chart-delete-with-task-pane-button-focused-deletes-chart
+
+Delete pressed while focus sat on a BUTTON in the chart's own Format task pane deleted the chart. The extension's capture-phase Delete listener asked only two questions -- `isKeyClaimed(e)` (a pointer claim, which is a GRID-OVERLAY concept and which a task-pane control does not and cannot carry) and `isTextEntryTarget(e.target)` (INPUT / TEXTAREA / contentEditable, none of which a `<button>` or a `<select>` is). Both said the keystroke was the chart's, so a Delete aimed at a tab button destroyed the chart. Three clicks from a fresh selection: select the chart, click a part of it to open the pane, click a tab.
+
+**Repro:** app: `npx vitest run extensions/Charts/handlers/__tests__/chartKeyboardOwnership.test.ts` -- "REFUSES a Delete aimed at a focused <button> in a task pane (the data-loss case)" (:94), plus ":112" for a `<select>` and ":117" for the ribbon Design-panel button, against ":127" as the positive control (the grid container itself holds focus). Manually: select a chart, press Ctrl+1 to open the Format pane, click any tab button in it, press Delete -- pre-fix the chart is deleted.
+**Triage:** app (confidence high) — A pointer claim answers "does a widget on the grid own this?" and a text-entry test answers "is the reader typing?". Neither answers "is the grid the subject?", and a focusable control that is neither an input nor an overlay falls through both.
+**Fix:** fixed — A third rung, in the middle: `chartOwnsKeystroke` (app/extensions/Charts/handlers/selectionHandler.ts:472) is now ONE predicate -- `isKeyClaimed` -> `isGridFocused` -> `isTextEntryTarget` -- read by all three of the extension's capture-phase key listeners (Delete at app/extensions/Charts/index.ts:2142, the insight-cue arrow step at :2228, the element walk at :2286), because the question is the same for every one of them and a per-listener copy is a copy that drifts. `isGridFocused` is imported from Core's own `@api/keybindings` rather than re-derived: a second spelling of the `[data-focus-container="spreadsheet"]` lookup inside an extension would drift on the first change to that attribute.
+  Files: app/extensions/Charts/handlers/selectionHandler.ts, app/extensions/Charts/index.ts, app/extensions/Charts/handlers/__tests__/chartKeyboardOwnership.test.ts

@@ -81,6 +81,34 @@ export interface GradientFill {
   stops: GradientStop[];
 }
 
+/** Pattern geometry for a {@link PatternFill}. */
+export type PatternType =
+  | "horizontal"
+  | "vertical"
+  | "diagonalUp"
+  | "diagonalDown"
+  | "grid"
+  | "diagonalGrid"
+  | "dots"
+  | "checker";
+
+/**
+ * Pattern fill specification. Modeled on {@link GradientFill}: a `type`
+ * discriminator plus the parameters that type needs, so a painter can hand the
+ * whole object to one fill helper. A pattern paints `foreground` ink over
+ * `background` in a `size`-pixel repeating cell.
+ */
+export interface PatternFill {
+  /** Pattern geometry. */
+  type: PatternType;
+  /** Foreground (pattern ink) color. */
+  foreground: string;
+  /** Background color behind the pattern. Default: the datum's resolved fill. */
+  background?: string;
+  /** Repeating cell size in pixels. Default: 8. */
+  size?: number;
+}
+
 /**
  * A fill can be a solid color string or a gradient specification.
  * When a string, treated as a solid hex color.
@@ -191,6 +219,14 @@ export interface AreaMarkOptions {
 
 /** Scatter point shape. */
 export type PointShape = "circle" | "square" | "diamond" | "triangle";
+
+/**
+ * Marker shape for a SINGLE data point (line/area/scatter/radar/bubble), set
+ * through {@link DataPointOverride.markerStyle}. A superset of
+ * {@link PointShape}: "none" hides just this one marker, and cross/star are
+ * stroke-only shapes Excel offers for emphasising one datum.
+ */
+export type MarkerStyle = PointShape | "none" | "cross" | "star";
 
 /** Options specific to scatter charts. */
 export interface ScatterMarkOptions {
@@ -697,9 +733,16 @@ export interface AxisSpec {
 
   // -- Extended Axis Options (Excel-compatible) --
 
-  /** Major unit (distance between major tick marks). null = auto. */
+  /**
+   * Major unit (distance between major tick marks). null = auto.
+   * Honoured by `axisTickValues` (rendering/chartPainterUtils.ts), which drives
+   * BOTH the tick marks and the tick labels, so the two cannot disagree.
+   */
   majorUnit?: number | null;
-  /** Minor unit (distance between minor tick marks). null = auto. */
+  /**
+   * Minor unit (distance between minor tick marks). null = auto (half the major
+   * step). Only drawn when {@link minorTickMark} asks for marks.
+   */
   minorUnit?: number | null;
   /** Display unit for value axis. Divides values by the unit factor. */
   displayUnit?: DisplayUnit;
@@ -707,16 +750,28 @@ export interface AxisSpec {
   showDisplayUnitLabel?: boolean;
   /** Major tick mark type. Default: "outside". */
   majorTickMark?: TickMarkType;
-  /** Minor tick mark type. Default: "none". */
+  /** Minor tick mark type. Default: "none" (no minor ticks are drawn at all). */
   minorTickMark?: TickMarkType;
   /** Axis label position. Default: "nextToAxis". */
   labelPosition?: AxisLabelPosition;
-  /** Where the perpendicular axis crosses. Default: "auto". */
+  /**
+   * Where the perpendicular axis crosses THIS axis. Default: "auto" (the plot's
+   * bottom edge). Read from `spec.yAxis` by `drawCartesianAxes`, which moves the
+   * horizontal axis LINE, its tick marks and its tick labels together — they are
+   * one object in Excel and separating them is how a half-implementation looks
+   * finished.
+   */
   crossesAt?: AxisCrossesAt;
   /** Custom value where the axis crosses (when crossesAt is "value"). */
   crossesAtValue?: number;
-  /** Whether to reverse the axis direction. */
-  reverse?: boolean;
+
+  // REVERSING AN AXIS LIVES ON `scale.reverse` ({@link ScaleSpec}) AND NOWHERE
+  // ELSE. There used to be a second `reverse?: boolean` here. Nothing ever read
+  // it — `createScaleFromSpec` (rendering/scales.ts) reads `scale.reverse` —
+  // but AxisContextMenu wrote it, so "Reverse Axis" in the chart's own axis
+  // menu was a visible no-op whose tick never lit, while the format pane's
+  // "Values in reverse order" (which writes `scale.reverse`) worked. Two
+  // spellings of one fact is how that happened; there is now one. (BUG-0123.)
 
   // -- Axis Line Styling --
 
@@ -736,6 +791,20 @@ export interface LegendSpec {
   visible: boolean;
   /** Legend position. */
   position: "top" | "bottom" | "left" | "right";
+  /**
+   * Entries removed from the legend while the data stays PLOTTED — Excel's
+   * "select a legend entry, press Delete".
+   *
+   * The indices are the same space `ChartElementRects.legendItems` uses: series
+   * indices for a cartesian legend, CATEGORY indices for a radial (pie/donut)
+   * one, because that is what each legend actually lists.
+   *
+   * DELIBERATE DIVERGENCE FROM EXCEL: Excel's deletion of a legend entry is not
+   * individually undoable — you have to remove the whole legend and recreate
+   * it. That is a defect, not a model. Here the removal is one array entry, so
+   * it is a normal spec edit and a normal undo.
+   */
+  hiddenEntries?: number[];
 }
 
 // ============================================================================
@@ -1069,12 +1138,26 @@ export interface TrendlineSpec {
  * Visual override for a single data point within a chart.
  * Allows formatting individual bars, pie slices, line markers, etc.
  * independently from their series defaults.
+ *
+ * IDENTITY: an override carries BOTH an index pair (`seriesIndex`,
+ * `categoryIndex`, in AUTHORING space — pre-filter) and, when written by a
+ * recent build, a `key` naming the datum. `resolveDatumStyle` matches by `key`
+ * FIRST and falls back to the index pair, so inserting a row into the plotted
+ * range keeps the formatting on the datum the user actually coloured instead of
+ * sliding it onto its neighbour. Specs written before `key` existed carry only
+ * the indices and keep working unchanged.
  */
 export interface DataPointOverride {
   /** Index of the series this override applies to. */
   seriesIndex: number;
   /** Index of the category (data point) within the series. */
   categoryIndex: number;
+  /**
+   * Datum identity captured at WRITE time: the resolved series name and
+   * category label joined by {@link DATA_POINT_KEY_SEPARATOR}. Matched before
+   * the index pair. Omit it to keep pure index behaviour.
+   */
+  key?: string;
   /** Override fill color (hex). */
   color?: string;
   /** Override opacity (0-1). */
@@ -1087,7 +1170,35 @@ export interface DataPointOverride {
   exploded?: number;
   /** Gradient fill override for this data point. */
   gradientFill?: GradientFill;
+  /** Pattern fill override for this data point. Painted over the resolved fill. */
+  patternFill?: PatternFill;
+  /**
+   * Excel's "Invert if negative": when true and this datum's value is below
+   * zero, the fill is replaced by {@link INVERTED_FILL_COLOR} (Excel's default
+   * inverted fill is the plot background, i.e. white).
+   */
+  invertIfNegative?: boolean;
+  /** Marker shape for this one point (line/area/scatter/radar/bubble). */
+  markerStyle?: MarkerStyle;
+  /** Marker radius in pixels for this one point. */
+  markerSize?: number;
+  /** Marker fill color for this one point (hex). */
+  markerFill?: string;
+  /** Marker border/stroke color for this one point (hex). */
+  markerBorderColor?: string;
+  /** Marker border/stroke width in pixels for this one point. */
+  markerBorderWidth?: number;
 }
+
+/**
+ * Separator joining series name and category label inside
+ * {@link DataPointOverride.key}. Chosen as a unit separator so an ordinary
+ * label containing a comma, pipe or slash cannot forge a key.
+ */
+export const DATA_POINT_KEY_SEPARATOR = "";
+
+/** Fill used when {@link DataPointOverride.invertIfNegative} fires. */
+export const INVERTED_FILL_COLOR = "#FFFFFF";
 
 // ============================================================================
 // Chart Filters (show/hide series and categories)
@@ -1494,14 +1605,98 @@ export function hasRenderableData(data: ParsedChartData | null | undefined): dat
 // Hit-Testing & Interaction
 // ============================================================================
 
-/** Result of hit-testing a point within a chart. */
+/**
+ * Every individually addressable chart element, as Excel names them.
+ *
+ * THE SOURCE OF TRUTH IS THIS ARRAY — {@link ChartElementId} is derived from it
+ * rather than re-typed beside it, and `elementHitTest-drift.test.ts` asserts
+ * that `rendering/chartHitTesting.ts` genuinely PRODUCES every entry. Adding a
+ * member here without a producer fails that test. That guard exists because
+ * "title" and "legend" sat in the previous union for a year with zero producers
+ * anywhere in the repository, and the only test over the union asserted that it
+ * had nine entries.
+ *
+ * There is ONE datum member. The old union spelled a data point three ways
+ * ("bar" / "point" / "slice") and every consumer collapsed them again on the
+ * spot, because the mark kind is already known from the spec — so the trio was
+ * a third spelling of something the caller had.
+ *
+ * EXCEL'S GRANULARITY ASYMMETRIES ARE DELIBERATE, not an accident of this list:
+ *   - `errorBars` is PER SERIES. Excel has no per-point error bar, so a hit on
+ *     one drawn bar answers the series and leaves `pointIndex` absent.
+ *   - `dataLabel` is PER POINT, and carries both indices.
+ *   - `trendline` is per series, plus {@link ChartHitResult.trendlineIndex}
+ *     because one series may carry several.
+ *   - Tick LABELS are not separable from their axis — Excel refuses to select
+ *     one, and so do we: they are part of `xAxis` / `yAxis`.
+ *
+ * `gridlines` is STILL deliberately NOT here, re-checked when the furniture wave
+ * (trendline / errorBars / dataLabel / dataTable) landed. Excel addresses
+ * gridlines — all-or-none per axis per major/minor, never one line — but nothing
+ * in {@link ChartLayout} records where they are drawn: `drawHorizontalGridLines`
+ * / `drawVerticalGridLines` compute their ticks inside the call and are invoked
+ * by twelve painters that never hand them a layout to write back to. A
+ * `gridlines` member would therefore be dead on arrival, which is the exact
+ * defect this list exists to prevent. It belongs with the change that threads a
+ * layout into those two painters and records the tick geometry, and the drift
+ * test will demand a producer on the day it is added.
+ */
+export const CHART_ELEMENT_IDS = [
+  "chartArea",
+  "plotArea",
+  "datum",
+  "title",
+  "xAxisTitle",
+  "yAxisTitle",
+  "xAxis",
+  "yAxis",
+  "legend",
+  "legendEntry",
+  "trendline",
+  "errorBars",
+  "dataLabel",
+  "dataTable",
+  "filterButton",
+  "none",
+] as const;
+
+/** Name of the chart element a hit landed on. Derived from {@link CHART_ELEMENT_IDS}. */
+export type ChartElementId = (typeof CHART_ELEMENT_IDS)[number];
+
+/**
+ * Result of hit-testing a point within a chart — Excel's
+ * `Chart.GetChartElement` contract: `ElementID + SeriesIndex + PointIndex`.
+ */
 export interface ChartHitResult {
-  /** What type of chart element was hit. */
-  type: "bar" | "point" | "slice" | "plotArea" | "title" | "legend" | "axis" | "filterButton" | "none";
-  /** Series index (set when a data element is hit). */
+  /**
+   * Which chart element was hit.
+   *
+   * OPTIONAL ONLY AS LONG AS `rendering/chartRenderer.ts` still builds one hit
+   * result of its own (`hitTestPivotFieldButtons`, a private copy of
+   * `hitTestFilterButtons`). Every producer in `rendering/chartHitTesting.ts`
+   * sets it; `chartElementOf` is the single reader that tolerates its absence
+   * and derives it from the legacy mirror. It becomes REQUIRED with the
+   * chartRenderer migration, in the same change that deletes the mirror.
+   */
+  element?: ChartElementId;
+  /**
+   * Series index — set for a datum, and for a `legendEntry` (the series that
+   * entry stands for; the CATEGORY index for a radial legend, matching what
+   * {@link ChartElementRects.legendItems} lists).
+   */
   seriesIndex?: number;
-  /** Category/data point index (set when a data element is hit). */
-  categoryIndex?: number;
+  /**
+   * Data-point index within the series. ABSENT means Excel's `PointIndex = -1`:
+   * the whole series rather than one of its points.
+   */
+  pointIndex?: number;
+  /**
+   * Which of the series' trendlines was hit — an index into `spec.trendlines`,
+   * NOT into the series list. Set only for `element: "trendline"`, because one
+   * series can carry a linear fit and a moving average at once and
+   * {@link seriesIndex} alone cannot tell them apart.
+   */
+  trendlineIndex?: number;
   /** Data value. */
   value?: number;
   /** Series name. */
@@ -1510,22 +1705,45 @@ export interface ChartHitResult {
   categoryName?: string;
   /** Field button info (set when a filter button is hit). */
   fieldButton?: PivotChartFieldButton;
-  /** Axis type (set when type is "axis"). */
+  /** Axis type (set for "xAxis" / "yAxis"). */
   axisType?: "x" | "y";
+  /**
+   * LEGACY MIRROR of {@link element}, kept only while
+   * `rendering/chartRenderer.ts` (hover state, tooltips, pivot buttons) is
+   * still on the old spelling. Written by ONE constructor in
+   * `rendering/chartHitTesting.ts`, so it cannot drift from `element`. Elements
+   * the old, narrower union could not name project to "none" — which is what
+   * the old code answered for them anyway. Delete both mirrors with the
+   * chartRenderer migration; nothing new may read them.
+   */
+  type: "bar" | "point" | "slice" | "plotArea" | "axis" | "filterButton" | "none";
+  /** LEGACY MIRROR of {@link pointIndex}. See {@link type}. */
+  categoryIndex?: number;
 }
 
-/** Hierarchical selection level within a chart. */
-export type ChartSelectionLevel = "none" | "chart" | "series" | "dataPoint" | "axis";
+/**
+ * Hierarchical selection level within a chart.
+ *
+ * `element` covers every non-datum, non-axis piece of furniture (title, axis
+ * titles, legend, legend entry); {@link ChartSubSelection.elementId} says which
+ * one. It is a single level rather than one level per element because the
+ * element's name is already carried — a `"title"` level beside
+ * `elementId: "title"` would be two spellings of one fact, which is how the
+ * dead hit-result members happened in the first place.
+ */
+export type ChartSelectionLevel = "none" | "chart" | "series" | "dataPoint" | "axis" | "element";
 
 /** Sub-selection state within a selected chart. */
 export interface ChartSubSelection {
   level: ChartSelectionLevel;
-  /** Selected series index (set at "series" and "dataPoint" levels). */
+  /** Selected series index (set at "series", "dataPoint" and legend-entry "element" levels). */
   seriesIndex?: number;
   /** Selected category index (set at "dataPoint" level). */
   categoryIndex?: number;
   /** Selected axis type (set at "axis" level). */
   axisType?: "x" | "y";
+  /** Which element is selected (set at "element" level). */
+  elementId?: ChartElementId;
 }
 
 // ============================================================================
@@ -1612,6 +1830,127 @@ export interface PivotChartFieldButton {
 // Chart Layout (generalized)
 // ============================================================================
 
+/** A rectangle in chart-local pixel space. */
+export interface ChartElementRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Names of the SINGLE-RECT chart elements — the keys `recordChartElementRect`
+ * accepts. The collections (legend entries, trendlines, error bars, data
+ * labels) are not here: they are many rects under one name and have their own
+ * recorders.
+ */
+export type ChartElementKey =
+  | "chartArea"
+  | "title"
+  | "xAxisTitle"
+  | "yAxisTitle"
+  | "xAxisBand"
+  | "yAxisBand"
+  | "legend"
+  | "displayUnitLabel"
+  | "dataTable";
+
+/**
+ * Rectangles for the non-datum chart elements, so a title, an axis band or one
+ * legend entry can be hit-tested, selected and edited. Before this existed the
+ * layout kept only four scalars (top/right/bottom/left) and a chart title had
+ * no rectangle anywhere.
+ *
+ * TWO-STAGE CONTRACT — read this before touching `layout` after it is computed:
+ *
+ * 1. LAYOUT STAGE (`computeCartesianLayout` / `computeRadialLayout`) fills these
+ *    in from the margins it just computed. Label widths there are ESTIMATED
+ *    (~7px/char for y-axis labels, ~6px/char for legend text), so these rects
+ *    are a PRE-PAINT FALLBACK, not truth.
+ * 2. PAINT STAGE overwrites the rects it can measure. `drawTitle` knows its own
+ *    box exactly and `drawLegendItems` measures every entry, so those write the
+ *    true rect back onto `layout.elements` via `recordChartElementRect` and add
+ *    their key to {@link measured}.
+ *
+ * MARGIN CHANGES AFTER LAYOUT: several stages mutate `layout.margin` and
+ * `layout.plotArea` between the two stages (the data table folded into
+ * `margin.bottom` in chartDispatch, pivot field buttons in chartRenderer,
+ * the secondary axis in combo/pareto, the horizontal-bar relayout). Every rect
+ * here EXCEPT `chartArea` and `title` is a function of `margin`/`plotArea`, so a
+ * stale `elements` would point at the wrong pixels. Such a stage MUST call
+ * `reflowChartElements(layout, spec, data, theme)` (chartPainterUtils) right
+ * after it finishes mutating — that recomputes every rect from the NEW margins
+ * and clears `measured`. Reflow BEFORE painting, never after: a reflow after
+ * paint would throw away the measured truth the painters wrote back.
+ */
+export interface ChartElementRects {
+  /**
+   * Which layout produced these rects. `reflowChartElements` needs it to know
+   * whether to recompute cartesian (axis bands) or radial (no axes) geometry.
+   */
+  family: "cartesian" | "radial";
+  /** The whole canvas. Never affected by a margin change. */
+  chartArea: ChartElementRect;
+  /** The chart title. Anchored to the canvas top edge, not to `margin.top`. */
+  title?: ChartElementRect;
+  /** The X axis title, below the x-axis label band. */
+  xAxisTitle?: ChartElementRect;
+  /** The Y axis title, rotated, in the left margin. */
+  yAxisTitle?: ChartElementRect;
+  /** The horizontal strip holding the X axis tick labels. */
+  xAxisBand?: ChartElementRect;
+  /** The vertical strip holding the Y axis tick labels. */
+  yAxisBand?: ChartElementRect;
+  /** Bounding box of the whole legend. */
+  legend?: ChartElementRect;
+  /**
+   * One rect per legend entry. `seriesIndex` is the PAINTER-space series index
+   * for cartesian legends and the PAINTER-space category index for radial
+   * (pie/donut) legends, matching what the legend actually lists.
+   */
+  legendItems?: Array<{ seriesIndex: number; rect: ChartElementRect }>;
+  /** The Y axis display-unit label ("Thousands", ...) above the plot area. */
+  displayUnitLabel?: ChartElementRect;
+  /**
+   * One entry per painted trendline, as a POLYLINE rather than a rect.
+   *
+   * A trendline's bounding box is useless as a hit target: a line from the
+   * bottom-left of the plot to the top-right has a box that covers the whole
+   * plot, so recording one would make the plot area unselectable. The hit test
+   * measures distance to the nearest SEGMENT instead, which is what Excel does
+   * and the only shape that can be both clickable and honest.
+   *
+   * `trendlineIndex` indexes `spec.trendlines`; `seriesIndex` is the series the
+   * trendline tracks, in PAINTER space.
+   */
+  trendlines?: Array<{
+    seriesIndex: number;
+    trendlineIndex: number;
+    points: Array<{ x: number; y: number }>;
+  }>;
+  /**
+   * One rect per DRAWN error bar (stem plus caps, tight). Many rects, ONE
+   * identity: Excel's error bars are a per-series object with no per-point
+   * member, so a hit on any of a series' bars answers that series and leaves
+   * `pointIndex` absent.
+   */
+  errorBars?: Array<{ seriesIndex: number; rect: ChartElementRect }>;
+  /**
+   * One rect per painted data label. Unlike error bars these ARE per point, so
+   * both indices are carried. For a radial mark the series and the category are
+   * the same axis, and both indices are the arc's own — matching what the slice
+   * hit test answers.
+   */
+  dataLabels?: Array<{ seriesIndex: number; pointIndex: number; rect: ChartElementRect }>;
+  /** The data-table grid below the plot area, when `spec.dataTable` is enabled. */
+  dataTable?: ChartElementRect;
+  /**
+   * Keys whose rect is MEASURED truth written back by a painter, rather than
+   * the layout's estimate. Cleared by `reflowChartElements`.
+   */
+  measured: ChartElementKey[];
+}
+
 /** Shared layout structure for all chart types. */
 export interface ChartLayout {
   /** Total canvas dimensions. */
@@ -1621,4 +1960,11 @@ export interface ChartLayout {
   margin: { top: number; right: number; bottom: number; left: number };
   /** The plot area rect (inside margins). For radial charts, this is the bounding box of the circle. */
   plotArea: { x: number; y: number; width: number; height: number };
+  /**
+   * Rectangles for the chart's non-datum elements (title, axis titles, axis
+   * label bands, legend + per-entry boxes, display-unit label). Optional so a
+   * hand-built layout in a test stays valid; see {@link ChartElementRects} for
+   * the two-stage estimate/measure contract and the reflow rule.
+   */
+  elements?: ChartElementRects;
 }

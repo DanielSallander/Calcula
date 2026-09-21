@@ -27,8 +27,28 @@ import {
   IconChartMarks,
   IconChartTransforms,
   isKeyClaimed,
+  registerTaskPane,
+  unregisterTaskPane,
+  openTaskPane,
+  removeTaskPaneContextKey,
 } from "@api";
 import { registerSandboxMark } from "./rendering/sandboxMarkShim";
+
+/**
+ * Excel's Ctrl+1 on a chart: format whatever is selected. Registered as a
+ * command (not just a listener) so the keybinding registry, the command palette
+ * and the macro recorder all see the same one door.
+ */
+const CHART_FORMAT_PANE_COMMAND = "chart.format.selection";
+
+/**
+ * Excel's Delete on a selected chart element. A COMMAND, not just a listener,
+ * because the keybinding registry's own window-capture listener runs outside
+ * (and therefore before) this extension's document-capture door and consumes
+ * Delete for `core.edit.clearContents` — so the only way the chart can claim
+ * the key is to stand in that registry with a `when` predicate.
+ */
+const CHART_DELETE_SELECTION_COMMAND = "chart.delete.selection";
 import { ChartMarksDialog } from "./components/ChartMarksDialog";
 import { ChartTransformsDialog } from "./components/ChartTransformsDialog";
 import { ChartLibraryConsentDialog } from "./components/ChartLibraryConsentDialog";
@@ -40,6 +60,8 @@ import {
   type LibraryGateDescriptor,
 } from "./lib/distributedLibraryGate";
 import { getActiveSheet } from "@api/lib";
+import { CommandRegistry } from "@api/commands";
+import { registerKeybinding, isGridFocused } from "@api/keybindings";
 import {
   removeGridRegionsByType,
   requestOverlayRedraw,
@@ -54,6 +76,8 @@ import {
   ChartManifest,
   ChartDialogDefinition,
   CHART_DIALOG_ID,
+  ChartFormatPaneDefinition,
+  CHART_FORMAT_PANE_ID,
 } from "./manifest";
 
 import {
@@ -62,14 +86,27 @@ import {
   selectChart,
   isChartSelected,
   advanceSelection,
-  resetSubSelection,
+  markSubSelectionStale,
+  revalidateSubSelection,
+  isSubSelectionStale,
+  notePressOrigin,
+  noteMovePreview,
   setPendingClick,
   clearPendingClick,
   consumePendingClick,
   deselectChart,
   getCurrentChartId,
   getSubSelection,
+  setSubSelection,
+  buildChartNavGroups,
+  navigateChartSelection,
+  escapeLevelUp,
+  chartOwnsKeystroke,
+  arrowsBelongToOverlayStep,
+  isChartAreaElement,
+  selectionAfterHidingLegendEntry,
 } from "./handlers/selectionHandler";
+import type { ChartNavDirection } from "./handlers/selectionHandler";
 import {
   resetChartStore,
   syncChartRegions,
@@ -88,12 +125,18 @@ import {
   replaceChartSpec as storeReplaceChartSpec,
   mergeSpecPreview,
   updateChartPlacement as storeUpdateChartPlacement,
+  flushPendingChartSaves,
 } from "./lib/chartStore";
 import { chartsBackend } from "./lib/chartsBackend";
 import { registerChartRenderingApi } from "@api/rendering";
 import { registerChartParamController } from "@api/chartParams";
 import { chartParamController } from "./lib/chartParamController";
-import { registerChartDataProvider } from "@api/chartData";
+import { registerChartDataProvider, setChartRightClickTarget } from "@api/chartData";
+import {
+  installChartSelectionPublisher,
+  publishCurrentChartSelection,
+  runResetToMatchStyleCommand,
+} from "./components/ChartFormatPane";
 import { chartDataProvider } from "./lib/chartDataProvider";
 import {
   chartCueSteps,
@@ -109,7 +152,7 @@ import {
   visibleChartCues,
 } from "@api/chartCues";
 import { cueAtDatum } from "./rendering/cuePainter";
-import { isTextEntryTarget, overlayStepDelta } from "./lib/overlayKeys";
+import { overlayStepDelta } from "./lib/overlayKeys";
 import { onOverlayStyleChanged } from "@api/insightStyle";
 import { hitTestCommentBoxes, hitTestCueStepper } from "./rendering/cueChrome";
 import { chartOverlayHost } from "./lib/chartOverlayHost";
@@ -120,7 +163,7 @@ import type { DataRangeRef } from "./types";
 import { QuickAccessPopup } from "./components/QuickAccessPopup";
 import { DataPointFormatDialog } from "./components/DataPointFormatDialog";
 import { AxisContextMenu } from "./components/AxisContextMenu";
-import { ChartContextMenu } from "./components/ChartContextMenu";
+import { ChartContextMenu, hideLegendEntryPatch } from "./components/ChartContextMenu";
 import { FormatAxisDialog } from "./components/FormatAxisDialog";
 import {
   renderChart,
@@ -153,7 +196,23 @@ import {
   type QuickAccessButton,
 } from "./rendering/quickAccessButtons";
 import { listChartQuickActions } from "@api/chartQuickActions";
-import { hitTestBarChart, hitTestGeometry, hitTestRect } from "./rendering/chartHitTesting";
+import {
+  chartElementOf,
+  hitTestGeometry,
+  hitTestRect,
+  isDatumHit,
+} from "./rendering/chartHitTesting";
+import { toAuthoringIndices } from "./lib/dataPointOverrides";
+import {
+  CHART_FORMAT_ELEMENT_EVENT,
+  handleChartDoubleClick,
+  handleChartTextDelete,
+  isChartTextElement,
+  maybeEnterTextEditOnClick,
+  resetChartTextEditing,
+  setChartDragActive,
+  type ChartFormatElementDetail,
+} from "./handlers/chartTextEditing";
 import { isComposed } from "./rendering/chartDispatch";
 import {
   setPointSelection,
@@ -161,7 +220,6 @@ import {
   clearAllPointSelections,
   pointSelectionKey,
   buildPointSelection,
-  isDataHit,
   SELECTION_SUPPORTED_MARKS,
   matchingSharedParams,
   brushKeysFromHits,
@@ -199,11 +257,58 @@ let rafPending = false;
 // ============================================================================
 
 /**
+ * The selected chart is about to re-read its numbers.
+ *
+ * Note the sub-selection as stale against the data cache it was chosen on
+ * rather than dropping the reader straight back to chart level: typing in a
+ * source cell used to throw away "this one bar" mid-task. Nothing can be
+ * decided here — the refreshed geometry does not exist yet — so the decision
+ * is deferred to the overlay render callback, which sees the new cache.
+ */
+function noteChartDataChanging(): void {
+  const cid = getCurrentChartId();
+  if (cid == null) return;
+  markSubSelectionStale(getCachedChartData(cid));
+}
+
+/**
  * Emit a CHART_SELECTION_CHANGED event with the current selection state.
  * Called after every selection change (select, advance, deselect) so the
  * Shell (FormulaBar, NameBox) can update accordingly.
  */
+/**
+ * Generation token for {@link emitChartSelectionEvent}.
+ *
+ * ONE FACT, TWO CHANNELS, AND ONLY ONE OF THEM CAN WAIT. The `@api`
+ * registry is published synchronously; the app event is synchronous for
+ * chart/axis/element levels but asynchronous for series/dataPoint (it resolves
+ * the sheet name and builds the SERIES formula, which can be a backend
+ * round-trip). Every call site is fire-and-forget, so a selection made WHILE an
+ * earlier series-level emit is still awaiting used to be announced FIRST and
+ * the stale series payload LAST: the formula bar armed series-reference
+ * drag/resize for a series that was no longer selected while the Name Box —
+ * reading the synchronous registry — correctly said "Chart Area". Two surfaces,
+ * one fact, disagreeing. A superseded emit now drops its payload instead of
+ * overtaking the one that replaced it.
+ */
+let chartSelectionEmitGeneration = 0;
+
 async function emitChartSelectionEvent(): Promise<void> {
+  const generation = ++chartSelectionEmitGeneration;
+  // THE REGISTRY IS FED SYNCHRONOUSLY, THE SHELL IS TOLD WHEN THE FORMULA IS
+  // READY. `@api/chartSelection` is what the Format pane targets, and this
+  // function is async for series-level selections (it resolves the sheet name
+  // and builds the SERIES formula, which can be a backend round-trip). A
+  // gesture that moves the ladder and opens the pane in the same tick — the
+  // double-click, the context menu's Format row — would otherwise show the
+  // PREVIOUS subject's fields until that promise settled, and then flip.
+  //
+  // There is still exactly ONE derive-and-publish function
+  // (`publishCurrentChartSelection`, which reads the ladder); this call and
+  // the publisher's own CHART_SELECTION_CHANGED subscription are two triggers
+  // for it, and the registry drops a publish that changes nothing.
+  publishCurrentChartSelection();
+
   const chartId = getCurrentChartId();
   if (chartId == null) {
     // No chart selected
@@ -225,6 +330,7 @@ async function emitChartSelectionEvent(): Promise<void> {
     level: sub.level,
     seriesIndex: sub.seriesIndex,
     categoryIndex: (sub as { categoryIndex?: number }).categoryIndex,
+    elementId: sub.elementId,
   };
 
   // For series-level or dataPoint-level selection, compute the SERIES formula
@@ -257,6 +363,11 @@ async function emitChartSelectionEvent(): Promise<void> {
       // If formula computation fails, emit without it
     }
   }
+
+  // A selection made while the awaits above were in flight has already been
+  // announced. Emitting now would announce the OLD subject last and leave every
+  // listener holding it. See `chartSelectionEmitGeneration`.
+  if (generation !== chartSelectionEmitGeneration) return;
 
   emitAppEvent(AppEvents.CHART_SELECTION_CHANGED, payload);
 }
@@ -524,6 +635,48 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFunctions.push(() => context.ui.dialogs.unregister(FORMAT_AXIS_DIALOG_ID));
 
+  // -----------------------------------------------------------------------
+  // The Format task pane — Excel's "Format <element>"
+  // -----------------------------------------------------------------------
+  //
+  // ONE FORMAT SURFACE, NOT TWO. The two dialog ids registered just above no
+  // longer format anything: `chart:dataPointFormat` and
+  // `chart:formatAxisDialog` are one-effect redirectors into this pane, kept
+  // registered only because ChartContextMenu, ChartDesignSections and
+  // AxisContextMenu still name those ids. They are doorways; the pane is the
+  // room. Nothing is registered twice for the same job.
+  registerTaskPane(ChartFormatPaneDefinition);
+  cleanupFunctions.push(() => {
+    unregisterTaskPane(CHART_FORMAT_PANE_ID);
+    // `selectChart` adds the "chart" context key and `deselectChart` removes
+    // it, but deactivation goes through `resetSelectionHandlerState`, which
+    // resets the ladder WITHOUT deselecting — so the key would outlive the
+    // only pane that declares it. Inert before this pane existed; a leak now.
+    removeTaskPaneContextKey("chart");
+  });
+
+  // The pane's SUBJECT. Without this nothing ever publishes into
+  // `@api/chartSelection` and the pane shows its "select a chart" invitation
+  // forever. It is an event listener on CHART_SELECTION_CHANGED rather than a
+  // call site, so the half-dozen places that move the ladder cannot forget it.
+  cleanupFunctions.push(installChartSelectionPublisher());
+
+  // A double-click on a non-text chart element asks for the Format surface
+  // (the two title elements open for typing instead and emit nothing). The
+  // event describes the selection the gesture just made, so the pane needs no
+  // payload — it reads the published selection, which is the same fact rather
+  // than a second description of it.
+  //
+  // The publish is forced FIRST because the pane mounts inside this very
+  // dispatch, while the announcement in the double-click seam above runs
+  // after `handleChartDoubleClick` returns — i.e. after this listener.
+  cleanupFunctions.push(
+    onAppEvent<ChartFormatElementDetail>(CHART_FORMAT_ELEMENT_EVENT, () => {
+      publishCurrentChartSelection();
+      openTaskPane(CHART_FORMAT_PANE_ID);
+    }),
+  );
+
   // Register API commands for programmatic chart management
   ExtensionRegistry.registerCommand({
     id: "chart.filter.set",
@@ -614,6 +767,25 @@ function activate(context: ExtensionContext): void {
     },
   });
 
+  // CI-11 — Excel's "Reset to Match Style". The body lives beside the Format
+  // pane's own button (components/ChartFormatPane.tsx) so the command and the
+  // button cannot drift: ONE resolver decides the scope from the current
+  // selection, and the whole reset is ONE applySpecPatch, hence one undo entry.
+  ExtensionRegistry.registerCommand({
+    id: "chart.resetToMatchStyle",
+    name: "Reset to Match Style",
+    execute: async (ctx) => {
+      const args = (ctx ?? {}) as { chartId?: string };
+      runResetToMatchStyleCommand(args.chartId);
+    },
+  });
+
+  // NARROWER ON PURPOSE, and not a leg of the command above. This one clears
+  // exactly what its id says and nothing else. `runResetToMatchStyleCommand`
+  // scopes itself to the CURRENT SELECTION, so routing this id through it
+  // would make "clear the data point overrides" mean "reset whichever rung
+  // happens to be selected" -- a silent change of meaning for a command id
+  // the scripting surface can name. The wider clear is `chart.resetToMatchStyle`.
   ExtensionRegistry.registerCommand({
     id: "chart.clearDataPointOverrides",
     name: "Clear Data Point Overrides",
@@ -726,8 +898,42 @@ function activate(context: ExtensionContext): void {
       type: "chart",
       render: (ctx: OverlayRenderContext) => {
         renderChart(ctx);
+        // A sub-selection marked stale by a data change is checked HERE, not
+        // where the change landed: the re-read is async, so at the moment of
+        // the edit the data cache still holds the pre-edit geometry and any
+        // check against it would pass and clear the flag. revalidateSubSelection
+        // compares the cache entry by identity and decides nothing until it is
+        // a different object.
+        const renderedId = ctx.region.data?.chartId as string | undefined;
+        if (renderedId != null && isSubSelectionStale() && isChartSelected(renderedId)) {
+          const fresh = getCachedChartData(renderedId);
+          if (revalidateSubSelection(renderedId, fresh, fresh ? fresh.hitGeometry : null)) {
+            void emitChartSelectionEvent();
+          }
+        }
       },
       hitTest: hitTestChart,
+      // Wave A's double-click seam. Excel's rule is that a double-click is a
+      // uniform "open Format <element>" gesture; the two text elements it can
+      // reach instead open for typing, because that is the same state Excel
+      // arrives at and it is what the reader asked for. See
+      // handlers/chartTextEditing.ts for why the answer is computed from the
+      // pixel alone and never from what was selected before the gesture.
+      onDoubleClick: (ctx) => {
+        const taken = handleChartDoubleClick(ctx);
+        if (!taken) return false;
+        // THE GESTURE MOVES THE LADDER ITSELF and announces nothing. It has
+        // to move it itself: by the time `dblclick` arrives both mouseups
+        // have already advanced the ladder, so the gesture STATES its answer
+        // (`setSubSelection`) instead of nudging one. Nothing inside it emits
+        // CHART_SELECTION_CHANGED, and that event is what feeds the Name Box
+        // and the Format pane's registry — so the announcement is made here,
+        // by the one module that owns it, for BOTH outcomes: the element that
+        // opened for typing and the element that asked to be formatted.
+        void emitChartSelectionEvent();
+        context.events.emit(AppEvents.GRID_REFRESH);
+        return true;
+      },
       // S6: claim an in-plot drag as a brush (interval select) instead of a move.
       // Only for a selected, brushable chart, inside the plot area, off any widget.
       claimsBodyDrag: (ctx) => {
@@ -777,19 +983,20 @@ function activate(context: ExtensionContext): void {
       const changes = (detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number }> } | undefined)?.changes;
       if (!changes || changes.length === 0) {
         invalidateAllChartCaches();
-        resetSubSelection();
+        noteChartDataChanging();
         context.events.emit(AppEvents.GRID_REFRESH);
         return;
       }
       const activeSheetIndex = getActiveSheetIndex();
+      const selectedId = getCurrentChartId();
       let any = false;
       for (const chart of charts) {
         if (chartIntersectsChanges(chart.spec, changes, activeSheetIndex)) {
           invalidateChartCache(chart.chartId);
+          if (chart.chartId === selectedId) noteChartDataChanging();
           any = true;
         }
       }
-      resetSubSelection();
       if (any) context.events.emit(AppEvents.GRID_REFRESH);
     }),
   );
@@ -828,10 +1035,11 @@ function activate(context: ExtensionContext): void {
       (c) => isPivotDataSource(c.spec?.data) || isDesignQueryDataSource(c.spec?.data),
     );
     if (aggregatedCharts.length > 0) {
+      const selectedId = getCurrentChartId();
       for (const chart of aggregatedCharts) {
         invalidateChartCache(chart.chartId);
+        if (chart.chartId === selectedId) noteChartDataChanging();
       }
-      resetSubSelection();
       context.events.emit(AppEvents.GRID_REFRESH);
     }
   };
@@ -859,6 +1067,12 @@ function activate(context: ExtensionContext): void {
     if (detail.regionType !== "chart") return;
     const chartId = detail.data?.chartId as string;
     if (chartId == null) return;
+
+    // Where the object sits NOW, so a live move preview can be measured
+    // against the press instead of against the object's own already-moved
+    // position (handleMovePreview writes straight through to the store).
+    const pressed = getChartById(chartId);
+    if (pressed) notePressOrigin(chartId, pressed.x, pressed.y);
 
     if (isChartSelected(chartId)) {
       // Chart is already selected: set pending click for deferred sub-selection.
@@ -895,8 +1109,18 @@ function activate(context: ExtensionContext): void {
     if (detail.regionType !== "chart") return;
     const chartId = detail.data?.chartId as string;
     if (chartId != null) {
-      // Clear pending click - this is a drag, not a click
-      clearPendingClick();
+      // Core dispatches this on EVERY mousemove once the drag is live; its own
+      // 3px hasMoved threshold gates only moveComplete. Charts never sets
+      // movable:false, so every left press starts a move drag and clearing the
+      // pending click here unconditionally meant one pixel of hand jitter
+      // between press and release silently cancelled the ladder advance.
+      // Below the threshold Core considers the object not to have moved at
+      // all, so neither the pending click nor the object itself is touched.
+      if (!noteMovePreview(chartId, detail.x, detail.y)) return;
+      // An open text editor hides for the duration of a real drag: its rect is
+      // recomputed per frame from the chart's canvas origin, so without this it
+      // would skate across the grid a frame behind the object.
+      setChartDragActive(chartId);
       moveChart(chartId, detail.x, detail.y);
       syncChartRegions();
       context.events.emit(AppEvents.GRID_REFRESH);
@@ -915,6 +1139,7 @@ function activate(context: ExtensionContext): void {
     if (chartId != null) {
       // Clear pending click - move completed, not a click
       clearPendingClick();
+      setChartDragActive(null);
       moveChart(chartId, detail.x, detail.y);
       syncChartRegions();
       invalidateChartCache(chartId);
@@ -935,6 +1160,7 @@ function activate(context: ExtensionContext): void {
     if (detail.regionType !== "chart") return;
     const chartId = detail.data?.chartId as string;
     if (chartId != null) {
+      setChartDragActive(chartId);
       resizeChart(chartId, detail.x, detail.y, detail.width, detail.height);
       syncChartRegions();
       context.events.emit(AppEvents.GRID_REFRESH);
@@ -951,6 +1177,7 @@ function activate(context: ExtensionContext): void {
     if (detail.regionType !== "chart") return;
     const chartId = detail.data?.chartId as string;
     if (chartId != null) {
+      setChartDragActive(null);
       resizeChart(chartId, detail.x, detail.y, detail.width, detail.height);
       syncChartRegions();
       invalidateChartCache(chartId);
@@ -1204,7 +1431,7 @@ function activate(context: ExtensionContext): void {
     // exactly as a click on the plot background drops the ladder to chart level.
     if (getChartOverlay(click.chartId).cues.length > 0) {
       const datumHit = hitTestGeometry(local.localX, local.localY, cachedData.hitGeometry, cachedData.layout);
-      const cue = isDataHit(datumHit) ? cueAtDatum(visibleChartCues(click.chartId), datumHit) : null;
+      const cue = isDatumHit(datumHit) ? cueAtDatum(visibleChartCues(click.chartId), datumHit) : null;
       setSelectedChartCue(click.chartId, cue ? cue.cueId : null);
       requestOverlayRedraw();
     }
@@ -1222,7 +1449,7 @@ function activate(context: ExtensionContext): void {
       // hitTestGeometry always returns an object — only a real datum sets a
       // selection; a background/axis click clears it (back to all-highlighted).
       const values: string[] = [];
-      if (isDataHit(hit)) {
+      if (isDatumHit(hit)) {
         const key = pointSelectionKey(hit, on);
         values.push(key);
         setPointSelection(click.chartId, buildPointSelection(selectParam.name, on, key));
@@ -1245,7 +1472,22 @@ function activate(context: ExtensionContext): void {
       return;
     }
 
-    const hitResult = hitTestBarChart(local.localX, local.localY, cachedData.barRects, cachedData.layout);
+    // The unified geometry — the same call the cue branch and the point-param
+    // branch above already make, and the same one HOVER makes. It used to be a
+    // bars-only hit test against a bars-only cache field, so hover and click
+    // disagreed about the same pixel and a pie, donut, line, area, scatter,
+    // radar or bubble chart had no selectable data points at all.
+    const hitResult = hitTestGeometry(local.localX, local.localY, cachedData.hitGeometry, cachedData.layout);
+    // Excel's second route into the title editor: two SLOW single clicks. The
+    // first selects the title (the ladder below does that); the second opens it
+    // for typing. Asked BEFORE the ladder advances, because the ladder would
+    // just select the same title again and the reader would never get past
+    // selecting it.
+    if (maybeEnterTextEditOnClick(click.chartId, hitResult)) {
+      emitChartSelectionEvent();
+      context.events.emit(AppEvents.GRID_REFRESH);
+      return;
+    }
     advanceSelection(click.chartId, hitResult);
     emitChartSelectionEvent();
     context.events.emit(AppEvents.GRID_REFRESH);
@@ -1256,12 +1498,57 @@ function activate(context: ExtensionContext): void {
   });
   // Drop ephemeral point-selection + widget state on deactivation (no leak).
   cleanupFunctions.push(() => { clearAllPointSelections(); clearAllWidgetValues(); });
+  // An in-place text edit is state too: a session still mounted at deactivation
+  // is DISCARDED, never committed -- unloading the extension must not write the
+  // half-typed title the reader never finished.
+  cleanupFunctions.push(resetChartTextEditing);
 
   // -----------------------------------------------------------------------
   // Right-click context menu for chart elements (axes)
   // -----------------------------------------------------------------------
 
+  /**
+   * A right-click on a chart: move the selection to what is UNDER THE CURSOR,
+   * record that subject for the menu, then open the menu.
+   *
+   * THE DEFECT THIS SHAPE EXISTS FOR (open-items line 409): the menu used to
+   * act on whatever the last LEFT click had selected, so right-clicking bar B
+   * while bar A was selected formatted A. Excel moves the selection on a
+   * right-click, and the menu's subject is then the selection's subject — one
+   * fact, not two.
+   *
+   * THE ELEMENT IS RESOLVED FROM THE CURSOR, not from hover state. Hover is
+   * rAF-throttled and only tracks what the renderer chose to track, which is
+   * why the axis branch used to key off hover while everything else resolved by
+   * bounds — the same pixel could answer two different questions depending on
+   * how fast the mouse got there.
+   */
   const handleContextMenu = (e: MouseEvent) => {
+    // A TEXT SURFACE OWNS ITS OWN RIGHT-CLICK.
+    //
+    // `isPointerClaimed` deliberately never claims the SECONDARY button (see
+    // pointerClaims.ts — a claimant that could take it would trap the reader
+    // inside its own rectangle), so the claim cannot answer this and the census
+    // verdict stays `right-press-exempt`. But the claim was never the whole
+    // question: the overlay text editor mounts a real <textarea> over a chart
+    // title, and this handler resolves the chart by GEOMETRY alone, so the
+    // editor's own paste menu was suppressed and the Chart menu opened on top
+    // of the field the reader was typing in. Core's sibling door for the same
+    // editor (`handleOverlayDoubleClick`) refuses on exactly this target class.
+    // Refusing here leaves the event alone — no preventDefault — so the field
+    // keeps its native menu.
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        target.isContentEditable)
+    ) {
+      setChartRightClickTarget(null);
+      return;
+    }
+
     // Resolve the chart under the cursor by BOUNDS, not hover state — hover
     // only tracks data elements and axes, but a right-click anywhere on a
     // chart (title, legend, plot background, frame) is a click on the OBJECT
@@ -1270,22 +1557,106 @@ function activate(context: ExtensionContext): void {
       gridContainer = document.querySelector("canvas")?.parentElement ?? null;
     }
     let boundsChartId: string | null = null;
+    let canvasX = 0;
+    let canvasY = 0;
     if (gridContainer) {
       const rect = gridContainer.getBoundingClientRect();
-      boundsChartId = findChartAtCanvasPos(e.clientX - rect.left, e.clientY - rect.top);
+      canvasX = e.clientX - rect.left;
+      canvasY = e.clientY - rect.top;
+      // CLIPPED TO THE GRID. `findChartAtCanvasPos` tests the chart's REGION,
+      // which is not clipped to the visible canvas: a chart wider than the grid
+      // — routinely, once the Chart Format task pane narrows it — still matches
+      // a point to the right of the canvas, and the pane sits exactly there. A
+      // right-click inside the pane was swallowed and the chart menu opened
+      // over it. A press outside the grid's own box is not a press on a chart.
+      if (
+        e.clientX < rect.left ||
+        e.clientX > rect.right ||
+        e.clientY < rect.top ||
+        e.clientY > rect.bottom
+      ) {
+        // Outside the grid box entirely — and the hover fallback below must not
+        // rescue it either, because hover is rAF-throttled and keeps whatever
+        // the pointer was last over INSIDE the grid.
+        setChartRightClickTarget(null);
+        return;
+      }
+      boundsChartId = findChartAtCanvasPos(canvasX, canvasY);
     }
 
     const hover = getHoverState();
+    const targetId = boundsChartId ?? hover?.chartId ?? null;
+    if (targetId == null) {
+      // A right-click that opens no chart menu must not leave the previous
+      // subject standing: a contribution reading the record inside the GRID's
+      // menu would otherwise be handed the chart the reader right-clicked
+      // before this one.
+      setChartRightClickTarget(null);
+      return;
+    }
 
-    // Axis-specific context menu
-    if (hover && hover.hitResult.type === "axis") {
-      e.preventDefault();
-      e.stopPropagation();
+    const cached = getCachedChartData(targetId);
+    const local = getChartLocalCoords(targetId, canvasX, canvasY);
+    const hit =
+      cached && local
+        ? hitTestGeometry(local.localX, local.localY, cached.hitGeometry, cached.layout)
+        : null;
+    // No cache yet (a chart that has never painted) is the only way to get here
+    // with nothing to hit-test; the click is still on the OBJECT, so the
+    // whole-chart menu is the honest answer.
+    const element = hit ? chartElementOf(hit) : "chartArea";
 
+    e.preventDefault();
+    e.stopPropagation();
+
+    // 1. MOVE THE SELECTION, exactly as a left-click on the same pixel would.
+    if (!isChartSelected(targetId)) selectChart(targetId);
+    if (element === "datum" && hit) {
+      // The datum ladder, not a stated rung: a first right-click on a bar
+      // selects its SERIES and a second selects the bar, which is what the
+      // left-click ladder does and what decides singular vs plural in the menu.
+      advanceSelection(targetId, hit);
+    } else if (element === "xAxis" || element === "yAxis") {
+      setSubSelection(targetId, {
+        level: "axis",
+        axisType: hit?.axisType ?? (element === "yAxis" ? "y" : "x"),
+      });
+    } else if (
+      element === "title" ||
+      element === "xAxisTitle" ||
+      element === "yAxisTitle" ||
+      element === "legend" ||
+      element === "legendEntry" ||
+      // The PLOT AREA is a rung of its own, exactly as a left-click on the
+      // same pixel now makes it (see `advanceSelection`). It has to be listed
+      // here too, because this handler STATES the rung outright rather than
+      // nudging the ladder: a route missing from this list is a right-click
+      // that lands somewhere the left-click would not, which is the two-
+      // spellings defect the recorded subject exists to remove.
+      element === "plotArea"
+    ) {
+      setSubSelection(targetId, {
+        level: "element",
+        elementId: element,
+        ...(hit?.seriesIndex !== undefined ? { seriesIndex: hit.seriesIndex } : {}),
+      });
+    } else {
+      // The chart area (the outer margin), a filter button, or a stale-cache
+      // miss -> the chart object.
+      setSubSelection(targetId, { level: "chart" });
+    }
+    void emitChartSelectionEvent();
+    context.events.emit(AppEvents.GRID_REFRESH);
+
+    // 2. The axis keeps its own menu (gridlines, scale, label angle). It reads
+    // its subject from the payload, not from the record, so the record is
+    // CLEARED rather than left pointing at a menu nobody is looking at.
+    if (element === "xAxis" || element === "yAxis") {
+      setChartRightClickTarget(null);
       showOverlay(AXIS_CONTEXT_MENU_ID, {
         data: {
-          chartId: hover.chartId,
-          axisType: hover.hitResult.axisType,
+          chartId: targetId,
+          axisType: hit?.axisType ?? (element === "yAxis" ? "y" : "x"),
           screenX: e.clientX,
           screenY: e.clientY,
         },
@@ -1293,17 +1664,36 @@ function activate(context: ExtensionContext): void {
       return;
     }
 
-    const targetId = boundsChartId ?? hover?.chartId ?? null;
-    if (targetId == null) return;
-
-    // Right-click selects the chart (like left-click), then shows the object menu.
-    e.preventDefault();
-    e.stopPropagation();
-    if (!isChartSelected(targetId)) {
-      selectChart(targetId);
-      void emitChartSelectionEvent();
-      context.events.emit(AppEvents.GRID_REFRESH);
+    // 3. RECORD THE SUBJECT, after the selection has moved so the menu's rung
+    // and the selection's rung are the same rung.
+    const sub = getSubSelection();
+    const painterSeries = hit?.seriesIndex;
+    // ABSENT pointIndex is Excel's PointIndex = -1 — the whole series — and it
+    // is the single thing that makes the menu say "Format Data Series..."
+    // instead of "Format Data Point...". It is therefore taken from the LADDER,
+    // not from the hit: the hit names a point on every datum click.
+    const painterPoint =
+      sub.level === "dataPoint" ? (hit?.pointIndex ?? sub.categoryIndex) : undefined;
+    // dataPointOverrides are keyed in AUTHORING space while the hit test
+    // answers in PAINTER space. Skipping this translation is wrong only on a
+    // FILTERED chart, which is exactly how it would pass review.
+    let authoring: { seriesIndex: number; pointIndex: number } | undefined;
+    if (cached?.data && painterSeries !== undefined && painterPoint !== undefined) {
+      const a = toAuthoringIndices(cached.data, painterSeries, painterPoint);
+      authoring = { seriesIndex: a.seriesIndex, pointIndex: a.categoryIndex };
     }
+    setChartRightClickTarget({
+      chartId: targetId,
+      element,
+      ...(painterSeries !== undefined ? { seriesIndex: painterSeries } : {}),
+      ...(painterPoint !== undefined ? { pointIndex: painterPoint } : {}),
+      ...(authoring ? { authoring } : {}),
+      seriesName: hit?.seriesName,
+      categoryName: hit?.categoryName,
+      value: hit?.value,
+      axisType: hit?.axisType,
+    });
+
     showOverlay(CHART_CONTEXT_MENU_ID, {
       data: { chartId: targetId, screenX: e.clientX, screenY: e.clientY },
     });
@@ -1312,6 +1702,9 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(() => {
     window.removeEventListener("contextmenu", handleContextMenu, true);
   });
+  // The recorded right-click subject is module state in @api; an unloaded
+  // extension must not leave one standing for a chart that no longer exists.
+  cleanupFunctions.push(() => setChartRightClickTarget(null));
 
   // -----------------------------------------------------------------------
   // Sheet Change: re-sync chart regions for the new active sheet
@@ -1813,32 +2206,211 @@ function activate(context: ExtensionContext): void {
   // component-store registry (scripts/MCP) and the E2E bridge now call. It used
   // to be a second copy here, and the two copies had drifted.
 
-  const handleDeleteKey = (e: KeyboardEvent) => {
-    if (e.key !== "Delete" && e.key !== "Backspace") return;
-    // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
-    // field, a shape's declared hit rectangle -- is not this extension's.
-    // The tag list below cannot see a <select> or a <button>; the claim can.
-    // See core/lib/pointerClaims.ts, and the census in
-    // core/lib/globalInputListeners.ts (a new global listener adds a row).
-    if (isKeyClaimed(e)) return;
-
-    // Don't intercept when editing a cell or input field
-    const target = e.target as HTMLElement;
-    if (
-      target.tagName === "INPUT" ||
-      target.tagName === "TEXTAREA" ||
-      target.isContentEditable
-    ) return;
-
+  /**
+   * WHAT DELETE DOES TO THE SELECTED CHART, with the rung deciding the subject.
+   *
+   * No KeyboardEvent: the act is reached from TWO doors now (see
+   * `CHART_DELETE_SELECTION_COMMAND` below) and only one of them has an event
+   * to consume. Every branch below used to call preventDefault()+
+   * stopPropagation() itself, unconditionally and identically — they are
+   * hoisted to the listener, which is the only place an event exists.
+   */
+  const runChartDeleteAction = (): void => {
     const chartId = getCurrentChartId();
     if (chartId == null) return;
 
-    e.preventDefault();
-    e.stopPropagation();
+    // A selected TITLE is a smaller subject than the chart, and Delete acts on
+    // the smallest thing selected -- as it does for a selected data point's
+    // formatting, and as Excel does. This is also how `spec.title === null`
+    // becomes reachable from the keyboard. Putting a removed title back is the
+    // Chart Elements checkbox, which is a separate item.
+    //
+    // THE SUBJECT DECIDES WHO OWNS THE KEYSTROKE, NOT WHETHER A WRITE
+    // HAPPENED. `handleChartTextDelete` answers "did I clear something", and
+    // that is false for a title that is ALREADY empty -- which the reader
+    // reaches with one Delete, because nothing moves the selection off a
+    // cleared title (`revalidateSubSelection` only ever re-checks series and
+    // dataPoint rungs). Branching on the write therefore made the second
+    // Delete -- the "did that work?" reflex -- destroy the whole chart.
+    const sub = getSubSelection();
+    if (sub.level === "element" && isChartTextElement(sub.elementId)) {
+      if (handleChartTextDelete(chartId)) {
+        emitChartSelectionEvent();
+        context.events.emit(AppEvents.GRID_REFRESH);
+      }
+      return;
+    }
+
+    // A LEGEND ENTRY IS THE ROW, NOT THE LEGEND.
+    //
+    // This used to hide the WHOLE legend for a selected entry, reasoning that
+    // Excel deletes the SERIES there (a data edit, and a separate item) and
+    // that doing nothing at all would leave Delete meaning "destroy the chart"
+    // one rung deeper. Both halves were true and the conclusion was still
+    // wrong: `LegendSpec.hiddenEntries` has been declared, schema-validated,
+    // written into the generated spec reference and HONOURED end to end —
+    // `visibleLegendEntries` filters both the layout estimate and the painter
+    // — and NOTHING ever wrote an index into it. So the finest act available
+    // on one row was exactly the coarser act the field was added to avoid.
+    //
+    // The series stays PLOTTED; only its row leaves the legend. It is ONE
+    // `updateChartSpec` call, therefore one debounced save and one undo entry
+    // — our recorded divergence from Excel, which makes you remove the whole
+    // legend and recreate it.
+    //
+    // The keystroke is consumed for the whole rung, not just for the write.
+    // Branching on whether the spec changed is what made the second Delete —
+    // the "did that work?" reflex — destroy the chart on an already-cleared
+    // title, and the same trap sits here for a row that is already hidden.
+    if (sub.level === "element" && sub.elementId === "legendEntry") {
+      const chart = getChartById(chartId);
+      const seriesIndex = sub.seriesIndex;
+      // ONE resolver, shared with the context menu's "Hide Legend Entry" row
+      // — the same two-derivations-one-answer split
+      // `resetToMatchStyleScopePatch` uses, so the keyboard and the menu
+      // cannot drift apart about what hiding a row means.
+      const patch =
+        chart && seriesIndex !== undefined ? hideLegendEntryPatch(chart.spec, seriesIndex) : null;
+      if (patch && seriesIndex !== undefined) {
+        // The rows AS MEASURED, read BEFORE the cache is dropped: the
+        // selection has to land on a row that still exists, and the
+        // post-write layout has not been computed yet.
+        const entries =
+          getCachedChartData(chartId)?.layout?.elements?.legendItems?.map((it) => it.seriesIndex) ??
+          [];
+        updateChartSpec(chartId, patch);
+        invalidateChartCache(chartId);
+        setSubSelection(chartId, selectionAfterHidingLegendEntry(entries, seriesIndex));
+        requestOverlayRedraw();
+        emitChartSelectionEvent();
+        context.events.emit(AppEvents.GRID_REFRESH);
+      }
+      return;
+    }
+
+    // The legend is furniture too, and it is the one piece the reader can
+    // select that is NOT text. Same shape as the branch above: the SUBJECT
+    // decides who owns the keystroke, so the chart is never at risk once a
+    // legend is selected, whether or not the spec actually changed.
+    if (sub.level === "element" && sub.elementId === "legend") {
+      const chart = getChartById(chartId);
+      if (chart && chart.spec.legend?.visible !== false) {
+        updateChartSpec(chartId, {
+          legend: { ...chart.spec.legend, visible: false },
+        });
+        invalidateChartCache(chartId);
+        // The selected rung has just stopped existing; leaving it selected is
+        // the stale-subject defect the cue rings already taught us.
+        setSubSelection(chartId, { level: "chart" });
+        requestOverlayRedraw();
+        emitChartSelectionEvent();
+        context.events.emit(AppEvents.GRID_REFRESH);
+      }
+      return;
+    }
+
+    // THE TWO AREAS ARE NOT THE CHART OBJECT.
+    //
+    // `plotArea` became clickable in this wave and was already walkable by
+    // keyboard, and both areas fell through every branch above into the
+    // destroy arm below — so Down, Down, Down, Delete destroyed the chart
+    // from a plot area the reader had selected in order to FORMAT it.
+    // Excel's Delete on a selected plot area does nothing destructive, and
+    // there is nothing smaller than a region to remove, so the keystroke is
+    // consumed and nothing happens. CONSUMED rather than ignored: letting it
+    // through would reach the grid and clear the CELLS under the chart.
+    //
+    // "Delete the whole chart" stays with the chart OBJECT — `level: "chart"`,
+    // the rung with the border and the resize handles, the one a reader gets
+    // by clicking the chart itself. Exactly one destructive route, and it is
+    // the one the reader asked for.
+    if (sub.level === "element" && isChartAreaElement(sub.elementId)) {
+      return;
+    }
+
     performChartDelete(chartId);
   };
+
+  const handleDeleteKey = (e: KeyboardEvent) => {
+    if (e.key !== "Delete" && e.key !== "Backspace") return;
+    // WHO OWNS THIS KEYSTROKE, IN TWO LINES THAT BOTH HAVE TO SAY YES.
+    //
+    // `chartOwnsKeystroke` (handlers/selectionHandler.ts) is the one predicate
+    // all three of this file's capture-phase key listeners read: pointer claim,
+    // then GRID FOCUS, then text field. Its own header carries the data-loss
+    // defect the middle gate closes — Delete pressed while a <button> in the
+    // chart's own Format pane held focus DESTROYED THE CHART, three clicks from
+    // a fresh selection.
+    //
+    // The claim is ALSO asked here, at the door. That is deliberate, not a
+    // leftover: the census in core/lib/globalInputListeners.ts requires a
+    // claim-guarded FILE to consult a claim predicate where its listener lives,
+    // on the stated ground that a guard behind an indirection is a guard a
+    // reviewer cannot see — and `globalInputListeners.test.ts` enforces it. The
+    // question is idempotent, so the cost is one attribute walk and the benefit
+    // is that deleting EITHER line still refuses.
+    if (isKeyClaimed(e)) return;
+    if (!chartOwnsKeystroke(e)) return;
+    if (getCurrentChartId() == null) return;
+
+    // Consumed for the whole rung, not per branch: every arm of
+    // `runChartDeleteAction` used to call these two itself, and branching on
+    // whether a write happened is what once made the second Delete — the "did
+    // that work?" reflex — destroy the chart on an already-cleared title.
+    e.preventDefault();
+    e.stopPropagation();
+    runChartDeleteAction();
+  };
+  // THIS LISTENER CANNOT SEE THE DELETE KEY ON ITS OWN, AND THAT IS WHY THE
+  // COMMAND BELOW EXISTS. `@api/keybindings` installs a CAPTURE-phase listener
+  // on `window` — strictly outside this one — and binds Delete to
+  // `core.edit.clearContents`, calling preventDefault()+stopPropagation() the
+  // moment it matches. With a chart title selected and the grid focused,
+  // Delete therefore cleared the user's CELLS and left the title standing:
+  // every branch above sat behind a door the key never reached. Backspace is
+  // still this listener's (nothing else binds it), so the listener stays.
   document.addEventListener("keydown", handleDeleteKey, true); // capture phase
   cleanupFunctions.push(() => document.removeEventListener("keydown", handleDeleteKey, true));
+
+  // Delete, through the registry — the SAME shape as Ctrl+1 below and for the
+  // same reason: the registry's window-capture listener runs first, so the only
+  // honest way to say "the chart owns this key WHILE a chart is selected" is a
+  // `when` predicate, which beats the unguarded built-in. The other two gates
+  // come free: `context: "not-editing"` is refused whenever a text field is
+  // focused OR anything inside the grid holds a pointer claim (the dispatcher's
+  // `ownsItsOwnKeys`), which is `chartOwnsKeystroke`'s first and third gates,
+  // and `isGridFocused` is its second.
+  CommandRegistry.register(CHART_DELETE_SELECTION_COMMAND, () => {
+    runChartDeleteAction();
+  });
+  cleanupFunctions.push(() => CommandRegistry.unregister(CHART_DELETE_SELECTION_COMMAND));
+  cleanupFunctions.push(
+    registerKeybinding(
+      {
+        id: "ext.charts.deleteSelection",
+        combo: "Delete",
+        commandId: CHART_DELETE_SELECTION_COMMAND,
+        label: "Delete Chart Selection",
+        category: "Editing",
+        context: "not-editing",
+        source: "extension",
+        extensionId: ChartManifest.id,
+      },
+      () => getCurrentChartId() !== null && isGridFocused(),
+    ),
+  );
+
+  // ARROW-KEY PRECEDENCE. Two features want Left/Right on a selected chart and
+  // both listen on this same capture-phase document door: the insight overlay's
+  // STEP through the points of interest, and the chart-element WALK below.
+  // Whichever were written second would silently dead-key the other, so the
+  // rule is ONE pure predicate that both listeners read —
+  // `arrowsBelongToOverlayStep` in handlers/selectionHandler.ts, where its
+  // reasoning and both of its branches live. In one line: plain Left/Right are
+  // the overlay's only at CHART level on a chart that carries cues; every
+  // deeper rung, every cueless chart and every modified arrow are the walk's.
+  const overlayStepOwnsArrows = (chartId: string, e: KeyboardEvent): boolean =>
+    arrowsBelongToOverlayStep(getSubSelection(), getChartOverlay(chartId).cues.length, e);
 
   // The keyboard's way through the points of interest (insight-overlays §4.8a):
   // plain Left/Right step the overlay on the selected chart, and ONLY while it
@@ -1847,10 +2419,12 @@ function activate(context: ExtensionContext): void {
   // listener that applies it, on the same capture-phase footing as Delete.
   const handleOverlayStepKey = (e: KeyboardEvent) => {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    // Both lines, for the reason spelled out on the Delete listener above.
     if (isKeyClaimed(e)) return;
-    if (isTextEntryTarget(e.target)) return;
+    if (!chartOwnsKeystroke(e)) return;
     const chartId = getCurrentChartId();
     if (chartId == null) return;
+    if (!overlayStepOwnsArrows(chartId, e)) return;
     const delta = overlayStepDelta(e, getChartOverlay(chartId).cues.length);
     if (delta === null) return;
     e.preventDefault();
@@ -1860,6 +2434,156 @@ function activate(context: ExtensionContext): void {
   };
   document.addEventListener("keydown", handleOverlayStepKey, true);
   cleanupFunctions.push(() => document.removeEventListener("keydown", handleOverlayStepKey, true));
+
+  // =======================================================================
+  // CI-10 — Excel's keyboard navigation of a chart's elements
+  // =======================================================================
+  // ACCESSIBILITY, not a nicety: a datum that another mark covers, or that is
+  // two pixels wide, cannot be clicked at all. Arrow-walking is the only way to
+  // reach it.
+  //
+  //   Up / Down     walk element GROUPS (chart area, title, legend, plot area,
+  //                 each axis, each axis title, each series)
+  //   Left / Right  walk MEMBERS inside the current group (the points inside a
+  //                 series, the entries inside a legend)
+  //   Ctrl+arrows   the same two walks. Reputable sources disagree about which
+  //                 binding current Excel requires; neither can be wrong for a
+  //                 user, so both are bound and the modified pair additionally
+  //                 keeps working where the overlay owns the plain pair.
+  //   Escape        one level UP (point -> series -> chart -> sheet). It was
+  //                 not a chart keystroke at all before: the only way out of a
+  //                 rung was a click elsewhere, which drops the whole chart.
+  //
+  // The walk itself is pure and lives in handlers/selectionHandler.ts; this is
+  // only the listener that applies it. It is built from the MEASURED layout and
+  // the hit geometry — the same two things a click is resolved against — so the
+  // keyboard can never address a rung the mouse cannot.
+  // Typed with `| undefined` on purpose: an index into a Record is only
+  // honestly optional when it is SPELLED optional, and the lookup below is a
+  // raw `e.key`. Without it the compiler thinks every keystroke maps to a
+  // direction and the guards that follow read as dead code.
+  const CHART_NAV_ARROWS: Record<string, ChartNavDirection | undefined> = {
+    ArrowDown: "nextGroup",
+    ArrowUp: "prevGroup",
+    ArrowRight: "nextMember",
+    ArrowLeft: "prevMember",
+  };
+
+  const handleChartNavKey = (e: KeyboardEvent) => {
+    const direction = CHART_NAV_ARROWS[e.key];
+    if (direction === undefined && e.key !== "Escape") return;
+    // Shift+arrow is the grid's range extension and Alt+arrow is its own thing;
+    // only the bare and Ctrl/Cmd forms are the chart's.
+    if (direction !== undefined && (e.shiftKey || e.altKey)) return;
+    // Inside an open chart-title editor the arrows move the CARET. The editor
+    // holds a pointer claim (the overlay-text-editor seam takes one), so this
+    // is the same pair the other two listeners use, not a special case.
+    if (isKeyClaimed(e)) return;
+    if (!chartOwnsKeystroke(e)) return;
+
+    const chartId = getCurrentChartId();
+    if (chartId == null) return;
+
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      const up = escapeLevelUp(getSubSelection());
+      if (up === null) {
+        deselectChart();
+      } else {
+        setSubSelection(chartId, up);
+      }
+      invalidateChartCache(chartId);
+      requestOverlayRedraw();
+      void emitChartSelectionEvent();
+      context.events.emit(AppEvents.GRID_REFRESH);
+      return;
+    }
+
+    if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && overlayStepOwnsArrows(chartId, e)) {
+      // The overlay step owns this keystroke — see the precedence note above.
+      return;
+    }
+
+    if (direction === undefined) return;
+
+    // The keystroke is ours from here on, so it is consumed even when the walk
+    // has nowhere to go (a one-member group). Letting it fall through would
+    // move the CELL cursor, which deselects the chart the reader is navigating.
+    e.preventDefault();
+    e.stopPropagation();
+
+    const cached = getCachedChartData(chartId);
+    const groups = buildChartNavGroups(cached?.layout ?? null, cached?.hitGeometry ?? null);
+    const next = navigateChartSelection(groups, getSubSelection(), direction);
+    if (next === null) return;
+
+    setSubSelection(chartId, next);
+    invalidateChartCache(chartId);
+    requestOverlayRedraw();
+    void emitChartSelectionEvent();
+    context.events.emit(AppEvents.GRID_REFRESH);
+  };
+  document.addEventListener("keydown", handleChartNavKey, true);
+  cleanupFunctions.push(() => document.removeEventListener("keydown", handleChartNavKey, true));
+
+  // Ctrl+1 — Excel's universal "format this". It goes through the keybinding
+  // registry rather than the listener above, because the registry's own
+  // capture-phase listener sits on `window` and is installed by the shell long
+  // before any extension activates: it would consume Ctrl+1 for Format Cells
+  // and stopPropagation() before this file's document-level door ever ran.
+  // The `when` predicate is how the two claims are told apart honestly — the
+  // chart owns Ctrl+1 only while a chart is selected, and the cells own it the
+  // rest of the time.
+  CommandRegistry.register(CHART_FORMAT_PANE_COMMAND, () => {
+    publishCurrentChartSelection();
+    openTaskPane(CHART_FORMAT_PANE_ID);
+  });
+  cleanupFunctions.push(() => CommandRegistry.unregister(CHART_FORMAT_PANE_COMMAND));
+  cleanupFunctions.push(
+    registerKeybinding(
+      {
+        id: "ext.charts.formatSelection",
+        combo: "Ctrl+1",
+        commandId: CHART_FORMAT_PANE_COMMAND,
+        label: "Format Chart Selection",
+        category: "Formatting",
+        context: "not-editing",
+        source: "extension",
+        extensionId: ChartManifest.id,
+      },
+      () => getCurrentChartId() !== null,
+    ),
+  );
+
+  // A CHART EDIT MADE INSIDE THE DEBOUNCE WINDOW IS NOT IN THE FILE.
+  //
+  // `chartStore` batches persistence 300 ms deep, so a title commit, a drag or
+  // a resize finished just before Ctrl+S was still a pending `setTimeout` when
+  // `save_file` serialised AppState — the file got the OLD chart. Worse on
+  // close: the dirty flag is set by `DocumentEffect::mutates` INSIDE
+  // `update_chart`, so a never-flushed edit left `is_modified` false and the
+  // close-without-saving prompt never appeared. `flushPendingChartSaves`
+  // documented itself as "call this before file save or app close" and had no
+  // caller in the product at all — only an E2E test. FloatingRange, the sibling
+  // feature with the identical debounce, hooks exactly this event.
+  //
+  // BEFORE_CLOSE is hooked as well as BEFORE_SAVE, and it is worth saying what
+  // it does and does not buy. The shell emits BEFORE_CLOSE and then awaits
+  // `isFileModified()`, and `emitAppEvent` does not await its listeners — so
+  // the flush and the dirty-flag read are two IPC calls in flight at once and
+  // the prompt is not GUARANTEED. What it does guarantee is that the edit
+  // reaches AppState at all, which is the difference between "the prompt might
+  // not appear" and "the work is gone". (CellBookmarks hit the same dispatcher
+  // limit and answered it with a write-through instead of a debounce; that is
+  // the shape this store would need for a guarantee.)
+  for (const evt of [AppEvents.BEFORE_SAVE, AppEvents.BEFORE_CLOSE]) {
+    cleanupFunctions.push(
+      context.events.on(evt, () => {
+        void flushPendingChartSaves();
+      }),
+    );
+  }
 
   const handleDeleteRequest = (e: Event) => {
     const chartId = (e as CustomEvent).detail?.chartId as string | undefined;

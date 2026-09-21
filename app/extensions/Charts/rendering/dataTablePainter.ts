@@ -12,7 +12,7 @@ import type {
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { seriesPaletteIndex } from "../lib/encodingResolver";
-import { formatTickValue } from "./chartPainterUtils";
+import { formatTickValue, recordChartElementRect } from "./chartPainterUtils";
 
 // ============================================================================
 // Constants
@@ -51,6 +51,12 @@ export function computeDataTableHeight(
 /**
  * Paint a data table below the plot area.
  * The layout must already have its plotArea reduced by computeDataTableHeight().
+ *
+ * SELECTABILITY: the grid's box is recorded onto `layout.elements.dataTable`,
+ * so it is hit-testable as Excel's `xlDataTable`. It is ONE object — Excel has
+ * no addressable data-table cell — which is why this is a single rect and not a
+ * collection. Nothing is recorded when there is nothing to draw, so a hit can
+ * never land on a table that was skipped for want of series or categories.
  */
 export function paintDataTable(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
@@ -201,4 +207,11 @@ export function paintDataTable(
   }
 
   ctx.restore();
+
+  recordChartElementRect(layout, "dataTable", {
+    x: tableLeft,
+    y: tableTop,
+    width: tableWidth,
+    height: tableHeight,
+  });
 }

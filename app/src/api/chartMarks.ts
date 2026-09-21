@@ -11,6 +11,75 @@
 
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
+/** A rectangle in chart-local pixel space. */
+export interface ChartMarkElementRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Names of the SINGLE-RECT chart elements (the collections have their own fields). */
+export type ChartMarkElementKey =
+  | "chartArea"
+  | "title"
+  | "xAxisTitle"
+  | "yAxisTitle"
+  | "xAxisBand"
+  | "yAxisBand"
+  | "legend"
+  | "displayUnitLabel"
+  | "dataTable";
+
+/**
+ * Rectangles for the chart's non-datum elements, so a custom mark can see where
+ * the host drew the title, the axis bands and the legend and avoid painting
+ * over them (or hit-test them the same way the host does).
+ *
+ * Structurally identical to the Charts-internal `ChartElementRects`. The rects
+ * are a LAYOUT-STAGE ESTIMATE (axis-label and legend widths are approximated
+ * from character counts) until a painter measures them and writes the truth
+ * back; `measured` lists the keys that are truth. A stage that changes
+ * `margin`/`plotArea` after layout must have the host recompute these — a mark
+ * should never mutate them itself.
+ */
+export interface ChartMarkElementRects {
+  family: "cartesian" | "radial";
+  chartArea: ChartMarkElementRect;
+  title?: ChartMarkElementRect;
+  xAxisTitle?: ChartMarkElementRect;
+  yAxisTitle?: ChartMarkElementRect;
+  xAxisBand?: ChartMarkElementRect;
+  yAxisBand?: ChartMarkElementRect;
+  legend?: ChartMarkElementRect;
+  /**
+   * One rect per legend entry. `seriesIndex` is the painter-space series index
+   * for cartesian legends and the painter-space category index for radial ones.
+   */
+  legendItems?: Array<{ seriesIndex: number; rect: ChartMarkElementRect }>;
+  displayUnitLabel?: ChartMarkElementRect;
+  /**
+   * One POLYLINE per painted trendline — not a rect, because a fit running
+   * corner to corner has a bounding box the size of the plot. `trendlineIndex`
+   * indexes the spec's trendline list; `seriesIndex` is the series it tracks.
+   */
+  trendlines?: Array<{
+    seriesIndex: number;
+    trendlineIndex: number;
+    points: Array<{ x: number; y: number }>;
+  }>;
+  /**
+   * One rect per drawn error bar. Many rects, ONE identity: error bars are a
+   * per-series object in Excel, with no per-point member.
+   */
+  errorBars?: Array<{ seriesIndex: number; rect: ChartMarkElementRect }>;
+  /** One rect per painted data label. These ARE per point, so both indices travel. */
+  dataLabels?: Array<{ seriesIndex: number; pointIndex: number; rect: ChartMarkElementRect }>;
+  /** The data-table grid below the plot area. */
+  dataTable?: ChartMarkElementRect;
+  measured: ChartMarkElementKey[];
+}
+
 /**
  * Pure geometry of a laid-out chart, exposed so a custom mark can position
  * itself. A structural subset of the Charts-internal ChartLayout — cast the
@@ -21,6 +90,8 @@ export interface ChartMarkLayout {
   height: number;
   margin: { top: number; right: number; bottom: number; left: number };
   plotArea: { x: number; y: number; width: number; height: number };
+  /** Rectangles for the non-datum chart elements. Absent on a hand-built layout. */
+  elements?: ChartMarkElementRects;
 }
 
 /** Descriptive metadata for a chart mark (drives UI + axis classification). */

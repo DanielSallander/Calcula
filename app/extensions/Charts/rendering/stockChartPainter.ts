@@ -5,6 +5,8 @@
 
 import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, StockMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { applyFillStyle } from "./gradientFill";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -43,7 +45,9 @@ export function paintStockChart(
 ): void {
   const { plotArea } = layout;
   const opts = (spec.markOptions ?? {}) as StockMarkOptions;
-  const style = opts.style ?? "candlestick";
+  // Named `chartStyle`, not `style`: the per-datum resolved style below is the
+  // other `style` in this function and the two must not be confusable.
+  const chartStyle = opts.style ?? "candlestick";
   const upColor = opts.upColor ?? "#4CAF50";
   const downColor = opts.downColor ?? "#E53935";
   const bodyWidthRatio = opts.bodyWidth ?? 0.6;
@@ -117,8 +121,10 @@ export function paintStockChart(
     drawHorizontalGridLines(ctx, yScale, plotArea, theme);
   }
 
-  // 4. Axes
-  drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme);
+  // 4. Axes — the layout is passed so the axis titles, the display-unit label
+  //    and the y-label band are written back MEASURED onto layout.elements
+  //    instead of staying the character-count estimates the layout made.
+  drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme, layout);
 
   // 5. Draw candles/OHLC bars
   for (let i = 0; i < n; i++) {
@@ -128,7 +134,14 @@ export function paintStockChart(
     const close = closeValues[i] ?? 0;
 
     const isUp = close >= open;
-    const color = isUp ? upColor : downColor;
+    // One candle per period, so the datum is (series 0, category i) — exactly
+    // the pair computeStockBarRects reports, which is what a Format Data Point
+    // write would carry. The up/down colour is the BASE the override wins
+    // against, so marking one earnings day keeps the rest of the series alone.
+    const style = resolveDatumStyle(spec, data, 0, i, {
+      fill: isUp ? upColor : downColor,
+    });
+    const color = style.fill;
 
     const bandCenter = xScale.scaleIndex(i) + xScale.bandwidth / 2;
     const bodyWidth = xScale.bandwidth * bodyWidthRatio;
@@ -143,7 +156,13 @@ export function paintStockChart(
     const bodyBottom = Math.max(yOpen, yClose);
     const bodyHeight = Math.max(bodyBottom - bodyTop, 1); // min 1px
 
-    if (style === "candlestick") {
+    const hasAlpha = style.opacity !== null;
+    if (hasAlpha) {
+      ctx.save();
+      ctx.globalAlpha = style.opacity as number;
+    }
+
+    if (chartStyle === "candlestick") {
       // Wick (high-low line)
       ctx.strokeStyle = color;
       ctx.lineWidth = wickWidth;
@@ -153,12 +172,12 @@ export function paintStockChart(
       ctx.stroke();
 
       // Body (open-close rect)
-      ctx.fillStyle = isUp ? color : color;
+      applyFillStyle(ctx, color, style.gradientFill ?? undefined, bodyLeft, bodyTop, bodyWidth, bodyHeight);
       ctx.fillRect(bodyLeft, bodyTop, bodyWidth, bodyHeight);
 
       // Body border for hollow up candles (optional: filled by default)
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = style.borderColor ?? color;
+      ctx.lineWidth = style.borderWidth ?? 1;
       ctx.strokeRect(bodyLeft, bodyTop, bodyWidth, bodyHeight);
     } else {
       // OHLC bars
@@ -184,6 +203,8 @@ export function paintStockChart(
       ctx.lineTo(bandCenter + tickLen, yClose);
       ctx.stroke();
     }
+
+    if (hasAlpha) ctx.restore();
   }
 
   // 6. Title

@@ -6,6 +6,9 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, HistogramMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { applyFillStyle } from "./gradientFill";
+import { strokeDatumBorderRect } from "./barChartPainter";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -15,6 +18,7 @@ import {
   drawTitle,
   drawLegend,
   drawRoundedRect,
+  recordChartElementRect,
   formatTickValue,
 } from "./chartPainterUtils";
 
@@ -72,11 +76,18 @@ export function computeHistogramLayout(
   theme: ChartRenderTheme,
 ): ChartLayout {
   // Build synthetic data for layout computation
-  const syntheticData = buildSyntheticData(data, spec);
+  const syntheticData = histogramResolveView(data, spec);
   return computeCartesianLayout(width, height, spec, syntheticData, theme);
 }
 
-function buildSyntheticData(data: ParsedChartData, spec: ChartSpec): ParsedChartData {
+/**
+ * The data a histogram RESOLVES PER-POINT OVERRIDES AGAINST (and lays out
+ * against): one "Frequency" series over the BIN labels. The raw rows are not
+ * datums here, so both the painter and the write path have to speak bins —
+ * exported so the identity key stamped on an override names a bin rather than
+ * a source row that no bar stands for.
+ */
+export function histogramResolveView(data: ParsedChartData, spec: ChartSpec): ParsedChartData {
   const opts = (spec.markOptions ?? {}) as HistogramMarkOptions;
   const binCount = opts.binCount ?? 10;
 
@@ -144,7 +155,7 @@ export function paintHistogramChart(
   }
 
   // 4. Axes
-  drawHistogramAxes(ctx, xScale, yScale, plotArea, spec, theme);
+  drawHistogramAxes(ctx, xScale, yScale, plotArea, spec, theme, layout);
 
   // 5. Bars
   ctx.save();
@@ -155,6 +166,15 @@ export function paintHistogramChart(
   const color = getSeriesColor(spec.palette, 0, null);
   const baseY = plotArea.y + plotArea.height;
 
+  // A histogram's datums are BINS, not the source rows: `data` here is the raw
+  // input and its categories mean nothing to a bar. Resolve overrides against
+  // the binned view instead — series 0, category = bin index, series name
+  // "Frequency" — which is exactly the identity computeHistogramBarRects
+  // reports, so an override written from a hit on a bar resolves back to it.
+  // SHARED with the write path (`datumAddress`) so the identity key is stamped
+  // from the bins too, not from the raw rows.
+  const binData = histogramResolveView(data, spec);
+
   for (let i = 0; i < bins.length; i++) {
     const x = xScale.scaleIndex(i);
     const barW = xScale.bandwidth;
@@ -162,13 +182,17 @@ export function paintHistogramChart(
     const barY = baseY - barH;
 
     if (barH > 0) {
-      ctx.fillStyle = color;
+      const style = resolveDatumStyle(spec, binData, 0, i, { fill: color });
+      if (style.opacity != null) ctx.globalAlpha = style.opacity;
+      applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, x, barY, barW, barH);
       if (borderRadius > 0 && barH > borderRadius * 2) {
         drawRoundedRect(ctx, x, barY, barW, barH, borderRadius);
         ctx.fill();
       } else {
         ctx.fillRect(x, barY, barW, barH);
       }
+      strokeDatumBorderRect(ctx, style, x, barY, barW, barH, borderRadius);
+      if (style.opacity != null) ctx.globalAlpha = 1;
     }
   }
 
@@ -189,6 +213,12 @@ export function paintHistogramChart(
 // Axes
 // ============================================================================
 
+/**
+ * `layout` is OPTIONAL and exists only for the element-rect write-back (the same
+ * contract as `drawCartesianAxes`): when passed, the measured y tick-label band
+ * replaces the layout's ~7px-per-character estimate. Omitting it paints
+ * identically.
+ */
 function drawHistogramAxes(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   xScale: ReturnType<typeof createBandScale>,
@@ -196,6 +226,7 @@ function drawHistogramAxes(
   plotArea: { x: number; y: number; width: number; height: number },
   spec: ChartSpec,
   theme: ChartRenderTheme,
+  layout?: ChartLayout,
 ): void {
   ctx.strokeStyle = theme.axisColor;
   ctx.lineWidth = 1;
@@ -243,10 +274,27 @@ function drawHistogramAxes(
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
 
+    let widestLabel = 0;
     for (const tick of ticks) {
       const y = yScale.scale(tick);
       if (y < plotArea.y || y > plotArea.y + plotArea.height) continue;
-      ctx.fillText(formatTickValue(tick), plotArea.x - 6, y);
+      const label = formatTickValue(tick);
+      if (layout) {
+        const w = ctx.measureText(label).width;
+        if (w > widestLabel) widestLabel = w;
+      }
+      ctx.fillText(label, plotArea.x - 6, y);
+    }
+    if (layout) {
+      // Labels are right-aligned at plotArea.x - 6, so the band runs from the
+      // widest label's left edge to the axis line.
+      const bandWidth = widestLabel + 6;
+      recordChartElementRect(layout, "yAxisBand", {
+        x: plotArea.x - bandWidth,
+        y: plotArea.y,
+        width: bandWidth,
+        height: plotArea.height,
+      });
     }
   }
 }

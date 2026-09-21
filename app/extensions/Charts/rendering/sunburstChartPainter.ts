@@ -9,6 +9,8 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, SunburstMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { applyFillStyle } from "./gradientFill";
 import {
   computeRadialLayout,
   drawChartBackground,
@@ -32,6 +34,15 @@ interface SunburstNode {
   endAngle: number;
   /** Color index (for palette lookup). */
   colorIndex: number;
+  /**
+   * Index of the SOURCE category this node terminates, or -1 when the node is a
+   * pure aggregate (an inner ring summing its children, with no row of its own).
+   * Only a terminating node has a datum identity, so only it can carry a
+   * per-point override — an inner ring keeps its palette colour.
+   * When two source rows spell the same path, the FIRST wins, matching the
+   * first-in-spec-order tie-break the shared resolver uses.
+   */
+  categoryIndex: number;
 }
 
 /** Build a tree from flat category labels using a separator. */
@@ -49,6 +60,7 @@ function buildHierarchy(
     startAngle: 0,
     endAngle: 0,
     colorIndex: 0,
+    categoryIndex: -1,
   };
 
   let colorIdx = 0;
@@ -74,6 +86,7 @@ function buildHierarchy(
           startAngle: 0,
           endAngle: 0,
           colorIndex: d === 0 ? colorIdx++ : current.colorIndex,
+          categoryIndex: -1,
         };
         current.children.push(child);
       }
@@ -81,6 +94,9 @@ function buildHierarchy(
       // Leaf node gets the value
       if (d === parts.length - 1) {
         child.value += value;
+        // ...and the identity of the source row, so a per-point override can
+        // find it. First row wins when two rows spell the same path.
+        if (child.categoryIndex < 0) child.categoryIndex = i;
       }
 
       current = child;
@@ -231,17 +247,43 @@ export function paintSunburstChart(
       const lighten = d * 0.12;
       const adjustedColor = lightenColor(color, lighten);
 
+      // Per-point formatting through the ONE shared resolver. Only a node that
+      // terminates a source category is a datum; an inner aggregate ring has no
+      // identity and so takes no override. The depth lightening is the BASE the
+      // resolver overrides, so an explicit per-point colour is used verbatim
+      // instead of being washed out by the ring it happens to sit on.
+      const style = node.categoryIndex >= 0
+        ? resolveDatumStyle(spec, data, 0, node.categoryIndex, { fill: adjustedColor })
+        : null;
+      const fillColor = style ? style.fill : adjustedColor;
+
+      const hasAlpha = style !== null && style.opacity !== null;
+      if (hasAlpha) {
+        ctx.save();
+        ctx.globalAlpha = style!.opacity as number;
+      }
+
       ctx.beginPath();
       ctx.arc(cx, cy, rOuter, sa, ea);
       ctx.arc(cx, cy, rInner, ea, sa, true);
       ctx.closePath();
-      ctx.fillStyle = adjustedColor;
+      applyFillStyle(
+        ctx,
+        fillColor,
+        style?.gradientFill ?? undefined,
+        cx - rOuter,
+        cy - rOuter,
+        rOuter * 2,
+        rOuter * 2,
+      );
       ctx.fill();
 
-      // Subtle border
-      ctx.strokeStyle = "rgba(255,255,255,0.6)";
-      ctx.lineWidth = 1;
+      // Subtle border (an override may ask for its own)
+      ctx.strokeStyle = style?.borderColor ?? "rgba(255,255,255,0.6)";
+      ctx.lineWidth = style?.borderWidth ?? 1;
       ctx.stroke();
+
+      if (hasAlpha) ctx.restore();
 
       // 3. Labels
       if (showLabels && angSpan > 0.15) {
@@ -274,7 +316,8 @@ export function paintSunburstChart(
           labelText = labelText.substring(0, maxChars - 1) + "...";
         }
 
-        const brightness = getBrightness(adjustedColor);
+        // Contrast follows the colour actually painted, override included.
+        const brightness = getBrightness(fillColor);
         ctx.fillStyle = brightness > 150 ? "#333333" : "#ffffff";
         ctx.font = `${Math.max(theme.labelFontSize - 1, 8)}px ${theme.fontFamily}`;
         ctx.textAlign = "center";
@@ -343,8 +386,17 @@ export function computeSunburstBarRects(
   const innerR = maxR * innerRadiusRatio;
   const ringW = (maxR - innerR) / numLevels;
 
-  // Flatten all nodes into rects (approximate bounding boxes)
-  let idx = 0;
+  // Flatten all nodes into rects (approximate bounding boxes).
+  //
+  // THE RECT'S IDENTITY IS THE NODE'S, NOT ITS POSITION IN THIS WALK. These
+  // indices used to be a flat running counter over every node — inner
+  // aggregate rings included — while the painter resolves a segment's override
+  // at `(0, node.categoryIndex)`. The two addressed different things, so the
+  // Format pane wrote a per-point colour at an address nothing ever read and
+  // the ring kept its palette colour while the swatch insisted it was green.
+  // An aggregate ring terminates no source category and so carries -1, exactly
+  // as the painter treats it: it takes no override rather than taking one that
+  // belongs to a leaf.
   for (let d = 0; d <= depthMax; d++) {
     const nodes = byDepth.get(d) ?? [];
     const rInner = innerR + d * ringW;
@@ -357,8 +409,8 @@ export function computeSunburstBarRects(
       const y = cy + Math.sin(midAngle) * midR - ringW / 2;
 
       rects.push({
-        seriesIndex: idx,
-        categoryIndex: idx,
+        seriesIndex: 0,
+        categoryIndex: node.categoryIndex,
         x,
         y,
         width: ringW,
@@ -367,7 +419,6 @@ export function computeSunburstBarRects(
         seriesName: node.name,
         categoryName: node.fullPath || node.name,
       });
-      idx++;
     }
   }
 
@@ -378,11 +429,26 @@ export function computeSunburstBarRects(
 // Helpers
 // ============================================================================
 
+/**
+ * Perceived brightness of a fill, used to pick black or white label text.
+ * A per-point override may supply a 3-digit hex or a non-hex colour, which the
+ * old 6-digit-only slicing turned into NaN; NaN > 150 is false, so such a datum
+ * already got white text. Returning 0 keeps exactly that outcome, explicitly.
+ */
 function getBrightness(hex: string): number {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return (r * 299 + g * 587 + b * 114) / 1000;
+  if (/^#[0-9a-f]{6}$/i.test(hex)) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return (r * 299 + g * 587 + b * 114) / 1000;
+  }
+  if (/^#[0-9a-f]{3}$/i.test(hex)) {
+    const r = parseInt(hex[1] + hex[1], 16);
+    const g = parseInt(hex[2] + hex[2], 16);
+    const b = parseInt(hex[3] + hex[3], 16);
+    return (r * 299 + g * 587 + b * 114) / 1000;
+  }
+  return 0;
 }
 
 /** Lighten a hex color by a fraction (0-1). */

@@ -3,9 +3,14 @@
 // CONTEXT: Detects when the mouse is on a floating overlay body and handles
 //          drag-to-move. Dispatches generic "floatingObject:moveComplete" and
 //          "floatingObject:selected" events so extensions can handle the logic.
+//          Also offers a DOUBLE-CLICK on a floating overlay to that overlay's
+//          owner via OverlayRegistration.onDoubleClick (@api/gridOverlays) -- the
+//          only seam that can reach an extension over a floating object, since
+//          the cell double-click interceptors are asked about a CELL.
 
 import type { GridConfig, Viewport } from "../../../types";
 import { getGridRegions, getOverlayRegistration, type GridRegion } from "../../../../api/gridOverlays";
+import { isPointerClaimed } from "../../../lib/pointerClaims";
 
 // ============================================================================
 // Overlay Move State
@@ -60,6 +65,18 @@ export interface OverlayMoveHandlers {
   handleOverlayMoveMouseMove: (mouseX: number, mouseY: number) => void;
   /** Handle mouseup to complete overlay move. */
   handleOverlayMoveMouseUp: () => void;
+  /**
+   * Offer a double-click that landed on a floating overlay to that overlay's
+   * owner (`OverlayRegistration.onDoubleClick`). Returns true when the owner
+   * took the gesture; false when nothing claimed it, in which case the grid
+   * does what it has always done over a floating object -- nothing.
+   */
+  handleOverlayDoubleClick: (
+    region: GridRegion,
+    mouseX: number,
+    mouseY: number,
+    event: React.MouseEvent<HTMLElement>,
+  ) => boolean;
 }
 
 // ============================================================================
@@ -368,10 +385,79 @@ export function createOverlayMoveHandlers(
     overlayMoveStateRef.current = null;
   };
 
+  /**
+   * A DOUBLE-CLICK on a floating overlay, offered to the overlay's owner.
+   *
+   * WHY THIS EXISTS. Core's `handleDoubleClick` returns null over a floating
+   * overlay, and that is correct -- a double-click on a chart must never open
+   * the cell editor hidden underneath it. But `checkCellDoubleClickInterceptors`
+   * (the @api/cellDoubleClickInterceptors seam) is reached only `if (cell)`, so
+   * a null cell meant the existing seam was structurally UNREACHABLE over every
+   * floating object: there was no way at all for the extension that owns an
+   * overlay to hear about a double-click on it. The Floating Range had to INFER
+   * the gesture from two `floatingObject:bodyDragStart` events within 350 ms --
+   * a private timer that only worked because the FR happens to opt into
+   * `claimsBodyDrag`, and that an overlay which does not claim body drags could
+   * not have written at all. The browser already knows what a double-click is.
+   *
+   * THE CLAIM COMES FIRST, and both halves of it are load-bearing:
+   *   - `isPointerClaimed` is Core's one generic rule (core/lib/pointerClaims.ts)
+   *     for a gesture that landed inside a surface an extension stacked on the
+   *     grid. `gridPointerDoubleClick` already refuses a claimed double-click at
+   *     the DOM door, so this is the second wall -- but this function is a NEW
+   *     actor on the gesture and an actor that dispatches to extension code
+   *     answers the claim itself rather than inheriting someone else's answer.
+   *   - the tag check is NOT redundant with it. An on-canvas cell editor --
+   *     the Floating Range's own <textarea>, the live example -- carries no
+   *     claim attribute, and its coordinates sit squarely inside the overlay's
+   *     rect. Without this, double-clicking a word inside the open editor would
+   *     be handed to the overlay owner as a fresh double-click on the cell
+   *     underneath, tearing down the editor the user is typing in. It is the
+   *     same guard `handleOverlayMoveMouseDown` applies to mousedown, for the
+   *     same reason: `checkOverlayBody` is pure GEOMETRY and never looks at
+   *     what the mouse actually landed on.
+   *
+   * No `preventDefault()`: like the two guards above, refusing the gesture must
+   * leave the browser's own default (the editor's word selection) alone.
+   */
+  const handleOverlayDoubleClick = (
+    region: GridRegion,
+    mouseX: number,
+    mouseY: number,
+    event: React.MouseEvent<HTMLElement>,
+  ): boolean => {
+    if (isPointerClaimed(event)) return false;
+
+    const target = event.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        target.isContentEditable)
+    ) {
+      return false;
+    }
+
+    const registration = getOverlayRegistration(region.type);
+    if (!registration?.onDoubleClick) return false;
+
+    const bounds = getFloatingCanvasBounds(region, config, viewport);
+    return registration.onDoubleClick({
+      region,
+      canvasX: mouseX,
+      canvasY: mouseY,
+      row: 0,
+      col: 0,
+      floatingCanvasBounds: bounds ?? undefined,
+    }) === true;
+  };
+
   return {
     checkOverlayBody,
     handleOverlayMoveMouseDown,
     handleOverlayMoveMouseMove,
     handleOverlayMoveMouseUp,
+    handleOverlayDoubleClick,
   };
 }

@@ -2,6 +2,8 @@
 // PURPOSE: Tests for chartSpecSchema — JSON Schema validity and reference generation.
 
 import { describe, it, expect } from "vitest";
+import * as fs from "fs";
+import * as path from "path";
 import { chartSpecJsonSchema, generateSpecReference } from "../chartSpecSchema";
 import { buildDefaultSpec } from "../chartSpecDefaults";
 import { PALETTE_NAMES } from "../../rendering/chartTheme";
@@ -336,10 +338,12 @@ describe("chartSpecJsonSchema drift guard", () => {
         tickCount: 6, tickFormat: ",.0f",
         majorUnit: 20, minorUnit: 5, displayUnit: "thousands", showDisplayUnitLabel: true,
         majorTickMark: "outside", minorTickMark: "none", labelPosition: "nextToAxis",
-        crossesAt: "auto", reverse: false, lineColor: "#999999", lineWidth: 1, lineDash: [2, 2], showLine: true,
+        // Reversal is `scale.reverse` (set above) and there is no axis-level
+        // `reverse` any more — it never had a reader. See AxisSpec in ../types.
+        crossesAt: "auto", crossesAtValue: 0, lineColor: "#999999", lineWidth: 1, lineDash: [2, 2], showLine: true,
       },
       yAxis: { title: "USD", gridLines: true, showLabels: true, labelAngle: 0, min: 0, max: null, minParam: "[Floor]", maxParam: "[Threshold]" },
-      legend: { visible: true, position: "bottom" },
+      legend: { visible: true, position: "bottom", hiddenEntries: [1] },
       palette: "default",
       markOptions: {
         borderRadius: 4, barGap: 3, stackMode: "stacked",
@@ -393,5 +397,195 @@ describe("chartSpecJsonSchema drift guard", () => {
     };
 
     expect(schemaViolations(spec, SCHEMA)).toEqual([]);
+  });
+
+  // --- Axis reversal has ONE spelling (BUG-0123) ---
+
+  it("refuses a top-level axis `reverse`, which never had a reader", () => {
+    // The axis context menu wrote this for a year and no painter read it —
+    // `createScaleFromSpec` reads `scale.reverse`. Two spellings of one fact is
+    // how a menu item becomes a visible no-op, so the dead one is now refused
+    // at the gate rather than quietly persisted into the workbook.
+    const spec = buildDefaultSpec(dataRange, true, autoDetected, "bar");
+    const withDeadField = { ...spec, yAxis: { ...spec.yAxis, reverse: true } } as never;
+    expect(schemaViolations(withDeadField, SCHEMA).length).toBeGreaterThan(0);
+  });
+
+  it("accepts the live spelling, scale.reverse", () => {
+    const spec = buildDefaultSpec(dataRange, true, autoDetected, "bar");
+    const reversed = { ...spec, yAxis: { ...spec.yAxis, scale: { reverse: true } } };
+    expect(schemaViolations(reversed, SCHEMA)).toEqual([]);
+  });
+
+  // --- Legend entries hidden individually ---
+
+  it("accepts legend.hiddenEntries and rejects a non-integer entry", () => {
+    const spec = buildDefaultSpec(dataRange, true, autoDetected, "bar");
+    const hidden = { ...spec, legend: { ...spec.legend, hiddenEntries: [0, 2] } };
+    expect(schemaViolations(hidden, SCHEMA)).toEqual([]);
+
+    const bogus = { ...spec, legend: { ...spec.legend, hiddenEntries: ["Sales"] } } as never;
+    expect(schemaViolations(bogus, SCHEMA).length).toBeGreaterThan(0);
+  });
+
+  it("documents hiddenEntries in the generated reference table", () => {
+    // The schema feeds the Monaco editor AND this reference; a field that is
+    // accepted but undocumented is a field nobody can discover.
+    const ref = generateSpecReference();
+    expect(ref).toContain("## LegendSpec");
+    expect(ref).toContain("| hiddenEntries |");
+  });
+});
+
+// ============================================================================
+// Drift Guard: NESTED definitions <-> types.ts interfaces
+// ============================================================================
+// The top-level guard above pins ChartSpec's own keys against a hand-kept list.
+// Nothing pinned the NESTED definitions — which is exactly how a nested field
+// would slip through: `additionalProperties: false` appears in dozens of places
+// in this schema, and ONE schema feeds THREE consumers (validateChartSpec, the
+// load canary over every chart in chartStore, and the Monaco spec editor). A
+// field added to types.ts but not here is REFUSED at the script-write gate and
+// red-underlined in the editor, for a spec that is perfectly valid.
+//
+// So this guard does not restate the field list: it READS types.ts at test time
+// and diffs the interface against the schema definition, the same "derive,
+// never retype" shape as src/api/__tests__/interpreterReachDrift.test.ts.
+
+const TYPES_TS = path.resolve(__dirname, "../../types.ts");
+const typesSrc = fs.readFileSync(TYPES_TS, "utf8");
+
+/**
+ * Property names declared directly on `export interface <name>` in TS source.
+ * Brace-depth aware, so a nested object type (`margin: { top: number; ... }`)
+ * contributes only its own name. Comments are stripped first so a `// foo:`
+ * note cannot fabricate a property.
+ */
+function interfaceProperties(src: string, name: string): string[] {
+  const header = new RegExp(`export\\s+interface\\s+${name}\\s*\\{`);
+  const m = header.exec(src);
+  if (!m) throw new Error(`interface ${name} not found in ${TYPES_TS}`);
+
+  let depth = 0;
+  let end = -1;
+  const start = m.index + m[0].length - 1; // at the opening brace
+  for (let i = start; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  if (end < 0) throw new Error(`unterminated interface ${name}`);
+
+  const body = src
+    .slice(start + 1, end)
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+
+  const props: string[] = [];
+  let d = 0;
+  for (const rawLine of body.split("\n")) {
+    const line = rawLine.trim();
+    if (d === 0) {
+      const pm = /^([A-Za-z_$][\w$]*)\??\s*:/.exec(line);
+      if (pm) props.push(pm[1]);
+    }
+    for (const ch of line) {
+      if (ch === "{") d++;
+      else if (ch === "}") d--;
+    }
+  }
+  return props;
+}
+
+/** Nested definitions that must mirror a types.ts interface 1:1. */
+const NESTED_MIRRORS: Array<{ definition: string; interfaceName: string }> = [
+  { definition: "DataPointOverride", interfaceName: "DataPointOverride" },
+  { definition: "LegendSpec", interfaceName: "LegendSpec" },
+  { definition: "PatternFill", interfaceName: "PatternFill" },
+  { definition: "GradientFill", interfaceName: "GradientFill" },
+];
+
+describe("chartSpecJsonSchema nested drift guard", () => {
+  it("the parser actually finds properties (guard against a silently empty diff)", () => {
+    // A property extractor that returns [] would make every assertion below
+    // pass vacuously. Pin a couple of known members and the brace handling.
+    const props = interfaceProperties(typesSrc, "DataPointOverride");
+    expect(props).toContain("seriesIndex");
+    expect(props).toContain("gradientFill");
+    expect(props.length).toBeGreaterThan(6);
+    // ChartLayout has a NESTED object type; only its own keys must come back.
+    expect(interfaceProperties(typesSrc, "ChartLayout")).toEqual([
+      "width", "height", "margin", "plotArea", "elements",
+    ]);
+  });
+
+  for (const { definition, interfaceName } of NESTED_MIRRORS) {
+    it(`${definition} declares exactly the ${interfaceName} properties (no missing, no extra)`, () => {
+      const def = DEFS[definition];
+      expect(def, `schema definition ${definition} is missing`).toBeDefined();
+      expect(def.additionalProperties).toBe(false);
+      const schemaKeys = Object.keys(def.properties).sort();
+      const typeKeys = interfaceProperties(typesSrc, interfaceName).sort();
+      // A missing schema entry is REFUSED at the broker gate and red-underlined
+      // in the Monaco editor; an extra one documents a field that does not exist.
+      expect(schemaKeys).toEqual(typeKeys);
+    });
+  }
+
+  it("every new DataPointOverride property is documented in the reference", () => {
+    const ref = generateSpecReference();
+    expect(ref).toContain("## DataPointOverride");
+    for (const prop of Object.keys(DEFS.DataPointOverride.properties)) {
+      expect(ref, `reference table is missing ${prop}`).toContain(`| ${prop} |`);
+    }
+  });
+
+  it("accepts a datum-keyed override using every new field", () => {
+    const dataRange: DataRangeRef = { sheetIndex: 0, startRow: 0, startCol: 0, endRow: 9, endCol: 3 };
+    const autoDetected = {
+      categoryIndex: 0,
+      series: [{ name: "Revenue", sourceIndex: 1, color: null }],
+      orientation: "columns" as const,
+    };
+    const spec = {
+      ...buildDefaultSpec(dataRange, true, autoDetected, "line"),
+      dataPointOverrides: [
+        {
+          seriesIndex: 0,
+          categoryIndex: 2,
+          key: "RevenueMar",
+          color: "#FFD700",
+          opacity: 0.8,
+          borderColor: "#000000",
+          borderWidth: 1,
+          exploded: 10,
+          gradientFill: { type: "radial", stops: [{ offset: 0, color: "#fff" }, { offset: 1, color: "#000" }] },
+          patternFill: { type: "diagonalUp", foreground: "#333333", background: "#ffffff", size: 6 },
+          invertIfNegative: true,
+          markerStyle: "diamond",
+          markerSize: 7,
+          markerFill: "#FF0000",
+          markerBorderColor: "#000000",
+          markerBorderWidth: 2,
+        },
+      ],
+    };
+    expect(schemaViolations(spec, SCHEMA)).toEqual([]);
+  });
+
+  it("still rejects an unknown property on a data point override", () => {
+    const dataRange: DataRangeRef = { sheetIndex: 0, startRow: 0, startCol: 0, endRow: 9, endCol: 3 };
+    const autoDetected = {
+      categoryIndex: 0,
+      series: [{ name: "Revenue", sourceIndex: 1, color: null }],
+      orientation: "columns" as const,
+    };
+    const spec = {
+      ...buildDefaultSpec(dataRange, true, autoDetected, "bar"),
+      dataPointOverrides: [{ seriesIndex: 0, categoryIndex: 0, glow: true } as never],
+    };
+    expect(schemaViolations(spec, SCHEMA).length).toBeGreaterThan(0);
   });
 });

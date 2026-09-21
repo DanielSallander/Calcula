@@ -6,6 +6,8 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, TreemapMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { applyFillStyle } from "./gradientFill";
 import {
   computeRadialLayout,
   drawChartBackground,
@@ -74,9 +76,26 @@ export function paintTreemapChart(
 
   // 3. Draw tiles
   for (const tile of tiles) {
-    const color = getSeriesColor(spec.palette, tile.index, null);
+    // A treemap tile IS a category of the first series, so it resolves its
+    // per-point style through the ONE shared resolver (key first, index
+    // fallback, painter -> authoring translation inside). The mark options are
+    // the BASE the override wins against.
+    const style = resolveDatumStyle(spec, data, 0, tile.index, {
+      fill: getSeriesColor(spec.palette, tile.index, null),
+      borderColor,
+      borderWidth,
+    });
+    const color = style.fill;
+    const tileBorderColor = style.borderColor ?? borderColor;
+    const tileBorderWidth = style.borderWidth ?? borderWidth;
 
-    ctx.fillStyle = color;
+    const hasAlpha = style.opacity !== null;
+    if (hasAlpha) {
+      ctx.save();
+      ctx.globalAlpha = style.opacity as number;
+    }
+
+    applyFillStyle(ctx, color, style.gradientFill ?? undefined, tile.x, tile.y, tile.w, tile.h);
     if (tileRadius > 0 && tile.w > tileRadius * 2 && tile.h > tileRadius * 2) {
       drawRoundedRect(ctx, tile.x, tile.y, tile.w, tile.h, tileRadius);
       ctx.fill();
@@ -85,9 +104,9 @@ export function paintTreemapChart(
     }
 
     // Border
-    if (borderWidth > 0) {
-      ctx.strokeStyle = borderColor;
-      ctx.lineWidth = borderWidth;
+    if (tileBorderWidth > 0) {
+      ctx.strokeStyle = tileBorderColor;
+      ctx.lineWidth = tileBorderWidth;
       if (tileRadius > 0 && tile.w > tileRadius * 2 && tile.h > tileRadius * 2) {
         drawRoundedRect(ctx, tile.x, tile.y, tile.w, tile.h, tileRadius);
         ctx.stroke();
@@ -95,6 +114,10 @@ export function paintTreemapChart(
         ctx.strokeRect(tile.x, tile.y, tile.w, tile.h);
       }
     }
+
+    // The per-point opacity is the TILE's, not the label's — a faded tile with
+    // an unreadable caption is not what "opacity 0.3 on this point" means.
+    if (hasAlpha) ctx.restore();
 
     // 4. Labels
     if (showLabels && tile.w > 30 && tile.h > 20) {
@@ -371,9 +394,24 @@ function worstAspectRatio(
 // Helpers
 // ============================================================================
 
+/**
+ * Perceived brightness of a fill, used to pick black or white label text.
+ * A per-point override may supply a 3-digit hex or a non-hex colour, which the
+ * old 6-digit-only slicing turned into NaN; NaN > 150 is false, so such a datum
+ * already got white text. Returning 0 keeps exactly that outcome, explicitly.
+ */
 function getBrightness(hex: string): number {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return (r * 299 + g * 587 + b * 114) / 1000;
+  if (/^#[0-9a-f]{6}$/i.test(hex)) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return (r * 299 + g * 587 + b * 114) / 1000;
+  }
+  if (/^#[0-9a-f]{3}$/i.test(hex)) {
+    const r = parseInt(hex[1] + hex[1], 16);
+    const g = parseInt(hex[2] + hex[2], 16);
+    const b = parseInt(hex[3] + hex[3], 16);
+    return (r * 299 + g * 587 + b * 114) / 1000;
+  }
+  return 0;
 }

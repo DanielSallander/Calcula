@@ -27,7 +27,27 @@ import {
   drawLegend,
   drawRoundedRect,
   formatTickValue,
+  reflowChartElements,
 } from "./chartPainterUtils";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { applyFillStyle } from "./gradientFill";
+// The combo mark draws its OWN axes (secondary axis, per-series scales) instead
+// of calling drawCartesianAxes, so it needs that function's rect write-backs.
+// They live ONCE in markerPainter, where points-elementRects.test.ts diffs them
+// against drawCartesianAxes's private equivalents — combo used to hand-copy both
+// the 14px title origin and the band arithmetic, which is a third source of
+// truth for the same rectangle and the exact shape of "three copies had already
+// drifted apart".
+import {
+  recordXAxisTitleRect,
+  recordYAxisTitleRect,
+  recordYLabelBandRect,
+  xAxisTitleBaselineY,
+  Y_AXIS_TITLE_X,
+} from "./markerPainter";
+
+/** Default radius of a line-series point marker. */
+const COMBO_MARKER_RADIUS = 4;
 
 // ============================================================================
 // Layout
@@ -48,6 +68,12 @@ export function computeComboLayout(
     const extraRight = 46;
     layout.margin.right += extraRight;
     layout.plotArea.width = Math.max(layout.plotArea.width - extraRight, 10);
+    // EVERY element rect except chartArea and title is a function of the margin
+    // and plot area computeCartesianLayout just handed us, and we have narrowed
+    // the plot by `extraRight`. Recompute them from the NEW numbers before
+    // anyone paints or hit-tests, or a legend/axis rect is stale by 46px and a
+    // click lands on nothing. See ChartElementRects for the two-stage contract.
+    reflowChartElements(layout, spec, data, theme);
   }
 
   return layout;
@@ -136,7 +162,7 @@ export function paintComboChart(
   }
 
   // 4. Axes
-  drawComboAxes(ctx, xBandScale, yScale, yScaleSecondary, plotArea, spec, opts, theme);
+  drawComboAxes(ctx, xBandScale, yScale, yScaleSecondary, plotArea, spec, opts, theme, layout);
 
   // 5. Draw in order: areas (back), then bars, then lines (front)
   ctx.save();
@@ -144,7 +170,11 @@ export function paintComboChart(
   ctx.rect(plotArea.x, plotArea.y, plotArea.width, plotArea.height);
   ctx.clip();
 
-  // Areas
+  // Areas. An area series in a combo paints ONE polygon per series and no
+  // per-datum shape at all, so there is nothing here for a DataPointOverride to
+  // recolour — the per-point path in this mark is the bars and the line markers
+  // below. (A combo series that wants per-point formatting is authored as a bar
+  // or a line series.)
   for (const si of areaSeries) {
     const series = data.series[si];
     const color = getSeriesColor(spec.palette, seriesPaletteIndex(data, si), series.color);
@@ -208,13 +238,46 @@ export function paintComboChart(
         const clippedHeight = clippedBottom - clippedY;
         if (clippedHeight <= 0) continue;
 
-        ctx.fillStyle = color;
+        // ONE shared resolver: `si`/`ci` are PAINTER-space loop counters and the
+        // resolver translates to authoring space itself. Hand-rolling the
+        // translation here is what aliases an override onto the wrong bar as
+        // soon as a filter hides a lower-index series.
+        const style = resolveDatumStyle(spec, data, si, ci, { fill: color });
+
+        if (style.opacity != null) ctx.globalAlpha = style.opacity;
+        applyFillStyle(
+          ctx,
+          style.fill,
+          style.gradientFill ?? undefined,
+          barX,
+          clippedY,
+          barWidth,
+          clippedHeight,
+        );
+
+        const borderWidth = style.borderWidth ?? 1;
+        const hasBorder = style.borderColor != null && borderWidth > 0;
+
         if (theme.barBorderRadius > 0 && clippedHeight > theme.barBorderRadius * 2) {
           drawRoundedRect(ctx, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
           ctx.fill();
+          if (hasBorder) {
+            ctx.strokeStyle = style.borderColor as string;
+            ctx.lineWidth = borderWidth;
+            // The rounded path is still current after fill(), so stroking it
+            // traces exactly the shape that was filled.
+            ctx.stroke();
+          }
         } else {
           ctx.fillRect(barX, clippedY, barWidth, clippedHeight);
+          if (hasBorder) {
+            ctx.strokeStyle = style.borderColor as string;
+            ctx.lineWidth = borderWidth;
+            ctx.strokeRect(barX, clippedY, barWidth, clippedHeight);
+          }
         }
+
+        if (style.opacity != null) ctx.globalAlpha = 1;
       }
     }
   }
@@ -242,17 +305,44 @@ export function paintComboChart(
     for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
     ctx.stroke();
 
-    // Markers
-    ctx.fillStyle = color;
-    for (const pt of points) {
+    // Markers. Resolved ONCE per datum and then drawn in TWO passes, exactly as
+    // before: every outer disc first, every white core second. Interleaving the
+    // passes would let a neighbouring point's outer disc paint over an already
+    // drawn core wherever the markers overlap, so the pass structure is load
+    // bearing, not stylistic.
+    const markerStyles = points.map((_pt, ci) =>
+      resolveDatumStyle(spec, data, si, ci, { fill: color }),
+    );
+
+    for (let ci = 0; ci < points.length; ci++) {
+      const st = markerStyles[ci];
+      if (st.markerStyle === "none") continue;
+      const pt = points[ci];
+      const r = st.markerSize ?? COMBO_MARKER_RADIUS;
+      if (r <= 0) continue;
+      if (st.opacity != null) ctx.globalAlpha = st.opacity;
+      ctx.fillStyle = st.markerFill ?? st.fill;
       ctx.beginPath();
-      ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+      ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
       ctx.fill();
+      const mbw = st.markerBorderWidth ?? 1;
+      if (st.markerBorderColor != null && mbw > 0) {
+        ctx.strokeStyle = st.markerBorderColor;
+        ctx.lineWidth = mbw;
+        ctx.stroke();
+      }
+      if (st.opacity != null) ctx.globalAlpha = 1;
     }
+
     ctx.fillStyle = "#ffffff";
-    for (const pt of points) {
+    for (let ci = 0; ci < points.length; ci++) {
+      const st = markerStyles[ci];
+      if (st.markerStyle === "none") continue;
+      const pt = points[ci];
+      const r = st.markerSize ?? COMBO_MARKER_RADIUS;
+      if (r <= 0) continue;
       ctx.beginPath();
-      ctx.arc(pt.x, pt.y, 2, 0, Math.PI * 2);
+      ctx.arc(pt.x, pt.y, Math.max(1, r / 2), 0, Math.PI * 2);
       ctx.fill();
     }
   }
@@ -274,6 +364,12 @@ export function paintComboChart(
 // Axes
 // ============================================================================
 
+/**
+ * `layout` is OPTIONAL and exists only for the element-rect write-back, matching
+ * `drawCartesianAxes`: passing it replaces the layout's character-count estimates
+ * for the y-label band and the y-axis title with their MEASURED boxes. Omitting
+ * it paints byte-identically and leaves the estimates in place.
+ */
 function drawComboAxes(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   xScale: ReturnType<typeof createBandScale>,
@@ -283,6 +379,7 @@ function drawComboAxes(
   spec: ChartSpec,
   opts: ComboMarkOptions,
   theme: ChartRenderTheme,
+  layout?: ChartLayout,
 ): void {
   ctx.strokeStyle = theme.axisColor;
   ctx.lineWidth = 1;
@@ -330,10 +427,19 @@ function drawComboAxes(
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
 
+    let widestYLabel = 0;
     for (const tick of ticks) {
       const y = yScale.scale(tick);
       if (y < plotArea.y || y > plotArea.y + plotArea.height) continue;
-      ctx.fillText(formatTickValue(tick), plotArea.x - 6, y);
+      const label = formatTickValue(tick);
+      widestYLabel = Math.max(widestYLabel, ctx.measureText(label).width);
+      ctx.fillText(label, plotArea.x - 6, y);
+    }
+
+    if (layout) {
+      // Labels are right-aligned at plotArea.x - 6; the shared helper owns the
+      // gutter so combo and drawCartesianAxes cannot disagree about the band.
+      recordYLabelBandRect(layout, plotArea, widestYLabel);
     }
   }
 
@@ -353,16 +459,54 @@ function drawComboAxes(
   }
 
   // Axis titles
+  //
+  // The X AXIS TITLE was missing here for as long as this painter has existed,
+  // while `computeCartesianLayout` reserved `axisTitleFontSize + 6` of bottom
+  // margin for it and `computeCartesianElementRects` produced an `xAxisTitle`
+  // RECT at that reservation. So a combo chart with `spec.xAxis.title` set gave
+  // up the space, painted nothing in it, and — once element hit-testing landed —
+  // let a click on that empty strip SELECT a title the user could not see. It is
+  // drawn exactly the way every other cartesian painter draws it: the shared
+  // `xAxisTitleBaselineY` decides the drop (so the four copies cannot disagree),
+  // and the measured box is written back before `restore`-free measurement can
+  // be spoiled by a font change.
+  if (spec.xAxis.title) {
+    ctx.fillStyle = theme.axisTitleColor;
+    ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    const baselineY = xAxisTitleBaselineY(plotArea, spec.xAxis.showLabels);
+    ctx.fillText(spec.xAxis.title, plotArea.x + plotArea.width / 2, baselineY);
+    if (layout) {
+      recordXAxisTitleRect(
+        layout,
+        plotArea,
+        ctx.measureText(spec.xAxis.title).width,
+        baselineY,
+        theme.axisTitleFontSize,
+      );
+    }
+  }
+
   if (spec.yAxis.title) {
     ctx.save();
     ctx.fillStyle = theme.axisTitleColor;
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
-    ctx.translate(14, plotArea.y + plotArea.height / 2);
+    ctx.translate(Y_AXIS_TITLE_X, plotArea.y + plotArea.height / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.fillText(spec.yAxis.title, 0, 0);
+    // Measure BEFORE restore: restore() puts the previous font back and a rect
+    // measured under the wrong font is fiction, not truth.
+    const titleWidth = ctx.measureText(spec.yAxis.title).width;
     ctx.restore();
+    if (layout) {
+      // Rotated -90deg with a "top" baseline: local +x runs UP the canvas, so
+      // the glyph run is a TALL box one font-size wide and `titleWidth` tall.
+      // The shared helper owns that arithmetic.
+      recordYAxisTitleRect(layout, plotArea, titleWidth, theme.axisTitleFontSize);
+    }
   }
 }
 

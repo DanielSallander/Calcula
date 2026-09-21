@@ -7,6 +7,15 @@ import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, BubbleMarkOp
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { resolvePointColor, resolvePointOpacity, resolveSeriesEncoding, seriesPaletteIndex } from "../lib/encodingResolver";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import {
+  paintDatumMarker,
+  recordXAxisTitleRect,
+  recordYAxisTitleRect,
+  recordYLabelBandRect,
+  xAxisTitleBaselineY,
+  Y_AXIS_TITLE_X,
+} from "./markerPainter";
 import { createLinearScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -98,8 +107,9 @@ export function paintBubbleChart(
     drawHorizontalGridLines(ctx, yScale, plotArea, theme);
   }
 
-  // 4. Axes
-  drawBubbleAxes(ctx, xAxis, yScale, plotArea, spec, theme);
+  // 4. Axes (the layout is passed so the axis titles and the y-label band
+  //    replace the layout's character-count estimates with measured boxes)
+  drawBubbleAxes(ctx, xAxis, yScale, plotArea, spec, theme, layout);
 
   // 5. Bubbles
   ctx.save();
@@ -123,14 +133,28 @@ export function paintBubbleChart(
       const y = yScale.scale(value);
       const r = getBubbleRadius(ci);
 
-      ctx.globalAlpha = pointOpacity;
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.stroke();
+      // Per-point override. `origIdx` — NOT the loop counter — is the painter's
+      // series index here: `valueSeries` has the size series filtered out of it,
+      // so resolving on `si` would alias every override one series across as
+      // soon as the size series is not the last one.
+      const style = resolveDatumStyle(spec, data, origIdx, ci, {
+        fill: color,
+        opacity: pointOpacity,
+        markerStyle: "circle",
+      });
+
+      // `markerSize` is deliberately NOT honoured on a bubble: the radius
+      // ENCODES the size series, and letting a formatting override resize one
+      // bubble would make the chart lie about its data. Shape, fill, opacity
+      // and border all apply, and markerStyle "none" hides the bubble.
+      paintDatumMarker(ctx, x, y, {
+        shape: style.markerStyle ?? "circle",
+        size: r,
+        fill: style.markerFill ?? style.fill,
+        borderColor: style.markerBorderColor ?? style.borderColor ?? style.markerFill ?? style.fill,
+        borderWidth: style.markerBorderWidth ?? style.borderWidth ?? 1,
+        opacity: style.opacity,
+      });
     }
   }
   ctx.globalAlpha = 1;
@@ -151,6 +175,12 @@ export function paintBubbleChart(
 // Axes
 // ============================================================================
 
+/**
+ * `layout` is OPTIONAL and exists only for the element-rect write-back, exactly
+ * like `drawCartesianAxes`: passing it replaces the layout's estimates for the
+ * axis titles and the y-label band with their measured boxes. Omitting it
+ * paints identically and leaves the estimates alone.
+ */
 function drawBubbleAxes(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   xAxis: ScatterXAxis,
@@ -158,6 +188,7 @@ function drawBubbleAxes(
   plotArea: { x: number; y: number; width: number; height: number },
   spec: ChartSpec,
   theme: ChartRenderTheme,
+  layout?: ChartLayout,
 ): void {
   ctx.strokeStyle = theme.axisColor;
   ctx.lineWidth = 1;
@@ -189,6 +220,7 @@ function drawBubbleAxes(
   }
 
   // Y axis labels
+  let widestYLabel = 0;
   if (spec.yAxis.showLabels) {
     const ticks = yScale.ticks(5);
     ctx.fillStyle = theme.axisLabelColor;
@@ -199,8 +231,12 @@ function drawBubbleAxes(
     for (const tick of ticks) {
       const y = yScale.scale(tick);
       if (y < plotArea.y || y > plotArea.y + plotArea.height) continue;
-      ctx.fillText(formatTickValue(tick), plotArea.x - 6, y);
+      const label = formatTickValue(tick);
+      const w = ctx.measureText(label).width;
+      if (w > widestYLabel) widestYLabel = w;
+      ctx.fillText(label, plotArea.x - 6, y);
     }
+    if (layout) recordYLabelBandRect(layout, plotArea, widestYLabel);
   }
 
   // Axis titles
@@ -209,22 +245,28 @@ function drawBubbleAxes(
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    ctx.fillText(
-      spec.xAxis.title,
-      plotArea.x + plotArea.width / 2,
-      plotArea.y + plotArea.height + (spec.xAxis.showLabels ? 30 : 16),
-    );
+    const baselineY = xAxisTitleBaselineY(plotArea, spec.xAxis.showLabels);
+    ctx.fillText(spec.xAxis.title, plotArea.x + plotArea.width / 2, baselineY);
+    if (layout) {
+      recordXAxisTitleRect(
+        layout, plotArea, ctx.measureText(spec.xAxis.title).width, baselineY, theme.axisTitleFontSize,
+      );
+    }
   }
   if (spec.yAxis.title) {
     ctx.save();
     ctx.fillStyle = theme.axisTitleColor;
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
-    ctx.translate(14, plotArea.y + plotArea.height / 2);
+    ctx.translate(Y_AXIS_TITLE_X, plotArea.y + plotArea.height / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.fillText(spec.yAxis.title, 0, 0);
+    // Measure BEFORE restore: restore() puts the previous font back, and a rect
+    // measured under the wrong font is fiction that hit-testing would believe.
+    const titleWidth = ctx.measureText(spec.yAxis.title).width;
     ctx.restore();
+    if (layout) recordYAxisTitleRect(layout, plotArea, titleWidth, theme.axisTitleFontSize);
   }
 }
 
@@ -272,6 +314,16 @@ export function computeBubblePointMarkers(
 
   for (let si = 0; si < valueSeries.length; si++) {
     const series = valueSeries[si];
+    // THE SERIES INDEX IS THE ONE IN `data.series`, NOT THE LOOP COUNTER.
+    // `valueSeries` has the SIZE series filtered out, so `si` slides by one for
+    // every value series after it. `paintBubbleChart` already resolves per-point
+    // overrides at this same `origIdx` (and picks its palette slot from it) —
+    // the fix was applied to the painter and not to the geometry, so with a
+    // sizeSeriesIndex that is not the last series the hit test named series
+    // `si` while the paint used `origIdx`: colouring a bubble in B recoloured
+    // A, and colouring one in A wrote at the size series' address, which is
+    // never painted at all.
+    const origIdx = data.series.indexOf(series);
     for (let ci = 0; ci < data.categories.length; ci++) {
       const value = series.values[ci] ?? 0;
       let bubbleR = (minBubble + maxBubble) / 2;
@@ -281,7 +333,7 @@ export function computeBubblePointMarkers(
         bubbleR = minBubble + norm * (maxBubble - minBubble);
       }
       markers.push({
-        seriesIndex: si,
+        seriesIndex: origIdx,
         categoryIndex: ci,
         cx: xAxis.xOf(ci),
         cy: yScale.scale(value),

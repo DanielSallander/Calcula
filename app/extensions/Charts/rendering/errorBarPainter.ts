@@ -7,6 +7,7 @@ import type {
   ChartSpec,
   ParsedChartData,
   ChartLayout,
+  ChartElementRect,
   HitGeometry,
   ErrorBarOptions,
   BarMarkOptions,
@@ -14,6 +15,7 @@ import type {
   ScatterMarkOptions,
 } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
+import { recordErrorBarRects } from "./chartPainterUtils";
 
 // ============================================================================
 // Public API
@@ -22,6 +24,13 @@ import type { ChartRenderTheme } from "./chartTheme";
 /**
  * Paint error bars for the given chart.
  * Requires pre-computed hit geometry to locate data point positions.
+ *
+ * SELECTABILITY: every drawn bar's tight box (stem plus caps) is recorded onto
+ * `layout.elements.errorBars` together with the SERIES it belongs to. Excel's
+ * error bars are a per-series object with no per-point member — you cannot
+ * select the error bar on March alone — so many rects share one identity and
+ * the hit answers the series with no point index. That asymmetry is deliberate
+ * and is the reason this records a flat list rather than a per-point map.
  */
 export function paintErrorBars(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
@@ -34,6 +43,7 @@ export function paintErrorBars(
   const errorBarOpts = getErrorBarOptions(spec);
   if (!errorBarOpts || !errorBarOpts.enabled) return;
 
+  const recorded: Array<{ seriesIndex: number; rect: ChartElementRect }> = [];
   const color = errorBarOpts.color ?? "#333333";
   const lineWidth = errorBarOpts.lineWidth ?? 1.5;
   const capWidth = 6; // half-width of T-cap in pixels
@@ -81,6 +91,10 @@ export function paintErrorBars(
         const xMinus = dataX - (rect.value >= 0 ? minusPx : -minusPx);
 
         drawHorizontalErrorBar(ctx, cy, xMinus, xPlus, capWidth, errorBarOpts.direction);
+        recorded.push({
+          seriesIndex: rect.seriesIndex,
+          rect: horizontalErrorBarBounds(cy, xMinus, xPlus, capWidth),
+        });
       } else {
         // Vertical bar: error bars extend up/down from the top of the bar
         const cx = rect.x + rect.width / 2;
@@ -98,6 +112,10 @@ export function paintErrorBars(
         const yMinus = dataY + minusPx;
 
         drawVerticalErrorBar(ctx, cx, yMinus, yPlus, capWidth, errorBarOpts.direction);
+        recorded.push({
+          seriesIndex: rect.seriesIndex,
+          rect: verticalErrorBarBounds(cx, yMinus, yPlus, capWidth),
+        });
       }
     }
   } else if (geometry.type === "points") {
@@ -123,10 +141,39 @@ export function paintErrorBars(
       const yMinus = marker.cy + minus * pxPerUnit;
 
       drawVerticalErrorBar(ctx, marker.cx, yMinus, yPlus, capWidth, errorBarOpts.direction);
+      recorded.push({
+        seriesIndex: marker.seriesIndex,
+        rect: verticalErrorBarBounds(marker.cx, yMinus, yPlus, capWidth),
+      });
     }
   }
 
   ctx.restore();
+
+  // One write-back with the complete list, after every bar is drawn.
+  recordErrorBarRects(layout, recorded);
+}
+
+/** The tight box a vertical error bar occupies: the stem's span, the caps' width. */
+function verticalErrorBarBounds(
+  cx: number,
+  yBottom: number,
+  yTop: number,
+  capHalf: number,
+): ChartElementRect {
+  const top = Math.min(yTop, yBottom);
+  return { x: cx - capHalf, y: top, width: capHalf * 2, height: Math.abs(yBottom - yTop) };
+}
+
+/** The tight box a horizontal error bar occupies. */
+function horizontalErrorBarBounds(
+  cy: number,
+  xLeft: number,
+  xRight: number,
+  capHalf: number,
+): ChartElementRect {
+  const left = Math.min(xLeft, xRight);
+  return { x: left, y: cy - capHalf, width: Math.abs(xRight - xLeft), height: capHalf * 2 };
 }
 
 // ============================================================================

@@ -14,6 +14,7 @@ import { getSeriesColor } from "./chartTheme";
 import { seriesPaletteIndex } from "../lib/encodingResolver";
 import { computeTrendline } from "../lib/trendlineComputation";
 import { createPointScale, createScaleFromSpec } from "./scales";
+import { recordTrendlineGeometry } from "./chartPainterUtils";
 
 // ============================================================================
 // Public API
@@ -22,6 +23,15 @@ import { createPointScale, createScaleFromSpec } from "./scales";
 /**
  * Paint all trendlines for a chart.
  * Should be called after the main chart is painted but while still clipped to plotArea.
+ *
+ * SELECTABILITY: every drawn trendline records its POLYLINE onto
+ * `layout.elements.trendlines`, which is what makes it hit-testable as Excel's
+ * `xlTrendline`. A bounding box would not do — a fit running corner to corner
+ * has a box the size of the plot — so the geometry recorded is the same point
+ * list that was stroked, and `hitTestChartElements` measures distance to the
+ * nearest segment. A trendline whose computation yielded fewer than two points
+ * is not drawn and contributes no entry, so the recorded list is exactly what
+ * is on screen.
  */
 export function paintTrendlines(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
@@ -59,7 +69,14 @@ export function paintTrendlines(
   ctx.rect(plotArea.x, plotArea.y, plotArea.width, plotArea.height);
   ctx.clip();
 
-  for (const trendline of spec.trendlines) {
+  const recorded: Array<{
+    seriesIndex: number;
+    trendlineIndex: number;
+    points: Array<{ x: number; y: number }>;
+  }> = [];
+
+  for (let ti = 0; ti < spec.trendlines.length; ti++) {
+    const trendline = spec.trendlines[ti];
     const result = computeTrendline(data, trendline);
     if (!result || result.points.length < 2) continue;
 
@@ -76,6 +93,7 @@ export function paintTrendlines(
       x: xScale.scaleIndex(p.ci),
       y: yScale.scale(p.value),
     }));
+    recorded.push({ seriesIndex, trendlineIndex: ti, points: pixelPoints });
 
     // Draw the trendline
     ctx.strokeStyle = color;
@@ -117,6 +135,10 @@ export function paintTrendlines(
   }
 
   ctx.restore();
+
+  // One write-back with the COMPLETE list, after the loop. Recording inside the
+  // loop would leave a half-list on the layout if a later trendline threw.
+  recordTrendlineGeometry(layout, recorded);
 }
 
 // ============================================================================

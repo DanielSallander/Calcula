@@ -7,6 +7,8 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, BoxPlotMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { applyFillStyle } from "./gradientFill";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -179,8 +181,10 @@ export function paintBoxPlotChart(
     drawHorizontalGridLines(ctx, yScale, plotArea, theme);
   }
 
-  // 4. Axes
-  drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme);
+  // 4. Axes — the layout is passed so the axis titles, the display-unit label
+  //    and the y-label band are written back MEASURED onto layout.elements
+  //    instead of staying the character-count estimates the layout made.
+  drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme, layout);
 
   // 5. Draw boxes
   for (let ci = 0; ci < data.categories.length; ci++) {
@@ -191,7 +195,15 @@ export function paintBoxPlotChart(
     const boxX = bandX + (bandW - boxW) / 2;
     const centerX = bandX + bandW / 2;
 
-    const color = getSeriesColor(spec.palette, ci, null);
+    // One box per category, aggregated across series — so the datum is
+    // (series 0, category ci), exactly the pair computeBoxPlotBarRects reports,
+    // which is what a Format Data Point write would carry. Resolved through the
+    // ONE shared resolver; the painter's own 0.7 box alpha is the BASE.
+    const style = resolveDatumStyle(spec, data, 0, ci, {
+      fill: getSeriesColor(spec.palette, ci, null),
+      opacity: 0.7,
+    });
+    const color = style.fill;
 
     const yQ1 = yScale.scale(stats.q1);
     const yQ3 = yScale.scale(stats.q3);
@@ -204,14 +216,14 @@ export function paintBoxPlotChart(
     const boxTop = Math.min(yQ1, yQ3);
     const boxHeight = Math.abs(yQ1 - yQ3);
 
-    ctx.fillStyle = color;
-    ctx.globalAlpha = 0.7;
+    applyFillStyle(ctx, color, style.gradientFill ?? undefined, boxX, boxTop, boxW, boxHeight);
+    ctx.globalAlpha = style.opacity ?? 0.7;
     ctx.fillRect(boxX, boxTop, boxW, boxHeight);
     ctx.globalAlpha = 1;
 
     // Box border
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = style.borderColor ?? color;
+    ctx.lineWidth = style.borderWidth ?? 1;
     ctx.strokeRect(boxX, boxTop, boxW, boxHeight);
 
     // Median line

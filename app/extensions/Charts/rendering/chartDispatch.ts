@@ -40,6 +40,7 @@ import { paintTrendlines } from "./trendlinePainter";
 import { paintDataLabels } from "./dataLabelPainter";
 import { paintErrorBars } from "./errorBarPainter";
 import { paintDataTable, computeDataTableHeight } from "./dataTablePainter";
+import { reflowChartElements } from "./chartPainterUtils";
 
 // ============================================================================
 // Built-in Mark Registration
@@ -440,6 +441,14 @@ export function dispatchComputeLayout(
   if (dtHeight > 0) {
     layout.plotArea.height = Math.max(layout.plotArea.height - dtHeight, 40);
     layout.margin.bottom += dtHeight;
+    // The mark's computeLayout already derived `layout.elements` from the
+    // margins it computed. We have just shortened the plot by the data-table
+    // height, so every rect that is a function of margin/plotArea — the axis
+    // bands, the axis titles, a bottom legend — is now wrong by exactly
+    // `dtHeight`, and a hit test on a stale rect lands on nothing. Recompute
+    // from the NEW numbers, before anything paints. (The reflow also clears
+    // `measured`, which is why it must never run AFTER a paint.)
+    reflowChartElements(layout, spec, data, theme);
   }
 
   return layout;
@@ -464,19 +473,4 @@ export function dispatchComputeGeometry(
   }
   const def = getChartMark(spec.mark);
   return def ? def.computeGeometry(data, spec, layout, theme) : { type: "bars", rects: [] };
-}
-
-// ============================================================================
-// Utility
-// ============================================================================
-
-/** Extract BarRect[] from HitGeometry for backwards compat with selection highlights. */
-export function extractBarRects(geometry: HitGeometry): BarRect[] {
-  if (geometry.type === "bars") return geometry.rects;
-  if (geometry.type === "composite") {
-    for (const g of geometry.groups) {
-      if (g.type === "bars") return g.rects;
-    }
-  }
-  return [];
 }

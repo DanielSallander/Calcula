@@ -93,6 +93,20 @@ export type OverlayCursorFn = (context: OverlayHitTestContext) => string | null;
  */
 export type OverlayClaimsBodyDragFn = (context: OverlayHitTestContext) => boolean;
 
+/**
+ * A function deciding what a DOUBLE-CLICK on an overlay means. Consulted by Core
+ * when a double-click lands on a floating overlay, after the pointer-claim check
+ * and BEFORE the grid's own double-click handling. Returning true means
+ * "handled, do not fall through"; returning false leaves the gesture to Core,
+ * which over a floating object is to do nothing at all -- a double-click on a
+ * chart must never open the cell editor hidden underneath it.
+ *
+ * This is the only route by which an overlay's owner hears about a
+ * double-click: `cellDoubleClickInterceptors` is asked about a CELL, and over a
+ * floating overlay there is no cell to be asked about.
+ */
+export type OverlayDoubleClickFn = (context: OverlayHitTestContext) => boolean;
+
 // ============================================================================
 // Lifecycle Events
 // ============================================================================
@@ -134,6 +148,14 @@ export interface OverlayRegistration {
    * claim, so the existing move/select behavior is unchanged.
    */
   claimsBodyDrag?: OverlayClaimsBodyDragFn;
+  /**
+   * Optional: handle a DOUBLE-CLICK on this overlay. Consulted only when the
+   * double-click lands on the overlay (the same body/extended-hit test the
+   * cursor and the body-drag claim use) and only when the registration opts in.
+   * Return true when the overlay took the gesture. Default: no handler, so the
+   * double-click is swallowed exactly as it always was.
+   */
+  onDoubleClick?: OverlayDoubleClickFn;
 }
 
 // ============================================================================

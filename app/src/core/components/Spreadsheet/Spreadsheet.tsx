@@ -19,6 +19,7 @@ import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
 import { useScrollbarMetrics } from "../Scrollbar/useScrollbarMetrics";
 import { useSpreadsheet } from "./useSpreadsheet";
 import { gridPointerMouseDown, gridPointerDoubleClick } from "./gridPointerEntry";
+import { getGlobalIsEditing } from "../../hooks/useEditing";
 import {
   clearRange,
   clearRangeWithOptions,
@@ -1314,9 +1315,11 @@ function SpreadsheetContent({
         splitCol: splitConfig.splitCol,
         beginSplitDrag: setSplitDrag,
         onGridMouseDown: handleMouseDown,
+        focusContainerRef,
+        isEditing: getGlobalIsEditing,
       });
     },
-    [handleMouseDown, hitTestSplitBar, splitConfig, containerRef, gridState.zoom]
+    [handleMouseDown, hitTestSplitBar, splitConfig, containerRef, gridState.zoom, focusContainerRef]
   );
 
   // The SECOND door bound to this element that can act on a gesture. It is not

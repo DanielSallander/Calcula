@@ -35,12 +35,19 @@ import {
 } from "./cueChrome";
 import { getChartById, getAllCharts, getActiveSheetIndex } from "../lib/chartStore";
 import { readChartDataResolved } from "../lib/chartDataReader";
-import { dispatchPaint, dispatchComputeLayout, dispatchComputeGeometry, extractBarRects, isComposed } from "./chartDispatch";
+import { dispatchPaint, dispatchComputeLayout, dispatchComputeGeometry } from "./chartDispatch";
 import { DEFAULT_CHART_THEME, resolveChartTheme } from "./chartTheme";
+import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { seriesPaletteIndex } from "../lib/encodingResolver";
 import { isChartSelected, getSubSelection } from "../handlers/selectionHandler";
-import { drawSelectionHighlights } from "./selectionHighlight";
+import { drawElementSelectionHighlight, drawSelectionHighlights } from "./selectionHighlight";
+// The chart's own text-edit state lives in handlers/chartTextEditing, which
+// already imports THIS module — asking it would close an import cycle. The seam
+// answers the same question without one: at most one in-place overlay editor is
+// live at a time, and the painter narrows "an editor is open" to "so do not draw
+// a box behind a TITLE editor" itself.
+import { isOverlayTextEditorOpen } from "@api/overlayTextEditor";
 import { clearPointSelection } from "../handlers/chartPointSelection";
 import { clearWidgetValues, getWidgetValue } from "../handlers/chartWidgetValues";
 import {
@@ -51,12 +58,13 @@ import {
 } from "./paramWidgets";
 import type { FormulaValue } from "../lib/chartFormula";
 import { hitTestGeometry } from "./chartHitTesting";
-import { formatTickValue } from "./chartPainterUtils";
+import { formatTickValue, reflowChartElements } from "./chartPainterUtils";
 import type {
   ParsedChartData,
-  BarRect,
   ChartHitResult,
   ChartLayout,
+  ChartSpec,
+  ChartSubSelection,
   HitGeometry,
   TooltipSpec,
   PivotChartFieldButton,
@@ -175,8 +183,6 @@ interface CachedChartData {
   data: ParsedChartData;
   layout: ChartLayout;
   hitGeometry: HitGeometry;
-  /** @deprecated Use hitGeometry instead. Kept for selection highlight compat. */
-  barRects: BarRect[];
   logicalWidth: number;
   logicalHeight: number;
   /** Pivot chart field buttons (only present for pivot-sourced charts). */
@@ -563,18 +569,15 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     renderChartAsync(chartId, pxWidth, pxHeight, chartWidth, chartHeight, dpr, currentVersion);
   }
 
-  // 3. Draw selection highlights (series/data point dimming + outlines)
+  // 3. Draw selection highlights (series/data point dimming + outlines, the
+  //    axis band, and the furniture boxes). One function, so every branch of the
+  //    selection ladder is reachable from a test without a live grid.
   const cachedData = chartDataCache.get(chartId);
   if (isChartSelected(chartId) && cachedData) {
-    const subSel = getSubSelection();
-    if (subSel.level === "series" || subSel.level === "dataPoint") {
-      // With a lens on the chart the wash would pale the very bars the lens
-      // exists to point at, so the selection is drawn as an outline alone.
-      const lensOn = visibleChartCues(chartId).length > 0;
-      drawSelectionHighlights(ctx, canvasX, canvasY, cachedData, chart.spec, subSel.level, subSel.seriesIndex, subSel.categoryIndex, !lensOn);
-    } else if (subSel.level === "axis" && subSel.axisType) {
-      drawAxisSelectionHighlight(ctx, canvasX, canvasY, cachedData.layout, subSel.axisType);
-    }
+    paintSelectionChrome(ctx, canvasX, canvasY, cachedData, chart.spec, getSubSelection(), {
+      lensOn: visibleChartCues(chartId).length > 0,
+      textEditing: isOverlayTextEditorOpen(),
+    });
   }
 
   // 3a. The insight overlay (IO-0..IO-3a): a transient lens from
@@ -827,7 +830,7 @@ async function renderChartAsync(
 
     // Inflate margins to make room for pivot field buttons
     if (pivotFields && pivotFields.length > 0) {
-      adjustLayoutForPivotButtons(layout, pivotFields);
+      adjustLayoutForPivotButtons(layout, pivotFields, spec, data, theme);
     }
 
     dispatchPaint(offCtx, data, spec, layout, theme);
@@ -852,11 +855,14 @@ async function renderChartAsync(
     chartDataCache.set(chartId, {
       data,
       layout,
+      // ONE geometry for hover, for the point-selection param, for the insight
+      // overlay AND for the selection ladder. It used to carry a second,
+      // bars-only `barRects` beside this, and only the ladder read it — which
+      // is why a pie, donut, line, area, scatter, radar or bubble chart could
+      // be hovered datum-by-datum but never SELECTED datum-by-datum: the
+      // bars-only extraction returned [] for points and slices, so hover and
+      // click disagreed about the same pixel.
       hitGeometry,
-      // barRects (deprecated; drives the editor sub-selection click path) stays
-      // empty for composed charts so cross-panel hit geometry doesn't leak panel-0
-      // bars into whole-chart sub-selection. Point-selection uses hitGeometry.
-      barRects: isComposed(spec, data) ? [] : extractBarRects(hitGeometry),
       logicalWidth,
       logicalHeight,
       pivotFieldButtons,
@@ -1315,6 +1321,66 @@ function drawAxisSelectionHighlight(
 }
 
 /**
+ * ALL of a selected chart's sub-selection chrome, in one place.
+ *
+ * Extracted out of `renderChart` step 3 so every branch of the selection ladder
+ * can be driven by a test: the private OffscreenCanvas caches make `renderChart`
+ * itself unreachable from a unit test, and an element highlight nobody calls is
+ * exactly the defect this work item exists to close — the painter was correct,
+ * queryable and formattable, and NOTHING DREW IT.
+ *
+ * `opts.lensOn` — an insight lens is showing cues on this chart. It turns the
+ * datum wash OFF: the overlay is painted after this, so with the wash on,
+ * selecting one marked bar leaves every OTHER marked bar pale under its ring.
+ * Settled precedent; see docs/design/insight-overlays.md section 5h.
+ *
+ * `opts.textEditing` — an in-place overlay text editor is open. The element
+ * painter narrows that to "so do not draw a box behind a TITLE editor"; it is
+ * passed as a plain boolean rather than looked up here so this function stays
+ * pure with respect to editor state.
+ */
+export function paintSelectionChrome(
+  ctx: CanvasRenderingContext2D,
+  canvasX: number,
+  canvasY: number,
+  cachedData: { hitGeometry: HitGeometry; layout: ChartLayout },
+  spec: ChartSpec,
+  subSel: ChartSubSelection,
+  opts: { lensOn: boolean; textEditing: boolean },
+): void {
+  if (subSel.level === "series" || subSel.level === "dataPoint") {
+    drawSelectionHighlights(
+      ctx,
+      canvasX,
+      canvasY,
+      cachedData,
+      spec,
+      subSel.level,
+      subSel.seriesIndex,
+      subSel.categoryIndex,
+      !opts.lensOn,
+    );
+  } else if (subSel.level === "axis" && subSel.axisType) {
+    drawAxisSelectionHighlight(ctx, canvasX, canvasY, cachedData.layout, subSel.axisType);
+  } else if (subSel.level === "element") {
+    // The furniture: title, axis titles, legend, one legend entry, plot area.
+    // The rects come from `layout.elements` (and `layout.plotArea`), which is
+    // where the painters wrote what they MEASURED; nothing here re-derives a box
+    // from the margins, because every rect but `chartArea`/`title` moves when a
+    // later stage edits them.
+    drawElementSelectionHighlight(
+      ctx,
+      canvasX,
+      canvasY,
+      cachedData.layout,
+      subSel.elementId,
+      subSel.seriesIndex,
+      { textEditing: opts.textEditing },
+    );
+  }
+}
+
+/**
  * Draw a small filter indicator badge (funnel icon + count).
  * Shown in the top-right corner of charts that have active filters.
  */
@@ -1411,10 +1477,24 @@ const FIELD_BTN_MARGIN = FIELD_BTN_HEIGHT + 10;
 /**
  * Adjust the chart layout margins and plot area to reserve space for
  * pivot field buttons so they don't overlap chart content.
+ *
+ * It takes `spec`/`data`/`theme` it does not otherwise need so that the
+ * element-rect reflow lives INSIDE the mutation rather than at the call site: a
+ * future second caller cannot then forget it. Every rect in `layout.elements`
+ * except `chartArea` and `title` is a function of the margin and the plot area,
+ * so shifting the plot down by FIELD_BTN_MARGIN without reflowing leaves the
+ * axis bands, the axis titles and the legend stale by exactly that many pixels
+ * — and a click on the title then lands on nothing.
+ *
+ * Exported ONLY so the layout-mutation contract can be tested directly; the one
+ * production caller is `renderChart` below.
  */
-function adjustLayoutForPivotButtons(
+export function adjustLayoutForPivotButtons(
   layout: ChartLayout,
   fields: PivotChartFieldInfo[],
+  spec: import("../types").ChartSpec,
+  data: ParsedChartData,
+  theme: ChartRenderTheme,
 ): void {
   const hasFilter = fields.some((f) => f.area === "filter");
   const hasRow = fields.some((f) => f.area === "row");
@@ -1437,6 +1517,11 @@ function adjustLayoutForPivotButtons(
   if (layout.plotArea.height < 40) {
     layout.plotArea.height = 40;
   }
+
+  // Recompute every element rect from the margins we just changed, BEFORE the
+  // paint. Reflow also clears `measured`, so running it after a paint would
+  // throw away the boxes the painters actually measured.
+  reflowChartElements(layout, spec, data, theme);
 }
 
 /**

@@ -5,7 +5,7 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, SliceArc, PieMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { buildOverrideMap, getOverrideFromMap, toAuthoringIndices } from "../lib/dataPointOverrides";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
 import { applyFillStyle } from "./gradientFill";
 import { valuesToAngles } from "./scales";
 import {
@@ -77,17 +77,20 @@ export function paintPieChart(
   drawChartBackground(ctx, layout, theme);
 
   // 2. Draw slices
-  const overrideMap = buildOverrideMap(spec.dataPointOverrides);
-
   for (let i = 0; i < angles.length; i++) {
     const { startAngle, endAngle } = angles[i];
     if (startAngle === endAngle) continue;
 
-    // Apply data point override (series 0 for pie, category index = i). Overrides
-    // are keyed in authoring space — translate the painter slice index first.
-    const override = getOverrideFromMap(overrideMap, 0, toAuthoringIndices(data, 0, i).categoryIndex);
-    const color = override?.color ?? getSeriesColor(spec.palette, i, null);
-    const explodeOffset = override?.exploded ?? 0;
+    // Per-point formatting goes through the ONE shared resolver: it matches the
+    // datum's identity key first, falls back to the index pair, and translates
+    // painter space to authoring space itself. A pie slice is series 0,
+    // category i — do NOT pre-translate the index here.
+    const style = resolveDatumStyle(spec, data, 0, i, {
+      fill: getSeriesColor(spec.palette, i, null),
+    });
+    const color = style.fill;
+    // Single source of truth for the pull-out distance (getExplodeOffset).
+    const explodeOffset = style.explodeOffset;
 
     // Compute exploded slice center offset
     let sliceCenterX = centerX;
@@ -99,7 +102,7 @@ export function paintPieChart(
     }
 
     ctx.save();
-    if (override?.opacity !== undefined) ctx.globalAlpha = override.opacity;
+    if (style.opacity !== null) ctx.globalAlpha = style.opacity;
 
     ctx.beginPath();
     ctx.arc(sliceCenterX, sliceCenterY, outerRadius, startAngle, endAngle);
@@ -117,13 +120,13 @@ export function paintPieChart(
       w: outerRadius * 2,
       h: outerRadius * 2,
     };
-    applyFillStyle(ctx, color, override?.gradientFill, sliceBounds.x, sliceBounds.y, sliceBounds.w, sliceBounds.h);
+    applyFillStyle(ctx, color, style.gradientFill ?? undefined, sliceBounds.x, sliceBounds.y, sliceBounds.w, sliceBounds.h);
     ctx.fill();
 
-    // Draw border if override specifies one
-    if (override?.borderColor) {
-      ctx.strokeStyle = override.borderColor;
-      ctx.lineWidth = override.borderWidth ?? 2;
+    // Draw border if the resolved style specifies one
+    if (style.borderColor) {
+      ctx.strokeStyle = style.borderColor;
+      ctx.lineWidth = style.borderWidth ?? 2;
       ctx.stroke();
     }
 
@@ -152,9 +155,10 @@ export function paintPieChart(
 
       const midAngle = (startAngle + endAngle) / 2;
 
-      // Account for exploded slice offset in label position (authoring-space key)
-      const override = getOverrideFromMap(overrideMap, 0, toAuthoringIndices(data, 0, i).categoryIndex);
-      const explodeOffset = override?.exploded ?? 0;
+      // Account for exploded slice offset in label position. Same resolver as
+      // the slice itself — the index is memoised per (spec, data), so this
+      // second call costs a map lookup and cannot disagree with the geometry.
+      const explodeOffset = resolveDatumStyle(spec, data, 0, i).explodeOffset;
       const lx = centerX + Math.cos(midAngle) * (labelRadius + explodeOffset);
       const ly = centerY + Math.sin(midAngle) * (labelRadius + explodeOffset);
 

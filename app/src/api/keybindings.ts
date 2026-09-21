@@ -379,8 +379,19 @@ function ownsItsOwnKeys(event: KeyboardEvent): boolean {
  * When focus is outside the grid (e.g., in a dialog, side pane, or menu),
  * grid-scoped keybindings should not fire so that native browser behaviour
  * (e.g., Ctrl+C to copy selected text) works as expected.
+ *
+ * PUBLIC, because it is not only this dispatcher's question. Any extension that
+ * installs its OWN global key listener has to ask exactly this before acting on
+ * the document, and `isKeyClaimed` is not a substitute: a pointer claim is a
+ * GRID-OVERLAY concept, so a `<button>` or a `<select>` in a task pane or on the
+ * ribbon carries no claim and is none of INPUT/TEXTAREA/contentEditable either.
+ * Charts' Delete listener had only that tag list, which made "select a chart,
+ * click a tab in the Format pane, press Delete" DESTROY THE CHART in three
+ * clicks. Re-deriving the selector inside an extension would be a second
+ * spelling of a Core concern that drifts on the first change to the container
+ * attribute, so the predicate is exported instead of copied.
  */
-function isGridFocused(): boolean {
+export function isGridFocused(): boolean {
   const active = document.activeElement;
   if (!active) return false;
   const container = (active as HTMLElement).closest?.('[data-focus-container="spreadsheet"]');
@@ -767,15 +778,45 @@ export function findConflicts(combo: string, excludeId?: string): KeyBinding[] {
 // ============================================================================
 
 /**
- * Register a keybinding. Returns an unregister function.
+ * Applicability predicates, keyed by binding id.
+ *
+ * PRIVATE, and deliberately not a field on {@link KeyBinding}: a callable on the
+ * binding object would leak through `getAllKeybindings()` into the settings UI
+ * and into every consumer that serialises a binding — the same reason the script
+ * runners live in their own map. Nothing outside this module can read one back.
  */
-export function registerKeybinding(binding: KeyBinding): () => void {
+const bindingGuards: Map<string, () => boolean> = new Map();
+
+/**
+ * Register a keybinding. Returns an unregister function.
+ *
+ * `when` is an optional applicability predicate — VS Code's "when clause", and
+ * the ONLY way two features can share one combination honestly. Without it the
+ * dispatcher settles a tie by REGISTRATION ORDER, which means the built-ins
+ * (registered in `initKeybindings`, long before any extension activates) always
+ * win; a feature that legitimately owns a key only while its own subject is
+ * selected could never say so. Excel's Ctrl+1 is exactly that key: it formats
+ * CELLS, except while a chart element is selected, when it formats the chart.
+ *
+ * Three rules, all here rather than at the call site:
+ *  - A guarded binding that says no is SKIPPED, and it is skipped before
+ *    `matches` is populated, so it cannot suppress the unguarded binding
+ *    underneath it or swallow the keystroke with a preventDefault.
+ *  - A guarded binding that says yes BEATS an unguarded one, because it is the
+ *    more specific claim. Ties among guarded bindings fall back to registration
+ *    order, as before.
+ *  - A predicate that THROWS counts as "does not apply". A broken extension must
+ *    not be able to take a key away from the app by failing.
+ */
+export function registerKeybinding(binding: KeyBinding, when?: () => boolean): () => void {
   installListener();
 
   if (registry.has(binding.id)) {
     console.warn(`[Keybindings] Overwriting keybinding: ${binding.id}`);
   }
   registry.set(binding.id, binding);
+  if (when === undefined) bindingGuards.delete(binding.id);
+  else bindingGuards.set(binding.id, when);
 
   // Log conflicts
   const effectiveCombo = getEffectiveCombo(binding.id);
@@ -791,8 +832,21 @@ export function registerKeybinding(binding: KeyBinding): () => void {
 
   return () => {
     registry.delete(binding.id);
+    bindingGuards.delete(binding.id);
     notifyChange();
   };
+}
+
+/** Does this binding currently apply? Guardless bindings always do. */
+function bindingApplies(id: string): boolean {
+  const guard = bindingGuards.get(id);
+  if (guard === undefined) return true;
+  try {
+    return guard() === true;
+  } catch (err) {
+    console.error(`[Keybindings] 'when' predicate for '${id}' threw; treating as inapplicable:`, err);
+    return false;
+  }
 }
 
 // ============================================================================
@@ -1142,6 +1196,11 @@ export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
     if (ctx === "editing" && !editing) return;
     if (ctx === "not-editing" && editing) return;
 
+    // A binding may declare WHEN it applies (see `registerKeybinding`). Asked
+    // here, before `matches` is populated, so a guarded binding that says no
+    // neither shadows the binding underneath it nor causes a preventDefault.
+    if (!bindingApplies(binding.id)) return;
+
     // Skip grid-scoped commands when focus is outside the grid
     // (e.g., in dialogs, side panes, menus) so native browser
     // shortcuts like Ctrl+C to copy text work as expected.
@@ -1173,8 +1232,15 @@ export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
   // app owns claimed the keys AFTERWARDS (a late-loading extension, a user
   // remap). Leaving that to registration order is how a sandboxed contribution
   // came to shadow a built-in once already; here it is a rule, not an accident.
-  // Otherwise: first registered wins.
-  const winner = matches.find((b) => b.source !== "script") ?? matches[0];
+  // Otherwise: first registered wins — EXCEPT that a binding which declared a
+  // `when` and passed it is the more specific claim and beats an unguarded one.
+  // Registration order cannot express "only while my subject is selected", and
+  // the built-ins are always registered first, so without this rule the
+  // specific claim could never be heard at all.
+  const winner =
+    matches.find((b) => b.source !== "script" && bindingGuards.has(b.id)) ??
+    matches.find((b) => b.source !== "script") ??
+    matches[0];
 
   event.preventDefault();
   event.stopPropagation();

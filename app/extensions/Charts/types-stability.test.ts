@@ -17,7 +17,7 @@ import type {
   DataPointOverride,
   DataTableOptions,
 } from "./types";
-import { isCartesianChart, isDataRangeRef, isPivotDataSource } from "./types";
+import { isCartesianChart, isDataRangeRef, isPivotDataSource, CHART_ELEMENT_IDS } from "./types";
 
 // ============================================================================
 // ChartSpec interface fields
@@ -205,14 +205,44 @@ describe("DataSource type guards", () => {
 });
 
 // ============================================================================
-// ChartHitResult type values
+// ChartHitResult — Excel's ElementID + SeriesIndex + PointIndex
 // ============================================================================
 
-describe("ChartHitResult type values", () => {
-  it("accepts all expected hit types", () => {
-    const hitTypes: ChartHitResult["type"][] = [
-      "bar", "point", "slice", "plotArea", "title", "legend", "axis", "filterButton", "none",
-    ];
-    expect(hitTypes).toHaveLength(9);
+// WHAT USED TO BE HERE, AND WHY IT IS GONE: this block asserted that
+// `ChartHitResult["type"]` had exactly nine entries. A count is not a contract —
+// two of those nine ("title", "legend") had ZERO producers anywhere in the
+// repository and the count test was perfectly happy about it. The real guard is
+// `rendering/__tests__/elementHitTest-drift.test.ts`, which RUNS the hit-tester
+// and asserts that every declared element is genuinely produced, in both
+// directions. What remains here is the shape of the result itself.
+
+describe("ChartHitResult shape", () => {
+  it("carries the element, the series and the point index", () => {
+    const datum: ChartHitResult = {
+      element: "datum",
+      seriesIndex: 1,
+      pointIndex: 3,
+      value: 42,
+      seriesName: "Sales",
+      categoryName: "Mar",
+      type: "bar",
+      categoryIndex: 3,
+    };
+    expect(datum.element).toBe("datum");
+    expect(datum.pointIndex).toBe(3);
+  });
+
+  it("spells 'the whole series' as an ABSENT pointIndex (Excel's PointIndex = -1)", () => {
+    const wholeSeries: ChartHitResult = { element: "datum", seriesIndex: 2, type: "bar" };
+    expect(wholeSeries.pointIndex).toBeUndefined();
+    expect("pointIndex" in wholeSeries).toBe(false);
+  });
+
+  it("declares each element id exactly once", () => {
+    expect(new Set(CHART_ELEMENT_IDS).size).toBe(CHART_ELEMENT_IDS.length);
+  });
+
+  it("has no 'gridlines' member — nothing in ChartLayout records where they are drawn", () => {
+    expect(CHART_ELEMENT_IDS as readonly string[]).not.toContain("gridlines");
   });
 });

@@ -7,6 +7,8 @@ import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, RadarMarkOpt
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { seriesPaletteIndex } from "../lib/encodingResolver";
+import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { paintDatumMarker } from "./markerPainter";
 import {
   computeRadialLayout,
   drawChartBackground,
@@ -185,13 +187,25 @@ export function paintRadarChart(
     ctx.lineWidth = lineWidth;
     ctx.stroke();
 
-    // Markers
+    // Markers. Resolved through the ONE shared resolver so a single vertex can
+    // be recoloured, reshaped or hidden — the translation from painter space to
+    // authoring space and the identity-key match both happen inside it.
     if (showMarkers) {
-      ctx.fillStyle = color;
-      for (const p of points) {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, markerRadius, 0, Math.PI * 2);
-        ctx.fill();
+      for (let ci = 0; ci < points.length; ci++) {
+        const p = points[ci];
+        const style = resolveDatumStyle(spec, data, si, ci, {
+          fill: color,
+          markerStyle: "circle",
+          markerSize: markerRadius,
+        });
+        paintDatumMarker(ctx, p.x, p.y, {
+          shape: style.markerStyle ?? "circle",
+          size: style.markerSize ?? markerRadius,
+          fill: style.markerFill ?? color,
+          borderColor: style.markerBorderColor,
+          borderWidth: style.markerBorderWidth,
+          opacity: style.opacity,
+        });
       }
     }
   }

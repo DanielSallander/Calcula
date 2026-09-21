@@ -32,6 +32,16 @@ is NOT a transient write** — the generic per-extension persistence tier (A5,
   (`scenario_shows_shape_cannot_claim_the_transient_exemption`).
 - **Nothing in this document is unbuilt.** All surfaces described here exist.
 
+### Added 2026-09-21
+
+- **The transient-write pattern now has a SECOND instance, and it has no backend in it.** The
+  chart Format pane's hover preview (CI-14) snapshots into a TypeScript store rather than into a
+  Rust `TransientScope`, so `DocumentEffect::transient` is not involved at all. That makes the
+  distinction explicit for the first time: the *arm* is how the pattern is enforced when a write
+  crosses to Rust; the *pattern* is snapshot / write-without-undo-or-dirty / restore, and it
+  applies either way. See "A SECOND instance of the pattern, with no backend in it" below, and
+  `docs/design/chart-interaction.md` §6.8 for the full exit-path list.
+
 **Related:**
 - `docs/design/scriptable-objects.md` — the composition-over-new-surface pattern this follows.
 - `docs/design/wave3-scripting-security.md` — the broker / sandbox / capability model; Animation is a trusted built-in that reaches the backend through the same classified door.
@@ -125,6 +135,56 @@ arm — the one exemption from dirtying the document. It is not asserted, it is 
 The operational definition, quoted from the gate's own doc comment: *"a write that is
 guaranteed to be undone"*. This is precisely why `scenario_show` **cannot** claim the
 exemption — it registers no restore, so it structurally cannot build a `TransientScope`.
+
+### A SECOND instance of the pattern, with no backend in it (added 2026-09-21)
+
+Until now this document was the only worked example of the transient-write pattern, and both of
+its reference points — Animation and the `scenario_show` correction — are **Rust backend
+commands**. That made the pattern read as if it *were* the `DocumentEffect::transient` arm. It is
+not. The arm is how the pattern is enforced **when a write reaches the backend**; the pattern
+itself is older and wider: *snapshot, write without entering the undo or dirty path, restore on
+stop.*
+
+The chart Format pane's **hover preview** (CI-14, `docs/design/chart-interaction.md` §6.8) is the
+second instance, and it is instructive precisely because it has no Rust in it at all. Hovering a
+colour swatch repaints the chart; clicking it writes one undo entry. The snapshot lives in a
+**TypeScript module-scope store**, not in a `TransientScope`:
+
+- `previewChartSpec(chartId, patch)` (`app/extensions/Charts/lib/chartStore.ts:185`) stashes the
+  stored spec as `activePreview.original` and reassigns the render-time spec to the merge.
+- `restoreChartSpecPreview()` (`:204`) puts it back and is safe to call on any exit path, however
+  many times.
+
+**What that means for the pattern.** `DocumentEffect::transient` is **not involved**, because
+nothing reaches the backend — there is no Tauri invoke, so there is no `FileState` to dirty and no
+effect to construct. The discipline is enforced by three things instead:
+
+1. **`previewChartSpec` never calls `scheduleSave`.** That is the whole rule, and it is the reason
+   the preview is not routed through `updateChartSpec`, which ends in `scheduleSave`
+   unconditionally. A 300 ms debounce would otherwise persist whichever swatch the pointer last
+   crossed on its way to the OK button, dirty the document, and leave the close-without-saving
+   prompt guarding an edit the reader never made.
+2. **Restore on every exit path, enumerated rather than assumed** — mouse-out, commit, pane close,
+   selection retarget, chart deletion, File > New/Open, extension teardown. The list is kept in
+   the code at `app/extensions/Charts/components/ChartFormatPane.tsx:341-349`, and in full with
+   citations in chart-interaction.md §6.8.
+3. **Two backstops, so a missed exit path is harmless rather than corrupting.**
+   `updateChartSpec` / `replaceChartSpec` restore **before** they merge
+   (`lib/chartStore.ts:690`, `:722`), so a real edit always starts from the true spec; and
+   `flushDirtyCharts` persists the ORIGINAL spec while a preview is up, via `chartAsPersisted`
+   (`:244`, used at `:470`), so an unrelated pending save — a drag scheduled 200 ms ago, firing
+   while the reader hovers — cannot carry the preview to disk.
+
+Backstop 1 is the frontend analogue of what `prove_restore_registered` buys the backend: neither
+relies on the caller remembering. The difference is that Rust can make the proof a *type*, and
+TypeScript cannot, so the guarantee is bought at the two choke points every real write passes
+through instead of at the effect's constructor.
+
+**The lesson for the next transient feature:** ask first whether the write crosses to Rust. If it
+does, `DocumentEffect::transient` and a `TransientScope` are mandatory and the exemption is
+proof-carrying. If it does not, the same three obligations still apply — no persist call, an
+enumerated restore list, and a backstop at the path a real write takes — and they have to be
+written down, because nothing in the compiler will ask for them.
 
 ### The four drivers (`app/extensions/Animation/drivers/`)
 

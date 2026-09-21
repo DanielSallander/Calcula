@@ -134,11 +134,6 @@ const cleanupFns: (() => void)[] = [];
 const FR_PROPERTIES_DIALOG_ID = "floatingRange.properties";
 const FR_CONTEXT_MENU_ID = "floatingRange:contextMenu";
 
-/** Double-click detection: Core dispatches no dblclick to overlays, so two
- *  bodyDragStart hits on the same local cell within 350 ms open the editor. */
-let lastBodyDown: { frId: string; row: number; col: number; time: number } | null =
-  null;
-
 /** Active drag teardown — cell drag-extend OR edge resize (also run on
  *  deactivate). One slot, because the two can never be live at once. */
 let activeDragCleanup: (() => void) | null = null;
@@ -632,6 +627,53 @@ function claimsBodyDrag(ctx: OverlayHitTestContext): boolean {
 }
 
 // ============================================================================
+// onDoubleClick — the real gesture, not a timer
+// ============================================================================
+
+/**
+ * A double-click on an FR CELL opens that cell's editor.
+ *
+ * Core hands this over through `OverlayRegistration.onDoubleClick`
+ * (@api/gridOverlays), which is the ONLY seam that reaches the owner of a
+ * floating object: the cell double-click interceptors are asked about a CELL,
+ * and Core resolves no cell over a floating overlay.
+ *
+ * Before that seam existed this was INFERRED from two `bodyDragStart` events on
+ * the same local cell within 350 ms — a private clock that (a) could not tell a
+ * double-click from two deliberate single clicks a third of a second apart, (b)
+ * fired only because the FR opts into `claimsBodyDrag`, so no overlay without a
+ * body-drag claim could have copied it, and (c) had to be reset on every zone
+ * change by hand. The browser already knows what a double-click is; ask it.
+ *
+ * The zone router's refusals are repeated here rather than shared, because a
+ * double-click is a different gesture with the same geometry: a reference pick
+ * must not open an editor (the first click already inserted the reference), and
+ * a title-bar or header double-click has no cell to edit.
+ */
+export function handleFrDoubleClick(ctx: OverlayHitTestContext): boolean {
+  const frId = ctx.region.data?.frId as string | undefined;
+  if (!frId || !ctx.floatingCanvasBounds) return false;
+  const entry = getFloatingRangeById(frId);
+  if (!entry) return false;
+  if (isGlobalFormulaMode() || externalTargetExpecting()) return false;
+
+  const dx = ctx.canvasX - ctx.floatingCanvasBounds.x;
+  const dy = ctx.canvasY - ctx.floatingCanvasBounds.y;
+  const hit = localCellFromPoint(entry, dx, dy);
+  if (hit.zone !== "cells") return false;
+
+  setLocalSelection({
+    frId,
+    anchorRow: hit.row,
+    anchorCol: hit.col,
+    endRow: hit.row,
+    endCol: hit.col,
+  });
+  openFrEditor(frId, hit.row, hit.col, null);
+  return true;
+}
+
+// ============================================================================
 // floatingObject:* handlers
 // ============================================================================
 
@@ -754,7 +796,7 @@ function setupFloatingObjectEvents(): void {
   );
 
   // --------------------------------------------------------------------------
-  // Body drag: local cell selection + drag-extend + dblclick-by-timestamp.
+  // Body drag: local cell selection + drag-extend.
   // --------------------------------------------------------------------------
   const handleBodyDragStart = (e: Event) => {
     const detail = (e as CustomEvent).detail;
@@ -796,26 +838,9 @@ function setupFloatingObjectEvents(): void {
       endRow = entry.rows - 1;
     }
 
-    // Double-click = two bodyDragStart on the same cell within 350 ms.
-    if (hit.zone === "cells") {
-      const now = performance.now();
-      if (
-        lastBodyDown &&
-        lastBodyDown.frId === frId &&
-        lastBodyDown.row === hit.row &&
-        lastBodyDown.col === hit.col &&
-        now - lastBodyDown.time < 350
-      ) {
-        lastBodyDown = null;
-        setLocalSelection({ frId, anchorRow, anchorCol, endRow, endCol });
-        openFrEditor(frId, hit.row, hit.col, null);
-        return;
-      }
-      lastBodyDown = { frId, row: hit.row, col: hit.col, time: now };
-    } else {
-      lastBodyDown = null;
-    }
-
+    // A double-click is NOT inferred here any more. It arrives as a real
+    // double-click through the overlay's `onDoubleClick` seam — see
+    // `handleFrDoubleClick`.
     setLocalSelection({ frId, anchorRow, anchorCol, endRow, endCol });
     requestOverlayRedraw();
 
@@ -969,6 +994,7 @@ function activate(context: ExtensionContext): void {
       hitTest: hitTestFloatingRange,
       getCursor: getFrCursor,
       claimsBodyDrag,
+      onDoubleClick: handleFrDoubleClick,
       priority: 13,
     }),
   );

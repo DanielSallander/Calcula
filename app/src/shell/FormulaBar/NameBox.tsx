@@ -20,6 +20,31 @@
 //      and defined names deliberately share ONE namespace, which is the whole
 //      reason a table name in this box means anything. So a workbook's tables
 //      could not be seen, listed, or navigated to by name.
+// FIX: The chart half is read from the `@api/chartSelection` REGISTRY instead of
+//      hand-parsed out of the raw CHART_SELECTION_CHANGED payload. The old
+//      reader pulled `chartName` out of the event and showed that and nothing
+//      else, so selecting a series, a point, an axis or the chart title all
+//      printed "Chart 1" — the box said WHICH chart but never WHAT in it. The
+//      registry derives Excel's own Name Box wording in one place; the shell
+//      renders it verbatim and derives nothing.
+//
+//      PRODUCT DECISION (D5-5), LANDED: at `level: "chart"` the Name Box says
+//      "Chart Area", not the chart's name — and it says `Chart 1 Chart Area`,
+//      qualified, because this is the ONLY surface that tells the reader WHICH
+//      chart is selected. Excel can afford the bare wording; its charts are
+//      sheet-scoped objects whose identity its Name Box carries separately, and
+//      dropping the name to match it exactly would trade one known fact for
+//      another instead of adding it.
+//
+//      `level: "chart"` IS the chart area — which is why the Format pane
+//      already shows chart-area fields there — and `elementId: "chartArea"` is
+//      the element vocabulary's name for the same canvas, so the two are one
+//      rung and return ONE string. (The PLOT area is a different region and now
+//      has a rung of its own that both the mouse and the keyboard can reach; it
+//      reads "Plot Area".) The wording lives in `chartSelectionDisplayName`
+//      (`app/src/api/chartSelection.ts`) and NOWHERE ELSE; this component
+//      renders `displayName` verbatim, so the pane header and the box moved
+//      together with that one function.
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -41,6 +66,12 @@ import {
   emitAppEvent,
   onAppEvent,
 } from "../../api";
+// Deliberately the SUBPATH, the way this file already reaches `api/lib`,
+// `api/backend` and `api/editing`. The registry is a dependency-free store, and
+// importing it by subpath keeps it out of the barrel doubles the Name Box's own
+// tests install — a barrel mock that does not list a newly used export makes it
+// `undefined` and the component throws on mount.
+import { getChartSelection, onChartSelectionChanged } from "../../api/chartSelection";
 import type { NamedRange } from "../../api";
 import { resolveNamedRangeCoords } from "../../api/lib";
 import type { NamedRangeCoords } from "../../api/lib";
@@ -154,8 +185,28 @@ export function NameBox(): React.ReactElement {
   /** Bumped by any table change, to re-derive the displayed table spelling. */
   const [tableRevision, setTableRevision] = useState(0);
 
-  /** Chart name to display when a chart is selected. */
-  const [chartName, setChartName] = useState<string | null>(null);
+  /**
+   * What the Name Box shows while something inside a chart is selected.
+   *
+   * READ FROM THE REGISTRY, NOT FROM THE EVENT. This used to subscribe to the
+   * raw `CHART_SELECTION_CHANGED` CustomEvent and pick `chartName` out of the
+   * payload by hand, which made the shell a fourth place that re-derived the
+   * chart selection — exactly the duplication `@api/chartSelection` was added to
+   * retire, and the reason the box could only ever say the chart's name however
+   * deep the ladder had gone. The registry already derives Excel's Name Box
+   * wording ("Series 1 Point 3", "Chart Title", "Vertical (Value) Axis") in ONE
+   * place, so the shell reads it and renders it verbatim. Deriving anything from
+   * the snapshot's parts here would put the decision back in two places.
+   *
+   * It starts EMPTY and is filled by the subscribing effect's first read, which
+   * is not the same as seeding it from the registry here. The box syncs its
+   * input text on a CHANGE of the displayed value, so a label that is already
+   * correct at the first render never reaches the input: mounting while a chart
+   * is selected (a panel toggle, a re-mount after a sheet switch) would render
+   * a blank box. Letting the effect move it from "" to the label is the change
+   * the sync is waiting for.
+   */
+  const [chartLabel, setChartLabel] = useState<string>("");
 
   const displayAddress = state.selection
     ? formatSelectionAddress(
@@ -318,15 +369,12 @@ export function NameBox(): React.ReactElement {
     };
   }, []);
 
-  // Listen for chart selection changes to show chart name
+  // Follow the published chart selection. `displayName` is "" when no chart is
+  // selected, which is the registry's own way of saying "show the address".
   useEffect(() => {
-    return onAppEvent(AppEvents.CHART_SELECTION_CHANGED, (detail: unknown) => {
-      const d = detail as { chartId?: number | null; chartName?: string | null } | null;
-      if (d && d.chartId != null && d.chartName) {
-        setChartName(d.chartName);
-      } else {
-        setChartName(null);
-      }
+    setChartLabel(getChartSelection().displayName);
+    return onChartSelectionChanged((snapshot) => {
+      setChartLabel(snapshot.displayName);
     });
   }, []);
 
@@ -340,11 +388,16 @@ export function NameBox(): React.ReactElement {
     });
   }, []);
 
-  // The displayed value: chart name > matched named range > table > address.
+  // The displayed value: chart selection > matched named range > table > address.
   // A defined name and a table name can both be exact for the same block (you
   // may define a name over a table's data body). Both are true, both navigate
   // to the same cells, and the tie goes to the one the user typed themselves.
-  const displayValue = chartName ?? matchedName ?? matchedTable ?? displayAddress;
+  //
+  // The chart label wins outright because while a chart is selected the grid
+  // selection underneath it has not moved, so the address would name a cell the
+  // user is not looking at.
+  const displayValue =
+    (chartLabel !== "" ? chartLabel : null) ?? matchedName ?? matchedTable ?? displayAddress;
 
   // Sync inputValue with displayValue when not editing
   const [prevDisplay, setPrevDisplay] = useState(displayValue);

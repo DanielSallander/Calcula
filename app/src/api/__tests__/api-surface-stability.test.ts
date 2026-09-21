@@ -70,6 +70,52 @@ describe("api/events.ts surface stability", () => {
 });
 
 // ============================================================================
+// index.ts — the chart seams are reachable from the BARREL
+// ============================================================================
+// Extensions may import ONLY from `@api`, and every chart seam except these two
+// blocks was already re-exported here (chartCues, chartQuickActions,
+// chartParams). `chartSelection` and the right-click-target half of `chartData`
+// were subpath-only, which reads as "private" to anyone obeying the Facade Rule
+// — nothing was blocked, but the seam looked like it was not for them. This
+// pins the two blocks so a future edit cannot quietly drop them back out.
+
+describe("api/index.ts chart seam re-exports", () => {
+  it("re-exports the chart selection registry", async () => {
+    const mod = (await import("../index")) as Record<string, unknown>;
+    for (const fn of [
+      "chartSelectionDisplayName",
+      "publishChartSelection",
+      "getChartSelection",
+      "onChartSelectionChanged",
+      "resetChartSelectionRegistry",
+    ]) {
+      expect(typeof mod[fn]).toBe("function");
+    }
+    expect(Array.isArray(mod.CHART_SELECTION_ELEMENT_IDS)).toBe(true);
+    expect(mod.EMPTY_CHART_SELECTION).toBeDefined();
+  });
+
+  it("re-exports the chart right-click target", async () => {
+    const mod = (await import("../index")) as Record<string, unknown>;
+    expect(typeof mod.setChartRightClickTarget).toBe("function");
+    expect(typeof mod.getChartRightClickTarget).toBe("function");
+    expect(Array.isArray(mod.CHART_TARGET_ELEMENTS)).toBe(true);
+  });
+
+  it("the barrel's copy IS the module's copy, not a second registry", async () => {
+    // A re-export that accidentally became a re-implementation would let a
+    // subpath writer and a barrel reader disagree about the current selection.
+    const barrel = (await import("../index")) as Record<string, unknown>;
+    const direct = await import("../chartSelection");
+    expect(barrel.getChartSelection).toBe(direct.getChartSelection);
+    expect(barrel.CHART_SELECTION_ELEMENT_IDS).toBe(direct.CHART_SELECTION_ELEMENT_IDS);
+    const chartData = await import("../chartData");
+    expect(barrel.setChartRightClickTarget).toBe(chartData.setChartRightClickTarget);
+    expect(barrel.CHART_TARGET_ELEMENTS).toBe(chartData.CHART_TARGET_ELEMENTS);
+  });
+});
+
+// ============================================================================
 // commands.ts exports
 // ============================================================================
 
