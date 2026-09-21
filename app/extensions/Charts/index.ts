@@ -101,7 +101,6 @@ import {
   firstCueOfFact,
   getChartCueStep,
   getChartOverlay,
-  getSelectedChartCue,
   onChartCuesChanged,
   registerChartCueHost,
   setChartCueStep,
@@ -1189,17 +1188,25 @@ function activate(context: ExtensionContext): void {
       }
     }
 
-    // A click on a ringed datum selects the ring (and a second click clears
-    // it), so the context menu can act on "this point of interest".
+    // THE LADDER OWNS THE CLICK. A ring is a PROPERTY of the datum it marks,
+    // not a thing the reader selects INSTEAD of it, so this branch records
+    // which cue (if any) sits on the datum just clicked and FALLS THROUGH to
+    // the selection ladder below. Clicking a bar therefore does the same thing
+    // whether the lens is on or off — chart, then series, then that bar — and
+    // the overlay stops being a mode.
+    //
+    // It used to `return` here, which is why a ringed bar could never be
+    // selected individually (the owner's finding). And it only assigned when a
+    // cue was FOUND, so a click on a bar with no ring left the previous ring
+    // selected — and "Add comment on this point…" then wrote the reader's
+    // words onto a bar they had already clicked away from. The assignment is
+    // unconditional now: a click that lands on no cue CLEARS the selection,
+    // exactly as a click on the plot background drops the ladder to chart level.
     if (getChartOverlay(click.chartId).cues.length > 0) {
       const datumHit = hitTestGeometry(local.localX, local.localY, cachedData.hitGeometry, cachedData.layout);
       const cue = isDataHit(datumHit) ? cueAtDatum(visibleChartCues(click.chartId), datumHit) : null;
-      if (cue) {
-        const current = getSelectedChartCue(click.chartId);
-        setSelectedChartCue(click.chartId, current?.cueId === cue.cueId ? null : cue.cueId);
-        requestOverlayRedraw();
-        return;
-      }
+      setSelectedChartCue(click.chartId, cue ? cue.cueId : null);
+      requestOverlayRedraw();
     }
 
     // Interactive point-selection (C5): if this chart declares a select:'point'

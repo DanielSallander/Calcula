@@ -1025,6 +1025,76 @@ where Playwright takes the file path as the flag's optional MODE argument; it ne
 **Gates:** full vitest, `check-types`, `lint:boundaries`, `check:line-endings` and the app crate's
 `insights::` tests green; 17 sabotages across the round, each redding only its own guard.
 
+## 5h. The lens was stealing the click — the ladder takes it back (2026-09-21)
+
+The owner tested §5g live and reported two more things, which turned out to be one cause with two
+faces. The overlay's click branch selected a cue and RETURNED, so a ringed bar could never be
+selected individually; and it assigned the selection only when a ring was actually hit, so a click
+on a bar with no ring left the previous ring selected and "Add comment on this point…" wrote the
+reader's words onto a bar they had already clicked away from.
+
+### Why not the owner's literal suggestion
+
+The owner proposed making the cue's own outline the click target, so the bar stays reachable. A
+ten-agent review priced it and it is refused, with the repo's own constants as the reason. The box
+sits `CUE_RING_PAD` (4) outside the bar, so it needs 8px of gap to sit clear of its neighbours.
+`createBandScale`'s default padding is 0.2, which puts the gap between bars at `bandwidth * 0.2`:
+
+| categories on a 400px plot | gap between bars |
+|---|---|
+| 6 | 11.1px |
+| 12 | 5.6px |
+| 24 | 2.8px |
+| 40 | 1.7px |
+
+Above roughly nine categories the ring's left and right segments are painted ON TOP of the
+neighbouring bars, so the "outline" is not a target that exists — and whether it exists depends on
+category count, grouping and stacking, none of which the reader can see. The same gesture would
+work on a five-bar chart and silently do nothing on a twenty-bar one. It also answers only half the
+report: a comment is welded to a cue in three places, so an un-ringed bar still could not take one.
+
+### The rule instead: one selection, and a ring is a property of a datum
+
+A chart already has a selection, and it is a ladder: chart, then series, then that bar. The overlay
+added a SECOND selection that consumed the click before the ladder saw it, which is the whole of
+finding (2) and the stale half of finding (1). So the ladder keeps the click. The cue branch no
+longer returns; it records which cue (if any) sits on the datum just clicked and falls through.
+Clicking a bar now does the same thing whether the lens is on or off, and the overlay stops being a
+mode.
+
+The assignment is unconditional, so a click that lands on no cue CLEARS the selection, exactly as a
+click on the plot background drops the ladder to chart level. `deselectChart` clears it too — and
+only for the chart being left, since another chart's ring is none of its business.
+
+### The regression this exposes, fixed in the same change
+
+At dataPoint level every non-selected element is filled `rgba(255,255,255,0.55)`. Letting a ringed
+bar reach that level means selecting one marked bar pales every OTHER marked bar — and the overlay
+is painted AFTER the highlight, so their rings survive over the ghosts. The reader clicks one point
+of interest and the rest turn pale. The wash is therefore skipped while the chart carries visible
+cues, leaving the outline and handles, which are unambiguous on their own.
+
+The three highlight painters moved to `extensions/Charts/rendering/selectionHighlight.ts` so the
+rule has a unit tier; nothing covered them before. Threading the flag through the PIE painter
+inverted its two branches on the way — with dimming off, an unselected slice fell into the
+highlight branch and every slice was outlined — which the new test caught before anything ran, and
+which is now one of the sabotages.
+
+### The proof that was missing
+
+Both defects shipped green because `insight-overlays.spec.ts` selected cues programmatically and its
+only chart mouse events were right-clicks. The journey now drives real LEFT clicks on real bars,
+located from the renderer's own hit geometry: a ringed bar reaching series then dataPoint, and a
+click on an un-ringed bar clearing the ring rather than keeping it. Two errors in that section were
+caught by re-reading the ladder rather than by running it — a second click inside the same series
+stays at dataPoint level rather than dropping to series, and the top of a chart belongs to the
+stepper pill, so a "click off the data" gesture aimed there steps instead of clearing.
+
+**Gates:** full vitest (112,906), `check-types`, `lint:boundaries`, `check:line-endings` green; five
+sabotages, each redding only its own guard. The live run is owed: it refused at the capture-
+environment guard with `devicePixelRatio` 2 against the corpus's 1, which is the 200% laptop panel
+rather than the 100% external display.
+
 ## 6. Verification — the standard this repository holds a milestone to
 
 - Every rule in §4.3 is a unit test; the harmful-cue gate and determinism are CI tests over the

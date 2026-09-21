@@ -40,6 +40,7 @@ import { DEFAULT_CHART_THEME, resolveChartTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { seriesPaletteIndex } from "../lib/encodingResolver";
 import { isChartSelected, getSubSelection } from "../handlers/selectionHandler";
+import { drawSelectionHighlights } from "./selectionHighlight";
 import { clearPointSelection } from "../handlers/chartPointSelection";
 import { clearWidgetValues, getWidgetValue } from "../handlers/chartWidgetValues";
 import {
@@ -567,7 +568,10 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   if (isChartSelected(chartId) && cachedData) {
     const subSel = getSubSelection();
     if (subSel.level === "series" || subSel.level === "dataPoint") {
-      drawSelectionHighlights(ctx, canvasX, canvasY, cachedData, chart.spec, subSel.level, subSel.seriesIndex, subSel.categoryIndex);
+      // With a lens on the chart the wash would pale the very bars the lens
+      // exists to point at, so the selection is drawn as an outline alone.
+      const lensOn = visibleChartCues(chartId).length > 0;
+      drawSelectionHighlights(ctx, canvasX, canvasY, cachedData, chart.spec, subSel.level, subSel.seriesIndex, subSel.categoryIndex, !lensOn);
     } else if (subSel.level === "axis" && subSel.axisType) {
       drawAxisSelectionHighlight(ctx, canvasX, canvasY, cachedData.layout, subSel.axisType);
     }
@@ -1034,183 +1038,6 @@ function drawCueTooltip(
     ty += lineH;
   }
   ctx.restore();
-}
-
-function drawSelectionHighlights(
-  ctx: CanvasRenderingContext2D,
-  chartX: number,
-  chartY: number,
-  cachedData: CachedChartData,
-  spec: import("../types").ChartSpec,
-  level: "series" | "dataPoint",
-  selSeriesIndex?: number,
-  selCategoryIndex?: number,
-): void {
-  const { hitGeometry } = cachedData;
-
-  if (hitGeometry.type === "bars") {
-    drawBarSelectionHighlights(ctx, chartX, chartY, hitGeometry.rects, level, selSeriesIndex, selCategoryIndex);
-  } else if (hitGeometry.type === "points") {
-    drawPointSelectionHighlights(ctx, chartX, chartY, hitGeometry.markers, level, selSeriesIndex, selCategoryIndex);
-  } else if (hitGeometry.type === "slices") {
-    drawSliceSelectionHighlights(ctx, chartX, chartY, hitGeometry.arcs, level, selSeriesIndex);
-  } else if (hitGeometry.type === "composite") {
-    for (const group of hitGeometry.groups) {
-      if (group.type === "bars") {
-        drawBarSelectionHighlights(ctx, chartX, chartY, group.rects, level, selSeriesIndex, selCategoryIndex);
-      } else if (group.type === "points") {
-        drawPointSelectionHighlights(ctx, chartX, chartY, group.markers, level, selSeriesIndex, selCategoryIndex);
-      }
-    }
-  }
-}
-
-function drawBarSelectionHighlights(
-  ctx: CanvasRenderingContext2D,
-  chartX: number,
-  chartY: number,
-  barRects: BarRect[],
-  level: "series" | "dataPoint",
-  selSeriesIndex?: number,
-  selCategoryIndex?: number,
-): void {
-  if (barRects.length === 0) return;
-
-  for (const bar of barRects) {
-    const bx = chartX + bar.x;
-    const by = chartY + bar.y;
-
-    const isSelected =
-      level === "series"
-        ? bar.seriesIndex === selSeriesIndex
-        : bar.seriesIndex === selSeriesIndex && bar.categoryIndex === selCategoryIndex;
-
-    if (isSelected) {
-      ctx.strokeStyle = "#0e639c";
-      ctx.lineWidth = 2;
-      ctx.setLineDash([]);
-      ctx.strokeRect(bx, by, bar.width, bar.height);
-    } else {
-      ctx.fillStyle = "rgba(255, 255, 255, 0.55)";
-      ctx.fillRect(bx, by, bar.width, bar.height);
-    }
-  }
-
-  // Draw selection handles on selected bars (small squares at corners)
-  if (level === "dataPoint" && selSeriesIndex != null && selCategoryIndex != null) {
-    const selectedBar = barRects.find(
-      (b) => b.seriesIndex === selSeriesIndex && b.categoryIndex === selCategoryIndex,
-    );
-    if (selectedBar) {
-      drawElementSelectionHandles(ctx, chartX + selectedBar.x, chartY + selectedBar.y, selectedBar.width, selectedBar.height);
-    }
-  }
-}
-
-function drawPointSelectionHighlights(
-  ctx: CanvasRenderingContext2D,
-  chartX: number,
-  chartY: number,
-  markers: import("../types").PointMarker[],
-  level: "series" | "dataPoint",
-  selSeriesIndex?: number,
-  selCategoryIndex?: number,
-): void {
-  if (markers.length === 0) return;
-
-  for (const marker of markers) {
-    const mx = chartX + marker.cx;
-    const my = chartY + marker.cy;
-
-    const isSelected =
-      level === "series"
-        ? marker.seriesIndex === selSeriesIndex
-        : marker.seriesIndex === selSeriesIndex && marker.categoryIndex === selCategoryIndex;
-
-    if (isSelected) {
-      ctx.strokeStyle = "#0e639c";
-      ctx.lineWidth = 2;
-      ctx.setLineDash([]);
-      ctx.beginPath();
-      ctx.arc(mx, my, marker.radius + 3, 0, Math.PI * 2);
-      ctx.stroke();
-    } else {
-      ctx.fillStyle = "rgba(255, 255, 255, 0.55)";
-      ctx.beginPath();
-      ctx.arc(mx, my, marker.radius + 2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-}
-
-function drawSliceSelectionHighlights(
-  ctx: CanvasRenderingContext2D,
-  chartX: number,
-  chartY: number,
-  arcs: import("../types").SliceArc[],
-  level: "series" | "dataPoint",
-  selSeriesIndex?: number,
-): void {
-  if (arcs.length === 0) return;
-
-  for (const arc of arcs) {
-    const isSelected = arc.seriesIndex === selSeriesIndex;
-
-    if (!isSelected) {
-      // Dim non-selected slices
-      ctx.fillStyle = "rgba(255, 255, 255, 0.55)";
-      ctx.beginPath();
-      ctx.moveTo(chartX + arc.centerX, chartY + arc.centerY);
-      ctx.arc(
-        chartX + arc.centerX,
-        chartY + arc.centerY,
-        arc.outerRadius,
-        arc.startAngle,
-        arc.endAngle,
-      );
-      ctx.closePath();
-      ctx.fill();
-    } else {
-      // Highlight selected slice
-      ctx.strokeStyle = "#0e639c";
-      ctx.lineWidth = 2;
-      ctx.setLineDash([]);
-      ctx.beginPath();
-      ctx.arc(
-        chartX + arc.centerX,
-        chartY + arc.centerY,
-        arc.outerRadius + 2,
-        arc.startAngle,
-        arc.endAngle,
-      );
-      ctx.stroke();
-    }
-  }
-}
-
-/**
- * Draw small selection handles at corners and midpoints.
- */
-function drawElementSelectionHandles(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-): void {
-  const size = 5;
-  const half = size / 2;
-  ctx.fillStyle = "#0e639c";
-
-  // Four corners
-  ctx.fillRect(x - half, y - half, size, size);
-  ctx.fillRect(x + w - half, y - half, size, size);
-  ctx.fillRect(x - half, y + h - half, size, size);
-  ctx.fillRect(x + w - half, y + h - half, size, size);
-
-  // Midpoints of top and bottom edges
-  ctx.fillRect(x + w / 2 - half, y - half, size, size);
-  ctx.fillRect(x + w / 2 - half, y + h - half, size, size);
 }
 
 // ============================================================================

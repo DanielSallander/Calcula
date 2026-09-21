@@ -281,6 +281,115 @@ test.describe("Insight overlays, live", () => {
     const drawn = diffCount(off, on);
     expect(drawn, "POSITIVE CONTROL: turning the overlay on must change the chart's pixels (a ring, the pill)").toBeGreaterThan(50);
 
+
+    // --- THE LADDER OWNS THE CLICK (the owner's live finding) --------------
+    // Two defects lived here, and BOTH shipped green because this journey
+    // selected cues programmatically and its only chart mouse events were
+    // right-clicks. These are real LEFT clicks on real bars.
+    //
+    //  (a) The overlay's click branch returned as soon as a ring was hit, so a
+    //      ringed bar could never be selected individually — the reader could
+    //      not reach the bar the overlay was pointing at.
+    //  (b) It assigned the selection only when a ring WAS hit, so clicking a
+    //      bar with no ring left the previous ring selected, and "Add comment
+    //      on this point…" then wrote the reader's words onto a bar they had
+    //      already clicked away from.
+    const ladderLevel = async (): Promise<string> =>
+      appPage.evaluate(async () => {
+        const m = (await (window as unknown as AppWindow).__appImport!(
+          "/extensions/Charts/handlers/selectionHandler.ts",
+        )) as { getSubSelection: () => { level: string; seriesIndex?: number; categoryIndex?: number } };
+        return JSON.stringify(m.getSubSelection());
+      });
+
+    /** One bar's rectangle, chart-local, from the renderer's own hit geometry. */
+    const barRect = async (categoryIndex: number): Promise<{ x: number; y: number; width: number; height: number }> => {
+      const rect = await appPage.evaluate(
+        async ({ chartId, categoryIndex }) => {
+          const m = (await (window as unknown as AppWindow).__appImport!(
+            "/extensions/Charts/rendering/chartRenderer.ts",
+          )) as { getCachedChartData: (id: string) => { hitGeometry: { type: string; rects?: Array<{ x: number; y: number; width: number; height: number; categoryIndex: number }> } } | undefined };
+          const g = m.getCachedChartData(chartId)?.hitGeometry;
+          const r = g?.rects?.find((b) => b.categoryIndex === categoryIndex);
+          return r ? { x: r.x, y: r.y, width: r.width, height: r.height } : null;
+        },
+        { chartId, categoryIndex },
+      );
+      expect(rect, `no bar is drawn at category ${categoryIndex}`).not.toBeNull();
+      return rect!;
+    };
+
+    /** The page-space centre of one bar. */
+    const barCentre = async (categoryIndex: number): Promise<{ x: number; y: number }> => {
+      const r = await barRect(categoryIndex);
+      return { x: box.x + r.x + r.width / 2, y: box.y + r.y + r.height / 2 };
+    };
+
+    const clickBar = async (categoryIndex: number): Promise<void> => {
+      const at = await barCentre(categoryIndex);
+      await appPage.mouse.click(at.x, at.y);
+      await appPage.waitForTimeout(250);
+    };
+
+    // The ringed bar (Aug, category 7) climbs the ladder like any other bar.
+    await appPage.evaluate(
+      async ({ chartId, mod }) => ((await (window as unknown as AppWindow).__appImport!(mod)) as { setChartCueStep: (id: string, s: number | "all") => void }).setChartCueStep(chartId, "all"),
+      { chartId, mod: CHART_CUES },
+    );
+    await appPage.waitForTimeout(300);
+
+    await clickBar(7);
+    expect(JSON.parse(await ladderLevel()), "one click on a RINGED bar selects its series, exactly as on any other bar")
+      .toMatchObject({ level: "series", seriesIndex: 0 });
+    let selected = await appPage.evaluate(
+      async ({ chartId, mod }) => ((await (window as unknown as AppWindow).__appImport!(mod)) as { getSelectedChartCue: (id: string) => { cueId: string; anchor: Record<string, unknown> } | null }).getSelectedChartCue(chartId),
+      { chartId, mod: CHART_CUES },
+    );
+    expect(selected?.anchor, "and the ring on it is the selected one").toMatchObject({ categoryLabel: "Aug" });
+
+    await clickBar(7);
+    expect(JSON.parse(await ladderLevel()), "a second click reaches the BAR — the defect was that it never could")
+      .toMatchObject({ level: "dataPoint", seriesIndex: 0, categoryIndex: 7 });
+
+    // A bar with no ring clears the selection rather than leaving the old one.
+    const unringed = await appPage.evaluate(
+      async ({ chartId, mod }) => {
+        const m = (await (window as unknown as AppWindow).__appImport!(mod)) as {
+          visibleChartCues: (id: string) => Array<{ anchor: { type: string; categoryIndex?: number } }>;
+        };
+        const ringed = new Set(m.visibleChartCues(chartId).filter((c) => c.anchor.type === "datum").map((c) => c.anchor.categoryIndex));
+        return [0, 1, 2, 3, 4, 5, 6, 8, 9, 10].find((i) => !ringed.has(i)) ?? null;
+      },
+      { chartId, mod: CHART_CUES },
+    );
+    expect(unringed, "the seeded chart must have at least one bar with no ring on it").not.toBeNull();
+
+    await clickBar(unringed!);
+    selected = await appPage.evaluate(
+      async ({ chartId, mod }) => ((await (window as unknown as AppWindow).__appImport!(mod)) as { getSelectedChartCue: (id: string) => { cueId: string; anchor: Record<string, unknown> } | null }).getSelectedChartCue(chartId),
+      { chartId, mod: CHART_CUES },
+    );
+    expect(selected, `clicking bar ${unringed} must CLEAR the ring selected on Aug, not keep it`).toBeNull();
+    // Same series, so the ladder stays at datum level and moves to the new bar.
+    expect(JSON.parse(await ladderLevel()), "and the ladder has moved to that bar")
+      .toMatchObject({ level: "dataPoint", seriesIndex: 0, categoryIndex: unringed });
+
+    // Leave the chart exactly as the overlay found it: chart level, no ring
+    // selected, step 0 — so every pixel comparison below still compares like
+    // with like. The click lands in the plot BACKGROUND, above the shortest
+    // bar: the TOP of the chart belongs to the stepper pill, which would step
+    // instead of clearing.
+    const shortest = await barRect(0);
+    await appPage.mouse.click(box.x + shortest.x + shortest.width / 2, box.y + shortest.y - 20);
+    await appPage.waitForTimeout(250);
+    expect(JSON.parse(await ladderLevel()), "a click off the data drops back to chart level").toMatchObject({ level: "chart" });
+    await appPage.evaluate(
+      async ({ chartId, mod }) => ((await (window as unknown as AppWindow).__appImport!(mod)) as { setChartCueStep: (id: string, s: number | "all") => void }).setChartCueStep(chartId, 0),
+      { chartId, mod: CHART_CUES },
+    );
+    await appPage.waitForTimeout(400);
+    await waitForGridStable(appPage);
+
     // --- STEP, from the keyboard --------------------------------------------
     // The chart is selected and shows cues, so the plain Right arrow is the
     // overlay's (lib/overlayKeys.ts); the grid's active cell must NOT move.

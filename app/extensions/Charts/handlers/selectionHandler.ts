@@ -17,6 +17,7 @@ import {
   registerPanel,
   unregisterPanel,
 } from "@api";
+import { setSelectedChartCue } from "@api/chartCues";
 import type { ChartHitResult, ChartSubSelection, ChartSelectionLevel } from "../types";
 import { CHART_DESIGN_TAB_ID, buildChartDesignPanelDefinition } from "../manifest";
 import { ChartEvents } from "../lib/chartEvents";
@@ -112,6 +113,11 @@ export function selectChart(chartId: string): void {
  */
 export function deselectChart(): void {
   if (currentChartId !== null) {
+    // The ring the reader had selected belonged to a datum on THIS chart, and
+    // they have just clicked away from it. Leaving it selected is the same
+    // stale-subject defect as a click on an unringed bar: the context menu
+    // would still offer to act on a point of interest nobody is looking at.
+    setSelectedChartCue(currentChartId, null);
     currentChartId = null;
     subSelection = { level: "none" };
     pendingClick = null;
