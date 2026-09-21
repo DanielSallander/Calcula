@@ -8,6 +8,7 @@ import React, { useState, useCallback } from "react";
 import { css } from "@emotion/css";
 import type { DialogProps } from "@api";
 import { useDialogWindow } from "@api/dialogWindow";
+import { dialogWidth } from "@api/dialogLayout";
 import { emitAppEvent, AppEvents } from "@api/events";
 
 import type {
@@ -31,12 +32,17 @@ const s = {
     align-items: center;
     justify-content: center;
   `,
+  // The box is a flex column that CLIPS; the body below is the only scroller.
+  // Previously `overflow-y: auto` sat here, so the header — which is also the
+  // drag handle — and the Apply button scrolled away with the content.
   dialog: css`
     background: #fff;
     border-radius: 8px;
-    width: 380px;
+    width: ${dialogWidth(760)};
     max-height: 80vh;
-    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
     font-size: 13px;
   `,
@@ -61,9 +67,23 @@ const s = {
   `,
   body: css`
     padding: 12px 16px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  `,
+  /** Two balanced columns; folds to one when the dialog is dragged narrow. */
+  columns: css`
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(max(300px, calc((100% - 24px) / 2)), 1fr));
+    column-gap: 24px;
+    row-gap: 12px;
+    align-items: start;
+  `,
+  column: css`
     display: flex;
     flex-direction: column;
     gap: 12px;
+    min-width: 0;
   `,
   section: css`
     display: flex;
@@ -157,7 +177,7 @@ export function FormatAxisDialog({ onClose, data }: DialogProps): React.ReactEle
   const axisType = data?.axisType as "x" | "y" | undefined;
 
   // Movable + resizable dialog window (shared @api hook)
-  const win = useDialogWindow({ minWidth: 340, minHeight: 320 });
+  const win = useDialogWindow({ minWidth: 560, minHeight: 320 });
 
   const chart = chartId != null ? getChartById(chartId) : undefined;
   const spec = chart?.spec;
@@ -260,7 +280,9 @@ export function FormatAxisDialog({ onClose, data }: DialogProps): React.ReactEle
         </div>
 
         <div className={s.body}>
-          {/* ---- AXIS OPTIONS ---- */}
+         <div className={s.columns}>
+          {/* LEFT: the scale itself — the tallest section, so it owns a column. */}
+          <div className={s.column}>
           <div className={s.section}>
             <div className={s.sectionTitle}>Axis Options</div>
 
@@ -365,6 +387,10 @@ export function FormatAxisDialog({ onClose, data }: DialogProps): React.ReactEle
             )}
           </div>
 
+          </div>
+
+          {/* RIGHT: everything that decorates the scale. */}
+          <div className={s.column}>
           {/* ---- TICK MARKS ---- */}
           <div className={s.section}>
             <div className={s.sectionTitle}>Tick Marks</div>
@@ -456,6 +482,8 @@ export function FormatAxisDialog({ onClose, data }: DialogProps): React.ReactEle
               <span>Show Gridlines</span>
             </div>
           </div>
+          </div>
+         </div>
         </div>
 
         <div className={s.footer}>

@@ -13,6 +13,12 @@ export const Backdrop = styled.div`
   pointer-events: none;
 `;
 
+/**
+ * Sized for a two-pane body (settings | live preview) rather than the old
+ * 620px column, which parked the 220px preview below the settings and turned
+ * the dialog into a scrolling straw. `min(px, vw)` keeps it honest on a small
+ * screen; the user's own drag-resize (useDialogWindow) overrides both.
+ */
 export const DialogContainer = styled.div`
   position: fixed;
   z-index: 1051;
@@ -21,8 +27,10 @@ export const DialogContainer = styled.div`
   border: 1px solid ${v("--border-default")};
   border-radius: 8px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-  width: 620px;
-  max-height: 600px;
+  width: min(1060px, 95vw);
+  height: min(660px, 88vh);
+  max-width: 95vw;
+  max-height: 88vh;
   display: flex;
   flex-direction: column;
   color: ${v("--text-primary")};
@@ -103,6 +111,23 @@ export const TabContent = styled.div`
   flex: 1;
 `;
 
+/**
+ * The commit-error strip. Full width, directly above the footer, so the reason
+ * the Insert button refused sits next to the button that refused — not buried
+ * at the bottom of a scrolled settings pane.
+ */
+export const ErrorBar = styled.div`
+  flex-shrink: 0;
+  max-height: 96px;
+  overflow-y: auto;
+  padding: 8px 16px;
+  border-top: 1px solid ${v("--border-default")};
+  background: rgba(220, 53, 69, 0.12);
+  color: #ff6b6b;
+  font-size: 12px;
+  white-space: pre-wrap;
+`;
+
 export const Footer = styled.div`
   display: flex;
   justify-content: flex-end;
@@ -152,16 +177,23 @@ export const Label = styled.label`
 `;
 
 /**
- * Two-column responsive layout for the Design tab: option groups flow into
- * columns instead of one long stacked list; collapses to a single column when
- * the dialog is narrow.
+ * Responsive multi-column layout for tab bodies: option groups flow into as
+ * many columns as the pane is wide enough for, and collapse back to one when
+ * the user drags the dialog narrow. 220px is tuned so the ~600px settings pane
+ * holds two columns and a widened dialog picks up a third on its own.
  */
 export const DesignGrid = styled.div`
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  column-gap: 28px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  column-gap: 24px;
   row-gap: 2px;
   align-items: start;
+`;
+
+/** A DesignGrid child that spans every column (a list, an editor, a hint). */
+export const GridSpan = styled.div`
+  grid-column: 1 / -1;
+  min-width: 0;
 `;
 
 export const Input = styled.input`
@@ -235,7 +267,7 @@ export const ErrorMessage = styled.div`
 export const SeriesList = styled.div`
   border: 1px solid ${v("--border-default")};
   border-radius: 4px;
-  max-height: 120px;
+  max-height: 180px;
   overflow-y: auto;
   background: ${v("--grid-bg")};
 `;
@@ -284,13 +316,19 @@ export const PaletteSwatch = styled.div<{ $color: string }>`
   background: ${(p) => p.$color};
 `;
 
+/**
+ * The preview fills whatever pane hosts it instead of holding a fixed 220px.
+ * Both call sites (the dialog's pinned preview pane and the Spec tab's full
+ * view) are flex columns, so `flex: 1` gives the chart the whole height of the
+ * dialog — the reason to widen the dialog in the first place.
+ */
 export const PreviewContainer = styled.div`
-  margin-top: 8px;
   border: 1px solid ${v("--border-default")};
   border-radius: 4px;
   overflow: hidden;
   background: #ffffff;
-  height: 220px;
+  flex: 1 1 auto;
+  min-height: 160px;
 `;
 
 export const PreviewCanvas = styled.canvas`

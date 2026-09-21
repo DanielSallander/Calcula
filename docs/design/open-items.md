@@ -326,6 +326,58 @@ already carried the correction while both doc comments asserted the opposite.
 
 Each is scoped, understood, and deliberately not done. They need a slot, not a decision.
 
+### 2.0 Twenty dialogs still read as tall scrolling columns (filed 2026-09-21)
+
+The owner reported Insert Chart as "a long scroll window" and asked for the same treatment
+elsewhere. Insert Chart is fixed and six more went with it (`docs/design/dialog-layout.md`
+lists exactly which, and `@api/dialogLayout` holds the primitives). A survey of all ~110 dialog
+components, each candidate then re-opened by an adversarial verifier, confirmed **25**; seven are
+done, so **twenty remain**. Nothing here is a correctness defect — every one is a dialog that
+reads worse than it needs to — which is why it is one row rather than twenty.
+
+**Do not implement any of these from the proposal alone.** The verification pass found a wrong
+specific in almost every one, and three of them are traps worth naming here:
+
+- `ProtectSheetDialog` is driven by a LIVE E2E journey (`app/e2e/tests/vba-wiring-batch.spec.ts:432`,
+  `protectSheetViaDialog()`), which fills inputs by position. Restructure it and that journey
+  breaks — it is not covered by the unit tier.
+- `WritebackColumnModal` does not honour a raw width: `editorShared.tsx`'s `quantiseModalWidth`
+  snaps to `MODAL_WIDTHS = [480, 640, 880, 1200]`, so `width={1040}` silently becomes 1200 and
+  then clamps. Ask for 880.
+- `FormatCellsDialog`'s frame has no definite height (only `max-height: 520px`) and its
+  `TabContent` carries `min-height: 280px`. Removing that min to let a tab flex makes the whole
+  dialog JUMP between tabs. Fix the three offending tabs' own layouts instead; the frame is close
+  to right already.
+
+Ranked by the verifier's corrected severity, with the one-line reason:
+
+| dialog | why |
+|---|---|
+| `ModelEditor/.../WritebackColumnModal.tsx` | HIGH. Two-column body; see the `quantiseModalWidth` trap above. |
+| `Distribution/PublishDialog.tsx` | HIGH, **push mode only**. Create/loading modes must stay a narrow column. |
+| `Distribution/DesignateWritebackDialog.tsx` | HIGH — and the real defect is that it has **no dialog chrome at all**: `<div style={{ padding: 16, minWidth: 400 }}>`, no max-height, no scroller. Give it chrome first; widening is secondary. |
+| `Slicer/SlicerSettingsDialog.tsx` | HIGH. 340px with four open sections; wants ~700px in two columns. |
+| `BuiltIn/FormatCellsDialog/tabs/FillTab.tsx` | Two-column, following `NumberTab`'s existing idiom. `DialogPane width={200}` would CLIP the ColorPicker's absolute dropdown. |
+| `BusinessIntelligence/ModelDialog.tsx` | Chrome fixed 2026-09-21; the widening half was deliberately NOT done (420→480 only) because the default "from file" state does not want it. |
+| `shell/FormulaBar/InsertFunctionDialog.tsx` | Catalog step → master/detail at ~760px. The **builder step half was refused** by the verifier: its preview is not a live preview. |
+| `DataForm/DataFormDialog.tsx` | Width must come from `headers.length` — a blanket widening makes the common 4–8 column case worse. |
+| `TextToColumns/TextToColumnsDialog.tsx` | Does NOT scroll today; the win is the 200px preview, and step 1 gets worse if widened naively. |
+| `Distribution/SubscribeDialog.tsx` | Review step only; the pick step was refuted. |
+| `Distribution/RefreshPreviewDialog.tsx` | Only when conflicts exist — and `handleApply` never clears `preview`, so gating on `conflicts.length` alone is a bug. |
+| `ScriptableObjects/ScriptConsentDialog.tsx` | Content-responsive: two columns only for a heavy payload, 460px otherwise. |
+| `CustomFunctions/CustomFunctionsDialog.tsx` | Third column for the return contracts, rendered OUTSIDE the `current ? …` ternary. |
+| `ControlsPane/AddFilterDialog.tsx` | Height-first, not width-first: the field list is read through a straw. |
+| `Protection/ProtectSheetDialog.tsx` | See the E2E trap above. |
+| `ScenarioManager/ScenarioManagerDialog.tsx` | Add/Edit sub-form only. Sharing one `useDialogWindow` across modes loses the 80vh cap (`win.style` sets `maxHeight: "none"`). |
+| `ExtensionsManager/InstallAddInDialog.tsx` | Measured at 1017px of content; widening cuts the overflow but does not remove it. Verifier marked it `proposalFeasible: false`. |
+| `BuiltIn/FormatCellsDialog` (frame) | See the jump trap above. |
+| `RemoveDuplicates/RemoveDuplicatesDialog.tsx` | Does not scroll; the win is `useDialogWindow` + a list that grows with the box. |
+| `MacroRecorder/RecordedMacroDialog.tsx` | Not a scroll fix — the code box wants the room. `minWidth: 560` would leave it 205px wide. |
+
+Full per-dialog reasoning, risks and corrected proposals: the workflow result at
+`C:\Users\Salle\AppData\Local\Temp\claude\c--Dropbox-Projekt-Calcula\…\tasks\wx7rhdssn.output`
+(transient — re-run the survey if it is gone).
+
 ### 2.1 Product / engine
 
 | item | verified at |

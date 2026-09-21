@@ -17,6 +17,7 @@ import {
   type BiModelInfo,
   type CalculatedMeasure,
 } from "@api";
+import { DialogBody, DialogPane, DialogSidePane } from "@api/dialogLayout";
 
 const s: Record<string, React.CSSProperties> = {
   overlay: {
@@ -28,19 +29,27 @@ const s: Record<string, React.CSSProperties> = {
     justifyContent: "center",
     zIndex: 1000,
   },
+  // A flex column that CLIPS. `overflowY: auto` used to sit here, so the title
+  // and the Save button scrolled away with the measure list — and the list is
+  // the one thing in here that grows without bound.
   card: {
     background: "var(--surface, #fff)",
     color: "var(--text, #1a1a1a)",
     borderRadius: 8,
-    width: 620,
+    width: "min(980px, 94vw)",
+    // No fixed height: the box grows with the measure list and stops at 85vh,
+    // where the editor pane starts scrolling on its own.
+    minHeight: 300,
     maxHeight: "85vh",
-    overflowY: "auto",
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
     boxShadow: "0 10px 40px rgba(0,0,0,0.25)",
-    padding: 20,
     fontSize: 13,
   },
-  title: { margin: "0 0 4px", fontSize: 16, fontWeight: 600 },
-  sub: { margin: "0 0 12px", fontSize: 12, color: "var(--text-muted, #777)" },
+  header: { padding: "18px 20px 12px", borderBottom: "1px solid var(--border, #e0e0e0)", flexShrink: 0 },
+  title: { margin: 0, fontSize: 16, fontWeight: 600 },
+  sub: { margin: "0 0 10px", fontSize: 12, color: "var(--text-muted, #777)", lineHeight: 1.5 },
   row: { display: "flex", flexDirection: "column", gap: 4, marginBottom: 10 },
   label: { fontSize: 12, fontWeight: 600, color: "var(--text-muted, #555)" },
   input: {
@@ -54,7 +63,15 @@ const s: Record<string, React.CSSProperties> = {
   measureRow: { display: "flex", gap: 6, alignItems: "center", marginBottom: 6 },
   nameInput: { width: 150 },
   exprInput: { flex: 1, fontFamily: "monospace" },
-  footer: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 },
+  footer: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 16,
+    padding: "12px 20px",
+    borderTop: "1px solid var(--border, #e0e0e0)",
+    flexShrink: 0,
+  },
   btn: {
     padding: "7px 14px",
     borderRadius: 4,
@@ -167,18 +184,14 @@ export function CalculatedMeasuresDialog(props: DialogProps): React.ReactElement
   return (
     <div style={s.overlay} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div style={s.card}>
-        <h2 style={s.title}>Calculated Measures</h2>
-        <p style={s.sub}>
-          Define measures in column form, e.g. <code>SUM(Sales[profit]) / SUM(Sales[revenue])</code>.
-          They become usable in CUBE formulas, pivots, and the <code>cube.*</code> script API.
-        </p>
-        <p style={s.sub}>
-          Use <code>GVAR</code> for a query-scoped value — evaluated once per query (ignores the row
-          axis, respects slicers) — for a share-of-total, e.g.{" "}
-          <code>GVAR grand = SUM(Sales[amount]) RETURN DIVIDE(SUM(Sales[amount]), grand)</code>. In
-          the spreadsheet, GVAR measures resolve in pivots; in a CUBE formula cell they are not
-          supported yet and return an error.
-        </p>
+        <div style={s.header}>
+          <h2 style={s.title}>Calculated Measures</h2>
+        </div>
+
+        {/* Editor left, syntax reference pinned right — the expression field is
+            the control that needs the width, and the prose was taking it. */}
+        <DialogBody>
+          <DialogPane scroll data-testid="calculated-measures-editor">
 
         <div style={s.row}>
           <label style={s.label}>Connection</label>
@@ -232,12 +245,36 @@ export function CalculatedMeasuresDialog(props: DialogProps): React.ReactElement
           >
             + Add measure
           </button>
-          {existingMeasureNames && (
-            <span style={{ ...s.hint, marginTop: 4 }}>Model measures: {existingMeasureNames}</span>
-          )}
         </div>
 
         {error && <div style={s.error}>{error}</div>}
+          </DialogPane>
+
+          <DialogSidePane title="Syntax" width={330} data-testid="calculated-measures-reference">
+            <div style={{ overflowY: "auto", minHeight: 0 }}>
+              <p style={s.sub}>
+                Define measures in column form, e.g.{" "}
+                <code>SUM(Sales[profit]) / SUM(Sales[revenue])</code>. They become usable in CUBE
+                formulas, pivots, and the <code>cube.*</code> script API.
+              </p>
+              <p style={s.sub}>
+                Use <code>GVAR</code> for a query-scoped value — evaluated once per query (ignores
+                the row axis, respects slicers) — for a share-of-total, e.g.{" "}
+                <code>GVAR grand = SUM(Sales[amount]) RETURN DIVIDE(SUM(Sales[amount]), grand)</code>
+                . In the spreadsheet, GVAR measures resolve in pivots; in a CUBE formula cell they
+                are not supported yet and return an error.
+              </p>
+              {existingMeasureNames && (
+                <>
+                  <div style={{ ...s.label, marginTop: 12, marginBottom: 4 }}>
+                    Measures already in the model
+                  </div>
+                  <span style={s.hint}>{existingMeasureNames}</span>
+                </>
+              )}
+            </div>
+          </DialogSidePane>
+        </DialogBody>
 
         <div style={s.footer}>
           <span style={s.hint}>

@@ -31,13 +31,19 @@ const dialogStyles = {
     justifyContent: "center",
     zIndex: 10000,
   },
+  // A flex column that CLIPS. `overflow: auto` used to sit here, which made the
+  // header and the Create button scroll with the content — so on a short window
+  // the pasted-JSON path pushed the very button it was leading to off-screen.
+  // The body below is the only scroller.
   dialog: {
     background: "#fff",
     borderRadius: "6px",
     boxShadow: "0 8px 32px rgba(0,0,0,0.2)",
-    width: "420px",
+    width: "min(480px, 94vw)",
     maxHeight: "80vh",
-    overflow: "auto",
+    display: "flex",
+    flexDirection: "column" as const,
+    overflow: "hidden",
     fontFamily: "Segoe UI, sans-serif",
     fontSize: "13px",
   },
@@ -47,12 +53,16 @@ const dialogStyles = {
     fontWeight: 600 as const,
     fontSize: "15px",
     color: "#333",
+    flexShrink: 0,
   },
   body: {
     padding: "16px 20px",
     display: "flex",
     flexDirection: "column" as const,
     gap: "14px",
+    flex: 1,
+    minHeight: 0,
+    overflowY: "auto" as const,
   },
   section: {
     display: "flex",
@@ -114,6 +124,7 @@ const dialogStyles = {
     display: "flex",
     justifyContent: "flex-end",
     gap: "8px",
+    flexShrink: 0,
   },
   statusError: {
     fontSize: "11px",

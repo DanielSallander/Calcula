@@ -88,7 +88,7 @@ const styles = {
     border: `1px solid ${v("--border-default")}`,
     borderRadius: 8,
     boxShadow: "0 12px 40px rgba(0, 0, 0, 0.5)",
-    width: 540,
+    width: "min(780px, 94vw)",
     maxHeight: "85vh",
     display: "flex",
     flexDirection: "column" as const,
@@ -117,7 +117,21 @@ const styles = {
     padding: "16px",
     overflowY: "auto" as const,
     flex: 1,
+    minHeight: 0,
   },
+  /** Two columns while there is room; folds to one when dragged narrow. No
+   *  titled section is ever split across the fold — Page+Margins go left,
+   *  Sheet right, and Header/Footer spans, because its own three-part grid is
+   *  the thing in here that actually wants the width. */
+  columns: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(max(300px, calc((100% - 28px) / 2)), 1fr))",
+    columnGap: 28,
+    rowGap: 0,
+    alignItems: "start" as const,
+  },
+  column: { minWidth: 0 },
+  spanAll: { gridColumn: "1 / -1", minWidth: 0 },
   section: {
     marginBottom: 16,
   },
@@ -227,7 +241,7 @@ const styles = {
 
 export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
   // Movable + resizable dialog window (shared @api hook)
-  const win = useDialogWindow({ minWidth: 360, minHeight: 320 });
+  const win = useDialogWindow({ minWidth: 520, minHeight: 360 });
 
   const [setup, setSetupState] = useState<PageSetup | null>(null);
   const [loading, setLoading] = useState(true);
@@ -330,7 +344,9 @@ export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
           {loading || !setup ? (
             <div>Loading...</div>
           ) : (
-            <>
+            <div style={styles.columns}>
+              {/* LEFT: the sheet of paper itself. */}
+              <div style={styles.column}>
               {/* Page section */}
               <div style={styles.section}>
                 <div style={styles.sectionTitle}>Page</div>
@@ -404,6 +420,10 @@ export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
                 </div>
               </div>
 
+              </div>
+
+              {/* RIGHT: what of the workbook goes onto it. */}
+              <div style={styles.column}>
               {/* Sheet section */}
               <div style={styles.section}>
                 <div style={styles.sectionTitle}>Sheet</div>
@@ -471,6 +491,11 @@ export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
                 </label>
               </div>
 
+              </div>
+
+              {/* Header/Footer spans both columns: its own left/centre/right
+                  grid is what the extra width is FOR. */}
+              <div style={styles.spanAll}>
               {/* Header/Footer section - three-section layout */}
               <div style={styles.section}>
                 <div style={styles.sectionTitle}>Header</div>
@@ -545,7 +570,8 @@ export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
                   Codes: &amp;P = page#, &amp;N = total pages, &amp;D = date, &amp;T = time, &amp;F = filename, &amp;A = sheet name
                 </div>
               </div>
-            </>
+              </div>
+            </div>
           )}
         </div>
 

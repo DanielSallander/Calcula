@@ -13,6 +13,12 @@ import {
 import type { DialogProps, ConnectionInfo } from "@api";
 import { emitAppEvent, AppEvents } from "@api/events";
 import { useDialogWindow } from "@api/dialogWindow";
+import {
+  DialogBody,
+  DialogPane,
+  DialogSidePane,
+  useDialogSplit,
+} from "@api/dialogLayout";
 
 import type {
   ChartSpec,
@@ -57,10 +63,9 @@ import {
   CloseButton,
   TabBar,
   Tab,
-  TabContent,
   Footer,
   Button,
-  ErrorMessage,
+  ErrorBar,
 } from "./CreateChartDialog.styles";
 
 // ============================================================================
@@ -155,6 +160,33 @@ const MANAGED_SPEC_KEYS = new Set<keyof ChartSpec>([
   "series",
   "data",
 ]);
+
+/**
+ * Shown in the preview pane before there is a spec to draw. The pane is always
+ * present, so it has to say something when it is empty — an unexplained blank
+ * rectangle reads as a broken preview.
+ */
+function EmptyPreviewHint(): React.ReactElement {
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        textAlign: "center",
+        padding: "0 16px",
+        border: "1px dashed var(--border-default)",
+        borderRadius: 4,
+        color: "var(--text-secondary)",
+        fontSize: 12,
+        lineHeight: 1.5,
+      }}
+    >
+      Choose a data range or write a design query to see the chart here.
+    </div>
+  );
+}
 
 // ============================================================================
 // Component
@@ -252,7 +284,24 @@ export function CreateChartDialog({
   const [specFullView, setSpecFullView] = useState(false);
 
   // Movable + resizable dialog window (shared @api hook)
-  const win = useDialogWindow({ minWidth: 520, minHeight: 380 });
+  const win = useDialogWindow({ minWidth: 620, minHeight: 420 });
+
+  // Settings | preview split. The user decides how much room the preview gets;
+  // below ~820px of body width the preview stops earning its column and the
+  // body stacks instead (see isNarrow).
+  const split = useDialogSplit({ initial: 0.6, min: 0.35, max: 0.78 });
+  const [bodyWidth, setBodyWidth] = useState(0);
+
+  useEffect(() => {
+    const el = split.containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    setBodyWidth(el.clientWidth);
+    const observer = new ResizeObserver((entries) => {
+      setBodyWidth(entries[0].contentRect.width);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [isOpen]);
 
   // Derive available axes from the parsed range
   const [availableAxes, setAvailableAxes] = useState<Array<{ index: number; label: string }>>([]);
@@ -360,6 +409,7 @@ export function CreateChartDialog({
       setSourceMode("range");
       setShowDataInspector(false);
       win.reset(); // Reset to centered, natural size
+      split.reset(); // Reset the settings/preview divider
       loadSheets();
 
       // Load BI connections for the design-query source picker (non-fatal).
@@ -727,6 +777,39 @@ export function CreateChartDialog({
 
   const isSpecFullView = activeTab === "spec" && specFullView;
 
+  // The Spec tab's full view owns its own editor|preview split, so the dialog's
+  // pinned preview pane would be a second copy of the same chart. Below ~820px
+  // a side-by-side preview leaves neither pane usable, so stack instead — the
+  // preview keeps a fixed slice at the bottom rather than scrolling out of view.
+  const isNarrowBody = bodyWidth > 0 && bodyWidth < 820;
+  const showSidePreview = !isSpecFullView && !isNarrowBody;
+
+  // Why the preview is blank, in the preview's own words. The pinned pane shows
+  // this the whole time you are configuring, so "select a data range" while a
+  // range IS selected is a message that actively misleads.
+  const previewEmptyMessage = (() => {
+    if (!isPivotMode && sourceMode === "designQuery") {
+      if (!connectionId) return "Choose a BI connection to preview";
+      if (!dslText.trim()) return "Write a design query to preview";
+      return undefined;
+    }
+    if (!isPivotMode && !sourceRange.trim()) return undefined; // default wording fits
+    if (series.length === 0 && !currentSpec?.concat && !currentSpec?.facet && !currentSpec?.repeat) {
+      return "Select at least one series to preview";
+    }
+    return undefined;
+  })();
+
+  const previewPane = currentSpec ? (
+    <ChartPreview
+      spec={resolvedSpec ?? currentSpec}
+      data={previewData}
+      emptyMessage={previewEmptyMessage}
+    />
+  ) : (
+    <EmptyPreviewHint />
+  );
+
   // A design-query chart with a failing query can only ever render an error —
   // block Insert/Update until the query compiles and runs. (Range sources keep
   // their permissive behavior: transient preview issues shouldn't lock the
@@ -785,8 +868,16 @@ export function CreateChartDialog({
           </Tab>
         </TabBar>
 
-        {/* Tab Content */}
-        <TabContent style={isSpecFullView ? { display: "flex", flexDirection: "column" } : undefined}>
+        {/* Body: settings pane | live preview pane */}
+        <DialogBody
+          ref={split.containerRef}
+          stacked={isNarrowBody && !isSpecFullView}
+        >
+          <DialogPane
+            scroll={!isSpecFullView}
+            style={showSidePreview ? split.primaryStyle : { flex: "1 1 0%" }}
+            data-testid="chart-dialog-settings"
+          >
           {activeTab === "data" && (
             <DataTab
               sourceRange={sourceRange}
@@ -835,18 +926,42 @@ export function CreateChartDialog({
               diagnostics={diagnostics}
             />
           )}
+          </DialogPane>
 
-          {/* Preview below tabs (non-full-view only) */}
-          {currentSpec && !isSpecFullView && (
-            <ChartPreview spec={resolvedSpec ?? currentSpec} data={previewData} />
+          {/* Live preview — pinned beside the settings, so it stays in view
+              while you scroll the thing it is previewing. */}
+          {showSidePreview && split.splitter}
+          {showSidePreview && (
+            <DialogSidePane
+              title="Preview"
+              flexible
+              style={split.secondaryStyle}
+              data-testid="chart-dialog-preview"
+            >
+              {previewPane}
+            </DialogSidePane>
           )}
 
-          {/* Error */}
-          {error && <ErrorMessage>{error}</ErrorMessage>}
-          {!error && previewError && (
-            <ErrorMessage style={{ whiteSpace: "pre-wrap" }}>{previewError}</ErrorMessage>
+          {/* Narrow dialog: the preview keeps a fixed slice at the bottom
+              rather than being pushed off the end of a scrolling column. */}
+          {!showSidePreview && !isSpecFullView && (
+            <DialogSidePane
+              title="Preview"
+              border="none"
+              style={{
+                flex: "0 0 220px",
+                borderTop: "1px solid var(--border-default)",
+              }}
+              data-testid="chart-dialog-preview"
+            >
+              {previewPane}
+            </DialogSidePane>
           )}
-        </TabContent>
+        </DialogBody>
+
+        {/* Errors — full width, next to the button that refused. */}
+        {error && <ErrorBar role="alert">{error}</ErrorBar>}
+        {!error && previewError && <ErrorBar role="alert">{previewError}</ErrorBar>}
 
         {/* Footer */}
         <Footer>

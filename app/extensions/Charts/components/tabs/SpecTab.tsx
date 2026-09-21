@@ -325,7 +325,10 @@ export function SpecTab({ spec, onSpecChange, isFullView, onToggleFullView, prev
         </div>
       </FieldGroup>
 
-      <div style={{ height: "300px", border: parseError ? "1px solid #e15759" : "1px solid #3c3c3c", borderRadius: "4px", overflow: "hidden" }}>
+      {/* Fills the settings pane instead of holding a fixed 300px — the pane is
+          now as tall as the dialog, and a short editor with dead space under it
+          is the whole problem this layout exists to remove. */}
+      <div style={{ flex: 1, minHeight: "220px", border: parseError ? "1px solid #e15759" : "1px solid #3c3c3c", borderRadius: "4px", overflow: "hidden" }}>
         <MonacoSpecEditor
           value={jsonText}
           onChange={handleChange}

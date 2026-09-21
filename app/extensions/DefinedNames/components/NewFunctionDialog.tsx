@@ -4,6 +4,12 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useDialogWindow } from "@api/dialogWindow";
+import {
+  DialogBody,
+  DialogPane,
+  dialogWidth,
+  dialogHeight,
+} from "@api/dialogLayout";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import type { DialogProps } from "@api/uiTypes";
@@ -43,7 +49,9 @@ const styles = {
     border: `1px solid ${v("--border-default")}`,
     borderRadius: 8,
     boxShadow: "0 12px 40px rgba(0, 0, 0, 0.5)",
-    width: 560,
+    width: dialogWidth(940),
+    height: dialogHeight(620),
+    maxHeight: "88vh",
     display: "flex",
     flexDirection: "column" as const,
     color: v("--text-primary"),
@@ -71,8 +79,8 @@ const styles = {
     fontSize: 14,
     lineHeight: 1,
   },
+  /** Column of fields inside a pane; the pane owns the padding and scroll. */
   body: {
-    padding: "16px",
     display: "flex",
     flexDirection: "column" as const,
     gap: 12,
@@ -192,11 +200,14 @@ const styles = {
     color: v("--accent-primary"),
     border: `1px solid ${v("--accent-primary")}`,
   },
+  // Fills its pane instead of holding 200px. Monaco runs with
+  // `automaticLayout: true`, so it re-measures itself when the pane resizes.
   editorContainer: {
     border: `1px solid ${v("--border-default")}`,
     borderRadius: 4,
     overflow: "hidden",
-    height: 200,
+    flex: 1,
+    minHeight: 180,
   },
 };
 
@@ -218,7 +229,7 @@ export function NewFunctionDialog(props: DialogProps): React.ReactElement | null
 
   // Movable + resizable dialog window (shared @api hook).
   // win.ref doubles as the click-outside detection ref.
-  const win = useDialogWindow({ minWidth: 420, minHeight: 340 });
+  const win = useDialogWindow({ minWidth: 720, minHeight: 420 });
   const dialogRef = win.ref;
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
 
@@ -481,7 +492,11 @@ export function NewFunctionDialog(props: DialogProps): React.ReactElement | null
           </button>
         </div>
 
-        <div style={styles.body}>
+        {/* Signature on the left, the body you are writing on the right —
+            adding a parameter used to push the editor down the page. */}
+        <DialogBody>
+          <DialogPane scroll width={340} data-testid="new-function-signature">
+          <div style={styles.body}>
           {/* Function Name */}
           <div style={styles.field}>
             <label style={styles.label}>Function name:</label>
@@ -563,7 +578,34 @@ export function NewFunctionDialog(props: DialogProps): React.ReactElement | null
           </div>
 
           {/* Function Body (Monaco Editor) */}
+
+          {/* Scope */}
           <div style={styles.field}>
+            <label style={styles.label}>Scope:</label>
+            <select
+              style={styles.select}
+              value={scopeIndex === null ? "__workbook__" : String(scopeIndex)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setScopeIndex(
+                  val === "__workbook__" ? null : parseInt(val, 10)
+                );
+              }}
+              onKeyDown={(e) => e.stopPropagation()}
+            >
+              <option value="__workbook__">Workbook</option>
+              {sheetNames.map((sn, i) => (
+                <option key={i} value={String(i)}>
+                  {sn}
+                </option>
+              ))}
+            </select>
+          </div>
+          </div>
+          </DialogPane>
+
+          <DialogPane scroll={false} data-testid="new-function-body">
+          <div style={{ ...styles.field, flex: 1, minHeight: 0 }}>
             <label style={styles.label}>Function body:</label>
             <div style={styles.editorContainer}>
               <Editor
@@ -599,33 +641,12 @@ export function NewFunctionDialog(props: DialogProps): React.ReactElement | null
             </div>
           </div>
 
-          {/* Scope */}
-          <div style={styles.field}>
-            <label style={styles.label}>Scope:</label>
-            <select
-              style={styles.select}
-              value={scopeIndex === null ? "__workbook__" : String(scopeIndex)}
-              onChange={(e) => {
-                const val = e.target.value;
-                setScopeIndex(
-                  val === "__workbook__" ? null : parseInt(val, 10)
-                );
-              }}
-              onKeyDown={(e) => e.stopPropagation()}
-            >
-              <option value="__workbook__">Workbook</option>
-              {sheetNames.map((sn, i) => (
-                <option key={i} value={String(i)}>
-                  {sn}
-                </option>
-              ))}
-            </select>
-          </div>
 
           {validationError && (
             <div style={styles.error}>{validationError}</div>
           )}
-        </div>
+          </DialogPane>
+        </DialogBody>
 
         <div style={styles.footer}>
           <button style={styles.btn} onClick={onClose}>

@@ -14,6 +14,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { css } from "@emotion/css";
 import type { DialogProps } from "@api/uiTypes";
 import { useDialogWindow } from "@api/dialogWindow";
+import { DialogBody, DialogPane, dialogWidth, dialogHeight } from "@api/dialogLayout";
 import { alertAsync } from "@api/dialogs";
 import {
   loadLayout,
@@ -46,8 +47,9 @@ const dialog = css`
   border: 1px solid var(--border-default, #444);
   border-radius: 8px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-  width: 600px;
-  max-height: 80vh;
+  width: ${dialogWidth(1000)};
+  height: ${dialogHeight(680, 0.85)};
+  max-height: 85vh;
   display: flex;
   flex-direction: column;
   color: var(--text-primary, #e0e0e0);
@@ -82,15 +84,6 @@ const closeBtn = css`
     background: var(--grid-bg, #333);
     color: var(--text-primary, #e0e0e0);
   }
-`;
-
-const body = css`
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
 `;
 
 const sectionLabel = css`
@@ -177,10 +170,11 @@ const chipRemove = css`
   }
 `;
 
+/** The palette owns its own pane now, so it no longer needs a dashed box to
+ *  say "this is a different thing" — the divider says it. */
 const addSection = css`
-  border: 1px dashed var(--border-default, #444);
-  border-radius: 6px;
-  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
 `;
 
 const addSectionHeader = css`
@@ -311,7 +305,7 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
   const { onClose } = props;
 
   // Movable + resizable dialog window (shared @api hook)
-  const win = useDialogWindow({ minWidth: 400, minHeight: 320 });
+  const win = useDialogWindow({ minWidth: 720, minHeight: 420 });
 
   const [layout, setLayout] = useState<HomeTabLayout>(() => loadLayout());
   const [newGroupName, setNewGroupName] = useState("");
@@ -499,8 +493,12 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
           <button className={closeBtn} onClick={onClose}>X</button>
         </div>
 
-        {/* Body */}
-        <div className={body}>
+        {/* Body — the arrangement you are building on the left, the palette you
+            build it from on the right. Stacked, adding a command meant scrolling
+            past every group you had already made to reach the palette, and then
+            back up to see where it landed. */}
+        <DialogBody>
+          <DialogPane scroll grow={1.15} minWidth={280} data-testid="hometab-current-groups">
           {/* Current Groups */}
           <div>
             <div className={sectionLabel}>Current Groups</div>
@@ -631,6 +629,9 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
             </div>
           </div>
 
+          </DialogPane>
+
+          <DialogPane scroll minWidth={260} style={{ borderLeft: "1px solid var(--border-default, #444)" }} data-testid="hometab-available-commands">
           {/* Available Items */}
           <div className={addSection}>
             <div className={addSectionHeader}>Available Commands</div>
@@ -684,7 +685,8 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
               );
             })}
           </div>
-        </div>
+          </DialogPane>
+        </DialogBody>
 
         {/* Footer */}
         <div className={footer}>

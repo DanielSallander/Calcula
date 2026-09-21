@@ -19,6 +19,8 @@ import {
   SeriesList,
   SeriesItem,
   ColorSwatch,
+  DesignGrid,
+  GridSpan,
 } from "../CreateChartDialog.styles";
 
 type SourceMode = "range" | "designQuery";
@@ -113,42 +115,48 @@ export function DataTab({
   const activeSources = new Set(series.map((s) => s.sourceIndex));
 
   return (
-    <>
-      {/* Source mode: cell range vs design query (BI model) */}
+    <DesignGrid>
+      {/* Source mode: cell range vs design query (BI model). Spans both columns
+          — it decides which fields below even exist, so it reads as a heading
+          for them rather than as a peer sitting beside one of them. */}
       {designQueryAvailable && (
-        <FieldGroup>
-          <Label>Data source</Label>
-          <RadioGroup>
-            <RadioLabel>
-              <input
-                type="radio"
-                name="sourceMode"
-                checked={sourceMode === "range"}
-                onChange={() => onSourceModeChange("range")}
-              />
-              Cell range
-            </RadioLabel>
-            <RadioLabel>
-              <input
-                type="radio"
-                name="sourceMode"
-                checked={sourceMode === "designQuery"}
-                onChange={() => onSourceModeChange("designQuery")}
-              />
-              Design query
-            </RadioLabel>
-          </RadioGroup>
-        </FieldGroup>
+        <GridSpan>
+          <FieldGroup>
+            <Label>Data source</Label>
+            <RadioGroup>
+              <RadioLabel>
+                <input
+                  type="radio"
+                  name="sourceMode"
+                  checked={sourceMode === "range"}
+                  onChange={() => onSourceModeChange("range")}
+                />
+                Cell range
+              </RadioLabel>
+              <RadioLabel>
+                <input
+                  type="radio"
+                  name="sourceMode"
+                  checked={sourceMode === "designQuery"}
+                  onChange={() => onSourceModeChange("designQuery")}
+                />
+                Design query
+              </RadioLabel>
+            </RadioGroup>
+          </FieldGroup>
+        </GridSpan>
       )}
 
       {sourceMode === "designQuery" ? (
         <>
-          {/* BI connection */}
+          {/* BI connection — one control, so it keeps a single column and the
+              query editor beside it gets the rest. */}
           <FieldGroup>
             <Label>Connection</Label>
             <Select
               value={connectionId}
               onChange={(e) => onConnectionIdChange(e.target.value)}
+              style={{ width: "100%" }}
             >
               <option value="">— Select a BI connection —</option>
               {connections.map((c) => (
@@ -159,141 +167,147 @@ export function DataTab({
             </Select>
           </FieldGroup>
 
-          {/* Design query DSL (shared pivot-layout-dsl Monaco editor) */}
-          <FieldGroup>
-            <Label>Design query</Label>
-            <DesignQueryEditor
-              value={dslText}
-              onChange={onDslTextChange}
-              connectionId={connectionId}
-            />
-            <span style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
-              Ctrl+Space suggests fields and measures. The query runs against the connection's model — the data lives in the chart, no pivot table needed.
-            </span>
-            {onInspectData && (
-              <div style={{ marginTop: "8px" }}>
-                <Button
-                  onClick={onInspectData}
-                  disabled={inspectDisabled}
-                  title={
-                    inspectDisabled
-                      ? "Run a valid query first"
-                      : "Show the query result as a data grid in a floating window"
-                  }
-                >
-                  Inspect data...
-                </Button>
-              </div>
-            )}
-          </FieldGroup>
+          {onInspectData && (
+            <FieldGroup>
+              <Label>Query result</Label>
+              <Button
+                onClick={onInspectData}
+                disabled={inspectDisabled}
+                title={
+                  inspectDisabled
+                    ? "Run a valid query first"
+                    : "Show the query result as a data grid in a floating window"
+                }
+              >
+                Inspect data...
+              </Button>
+            </FieldGroup>
+          )}
+
+          {/* Design query DSL (shared pivot-layout-dsl Monaco editor) — the one
+              genuinely wide control here, so it takes the full pane. */}
+          <GridSpan>
+            <FieldGroup>
+              <Label>Design query</Label>
+              <DesignQueryEditor
+                value={dslText}
+                onChange={onDslTextChange}
+                connectionId={connectionId}
+              />
+              <span style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px", display: "block" }}>
+                Ctrl+Space suggests fields and measures. The query runs against the connection's model — the data lives in the chart, no pivot table needed.
+              </span>
+            </FieldGroup>
+          </GridSpan>
         </>
       ) : (
-      <>
-      {/* Source Range */}
-      <FieldGroup>
-        <Label>Data Range</Label>
-        <Input
-          type="text"
-          value={sourceRange}
-          onChange={(e) => onSourceRangeChange(e.target.value)}
-          placeholder="e.g., Sheet1!A1:D10"
-        />
-      </FieldGroup>
+        <>
+          {/* Left column: what the data IS. */}
+          <div>
+            <FieldGroup>
+              <Label>Data Range</Label>
+              <Input
+                type="text"
+                value={sourceRange}
+                onChange={(e) => onSourceRangeChange(e.target.value)}
+                placeholder="e.g., Sheet1!A1:D10"
+              />
+            </FieldGroup>
 
-      {/* Has Headers */}
-      <FieldGroup>
-        <CheckboxLabel>
-          <input
-            type="checkbox"
-            checked={hasHeaders}
-            onChange={(e) => onHasHeadersChange(e.target.checked)}
-          />
-          First row contains headers
-        </CheckboxLabel>
-      </FieldGroup>
-
-      {/* Series Orientation */}
-      <FieldGroup>
-        <Label>Series in</Label>
-        <RadioGroup>
-          <RadioLabel>
-            <input
-              type="radio"
-              name="orientation"
-              checked={orientation === "columns"}
-              onChange={() => onOrientationChange("columns")}
-            />
-            Columns
-          </RadioLabel>
-          <RadioLabel>
-            <input
-              type="radio"
-              name="orientation"
-              checked={orientation === "rows"}
-              onChange={() => onOrientationChange("rows")}
-            />
-            Rows
-          </RadioLabel>
-        </RadioGroup>
-      </FieldGroup>
-
-      {/* Category Axis */}
-      {availableAxes.length > 0 && (
-        <FieldGroup>
-          <Label>Category axis ({orientation === "columns" ? "column" : "row"})</Label>
-          <Select
-            value={categoryIndex}
-            onChange={(e) => onCategoryIndexChange(parseInt(e.target.value, 10))}
-          >
-            {availableAxes.map((axis) => (
-              <option key={axis.index} value={axis.index}>
-                {axis.label}
-              </option>
-            ))}
-          </Select>
-        </FieldGroup>
-      )}
-
-      {/* Series Selection */}
-      <FieldGroup>
-        <Label>Series</Label>
-        <SeriesList>
-          {allSeriesIndices.map((idx) => {
-            const axisLabel = availableAxes.find((a) => a.index === idx)?.label ?? `Column ${idx}`;
-            const seriesDef = series.find((s) => s.sourceIndex === idx);
-            const isActive = activeSources.has(idx);
-            const colorIndex = series.findIndex((s) => s.sourceIndex === idx);
-
-            return (
-              <SeriesItem key={idx}>
+            <FieldGroup>
+              <Label>Series in</Label>
+              <RadioGroup>
+                <RadioLabel>
+                  <input
+                    type="radio"
+                    name="orientation"
+                    checked={orientation === "columns"}
+                    onChange={() => onOrientationChange("columns")}
+                  />
+                  Columns
+                </RadioLabel>
+                <RadioLabel>
+                  <input
+                    type="radio"
+                    name="orientation"
+                    checked={orientation === "rows"}
+                    onChange={() => onOrientationChange("rows")}
+                  />
+                  Rows
+                </RadioLabel>
+              </RadioGroup>
+              <CheckboxLabel>
                 <input
                   type="checkbox"
-                  checked={isActive}
-                  onChange={(e) => handleSeriesToggle(idx, e.target.checked)}
+                  checked={hasHeaders}
+                  onChange={(e) => onHasHeadersChange(e.target.checked)}
                 />
-                <span style={{ flex: 1 }}>{axisLabel}</span>
-                {isActive && (
-                  <ColorSwatch
-                    type="color"
-                    value={seriesDef?.color ?? getSeriesColor(palette, colorIndex, null)}
-                    onChange={(e) => handleSeriesColorChange(idx, e.target.value)}
-                    title="Series color"
-                  />
+                First row contains headers
+              </CheckboxLabel>
+            </FieldGroup>
+
+            {availableAxes.length > 0 && (
+              <FieldGroup>
+                <Label>Category axis ({orientation === "columns" ? "column" : "row"})</Label>
+                <Select
+                  value={categoryIndex}
+                  onChange={(e) => onCategoryIndexChange(parseInt(e.target.value, 10))}
+                  style={{ width: "100%" }}
+                >
+                  {availableAxes.map((axis) => (
+                    <option key={axis.index} value={axis.index}>
+                      {axis.label}
+                    </option>
+                  ))}
+                </Select>
+              </FieldGroup>
+            )}
+          </div>
+
+          {/* Right column: which of it gets PLOTTED. The series list is the one
+              control here that grows with the data, so it gets its own column
+              instead of being the thing that pushes everything else off screen. */}
+          <div>
+            <FieldGroup>
+              <Label>Series</Label>
+              <SeriesList>
+                {allSeriesIndices.map((idx) => {
+                  const axisLabel = availableAxes.find((a) => a.index === idx)?.label ?? `Column ${idx}`;
+                  const seriesDef = series.find((s) => s.sourceIndex === idx);
+                  const isActive = activeSources.has(idx);
+                  const colorIndex = series.findIndex((s) => s.sourceIndex === idx);
+
+                  return (
+                    <SeriesItem key={idx}>
+                      <input
+                        type="checkbox"
+                        checked={isActive}
+                        onChange={(e) => handleSeriesToggle(idx, e.target.checked)}
+                      />
+                      <span style={{ flex: 1 }}>{axisLabel}</span>
+                      {isActive && (
+                        <ColorSwatch
+                          type="color"
+                          value={seriesDef?.color ?? getSeriesColor(palette, colorIndex, null)}
+                          onChange={(e) => handleSeriesColorChange(idx, e.target.value)}
+                          title="Series color"
+                        />
+                      )}
+                    </SeriesItem>
+                  );
+                })}
+                {allSeriesIndices.length === 0 && (
+                  <SeriesItem>
+                    <span style={{ color: "var(--text-secondary)", fontStyle: "italic" }}>
+                      No series available. Select a data range with multiple columns.
+                    </span>
+                  </SeriesItem>
                 )}
-              </SeriesItem>
-            );
-          })}
-          {allSeriesIndices.length === 0 && (
-            <SeriesItem>
-              <span style={{ color: "var(--text-secondary)", fontStyle: "italic" }}>
-                No series available. Select a data range with multiple columns.
-              </span>
-            </SeriesItem>
-          )}
-        </SeriesList>
-      </FieldGroup>
-      </>
+              </SeriesList>
+            </FieldGroup>
+          </div>
+        </>
       )}
-    </>
+    </DesignGrid>
   );
 }
