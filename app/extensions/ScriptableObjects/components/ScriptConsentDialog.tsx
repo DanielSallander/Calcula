@@ -6,6 +6,7 @@
 import React, { useState, useCallback, useEffect, useMemo } from "react";
 import { emitAppEvent } from "@api/events";
 import { requireScriptEditorProvider } from "@api/scriptEditorService";
+import { DialogBody, DialogPane, DialogPaneTitle, dialogWidth } from "@api/dialogLayout";
 import type { CapabilityId } from "@api";
 import { lineDiff, changedLineCount, type DiffRowType } from "../lib/lineDiff";
 
@@ -97,11 +98,15 @@ const overlayStyle: React.CSSProperties = {
   fontFamily: "'Segoe UI', Tahoma, sans-serif",
 };
 
+/**
+ * The frame. WIDTH IS NOT HERE: it is a function of how much this particular
+ * application makes the user read (see `twoColumn` below), so the component
+ * supplies it. Everything else about the box is constant.
+ */
 const dialogStyle: React.CSSProperties = {
   backgroundColor: "#FFF",
   borderRadius: 8,
   boxShadow: "0 8px 32px rgba(0,0,0,0.2)",
-  width: 460,
   maxHeight: "80vh",
   display: "flex",
   flexDirection: "column",
@@ -114,6 +119,9 @@ const headerStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 10,
+  // The header and the footer are the two things that must never scroll away:
+  // the footer holds Block/Allow, and the header is what the prompt is about.
+  flexShrink: 0,
 };
 
 const shieldIcon: React.CSSProperties = {
@@ -130,13 +138,72 @@ const shieldIcon: React.CSSProperties = {
   flexShrink: 0,
 };
 
-const bodyStyle: React.CSSProperties = {
-  padding: "16px 20px",
+/**
+ * The prose settings of the body — typography only. The BOX behaviour (flex,
+ * min-height, the scrollbar) now belongs to `DialogPane`, which is what lets
+ * two columns scroll independently while the footer stays put.
+ *
+ * `display: "block"` overrides the pane's own flex column on purpose: this pane
+ * holds paragraphs, and block flow is what collapses adjacent <p> margins. As
+ * flex items each paragraph would keep both margins and the disclosure would
+ * get TALLER, which is the opposite of the point.
+ */
+const bodyTextStyle: React.CSSProperties = {
+  display: "block",
   fontSize: 12,
   lineHeight: "1.6",
   color: "#333",
+};
+
+/** Padding of a body pane — the same inset the single-column body always had. */
+const BODY_PADDING = "16px 20px";
+
+/** The hairline between the two columns, in this dialog's own palette. */
+const paneDividerStyle: React.CSSProperties = {
+  borderLeft: "1px solid #E8E8E8",
+};
+
+/**
+ * A pane in the STACKED (single-column) arrangement. It is not a column there,
+ * just a group in one flow, so it takes its natural height and the body around
+ * it does the scrolling — otherwise two column-flex siblings would split the
+ * height between them and each scroll on its own.
+ */
+const stackedPaneStyle: React.CSSProperties = {
+  ...bodyTextStyle,
+  flex: "0 0 auto",
+};
+
+/**
+ * The column captions. `DialogPaneTitle` paints from the CSS custom properties;
+ * this dialog hard-codes a light palette, so the colour is overridden to match
+ * the rest of the prompt rather than the app theme.
+ */
+const paneTitleStyle: React.CSSProperties = {
+  color: "#666",
+  marginBottom: 8,
+};
+
+/**
+ * The re-consent diffs, FULL WIDTH beneath the columns. A changed script's
+ * old->new lines are code: a column would give them less room than the
+ * single-column body did, not more. Its own scroller so an expanded diff
+ * cannot push Block/Allow off the screen.
+ */
+const diffStripStyle: React.CSSProperties = {
+  // `0 1 auto` + `minHeight: 0`, not `flexShrink: 0` and a percentage cap: a
+  // percentage max-height against an auto-height box resolves to none, and an
+  // unshrinkable strip of expanded diffs would push the footer out of the
+  // clipped dialog — the very failure this rollout exists to end.
+  flex: "0 1 auto",
+  minHeight: 0,
+  maxHeight: 260,
   overflowY: "auto",
-  flex: 1,
+  padding: "10px 20px 12px",
+  borderTop: "1px solid #E0E0E0",
+  fontSize: 12,
+  lineHeight: "1.6",
+  color: "#333",
 };
 
 const scriptListStyle: React.CSSProperties = {
@@ -226,6 +293,7 @@ const footerStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "flex-end",
   gap: 8,
+  flexShrink: 0,
 };
 
 const btnStyle: React.CSSProperties = {
@@ -340,9 +408,25 @@ export default function ScriptConsentDialog({
     })();
   }, [scriptIds, moduleScriptIds]);
 
+  // WHEN A SECOND COLUMN EARNS ITS KEEP. The light payload — one object script,
+  // no macros, no capabilities — is a few hundred pixels of prose, and the
+  // 460px column reads it well. It is the heavy payload that buries a third of
+  // the disclosure below the fold while "Allow Scripts" is already visible in
+  // the fixed footer, so both the width and the split are a function of what
+  // this application actually ships rather than a constant. A re-consent counts
+  // as heavy by itself: that is the prompt with the most at stake on it.
+  const twoColumn =
+    moduleScriptNames.length > 0 ||
+    changedScripts.length > 0 ||
+    requestedCapabilities.length >= 2 ||
+    scriptNames.length >= 3;
+
   return (
     <div style={overlayStyle} onClick={handleBlock}>
-      <div style={dialogStyle} onClick={(e) => e.stopPropagation()}>
+      <div
+        style={{ ...dialogStyle, width: twoColumn ? dialogWidth(860) : 460 }}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div style={headerStyle}>
           <div style={shieldIcon}>!</div>
           <div>
@@ -355,247 +439,294 @@ export default function ScriptConsentDialog({
           </div>
         </div>
 
-        <div style={bodyStyle}>
-          {/* An application may ship object scripts, macros, or ONLY macros —
-              the pull materializes the two independently. Each list is rendered
-              only when it has entries, so a macro-only application is not
-              introduced as including "0 object scripts". */}
-          {scriptCount > 0 && (
-            <>
-              <p>
-                The package <strong>"{packageName}"</strong> includes {scriptCount} object
-                script{scriptCount !== 1 ? "s" : ""} that can run code in your workbook:
-              </p>
+        {/* THE BODY IS THE ONLY SCROLLER — the box clips, so the header and the
+            Block/Allow footer cannot slide out of view. Two columns once this
+            application makes the user read enough to bury the second half of
+            the disclosure; otherwise the two groups stack in the order they
+            have always had, inside one scroller, exactly as before. */}
+        <DialogBody
+          stacked={!twoColumn}
+          style={twoColumn ? undefined : { overflowY: "auto" }}
+        >
+          {/* WHAT IS IN THIS APPLICATION — the inventory. Nothing here is split
+              from the colon that introduces it: the macro intro, its trigger
+              bullets, "They will not run at all..." and the macro list are ONE
+              unit, because both of those sentences end on a colon whose list is
+              the node after it. */}
+          <DialogPane
+            scroll={twoColumn}
+            padding={twoColumn ? BODY_PADDING : "16px 20px 0"}
+            style={twoColumn ? bodyTextStyle : stackedPaneStyle}
+          >
+            {twoColumn && (
+              <DialogPaneTitle style={paneTitleStyle}>
+                What is in this application
+              </DialogPaneTitle>
+            )}
+            {/* An application may ship object scripts, macros, or ONLY macros —
+                the pull materializes the two independently. Each list is rendered
+                only when it has entries, so a macro-only application is not
+                introduced as including "0 object scripts". */}
+            {scriptCount > 0 && (
+              <>
+                <p>
+                  The package <strong>"{packageName}"</strong> includes {scriptCount} object
+                  script{scriptCount !== 1 ? "s" : ""} that can run code in your workbook:
+                </p>
 
-              <div style={scriptListStyle}>
-                {scriptNames.map((name, i) => (
-                  <div key={i} style={scriptItemStyle}>{name}</div>
-                ))}
-              </div>
-            </>
-          )}
+                <div style={scriptListStyle}>
+                  {scriptNames.map((name, i) => (
+                    <div key={i} style={scriptItemStyle}>{name}</div>
+                  ))}
+                </div>
+              </>
+            )}
 
-          {moduleScriptNames.length > 0 && (
-            <>
-              <p>
-                {scriptCount > 0 ? (
-                  <>It also includes </>
-                ) : (
-                  <>The package <strong>"{packageName}"</strong> includes </>
-                )}
-                {moduleScriptNames.length} macro
-                {moduleScriptNames.length !== 1 ? "s" : ""} (module scripts).
-                Nothing puts a macro on a timer and nothing starts one when you
-                open this workbook &mdash; but allowing arms every way one can be
-                started here:
-              </p>
-              {/* CONSENT TEXT &mdash; VERIFIED AGAINST THE RUN PATHS, NOT WRITTEN
-                  FROM MEMORY. This used to read "Nothing runs them on its own —
-                  you run them yourself, from the macro library". The macro
-                  library stopped being the only surface the moment macros were
-                  folded into this one grant, and the surface that was missing
-                  belongs to the PUBLISHER: a `calcula.button` cell carries
-                  `action: { kind: "script", scriptId }` in its cell-type params,
-                  those params publish as a `cellType` custom object and are
-                  materialized on pull byte-for-byte with no sanitizing
-                  (collect_cell_type_custom_objects / materialize_saved_cell_types,
-                  app/src-tauri/src/calp_commands.rs), and one click resolves the
-                  module by id and hands its stored source verbatim to run_script
-                  (extensions/CellTypes/types/button.ts -> planStoredModuleRun,
-                  extensions/_shared/lib/buttonScriptRun.ts). So a .calp ships the
-                  button AND the macro, and this grant is what arms it.
+            {moduleScriptNames.length > 0 && (
+              <>
+                <p>
+                  {scriptCount > 0 ? (
+                    <>It also includes </>
+                  ) : (
+                    <>The package <strong>"{packageName}"</strong> includes </>
+                  )}
+                  {moduleScriptNames.length} macro
+                  {moduleScriptNames.length !== 1 ? "s" : ""} (module scripts).
+                  Nothing puts a macro on a timer and nothing starts one when you
+                  open this workbook &mdash; but allowing arms every way one can be
+                  started here:
+                </p>
+                {/* CONSENT TEXT &mdash; VERIFIED AGAINST THE RUN PATHS, NOT WRITTEN
+                    FROM MEMORY. This used to read "Nothing runs them on its own —
+                    you run them yourself, from the macro library". The macro
+                    library stopped being the only surface the moment macros were
+                    folded into this one grant, and the surface that was missing
+                    belongs to the PUBLISHER: a `calcula.button` cell carries
+                    `action: { kind: "script", scriptId }` in its cell-type params,
+                    those params publish as a `cellType` custom object and are
+                    materialized on pull byte-for-byte with no sanitizing
+                    (collect_cell_type_custom_objects / materialize_saved_cell_types,
+                    app/src-tauri/src/calp_commands.rs), and one click resolves the
+                    module by id and hands its stored source verbatim to run_script
+                    (extensions/CellTypes/types/button.ts -> planStoredModuleRun,
+                    extensions/_shared/lib/buttonScriptRun.ts). So a .calp ships the
+                    button AND the macro, and this grant is what arms it.
 
-                  The bullets are deliberately generous about "a button": an
-                  on-grid button CONTROL does arrive disarmed (a pull strips
-                  onSelect and macroRef — EXECUTABLE_CONTROL_PROPERTIES,
-                  app/src-tauri/src/controls.rs), but a consent screen is the wrong
-                  place to teach the cell/control distinction, and the safe error
-                  is to warn about a click that cannot happen rather than to miss
-                  one that can.
+                    The bullets are deliberately generous about "a button": an
+                    on-grid button CONTROL does arrive disarmed (a pull strips
+                    onSelect and macroRef — EXECUTABLE_CONTROL_PROPERTIES,
+                    app/src-tauri/src/controls.rs), but a consent screen is the wrong
+                    place to teach the cell/control distinction, and the safe error
+                    is to warn about a click that cannot happen rather than to miss
+                    one that can.
 
-                  The two negatives are load-bearing and both hold: cap.schedule*
-                  runs one of the SCRIPT'S OWN methods, never a stored macro
-                  (allowlist.ts), and no path mounts or runs a module script at
-                  open — only object scripts mount, and api.runMacro is
-                  unlocked-tier, which a distributed script can never reach
-                  (accessLevelForOrigin, scriptOrigin.ts). Pinned by
-                  macroConsentTriggerHonesty.test.ts. */}
-              <ul style={triggerListStyle}>
-                <li>
-                  Developer &#9656; Macros, where you pick one and press Run.
-                </li>
-                <li>
-                  A button the publisher put on a sheet &mdash; a button's action
-                  travels inside the application, so one click runs the macro it
-                  names.
-                </li>
-                <li>
-                  Anything of your own you point at one later: a button, a view
-                  bookmark, the command line, or one of your own scripts.
-                </li>
-              </ul>
-              <p>
-                They will not run at all until this application&apos;s code is
-                approved, and allowing approves them:
-              </p>
-              <div style={scriptListStyle}>
-                {moduleScriptNames.map((name, i) => (
-                  <div key={i} style={scriptItemStyle}>{name}</div>
-                ))}
-              </div>
-            </>
-          )}
-
-          {unapprovableMacroNames.length > 0 && (
-            <>
-              {/* A prompt that Allow cannot satisfy must SAY so. This
-                  application ships a macro whose id is already used by one of
-                  its object scripts; one consent record is a flat list keyed by
-                  id, so the record cannot hold both and the object script keeps
-                  the id. Allowing therefore leaves these refused — and while
-                  that was unsaid, the freshness check still required their hash,
-                  so the application asked again on every single open and no
-                  amount of pressing Allow could stop it. */}
-              <p style={{ color: "#9a5b00", fontWeight: 600, margin: "8px 0 4px" }}>
-                {unapprovableMacroNames.length} macro
-                {unapprovableMacroNames.length !== 1 ? "s" : ""} in this
-                application cannot be approved and will not run. Each one uses
-                the same internal id as one of the application&apos;s object
-                scripts, and an approval records one artifact per id &mdash; so
-                allowing does not cover {unapprovableMacroNames.length !== 1 ? "them" : "it"}.
-                Ask the publisher to give {unapprovableMacroNames.length !== 1 ? "them" : "it"} {" "}
-                {unapprovableMacroNames.length !== 1 ? "distinct ids" : "a distinct id"}.
-              </p>
-              <div style={scriptListStyle}>
-                {unapprovableMacroNames.map((name, i) => (
-                  <div key={i} style={scriptItemStyle}>{name}</div>
-                ))}
-              </div>
-            </>
-          )}
-
-          {changedScripts.length > 0 && (
-            <div style={{ marginTop: 8 }}>
-              <p style={{ color: "#9a5b00", fontWeight: 600, margin: "0 0 4px" }}>
-                {changedScripts.length} script{changedScripts.length === 1 ? "" : "s"} changed
-                since you last approved this package &mdash; review what changed before allowing:
-              </p>
-              {changedScripts.map((cs) => (
-                <ScriptChangeDiff key={cs.id} {...cs} />
-              ))}
-            </div>
-          )}
-
-          {requestedCapabilities.length > 0 && (
-            <>
-              <p>
-                Allowing grants these scripts the following capabilities:
-              </p>
-              <ul style={capListStyle}>
-                {requestedCapabilities.map((cap) => (
-                  <li key={cap.capability} style={capItemStyle}>
-                    <span style={capIconStyle} aria-hidden="true">
-                      {CAP_ICON[cap.capability] ?? "*"}
-                    </span>
-                    <span>
-                      {cap.description}
-                      {cap.origins.map((origin) => (
-                        <code key={origin} style={capOriginStyle}>{origin}</code>
-                      ))}
-                    </span>
+                    The two negatives are load-bearing and both hold: cap.schedule*
+                    runs one of the SCRIPT'S OWN methods, never a stored macro
+                    (allowlist.ts), and no path mounts or runs a module script at
+                    open — only object scripts mount, and api.runMacro is
+                    unlocked-tier, which a distributed script can never reach
+                    (accessLevelForOrigin, scriptOrigin.ts). Pinned by
+                    macroConsentTriggerHonesty.test.ts. */}
+                <ul style={triggerListStyle}>
+                  <li>
+                    Developer &#9656; Macros, where you pick one and press Run.
                   </li>
-                ))}
-              </ul>
-            </>
-          )}
+                  <li>
+                    A button the publisher put on a sheet &mdash; a button's action
+                    travels inside the application, so one click runs the macro it
+                    names.
+                  </li>
+                  <li>
+                    Anything of your own you point at one later: a button, a view
+                    bookmark, the command line, or one of your own scripts.
+                  </li>
+                </ul>
+                <p>
+                  They will not run at all until this application&apos;s code is
+                  approved, and allowing approves them:
+                </p>
+                <div style={scriptListStyle}>
+                  {moduleScriptNames.map((name, i) => (
+                    <div key={i} style={scriptItemStyle}>{name}</div>
+                  ))}
+                </div>
+              </>
+            )}
 
-          {/* THE REACH PARAGRAPH IS A FUNCTION OF WHAT THIS GRANT COVERS.
-              Both sentences below describe the OBJECT-SCRIPT realm — the
-              worker realm, clamped by the host to the sheet currently shown —
-              so neither may be rendered on a prompt that has no object scripts
-              in it. A macro-only application used to end with the
-              restricted-mode sentence anyway: the last screen before a
-              stranger's code runs described the containment of a surface that
-              application does not use, and understated the one it does. The
-              macro paragraph below states the macro surface's own reach, and it
-              is pinned against core/script-engine/src/manifest.rs. */}
-          {scriptCount > 0 &&
-            (requestedCapabilities.length > 0 ? (
-              /* CONSENT TEXT — held to the same bar as the capability itself.
-                 "Scripts can only reach the objects they're attached to" was
-                 false: the whole `sheet.*` family in scriptHost/allowlist.ts is
-                 `tier: "restricted"`, so cell reads and writes need no
-                 capability at all. What a capability gates is reach BEYOND the
-                 workbook. Say that, and say the grid access plainly, rather
-                 than implying an isolation the sandbox does not provide.
-                 Mirrors CapabilityRequestDialog.tsx, which records the same
-                 correction. */
-              <p style={{ fontSize: 11, color: "#888" }}>
-                Anything not listed stays blocked. Even with nothing listed,
-                these scripts can read and write the cells of the sheet
-                currently shown — that is what an object script is for — but
-                they reach nothing outside this workbook: no network, no files,
-                no BI data.
-              </p>
-            ) : (
-              /* "cannot read or write arbitrary cells" was simply not true:
-                 sheet.getCellValue / sheet.setCellValue and the rest of the
-                 sheet.* family are restricted-tier rows in
-                 scriptHost/allowlist.ts, granted to every mounted object
-                 script with no capability involved. Restricted mode limits
-                 which SHEET — the host clamps to the sheet currently shown —
-                 and it blocks everything outside the workbook. It does not
-                 keep a script out of your cells. Wording matches the allowlist
-                 rows' own `desc` on purpose. */
-              <p>
-                Object scripts run in <strong>restricted mode</strong> — they
-                can read and write the cells of the sheet currently shown, and
-                they reach nothing outside this workbook: no network, no files,
-                no BI data. They have asked for no other permissions.
-              </p>
+            {unapprovableMacroNames.length > 0 && (
+              <>
+                {/* A prompt that Allow cannot satisfy must SAY so. This
+                    application ships a macro whose id is already used by one of
+                    its object scripts; one consent record is a flat list keyed by
+                    id, so the record cannot hold both and the object script keeps
+                    the id. Allowing therefore leaves these refused — and while
+                    that was unsaid, the freshness check still required their hash,
+                    so the application asked again on every single open and no
+                    amount of pressing Allow could stop it. */}
+                <p style={{ color: "#9a5b00", fontWeight: 600, margin: "8px 0 4px" }}>
+                  {unapprovableMacroNames.length} macro
+                  {unapprovableMacroNames.length !== 1 ? "s" : ""} in this
+                  application cannot be approved and will not run. Each one uses
+                  the same internal id as one of the application&apos;s object
+                  scripts, and an approval records one artifact per id &mdash; so
+                  allowing does not cover {unapprovableMacroNames.length !== 1 ? "them" : "it"}.
+                  Ask the publisher to give {unapprovableMacroNames.length !== 1 ? "them" : "it"} {" "}
+                  {unapprovableMacroNames.length !== 1 ? "distinct ids" : "a distinct id"}.
+                </p>
+                <div style={scriptListStyle}>
+                  {unapprovableMacroNames.map((name, i) => (
+                    <div key={i} style={scriptItemStyle}>{name}</div>
+                  ))}
+                </div>
+              </>
+            )}
+          </DialogPane>
+
+          {/* WHAT ALLOWING PERMITS — the consequence. The capability list and
+              both reach paragraphs say "these scripts", meaning the lists in the
+              pane beside this one, so they belong next to them and not a screen
+              below them. The re-consent DIFFS are deliberately not here: code
+              needs the dialog's whole width, so they go full width underneath. */}
+          <DialogPane
+            scroll={twoColumn}
+            padding={twoColumn ? BODY_PADDING : "0 20px 16px"}
+            style={
+              twoColumn ? { ...bodyTextStyle, ...paneDividerStyle } : stackedPaneStyle
+            }
+          >
+            {twoColumn && (
+              <DialogPaneTitle style={paneTitleStyle}>
+                What allowing permits
+              </DialogPaneTitle>
+            )}
+            {requestedCapabilities.length > 0 && (
+              <>
+                <p>
+                  Allowing grants these scripts the following capabilities:
+                </p>
+                <ul style={capListStyle}>
+                  {requestedCapabilities.map((cap) => (
+                    <li key={cap.capability} style={capItemStyle}>
+                      <span style={capIconStyle} aria-hidden="true">
+                        {CAP_ICON[cap.capability] ?? "*"}
+                      </span>
+                      <span>
+                        {cap.description}
+                        {cap.origins.map((origin) => (
+                          <code key={origin} style={capOriginStyle}>{origin}</code>
+                        ))}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+
+            {/* THE REACH PARAGRAPH IS A FUNCTION OF WHAT THIS GRANT COVERS.
+                Both sentences below describe the OBJECT-SCRIPT realm — the
+                worker realm, clamped by the host to the sheet currently shown —
+                so neither may be rendered on a prompt that has no object scripts
+                in it. A macro-only application used to end with the
+                restricted-mode sentence anyway: the last screen before a
+                stranger's code runs described the containment of a surface that
+                application does not use, and understated the one it does. The
+                macro paragraph below states the macro surface's own reach, and it
+                is pinned against core/script-engine/src/manifest.rs. */}
+            {scriptCount > 0 &&
+              (requestedCapabilities.length > 0 ? (
+                /* CONSENT TEXT — held to the same bar as the capability itself.
+                   "Scripts can only reach the objects they're attached to" was
+                   false: the whole `sheet.*` family in scriptHost/allowlist.ts is
+                   `tier: "restricted"`, so cell reads and writes need no
+                   capability at all. What a capability gates is reach BEYOND the
+                   workbook. Say that, and say the grid access plainly, rather
+                   than implying an isolation the sandbox does not provide.
+                   Mirrors CapabilityRequestDialog.tsx, which records the same
+                   correction. */
+                <p style={{ fontSize: 11, color: "#888" }}>
+                  Anything not listed stays blocked. Even with nothing listed,
+                  these scripts can read and write the cells of the sheet
+                  currently shown — that is what an object script is for — but
+                  they reach nothing outside this workbook: no network, no files,
+                  no BI data.
+                </p>
+              ) : (
+                /* "cannot read or write arbitrary cells" was simply not true:
+                   sheet.getCellValue / sheet.setCellValue and the rest of the
+                   sheet.* family are restricted-tier rows in
+                   scriptHost/allowlist.ts, granted to every mounted object
+                   script with no capability involved. Restricted mode limits
+                   which SHEET — the host clamps to the sheet currently shown —
+                   and it blocks everything outside the workbook. It does not
+                   keep a script out of your cells. Wording matches the allowlist
+                   rows' own `desc` on purpose. */
+                <p>
+                  Object scripts run in <strong>restricted mode</strong> — they
+                  can read and write the cells of the sheet currently shown, and
+                  they reach nothing outside this workbook: no network, no files,
+                  no BI data. They have asked for no other permissions.
+                </p>
+              ))}
+
+            {moduleScriptNames.length > 0 && (
+              <>
+                {/* THE MACRO SURFACE'S OWN REACH, DERIVED — NOT BORROWED.
+                    A macro is a MODULE script: the run routes hand its source to
+                    `run_script`, which is the `one-off-script` surface of the Rust
+                    QuickJS interpreter. `SURFACE_PROFILES` in
+                    core/script-engine/src/manifest.rs records how that realm is
+                    built — no ModelDataProvider, no granted capability ids, host
+                    globals left in place — and `surface_reach()` derives from it
+                    exactly the six reach classes this paragraph enumerates:
+                    grid, workbook, view, bookmarks, appMetadata, output. The
+                    clauses below are in that order, and
+                    macroSurfaceReachHonesty.test.ts fails if the manifest grows a
+                    class this sentence does not name, or grants a capability this
+                    sentence says cannot be granted.
+
+                    It is deliberately WIDER than the object-script sentence in
+                    two ways the user has to be told: a macro is not clamped to the
+                    sheet currently shown, and there is no capability to withhold
+                    because none is consulted. */}
+                <p>
+                  A macro is not an object script and does not run in that realm.
+                  It runs in Calcula&apos;s isolated interpreter, on a copy of this
+                  workbook, and what it may touch there is fixed &mdash; there is
+                  no permission to grant and none to withhold: the cells of any
+                  sheet in this workbook; its sheets, document properties and
+                  calculation settings; how it is displayed; its bookmarks;
+                  Calcula&apos;s own version and locale settings, which it can
+                  read; and the results it prints back to you. It reaches nothing
+                  else: no network, no files, no BI data.
+                </p>
+              </>
+            )}
+
+            <p style={{ fontSize: 11, color: "#888" }}>
+              You can inspect the source before allowing. Allowing is remembered
+              with this workbook; if the application changes any script&apos;s or
+              macro&apos;s code, or requests new capabilities, you will be asked
+              again.
+            </p>
+          </DialogPane>
+        </DialogBody>
+
+        {/* THE RE-CONSENT DIFF, FULL WIDTH AND OUTSIDE BOTH PANES. This is the
+            highest-stakes thing on a re-consent prompt and it is CODE: a column
+            would hand it less room than the old single-column body did, not
+            more. Its own scroller, below the panes and above the footer, so an
+            expanded diff can never push Block/Allow off the screen. */}
+        {changedScripts.length > 0 && (
+          <div style={diffStripStyle}>
+            <p style={{ color: "#9a5b00", fontWeight: 600, margin: "0 0 4px" }}>
+              {changedScripts.length} script{changedScripts.length === 1 ? "" : "s"} changed
+              since you last approved this package &mdash; review what changed before allowing:
+            </p>
+            {changedScripts.map((cs) => (
+              <ScriptChangeDiff key={cs.id} {...cs} />
             ))}
-
-          {moduleScriptNames.length > 0 && (
-            <>
-              {/* THE MACRO SURFACE'S OWN REACH, DERIVED — NOT BORROWED.
-                  A macro is a MODULE script: the run routes hand its source to
-                  `run_script`, which is the `one-off-script` surface of the Rust
-                  QuickJS interpreter. `SURFACE_PROFILES` in
-                  core/script-engine/src/manifest.rs records how that realm is
-                  built — no ModelDataProvider, no granted capability ids, host
-                  globals left in place — and `surface_reach()` derives from it
-                  exactly the six reach classes this paragraph enumerates:
-                  grid, workbook, view, bookmarks, appMetadata, output. The
-                  clauses below are in that order, and
-                  macroSurfaceReachHonesty.test.ts fails if the manifest grows a
-                  class this sentence does not name, or grants a capability this
-                  sentence says cannot be granted.
-
-                  It is deliberately WIDER than the object-script sentence in
-                  two ways the user has to be told: a macro is not clamped to the
-                  sheet currently shown, and there is no capability to withhold
-                  because none is consulted. */}
-              <p>
-                A macro is not an object script and does not run in that realm.
-                It runs in Calcula&apos;s isolated interpreter, on a copy of this
-                workbook, and what it may touch there is fixed &mdash; there is
-                no permission to grant and none to withhold: the cells of any
-                sheet in this workbook; its sheets, document properties and
-                calculation settings; how it is displayed; its bookmarks;
-                Calcula&apos;s own version and locale settings, which it can
-                read; and the results it prints back to you. It reaches nothing
-                else: no network, no files, no BI data.
-              </p>
-            </>
-          )}
-
-          <p style={{ fontSize: 11, color: "#888" }}>
-            You can inspect the source before allowing. Allowing is remembered
-            with this workbook; if the application changes any script&apos;s or
-            macro&apos;s code, or requests new capabilities, you will be asked
-            again.
-          </p>
-        </div>
+          </div>
+        )}
 
         <div style={footerStyle}>
           {canInspect && (

@@ -14,6 +14,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useDialogWindow } from "../../api/dialogWindow";
+import { DialogBody, DialogPane } from "../../api/dialogLayout";
 import {
   findFunctionBuilder,
   subscribeToFunctionBuilders,
@@ -66,6 +67,9 @@ export function InsertFunctionDialog({
   const [selectedFunction, setSelectedFunction] = useState<FunctionInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // Attached to whichever row is selected, so the arrow keys can bring it back
+  // into view (see the effect below).
+  const selectedItemRef = useRef<HTMLDivElement>(null);
 
   // Step 2: the function whose arguments are being assembled, and the formula
   // the builder has assembled so far (null = not insertable yet).
@@ -82,7 +86,10 @@ export function InsertFunctionDialog({
 
   // Movable + resizable dialog window (shared hook).
   // win.ref doubles as the click-outside detection ref.
-  const win = useDialogWindow({ minWidth: 380, minHeight: 380 });
+  // minWidth 600, not 380: the catalog step is a two-pane split with a fixed
+  // 190px category rail, and a rail that cannot shrink against a 190px list is
+  // not a browsable catalog.
+  const win = useDialogWindow({ minWidth: 600, minHeight: 380 });
   const dialogRef = win.ref;
 
   useEffect(() => {
@@ -146,6 +153,15 @@ export function InsertFunctionDialog({
   useEffect(() => {
     searchInputRef.current?.focus();
   }, []);
+
+  // ArrowUp/ArrowDown moved the selection through the list without moving the
+  // LIST, so the moment the highlight passed the fold it travelled off-screen
+  // and the dialog looked frozen. A list that now fills the dialog has more
+  // rows below the fold, not fewer, so the scroll has to follow the selection.
+  useEffect(() => {
+    // Optional call: jsdom does not implement scrollIntoView.
+    selectedItemRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [selectedFunction]);
 
   useEffect(() => {
     // Step 2 is real work in a form: an accidental click on the grid behind it
@@ -312,37 +328,55 @@ export function InsertFunctionDialog({
           />
         </S.SearchContainer>
 
-        <S.CategoryContainer>
-          {categories.map((cat) => (
-            <S.CategoryButton
-              key={cat.id ?? "all"}
-              onClick={() => setSelectedCategory(cat.id)}
-              isActive={selectedCategory === cat.id}
-            >
-              {cat.label}
-            </S.CategoryButton>
-          ))}
-        </S.CategoryContainer>
+        {/* MASTER-DETAIL, not a column. Category and search are PARALLEL
+            filters over one catalog of 500+ functions, so the categories belong
+            beside the list rather than above it: as a wrapping chip bar they
+            reflowed into three or four rows and spent the height the list had
+            to live in. The list pane is the only scroller here — the rail
+            scrolls itself only if the dialog is dragged short. */}
+        <DialogBody>
+          <DialogPane
+            width={190}
+            padding={0}
+            style={{ borderRight: "1px solid var(--dialog-border)" }}
+            data-testid="function-category-rail"
+          >
+            <S.CategoryContainer>
+              {categories.map((cat) => (
+                <S.CategoryButton
+                  key={cat.id ?? "all"}
+                  onClick={() => setSelectedCategory(cat.id)}
+                  isActive={selectedCategory === cat.id}
+                >
+                  {cat.label}
+                </S.CategoryButton>
+              ))}
+            </S.CategoryContainer>
+          </DialogPane>
 
-        <S.FunctionListContainer>
-          {isLoading ? (
-            <S.LoadingMessage>Loading functions...</S.LoadingMessage>
-          ) : filteredFunctions.length === 0 ? (
-            <S.EmptyMessage>No functions found</S.EmptyMessage>
-          ) : (
-            filteredFunctions.map((fn) => (
-              <S.FunctionItem
-                key={fn.name}
-                onClick={() => setSelectedFunction(fn)}
-                onDoubleClick={handleInsert}
-                isSelected={selectedFunction?.name === fn.name}
-              >
-                <S.FunctionName>{fn.name}</S.FunctionName>
-                <S.FunctionDescription>{fn.description}</S.FunctionDescription>
-              </S.FunctionItem>
-            ))
-          )}
-        </S.FunctionListContainer>
+          <DialogPane padding={0} data-testid="function-list-pane">
+            <S.FunctionListContainer>
+              {isLoading ? (
+                <S.LoadingMessage>Loading functions...</S.LoadingMessage>
+              ) : filteredFunctions.length === 0 ? (
+                <S.EmptyMessage>No functions found</S.EmptyMessage>
+              ) : (
+                filteredFunctions.map((fn) => (
+                  <S.FunctionItem
+                    key={fn.name}
+                    ref={selectedFunction?.name === fn.name ? selectedItemRef : undefined}
+                    onClick={() => setSelectedFunction(fn)}
+                    onDoubleClick={handleInsert}
+                    isSelected={selectedFunction?.name === fn.name}
+                  >
+                    <S.FunctionName>{fn.name}</S.FunctionName>
+                    <S.FunctionDescription>{fn.description}</S.FunctionDescription>
+                  </S.FunctionItem>
+                ))
+              )}
+            </S.FunctionListContainer>
+          </DialogPane>
+        </DialogBody>
 
         {selectedFunction && (
           <S.FunctionDetails>

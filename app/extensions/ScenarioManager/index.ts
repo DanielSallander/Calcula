@@ -25,10 +25,17 @@ function activate(context: ExtensionContext): void {
   console.log("[ScenarioManager] Activating...");
 
   // 1. Register dialogs
+  // dismissOnEscape: false — this dialog has two modes and Escape means
+  // different things in each: "back to the list" inside the Add/Edit sub-form,
+  // "close" in list mode. The shell's own Escape handler would race the
+  // dialog's and always close the whole thing, losing a half-typed scenario.
+  // The dialog's handler cannot win that race by itself: its effect re-subscribes
+  // on every mode change, so in the sub-form it is registered AFTER the shell's.
   context.ui.dialogs.register({
     id: "scenario-manager",
     component: ScenarioManagerDialog,
     priority: 100,
+    dismissOnEscape: false,
   });
   cleanupFns.push(() => context.ui.dialogs.unregister("scenario-manager"));
 

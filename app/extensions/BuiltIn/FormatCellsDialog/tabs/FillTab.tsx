@@ -87,115 +87,130 @@ export function FillTab(): React.ReactElement {
         </FillModeBar>
       </Section>
 
-      {/* Solid Fill */}
+      {/* Solid Fill -- colours on the left, the big picker on the right, so the
+          Preview below them stays above the fold (see ModeRow). */}
       {fillMode === "solid" && (
-        <>
-          <Section>
-            <SectionTitle>Background Color</SectionTitle>
-            <ColorPickerRow>
-              <ColorPicker
-                value={backgroundColor}
-                onChange={setBackgroundColor}
-                label="Color:"
-              />
-            </ColorPickerRow>
-          </Section>
-          <Section>
-            <SectionTitle>Quick Colors</SectionTitle>
-            <QuickColorGrid>
-              {QUICK_COLORS.map((color) => (
-                <QuickColorCell
-                  key={color}
-                  $color={color}
-                  $selected={backgroundColor.toLowerCase() === color.toLowerCase()}
-                  onClick={() => setBackgroundColor(color)}
-                  title={color}
+        <ModeRow>
+          <ColorColumn>
+            <Section>
+              <SectionTitle>Background Color</SectionTitle>
+              <ColorPickerRow>
+                <ColorPicker
+                  value={backgroundColor}
+                  onChange={setBackgroundColor}
+                  label="Color:"
                 />
-              ))}
-            </QuickColorGrid>
-          </Section>
-        </>
-      )}
-
-      {/* Gradient Fill */}
-      {fillMode === "gradient" && (
-        <>
-          <Section>
-            <SectionTitle>Gradient Colors</SectionTitle>
-            <ColorPickerRow>
-              <ColorPicker
-                value={gradientColor1}
-                onChange={setGradientColor1}
-                label="Color 1:"
-              />
-              <ColorPicker
-                value={gradientColor2}
-                onChange={setGradientColor2}
-                label="Color 2:"
-              />
-            </ColorPickerRow>
-          </Section>
-          <Section>
-            <SectionTitle>Direction</SectionTitle>
-            <DirectionBar>
-              {GRADIENT_DIRECTIONS.map((dir) => (
-                <DirectionButton
-                  key={dir.id}
-                  $active={gradientDirection === dir.id}
-                  onClick={() => setGradientDirection(dir.id)}
-                  title={dir.label}
-                >
-                  <DirectionIcon>{dir.icon}</DirectionIcon>
-                  <DirectionLabel>{dir.label}</DirectionLabel>
-                </DirectionButton>
-              ))}
-            </DirectionBar>
-          </Section>
-        </>
-      )}
-
-      {/* Pattern Fill */}
-      {fillMode === "pattern" && (
-        <>
-          <Section>
-            <SectionTitle>Pattern Colors</SectionTitle>
-            <ColorPickerRow>
-              <ColorPicker
-                value={patternFgColor}
-                onChange={setPatternFgColor}
-                label="Pattern:"
-              />
-              <ColorPicker
-                value={patternBgColor}
-                onChange={setPatternBgColor}
-                label="Background:"
-              />
-            </ColorPickerRow>
-          </Section>
-          <Section>
-            <SectionTitle>Pattern Style</SectionTitle>
-            <PatternGrid>
-              {PATTERN_TYPES.map((pt) => (
-                <PatternCell
-                  key={pt.id}
-                  $selected={patternType === pt.id}
-                  onClick={() => setPatternType(pt.id)}
-                  title={pt.label}
-                >
-                  <PatternPreviewCanvas
-                    patternType={pt.id}
-                    fgColor={patternFgColor}
-                    bgColor={patternBgColor}
+              </ColorPickerRow>
+            </Section>
+          </ColorColumn>
+          <PickerColumn>
+            <Section>
+              <SectionTitle>Quick Colors</SectionTitle>
+              <QuickColorGrid>
+                {QUICK_COLORS.map((color) => (
+                  <QuickColorCell
+                    key={color}
+                    $color={color}
+                    $selected={backgroundColor.toLowerCase() === color.toLowerCase()}
+                    onClick={() => setBackgroundColor(color)}
+                    title={color}
                   />
-                </PatternCell>
-              ))}
-            </PatternGrid>
-          </Section>
-        </>
+                ))}
+              </QuickColorGrid>
+            </Section>
+          </PickerColumn>
+        </ModeRow>
       )}
 
-      {/* Preview */}
-      <Section>
+      {/* Gradient Fill -- same two-column shape as the other modes. */}
+      {fillMode === "gradient" && (
+        <ModeRow>
+          <ColorColumn>
+            <Section>
+              <SectionTitle>Gradient Colors</SectionTitle>
+              <ColorPickerRow>
+                <ColorPicker
+                  value={gradientColor1}
+                  onChange={setGradientColor1}
+                  label="Color 1:"
+                />
+                <ColorPicker
+                  value={gradientColor2}
+                  onChange={setGradientColor2}
+                  label="Color 2:"
+                />
+              </ColorPickerRow>
+            </Section>
+          </ColorColumn>
+          <PickerColumn>
+            <Section>
+              <SectionTitle>Direction</SectionTitle>
+              <DirectionBar>
+                {GRADIENT_DIRECTIONS.map((dir) => (
+                  <DirectionButton
+                    key={dir.id}
+                    $active={gradientDirection === dir.id}
+                    onClick={() => setGradientDirection(dir.id)}
+                    title={dir.label}
+                  >
+                    <DirectionIcon>{dir.icon}</DirectionIcon>
+                    <DirectionLabel>{dir.label}</DirectionLabel>
+                  </DirectionButton>
+                ))}
+              </DirectionBar>
+            </Section>
+          </PickerColumn>
+        </ModeRow>
+      )}
+
+      {/* Pattern Fill -- the tallest mode, and the one the split rescues: the
+          17 square pattern cells used to push the Preview clean off the tab. */}
+      {fillMode === "pattern" && (
+        <ModeRow>
+          <ColorColumn>
+            <Section>
+              <SectionTitle>Pattern Colors</SectionTitle>
+              <ColorPickerRow>
+                <ColorPicker
+                  value={patternFgColor}
+                  onChange={setPatternFgColor}
+                  label="Pattern:"
+                />
+                <ColorPicker
+                  value={patternBgColor}
+                  onChange={setPatternBgColor}
+                  label="Background:"
+                />
+              </ColorPickerRow>
+            </Section>
+          </ColorColumn>
+          <PickerColumn>
+            <Section>
+              <SectionTitle>Pattern Style</SectionTitle>
+              <PatternGrid>
+                {PATTERN_TYPES.map((pt) => (
+                  <PatternCell
+                    key={pt.id}
+                    $selected={patternType === pt.id}
+                    onClick={() => setPatternType(pt.id)}
+                    title={pt.label}
+                  >
+                    <PatternPreviewCanvas
+                      patternType={pt.id}
+                      fgColor={patternFgColor}
+                      bgColor={patternBgColor}
+                    />
+                  </PatternCell>
+                ))}
+              </PatternGrid>
+            </Section>
+          </PickerColumn>
+        </ModeRow>
+      )}
+
+      {/* Preview -- pinned to the bottom of the tab, so it sits in the same
+          place whichever mode is showing (NumberTab does the same). */}
+      <PreviewSection>
         <SectionTitle>Preview</SectionTitle>
         <PreviewCanvas
           fillMode={fillMode}
@@ -207,7 +222,7 @@ export function FillTab(): React.ReactElement {
           patternFgColor={patternFgColor}
           patternBgColor={patternBgColor}
         />
-      </Section>
+      </PreviewSection>
     </Container>
   );
 }
@@ -228,13 +243,23 @@ function PreviewCanvas(props: {
 }): React.ReactElement {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
 
-  React.useEffect(() => {
+  // The backing store is sized from the MEASURED box, not a hard-coded 460, and
+  // repainted on resize. The tab is now two columns inside a user-resizable
+  // dialog, so a fixed bitmap under `width: 100%` is stretched anisotropically —
+  // the one element whose whole job is to show what the fill will look like was
+  // showing it ~40% too wide.
+  const paint = React.useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    if (w === 0 || h === 0) return;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const w = canvas.width;
-    const h = canvas.height;
+    ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, w, h);
 
     // Draw checkerboard background to show transparency
@@ -298,9 +323,19 @@ function PreviewCanvas(props: {
     props.patternType, props.patternFgColor, props.patternBgColor,
   ]);
 
-  return (
-    <PreviewCanvasEl ref={canvasRef} width={460} height={60} />
-  );
+  React.useEffect(() => {
+    paint();
+  }, [paint]);
+
+  React.useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => paint());
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [paint]);
+
+  return <PreviewCanvasEl ref={canvasRef} height={60} />;
 }
 
 function PatternPreviewCanvas(props: {
@@ -460,17 +495,48 @@ function isLightColor(hex: string): boolean {
 // Styled Components
 // ============================================================================
 
+// `min-height: 100%` -- not `height` -- gives the column flex a definite height to
+// hand to the Preview's `margin-top: auto`, while still letting the tab grow (and
+// TabContent scroll) if the dialog is dragged narrow enough to reflow the grids.
 const Container = styled.div`
   padding: 4px 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-height: 100%;
 `;
 
 const Section = styled.div`
   display: flex;
   flex-direction: column;
   gap: 8px;
+`;
+
+// The mode's four sections are peers, not steps: "Fill Type" stays a full-width
+// mode switch, and the mode's own two sections sit side by side instead of
+// stacking -- stacked, solid and pattern ran ~120px and ~170px past the tab.
+const ModeRow = styled.div`
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+`;
+
+// 240px, not narrower: ColorPicker's dropdown is min-width 220px and it opens
+// inside this column, so anything tighter cuts off the palette and the hex box.
+const ColorColumn = styled.div`
+  flex: 0 1 240px;
+  min-width: 220px;
+`;
+
+// min-width: 0 so the swatch/pattern grids reflow inside the column rather than
+// widening the row past the tab.
+const PickerColumn = styled.div`
+  flex: 1;
+  min-width: 0;
+`;
+
+const PreviewSection = styled(Section)`
+  margin-top: auto;
 `;
 
 const SectionTitle = styled.div`
@@ -481,10 +547,14 @@ const SectionTitle = styled.div`
   border-bottom: 1px solid ${v("--border-default")};
 `;
 
+// Wraps, because two pickers ("Pattern:" + "Background:") do not always fit one
+// row of the colour column -- stacked they still each keep their full width.
 const ColorPickerRow = styled.div`
   display: flex;
   align-items: center;
-  gap: 16px;
+  flex-wrap: wrap;
+  column-gap: 16px;
+  row-gap: 10px;
 `;
 
 const FillModeBar = styled.div`
@@ -512,9 +582,12 @@ const FillModeButton = styled.button<{ $active: boolean }>`
   }
 `;
 
+// auto-fill, not a fixed 10 columns: the cells are square, so a fixed count turns
+// every pixel of width 1:1 into height (40 swatches were 4 rows of 46px). Width
+// now buys COLUMNS and the swatches stay near Excel's size.
 const QuickColorGrid = styled.div`
   display: grid;
-  grid-template-columns: repeat(10, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(20px, 1fr));
   gap: 3px;
 `;
 
@@ -537,13 +610,17 @@ const QuickColorCell = styled.button<{ $color: string; $selected: boolean }>`
   }
 `;
 
+// A grid that wraps rather than a five-across flex row: in the narrower picker
+// column five equal buttons are ~42px, which ellipsises every label down to a
+// letter or two. The 64px floor keeps "Diagonal Down" readable and wraps to two
+// rows instead, and goes back to one row when the dialog is dragged wider.
 const DirectionBar = styled.div`
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
   gap: 4px;
 `;
 
 const DirectionButton = styled.button<{ $active: boolean }>`
-  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -573,9 +650,11 @@ const DirectionLabel = styled.span`
   max-width: 100%;
 `;
 
+// Same reason as QuickColorGrid, with a 34px floor so a cell never falls far
+// below the 32px pattern canvas it draws.
 const PatternGrid = styled.div`
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(34px, 1fr));
   gap: 4px;
 `;
 

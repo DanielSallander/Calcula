@@ -46,6 +46,7 @@ import {
 } from "@api/distribution";
 import { confirmAsync } from "@api/dialogs";
 import { useDialogWindow } from "@api/dialogWindow";
+import { DialogBody, DialogPane, useDialogSplit, dialogWidth } from "@api/dialogLayout";
 import { ThreeWayRow, type RowChoice } from "./ThreeWayRow";
 import { announceSubscribedContentReplaced } from "../lib/refreshAftermath";
 import { describeRefreshCard, formatSubscriptionTarget } from "../lib/environments";
@@ -54,7 +55,6 @@ import { describeRefreshCard, formatSubscriptionTarget } from "../lib/environmen
 const cellKey = (c: ConflictPreviewCell) => `${c.localSheetId}:${c.cellId}`;
 
 export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
-  const win = useDialogWindow({ minWidth: 460, minHeight: 320 });
   const [preview, setPreview] = useState<RefreshPreview | null>(null);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [loading, setLoading] = useState(true);
@@ -157,6 +157,36 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
     (n) => !dismissedNotices.has(`${n.packageName}@${n.registryUrl}`),
   );
 
+  /**
+   * THE CONFLICT LIST GETS A COLUMN OF ITS OWN — and only when there is one.
+   *
+   * Every conflict is ~90px of row inside a 240px box, so the list was a
+   * two-and-a-half-row porthole inside the body's own scroller, and it is the
+   * only per-row-actionable thing in the dialog. Beside the narrative instead of
+   * under it, the same dialog shows six or seven, with one scroller.
+   *
+   * This is the SAME condition the conflict block renders under, NOT
+   * `conflicts.length > 0`: `handleApply` deliberately leaves `preview` standing
+   * (the versions it echoed back stay inspectable), so `conflicts` is still full
+   * on the "Refresh Complete" screen and gating on the array alone would pin an
+   * empty second pane beside a one-sentence result.
+   */
+  const twoPane = !loading && !result && hasUpdates && !!preview && conflicts.length > 0;
+
+  // MOVED DOWN from the first line of the component — still unconditional, and
+  // still the same order on every render — because the resize floor has to be
+  // the TWO-pane floor while there are two panes. `stacked` is a caller prop,
+  // not a container query, so nothing collapses the split automatically and a
+  // drag to 460px would leave two ~220px columns.
+  const win = useDialogWindow({ minWidth: twoPane ? 740 : 460, minHeight: 320 });
+  // The conflicts are the WORK, so they get the larger share. The primary style
+  // goes on the NARRATIVE pane because that one comes first in source order
+  // (which the subscriber-surface guard reads), so the fraction here is the
+  // narrative's: 0.44 of 940 leaves the conflict pane ~523px, and after its
+  // padding and the list's border each ThreeWayRow still has the ~488px of
+  // width it has today. Taller is the win; narrower would not have been.
+  const split = useDialogSplit({ initial: 0.44, min: 0.3, max: 0.65 });
+
   const handleApply = async () => {
     setApplying(true);
     setConfirming(false);
@@ -254,7 +284,14 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
     left: "50%",
     top: "14%",
     transform: "translateX(-50%)",
-    width: "520px",
+    // Wide enough for two columns only while there are two. `dialogWidth` keeps
+    // the preferred width off a small screen's edge.
+    width: twoPane ? dialogWidth(940) : "520px",
+    // ...and the growth is eased rather than popped, because the loading state
+    // renders first and the jump would otherwise land on the user mid-read. The
+    // easing stops the moment they take the window over, or every resize drag
+    // would lag behind the cursor.
+    transition: win.style.width === undefined ? "width 140ms ease" : undefined,
     maxHeight: "78vh",
     zIndex: 1050,
     display: "flex",
@@ -287,12 +324,8 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
     fontSize: "14px",
     lineHeight: 1,
   };
-  const bodyStyle: React.CSSProperties = {
-    flex: 1,
-    minHeight: 0,
-    overflowY: "auto",
-    padding: "12px 16px",
-  };
+  /** What the body's own padding used to be; now carried by each pane. */
+  const panePadding = "12px 16px";
   const footerStyle: React.CSSProperties = {
     display: "flex",
     justifyContent: "flex-end",
@@ -301,10 +334,15 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
     flexShrink: 0,
     borderTop: "1px solid var(--border-default)",
   };
+  // THE LIST FILLS ITS PANE. `maxHeight: 240` was a hard cap on a ~90px row —
+  // about two and a half conflicts, nested inside the body's scroller. It only
+  // ever renders in the two-pane path, so it can simply take the height it is
+  // given and be the ONE scroller on that side.
   const listBoxStyle: React.CSSProperties = {
     border: "1px solid var(--border-default)",
     borderRadius: "3px",
-    maxHeight: "240px",
+    flex: 1,
+    minHeight: 0,
     overflowY: "auto",
   };
   const secondary: React.CSSProperties = { color: "var(--text-secondary)" };
@@ -328,354 +366,385 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
         </button>
       </div>
 
-      <div style={bodyStyle}>
-        {loading && <div>Computing refresh preview...</div>}
+      {/* ONE ROW, TWO PANES — narrative on the left, the decisions on the
+          right. `stacked` when there is nothing to decide, which is every
+          other state this dialog has (loading, failed, up to date, complete,
+          and a conflict-free refresh), so those stay the 520px column they
+          have always been. */}
+      <DialogBody ref={split.containerRef} stacked={!twoPane}>
+        <DialogPane
+          padding={panePadding}
+          style={twoPane ? split.primaryStyle : undefined}
+          data-testid="refresh-narrative"
+        >
+          {loading && <div>Computing refresh preview...</div>}
 
-        {!loading && result && <p style={{ margin: 0 }}>{result}</p>}
+          {!loading && result && <p style={{ margin: 0 }}>{result}</p>}
 
-        {!loading && !result && error && !preview && (
-          <div style={{ color: "var(--text-error, #d33)", fontSize: "12px" }}>{error}</div>
-        )}
+          {!loading && !result && error && !preview && (
+            <div style={{ color: "var(--text-error, #d33)", fontSize: "12px" }}>{error}</div>
+          )}
 
-        {/* THE FRONT DOOR. "Up to date" used to be the end of the conversation.
-            It is now the place where the other verb lives, because this is
-            exactly where a user who wanted it ends up. */}
-        {!loading && !result && !(error && !preview) && !hasUpdates && (
-          <>
-            <p style={{ margin: "0 0 8px 0" }}>
-              All subscriptions are on the latest published version.
-            </p>
-            <p style={{ margin: "0 0 12px 0", fontSize: "12px", ...secondary }}>
-              Refresh brings in a <strong>newer version</strong> from the workspace. It does
-              not undo your own edits — if you changed cells on a subscribed sheet and want
-              the published values back, reset the subscription instead.
-            </p>
-            {subscriptions.length === 0 && (
-              <div style={{ fontSize: "12px", ...secondary }}>
-                This workbook has no subscriptions.
-              </div>
-            )}
-            {subscriptions.map((s) => (
-              <div
-                key={`${s.packageName}@${s.registryUrl}`}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: "8px",
-                  padding: "6px 8px",
-                  marginBottom: "6px",
-                  border: "1px solid var(--border-default)",
-                  borderRadius: "4px",
-                }}
-              >
-                <span style={{ minWidth: 0 }}>
-                  <span style={{ fontWeight: 600 }}>{s.packageName}</span>
-                  <span style={{ fontSize: "11px", marginLeft: 6, ...secondary }}>
-                    v{s.resolvedVersion}
-                  </span>
-                </span>
-                <button
-                  onClick={() => void handleReset(s)}
-                  disabled={resetting !== null}
-                  style={{ whiteSpace: "nowrap" }}
-                >
-                  {resetting === s.packageName ? "Resetting..." : "Reset to published..."}
-                </button>
-              </div>
-            ))}
-            {error && (
-              <div style={{ color: "var(--text-error, #d33)", fontSize: "12px", marginTop: 8 }}>
-                {error}
-              </div>
-            )}
-          </>
-        )}
-
-        {/* CANNOT BE RESOLVED AT ALL. Rendered before anything else and
-            outside the `hasUpdates` branch, because a workbook whose only
-            subscription is stranded has no updates to show and would otherwise
-            read as "all up to date". */}
-        {!loading && !result && unavailable.length > 0 && (
-          <div style={{ marginBottom: 12 }}>
-            {unavailable.map((u) => (
-              <div
-                key={`${u.packageName}@${u.registryUrl}`}
-                style={{
-                  padding: "8px",
-                  marginBottom: "8px",
-                  borderRadius: 4,
-                  background: "#fdeceb",
-                  color: "#c5221f",
-                  lineHeight: 1.4,
-                  fontSize: "12px",
-                }}
-              >
-                <div style={{ fontWeight: 600 }}>
-                  {formatSubscriptionTarget(u.packageName, u.environment)} cannot be
-                  refreshed
+          {/* THE FRONT DOOR. "Up to date" used to be the end of the conversation.
+              It is now the place where the other verb lives, because this is
+              exactly where a user who wanted it ends up. */}
+          {!loading && !result && !(error && !preview) && !hasUpdates && (
+            <>
+              <p style={{ margin: "0 0 8px 0" }}>
+                All subscriptions are on the latest published version.
+              </p>
+              <p style={{ margin: "0 0 12px 0", fontSize: "12px", ...secondary }}>
+                Refresh brings in a <strong>newer version</strong> from the workspace. It does
+                not undo your own edits — if you changed cells on a subscribed sheet and want
+                the published values back, reset the subscription instead.
+              </p>
+              {subscriptions.length === 0 && (
+                <div style={{ fontSize: "12px", ...secondary }}>
+                  This workbook has no subscriptions.
                 </div>
-                <div style={{ marginTop: 2 }}>{u.reason}</div>
-                <div style={{ marginTop: 6 }}>
-                  <EnvironmentSwitcher
-                    registryUrl={u.registryUrl}
-                    packageName={u.packageName}
-                    current={u.environment ?? null}
-                    busy={switching}
-                    setBusy={setSwitching}
-                    onSwitched={reload}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* A PIPELINE APPEARED. The subscription still works — it follows the
-            line — so this is a notice, not a block, and "Not now" is a real
-            answer that lasts the rest of this showing. */}
-        {!loading && !result && notices.length > 0 && (
-          <div style={{ marginBottom: 12 }}>
-            {notices.map((n) => (
-              <div
-                key={`${n.packageName}@${n.registryUrl}`}
-                style={{
-                  padding: "8px",
-                  marginBottom: "8px",
-                  borderRadius: 4,
-                  background: "#fff3cd",
-                  color: "#664d03",
-                  lineHeight: 1.4,
-                  fontSize: "12px",
-                }}
-              >
-                <div>
-                  <strong>{n.packageName}</strong> follows the development line, but the
-                  application now has environments ({n.environments.join(", ")}). The
-                  development line receives every push the moment it lands, including work
-                  that has not been released.
-                </div>
-                <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <EnvironmentSwitcher
-                    registryUrl={n.registryUrl}
-                    packageName={n.packageName}
-                    current={null}
-                    environments={n.environments}
-                    busy={switching}
-                    setBusy={setSwitching}
-                    onSwitched={reload}
-                  />
-                  <button
-                    onClick={() =>
-                      setDismissedNotices((prev) =>
-                        new Set(prev).add(`${n.packageName}@${n.registryUrl}`),
-                      )
-                    }
-                  >
-                    Not now
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {!loading && !result && hasUpdates && preview && (
-          <>
-            {/* SAY WHAT HAPPENS TO PIVOTS (§2.z, owner decision 2026-09-13).
-                Refresh ADOPTS the publisher's pivot definitions, and until this
-                sentence existed the two surfaces disagreed in silence: refresh
-                kept the subscriber's layout without saying so and reset
-                discarded it without saying so. The decision itself is not a
-                preference — a v1 definition aimed at v2's data keeps a stale
-                source COLUMN ORDINAL, so "you keep your layout" quietly becomes
-                "you keep a wrong number" — but a user who re-arranged a pivot
-                is entitled to know it is about to go back. */}
-            <p style={{ margin: "0 0 10px 0", fontSize: "12px", ...secondary }}>
-              Pivot tables from these applications are updated to the publisher&apos;s
-              version, including ones you have re-arranged. Your own pivots are not
-              touched.
-            </p>
-            {preview.subscriptionPreviews.map((sp) => (
-              <div
-                key={sp.packageName}
-                style={{
-                  marginBottom: "12px",
-                  padding: "8px",
-                  border: "1px solid var(--border-default)",
-                  borderRadius: "4px",
-                }}
-              >
-                <div style={{ fontWeight: 600 }}>
-                  {formatSubscriptionTarget(sp.packageName, sp.environment)}
-                </div>
-                {/* THE DIRECTION IS IN THE WORDS. A subscriber who reads a
-                    downgrade as an update concludes the publisher changed those
-                    cells; what actually happened is that a known-good version
-                    was restored, and the conflicts below are against the OLDER
-                    content. */}
+              )}
+              {subscriptions.map((s) => (
                 <div
-                  style={{
-                    fontSize: "12px",
-                    ...(sp.isRollback
-                      ? { color: "#664d03", fontWeight: 600 }
-                      : secondary),
-                  }}
-                >
-                  {
-                    describeRefreshCard({
-                      packageName: sp.packageName,
-                      environment: sp.environment,
-                      currentVersion: sp.currentVersion,
-                      newVersion: sp.newVersion,
-                    }).versions
-                  }
-                </div>
-                {sp.isRollback && (
-                  <div
-                    style={{
-                      fontSize: "12px",
-                      background: "#fff3cd",
-                      color: "#664d03",
-                      padding: "4px 6px",
-                      borderRadius: 3,
-                      margin: "4px 0",
-                      lineHeight: 1.4,
-                    }}
-                  >
-                    {sp.environment ?? "This application"} was rolled back to a version
-                    published earlier. Cells you edited keep their overrides.
-                  </div>
-                )}
-                {sp.sheetsAdded.length > 0 && (
-                  <div style={{ fontSize: "12px", color: "green" }}>
-                    + {sp.sheetsAdded.length} sheet(s) added:{" "}
-                    {sp.sheetsAdded.map((s) => s.name).join(", ")}
-                  </div>
-                )}
-                {sp.sheetsRemoved.length > 0 && (
-                  <div style={{ fontSize: "12px", color: "var(--text-error, #d33)" }}>
-                    - {sp.sheetsRemoved.length} sheet(s) removed:{" "}
-                    {sp.sheetsRemoved.map((s) => s.name).join(", ")}
-                  </div>
-                )}
-                {sp.sheetsUpdated.length > 0 && (
-                  <div style={{ fontSize: "12px" }}>
-                    ~ {sp.sheetsUpdated.length} sheet(s) updated
-                    {sp.cellsChanged > 0 && (
-                      <>
-                        {", "}
-                        {sp.cellsChangedExact ? "" : "at least "}
-                        {sp.cellsChanged} cell(s) changed
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
-
-            {/* WHAT A REFRESH DESTROYS, said out loud. The grid is replaced
-                wholesale; only recorded cell overrides are put back. */}
-            <div style={{ fontSize: "12px", marginBottom: "10px", ...secondary }}>
-              Updated sheets are replaced with the published content. Your edited cell
-              values are kept; formatting, conditional formats, validations, comments and
-              notes on those sheets are not.
-            </div>
-
-            {blocked && (
-              <div
-                style={{
-                  fontSize: "12px",
-                  color: "var(--text-error, #d33)",
-                  border: "1px solid var(--text-error, #d33)",
-                  borderRadius: "4px",
-                  padding: "8px",
-                  marginBottom: "10px",
-                }}
-              >
-                {unexamined.length} sheet(s) could not be read, so this list may be missing
-                conflicts:{" "}
-                {unexamined.map((u) => u.sheetName).join(", ")}. Applying now would resolve
-                the ones you cannot see without asking. Check the workspace is reachable and
-                reopen this dialog.
-              </div>
-            )}
-
-            {conflicts.length > 0 && (
-              <>
-                <div
+                  key={`${s.packageName}@${s.registryUrl}`}
                   style={{
                     display: "flex",
                     justifyContent: "space-between",
                     alignItems: "center",
-                    marginBottom: "4px",
+                    gap: "8px",
+                    padding: "6px 8px",
+                    marginBottom: "6px",
+                    border: "1px solid var(--border-default)",
+                    borderRadius: "4px",
                   }}
                 >
-                  <span style={{ fontWeight: 600 }}>
-                    {conflicts.length} cell(s) changed on both sides
+                  <span style={{ minWidth: 0 }}>
+                    <span style={{ fontWeight: 600 }}>{s.packageName}</span>
+                    <span style={{ fontSize: "11px", marginLeft: 6, ...secondary }}>
+                      v{s.resolvedVersion}
+                    </span>
                   </span>
-                  <span style={{ display: "flex", gap: "4px" }}>
+                  <button
+                    onClick={() => void handleReset(s)}
+                    disabled={resetting !== null}
+                    style={{ whiteSpace: "nowrap" }}
+                  >
+                    {resetting === s.packageName ? "Resetting..." : "Reset to published..."}
+                  </button>
+                </div>
+              ))}
+            </>
+          )}
+
+          {/* CANNOT BE RESOLVED AT ALL. Rendered before anything else and
+              outside the `hasUpdates` branch, because a workbook whose only
+              subscription is stranded has no updates to show and would otherwise
+              read as "all up to date". */}
+          {!loading && !result && unavailable.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              {unavailable.map((u) => (
+                <div
+                  key={`${u.packageName}@${u.registryUrl}`}
+                  style={{
+                    padding: "8px",
+                    marginBottom: "8px",
+                    borderRadius: 4,
+                    background: "#fdeceb",
+                    color: "#c5221f",
+                    lineHeight: 1.4,
+                    fontSize: "12px",
+                  }}
+                >
+                  <div style={{ fontWeight: 600 }}>
+                    {formatSubscriptionTarget(u.packageName, u.environment)} cannot be
+                    refreshed
+                  </div>
+                  <div style={{ marginTop: 2 }}>{u.reason}</div>
+                  <div style={{ marginTop: 6 }}>
+                    <EnvironmentSwitcher
+                      registryUrl={u.registryUrl}
+                      packageName={u.packageName}
+                      current={u.environment ?? null}
+                      busy={switching}
+                      setBusy={setSwitching}
+                      onSwitched={reload}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* A PIPELINE APPEARED. The subscription still works — it follows the
+              line — so this is a notice, not a block, and "Not now" is a real
+              answer that lasts the rest of this showing. */}
+          {!loading && !result && notices.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              {notices.map((n) => (
+                <div
+                  key={`${n.packageName}@${n.registryUrl}`}
+                  style={{
+                    padding: "8px",
+                    marginBottom: "8px",
+                    borderRadius: 4,
+                    background: "#fff3cd",
+                    color: "#664d03",
+                    lineHeight: 1.4,
+                    fontSize: "12px",
+                  }}
+                >
+                  <div>
+                    <strong>{n.packageName}</strong> follows the development line, but the
+                    application now has environments ({n.environments.join(", ")}). The
+                    development line receives every push the moment it lands, including work
+                    that has not been released.
+                  </div>
+                  <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <EnvironmentSwitcher
+                      registryUrl={n.registryUrl}
+                      packageName={n.packageName}
+                      current={null}
+                      environments={n.environments}
+                      busy={switching}
+                      setBusy={setSwitching}
+                      onSwitched={reload}
+                    />
                     <button
-                      style={{ fontSize: "11px" }}
-                      onClick={() => setChoices({})}
-                      title="Every conflicted cell keeps your value"
-                    >
-                      Keep all mine
-                    </button>
-                    <button
-                      style={{ fontSize: "11px" }}
                       onClick={() =>
-                        setChoices(
-                          Object.fromEntries(
-                            conflicts.map((c) => [cellKey(c), "takeTheirs" as RowChoice]),
-                          ),
+                        setDismissedNotices((prev) =>
+                          new Set(prev).add(`${n.packageName}@${n.registryUrl}`),
                         )
                       }
-                      title="Every conflicted cell takes the published value"
                     >
-                      Take all theirs
+                      Not now
                     </button>
-                  </span>
+                  </div>
                 </div>
-                <div style={{ fontSize: "11px", marginBottom: "6px", ...secondary }}>
-                  You edited these cells and so did the publisher. Anything you leave on
-                  &ldquo;keep mine&rdquo; stays yours and stays flagged in the Overrides pane.
-                </div>
-                <div style={listBoxStyle}>
-                  {conflicts.map((c) => (
-                    <ThreeWayRow
-                      key={cellKey(c)}
-                      mode="choose"
-                      a1={c.a1}
-                      sheetName={c.sheetName}
-                      baseline={c.baseline}
-                      current={c.current}
-                      upstreamNew={c.upstreamNew}
-                      conflict
-                      choice={choices[cellKey(c)] ?? "keepMine"}
-                      onChoose={(ch) =>
-                        setChoices((prev) => ({ ...prev, [cellKey(c)]: ch }))
-                      }
-                    />
-                  ))}
-                </div>
-              </>
-            )}
+              ))}
+            </div>
+          )}
 
-            {error && (
-              <div
-                style={{
-                  color: "var(--text-error, #d33)",
-                  marginTop: "8px",
-                  fontSize: "12px",
-                }}
-              >
-                {error}
+          {!loading && !result && hasUpdates && preview && (
+            <>
+              {/* SAY WHAT HAPPENS TO PIVOTS (§2.z, owner decision 2026-09-13).
+                  Refresh ADOPTS the publisher's pivot definitions, and until this
+                  sentence existed the two surfaces disagreed in silence: refresh
+                  kept the subscriber's layout without saying so and reset
+                  discarded it without saying so. The decision itself is not a
+                  preference — a v1 definition aimed at v2's data keeps a stale
+                  source COLUMN ORDINAL, so "you keep your layout" quietly becomes
+                  "you keep a wrong number" — but a user who re-arranged a pivot
+                  is entitled to know it is about to go back. */}
+              <p style={{ margin: "0 0 10px 0", fontSize: "12px", ...secondary }}>
+                Pivot tables from these applications are updated to the publisher&apos;s
+                version, including ones you have re-arranged. Your own pivots are not
+                touched.
+              </p>
+              {preview.subscriptionPreviews.map((sp) => (
+                <div
+                  key={sp.packageName}
+                  style={{
+                    marginBottom: "12px",
+                    padding: "8px",
+                    border: "1px solid var(--border-default)",
+                    borderRadius: "4px",
+                  }}
+                >
+                  <div style={{ fontWeight: 600 }}>
+                    {formatSubscriptionTarget(sp.packageName, sp.environment)}
+                  </div>
+                  {/* THE DIRECTION IS IN THE WORDS. A subscriber who reads a
+                      downgrade as an update concludes the publisher changed those
+                      cells; what actually happened is that a known-good version
+                      was restored, and the conflicts below are against the OLDER
+                      content. */}
+                  <div
+                    style={{
+                      fontSize: "12px",
+                      ...(sp.isRollback
+                        ? { color: "#664d03", fontWeight: 600 }
+                        : secondary),
+                    }}
+                  >
+                    {
+                      describeRefreshCard({
+                        packageName: sp.packageName,
+                        environment: sp.environment,
+                        currentVersion: sp.currentVersion,
+                        newVersion: sp.newVersion,
+                      }).versions
+                    }
+                  </div>
+                  {sp.isRollback && (
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        background: "#fff3cd",
+                        color: "#664d03",
+                        padding: "4px 6px",
+                        borderRadius: 3,
+                        margin: "4px 0",
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      {sp.environment ?? "This application"} was rolled back to a version
+                      published earlier. Cells you edited keep their overrides.
+                    </div>
+                  )}
+                  {sp.sheetsAdded.length > 0 && (
+                    <div style={{ fontSize: "12px", color: "green" }}>
+                      + {sp.sheetsAdded.length} sheet(s) added:{" "}
+                      {sp.sheetsAdded.map((s) => s.name).join(", ")}
+                    </div>
+                  )}
+                  {sp.sheetsRemoved.length > 0 && (
+                    <div style={{ fontSize: "12px", color: "var(--text-error, #d33)" }}>
+                      - {sp.sheetsRemoved.length} sheet(s) removed:{" "}
+                      {sp.sheetsRemoved.map((s) => s.name).join(", ")}
+                    </div>
+                  )}
+                  {sp.sheetsUpdated.length > 0 && (
+                    <div style={{ fontSize: "12px" }}>
+                      ~ {sp.sheetsUpdated.length} sheet(s) updated
+                      {sp.cellsChanged > 0 && (
+                        <>
+                          {", "}
+                          {sp.cellsChangedExact ? "" : "at least "}
+                          {sp.cellsChanged} cell(s) changed
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {/* WHAT A REFRESH DESTROYS, said out loud. The grid is replaced
+                  wholesale; only recorded cell overrides are put back. */}
+              <div style={{ fontSize: "12px", marginBottom: "10px", ...secondary }}>
+                Updated sheets are replaced with the published content. Your edited cell
+                values are kept; formatting, conditional formats, validations, comments and
+                notes on those sheets are not.
               </div>
-            )}
-          </>
+
+              {blocked && (
+                <div
+                  style={{
+                    fontSize: "12px",
+                    color: "var(--text-error, #d33)",
+                    border: "1px solid var(--text-error, #d33)",
+                    borderRadius: "4px",
+                    padding: "8px",
+                    marginBottom: "10px",
+                  }}
+                >
+                  {unexamined.length} sheet(s) could not be read, so this list may be missing
+                  conflicts:{" "}
+                  {unexamined.map((u) => u.sheetName).join(", ")}. Applying now would resolve
+                  the ones you cannot see without asking. Check the workspace is reachable and
+                  reopen this dialog.
+                </div>
+              )}
+
+              {/* The conflict list used to sit HERE, at the bottom of the
+                  scroller. It is now the pane on the right — same markup, same
+                  handlers, under the same condition, which `twoPane` names. */}
+
+            </>
+          )}
+        </DialogPane>
+
+        {twoPane && split.splitter}
+
+        {/* THE DECISIONS, PINNED BESIDE THE NARRATIVE. Same markup and the same
+            handlers as the block that used to close the scroller; `twoPane` is
+            literally the condition it rendered under, so there is no state in
+            which an empty column can appear here. The PANE does not scroll —
+            the list does, and it is the only scroller on this side. */}
+        {twoPane && (
+          <DialogPane
+            scroll={false}
+            padding={panePadding}
+            style={split.secondaryStyle}
+            data-testid="refresh-conflicts"
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: "4px",
+                flexShrink: 0,
+              }}
+            >
+              <span style={{ fontWeight: 600 }}>
+                {conflicts.length} cell(s) changed on both sides
+              </span>
+              <span style={{ display: "flex", gap: "4px" }}>
+                <button
+                  style={{ fontSize: "11px" }}
+                  onClick={() => setChoices({})}
+                  title="Every conflicted cell keeps your value"
+                >
+                  Keep all mine
+                </button>
+                <button
+                  style={{ fontSize: "11px" }}
+                  onClick={() =>
+                    setChoices(
+                      Object.fromEntries(
+                        conflicts.map((c) => [cellKey(c), "takeTheirs" as RowChoice]),
+                      ),
+                    )
+                  }
+                  title="Every conflicted cell takes the published value"
+                >
+                  Take all theirs
+                </button>
+              </span>
+            </div>
+            <div
+              style={{ fontSize: "11px", marginBottom: "6px", flexShrink: 0, ...secondary }}
+            >
+              You edited these cells and so did the publisher. Anything you leave on
+              &ldquo;keep mine&rdquo; stays yours and stays flagged in the Overrides pane.
+            </div>
+            <div style={listBoxStyle}>
+              {conflicts.map((c) => (
+                <ThreeWayRow
+                  key={cellKey(c)}
+                  mode="choose"
+                  a1={c.a1}
+                  sheetName={c.sheetName}
+                  baseline={c.baseline}
+                  current={c.current}
+                  upstreamNew={c.upstreamNew}
+                  conflict
+                  choice={choices[cellKey(c)] ?? "keepMine"}
+                  onChoose={(ch) => setChoices((prev) => ({ ...prev, [cellKey(c)]: ch }))}
+                />
+              ))}
+            </div>
+          </DialogPane>
         )}
-      </div>
+      </DialogBody>
+
+      {/* ONE error banner, OUTSIDE the scrolling body. The three in-pane copies
+          it replaces were the last child of a pane that scrolls, so an apply
+          refusal landed below the fold and read as the button doing nothing.
+          Deliberately NOT gated on `!result`: a failed reset AFTER a successful
+          refresh is exactly when the user most needs to be told. */}
+      {error && preview && (
+        <div
+          style={{
+            padding: "10px 16px",
+            borderTop: "1px solid var(--border-default)",
+            flexShrink: 0,
+            color: "var(--text-error, #d33)",
+            fontSize: "12px",
+          }}
+        >
+          {error}
+        </div>
+      )}
 
       {/* THE CONFIRM IS INLINE, not confirmAsync. The whole value of the gate is
           that the conflict list stays on screen while the user reads what they

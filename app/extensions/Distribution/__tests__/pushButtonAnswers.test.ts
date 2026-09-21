@@ -52,14 +52,21 @@ describe("the Push button answers every click", () => {
     // The error and status used to render inside the scroll region of a dialog
     // tall enough to need scrolling, so pressing Push with the sheet list in
     // view put the reply above the fold — indistinguishable from silence.
-    const bodyStart = CODE.indexOf("<div style={bodyStyle}>");
+    // The scroll region is now @api/dialogLayout's <DialogBody> — a form pane
+    // beside a review pane in push mode, one scrolling column otherwise. The
+    // invariant is unchanged and the anchor moved with it.
+    const bodyStart = CODE.indexOf("<DialogBody");
+    const bodyEnd = CODE.indexOf("</DialogBody>");
     const strip = CODE.indexOf("(error || status || (blocked && !pushed))");
     const footer = CODE.indexOf("<div style={footerStyle}>");
-    expect(bodyStart, "bodyStyle block moved").toBeGreaterThanOrEqual(0);
+    expect(bodyStart, "the DialogBody scroll region moved").toBeGreaterThanOrEqual(0);
+    expect(bodyEnd, "the DialogBody scroll region moved").toBeGreaterThan(bodyStart);
     expect(strip, "the answer strip is gone").toBeGreaterThanOrEqual(0);
     expect(footer, "footerStyle block moved").toBeGreaterThanOrEqual(0);
-    // Between the body and the footer means pinned, not scrolled.
-    expect(strip).toBeGreaterThan(bodyStart);
+    // AFTER the body CLOSES, not merely after it opens: "after the opening tag"
+    // is also true of a strip that sits inside the scroll region, which is the
+    // exact defect this pins.
+    expect(strip).toBeGreaterThan(bodyEnd);
     expect(strip).toBeLessThan(footer);
     // And `flexShrink: 0`, or the flex column will collapse it away.
     const region = CODE.slice(strip, footer);

@@ -30,6 +30,7 @@ import {
 } from "@api/distributionWorkspaces";
 import { pickWorkspaceFile } from "../lib/pickWorkspace";
 import { useDialogWindow } from "@api/dialogWindow";
+import { DialogFieldGrid, dialogWidth } from "@api/dialogLayout";
 import {
   defaultEnvironment,
   formatSubscriptionTarget,
@@ -516,7 +517,16 @@ export function SubscribeDialog({ onClose }: DialogProps) {
     left: "50%",
     top: "10%",
     transform: "translateX(-50%)",
-    width: "460px",
+    // TWO STEPS, TWO WIDTHS. The pick step is four fields and one list; 900px
+    // there would only stretch the workspace path input and lengthen eye
+    // travel, so it gets 560 — enough that the path input, Browse and List
+    // Applications stop competing for one row. The REVIEW step is the one that
+    // overflows: a typical report's seven sections total ~900px against a
+    // ~525px body on a 1366x768 laptop, which puts the Notebooks card entirely
+    // below the fold. Two columns need the width. Expressed through
+    // dialogWidth() so it stays a CSS value the user's own resize (win.style,
+    // spread last) overrides wholesale.
+    width: inspection ? dialogWidth(900) : dialogWidth(560),
     maxHeight: "82vh",
     zIndex: 1050,
     display: "flex",
@@ -555,6 +565,23 @@ export function SubscribeDialog({ onClose }: DialogProps) {
     overflowY: "auto",
     padding: "12px 16px",
   };
+  /**
+   * The PICK step's body is a flex COLUMN, so the applications list can take
+   * the height the dialog is not using instead of reading through a fixed
+   * 168px slot. A selected row expands to roughly 204px — environment radios,
+   * the unreleased-work note, the version chips — so the one row the user just
+   * clicked was taller than the viewport it was shown in.
+   */
+  const pickBodyStyle: React.CSSProperties = {
+    display: "flex",
+    flexDirection: "column",
+  };
+  /** A column of the review grid: a stack, so its cards read as one group. */
+  const reviewColumnStyle: React.CSSProperties = {
+    display: "flex",
+    flexDirection: "column",
+    minWidth: 0,
+  };
   const footerStyle: React.CSSProperties = {
     display: "flex",
     justifyContent: "flex-end",
@@ -564,7 +591,9 @@ export function SubscribeDialog({ onClose }: DialogProps) {
     borderTop: "1px solid var(--border-default)",
   };
   const fieldStyle: React.CSSProperties = {
-    display: "flex", flexDirection: "column", gap: "4px", marginBottom: "8px",
+    // flexShrink 0: in the pick step these are flex items, and the list is the
+    // one thing that gives — a squeezed label/input pair helps nobody.
+    display: "flex", flexDirection: "column", gap: "4px", marginBottom: "8px", flexShrink: 0,
   };
   const inputStyle: React.CSSProperties = {
     padding: "4px 6px",
@@ -581,6 +610,15 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       {status && <div style={{ color: "green", marginBottom: "8px", fontSize: "12px" }}>{status}</div>}
     </>
   );
+
+  // Does this application carry executable code at all? Decides whether the
+  // review grid gets a code column; with none, the contents column takes the
+  // whole width rather than leaving a stranded gutter.
+  const hasCode =
+    !!inspection &&
+    (inspection.scripts.length > 0 ||
+      inspection.moduleScripts.length > 0 ||
+      inspection.notebooks.length > 0);
 
   // Review step: show what the application contains before anything lands.
   const reviewBody = inspection && (
@@ -630,155 +668,185 @@ export function SubscribeDialog({ onClose }: DialogProps) {
           </div>
         );
       })()}
-      <div style={{ fontSize: "12px", marginBottom: "8px" }}>
-        <strong>Sheets ({inspection.sheets.length})</strong>
-        {inspection.sheets.map((s, i) => (
-          <div key={i} style={{ marginLeft: 8 }}>
-            {s.name}{s.description ? ` — ${s.description}` : ""}
-          </div>
-        ))}
-      </div>
+      {/* ONE grid, EXACTLY TWO CHILDREN, each an explicit column stack.
+          Handing the six sections to the grid flat would let auto-fit flow them
+          ROW-MAJOR into three tracks — Sheets | Scripts | Module scripts /
+          Notebooks | Data sources | Inventory — which splits the
+          executable-code group across two rows and three columns, the opposite
+          of what this screen is for. minColumnWidth 380 makes two the
+          arithmetic maximum at 900px and still folds to one when the user drags
+          the window narrow.
 
-      {inspection.scripts.length > 0 && (
-        <div style={{
-          fontSize: "12px", marginBottom: "8px", padding: "6px 8px",
-          backgroundColor: "#fff3cd", borderRadius: 4, color: "#664d03",
-        }}>
-          <strong>Scripts ({inspection.scripts.length})</strong> — executable code.
-          Scripts arrive in restricted mode and ask for consent before running.
-          {inspection.scripts.map((s, i) => (
-            <div key={i} style={{ marginLeft: 8 }}>
-              {s.name} ({s.objectType}){s.description ? ` — ${s.description}` : ""}
-              {s.requestedCapabilities.length > 0 && (
-                <div style={{ marginLeft: 8 }}>
-                  wants: {s.requestedCapabilities.map(capabilityPhrase).join(", ")}
+          The CODE column comes FIRST, where a Western reader starts: all three
+          amber cards then begin at the banner's bottom edge instead of being
+          strung out over ~430px of scroll, which is what let a reviewer on a
+          laptop read "Scripts (2)" and never see the notebooks below the fold.
+          The trust banner stays above it, full width and unchanged — WHO signed
+          this is still the first thing read. */}
+      <DialogFieldGrid minColumnWidth={380} maxColumns={2} columnGap={20} rowGap={0}>
+        {/* THE CODE COLUMN — rendered only when there IS code, so an
+            application carrying none leaves no stranded gutter and the
+            contents column takes the full width for free (auto-fit collapses
+            the empty track). */}
+        {hasCode && (
+          <div data-testid="subscribe-review-code" style={reviewColumnStyle}>
+            {inspection.scripts.length > 0 && (
+              <div style={{
+                fontSize: "12px", marginBottom: "8px", padding: "6px 8px",
+                backgroundColor: "#fff3cd", borderRadius: 4, color: "#664d03",
+              }}>
+                <strong>Scripts ({inspection.scripts.length})</strong> — executable code.
+                Scripts arrive in restricted mode and ask for consent before running.
+                {inspection.scripts.map((s, i) => (
+                  <div key={i} style={{ marginLeft: 8 }}>
+                    {s.name} ({s.objectType}){s.description ? ` — ${s.description}` : ""}
+                    {s.requestedCapabilities.length > 0 && (
+                      <div style={{ marginLeft: 8 }}>
+                        wants: {s.requestedCapabilities.map(capabilityPhrase).join(", ")}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Module scripts and notebooks are CODE, and the pre-pull review used to
+                render neither: `inspect_package` returns both
+                (calp_commands.rs::ApplicationInspection) and this screen showed only
+                `scripts`. A reviewer reading "Scripts (2)" had no way to know the
+                package also carried four notebooks and a formula-function library.
+                They land inert — nothing here mounts or runs on subscribe — but the
+                disclosure is the point of this screen. Rendering them was only half
+                the fix: stacked down a 460px column they were three cards spread over
+                ~430px of scroll, so the last one sat below the fold on a laptop and
+                the screen still read as "Scripts (2), that is the code". They are
+                adjacent now, and all three fit. */}
+            {inspection.moduleScripts.length > 0 && (
+              <div style={{
+                fontSize: "12px", marginBottom: "8px", padding: "6px 8px",
+                backgroundColor: "#fff3cd", borderRadius: 4, color: "#664d03",
+              }}>
+                <strong>Module scripts ({inspection.moduleScripts.length})</strong> — executable code.
+                They arrive switched off: subscribing stores them, it does not run them.
+                {inspection.moduleScripts.map((m, i) => (
+                  <div key={i} style={{ marginLeft: 8 }}>
+                    {m.name} ({m.scope}){m.description ? ` — ${m.description}` : ""}
+                    {isCustomFunctionLibrary(m.id) && (
+                      <div style={{ marginLeft: 8, fontWeight: 600 }}>
+                        Custom formula functions — run whenever a cell uses them. They stay
+                        unavailable until you approve them separately, after subscribing.
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {inspection.notebooks.length > 0 && (
+              <div style={{
+                fontSize: "12px", marginBottom: "8px", padding: "6px 8px",
+                backgroundColor: "#fff3cd", borderRadius: 4, color: "#664d03",
+              }}>
+                <strong>Notebooks ({inspection.notebooks.length})</strong> — analysis code you can
+                open and run yourself. Subscribing stores them; nothing in them runs on its own.
+                {inspection.notebooks.map((n, i) => (
+                  <div key={i} style={{ marginLeft: 8 }}>
+                    {n.name} ({n.cellCount} cell{n.cellCount === 1 ? "" : "s"})
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* THE CONTENTS COLUMN — what the report IS, beside what it RUNS. */}
+        <div data-testid="subscribe-review-contents" style={reviewColumnStyle}>
+          <div style={{ fontSize: "12px", marginBottom: "8px" }}>
+            <strong>Sheets ({inspection.sheets.length})</strong>
+            {inspection.sheets.map((s, i) => (
+              <div key={i} style={{ marginLeft: 8 }}>
+                {s.name}{s.description ? ` — ${s.description}` : ""}
+              </div>
+            ))}
+          </div>
+
+          {inspection.dataSources.length > 0 && (
+            <div style={{ fontSize: "12px", marginBottom: "8px" }}>
+              <strong>Data sources ({inspection.dataSources.length})</strong>
+              {inspection.dataSources.map((d, i) => (
+                <div key={i} style={{ marginLeft: 8 }}>
+                  {d.name} ({d.connectionType}: {d.server}/{d.database})
                 </div>
-              )}
+              ))}
             </div>
-          ))}
+          )}
+
+          <div style={{ fontSize: "12px", marginBottom: "12px", color: "var(--text-secondary)" }}>
+            {inspection.writebackRegionCount > 0 && (
+              <div>{inspection.writebackRegionCount} writeback region(s) — cells you can fill in and submit back</div>
+            )}
+            {inspection.tableCount > 0 && (
+              <div>
+                {inspection.tableCount} table(s)
+                {inspection.tableNames.length > 0 ? `: ${inspection.tableNames.join(", ")}` : ""}
+              </div>
+            )}
+            {inspection.namedRangeCount > 0 && (
+              <div>
+                {inspection.namedRangeCount} named range(s)
+                {inspection.namedRangeNames.length > 0
+                  ? `: ${inspection.namedRangeNames.join(", ")}`
+                  : ""}
+              </div>
+            )}
+            {inspection.chartCount > 0 && <div>{inspection.chartCount} chart(s)</div>}
+            {inspection.sparklineCount > 0 && (
+              <div>{inspection.sparklineCount} sparkline group set(s)</div>
+            )}
+            {inspection.pivotCount > 0 && <div>{inspection.pivotCount} pivot table(s)</div>}
+            {inspection.controlSheetCount > 0 && (
+              <div>
+                {inspection.controlSheetCount} sheet(s) with buttons/checkboxes — they
+                arrive with their click actions disarmed; any package scripts are
+                listed above and require consent
+              </div>
+            )}
+            {inspection.paneControlCount > 0 && (
+              <div>
+                {inspection.paneControlCount} pane control(s)
+                {inspection.paneControlNames.length > 0
+                  ? `: ${inspection.paneControlNames.join(", ")}`
+                  : ""}
+              </div>
+            )}
+            {inspection.slicerCount > 0 && <div>{inspection.slicerCount} slicer(s)</div>}
+            {inspection.ribbonFilterCount > 0 && (
+              <div>{inspection.ribbonFilterCount} ribbon filter(s)</div>
+            )}
+            {inspection.pivotLayoutCount > 0 && (
+              <div>{inspection.pivotLayoutCount} saved pivot layout(s)</div>
+            )}
+            {inspection.hasDocumentTheme && (
+              <div>document theme — applied unless you customized yours</div>
+            )}
+            {inspection.commentSheetCount > 0 && (
+              <div>
+                includes comments on {inspection.commentSheetCount} sheet(s) —
+                discussion threads the publisher chose to share
+              </div>
+            )}
+            {inspection.extensionDataCount > 0 && (
+              <div>
+                {inspection.extensionDataCount} extension state key(s)
+                {inspection.extensionDataKeys.length > 0
+                  ? `: ${inspection.extensionDataKeys.join(", ")}`
+                  : ""}{" "}
+                — only keys you don't already have will apply
+              </div>
+            )}
+          </div>
         </div>
-      )}
-
-      {/* Module scripts and notebooks are CODE, and the pre-pull review used to
-          render neither: `inspect_package` returns both
-          (calp_commands.rs::ApplicationInspection) and this screen showed only
-          `scripts`. A reviewer reading "Scripts (2)" had no way to know the
-          package also carried four notebooks and a formula-function library.
-          They land inert — nothing here mounts or runs on subscribe — but the
-          disclosure is the point of this screen. */}
-      {inspection.moduleScripts.length > 0 && (
-        <div style={{
-          fontSize: "12px", marginBottom: "8px", padding: "6px 8px",
-          backgroundColor: "#fff3cd", borderRadius: 4, color: "#664d03",
-        }}>
-          <strong>Module scripts ({inspection.moduleScripts.length})</strong> — executable code.
-          They arrive switched off: subscribing stores them, it does not run them.
-          {inspection.moduleScripts.map((m, i) => (
-            <div key={i} style={{ marginLeft: 8 }}>
-              {m.name} ({m.scope}){m.description ? ` — ${m.description}` : ""}
-              {isCustomFunctionLibrary(m.id) && (
-                <div style={{ marginLeft: 8, fontWeight: 600 }}>
-                  Custom formula functions — run whenever a cell uses them. They stay
-                  unavailable until you approve them separately, after subscribing.
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {inspection.notebooks.length > 0 && (
-        <div style={{
-          fontSize: "12px", marginBottom: "8px", padding: "6px 8px",
-          backgroundColor: "#fff3cd", borderRadius: 4, color: "#664d03",
-        }}>
-          <strong>Notebooks ({inspection.notebooks.length})</strong> — analysis code you can
-          open and run yourself. Subscribing stores them; nothing in them runs on its own.
-          {inspection.notebooks.map((n, i) => (
-            <div key={i} style={{ marginLeft: 8 }}>
-              {n.name} ({n.cellCount} cell{n.cellCount === 1 ? "" : "s"})
-            </div>
-          ))}
-        </div>
-      )}
-
-      {inspection.dataSources.length > 0 && (
-        <div style={{ fontSize: "12px", marginBottom: "8px" }}>
-          <strong>Data sources ({inspection.dataSources.length})</strong>
-          {inspection.dataSources.map((d, i) => (
-            <div key={i} style={{ marginLeft: 8 }}>
-              {d.name} ({d.connectionType}: {d.server}/{d.database})
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div style={{ fontSize: "12px", marginBottom: "12px", color: "var(--text-secondary)" }}>
-        {inspection.writebackRegionCount > 0 && (
-          <div>{inspection.writebackRegionCount} writeback region(s) — cells you can fill in and submit back</div>
-        )}
-        {inspection.tableCount > 0 && (
-          <div>
-            {inspection.tableCount} table(s)
-            {inspection.tableNames.length > 0 ? `: ${inspection.tableNames.join(", ")}` : ""}
-          </div>
-        )}
-        {inspection.namedRangeCount > 0 && (
-          <div>
-            {inspection.namedRangeCount} named range(s)
-            {inspection.namedRangeNames.length > 0
-              ? `: ${inspection.namedRangeNames.join(", ")}`
-              : ""}
-          </div>
-        )}
-        {inspection.chartCount > 0 && <div>{inspection.chartCount} chart(s)</div>}
-        {inspection.sparklineCount > 0 && (
-          <div>{inspection.sparklineCount} sparkline group set(s)</div>
-        )}
-        {inspection.pivotCount > 0 && <div>{inspection.pivotCount} pivot table(s)</div>}
-        {inspection.controlSheetCount > 0 && (
-          <div>
-            {inspection.controlSheetCount} sheet(s) with buttons/checkboxes — they
-            arrive with their click actions disarmed; any package scripts are
-            listed above and require consent
-          </div>
-        )}
-        {inspection.paneControlCount > 0 && (
-          <div>
-            {inspection.paneControlCount} pane control(s)
-            {inspection.paneControlNames.length > 0
-              ? `: ${inspection.paneControlNames.join(", ")}`
-              : ""}
-          </div>
-        )}
-        {inspection.slicerCount > 0 && <div>{inspection.slicerCount} slicer(s)</div>}
-        {inspection.ribbonFilterCount > 0 && (
-          <div>{inspection.ribbonFilterCount} ribbon filter(s)</div>
-        )}
-        {inspection.pivotLayoutCount > 0 && (
-          <div>{inspection.pivotLayoutCount} saved pivot layout(s)</div>
-        )}
-        {inspection.hasDocumentTheme && (
-          <div>document theme — applied unless you customized yours</div>
-        )}
-        {inspection.commentSheetCount > 0 && (
-          <div>
-            includes comments on {inspection.commentSheetCount} sheet(s) —
-            discussion threads the publisher chose to share
-          </div>
-        )}
-        {inspection.extensionDataCount > 0 && (
-          <div>
-            {inspection.extensionDataCount} extension state key(s)
-            {inspection.extensionDataKeys.length > 0
-              ? `: ${inspection.extensionDataKeys.join(", ")}`
-              : ""}{" "}
-            — only keys you don't already have will apply
-          </div>
-        )}
-      </div>
-
-      {messages}
+      </DialogFieldGrid>
     </>
   );
 
@@ -827,7 +895,14 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       </div>
 
       {packages && packages.length > 0 && (
-        <div style={{ marginBottom: 12, maxHeight: 168, overflowY: "auto", border: "1px solid var(--border-default)", borderRadius: 4 }}>
+        /* THE LIST TAKES THE ROOM NOBODY ELSE WANTS. It used to be a hard
+           `maxHeight: 168` — a nested scroller shorter than one selected row,
+           which expands to roughly 204px of environment radios, the
+           unreleased-work note and the version chips. The dialog had unused
+           height below it the whole time. `flex` inside the pick step's column
+           body gives the list that height; it is the only child that flexes,
+           so it is also the only one that gives when the dialog is short. */
+        <div style={{ marginBottom: 12, flex: "1 1 auto", minHeight: 120, overflowY: "auto", border: "1px solid var(--border-default)", borderRadius: 4 }}>
           {packages.map((pkg) => {
             const selected = packageName === pkg.name;
             return (
@@ -998,8 +1073,6 @@ export function SubscribeDialog({ onClose }: DialogProps) {
           </span>
         </div>
       )}
-
-      {messages}
     </>
   );
 
@@ -1017,9 +1090,17 @@ export function SubscribeDialog({ onClose }: DialogProps) {
         </button>
       </div>
 
-      <div style={bodyStyle}>
+      <div style={inspection ? bodyStyle : { ...bodyStyle, ...pickBodyStyle }}>
         {inspection ? reviewBody : formBody}
       </div>
+
+      {/* THE REFUSAL SITS NEXT TO THE BUTTON THAT REFUSED. Both messages used
+          to be the last thing inside the scrolling body, so a failed Pull
+          reported itself at the bottom of a screen the reader was at the top
+          of — the button said nothing and nothing appeared to happen. */}
+      {(error || status) && (
+        <div style={{ flexShrink: 0, padding: "8px 16px 0" }}>{messages}</div>
+      )}
 
       <div style={footerStyle}>
         {inspection ? (

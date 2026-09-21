@@ -8,6 +8,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api/uiTypes";
 import { useDialogWindow } from "@api/dialogWindow";
+import { DialogFieldGrid, dialogWidth } from "@api/dialogLayout";
 import {
   getCell,
   updateCellsBatch,
@@ -50,6 +51,9 @@ const styles = {
     alignItems: "center",
     padding: "12px 16px",
     borderBottom: `1px solid ${v("--border-default")}`,
+    // The title bar is also the drag handle: it must never be squeezed out by
+    // the body, which is the only thing allowed to scroll.
+    flexShrink: 0,
   },
   title: {
     fontWeight: 600,
@@ -79,7 +83,9 @@ const styles = {
     gap: 12,
   },
   fieldLabel: {
-    width: 140,
+    // 120, not 140: at three columns the label is the input's only competitor
+    // for the track, and a header that ellipsizes at 140 ellipsizes at 120 too.
+    width: 120,
     fontSize: 13,
     flexShrink: 0,
     overflow: "hidden" as const,
@@ -117,6 +123,14 @@ const styles = {
     color: v("--text-primary"),
     outline: "none",
   },
+  // "Record 3 of 250", the jump box and the New Record / Criteria banner, as a
+  // SIBLING of the scrolling body rather than its last child — see the render.
+  // 8px, not the footer's 12px: the children below carry 4px of their own.
+  statusRow: {
+    padding: "8px 16px",
+    borderTop: `1px solid ${v("--border-default")}`,
+    flexShrink: 0,
+  },
   footer: {
     display: "flex",
     justifyContent: "space-between",
@@ -124,6 +138,8 @@ const styles = {
     padding: "12px 16px",
     borderTop: `1px solid ${v("--border-default")}`,
     flexWrap: "wrap" as const,
+    // Close/Next/Last are pinned: the body scrolls, the footer does not.
+    flexShrink: 0,
   },
   footerLeft: {
     display: "flex",
@@ -207,7 +223,10 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
 
   // Movable + resizable dialog window (shared @api hook).
   // win.ref doubles as the click-outside detection ref.
-  const win = useDialogWindow({ minWidth: 340, minHeight: 300 });
+  // minWidth 360, not 340: a 300px field column plus the body's 32px padding
+  // and a scrollbar is 347, so 340 let a drag push the single column past the
+  // dialog's own edge.
+  const win = useDialogWindow({ minWidth: 360, minHeight: 300 });
   const dialogRef = win.ref;
 
   // Region bounds from dialog data
@@ -569,10 +588,30 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
   // Render
   // ============================================================================
 
+  // One field per column of the detected region, so the field count is
+  // unbounded by user data. Earn the width from that count instead of fixing
+  // it: an ordinary 4-8 column region is right at 460 and gets no dead space,
+  // while a 30-column region would otherwise be a 30-row scrolling straw.
+  // colCount is known before the headers load, so the box does not resize
+  // under the user when loading finishes. Spread BEFORE win.style — a user
+  // drag still wins.
+  const fieldCount = headers.length || colCount;
+  const dialogSizeStyle: React.CSSProperties = {
+    width:
+      fieldCount <= 12
+        ? 460
+        : fieldCount <= 28
+          ? dialogWidth(780)
+          : dialogWidth(1100),
+  };
+
   if (isLoading) {
     return (
       <div style={styles.backdrop}>
-        <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        <div
+          ref={dialogRef}
+          style={{ ...styles.dialog, ...dialogSizeStyle, position: "relative", ...win.style }}
+        >
           <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
             <span style={styles.title}>Data Form</span>
           </div>
@@ -590,7 +629,10 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
 
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+      <div
+        ref={dialogRef}
+        style={{ ...styles.dialog, ...dialogSizeStyle, position: "relative", ...win.style }}
+      >
         {/* Header — drag handle */}
         <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>
@@ -601,25 +643,37 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
           </button>
         </div>
 
-        {/* Body - field inputs */}
+        {/* Body - field inputs. The fields are parallel fields of ONE record,
+            not steps, so they flow row-major into as many columns as the width
+            allows (A B / C D — the sheet's own left-to-right order). The pane
+            keeps overflowY as the backstop: three columns still cannot show a
+            60-column region. */}
         <div style={styles.body}>
-          {headers.map((header, i) => (
-            <div key={i} style={styles.fieldRow}>
-              <label style={styles.fieldLabel} title={header}>
-                {header}:
-              </label>
-              <input
-                style={styles.fieldInput}
-                value={shownValues[i] ?? ""}
-                placeholder={isCriteria ? "search…" : undefined}
-                onChange={(e) => handleFieldChange(i, e.target.value)}
-                onKeyDown={handleFieldKeyDown}
-                autoFocus={i === 0}
-              />
-            </div>
-          ))}
+          <DialogFieldGrid minColumnWidth={300} columnGap={24} rowGap={10}>
+            {headers.map((header, i) => (
+              <div key={i} style={styles.fieldRow}>
+                <label style={styles.fieldLabel} title={header}>
+                  {header}:
+                </label>
+                <input
+                  style={styles.fieldInput}
+                  value={shownValues[i] ?? ""}
+                  placeholder={isCriteria ? "search…" : undefined}
+                  onChange={(e) => handleFieldChange(i, e.target.value)}
+                  onKeyDown={handleFieldKeyDown}
+                  autoFocus={i === 0}
+                />
+              </div>
+            ))}
+          </DialogFieldGrid>
+        </div>
 
-          {/* Status / record jump */}
+        {/* Status / record jump — OUTSIDE the scrolling body. As the body's last
+            child, "Record 3 of 250", the jump box and the New Record / Criteria
+            banner were what actually fell below the fold once a region had more
+            fields than the body could show; the footer never did, being a
+            sibling. Now this is a sibling too, so it stays put. */}
+        <div style={styles.statusRow}>
           {isCriteria ? (
             <div style={{ ...styles.banner, color: v("--accent-primary") }}>
               Enter criteria, then Find Next / Find Prev

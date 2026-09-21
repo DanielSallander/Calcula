@@ -15,6 +15,15 @@ import {
 } from "@api";
 import type { CellUpdateInput } from "@api";
 import {
+  DialogBody,
+  DialogPane,
+  DialogSidePane,
+  DialogFieldGrid,
+  dialogWidth,
+  dialogHeight,
+} from "@api/dialogLayout";
+import { useDialogWindow } from "@api/dialogWindow";
+import {
   parseAll,
   getMaxColumns,
   applyFormats,
@@ -47,8 +56,15 @@ const S = {
     border: `1px solid ${v("--border-default")}`,
     borderRadius: 8,
     boxShadow: "0 12px 40px rgba(0, 0, 0, 0.5)",
-    width: 560,
-    maxHeight: "80vh",
+    // 560px starved the one dimension this wizard needs: the fixed-width ruler
+    // showed 62 characters of an 80-132 character record, and the split preview
+    // 9 characters per field at six columns — while ~350px of height went
+    // unused. A DECLARED height (not just a max) is what lets the previews take
+    // `flex: 1`; against `maxHeight` alone they would size to content and the
+    // window would jump between steps.
+    width: dialogWidth(900),
+    height: dialogHeight(600),
+    maxHeight: "88vh",
     display: "flex",
     flexDirection: "column" as const,
     color: v("--text-primary"),
@@ -61,6 +77,7 @@ const S = {
     alignItems: "center",
     padding: "12px 16px",
     borderBottom: `1px solid ${v("--border-default")}`,
+    flexShrink: 0,
   },
   title: { fontWeight: 600, fontSize: 15 },
   closeBtn: {
@@ -74,12 +91,15 @@ const S = {
     lineHeight: 1,
   },
   body: {
-    padding: "16px",
+    // Just the region between the header and the footer now. The padding and
+    // the 12px gap moved INTO each step's pane, because step 2 delimited splits
+    // this region into two panes and only the left one may scroll.
     display: "flex",
     flexDirection: "column" as const,
-    gap: 12,
-    overflowY: "auto" as const,
     flex: 1,
+    minHeight: 0,
+    minWidth: 0,
+    overflow: "hidden" as const,
   },
   footer: {
     display: "flex",
@@ -87,6 +107,7 @@ const S = {
     gap: 8,
     padding: "12px 16px",
     borderTop: `1px solid ${v("--border-default")}`,
+    flexShrink: 0,
   },
   btn: {
     padding: "6px 20px",
@@ -166,7 +187,10 @@ const S = {
     border: `1px solid ${v("--border-default")}`,
     borderRadius: 4,
     overflow: "auto" as const,
-    maxHeight: 200,
+    // Was maxHeight 200 — at ~22px a row that showed 9 of the 20 rows the
+    // parser had already computed. Fill the pane instead and let it scroll.
+    flex: 1,
+    minHeight: 0,
   },
   previewTable: {
     width: "100%",
@@ -196,12 +220,22 @@ const S = {
     overflow: "hidden",
     textOverflow: "ellipsis",
   },
+  // Raw (unsplit) source lines — step 1's whole job is reading them, and they
+  // are the longest strings in the flow, so they get previewTd WITHOUT its
+  // 150px cap and ellipsis. Widening the dialog cannot lift a hard cap.
+  rawPreviewTd: {
+    padding: "3px 8px",
+    borderBottom: `1px solid ${v("--border-default")}`,
+    whiteSpace: "nowrap" as const,
+  },
   // Fixed width ruler
   rulerContainer: {
     border: `1px solid ${v("--border-default")}`,
     borderRadius: 4,
     overflow: "auto" as const,
-    maxHeight: 200,
+    // Was maxHeight 200; fills its pane now, same reason as S.preview.
+    flex: 1,
+    minHeight: 0,
     fontFamily: "Consolas, monospace",
     fontSize: 12,
     position: "relative" as const,
@@ -333,6 +367,10 @@ interface SourceData {
 export function TextToColumnsDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
   const dialogRef = useRef<HTMLDivElement>(null);
+  // A wizard that now declares a size should also be movable and resizable.
+  // minWidth is set high enough that a drag cannot crush the two panes of
+  // step 2 delimited into unreadable slivers.
+  const win = useDialogWindow({ minWidth: 640, minHeight: 420 });
 
   // Wizard state
   const [step, setStep] = useState<1 | 2 | 3>(1);
@@ -443,11 +481,15 @@ export function TextToColumnsDialog(props: DialogProps): React.ReactElement | nu
   // --------------------------------------------------------------------------
   const handleBackdropClick = useCallback(
     (e: React.MouseEvent) => {
-      if (dialogRef.current && !dialogRef.current.contains(e.target as Node)) {
+      // The wizard box carries the window hook's ref; the error box still
+      // carries dialogRef. Consult whichever is mounted, or a click anywhere
+      // on the backdrop would stop closing one of the two.
+      const box = win.ref.current ?? dialogRef.current;
+      if (box && !box.contains(e.target as Node)) {
         onClose();
       }
     },
-    [onClose],
+    [onClose, win.ref],
   );
 
   // --------------------------------------------------------------------------
@@ -641,9 +683,12 @@ export function TextToColumnsDialog(props: DialogProps): React.ReactElement | nu
   // --------------------------------------------------------------------------
   return (
     <div style={S.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={S.dialog}>
-        {/* Header */}
-        <div style={S.header}>
+      {/* position:relative anchors the hook's eight resize handles to THIS box —
+          without it they are absolute against the fixed backdrop and land at the
+          viewport edges, silently. */}
+      <div ref={win.ref} style={{ ...S.dialog, position: "relative", ...win.style }}>
+        {/* Header — also the drag handle */}
+        <div style={S.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={S.title}>
             Convert Text to Columns Wizard - Step {step} of 3
           </span>
@@ -684,6 +729,7 @@ export function TextToColumnsDialog(props: DialogProps): React.ReactElement | nu
               onSelectCol={setSelectedPreviewCol}
               onSetFormat={setColumnFormat}
               sourceCol={source?.startCol ?? 0}
+              sourceRow={source?.startRow ?? 0}
             />
           )}
         </div>
@@ -712,6 +758,8 @@ export function TextToColumnsDialog(props: DialogProps): React.ReactElement | nu
             </button>
           )}
         </div>
+
+        {win.resizeHandles}
       </div>
     </div>
   );
@@ -728,43 +776,47 @@ function Step1(props: {
 }) {
   const { mode, onSetMode, values } = props;
 
+  // Full width, not a split: the two radios are one row of the grid and the
+  // raw preview — the thing you are actually reading here — takes the rest.
   return (
-    <>
+    <DialogPane scroll={false} style={{ gap: 12 }}>
       <div style={S.sectionLabel}>Choose the file type that best describes your data</div>
-      <label style={S.radioRow}>
-        <input
-          type="radio"
-          name="ttc-mode"
-          style={S.radio}
-          checked={mode === "delimited"}
-          onChange={() => onSetMode("delimited")}
-        />
-        <div>
-          <div style={{ fontWeight: 500 }}>Delimited</div>
-          <div style={{ fontSize: 11, color: v("--text-secondary") }}>
-            Characters such as commas or tabs separate each field.
+      <DialogFieldGrid maxColumns={2} rowGap={8}>
+        <label style={S.radioRow}>
+          <input
+            type="radio"
+            name="ttc-mode"
+            style={S.radio}
+            checked={mode === "delimited"}
+            onChange={() => onSetMode("delimited")}
+          />
+          <div>
+            <div style={{ fontWeight: 500 }}>Delimited</div>
+            <div style={{ fontSize: 11, color: v("--text-secondary") }}>
+              Characters such as commas or tabs separate each field.
+            </div>
           </div>
-        </div>
-      </label>
-      <label style={S.radioRow}>
-        <input
-          type="radio"
-          name="ttc-mode"
-          style={S.radio}
-          checked={mode === "fixedWidth"}
-          onChange={() => onSetMode("fixedWidth")}
-        />
-        <div>
-          <div style={{ fontWeight: 500 }}>Fixed width</div>
-          <div style={{ fontSize: 11, color: v("--text-secondary") }}>
-            Fields are aligned in columns with spaces between each field.
+        </label>
+        <label style={S.radioRow}>
+          <input
+            type="radio"
+            name="ttc-mode"
+            style={S.radio}
+            checked={mode === "fixedWidth"}
+            onChange={() => onSetMode("fixedWidth")}
+          />
+          <div>
+            <div style={{ fontWeight: 500 }}>Fixed width</div>
+            <div style={{ fontSize: 11, color: v("--text-secondary") }}>
+              Fields are aligned in columns with spaces between each field.
+            </div>
           </div>
-        </div>
-      </label>
+        </label>
+      </DialogFieldGrid>
 
       <div style={S.sectionLabel}>Preview of selected data</div>
       <RawPreview values={values} />
-    </>
+    </DialogPane>
   );
 }
 
@@ -780,92 +832,99 @@ function Step2Delimited(props: {
 }) {
   const { config, onSetProp, previewRows, maxCols } = props;
 
+  // The one step where a split pays: you toggle a delimiter and watch the split
+  // change, so the preview must stay in view — and stacking the five delimiters
+  // fills the narrow column better than the wrap-prone row did.
   return (
-    <>
-      <div style={S.sectionLabel}>Delimiters</div>
-      <div style={S.inlineRow}>
-        <label style={S.checkboxRow}>
-          <input
-            type="checkbox"
-            style={S.checkbox}
-            checked={config.tab}
-            onChange={(e) => onSetProp("tab", e.target.checked)}
-          />
-          Tab
-        </label>
-        <label style={S.checkboxRow}>
-          <input
-            type="checkbox"
-            style={S.checkbox}
-            checked={config.semicolon}
-            onChange={(e) => onSetProp("semicolon", e.target.checked)}
-          />
-          Semicolon
-        </label>
-        <label style={S.checkboxRow}>
-          <input
-            type="checkbox"
-            style={S.checkbox}
-            checked={config.comma}
-            onChange={(e) => onSetProp("comma", e.target.checked)}
-          />
-          Comma
-        </label>
-        <label style={S.checkboxRow}>
-          <input
-            type="checkbox"
-            style={S.checkbox}
-            checked={config.space}
-            onChange={(e) => onSetProp("space", e.target.checked)}
-          />
-          Space
-        </label>
-        <label style={S.checkboxRow}>
-          <input
-            type="checkbox"
-            style={S.checkbox}
-            checked={config.other.length > 0}
-            onChange={(e) => {
-              if (!e.target.checked) onSetProp("other", "");
-            }}
-          />
-          Other:
-          <input
-            type="text"
-            style={S.input}
-            maxLength={1}
-            value={config.other}
-            onChange={(e) => onSetProp("other", e.target.value)}
-          />
-        </label>
-      </div>
+    <DialogBody>
+      <DialogPane width={300} style={{ gap: 12 }}>
+        <div style={S.sectionLabel}>Delimiters</div>
+        <div style={{ ...S.inlineRow, flexDirection: "column", alignItems: "flex-start", gap: 6 }}>
+          <label style={S.checkboxRow}>
+            <input
+              type="checkbox"
+              style={S.checkbox}
+              checked={config.tab}
+              onChange={(e) => onSetProp("tab", e.target.checked)}
+            />
+            Tab
+          </label>
+          <label style={S.checkboxRow}>
+            <input
+              type="checkbox"
+              style={S.checkbox}
+              checked={config.semicolon}
+              onChange={(e) => onSetProp("semicolon", e.target.checked)}
+            />
+            Semicolon
+          </label>
+          <label style={S.checkboxRow}>
+            <input
+              type="checkbox"
+              style={S.checkbox}
+              checked={config.comma}
+              onChange={(e) => onSetProp("comma", e.target.checked)}
+            />
+            Comma
+          </label>
+          <label style={S.checkboxRow}>
+            <input
+              type="checkbox"
+              style={S.checkbox}
+              checked={config.space}
+              onChange={(e) => onSetProp("space", e.target.checked)}
+            />
+            Space
+          </label>
+          <label style={S.checkboxRow}>
+            <input
+              type="checkbox"
+              style={S.checkbox}
+              checked={config.other.length > 0}
+              onChange={(e) => {
+                if (!e.target.checked) onSetProp("other", "");
+              }}
+            />
+            Other:
+            <input
+              type="text"
+              style={S.input}
+              maxLength={1}
+              value={config.other}
+              onChange={(e) => onSetProp("other", e.target.value)}
+            />
+          </label>
+        </div>
 
-      <label style={S.checkboxRow}>
-        <input
-          type="checkbox"
-          style={S.checkbox}
-          checked={config.treatConsecutiveAsOne}
-          onChange={(e) => onSetProp("treatConsecutiveAsOne", e.target.checked)}
-        />
-        Treat consecutive delimiters as one
-      </label>
+        <label style={S.checkboxRow}>
+          <input
+            type="checkbox"
+            style={S.checkbox}
+            checked={config.treatConsecutiveAsOne}
+            onChange={(e) => onSetProp("treatConsecutiveAsOne", e.target.checked)}
+          />
+          Treat consecutive delimiters as one
+        </label>
 
-      <div style={{ ...S.inlineRow, gap: 8 }}>
-        <span>Text qualifier:</span>
-        <select
-          style={S.select}
-          value={config.textQualifier}
-          onChange={(e) => onSetProp("textQualifier", e.target.value)}
-        >
-          <option value={'"'}>&quot; (double quote)</option>
-          <option value={"'"}>&apos; (single quote)</option>
-          <option value="">(none)</option>
-        </select>
-      </div>
+        <div style={{ ...S.inlineRow, gap: 8 }}>
+          <span>Text qualifier:</span>
+          <select
+            style={S.select}
+            value={config.textQualifier}
+            onChange={(e) => onSetProp("textQualifier", e.target.value)}
+          >
+            <option value={'"'}>&quot; (double quote)</option>
+            <option value={"'"}>&apos; (single quote)</option>
+            <option value="">(none)</option>
+          </select>
+        </div>
+      </DialogPane>
 
-      <div style={S.sectionLabel}>Data preview</div>
-      <SplitPreview rows={previewRows} maxCols={maxCols} />
-    </>
+      <DialogSidePane flexible>
+        <div style={S.sectionLabel}>Data preview</div>
+        <SplitPreview rows={previewRows} maxCols={maxCols} />
+      </DialogSidePane>
+    </DialogBody>
   );
 }
 
@@ -948,8 +1007,10 @@ function Step2FixedWidth(props: {
 
   const previewLines = values.slice(0, MAX_PREVIEW_ROWS);
 
+  // Full width, single pane: you place breaks by clicking the record itself, so
+  // every pixel of width is another character you can aim at.
   return (
-    <>
+    <DialogPane scroll={false} style={{ gap: 12 }}>
       <div style={S.sectionLabel}>
         Click on the ruler to set column breaks. Double-click a break to remove it.
       </div>
@@ -1006,7 +1067,7 @@ function Step2FixedWidth(props: {
           </div>
         ))}
       </div>
-    </>
+    </DialogPane>
   );
 }
 
@@ -1022,28 +1083,48 @@ function Step3Format(props: {
   onSelectCol: (col: number) => void;
   onSetFormat: (col: number, fmt: ColumnFormat) => void;
   sourceCol: number;
+  /** 0-based row of the source range's top-left cell. The destination box
+   *  needs BOTH coordinates: it used to build the row number out of the
+   *  COLUMN index, so it named the right cell only when startRow===startCol. */
+  sourceRow: number;
 }) {
-  const { previewRows, maxCols, formats, selectedCol, onSelectCol, onSetFormat, sourceCol } = props;
+  const { previewRows, maxCols, formats, selectedCol, onSelectCol, onSetFormat, sourceCol, sourceRow } = props;
   const currentFormat = formats[selectedCol] ?? "general";
 
+  // Full width, NOT a split: this step's controls are one row — a select and a
+  // read-only destination box. Parked in a 600px-tall column they would float
+  // in emptiness, so they sit inline above a preview that takes the rest.
   return (
-    <>
+    <DialogPane scroll={false} style={{ gap: 12 }}>
       <div style={S.sectionLabel}>Column data format</div>
       <div style={{ fontSize: 12, color: v("--text-secondary"), marginBottom: 4 }}>
         Click a column in the preview to select it, then choose its format.
       </div>
 
-      <div style={S.formatRow}>
-        <span>Format for column {selectedCol + 1}:</span>
-        <select
-          style={S.select}
-          value={currentFormat}
-          onChange={(e) => onSetFormat(selectedCol, e.target.value as ColumnFormat)}
-        >
-          {FORMAT_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>{opt.label}</option>
-          ))}
-        </select>
+      <div style={{ ...S.inlineRow, gap: 24 }}>
+        <div style={S.formatRow}>
+          <span>Format for column {selectedCol + 1}:</span>
+          <select
+            style={S.select}
+            value={currentFormat}
+            onChange={(e) => onSetFormat(selectedCol, e.target.value as ColumnFormat)}
+          >
+            {FORMAT_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={S.destRow}>
+          <span>Destination:</span>
+          <input
+            type="text"
+            style={S.destInput}
+            readOnly
+            value={`$${indexToCol(sourceCol)}$${sourceRow + 1}`}
+            title="The split data will be written starting from this cell."
+          />
+        </div>
       </div>
 
       <div style={S.sectionLabel}>Data preview</div>
@@ -1100,18 +1181,7 @@ function Step3Format(props: {
           </tbody>
         </table>
       </div>
-
-      <div style={S.destRow}>
-        <span>Destination:</span>
-        <input
-          type="text"
-          style={S.destInput}
-          readOnly
-          value={`$${indexToCol(sourceCol)}$${sourceCol + 1}`}
-          title="The split data will be written starting from this cell."
-        />
-      </div>
-    </>
+    </DialogPane>
   );
 }
 
@@ -1129,7 +1199,9 @@ function RawPreview(props: { values: string[] }) {
         <tbody>
           {subset.map((val, i) => (
             <tr key={i}>
-              <td style={S.previewTd}>{val}</td>
+              {/* rawPreviewTd, not previewTd: a 150px cap with an ellipsis
+                  would survive any amount of widening. */}
+              <td style={S.rawPreviewTd}>{val}</td>
             </tr>
           ))}
         </tbody>

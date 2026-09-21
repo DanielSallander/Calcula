@@ -326,7 +326,7 @@ already carried the correction while both doc comments asserted the opposite.
 
 Each is scoped, understood, and deliberately not done. They need a slot, not a decision.
 
-### 2.0 Twenty dialogs still read as tall scrolling columns (filed 2026-09-21)
+### ~~2.0 Twenty dialogs still read as tall scrolling columns (filed 2026-09-21)~~ — **CLOSED 2026-09-21, all twenty done**
 
 The owner reported Insert Chart as "a long scroll window" and asked for the same treatment
 elsewhere. Insert Chart is fixed and six more went with it (`docs/design/dialog-layout.md`
@@ -334,6 +334,21 @@ lists exactly which, and `@api/dialogLayout` holds the primitives). A survey of 
 components, each candidate then re-opened by an adversarial verifier, confirmed **25**; seven are
 done, so **twenty remain**. Nothing here is a correctness defect — every one is a dialog that
 reads worse than it needs to — which is why it is one row rather than twenty.
+
+**CLOSED the same day.** All twenty were implemented, one agent per dialog from its own verified
+plan, then reviewed by three lenses per file with every finding put to a separate refuter: 25
+findings survived, deduplicating to 15 defects, all fixed. Three were CORRECTNESS bugs the
+restructuring introduced (Text to Columns naming the wrong destination cell; Custom Functions
+erasing a comma as you typed it; Add Filter splitting a BI field key on the first dot, which the
+repo forbids for schema-qualified tables). Two more could not have been caught by any unit test,
+because jsdom has neither layout nor `ResizeObserver`: `PublishDialog`'s width was a function of
+the measurement the width itself decided (620px was an absorbing state, so the two-pane layout was
+unreachable on open), and `useDialogWindow` pinned a dialog's SIZE on a drag-to-MOVE, silently
+reverting every mode-dependent dialog to its narrow layout. Both now carry guards
+(`extensions/Distribution/__tests__/publishDialogWidth.test.ts`,
+`src/api/__tests__/dialogWindowSizeOwnership.test.tsx`), each sabotage-checked. Full account in
+`docs/design/dialog-layout.md`. The table below is kept as the record of what was done and of the
+traps that were real.
 
 **Do not implement any of these from the proposal alone.** The verification pass found a wrong
 specific in almost every one, and three of them are traps worth naming here:

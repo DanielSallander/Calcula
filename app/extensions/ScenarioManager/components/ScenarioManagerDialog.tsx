@@ -3,6 +3,13 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { useDialogWindow } from "@api/dialogWindow";
+import {
+  DialogBody,
+  DialogPane,
+  DialogFieldGrid,
+  DialogFieldSpan,
+  dialogWidth,
+} from "@api/dialogLayout";
 import type { DialogProps } from "@api/uiTypes";
 import {
   scenarioList,
@@ -49,6 +56,9 @@ const styles = {
     alignItems: "center",
     padding: "12px 16px",
     borderBottom: `1px solid ${v("--border-default")}`,
+    // The title bar is also the drag handle: it must never be squeezed out by
+    // a body that has more content than the 80vh box can hold.
+    flexShrink: 0,
   },
   title: { fontWeight: 600, fontSize: 15 },
   closeBtn: {
@@ -61,19 +71,28 @@ const styles = {
     fontSize: 14,
     lineHeight: 1,
   },
+  // List mode's body (add/edit uses @api/dialogLayout's panes instead).
+  // `1 1 auto` rather than `flex: 1`: basis auto keeps the dialog sizing to its
+  // content when it is unresized, and still lets the body take the slack once
+  // useDialogWindow pins a concrete height.
   body: {
     padding: "16px",
     display: "flex",
     flexDirection: "column" as const,
     gap: 12,
+    flex: "1 1 auto",
+    minHeight: 0,
     overflow: "auto",
   },
   listBox: {
     border: `1px solid ${v("--border-default")}`,
     borderRadius: 4,
     background: v("--grid-bg"),
+    // Was maxHeight: 200, which meant dragging the window taller bought dead
+    // space instead of list rows. Growing with the body is the whole point of
+    // a resizable list; 120 stays the floor and the box scrolls inside it.
+    flex: "1 1 auto",
     minHeight: 120,
-    maxHeight: 200,
     overflow: "auto",
   },
   listItem: {
@@ -94,6 +113,8 @@ const styles = {
     display: "flex",
     gap: 8,
     flexWrap: "wrap" as const,
+    // The list is the flexible thing above; these buttons keep their height.
+    flexShrink: 0,
   },
   btn: {
     padding: "6px 16px",
@@ -135,6 +156,9 @@ const styles = {
   },
   fieldInput: {
     flex: 1,
+    // Without this the input's min-content width keeps the row wider than
+    // its grid track, so the field is clipped by the pane instead of shrinking.
+    minWidth: 0,
     padding: "5px 8px",
     fontSize: 13,
     borderRadius: 3,
@@ -144,14 +168,46 @@ const styles = {
     outline: "none",
     fontFamily: '"Segoe UI", system-ui, sans-serif',
   },
+  // List mode's error sits next to the buttons that raised it (Show/Delete),
+  // which live in the body -- so it stays there, and keeps its height.
   errorText: {
     color: "#e74c3c",
     fontSize: 12,
+    flexShrink: 0,
   },
-  infoText: {
-    color: v("--text-secondary"),
+  // Add/Edit's refusal banner: a sibling of the body, so the reason OK refused
+  // sits next to OK instead of somewhere up inside the value list's scroller.
+  errorBanner: {
+    color: "#e74c3c",
     fontSize: 12,
-    fontStyle: "italic" as const,
+    padding: "0 16px 10px",
+    flexShrink: 0,
+  },
+  // Selected-scenario detail, one labelled row per fact (it used to be a single
+  // italic run-on line: "cells -- comment (by someone)").
+  detailBlock: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 3,
+    fontSize: 12,
+    flexShrink: 0,
+    maxHeight: 80,
+    overflowY: "auto" as const,
+  },
+  detailRow: {
+    display: "flex",
+    gap: 8,
+    alignItems: "baseline" as const,
+  },
+  detailLabel: {
+    width: 96,
+    flexShrink: 0,
+    color: v("--text-secondary"),
+  },
+  detailValue: {
+    minWidth: 0,
+    color: v("--text-primary"),
+    wordBreak: "break-word" as const,
   },
   footer: {
     display: "flex",
@@ -159,6 +215,19 @@ const styles = {
     gap: 8,
     padding: "12px 16px",
     borderTop: `1px solid ${v("--border-default")}`,
+    // Same reason as the header: the OK button is not a thing you scroll to.
+    flexShrink: 0,
+  },
+  // The caption sticks to the top of the scrolling values pane -- past cell ten
+  // an unlabelled column of inputs stops telling you what it is.
+  cellValuesTitle: {
+    fontSize: 13,
+    fontWeight: 600,
+    position: "sticky" as const,
+    top: 0,
+    background: v("--panel-bg"),
+    paddingBottom: 6,
+    zIndex: 1,
   },
   cellValueRow: {
     display: "flex",
@@ -173,6 +242,9 @@ const styles = {
   },
   cellValueInput: {
     flex: 1,
+    // Without this the input's min-content width keeps the row wider than
+    // its grid track, so the field is clipped by the pane instead of shrinking.
+    minWidth: 0,
     padding: "4px 8px",
     fontSize: 13,
     borderRadius: 3,
@@ -242,9 +314,15 @@ type Mode = "list" | "add" | "edit";
 export function ScenarioManagerDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
 
-  // Movable + resizable dialog window (shared @api hook; list mode only —
-  // the add/edit sub-form keeps its own natural placement)
+  // Movable + resizable dialog window for the list (shared @api hook).
   const win = useDialogWindow({ minWidth: 340, minHeight: 300 });
+  // The add/edit sub-form gets its OWN instance rather than borrowing the
+  // list's. Two reasons: it was the one mode you could neither move nor resize,
+  // and win.style sets maxHeight:"none" -- handing it the list's materialized
+  // rect would also drop the 80vh cap, so a 19-cell form could render taller
+  // than the viewport with nothing left to scroll it. Both calls are
+  // unconditional, so hook order is fixed whichever mode renders.
+  const formWin = useDialogWindow({ minWidth: 420, minHeight: 300 });
 
   const [mode, setMode] = useState<Mode>("list");
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
@@ -291,11 +369,28 @@ export function ScenarioManagerDialog(props: DialogProps): React.ReactElement | 
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [mode, onClose]);
 
-  // Parse changing cells and set up value inputs
+  // Parse changing cells and set up value inputs.
+  // This fires on every KEYSTROKE in the Changing cells field, and it used to
+  // rebuild every row with an empty value -- so editing the range after typing
+  // values wiped them all. Values now travel with their cell ref, in order, so
+  // a ref that survives the edit keeps what you typed against it.
   const handleChangingCellsChange = useCallback((ref: string) => {
     setFormChangingCellsRef(ref);
     const cells = parseCellRange(ref);
-    setFormCellValues(cells.map((c) => ({ row: c.row, col: c.col, value: "" })));
+    setFormCellValues((prev) => {
+      const carried = new Map<string, string[]>();
+      for (const p of prev) {
+        const key = `${p.row}:${p.col}`;
+        const queue = carried.get(key);
+        if (queue) queue.push(p.value);
+        else carried.set(key, [p.value]);
+      }
+      return cells.map((c) => {
+        const queue = carried.get(`${c.row}:${c.col}`);
+        const value = queue && queue.length > 0 ? (queue.shift() as string) : "";
+        return { row: c.row, col: c.col, value };
+      });
+    });
   }, []);
 
   // --- Handlers ---
@@ -309,6 +404,11 @@ export function ScenarioManagerDialog(props: DialogProps): React.ReactElement | 
     const activeCol = (sel?.activeCol as number) ?? 0;
     const endRow = (sel?.endRow as number) ?? activeRow;
     const endCol = (sel?.endCol as number) ?? activeCol;
+
+    // A new scenario starts blank: clear first so the carry-over inside
+    // handleChangingCellsChange has nothing from the previous scenario to
+    // carry (queued state updaters run in the order they were queued).
+    setFormCellValues([]);
 
     if (activeRow !== endRow || activeCol !== endCol) {
       const ref = `${formatCellRef(activeRow, activeCol)}:${formatCellRef(endRow, endCol)}`;
@@ -420,8 +520,19 @@ export function ScenarioManagerDialog(props: DialogProps): React.ReactElement | 
   if (mode === "add" || mode === "edit") {
     return (
       <div style={styles.backdrop}>
-        <div style={styles.dialog}>
-          <div style={styles.header}>
+        <div
+          ref={formWin.ref}
+          style={{
+            ...styles.dialog,
+            // 700 rather than 520: a prefilled column selection is 19 changing
+            // cells, and at 520 they can only be a single tall column. Capped
+            // at the viewport by dialogWidth, so a small screen still fits.
+            width: dialogWidth(700),
+            position: "relative",
+            ...formWin.style,
+          }}
+        >
+          <div style={styles.header} onMouseDown={formWin.onHeaderMouseDown}>
             <span style={styles.title}>
               {mode === "add" ? "Add Scenario" : "Edit Scenario"}
             </span>
@@ -430,64 +541,93 @@ export function ScenarioManagerDialog(props: DialogProps): React.ReactElement | 
             </button>
           </div>
 
-          <div style={styles.body}>
-            <div style={styles.fieldRow}>
-              <label style={styles.fieldLabel}>Scenario name:</label>
-              <input
-                style={styles.fieldInput}
-                value={formName}
-                onChange={(e) => setFormName(e.target.value)}
-                placeholder="Best Case"
-                autoFocus
-                disabled={mode === "edit"}
-              />
-            </div>
+          {/* Two stacked panes, not one scroller: the identity fields used to
+              scroll away WITH the value list, so at cell 19 you could no longer
+              see the scenario name you typed or the range that generated the
+              list. Identity is pinned; only the values scroll. */}
+          <DialogBody stacked>
+            {/* `0 0 auto` -- this pane is the fixed part of the split; the value
+                pane below is the one that takes (and gives back) the slack. */}
+            <DialogPane scroll={false} style={{ flex: "0 0 auto" }}>
+              <DialogFieldGrid maxColumns={2} minColumnWidth={300} rowGap={12}>
+                <div style={styles.fieldRow}>
+                  <label style={styles.fieldLabel}>Scenario name:</label>
+                  <input
+                    style={styles.fieldInput}
+                    value={formName}
+                    onChange={(e) => setFormName(e.target.value)}
+                    placeholder="Best Case"
+                    autoFocus
+                    disabled={mode === "edit"}
+                  />
+                </div>
 
-            <div style={styles.fieldRow}>
-              <label style={styles.fieldLabel}>Changing cells:</label>
-              <input
-                style={styles.fieldInput}
-                value={formChangingCellsRef}
-                onChange={(e) => handleChangingCellsChange(e.target.value)}
-                placeholder="$B$2,$B$3 or $B$2:$B$5"
-              />
-            </div>
+                <div style={styles.fieldRow}>
+                  <label style={styles.fieldLabel}>Changing cells:</label>
+                  <input
+                    style={styles.fieldInput}
+                    value={formChangingCellsRef}
+                    onChange={(e) => handleChangingCellsChange(e.target.value)}
+                    placeholder="$B$2,$B$3 or $B$2:$B$5"
+                  />
+                </div>
 
-            <div style={styles.fieldRow}>
-              <label style={styles.fieldLabel}>Comment:</label>
-              <input
-                style={styles.fieldInput}
-                value={formComment}
-                onChange={(e) => setFormComment(e.target.value)}
-                placeholder="Optional description"
-              />
-            </div>
-
-            {formCellValues.length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>Cell values:</div>
-                {formCellValues.map((cv, i) => (
-                  <div key={`${cv.row}-${cv.col}`} style={styles.cellValueRow}>
-                    <span style={styles.cellValueLabel}>
-                      {formatCellRef(cv.row, cv.col)}:
-                    </span>
+                <DialogFieldSpan>
+                  <div style={styles.fieldRow}>
+                    <label style={styles.fieldLabel}>Comment:</label>
                     <input
-                      style={styles.cellValueInput}
-                      value={cv.value}
-                      onChange={(e) => {
-                        const updated = [...formCellValues];
-                        updated[i] = { ...cv, value: e.target.value };
-                        setFormCellValues(updated);
-                      }}
-                      placeholder="Value"
+                      style={styles.fieldInput}
+                      value={formComment}
+                      onChange={(e) => setFormComment(e.target.value)}
+                      placeholder="Optional description"
                     />
                   </div>
-                ))}
-              </div>
-            )}
+                </DialogFieldSpan>
+              </DialogFieldGrid>
+            </DialogPane>
 
-            {error && <div style={styles.errorText}>{error}</div>}
-          </div>
+            {formCellValues.length > 0 && (
+              // `1 1 auto`, not the pane's default `1 1 0%`: basis auto keeps an
+              // unresized dialog sized to its content (one changing cell is a
+              // short dialog), and still lets this pane take the slack once the
+              // user drags the window taller.
+              <DialogPane
+                scroll
+                style={{ flex: "1 1 auto" }}
+                padding="0 16px 16px"
+                data-testid="scenario-cell-values"
+              >
+                <div style={styles.cellValuesTitle}>Cell values:</div>
+                {/* The rows are an unordered set keyed by cell ref, so flowing
+                    them into two columns loses nothing -- and auto-fit still
+                    folds back to one when the window is dragged narrow. */}
+                <DialogFieldGrid maxColumns={2} minColumnWidth={280} rowGap={6}>
+                  {formCellValues.map((cv, i) => (
+                    // Keyed by index: "$B$2,$B$2" is a range parseCellRange
+                    // happily produces, and a ref key collides on it.
+                    <div key={i} style={styles.cellValueRow}>
+                      <span style={styles.cellValueLabel}>
+                        {formatCellRef(cv.row, cv.col)}:
+                      </span>
+                      <input
+                        style={styles.cellValueInput}
+                        value={cv.value}
+                        onChange={(e) => {
+                          const updated = [...formCellValues];
+                          updated[i] = { ...cv, value: e.target.value };
+                          setFormCellValues(updated);
+                        }}
+                        placeholder="Value"
+                      />
+                    </div>
+                  ))}
+                </DialogFieldGrid>
+              </DialogPane>
+            )}
+          </DialogBody>
+
+          {/* Outside the scroller: the reason OK refused belongs beside OK. */}
+          {error && <div style={styles.errorBanner}>{error}</div>}
 
           <div style={styles.footer}>
             <button style={styles.btn} onClick={() => setMode("list")}>
@@ -501,6 +641,7 @@ export function ScenarioManagerDialog(props: DialogProps): React.ReactElement | 
               {loading ? "Saving..." : "OK"}
             </button>
           </div>
+          {formWin.resizeHandles}
         </div>
       </div>
     );
@@ -520,7 +661,7 @@ export function ScenarioManagerDialog(props: DialogProps): React.ReactElement | 
         </div>
 
         <div style={styles.body}>
-          <div style={{ fontSize: 13 }}>Scenarios:</div>
+          <div style={{ fontSize: 13, flexShrink: 0 }}>Scenarios:</div>
           <div style={styles.listBox}>
             {scenarios.length === 0 ? (
               <div style={{ padding: "12px", color: v("--text-secondary"), fontStyle: "italic" }}>
@@ -540,11 +681,30 @@ export function ScenarioManagerDialog(props: DialogProps): React.ReactElement | 
             )}
           </div>
 
+          {/* One labelled row per fact. The three used to run together in a
+              single italic line, so a long cell list swallowed the comment. */}
           {selectedScenario && (
-            <div style={styles.infoText}>
-              Changing cells: {selectedScenario.changingCells.map((c) => formatCellRef(c.row, c.col)).join(", ")}
-              {selectedScenario.comment ? ` -- ${selectedScenario.comment}` : ""}
-              {selectedScenario.createdBy ? ` (by ${selectedScenario.createdBy})` : ""}
+            <div style={styles.detailBlock}>
+              <div style={styles.detailRow}>
+                <span style={styles.detailLabel}>Changing cells:</span>
+                <span style={styles.detailValue}>
+                  {selectedScenario.changingCells
+                    .map((c) => formatCellRef(c.row, c.col))
+                    .join(", ")}
+                </span>
+              </div>
+              {selectedScenario.comment && (
+                <div style={styles.detailRow}>
+                  <span style={styles.detailLabel}>Comment:</span>
+                  <span style={styles.detailValue}>{selectedScenario.comment}</span>
+                </div>
+              )}
+              {selectedScenario.createdBy && (
+                <div style={styles.detailRow}>
+                  <span style={styles.detailLabel}>Created by:</span>
+                  <span style={styles.detailValue}>{selectedScenario.createdBy}</span>
+                </div>
+              )}
             </div>
           )}
 

@@ -6,6 +6,7 @@ import React, { useState, useCallback } from "react";
 import { css } from "@emotion/css";
 import type { DialogProps } from "@api";
 import { useDialogWindow } from "@api/dialogWindow";
+import { DialogFieldGrid, dialogWidth } from "@api/dialogLayout";
 import { removeDuplicates } from "@api/backend";
 import { emitAppEvent, AppEvents } from "@api";
 import { refreshCache } from "../lib/tableStore";
@@ -30,7 +31,7 @@ const styles = {
     background: #fff;
     border-radius: 6px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-    width: 340px;
+    /* Width comes from the column count at render time (see boxWidth). */
     max-height: 80vh;
     display: flex;
     flex-direction: column;
@@ -43,12 +44,18 @@ const styles = {
     font-size: 14px;
     font-weight: 600;
     border-bottom: 1px solid #e0e0e0;
+    /* The title bar is the drag handle — never let it be squeezed. */
+    flex-shrink: 0;
+    cursor: move;
   `,
   body: css`
     padding: 12px 16px;
     display: flex;
     flex-direction: column;
     gap: 10px;
+    /* Takes what the header and footer leave and hands it to the list. */
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
   `,
   sectionLabel: css`
@@ -62,11 +69,29 @@ const styles = {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    max-height: 200px;
+    /* The list is what grows: a hard 200px cap showed ~8 rows of a wide table
+       through a straw, with the rest of the dialog's height unused. */
+    flex: 1 1 auto;
+    min-height: 120px;
     overflow-y: auto;
     border: 1px solid #e0e0e0;
     border-radius: 4px;
     padding: 6px 8px;
+  `,
+  /* One row for the controls that act on the whole list. */
+  controlRow: css`
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+  `,
+  columnLabelText: css`
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
   `,
   checkboxLabel: css`
     display: flex;
@@ -75,9 +100,11 @@ const styles = {
     cursor: pointer;
     padding: 2px 0;
     font-size: 12px;
+    min-width: 0;
 
     input {
       cursor: pointer;
+      flex-shrink: 0;
     }
   `,
   selectButtons: css`
@@ -104,6 +131,8 @@ const styles = {
     gap: 8px;
     padding: 10px 16px 14px;
     border-top: 1px solid #e0e0e0;
+    /* The button stays put however tall the list gets. */
+    flex-shrink: 0;
   `,
   button: css`
     padding: 6px 16px;
@@ -232,13 +261,29 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
 
   if (!isOpen || !table) return null;
 
+  // Horizontal room is EARNED by the column count — a 4-column table has no use
+  // for the width a 20-column one needs.
+  const wide = columns.length > 8;
+  const boxWidth = dialogWidth(columns.length > 14 ? 640 : wide ? 520 : 340);
+
+  const columnCheckboxes = columns.map((col, i) => (
+    <label key={col.id} className={styles.checkboxLabel} title={col.name}>
+      <input
+        type="checkbox"
+        checked={selected[i] ?? false}
+        onChange={() => toggleColumn(i)}
+      />
+      <span className={styles.columnLabelText}>{col.name}</span>
+    </label>
+  ));
+
   return (
     <div className={styles.overlay} onClick={onClose}>
       <div
         ref={win.ref}
         className={styles.dialog}
         onClick={(e) => e.stopPropagation()}
-        style={{ position: "relative", ...win.style }}
+        style={{ position: "relative", width: boxWidth, ...win.style }}
       >
         <div className={styles.header} onMouseDown={win.onHeaderMouseDown}>Remove Duplicates</div>
         <div className={styles.body}>
@@ -252,24 +297,28 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
             <div className={styles.errorMessage}>{error}</div>
           ) : (
             <>
-              <div>
-                Select the columns that contain duplicates:
+              {/* One row: the prompt and the two controls that act on the whole
+                  list below it, instead of two stacked rows of the list's
+                  height. */}
+              <div className={styles.controlRow}>
+                <div>
+                  Select the columns that contain duplicates:
+                </div>
+                <div className={styles.selectButtons}>
+                  <button className={styles.linkButton} onClick={selectAll}>Select All</button>
+                  <button className={styles.linkButton} onClick={unselectAll}>Unselect All</button>
+                </div>
               </div>
-              <div className={styles.selectButtons}>
-                <button className={styles.linkButton} onClick={selectAll}>Select All</button>
-                <button className={styles.linkButton} onClick={unselectAll}>Unselect All</button>
-              </div>
-              <div className={styles.columnList}>
-                {columns.map((col, i) => (
-                  <label key={col.id} className={styles.checkboxLabel}>
-                    <input
-                      type="checkbox"
-                      checked={selected[i] ?? false}
-                      onChange={() => toggleColumn(i)}
-                    />
-                    {col.name}
-                  </label>
-                ))}
+              {/* Above the threshold the checkboxes flow into columns; auto-fit
+                  collapses them back when the dialog is dragged narrow. */}
+              <div className={styles.columnList} data-testid="table-remove-duplicates-column-list">
+                {wide ? (
+                  <DialogFieldGrid minColumnWidth={200} rowGap={0}>
+                    {columnCheckboxes}
+                  </DialogFieldGrid>
+                ) : (
+                  columnCheckboxes
+                )}
               </div>
             </>
           )}

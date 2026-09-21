@@ -105,7 +105,28 @@ export function useDialogWindow(options: DialogWindowOptions = {}): DialogWindow
   const ref = useRef<HTMLDivElement>(null);
   // null until the user first drags/resizes — the dialog's own CSS positions it.
   const [rect, setRect] = useState<Rect | null>(null);
-  const reset = useCallback(() => setRect(null), []);
+  /**
+   * Does the USER own the size, or only the position?
+   *
+   * Materializing width/height on a MOVE freezes the dialog at whatever size it
+   * happened to be when it was dragged — and a dialog whose CSS width depends on
+   * its mode (Publish's 620 -> 1040 on push, Subscribe's 560 -> 900 on review,
+   * Refresh Preview's 520 -> 940 on conflicts) then never grows. Dragging it
+   * aside silently reverted the wide layout to the narrow one.
+   *
+   * A move now emits POSITION only; the CSS keeps deciding the size until the
+   * user actually drags an edge.
+   *
+   * The exception is a dialog the hook has to POP OUT of a flex backdrop: it was
+   * laid out as a flex child, so once it goes `position: fixed` with no width it
+   * would shrink to fit. For those we keep emitting the measured size, which is
+   * exactly today's behavior.
+   */
+  const [sizeOwned, setSizeOwned] = useState(false);
+  const reset = useCallback(() => {
+    setRect(null);
+    setSizeOwned(false);
+  }, []);
 
   // Live drag state (refs — no re-render per mousemove; setRect drives paint).
   const dragState = useRef<{
@@ -191,6 +212,14 @@ export function useDialogWindow(options: DialogWindowOptions = {}): DialogWindow
       e.preventDefault();
       e.stopPropagation();
       document.body.style.userSelect = "none";
+      // A resize makes the user the owner of the size. So does popping a
+      // flex-laid-out box out of its backdrop, which would otherwise shrink to
+      // fit once it becomes `position: fixed`.
+      const wasFixed =
+        typeof window !== "undefined" && ref.current
+          ? window.getComputedStyle(ref.current).position === "fixed"
+          : true;
+      if (mode === "resize" || !wasFixed) setSizeOwned(true);
       // Materialize so the CSS centering transform stops fighting the drag.
       setRect(start);
       dragState.current = {
@@ -239,17 +268,23 @@ export function useDialogWindow(options: DialogWindowOptions = {}): DialogWindow
       position: "fixed",
       left: rect.x,
       top: rect.y,
-      width: rect.width,
-      height: rect.height,
+      // Size is emitted ONLY when the user owns it (see `sizeOwned`), so a move
+      // never pins a dialog whose CSS width depends on its mode.
+      ...(sizeOwned
+        ? {
+            width: rect.width,
+            height: rect.height,
+            maxWidth: "none",
+            maxHeight: "none",
+          }
+        : null),
       // Defeat percentage/transform centering once the user takes control.
       right: "auto",
       bottom: "auto",
       transform: "none",
       margin: 0,
-      maxWidth: "none",
-      maxHeight: "none",
     };
-  }, [rect]);
+  }, [rect, sizeOwned]);
 
   return { ref, style, onHeaderMouseDown, resizeHandles, reset };
 }

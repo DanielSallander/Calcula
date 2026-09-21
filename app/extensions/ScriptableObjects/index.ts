@@ -697,12 +697,15 @@ async function activate(context: ExtensionContext): Promise<void> {
   // dialog/listeners register after the initial load, a workbook that
   // already contains distributed scripts at activation loses its consent
   // prompt for the whole session.
+  // No width/height here. DialogContainer renders the component with isOpen /
+  // onClose / data and never reads either field, and the prompt now sizes
+  // itself from its payload — one column at 460px for a light application, two
+  // at 860px once the disclosure would otherwise run off the bottom. A dead
+  // 460x400 sitting here was a second source of truth that could only drift.
   context.ui.dialogs.register({
     id: "scriptable-objects.consent",
     title: "Script Security",
     component: ScriptConsentDialog,
-    width: 460,
-    height: 400,
   });
   cleanupFunctions.push(() => context.ui.dialogs.unregister("scriptable-objects.consent"));
 

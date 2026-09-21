@@ -23,9 +23,17 @@ import {
   type CustomFunctionUdf,
   type CustomFunctionLibrary,
 } from "@api";
+import { DialogBody, DialogPane, dialogWidth, dialogHeight } from "@api/dialogLayout";
 import { CustomFunctionsCodeEditor } from "./CustomFunctionsCodeEditor";
 
 const BLANK: CustomFunctionUdf = { name: "", params: [], body: "return ;", description: "" };
+
+/** Width of the pinned Reference column. At 260 the cellError contract alone
+ *  reflows to ~7 lines; 300 keeps each contract to two or three. */
+const REFERENCE_PANE_WIDTH = 300;
+/** Floor for the code editor before the pane starts scrolling instead of
+ *  shrinking it further (see the editor pane below). */
+const CODE_EDITOR_MIN_HEIGHT = 200;
 
 function listItemStyle(active: boolean): React.CSSProperties {
   return {
@@ -57,26 +65,34 @@ const s: Record<string, React.CSSProperties> = {
     background: "var(--surface, #fff)",
     color: "var(--text, #1a1a1a)",
     borderRadius: 8,
-    width: 720,
+    // Three columns now (list | editor | reference), so the card is wide rather
+    // than a tall straw: 1040 leaves the code column ~558px, WIDER than the
+    // 539px it had at 720 even after the Reference pane takes its 300.
+    width: dialogWidth(1040),
+    // A DEFINITE height, not just a cap. The code editor is a flex:1 child now,
+    // and flex:1 divides *free* space — with an auto-height card there is none,
+    // so the editor would collapse to nothing. Same shape as CreateChartDialog.
+    height: dialogHeight(780, 0.86),
     maxHeight: "86vh",
     display: "flex",
     flexDirection: "column",
     boxShadow: "0 10px 40px rgba(0,0,0,0.25)",
     fontSize: 13,
   },
-  head: { padding: "16px 20px 8px" },
+  head: { padding: "16px 20px 8px", flexShrink: 0 },
   title: { margin: 0, fontSize: 16, fontWeight: 600 },
   sub: { margin: "4px 0 0", fontSize: 12, color: "var(--text-muted, #777)" },
-  bodyWrap: { display: "flex", gap: 0, flex: 1, minHeight: 280, overflow: "hidden" },
+  // Passed to <DialogBody>, which supplies the row/flex/minHeight-0 bookkeeping.
+  bodyWrap: { minHeight: 280, overflow: "hidden" },
   list: {
     width: 180,
+    flexShrink: 0,
     borderRight: "1px solid var(--border, #e2e2e2)",
     overflowY: "auto",
     padding: "8px",
   },
-  editor: { flex: 1, padding: "10px 16px", overflowY: "auto" },
-  row: { display: "flex", flexDirection: "column", gap: 4, marginBottom: 10 },
-  label: { fontSize: 12, fontWeight: 600, color: "var(--text-muted, #555)" },
+  row: { display: "flex", flexDirection: "column", gap: 4, marginBottom: 10, flexShrink: 0 },
+  label: { fontSize: 12, fontWeight: 600, color: "var(--text-muted, #555)", flexShrink: 0 },
   input: {
     padding: "6px 8px",
     border: "1px solid var(--border, #ccc)",
@@ -96,15 +112,21 @@ const s: Record<string, React.CSSProperties> = {
   },
   foot: {
     display: "flex",
-    justifyContent: "space-between",
+    // The BI-access grant moved up into the Reference pane (it is a LIBRARY
+    // capability, not a per-function option), so the footer is buttons only.
+    justifyContent: "flex-end",
     alignItems: "center",
     padding: "10px 20px 16px",
     borderTop: "1px solid var(--border, #e2e2e2)",
+    flexShrink: 0,
   },
   btn: { padding: "7px 14px", borderRadius: 4, border: "1px solid var(--border, #ccc)", cursor: "pointer", fontSize: 13 },
   btnPrimary: { padding: "7px 14px", borderRadius: 4, border: "none", background: "var(--accent, #2563eb)", color: "#fff", cursor: "pointer", fontSize: 13 },
   smallBtn: { padding: "2px 8px", borderRadius: 4, border: "1px solid var(--border, #ccc)", cursor: "pointer", fontSize: 12 },
-  hint: { fontSize: 11, color: "var(--text-muted, #888)" },
+  // flexShrink: 0 — these now sit in flex COLUMNS (the editor pane, the
+  // Reference pane), where a prose block would otherwise be squashed rather
+  // than scrolled.
+  hint: { fontSize: 11, color: "var(--text-muted, #888)", flexShrink: 0 },
   helpBox: {
     marginTop: 6,
     padding: "8px 10px",
@@ -114,9 +136,24 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 11,
     lineHeight: 1.5,
     color: "var(--text-muted, #666)",
+    flexShrink: 0,
   },
   helpLine: { marginBottom: 3 },
-  error: { color: "#c00", fontSize: 12, padding: "0 20px", whiteSpace: "pre-wrap" },
+  // The Reference column. Its own border/caption colours come from THIS
+  // dialog's token family (--border / --text-muted with light fallbacks), not
+  // from DialogSidePane's --border-default / --text-secondary: those are real,
+  // themed tokens and would paint a skinned rule on a hard-light card.
+  refPane: { borderLeft: "1px solid var(--border, #e2e2e2)", gap: 8 },
+  paneTitle: {
+    fontSize: 11,
+    fontWeight: 700,
+    textTransform: "uppercase",
+    letterSpacing: "0.4px",
+    color: "var(--text-muted, #777)",
+    flexShrink: 0,
+  },
+  checkRow: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, flexShrink: 0 },
+  error: { color: "#c00", fontSize: 12, padding: "0 20px", whiteSpace: "pre-wrap", flexShrink: 0 },
 };
 
 export function CustomFunctionsDialog(props: DialogProps): React.ReactElement | null {
@@ -171,7 +208,16 @@ export function CustomFunctionsDialog(props: DialogProps): React.ReactElement | 
 
   const lib: CustomFunctionLibrary = useMemo(
     () => ({
-      functions: functions.map((f) => ({ ...f, name: f.name.trim() })),
+      // Params are trimmed and de-blanked HERE, at the point of consumption —
+      // never on keystroke. Normalising a controlled input's value as you type
+      // means a trailing comma can never survive the round trip: React writes
+      // the normalised value straight back over the DOM, so `price` + `,`
+      // becomes `price` again and a second parameter cannot be typed.
+      functions: functions.map((f) => ({
+        ...f,
+        name: f.name.trim(),
+        params: f.params.map((x) => x.trim()).filter(Boolean),
+      })),
       capabilities: biAccess ? ["bi.query"] : [],
     }),
     [functions, biAccess],
@@ -241,7 +287,7 @@ export function CustomFunctionsDialog(props: DialogProps): React.ReactElement | 
           </p>
         </div>
 
-        <div style={s.bodyWrap}>
+        <DialogBody style={s.bodyWrap}>
           <div style={s.list}>
             {functions.map((f, i) => (
               <div
@@ -258,10 +304,14 @@ export function CustomFunctionsDialog(props: DialogProps): React.ReactElement | 
             </button>
           </div>
 
-          <div style={s.editor}>
+          {/* The editor column is a flex COLUMN (DialogPane supplies that) so the
+              code editor can be its one flex:1 child. It keeps overflow-y:auto as
+              a floor-breaker only: the editor has a min-height, so on a very short
+              viewport the pane scrolls instead of clipping the Delete button. */}
+          <DialogPane padding="10px 16px" data-testid="custom-functions-editor">
             {current ? (
               <>
-                <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
                   <div style={{ ...s.row, flex: 1 }}>
                     <label style={s.label}>Name</label>
                     <input
@@ -275,40 +325,27 @@ export function CustomFunctionsDialog(props: DialogProps): React.ReactElement | 
                     <input
                       style={s.input}
                       placeholder="e.g. price, rate"
-                      value={current.params.join(", ")}
-                      onChange={(e) =>
-                        patch({ params: e.target.value.split(",").map((p) => p.trim()).filter(Boolean) })
-                      }
+                      value={current.params.join(",")}
+                      onChange={(e) => patch({ params: e.target.value.split(",") })}
                     />
                   </div>
                 </div>
-                <div style={s.row}>
+                {/* The one growing row: label fixed, editor takes the rest. The
+                    static return contracts that used to sit under it are in the
+                    Reference column — they never change, so they cost the author
+                    nothing but the height they were eating from the code. */}
+                {/* NO `minHeight: 0` here: it lets the row shrink under the editor's own
+                    200px floor, and Monaco then paints OVER the Description field
+                    instead of the pane scrolling. `min-height: auto` clamps the row
+                    at label+editor and hands the overflow to DialogPane. */}
+                <div style={{ ...s.row, flex: 1, marginBottom: 10 }}>
                   <label style={s.label}>Body (JavaScript — must return a value)</label>
-                  <CustomFunctionsCodeEditor
-                    value={current.body}
-                    onChange={(body) => patch({ body })}
-                  />
-                  <span style={s.hint}>
-                    Available: the parameters, <code>cube</code> (when BI access is on),{" "}
-                    <code>cellError</code>, and standard JS.
-                  </span>
-                  <div style={s.helpBox}>
-                    <div style={s.helpLine}>
-                      <b>Return a value</b> — a number, text or boolean fills the cell.
-                    </div>
-                    <div style={s.helpLine}>
-                      <b>Return an array</b> to spill like a dynamic array:{" "}
-                      <code>return [1, 2, 3]</code> fills three rows,{" "}
-                      <code>return [[1, 2], [3, 4]]</code> fills a 2x2 block.
-                    </div>
-                    <div style={s.helpLine}>
-                      <b>Return an error</b> with <code>cellError</code>:{" "}
-                      <code>return cellError("#N/A")</code> puts a real #N/A in the cell —
-                      returning the plain text <code>"#N/A"</code> stays text. Valid codes:
-                      #N/A, #VALUE!, #REF!, #NAME?, #DIV/0!. You can also{" "}
-                      <code>throw new Error("#N/A")</code> from inside a catch block; any
-                      other thrown error becomes #VALUE!.
-                    </div>
+                  <div style={{ flex: 1, minHeight: CODE_EDITOR_MIN_HEIGHT }}>
+                    <CustomFunctionsCodeEditor
+                      value={current.body}
+                      onChange={(body) => patch({ body })}
+                      height="100%"
+                    />
                   </div>
                 </div>
                 <div style={s.row}>
@@ -319,8 +356,11 @@ export function CustomFunctionsDialog(props: DialogProps): React.ReactElement | 
                     onChange={(e) => patch({ description: e.target.value })}
                   />
                 </div>
+                {/* The volatile explanation stays WITH its checkbox rather than
+                    moving to Reference: "runs on every single edit" is exactly
+                    what the author must read at the moment of ticking the box. */}
                 <div style={s.row}>
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                  <label style={s.checkRow}>
                     <input
                       type="checkbox"
                       checked={current.volatile === true}
@@ -336,23 +376,71 @@ export function CustomFunctionsDialog(props: DialogProps): React.ReactElement | 
                     every single edit in the workbook.
                   </span>
                 </div>
-                <button style={s.smallBtn} onClick={() => removeFn(selected)}>
+                {/* alignSelf: the pane is a flex COLUMN now, and a stretched
+                    flex item would run this button the full width of it. */}
+                <button
+                  style={{ ...s.smallBtn, alignSelf: "flex-start", flexShrink: 0 }}
+                  onClick={() => removeFn(selected)}
+                >
                   Delete this function
                 </button>
               </>
             ) : (
               <div style={s.hint}>No functions yet. Click "Add function".</div>
             )}
-          </div>
-        </div>
+          </DialogPane>
 
+          {/* Reference. Deliberately OUTSIDE the `current ? …` ternary: the author
+              who most needs the return contracts is the one who has not added a
+              function yet and would otherwise see an empty dialog. */}
+          <DialogPane
+            width={REFERENCE_PANE_WIDTH}
+            style={s.refPane}
+            data-testid="custom-functions-reference"
+          >
+            {/* A LIBRARY-wide capability grant. It used to sit in the footer
+                beside Cancel/Save, where it read as an option on the function
+                being edited; here it is next to the `cube` it unlocks. */}
+            <label style={s.checkRow}>
+              <input
+                type="checkbox"
+                checked={biAccess}
+                onChange={(e) => setBiAccess(e.target.checked)}
+              />
+              Allow BI model access (cube.*)
+            </label>
+
+            <div style={s.paneTitle}>Reference</div>
+            <span style={s.hint}>
+              Available: the parameters, <code>cube</code> (when BI access is on),{" "}
+              <code>cellError</code>, and standard JS.
+            </span>
+            <div style={s.helpBox}>
+              <div style={s.helpLine}>
+                <b>Return a value</b> — a number, text or boolean fills the cell.
+              </div>
+              <div style={s.helpLine}>
+                <b>Return an array</b> to spill like a dynamic array:{" "}
+                <code>return [1, 2, 3]</code> fills three rows,{" "}
+                <code>return [[1, 2], [3, 4]]</code> fills a 2x2 block.
+              </div>
+              <div style={s.helpLine}>
+                <b>Return an error</b> with <code>cellError</code>:{" "}
+                <code>return cellError("#N/A")</code> puts a real #N/A in the cell —
+                returning the plain text <code>"#N/A"</code> stays text. Valid codes:
+                #N/A, #VALUE!, #REF!, #NAME?, #DIV/0!. You can also{" "}
+                <code>throw new Error("#N/A")</code> from inside a catch block; any
+                other thrown error becomes #VALUE!.
+              </div>
+            </div>
+          </DialogPane>
+        </DialogBody>
+
+        {/* Outside the body, above the footer: the reason a button refused has to
+            sit next to the button, not scroll away inside a pane. */}
         {error && <div style={s.error}>{error}</div>}
 
         <div style={s.foot}>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
-            <input type="checkbox" checked={biAccess} onChange={(e) => setBiAccess(e.target.checked)} />
-            Allow BI model access (cube.*)
-          </label>
           <div style={{ display: "flex", gap: 8 }}>
             <button style={s.btn} onClick={onClose}>
               Cancel

@@ -5,6 +5,15 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api";
+import {
+  DialogBody,
+  DialogPane,
+  DialogFieldGrid,
+  DialogPaneTitle,
+  dialogWidth,
+  dialogHeight,
+} from "@api/dialogLayout";
+import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 import { createFilterAsync } from "../lib/filterPaneStore";
 import {
   getBiConnections,
@@ -23,6 +32,10 @@ interface ModelSource {
   description: string;
   /** "Table.Column" keys of all model columns. */
   fields: string[];
+  /** The model's table names, so a key can be split on the LONGEST known table
+   *  prefix. A first-dot split mis-attributes a schema-qualified table such as
+   *  "BI.dim_customer" — see extensions/_shared/lib/biFieldKey.ts. */
+  tableNames: string[];
   /** Map of field name -> data type category. */
   fieldTypes: Map<string, FieldDataType>;
 }
@@ -65,8 +78,10 @@ export function AddFilterDialog({
         try {
           const modelInfo = await getBiModelInfo(conn.id);
           const allFields: string[] = [];
+          const tableNames: string[] = [];
           const fieldTypes = new Map<string, FieldDataType>();
           for (const table of modelInfo.tables) {
+            tableNames.push(table.name);
             for (const col of table.columns) {
               const key = `${table.name}.${col.name}`;
               allFields.push(key);
@@ -86,6 +101,7 @@ export function AddFilterDialog({
             name: conn.name,
             description: conn.description,
             fields: allFields,
+            tableNames,
             fieldTypes,
           });
         } catch (err) {
@@ -153,9 +169,51 @@ export function AddFilterDialog({
       )
     : [];
 
+  // Grouping by table is only a win on a BIG model: six uppercase headings plus
+  // their spacing cost more height than they save on a 24-column model, so the
+  // flat list stays flat until the model is large enough for the headings to
+  // earn their keep. Plain consts, not useMemo — this runs after the `!isOpen`
+  // early return, so a hook here would change hook order between renders.
+  const groupByTable = !!selectedSource && selectedSource.fields.length > GROUP_BY_TABLE_MIN_FIELDS;
+  const fieldGroups: Array<[string, string[]]> = [];
+  if (groupByTable) {
+    const byTable = new Map<string, string[]>();
+    for (const f of filteredFields) {
+      const { table } = splitBiFieldKey(f, selectedSource?.tableNames);
+      const bucket = byTable.get(table);
+      if (bucket) bucket.push(f);
+      else byTable.set(table, [f]);
+    }
+    for (const entry of byTable) fieldGroups.push(entry);
+  }
+
+  // One row of the field list. `field` is always the full "Table.Column" key —
+  // that is what gets stored — while `display` may have the table prefix
+  // stripped when the heading above already says it. The title attribute keeps
+  // the whole key readable on hover either way.
+  const renderField = (field: string, display: string) => (
+    <label key={field} style={styles.fieldItem} title={field}>
+      <input
+        type="checkbox"
+        checked={checkedFields.has(field)}
+        onChange={() => handleToggleField(field)}
+      />
+      <span style={styles.fieldName}>{display}</span>
+    </label>
+  );
+
   return (
     <div style={styles.overlay} onClick={onClose}>
-      <div style={styles.dialog} onClick={(e) => e.stopPropagation()}>
+      {/* The dialog claims its full permitted height ONLY once there is a field
+          list to fill it — a 680px box holding the one-sentence "no model
+          connections" notice would just look broken. */}
+      <div
+        style={{
+          ...styles.dialog,
+          height: selectedSource ? DIALOG_TALL_HEIGHT : undefined,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div style={styles.header}>
           <span style={styles.title}>Add Filter</span>
@@ -164,73 +222,104 @@ export function AddFilterDialog({
           </button>
         </div>
 
-        {/* Body */}
-        <div style={styles.body}>
-          {/* Model connection picker */}
-          <div style={styles.field}>
-            <label style={styles.label}>Model Connection</label>
-            {isLoadingSources ? (
-              <div style={styles.loading}>Loading model connections...</div>
-            ) : sources.length === 0 ? (
-              <div style={styles.noData}>
-                No Calcula model connections found. Filters are sourced from
-                model connections — add one via Data &#9656; Business
-                Intelligence... first.
-              </div>
-            ) : (
-              <select
-                style={styles.select}
-                value={selectedSourceIndex}
-                onChange={(e) => {
-                  setSelectedSourceIndex(Number(e.target.value));
-                  setCheckedFields(new Set());
-                  setSearchText("");
-                }}
-              >
-                <option value={-1}>-- Select a model connection --</option>
-                {sources.map((s, i) => (
-                  <option key={s.connectionId} value={i}>
-                    {s.name}
-                    {s.description ? ` — ${s.description}` : ""}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
-
-          {/* Field list */}
-          {selectedSource && (
+        {/* Body — DialogBody/DialogPane carry the `minHeight: 0` chain the
+            hand-rolled body never had, which is why the field list can scroll
+            on its own instead of pushing the dialog past its maximum height. */}
+        <DialogBody stacked>
+          <DialogPane scroll={false} padding="12px 16px">
+            {/* Model connection picker — stays a <select>: it does the job in
+                29px, keeps keyboard nav and a11y for free, and the common case
+                is a single connection that is auto-selected anyway. */}
             <div style={styles.field}>
-              <label style={styles.label}>
-                Fields ({checkedFields.size} selected)
-              </label>
-              {selectedSource.fields.length > 8 && (
-                <input
-                  type="text"
-                  placeholder="Search fields..."
-                  value={searchText}
-                  onChange={(e) => setSearchText(e.target.value)}
-                  style={styles.searchInput}
-                />
+              <label style={styles.label}>Model Connection</label>
+              {isLoadingSources ? (
+                <div style={styles.loading}>Loading model connections...</div>
+              ) : sources.length === 0 ? (
+                <div style={styles.noData}>
+                  No Calcula model connections found. Filters are sourced from
+                  model connections — add one via Data &#9656; Business
+                  Intelligence... first.
+                </div>
+              ) : (
+                <select
+                  style={styles.select}
+                  value={selectedSourceIndex}
+                  onChange={(e) => {
+                    setSelectedSourceIndex(Number(e.target.value));
+                    setCheckedFields(new Set());
+                    setSearchText("");
+                  }}
+                >
+                  <option value={-1}>-- Select a model connection --</option>
+                  {sources.map((s, i) => (
+                    <option key={s.connectionId} value={i}>
+                      {s.name}
+                      {s.description ? ` — ${s.description}` : ""}
+                    </option>
+                  ))}
+                </select>
               )}
-              <div style={styles.fieldList}>
-                {filteredFields.map((f) => (
-                  <label key={f} style={styles.fieldItem}>
-                    <input
-                      type="checkbox"
-                      checked={checkedFields.has(f)}
-                      onChange={() => handleToggleField(f)}
-                    />
-                    <span style={styles.fieldName}>{f}</span>
-                  </label>
-                ))}
-                {filteredFields.length === 0 && (
-                  <div style={styles.noData}>No matching fields</div>
-                )}
-              </div>
             </div>
-          )}
-        </div>
+
+            {/* Field list — the label and the search box stay pinned while the
+                list below them takes every remaining pixel. The old 300px cap
+                showed 12 rows of a 61-column model through a window half the
+                size the dialog was already allowed to be. */}
+            {selectedSource && (
+              <div style={styles.fieldsSection}>
+                <label style={styles.label}>
+                  Fields ({checkedFields.size} selected)
+                </label>
+                {selectedSource.fields.length > 8 && (
+                  <input
+                    type="text"
+                    placeholder="Search fields..."
+                    value={searchText}
+                    onChange={(e) => setSearchText(e.target.value)}
+                    style={styles.searchInput}
+                  />
+                )}
+                <div style={styles.fieldList}>
+                  {/* Short field names flow into two columns, so a full-height
+                      list shows ~44 of them at once instead of ~12. */}
+                  {groupByTable
+                    ? fieldGroups.map(([table, fields]) => (
+                        <div key={table}>
+                          <DialogPaneTitle style={styles.fieldGroupTitle}>
+                            {table}
+                          </DialogPaneTitle>
+                          <DialogFieldGrid
+                            minColumnWidth={240}
+                            maxColumns={2}
+                            rowGap={0}
+                          >
+                            {fields.map((f) =>
+                              renderField(
+                                f,
+                                splitBiFieldKey(f, selectedSource?.tableNames)
+                                  .column || f,
+                              ),
+                            )}
+                          </DialogFieldGrid>
+                        </div>
+                      ))
+                    : (
+                        <DialogFieldGrid
+                          minColumnWidth={240}
+                          maxColumns={2}
+                          rowGap={0}
+                        >
+                          {filteredFields.map((f) => renderField(f, f))}
+                        </DialogFieldGrid>
+                      )}
+                  {filteredFields.length === 0 && (
+                    <div style={styles.noData}>No matching fields</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </DialogPane>
+        </DialogBody>
 
         {/* Footer */}
         <div style={styles.footer}>
@@ -257,6 +346,12 @@ export function AddFilterDialog({
 // Styles
 // ============================================================================
 
+/** Height the dialog claims once a connection is picked. */
+const DIALOG_TALL_HEIGHT = dialogHeight(680);
+
+/** Above this many columns, the per-table headings save more than they cost. */
+const GROUP_BY_TABLE_MIN_FIELDS = 30;
+
 const styles: Record<string, React.CSSProperties> = {
   overlay: {
     position: "fixed",
@@ -270,10 +365,14 @@ const styles: Record<string, React.CSSProperties> = {
   dialog: {
     background: "#fff",
     borderRadius: "6px",
-    width: "420px",
+    // Two columns of "Table.Column" keys need ~640px; 420 could only ever show
+    // one. `overflow: hidden` keeps the BOX from scrolling, so the title bar
+    // and the Add button never slide out of view — only the field list moves.
+    width: dialogWidth(640),
     maxHeight: "90vh",
     display: "flex",
     flexDirection: "column",
+    overflow: "hidden",
     boxShadow: "0 8px 32px rgba(0,0,0,0.2)",
   },
   header: {
@@ -282,6 +381,7 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "space-between",
     padding: "12px 16px",
     borderBottom: "1px solid #e0e0e0",
+    flexShrink: 0,
   },
   title: {
     fontSize: "14px",
@@ -296,13 +396,16 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#888",
     padding: "0 4px",
   },
-  body: {
-    padding: "12px 16px",
-    overflowY: "auto" as const,
-    flex: 1,
-  },
   field: {
     marginBottom: "12px",
+    flexShrink: 0,
+  },
+  /** The field list's section: it, not the dialog, absorbs the spare height. */
+  fieldsSection: {
+    display: "flex",
+    flexDirection: "column",
+    flex: 1,
+    minHeight: 0,
   },
   label: {
     display: "block",
@@ -310,6 +413,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     color: "#555",
     marginBottom: "4px",
+    flexShrink: 0,
   },
   select: {
     width: "100%",
@@ -326,13 +430,21 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid #d0d0d0",
     borderRadius: "3px",
     marginBottom: "6px",
+    flexShrink: 0,
   },
+  /** The ONLY scroller in the dialog — `maxHeight: 300px` used to be, and that
+   *  cap was what made a 61-column model a five-screenful straw. */
   fieldList: {
-    maxHeight: "300px",
+    flex: 1,
+    minHeight: 0,
     overflowY: "auto" as const,
     border: "1px solid #d0d0d0",
     borderRadius: "4px",
     padding: "4px 0",
+  },
+  fieldGroupTitle: {
+    color: "#888",
+    padding: "6px 10px 2px",
   },
   fieldItem: {
     display: "flex",
@@ -346,6 +458,9 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap" as const,
+    // A flex item's default `min-width: auto` refuses to shrink, so without
+    // this the ellipsis above never fires inside a fixed-width grid column.
+    minWidth: 0,
   },
   loading: {
     fontSize: "12px",
@@ -365,6 +480,7 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "8px",
     padding: "12px 16px",
     borderTop: "1px solid #e0e0e0",
+    flexShrink: 0,
   },
   cancelButton: {
     padding: "6px 16px",

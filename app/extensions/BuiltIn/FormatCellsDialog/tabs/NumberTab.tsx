@@ -273,6 +273,8 @@ export function NumberTab(): React.ReactElement {
                 </>
               ) : (
                 <>
+                  <ListPair>
+                  <ListBlock>
                   <SectionLabel>
                     {selectedCategory === "currency" ? "Symbol:" : "Format:"}
                   </SectionLabel>
@@ -294,9 +296,10 @@ export function NumberTab(): React.ReactElement {
                       </FormatItem>
                     ))}
                   </FormatList>
+                  </ListBlock>
 
                   {selectedCategory === "currency" && (
-                    <>
+                    <ListBlock>
                       <SectionLabel>Negative numbers:</SectionLabel>
                       <FormatList>
                         {NEGATIVE_STYLE_OPTIONS.map((option) => (
@@ -314,8 +317,9 @@ export function NumberTab(): React.ReactElement {
                           </FormatItem>
                         ))}
                       </FormatList>
-                    </>
+                    </ListBlock>
                   )}
+                  </ListPair>
 
                   <PreviewSection>
                     <SectionLabel>Preview:</SectionLabel>
@@ -414,6 +418,26 @@ const FormatInput = styled.input`
   &:focus {
     border-color: ${v("--accent-primary")};
   }
+`;
+
+/**
+ * Symbol and Negative numbers are two independent axes of ONE currency format
+ * — the comment above `NEGATIVE_STYLE_OPTIONS` already says so — and stacked
+ * they read as one long list and ran the tab ~70px past its height. Side by
+ * side they read as what they are. `auto-fit` folds them back to one column
+ * when the dialog is dragged narrow, and the non-currency case has a single
+ * child so the grid is a no-op there.
+ */
+const ListPair = styled.div`
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(max(200px, calc((100% - 16px) / 2)), 1fr));
+  column-gap: 16px;
+  row-gap: 8px;
+  align-items: start;
+`;
+
+const ListBlock = styled.div`
+  min-width: 0;
 `;
 
 const FormatList = styled.div`

@@ -1,5 +1,6 @@
 //! FILENAME: app/src/shell/FormulaBar/InsertFunctionDialog.styles.ts
 import styled from 'styled-components';
+import { dialogWidth, dialogHeight } from '../../api/dialogLayout';
 
 const v = (name: string) => `var(${name})`;
 
@@ -17,15 +18,29 @@ export const Overlay = styled.div`
 `;
 
 interface DialogContainerProps {
-  /** The argument-builder step needs more room than the function list does. */
+  /** The argument-builder step is a form in a column, sized to its own content. */
   $wide?: boolean;
 }
 
+/** The catalog step's natural size, clamped so it still fits a small screen. */
+const CATALOG_WIDTH = dialogWidth(760);
+const CATALOG_HEIGHT = dialogHeight(760, 0.8);
+
+/**
+ * The catalog step is a BROWSER, so it gets a browser's proportions: 760px wide
+ * for a category rail beside the list, and a DEFINITE height rather than a
+ * content-driven one. The height is not cosmetic — with the list free to fill
+ * the body, a content-driven box would grow to 80vh with 500+ functions in it
+ * and shrink back as soon as a search matched three, walking the footer up the
+ * screen while the user typed. The builder step is still a column and keeps its
+ * content height; it is only widened 580 -> 640.
+ */
 export const DialogContainer = styled.div<DialogContainerProps>`
   background-color: ${v('--dialog-bg')};
   border-radius: 4px;
   box-shadow: 0 4px 20px ${v('--dialog-shadow')};
-  width: ${props => (props.$wide ? '580px' : '500px')};
+  width: ${props => (props.$wide ? '640px' : CATALOG_WIDTH)};
+  height: ${props => (props.$wide ? 'auto' : CATALOG_HEIGHT)};
   max-height: 80vh;
   display: flex;
   flex-direction: column;
@@ -38,6 +53,8 @@ export const Header = styled.div`
   display: flex;
   justify-content: space-between;
   align-items: center;
+  /* The title bar is also the drag handle: it never scrolls away. */
+  flex-shrink: 0;
 `;
 
 export const Title = styled.h2`
@@ -60,9 +77,11 @@ export const CloseButton = styled.button`
   }
 `;
 
+/** Full width above the split: search filters BOTH panes' meaning. */
 export const SearchContainer = styled.div`
   padding: 12px 16px;
   border-bottom: 1px solid ${v('--dialog-border')};
+  flex-shrink: 0;
 `;
 
 export const SearchInput = styled.input`
@@ -81,11 +100,19 @@ export const SearchInput = styled.input`
   }
 `;
 
+/**
+ * A RAIL down the left of the split, not a wrapping bar above the list. There
+ * is one chip per catalog category plus "All" — well over a dozen, and derived
+ * from the catalog, so the count is whatever the backend ships. As a wrapping
+ * row they reflowed into three or four rows depending on the dialog's width,
+ * spending ~110px of the vertical budget the list needed and moving the list
+ * every time the user resized. Stacked, they cost WIDTH instead, which the
+ * dialog now has.
+ */
 export const CategoryContainer = styled.div`
-  padding: 8px 16px;
-  border-bottom: 1px solid ${v('--dialog-border')};
+  padding: 8px;
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 4px;
 `;
 
@@ -96,6 +123,10 @@ interface CategoryButtonProps {
 export const CategoryButton = styled.button<CategoryButtonProps>`
   padding: 4px 8px;
   font-size: 11px;
+  /* Still a <button>, stacked: labels read down a rail, so they align left and
+     never squash when the rail is scrolled. */
+  text-align: left;
+  flex-shrink: 0;
   border: 1px solid ${v('--dialog-category-border')};
   border-radius: 3px;
   background-color: ${props => props.isActive ? v('--dialog-category-active-bg') : v('--dialog-category-bg')};
@@ -107,11 +138,14 @@ export const CategoryButton = styled.button<CategoryButtonProps>`
   }
 `;
 
+/**
+ * A plain block: the DialogPane around it is the ONE scroller. The 300px cap
+ * that used to live here showed six or seven of 500+ functions and, worse,
+ * defeated the dialog's own resize — dragging it taller landed the extra height
+ * as a dead band below the footer instead of as more rows.
+ */
 export const FunctionListContainer = styled.div`
-  flex: 1;
-  overflow: auto;
-  min-height: 200px;
-  max-height: 300px;
+  min-width: 0;
 `;
 
 export const LoadingMessage = styled.div`
@@ -156,10 +190,15 @@ export const FunctionDescription = styled.div`
   text-overflow: ellipsis;
 `;
 
+/** Sized for its tallest state (signature + description + builder badge) so
+ *  arrowing through the list does not resize the list under the selection. */
 export const FunctionDetails = styled.div`
   padding: 12px 16px;
   border-top: 1px solid ${v('--dialog-border')};
   background-color: ${v('--dialog-details-bg')};
+  min-height: 86px;
+  box-sizing: border-box;
+  flex-shrink: 0;
 `;
 
 export const FunctionSignature = styled.div`
@@ -204,6 +243,7 @@ export const BuilderPreview = styled.div`
   font-size: 12px;
   color: ${v('--dialog-function-signature')};
   word-break: break-all;
+  flex-shrink: 0;
 `;
 
 export const Footer = styled.div`
@@ -212,6 +252,8 @@ export const Footer = styled.div`
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+  /* Insert must never scroll out from under the list. */
+  flex-shrink: 0;
 `;
 
 /** Pushes Back to the left so it reads as navigation, not as a third action. */

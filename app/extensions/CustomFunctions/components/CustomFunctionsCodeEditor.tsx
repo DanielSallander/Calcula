@@ -107,7 +107,13 @@ registerSurface();
 export interface CustomFunctionsCodeEditorProps {
   value: string;
   onChange: (value: string) => void;
-  height?: number;
+  /**
+   * Any CSS height. A number is px; pass `"100%"` to fill a host that has
+   * already decided the height (the dialog gives the editor a flex:1 column),
+   * which is what turns this from a fixed 170px box into the pane's main event.
+   * `automaticLayout: true` below re-measures Monaco when that height moves.
+   */
+  height?: number | string;
 }
 
 export function CustomFunctionsCodeEditor({

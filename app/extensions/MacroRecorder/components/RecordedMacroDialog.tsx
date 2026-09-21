@@ -15,6 +15,12 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useDialogWindow } from "@api/dialogWindow";
+import {
+  DialogBody,
+  DialogPane,
+  dialogHeight,
+  dialogWidth,
+} from "@api/dialogLayout";
 import type { DialogProps } from "@api/uiTypes";
 import { showToast } from "@api/notifications";
 import { requestMacroToNotebook } from "@api/lib";
@@ -35,12 +41,22 @@ import { disabledIf, styles } from "./styles";
 
 export function RecordedMacroDialog(props: DialogProps): React.ReactElement | null {
   const { isOpen, onClose } = props;
-  const win = useDialogWindow({ minWidth: 560, minHeight: 420 });
+  // The minimum is a GUARD on the code box, not a taste. The body is a fixed
+  // 340px prose column beside the source, so whatever the user drags the window
+  // down to, the code keeps the rest — at 720 that is still ~350px of monospace.
+  // At the old 560 minimum the box would have collapsed to about 28 characters
+  // wide, and `whiteSpace: "pre"` does not wrap to rescue it.
+  const win = useDialogWindow({ minWidth: 720, minHeight: 440 });
 
   const recording = isOpen ? getFinishedRecording() : null;
 
   const [target, setTarget] = useState<MacroTarget>("objectScript");
   const [edited, setEdited] = useState<string | null>(null);
+  // What the last successful "Update Module" actually stored. Clearing `edited`
+  // on save reverted the box to the REGENERATED source in front of the user —
+  // the edit was persisted but visibly disappeared. Keeping the stored text
+  // lets the box hold the edit while `dirty` still goes false.
+  const [storedSource, setStoredSource] = useState<string | null>(null);
   const [anchor, setAnchor] = useState("A1");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,6 +68,7 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
     const rec = getFinishedRecording();
     setTarget(rec?.target ?? "objectScript");
     setEdited(null);
+    setStoredSource(null);
     setError(null);
     const cell = getAnchorCell();
     setAnchor(formatA1(cell.row, cell.col));
@@ -80,6 +97,18 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
   }, [recording, target]);
 
   const source = edited ?? generated.source;
+
+  /**
+   * Does what the box SHOWS differ from what is STORED? Two ways it can:
+   * the text was hand-edited, or the runtime target was switched (the module is
+   * saved with `runtime: target`, so a switch alone changes what a save writes).
+   * The old gate was `edited === null`, which disabled the very button the
+   * module-runtime banner tells the user to press after switching target — and
+   * claimed in its tooltip that nothing had changed.
+   */
+  const dirty =
+    (edited !== null && edited !== storedSource) ||
+    (recording?.saved != null && target !== recording.saved.runtime);
 
   /**
    * Whether the QuickJS MODULE runtime could express this whole recording.
@@ -138,9 +167,10 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
     // Unsaved edits in the box are NOT what the button runs — the button links
     // the STORED macro. Nudge the user to write them back first so the button
     // and the code they are reading agree.
-    if (edited !== null) {
+    if (edited !== null && edited !== storedSource) {
       setError(
-        "You have unsaved edits above. Press \"Update Module\" first — the button " +
+        "You have unsaved edits in the source box. Press \"Update Module\" " +
+          "first — the button " +
           "links the STORED macro, so it would run the last saved version, not " +
           "the text shown here.",
       );
@@ -195,7 +225,7 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
         recordedAt: recording.recordedAt,
       });
       setFinishedSavedModule(saved);
-      setEdited(null);
+      setStoredSource(source);
       showToast(`Updated module script "${saved.name}".`, { type: "success" });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -249,9 +279,20 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
       <div
         ref={win.ref}
         data-macro-result-dialog=""
-        style={{ ...styles.dialog, width: 720, height: 600, ...win.style }}
+        // Wider, because the source box now sits BESIDE the prose instead of
+        // under it. `dialogWidth`/`dialogHeight` keep that from overflowing a
+        // small screen — the user's own drag still overrides both.
+        style={{
+          ...styles.dialog,
+          width: dialogWidth(900),
+          height: dialogHeight(600),
+          ...win.style,
+        }}
       >
-        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
+        <div
+          style={{ ...styles.header, flexShrink: 0 }}
+          onMouseDown={win.onHeaderMouseDown}
+        >
           <span style={styles.title}>
             Recorded Macro — {recording.name} ({recording.actions.length}{" "}
             {recording.actions.length === 1 ? "action" : "actions"})
@@ -261,111 +302,161 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
           </button>
         </div>
 
-        <div style={styles.body}>
-          {recording.saved ? (
-            <div style={styles.saved} data-macro-saved-banner="">
-              Saved as the workbook module script{" "}
-              <strong>{recording.saved.name}</strong> (
-              {describeMacroRuntime(recording.saved.runtime)}). Find it again
-              under <strong>Developer ▸ Macros…</strong>, where{" "}
-              <strong>Run</strong> executes it — closing this window keeps it.
-            </div>
-          ) : (
-            <div style={styles.error} data-macro-save-error="">
-              <strong>This recording could not be saved.</strong> {recording.saveError}
-              <br />
-              It is still here, so copy the source below or send it to a notebook
-              cell before you close this window — otherwise it is lost.
-            </div>
-          )}
+        {/*
+          Two panes, not one column. The editable source is the point of this
+          dialog (see the file header), and stacked it got roughly half the body
+          and lost more to every warning that appeared above it — and when the
+          column did overflow, the CODE was what scrolled out of view. Beside the
+          prose it keeps the full body height and the prose scrolls on its own.
+          `styles.body` is deliberately NOT reused here: MacroLibraryDialog and
+          StartRecordingDialog share it and are still single-column.
+        */}
+        <DialogBody>
+          <DialogPane
+            scroll
+            width={340}
+            // 340 is the preference, not a floor: on a viewport too small for
+            // 340 + the code box's own 320 minimum the prose gives way first,
+            // because prose reflows and `whiteSpace: "pre"` code does not.
+            style={{ gap: 12, flexShrink: 1, minWidth: 240 }}
+            data-testid="recorded-macro-settings"
+          >
+            {recording.saved ? (
+              <div style={styles.saved} data-macro-saved-banner="">
+                Saved as the workbook module script{" "}
+                <strong>{recording.saved.name}</strong> (
+                {describeMacroRuntime(recording.saved.runtime)}). Find it again
+                under <strong>Developer ▸ Macros…</strong>, where{" "}
+                <strong>Run</strong> executes it — closing this window keeps it.
+              </div>
+            ) : (
+              <div style={styles.error} data-macro-save-error="">
+                <strong>This recording could not be saved.</strong>{" "}
+                {recording.saveError}
+                <br />
+                It is still here, so copy the source or send it to a notebook
+                cell before you close this window — otherwise it is lost.
+              </div>
+            )}
 
-          <div style={styles.radioRow}>
-            <label style={styles.radioLabel}>
-              <input
-                type="radio"
-                name="macro-out-target"
-                checked={target === "objectScript"}
-                onChange={() => switchTarget("objectScript")}
-              />
-              <span>Object script</span>
-            </label>
-            <label style={styles.radioLabel}>
-              <input
-                type="radio"
-                name="macro-out-target"
-                checked={target === "notebook"}
-                onChange={() => switchTarget("notebook")}
-              />
-              <span>Notebook cell</span>
-            </label>
+            {/* Stays a ROW: the two labels fit one line at this width, and
+                stacking them would cost 25px of the column for nothing. */}
+            <div style={styles.radioRow}>
+              <label style={styles.radioLabel}>
+                <input
+                  type="radio"
+                  name="macro-out-target"
+                  checked={target === "objectScript"}
+                  onChange={() => switchTarget("objectScript")}
+                />
+                <span>Object script</span>
+              </label>
+              <label style={styles.radioLabel}>
+                <input
+                  type="radio"
+                  name="macro-out-target"
+                  checked={target === "notebook"}
+                  onChange={() => switchTarget("notebook")}
+                />
+                <span>Notebook cell</span>
+              </label>
+            </div>
 
+            {generated.unsupported.length > 0 ? (
+              <div style={styles.warning} data-macro-unsupported="">
+                {generated.unsupported.length} recorded action
+                {generated.unsupported.length === 1 ? "" : "s"} cannot run on
+                this runtime and{" "}
+                {generated.unsupported.length === 1 ? "is" : "are"} left in the
+                source as comments. Switch to the object-script target for
+                formatting and structural actions.
+              </div>
+            ) : null}
+
+            {target === "objectScript" && moduleRuntime ? (
+              <div
+                style={moduleRuntime.supported ? styles.hint : styles.warning}
+                data-macro-module-runtime={moduleRuntime.supported ? "yes" : "no"}
+              >
+                {moduleRuntime.supported ? (
+                  <>
+                    Every action in this recording is also expressible in the
+                    workbook script runtime — switching to{" "}
+                    <strong>Notebook cell</strong> and pressing{" "}
+                    <strong>Update Module</strong> would store a module that
+                    runtime runs directly. Either way, <strong>Run</strong> in
+                    Developer ▸ Macros… works.
+                  </>
+                ) : (
+                  <>
+                    This recording cannot be stored for the workbook script
+                    runtime: {moduleRuntime.reasons.length}{" "}
+                    {moduleRuntime.reasons.length === 1
+                      ? "action has"
+                      : "actions have"}{" "}
+                    no equivalent there ({moduleRuntime.reasons[0]}
+                    {moduleRuntime.reasons.length > 1 ? ", …" : ""}). It stays an
+                    object script — <strong>Run</strong> mounts it as a temporary
+                    unlocked object script, and{" "}
+                    <strong>Save as Button Script</strong> binds the same source
+                    to a button.
+                  </>
+                )}
+              </div>
+            ) : null}
+
+            {/* Restacked for a 340px column: the field is one row, its
+                explanation a block beneath it. As a third flex item the hint
+                squeezed the A1 box down to a few characters. */}
+            {target === "objectScript" ? (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={styles.label}>Place the button at</span>
+                  <input
+                    style={{ ...styles.input, width: 90, flex: "0 0 90px" }}
+                    value={anchor}
+                    onChange={(e) => setAnchor(e.target.value)}
+                  />
+                </div>
+                <div style={{ ...styles.hint, marginTop: 4 }}>
+                  on the sheet the selection is on. The script is bound to that
+                  cell's control id.
+                </div>
+              </div>
+            ) : null}
+          </DialogPane>
+
+          {/* The source, and nothing else. `scroll={false}` because a textarea
+              scrolls itself — a scrolling pane around it would be a second
+              scrollbar for the same overflow. `styles.code`'s own minHeight of
+              220 is lowered here: inside a flex pane it would push the box past
+              the pane and out under the footer on a short window. */}
+          <DialogPane
+            scroll={false}
+            grow={1}
+            minWidth={320}
+            style={{ paddingLeft: 0 }}
+            data-testid="recorded-macro-source"
+          >
+            <textarea
+              style={{ ...styles.code, height: "100%", minHeight: 160, flex: 1 }}
+              value={source}
+              spellCheck={false}
+              onChange={(e) => setEdited(e.target.value)}
+            />
+          </DialogPane>
+        </DialogBody>
+
+        {/* OUTSIDE the scrolling pane on purpose: this is why a footer button
+            just refused, so it belongs next to that button, not somewhere in a
+            column the user may have scrolled away from. */}
+        {error ? (
+          <div style={{ ...styles.warning, margin: "0 16px 12px", flexShrink: 0 }}>
+            {error}
           </div>
+        ) : null}
 
-          {generated.unsupported.length > 0 ? (
-            <div style={styles.warning} data-macro-unsupported="">
-              {generated.unsupported.length} recorded action
-              {generated.unsupported.length === 1 ? "" : "s"} cannot run on this
-              runtime and {generated.unsupported.length === 1 ? "is" : "are"}{" "}
-              left in the source as comments. Switch to the object-script target
-              for formatting and structural actions.
-            </div>
-          ) : null}
-
-          {target === "objectScript" && moduleRuntime ? (
-            <div
-              style={moduleRuntime.supported ? styles.hint : styles.warning}
-              data-macro-module-runtime={moduleRuntime.supported ? "yes" : "no"}
-            >
-              {moduleRuntime.supported ? (
-                <>
-                  Every action in this recording is also expressible in the
-                  workbook script runtime — switching to{" "}
-                  <strong>Notebook cell</strong> and pressing{" "}
-                  <strong>Update Module</strong> would store a module that
-                  runtime runs directly. Either way, <strong>Run</strong> in
-                  Developer ▸ Macros… works.
-                </>
-              ) : (
-                <>
-                  This recording cannot be stored for the workbook script
-                  runtime: {moduleRuntime.reasons.length}{" "}
-                  {moduleRuntime.reasons.length === 1 ? "action has" : "actions have"}{" "}
-                  no equivalent there ({moduleRuntime.reasons[0]}
-                  {moduleRuntime.reasons.length > 1 ? ", …" : ""}). It stays an
-                  object script — <strong>Run</strong> mounts it as a temporary
-                  unlocked object script, and <strong>Save as Button Script</strong>{" "}
-                  binds the same source to a button.
-                </>
-              )}
-            </div>
-          ) : null}
-
-          <textarea
-            style={styles.code}
-            value={source}
-            spellCheck={false}
-            onChange={(e) => setEdited(e.target.value)}
-          />
-
-          {target === "objectScript" ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={styles.label}>Place the button at</span>
-              <input
-                style={{ ...styles.input, width: 90 }}
-                value={anchor}
-                onChange={(e) => setAnchor(e.target.value)}
-              />
-              <span style={styles.hint}>
-                on the sheet the selection is on. The script is bound to that
-                cell's control id.
-              </span>
-            </div>
-          ) : null}
-
-          {error ? <div style={styles.warning}>{error}</div> : null}
-        </div>
-
-        <div style={styles.footer}>
+        <div style={{ ...styles.footer, flexShrink: 0 }}>
           <button
             type="button"
             data-macro-result-close=""
@@ -380,10 +471,10 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
           {recording.saved ? (
             <button
               type="button"
-              style={disabledIf(styles.btn, busy || edited === null)}
-              disabled={busy || edited === null}
+              style={disabledIf(styles.btn, busy || !dirty)}
+              disabled={busy || !dirty}
               title={
-                edited === null
+                !dirty
                   ? "Nothing to update — the box still matches the stored module."
                   : "Write the text above back into the stored module."
               }

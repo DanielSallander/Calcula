@@ -25,6 +25,12 @@
 import React, { useCallback, useState } from "react";
 import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
 import { useDialogWindow } from "@api/dialogWindow";
+// LAYOUT ONLY. This screen carries ~1,900 characters of security prose and it
+// is the last one before third-party code is copied onto the machine, so the
+// reach and the Install button have to be on screen together. The grid is the
+// only primitive taken: dialogLayout's panes paint from the CSS variables and
+// this dialog hand-rolls its own trust palette.
+import { DialogFieldGrid, dialogWidth } from "@api/dialogLayout";
 import { CAPABILITY_ID_SET, describeCapability, showToast } from "@api";
 import type { CapabilityId } from "@api";
 // The reach EVERY add-in has, whatever it declares. Imported rather than
@@ -165,7 +171,10 @@ export function InstallAddInDialog({
   onClose,
   onInstalled,
 }: InstallAddInDialogProps): React.ReactElement {
-  const win = useDialogWindow({ minWidth: 460, minHeight: 400 });
+  // A WIDER FLOOR, raised from 460 with the two disclosure columns below: the
+  // grid folds back to one column on its own at about 730px, and a drag down to
+  // 460 would otherwise have left two ~200px columns of prose nobody can read.
+  const win = useDialogWindow({ minWidth: 620, minHeight: 400 });
 
   const [sourcePath, setSourcePath] = useState<string>("");
   const [report, setReport] = useState<InstallExtensionReport | null>(null);
@@ -261,8 +270,6 @@ export function InstallAddInDialog({
           </span>
         </div>
 
-        {error && <div style={styles.error}>{error}</div>}
-
         {report && (
           <>
             <div style={styles.identity}>
@@ -304,96 +311,117 @@ export function InstallAddInDialog({
               </div>
             )}
 
-            <Section title="Capabilities it asks for">
-              {report.declaredCapabilities.length === 0 ? (
-                <div style={styles.muted}>
-                  None. It cannot reach the network, storage, BI data or your attention.
-                </div>
-              ) : (
-                <>
-                  <ul style={styles.list}>
-                    {report.declaredCapabilities.map((c) => {
-                      const known = CAPABILITY_ID_SET.has(c as CapabilityId);
-                      return (
-                        <li key={c} style={styles.listItem}>
-                          <code style={styles.code}>{c}</code>
-                          {known ? (
-                            <span style={styles.capDesc}>
-                              {" "}
-                              — {describeCapability(c as CapabilityId)}
-                            </span>
-                          ) : (
-                            <span style={styles.capDesc}> — not a capability Calcula knows; ignored.</span>
-                          )}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                  {/* "Each one is still asked for separately the first time it
-                      is actually used" was false for two of them. The JIT
-                      prompt (maybeRequestCapabilityGrant in
-                      scriptHost/extensionWorkerHost.ts) only fires on `cap.*`
-                      broker calls; `grid.read` and `formula.udf` are granted by
-                      recordCapabilityGrant at registration, with no prompt,
-                      because they are consumed by contributions the host calls
-                      INTO the add-in rather than calls the add-in makes out.
-                      Install IS the consent for those two, so this screen has
-                      to say so — it is the last screen before it happens. */}
-                  <div style={report.capabilitiesHonored ? styles.muted : styles.deniedNote}>
-                    {report.capabilitiesHonored ? (
-                      <>
-                        Network, storage, BI and dialog access are asked for separately the first
-                        time they are actually used. Being shown your cells (
-                        <code style={styles.code}>grid.read</code>) and running as a worksheet
-                        function (<code style={styles.code}>formula.udf</code>) are granted by
-                        installing — they take effect as soon as the add-in loads, with no further
-                        prompt.
-                      </>
-                    ) : (
-                      "All of these will be REFUSED, because the manifest declaring them is not trustworthy. Worksheet functions need one of them, so they will not appear."
-                    )}
+            {/* THE TWO PARALLEL DISCLOSURES, SIDE BY SIDE. These are the two
+                tallest blocks on the screen and the two a reader compares —
+                what it may reach, against what it plants in the app. Stacked,
+                their heights ADD and the Install button leaves the screen with
+                the capability list still above it; beside each other the
+                taller one alone sets the height. A grid rather than a flex
+                row, so `auto-fit` folds it back to one column when the window
+                is dragged narrow — no measurement, no ResizeObserver, and no
+                static `stacked` prop to get wrong. It is a plain child of the
+                body, which keeps sole ownership of the scrollbar: two scroll
+                regions on the screen that gates installing third-party code
+                would make "did they actually see the reach" strictly worse. */}
+            <DialogFieldGrid minColumnWidth={340} maxColumns={2}>
+              <Section title="Capabilities it asks for">
+                {report.declaredCapabilities.length === 0 ? (
+                  <div style={styles.muted}>
+                    None. It cannot reach the network, storage, BI data or your attention.
                   </div>
-                </>
-              )}
-            </Section>
-
-            <Section title="What it will add to Calcula">
-              {report.contributions.length === 0 ? (
-                <div style={styles.muted}>
-                  Nothing in your menus, ribbon, shortcuts or formulas.
-                </div>
-              ) : (
-                <ul style={styles.list}>
-                  {report.contributions.map((c) => (
-                    <li key={c.kind} style={styles.listItem}>
-                      <span style={styles.contribKind}>
-                        {CONTRIBUTION_LABEL[c.kind] ?? c.kind}:
-                      </span>{" "}
-                      {c.ids.join(", ")}
-                      {CONTRIBUTION_REACH[c.kind] && (
-                        <div style={styles.reach}>{CONTRIBUTION_REACH[c.kind]}</div>
+                ) : (
+                  <>
+                    <ul style={styles.list}>
+                      {report.declaredCapabilities.map((c) => {
+                        const known = CAPABILITY_ID_SET.has(c as CapabilityId);
+                        return (
+                          <li key={c} style={styles.listItem}>
+                            <code style={styles.code}>{c}</code>
+                            {known ? (
+                              <span style={styles.capDesc}>
+                                {" "}
+                                — {describeCapability(c as CapabilityId)}
+                              </span>
+                            ) : (
+                              <span style={styles.capDesc}> — not a capability Calcula knows; ignored.</span>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    {/* "Each one is still asked for separately the first time it
+                        is actually used" was false for two of them. The JIT
+                        prompt (maybeRequestCapabilityGrant in
+                        scriptHost/extensionWorkerHost.ts) only fires on `cap.*`
+                        broker calls; `grid.read` and `formula.udf` are granted by
+                        recordCapabilityGrant at registration, with no prompt,
+                        because they are consumed by contributions the host calls
+                        INTO the add-in rather than calls the add-in makes out.
+                        Install IS the consent for those two, so this screen has
+                        to say so — it is the last screen before it happens. */}
+                    <div style={report.capabilitiesHonored ? styles.muted : styles.deniedNote}>
+                      {report.capabilitiesHonored ? (
+                        <>
+                          Network, storage, BI and dialog access are asked for separately the first
+                          time they are actually used. Being shown your cells (
+                          <code style={styles.code}>grid.read</code>) and running as a worksheet
+                          function (<code style={styles.code}>formula.udf</code>) are granted by
+                          installing — they take effect as soon as the add-in loads, with no further
+                          prompt.
+                        </>
+                      ) : (
+                        "All of these will be REFUSED, because the manifest declaring them is not trustworthy. Worksheet functions need one of them, so they will not appear."
                       )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {/* UNCONDITIONAL, and not beside a kind. `ext.executeCommand`
-                  needs no contribution and no capability, so an add-in that
-                  declares nothing at all still holds this door — which is why
-                  it cannot hang off a row in the list above, and why the list
-                  being empty must not hide it. */}
-              <div style={styles.reach}>{EXTENSION_BUILTIN_ACTION_REACH_NOTE}</div>
-            </Section>
+                    </div>
+                  </>
+                )}
+              </Section>
 
-            <Section title="Files that will be installed">
-              <ul style={styles.list}>
+              <Section title="What it will add to Calcula">
+                {report.contributions.length === 0 ? (
+                  <div style={styles.muted}>
+                    Nothing in your menus, ribbon, shortcuts or formulas.
+                  </div>
+                ) : (
+                  <ul style={styles.list}>
+                    {report.contributions.map((c) => (
+                      <li key={c.kind} style={styles.listItem}>
+                        <span style={styles.contribKind}>
+                          {CONTRIBUTION_LABEL[c.kind] ?? c.kind}:
+                        </span>{" "}
+                        {c.ids.join(", ")}
+                        {CONTRIBUTION_REACH[c.kind] && (
+                          <div style={styles.reach}>{CONTRIBUTION_REACH[c.kind]}</div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {/* UNCONDITIONAL, and not beside a kind. `ext.executeCommand`
+                    needs no contribution and no capability, so an add-in that
+                    declares nothing at all still holds this door — which is why
+                    it cannot hang off a row in the list above, and why the list
+                    being empty must not hide it. */}
+                <div style={styles.reach}>{EXTENSION_BUILTIN_ACTION_REACH_NOTE}</div>
+              </Section>
+            </DialogFieldGrid>
+
+            {/* DEMOTED, and full width under both columns. report.files is
+                always exactly the three known files — bundle, manifest,
+                signature (extension_install.rs copies those and never walks a
+                directory) — so a titled section with three bullets spent four
+                rows of a crowded screen on a constant. One caption, one
+                wrapping line. */}
+            <div style={styles.filesBlock}>
+              <div style={styles.filesCaption}>Files that will be installed</div>
+              <div style={styles.filesLine}>
                 {report.files.map((f) => (
-                  <li key={f} style={styles.listItem}>
-                    <code style={styles.code}>{f}</code>
-                  </li>
+                  <code key={f} style={styles.code}>
+                    {f}
+                  </code>
                 ))}
-              </ul>
-            </Section>
+              </div>
+            </div>
 
             {report.warnings.map((w) => (
               <div key={w} style={styles.warning}>
@@ -426,6 +454,13 @@ export function InstallAddInDialog({
           </>
         )}
       </div>
+
+      {/* OUT OF THE SCROLLER, deliberately. `error` is set by BOTH the folder
+          preview and by Install itself, and Install lives in the pinned footer:
+          left at the top of the body it was the one thing a scrolled-down
+          reader could not see at the moment it mattered. A refusal belongs
+          beside the button that refused. */}
+      {error && <div style={styles.error}>{error}</div>}
 
       <div style={styles.footer}>
         <span style={styles.footerNote}>
@@ -472,7 +507,14 @@ const styles: Record<string, React.CSSProperties> = {
     left: "50%",
     top: "8%",
     transform: "translateX(-50%)",
-    width: "540px",
+    // 540px could not hold this screen: measured, its body is ~1,000px of
+    // content at that width and the Install button sat below the fold on every
+    // laptop. The extra width is spent on the PROSE — one capability
+    // description alone runs 397 characters — and it re-reads the same on a
+    // small screen because min() falls back to the viewport. Not conditional
+    // on `report`: a width that jumps once the preview loads is jarring, and
+    // useDialogWindow pins concrete pixels the moment the user drags anyway.
+    width: dialogWidth(940),
     maxHeight: "84vh",
     zIndex: 1050,
     display: "flex",
@@ -564,6 +606,11 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 10,
     paddingTop: 8,
     borderTop: "1px dashed var(--border-default, #eaeaea)",
+    // As a grid child its automatic minimum is its min-content width, and one
+    // long unbroken capability id would then widen the whole column past the
+    // dialog. Break inside the word instead.
+    minWidth: 0,
+    overflowWrap: "break-word",
   },
   sectionTitle: {
     fontWeight: 600,
@@ -606,6 +653,25 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "0 3px",
     borderRadius: 3,
   },
+  // The three known files, as a caption over one wrapping line — deliberately
+  // quieter than the two disclosures above it, which are the decision.
+  filesBlock: {
+    marginTop: 10,
+    paddingTop: 8,
+    borderTop: "1px dashed var(--border-default, #eaeaea)",
+  },
+  filesCaption: {
+    fontSize: 11.5,
+    color: "var(--text-secondary, #5f6368)",
+    marginBottom: 3,
+  },
+  filesLine: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 6,
+    minWidth: 0,
+    overflowWrap: "break-word",
+  },
   warning: {
     marginTop: 8,
     padding: "6px 9px",
@@ -616,7 +682,10 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1.45,
   },
   error: {
-    marginTop: 8,
+    // Sits between the body and the footer now, so it keeps the body's
+    // horizontal padding as a margin and never shrinks away.
+    flexShrink: 0,
+    margin: "0 14px 10px 14px",
     padding: "6px 9px",
     background: "#fce8e6",
     color: "#a50e0a",

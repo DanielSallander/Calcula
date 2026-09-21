@@ -146,8 +146,71 @@ Insert Chart and the `@api` primitives carry unit tests. The other six are layou
 verified by the existing suites (112,936 green) plus screenshots of each dialog in the running app
 — there are no new tests for them.
 
-Twenty further dialogs were confirmed by the survey and are NOT done; the ranked list is in
-`docs/design/open-items.md`.
+## The second pass (2026-09-21): the remaining twenty
+
+All of them, one agent per dialog working from its own adversarially-verified plan, then a
+three-lens review (behaviour / layout / integration) over every changed file with each finding
+put to a separate refuter. 25 findings survived refutation, deduplicating to 15 defects. Three of
+those were CORRECTNESS bugs the restructuring introduced, and none of them were layout:
+
+- **Text to Columns** built the destination cell's ROW number out of the COLUMN index, so step 3
+  named the wrong cell whenever `startRow !== startCol`. `Step3Format` was never passed
+  `sourceRow` at all.
+- **Custom Functions** normalised the Parameters field on every keystroke
+  (`split(",").map(trim).filter(Boolean)`) while the input was controlled off the result — so a
+  trailing comma could never survive the round trip and a second parameter could not be typed.
+  Normalisation moved to the point of consumption; the `join`/`split` pair is now an exact inverse.
+- **Add Filter** hand-rolled a first-dot split of the BI field key for its new per-table headings.
+  The repo forbids that: a schema-qualified table like `BI.dim_customer` mis-attributes. It now
+  goes through `splitBiFieldKey` with the model's own table names, which the dialog was already
+  loading and discarding.
+
+### Two defects that no unit test could have caught
+
+Both are invisible in jsdom, which has no layout and no `ResizeObserver`:
+
+1. **A width that was a function of its own measurement.** `PublishDialog` read
+   `width: twoPane ? 1040 : 620`, `twoPane` read `!isNarrowBody`, and `isNarrowBody` came from a
+   ResizeObserver on the body. The dialog opens in `loading` mode at 620, the mount effect
+   measures ~618, `isNarrowBody` latches true — and when the awaited status resolves to `push` the
+   width expression still reads 620. **620 is an absorbing state**: the two-pane layout was
+   unreachable on open, and the only way to it was to drag the dialog past 820px by hand. In jsdom
+   `bodyWidth` stays 0, so `twoPane` comes out true and a naive test passes on a broken dialog.
+   The width is now keyed on `mode`, which no measurement can change, so `isNarrowBody` is a pure
+   CONSUMER of the width — it can only collapse a dialog that is already wide, and collapsing
+   terminates. Pinned as a SHAPE by `extensions/Distribution/__tests__/publishDialogWidth.test.ts`.
+
+2. **Moving a dialog pinned its size.** `useDialogWindow` materialised the whole rect on the first
+   interaction of *either* kind, so a drag-to-move froze the width — and every dialog whose CSS
+   width depends on its mode silently lost the wider layout (Publish 620→1040, Subscribe 560→900,
+   Refresh Preview 520→940). Position and size are now owned separately: a move emits position
+   only and leaves the size to the CSS; a resize takes both, stickily. The exception is a box the
+   hook has to pop OUT of a flex backdrop — it was sized by the flex container, so `position:
+   fixed` with no width would shrink it to fit, and those keep the old behaviour.
+   `src/api/__tests__/dialogWindowSizeOwnership.test.tsx`, two sabotages.
+
+### The rest
+
+`SlicerSettingsDialog`'s JSON mode gave Monaco zero height (`flex: 1` divides FREE space, and an
+auto-height box has none — the branch needs a DEFINITE height, not a cap). `CustomFunctionsDialog`
+let its editor row shrink under the editor's own 200px floor, so Monaco painted over the
+Description field instead of the pane scrolling. `ScenarioManagerDialog`'s inputs lacked
+`minWidth: 0` so they overflowed their grid tracks, and Escape in the Add/Edit sub-form closed the
+whole dialog rather than returning to the list (fixed with `dismissOnEscape: false` — the dialog's
+own handler cannot win that race, because its effect re-subscribes on mode change and so registers
+*after* the shell's). `RecordedMacroDialog`'s "Update Module" saved the edit and then visibly
+reverted the box to the regenerated source, and its gate disabled the very button the
+module-runtime banner told the user to press. `RefreshPreviewDialog`'s apply-failure message was
+the last child of a scrolling pane. `FillTab`'s preview canvas kept a hard-coded 460px bitmap
+under a `width: 100%` box that is now ~645px — the one element whose job is to show the fill was
+showing it 40% too wide.
+
+**Everything from the survey is now done.** Verification: `npm run check-types`,
+`lint:boundaries` and `check:line-endings` clean; **112,962 vitest green across 1,091 files**
+(up 26 tests and 5 files from the first pass); the live E2E DOM contract that
+`vba-wiring-batch.spec.ts` depends on re-checked in a real browser, including the exact
+`fill(first)` → `fill(nth(1))` sequence Playwright performs; and every reachable dialog opened and
+screenshotted in the running app.
 
 ## When NOT to use this
 

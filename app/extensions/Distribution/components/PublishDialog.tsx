@@ -59,6 +59,13 @@ const parseCellKey = (k: string): HoldBackCellRef => {
 };
 import { listWorkspaces, type SavedWorkspace } from "@api/distributionWorkspaces";
 import { useDialogWindow } from "@api/dialogWindow";
+import {
+  DialogBody,
+  DialogPane,
+  DialogSidePane,
+  useDialogSplit,
+  dialogWidth,
+} from "@api/dialogLayout";
 import { pickWorkspaceFile, pickWorkspaceFolder } from "../lib/pickWorkspace";
 import { pushBlockingReason } from "../lib/pushReadiness";
 import { describePushLanding } from "../lib/environments";
@@ -73,7 +80,32 @@ export function PublishDialog({ onClose, data }: DialogProps) {
   // `Record<string, unknown>` and comes from a caller this component does not
   // control.
   const focusSheetName = typeof data?.focusSheetName === "string" ? data.focusSheetName : undefined;
-  const win = useDialogWindow({ minWidth: 460, minHeight: 400 });
+  // minWidth raised with the two-pane push layout below — 460px was narrower
+  // than either pane wants and narrower than this dialog ever opens. 620 is
+  // CreateChartDialog's floor and this dialog's own narrow width, so the first
+  // resize drag does not snap the create-mode window wider.
+  const win = useDialogWindow({ minWidth: 620, minHeight: 420 });
+
+  // THE DIVIDER between the form and its review, and the measurement that folds
+  // the two panes back into one column when the dialog is dragged narrow. The
+  // review side gets the larger share by default: the settings are a version
+  // box, a textarea and a checkbox list that read fine at ~420px, while the
+  // review hosts VersionDiffView's four-column Cell/Before/After table. 820px
+  // is the same threshold CreateChartDialog uses, so two dialogs do not
+  // disagree about what "narrow" means.
+  const split = useDialogSplit({ initial: 0.45, min: 0.3, max: 0.7 });
+  const [bodyWidth, setBodyWidth] = useState(0);
+  useEffect(() => {
+    const el = split.containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    setBodyWidth(el.clientWidth);
+    const observer = new ResizeObserver((entries) => {
+      setBodyWidth(entries[0].contentRect.width);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [split.containerRef]);
+  const isNarrowBody = bodyWidth > 0 && bodyWidth < 820;
 
   const [mode, setMode] = useState<Mode>("loading");
   const [workspace, setWorkspace] = useState<WorkingCopyStatus | null>(null);
@@ -662,13 +694,46 @@ export function PublishDialog({ onClose, data }: DialogProps) {
   const blocked = blockingReason();
   const canPush = !blocked && !pushed;
 
+  // ---- layout -------------------------------------------------------------
+  /**
+   * FORM on the left, REVIEW pinned beside it — but only for a push.
+   *
+   * This is not a wizard: there is no step sequence and no dependency chain in
+   * the vertical order. The banner, the diff, the warnings and the report are
+   * reactive OUTPUTS that recompute from the form, and stacking them made the
+   * push ~1150px tall against a frame of ~690px on 1080p — ~400px at 150%
+   * scaling. Worse than the height, the order was hostile: the Sheets checklist
+   * sat BELOW the "Changes since vN" box it invalidates, and the report's own
+   * "Out of date — the sheet selection changed" banner rendered at the very
+   * bottom of the scroll, below the control that staled it. The error strip was
+   * already lifted out of this scroll for the same reason (see below).
+   *
+   * Create mode is excluded deliberately: it has no banner, never fetches a
+   * diff, and has a null report until Preview is pressed, so a second pane
+   * would open EMPTY beside five narrow fields — worse than one column.
+   */
+  const twoPane = mode === "push" && !isNarrowBody;
+  /** Is there anything for the review side to hold? A push always has a diff. */
+  const hasReview = mode === "push" || warnings.length > 0 || report !== null;
+
   // ---- styles -------------------------------------------------------------
   const windowStyle: React.CSSProperties = {
     position: "fixed",
     left: "50%",
     top: "8%",
     transform: "translateX(-50%)",
-    width: "540px",
+    // Room for two panes when there are two; the old narrow column otherwise
+    // (620, not 540: create mode's workspace row is an input and two buttons).
+    //
+    // Keyed on `mode`, NOT on `twoPane`. Deriving the width from `twoPane`
+    // closes a cycle that 620px absorbs: the dialog opens in `loading` mode at
+    // 620, the mount effect measures the body at ~618, `isNarrowBody` latches
+    // true, and when the awaited status resolves to `push` the width expression
+    // still reads 620 — so nothing ever re-measures and the two-pane layout can
+    // never appear on open. `mode` is not a function of any measurement, so
+    // `isNarrowBody` stays a pure CONSUMER of the width: it can only collapse a
+    // dialog that is already wide, which terminates.
+    width: mode === "push" ? dialogWidth(1040) : dialogWidth(620),
     maxHeight: "84vh",
     zIndex: 1050,
     display: "flex",
@@ -700,12 +765,6 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     borderRadius: "4px",
     fontSize: "14px",
     lineHeight: 1,
-  };
-  const bodyStyle: React.CSSProperties = {
-    flex: 1,
-    minHeight: 0,
-    overflowY: "auto",
-    padding: "12px 16px",
   };
   const footerStyle: React.CSSProperties = {
     display: "flex",
@@ -748,7 +807,23 @@ export function PublishDialog({ onClose, data }: DialogProps) {
         </button>
       </div>
 
-      <div style={bodyStyle}>
+      {/*
+        When there are two panes, each scrolls its own column. When there is one
+        — create mode, or a push dragged narrow — the BODY scrolls and the panes
+        just stack at their natural height, which is exactly the single scroller
+        this dialog always had.
+      */}
+      <DialogBody
+        ref={split.containerRef}
+        stacked={!twoPane}
+        style={twoPane ? undefined : { overflowY: "auto" }}
+      >
+        <DialogPane
+          scroll={twoPane}
+          padding="12px 16px"
+          style={twoPane ? split.primaryStyle : { flex: "0 0 auto" }}
+          data-testid="publish-dialog-form"
+        >
         {mode === "loading" && (
           <div style={{ color: "var(--text-secondary)" }}>Reading workbook…</div>
         )}
@@ -936,94 +1011,12 @@ export function PublishDialog({ onClose, data }: DialogProps) {
           </div>
         )}
 
-        {mode === "push" && (
-          <div style={fieldStyle}>
-            <label>Changes since v{workspace?.baseVersion}</label>
-            <div
-              style={{
-                border: "1px solid var(--border-default)",
-                borderRadius: 3,
-                padding: "8px",
-                maxHeight: "260px",
-                overflowY: "auto",
-              }}
-            >
-              {diffBusy && (
-                <span style={{ color: "var(--text-secondary)", fontSize: "12px" }}>
-                  Working out what you changed…
-                </span>
-              )}
-              {diffError && !diffBusy && (
-                <span style={{ color: "var(--text-secondary)", fontSize: "12px" }}>
-                  Could not compare against v{workspace?.baseVersion}: {diffError}
-                </span>
-              )}
-              {diff && !diffBusy && (
-                <VersionDiffView
-                  diff={diff}
-                  // Only a PUSH can hold a change back. A first publish has no
-                  // base version to take the held-back value from, so a
-                  // checkbox there would be a control with nothing behind it.
-                  //
-                  // DISABLED 2026-09-01 by this session's adversarial review and
-                  // RE-ENABLED 2026-09-02 on the condition that review set. The
-                  // problem was that `undo()` was a BLIND `pop_undo()` taking no
-                  // token, while this dialog is deliberately non-modal — so an
-                  // edit made during the seconds a publish spends signing and
-                  // writing to a share was what the `finally` reversed. The
-                  // hold-back then stayed applied, permanently and silently: the
-                  // author's value gone from their own workbook, the dialog
-                  // reporting success, a save persisting the base value. Nor
-                  // does AutoRecover save them — it snapshots LIVE state, which
-                  // at that moment holds the base values, and the undo stack is
-                  // never serialized.
-                  //
-                  // `calp_hold_back_cells` now returns the id of the entry it
-                  // left, and the un-revert pops ONLY if the top of the history
-                  // is still that entry — refusing with a sentence that says how
-                  // many Ctrl+Z it now takes, rather than reversing somebody
-                  // else's work. The author's own edit is no longer the quiet
-                  // failure; it is a message.
-                  selection={
-                    mode === "push" && workspace?.baseVersion
-                      ? {
-                          excluded: excludedCells,
-                          label: "Push",
-                          onToggle: (sheetId, c, include) =>
-                            setExcludedCells((prev) => {
-                              const next = new Set(prev);
-                              const key = cellKeyOf(sheetId, c);
-                              if (include) next.delete(key);
-                              else next.add(key);
-                              return next;
-                            }),
-                        }
-                      : undefined
-                  }
-                />
-              )}
-              {excludedCells.size > 0 && (
-                <div
-                  style={{
-                    fontSize: "11px",
-                    marginTop: 6,
-                    display: "flex",
-                    gap: 8,
-                    alignItems: "baseline",
-                  }}
-                >
-                  <span style={{ color: "var(--conflict-text, #856404)" }}>
-                    {excludedCells.size} change(s) stay local — the published version keeps
-                    v{workspace?.baseVersion}&rsquo;s value there.
-                  </span>
-                  <button style={{ fontSize: "11px" }} onClick={() => setExcludedCells(new Set())}>
-                    Push all
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+        {/*
+          "Changes since v…" used to render HERE, between the version and the
+          summary — which put the Sheets checklist BELOW the diff that checklist
+          invalidates. It is an output of this form, not a field in it, so it
+          now lives on the review side; see the side pane below.
+        */}
 
         {mode !== "loading" && (
           <div style={fieldStyle}>
@@ -1067,12 +1060,14 @@ export function PublishDialog({ onClose, data }: DialogProps) {
         {mode !== "loading" && availableSheets.length > 0 && (
           <div style={fieldStyle}>
             <label>Sheets</label>
+            {/* NO 140px CAP AND NO SCROLLER OF ITS OWN. The pane this sits in
+                scrolls, and a 140px box nested inside a scrolling column traps
+                the wheel in the one list whose whole job is letting the author
+                see what leaves the machine. */}
             <div
               style={{
                 border: "1px solid var(--border-default)",
                 borderRadius: "3px",
-                maxHeight: "140px",
-                overflowY: "auto",
                 padding: "4px 6px",
               }}
             >
@@ -1235,7 +1230,146 @@ export function PublishDialog({ onClose, data }: DialogProps) {
           the fold — visually identical to the button doing nothing. They now
           render in the pinned strip just above the footer; see below.
         */}
+        </DialogPane>
 
+        {twoPane && split.splitter}
+
+        {/*
+          THE REVIEW SIDE. Every box here is computed FROM the form beside it —
+          what this push would change, what it would degrade for subscribers,
+          what it would ship — so it belongs next to that form rather than
+          below the end of it.
+        */}
+        {hasReview && (
+          <DialogSidePane
+            flexible
+            border={twoPane ? "left" : "none"}
+            data-testid="publish-dialog-review"
+            style={
+              twoPane
+                ? { ...split.secondaryStyle, padding: "12px 16px" }
+                : // Stacked: the body is the scroller, so this just sits under
+                  // the form at its natural height.
+                  { flex: "0 0 auto", padding: "0 16px 12px" }
+            }
+          >
+            {mode === "push" && (
+              <div
+                style={
+                  twoPane
+                    ? // Fills the pane and scrolls INSIDE it. 260px was a
+                      // letterbox onto the one panel an author reviews a push
+                      // in, nested inside another scroller.
+                      { ...fieldStyle, flex: "1 1 0", minHeight: 140, marginBottom: 0 }
+                    : fieldStyle
+                }
+              >
+                <label>Changes since v{workspace?.baseVersion}</label>
+                <div
+                  style={{
+                    border: "1px solid var(--border-default)",
+                    borderRadius: 3,
+                    padding: "8px",
+                    overflowY: "auto",
+                    ...(twoPane ? { flex: "1 1 0", minHeight: 0 } : { maxHeight: "260px" }),
+                  }}
+                >
+                  {diffBusy && (
+                    <span style={{ color: "var(--text-secondary)", fontSize: "12px" }}>
+                      Working out what you changed…
+                    </span>
+                  )}
+                  {diffError && !diffBusy && (
+                    <span style={{ color: "var(--text-secondary)", fontSize: "12px" }}>
+                      Could not compare against v{workspace?.baseVersion}: {diffError}
+                    </span>
+                  )}
+                  {diff && !diffBusy && (
+                    <VersionDiffView
+                      diff={diff}
+                      // Only a PUSH can hold a change back. A first publish has
+                      // no base version to take the held-back value from, so a
+                      // checkbox there would be a control with nothing behind
+                      // it.
+                      //
+                      // DISABLED 2026-09-01 by this session's adversarial review
+                      // and RE-ENABLED 2026-09-02 on the condition that review
+                      // set. The problem was that `undo()` was a BLIND
+                      // `pop_undo()` taking no token, while this dialog is
+                      // deliberately non-modal — so an edit made during the
+                      // seconds a publish spends signing and writing to a share
+                      // was what the `finally` reversed. The hold-back then
+                      // stayed applied, permanently and silently: the author's
+                      // value gone from their own workbook, the dialog
+                      // reporting success, a save persisting the base value. Nor
+                      // does AutoRecover save them — it snapshots LIVE state,
+                      // which at that moment holds the base values, and the undo
+                      // stack is never serialized.
+                      //
+                      // `calp_hold_back_cells` now returns the id of the entry
+                      // it left, and the un-revert pops ONLY if the top of the
+                      // history is still that entry — refusing with a sentence
+                      // that says how many Ctrl+Z it now takes, rather than
+                      // reversing somebody else's work. The author's own edit is
+                      // no longer the quiet failure; it is a message.
+                      selection={
+                        mode === "push" && workspace?.baseVersion
+                          ? {
+                              excluded: excludedCells,
+                              label: "Push",
+                              onToggle: (sheetId, c, include) =>
+                                setExcludedCells((prev) => {
+                                  const next = new Set(prev);
+                                  const key = cellKeyOf(sheetId, c);
+                                  if (include) next.delete(key);
+                                  else next.add(key);
+                                  return next;
+                                }),
+                            }
+                          : undefined
+                      }
+                    />
+                  )}
+                </div>
+                {/* PINNED BELOW THE SCROLL, not inside it: this was the one
+                    control that undoes an exclusion, and it scrolled away with
+                    the rows it is about. */}
+                {excludedCells.size > 0 && (
+                  <div
+                    style={{
+                      fontSize: "11px",
+                      marginTop: 6,
+                      flexShrink: 0,
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "baseline",
+                    }}
+                  >
+                    <span style={{ color: "var(--conflict-text, #856404)" }}>
+                      {excludedCells.size} change(s) stay local — the published version keeps
+                      v{workspace?.baseVersion}&rsquo;s value there.
+                    </span>
+                    <button
+                      style={{ fontSize: "11px" }}
+                      onClick={() => setExcludedCells(new Set())}
+                    >
+                      Push all
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* The warnings and the report share whatever height the diff does
+                not take, and scroll between themselves when there is not
+                enough — nothing here may push the diff out of the pane. */}
+            <div
+              style={
+                twoPane
+                  ? { flex: "0 1 auto", minHeight: 0, overflowY: "auto" }
+                  : { flexShrink: 0 }
+              }
+            >
         {warnings.length > 0 && (
           <div
             style={{
@@ -1283,7 +1417,10 @@ export function PublishDialog({ onClose, data }: DialogProps) {
             <PublishReportView report={report} />
           </div>
         )}
-      </div>
+            </div>
+          </DialogSidePane>
+        )}
+      </DialogBody>
 
       {/*
         THE ANSWER STRIP — pinned, outside the scroll, directly above the button

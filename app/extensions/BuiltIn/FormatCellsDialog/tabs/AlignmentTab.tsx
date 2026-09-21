@@ -164,11 +164,19 @@ export function AlignmentTab(): React.ReactElement {
 }
 
 // Styled Components
+/**
+ * The four sections are independent properties of one selection, not steps, so
+ * they flow into columns instead of a 416px stack: Text alignment + Indent in
+ * one, Text control + Orientation in the other. `auto-fit` means they fold back
+ * to a single column on their own when the dialog is dragged narrow.
+ */
 const Container = styled.div`
   padding: 4px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(max(240px, calc((100% - 24px) / 2)), 1fr));
+  column-gap: 24px;
+  row-gap: 16px;
+  align-items: start;
 `;
 
 const Section = styled.div`

@@ -15,13 +15,21 @@ export const Backdrop = styled.div`
   justify-content: center;
 `;
 
+/**
+ * A property sheet wants ONE stable frame across its six tabs, so the height is
+ * DEFINITE rather than a `max-height`. That is both what Excel does and what
+ * makes `min-height: 0` safe on TabContent below: with only a max-height the
+ * frame had no height to hand down, so a tab could not flex and the box JUMPED
+ * as you moved between tabs.
+ */
 export const DialogContainer = styled.div`
   background: ${v("--panel-bg")};
   border: 1px solid ${v("--border-default")};
   border-radius: 8px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-  width: 520px;
-  max-height: 520px;
+  width: min(680px, 94vw);
+  height: min(560px, 88vh);
+  max-height: 88vh;
   display: flex;
   flex-direction: column;
   color: ${v("--text-primary")};
@@ -93,11 +101,14 @@ export const Tab = styled.button<{ $active: boolean }>`
   }
 `;
 
+/** `min-height: 0`, not 280px: the frame now has a definite height, so the tab
+ *  flexes into whatever is left and scrolls only when its own content exceeds
+ *  that. A floor here would push the frame instead. */
 export const TabContent = styled.div`
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 12px 16px;
-  min-height: 280px;
 
   &::-webkit-scrollbar {
     width: 6px;

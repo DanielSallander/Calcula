@@ -10,6 +10,8 @@ import {
   indexToCol,
   removeDuplicates,
 } from "@api";
+import { DialogFieldGrid, dialogWidth, dialogHeight } from "@api/dialogLayout";
+import { useDialogWindow } from "@api/dialogWindow";
 
 // ============================================================================
 // Styles (using CSS variables from the app theme)
@@ -32,7 +34,13 @@ const styles = {
     border: `1px solid ${v("--border-default")}`,
     borderRadius: 8,
     boxShadow: "0 12px 40px rgba(0, 0, 0, 0.5)",
-    width: 420,
+    // No fixed `width` here: it is chosen per render from how many columns the
+    // region actually has (see `boxWidth`). A 4-column sheet has no use for the
+    // room a 20-column import needs, and widening it unconditionally just
+    // strings four short labels across an empty row.
+    // The ceiling is on the BOX, not on the list: the list is the flexing child,
+    // so a taller dialog shows more columns instead of more dead space.
+    maxHeight: dialogHeight(560),
     display: "flex",
     flexDirection: "column" as const,
     color: v("--text-primary"),
@@ -45,6 +53,9 @@ const styles = {
     alignItems: "center",
     padding: "12px 16px",
     borderBottom: `1px solid ${v("--border-default")}`,
+    // The title bar is also the drag handle, so it must never be squeezed.
+    flexShrink: 0,
+    cursor: "move",
   },
   title: {
     fontWeight: 600,
@@ -65,6 +76,22 @@ const styles = {
     display: "flex",
     flexDirection: "column" as const,
     gap: 12,
+    // Takes the space the header and footer leave, and passes it to the list.
+    flex: 1,
+    minHeight: 0,
+  },
+  // One row for every control that acts on the whole list: the headers toggle
+  // relabels it, Select All / Unselect All tick it. Three stacked rows cost
+  // ~44px of the height the list wanted.
+  controlRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    flexWrap: "wrap" as const,
+    flexShrink: 0,
+    paddingBottom: 6,
+    borderBottom: `1px solid ${v("--border-default")}`,
   },
   headerCheckboxRow: {
     display: "flex",
@@ -72,13 +99,10 @@ const styles = {
     gap: 8,
     cursor: "pointer",
     fontSize: 13,
-    paddingBottom: 4,
-    borderBottom: `1px solid ${v("--border-default")}`,
   },
   selectButtons: {
     display: "flex",
     gap: 8,
-    marginBottom: 4,
   },
   selectBtn: {
     padding: "3px 10px",
@@ -90,7 +114,11 @@ const styles = {
     border: `1px solid ${v("--border-default")}`,
   },
   columnList: {
-    maxHeight: 200,
+    // The list is what grows. A hard 200px cap showed ~8 rows of a 20-column
+    // import through a straw that the user had no way to widen; now it takes
+    // whatever the body has left, and dragging the dialog taller shows more.
+    flex: "1 1 auto",
+    minHeight: 140,
     overflowY: "auto" as const,
     border: `1px solid ${v("--border-default")}`,
     borderRadius: 4,
@@ -103,19 +131,21 @@ const styles = {
     cursor: "pointer",
     fontSize: 13,
     padding: "3px 10px",
+    minWidth: 0,
+  },
+  // A long header name must not push a grid track wide enough to lose a column.
+  columnLabel: {
+    overflow: "hidden" as const,
+    textOverflow: "ellipsis" as const,
+    whiteSpace: "nowrap" as const,
+    minWidth: 0,
   },
   checkbox: {
     width: 16,
     height: 16,
+    flexShrink: 0,
     cursor: "pointer",
     accentColor: v("--accent-primary"),
-  },
-  sectionLabel: {
-    fontSize: 12,
-    fontWeight: 600,
-    color: v("--text-secondary"),
-    textTransform: "uppercase" as const,
-    letterSpacing: 0.5,
   },
   footer: {
     display: "flex",
@@ -123,6 +153,8 @@ const styles = {
     gap: 8,
     padding: "12px 16px",
     borderTop: `1px solid ${v("--border-default")}`,
+    // The OK button stays put however tall the list gets.
+    flexShrink: 0,
   },
   btn: {
     padding: "6px 20px",
@@ -192,6 +224,10 @@ interface DataRegion {
 
 export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
+  // The main dialog is movable/resizable — with a 20-column region the list is
+  // the whole dialog, and the user had no way to make it bigger.
+  const win = useDialogWindow({ minWidth: 380, minHeight: 320 });
+  // Still needed for the no-region notice, which is not a resizable window.
   const dialogRef = useRef<HTMLDivElement>(null);
 
   const [loaded, setLoaded] = useState(false);
@@ -209,6 +245,9 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
 
   // Load data region and column headers on mount
   useEffect(() => {
+    // Reopen centered at the natural size rather than wherever it was last
+    // dragged to, which would be off screen after a window resize.
+    win.reset();
     async function load() {
       const sel = data as Record<string, unknown> | undefined;
       const activeRow = (sel?.activeRow as number) ?? 0;
@@ -296,11 +335,15 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
   // Click outside to close
   const handleBackdropClick = useCallback(
     (e: React.MouseEvent) => {
-      if (dialogRef.current && !dialogRef.current.contains(e.target as Node)) {
+      // Two boxes share this backdrop and exactly one is ever mounted: the main
+      // dialog carries the window hook's ref (so it can be dragged), the
+      // no-region notice keeps its own.
+      const box = win.ref.current ?? dialogRef.current;
+      if (box && !box.contains(e.target as Node)) {
         onClose();
       }
     },
-    [onClose],
+    [onClose, win.ref],
   );
 
   const handleToggleColumn = useCallback((absCol: number) => {
@@ -393,12 +436,35 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
     );
   }
 
+  // Horizontal room is EARNED by the column count. Below nine columns the
+  // single flex column still reads best; a wide dialog would only spread a
+  // handful of short labels over an empty row.
+  const wide = columns.length > 8;
+  const boxWidth = dialogWidth(columns.length > 14 ? 640 : wide ? 520 : 420);
+
+  const columnCheckboxes = columns.map((col) => (
+    <label key={col.absCol} style={styles.checkboxRow} title={col.label}>
+      <input
+        type="checkbox"
+        style={styles.checkbox}
+        checked={col.checked}
+        onChange={() => handleToggleColumn(col.absCol)}
+      />
+      <span style={styles.columnLabel}>{col.label}</span>
+    </label>
+  ));
+
   // Main dialog
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={styles.dialog}>
-        {/* Header */}
-        <div style={styles.header}>
+      <div
+        ref={win.ref}
+        // position:relative anchors the resize handles; win.style LAST so the
+        // user's own drag wins over the centering and the max-height.
+        style={{ ...styles.dialog, width: boxWidth, position: "relative", ...win.style }}
+      >
+        {/* Header — also the drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Remove Duplicates</span>
           <button style={styles.closeBtn} onClick={onClose}>
             X
@@ -407,44 +473,40 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
 
         {/* Body */}
         <div style={styles.body}>
-          {/* My data has headers checkbox */}
-          <label style={styles.headerCheckboxRow}>
-            <input
-              type="checkbox"
-              style={styles.checkbox}
-              checked={hasHeaders}
-              onChange={(e) => setHasHeaders(e.target.checked)}
-            />
-            My data has headers
-          </label>
+          {/* One row of list-wide controls: the headers toggle relabels the
+              list below, Select All / Unselect All tick it. */}
+          <div style={styles.controlRow}>
+            <label style={styles.headerCheckboxRow}>
+              <input
+                type="checkbox"
+                style={styles.checkbox}
+                checked={hasHeaders}
+                onChange={(e) => setHasHeaders(e.target.checked)}
+              />
+              My data has headers
+            </label>
 
-          {/* Column selection label and buttons */}
-          <div style={styles.sectionLabel}>Columns</div>
-          <div style={styles.selectButtons}>
-            <button style={styles.selectBtn} onClick={handleSelectAll}>
-              Select All
-            </button>
-            <button style={styles.selectBtn} onClick={handleUnselectAll}>
-              Unselect All
-            </button>
+            <div style={styles.selectButtons}>
+              <button style={styles.selectBtn} onClick={handleSelectAll}>
+                Select All
+              </button>
+              <button style={styles.selectBtn} onClick={handleUnselectAll}>
+                Unselect All
+              </button>
+            </div>
           </div>
 
-          {/* Column list */}
-          <div style={styles.columnList}>
-            {columns.map((col) => (
-              <label
-                key={col.absCol}
-                style={styles.checkboxRow}
-              >
-                <input
-                  type="checkbox"
-                  style={styles.checkbox}
-                  checked={col.checked}
-                  onChange={() => handleToggleColumn(col.absCol)}
-                />
-                {col.label}
-              </label>
-            ))}
+          {/* Column list. Above the threshold the checkboxes flow into columns
+              (auto-fit, so dragging the dialog narrow collapses them back);
+              below it, the original single flex column is left alone. */}
+          <div style={styles.columnList} data-testid="remove-duplicates-column-list">
+            {wide ? (
+              <DialogFieldGrid minColumnWidth={200} rowGap={0}>
+                {columnCheckboxes}
+              </DialogFieldGrid>
+            ) : (
+              columnCheckboxes
+            )}
           </div>
         </div>
 
@@ -465,6 +527,7 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
             OK
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );
