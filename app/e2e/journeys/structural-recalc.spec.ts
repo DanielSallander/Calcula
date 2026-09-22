@@ -75,6 +75,7 @@ import {
   type GridHelper,
 } from "../helpers/grid";
 import { waitForGridStable } from "../helpers/screenshots";
+import { samplePixels, diffCount, type PixelClip } from "../viewportSample";
 
 // ===========================================================================
 // Plumbing — setup and ORACLES only. Never the thing under test.
@@ -365,14 +366,24 @@ async function deleteColAt(page: Page, letter: string): Promise<void> {
 
 // ---------------------------------------------------------------------------
 // Pixels — the canvas really repainted, not just the backend
+//
+// The GEOMETRY stays here (`rangeClip` knows where a cell is); the CAPTURE
+// comes from `../viewportSample`, which screenshots the whole viewport and
+// crops afterwards inside the page. `page.screenshot({ clip })` asks Chromium
+// to put that rectangle on screen, which makes the sampler capable of
+// disturbing what it measures — a hover parked on a control can be cancelled by
+// the capture itself. Nothing here hovers, so this file was never at risk; it
+// hands its decode and its `diffCount` to the shared module because the same
+// twenty lines lived in nine specs and had already drifted apart.
 // ---------------------------------------------------------------------------
 
-interface Clip {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+/**
+ * A rectangle in CSS pixels — the sampler's own input type, not a copy of it.
+ * This was a private `interface Clip` with the same four fields; aliasing the
+ * real one means `rangeClip` and the sampler it feeds cannot drift apart
+ * without the compiler saying so.
+ */
+type Clip = PixelClip;
 
 async function rangeClip(page: Page, from: string, to: string): Promise<Clip> {
   const geo = await readGridGeometry(page);
@@ -380,40 +391,6 @@ async function rangeClip(page: Page, from: string, to: string): Promise<Clip> {
   const box = await page.locator("canvas").first().boundingBox();
   if (!box) throw new Error("grid canvas has no bounding box");
   return { x: box.x + rect.x, y: box.y + rect.y, width: rect.width, height: rect.height };
-}
-
-async function pixels(page: Page, clip: Clip): Promise<number[]> {
-  const png = await page.screenshot({ clip });
-  return page.evaluate(async (b64: string) => {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("no 2d context for pixel decode");
-    ctx.drawImage(bitmap, 0, 0);
-    return Array.from(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
-  }, png.toString("base64"));
-}
-
-function diffCount(a: number[], b: number[]): number {
-  if (a.length !== b.length) {
-    throw new Error(`capture sizes differ (${a.length} vs ${b.length}) — the clip moved`);
-  }
-  let n = 0;
-  for (let i = 0; i < a.length; i += 4) {
-    if (
-      Math.abs(a[i] - b[i]) > 8 ||
-      Math.abs(a[i + 1] - b[i + 1]) > 8 ||
-      Math.abs(a[i + 2] - b[i + 2]) > 8
-    ) {
-      n++;
-    }
-  }
-  return n;
 }
 
 // ===========================================================================
@@ -458,7 +435,7 @@ test.describe.serial("Structural edits recalculate (D8 / §2s) — on the runnin
       expect(await renderedCell(page, "H1"), "control: the SUM over the same range").toBe("150");
       await home(grid);
 
-      const before = await pixels(page, await rangeClip(page, "G1", "G1"));
+      const before = await samplePixels(page, await rangeClip(page, "G1", "G1"));
 
       // --- THE REAL GESTURE ---
       await insertRowAt(page, 3);
@@ -482,7 +459,7 @@ test.describe.serial("Structural edits recalculate (D8 / §2s) — on the runnin
       );
 
       // --- The CANVAS repainted, not just the backend model. ---
-      const after = await pixels(page, await rangeClip(page, "G1", "G1"));
+      const after = await samplePixels(page, await rangeClip(page, "G1", "G1"));
       expect(
         diffCount(before, after),
         "the painted G1 must differ — a '5' and a '6' are different ink",

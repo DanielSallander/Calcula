@@ -47,6 +47,7 @@ import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
 import { parseCellRef, type GridHelper } from "../helpers/grid";
 import { waitForGridStable } from "../helpers/screenshots";
+import { diffCount, samplePixels } from "../viewportSample";
 
 const FILE = path.join(os.tmpdir(), "calcula-computed-property-restore.cala");
 
@@ -178,6 +179,16 @@ async function computedProps(
  * (nothing to do with the header), and the post-reload one "failed" because both
  * captures photographed the same empty patch of grid. A pixel oracle that moves
  * with the camera measures the camera.
+ *
+ * THE DECODE ITSELF IS `../viewportSample`. The geometry above and the scroll
+ * normalisation are this spec's knowledge and stay here; the capture is not.
+ * `samplePixels` photographs the WHOLE viewport and crops afterwards inside the
+ * page, because `page.screenshot({ clip })` asks Chromium to put that rectangle
+ * on screen and is therefore not a passive read (that module's header carries
+ * the measured evidence, and the day it failed to reproduce). This spec never
+ * hovers, so the clip was not hurting it — but its private copy of the decode
+ * and of `diffCount` was one of nine, and nine copies of one fact are how a
+ * threshold drifts in eight places and nobody notices.
  */
 async function captureHeaderBar(grid: GridHelper): Promise<number[]> {
   const page = grid.page;
@@ -191,37 +202,7 @@ async function captureHeaderBar(grid: GridHelper): Promise<number[]> {
     width: SLICER.width,
     height: 32,
   };
-  const png = await page.screenshot({ clip });
-  return page.evaluate(async (b64: string) => {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("no 2d context for the pixel decode");
-    ctx.drawImage(bitmap, 0, 0);
-    return Array.from(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
-  }, png.toString("base64"));
-}
-
-function diffCount(a: number[], b: number[]): number {
-  if (a.length !== b.length) {
-    throw new Error(`capture sizes differ (${a.length} vs ${b.length}) — the clip moved`);
-  }
-  let n = 0;
-  for (let i = 0; i < a.length; i += 4) {
-    if (
-      Math.abs(a[i] - b[i]) > 8 ||
-      Math.abs(a[i + 1] - b[i + 1]) > 8 ||
-      Math.abs(a[i + 2] - b[i + 2]) > 8
-    ) {
-      n++;
-    }
-  }
-  return n;
+  return samplePixels(page, clip);
 }
 
 // ---------------------------------------------------------------------------

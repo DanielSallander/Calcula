@@ -26,6 +26,16 @@ import { test, expect } from "../fixtures";
 import { readGridGeometry, cellRangeRectFrom } from "../helpers/grid";
 // (readGridGeometry / cellRangeRectFrom feed rangeClip below.)
 import { takeRegionScreenshot, waitForGridStable } from "../helpers/screenshots";
+// THE PIXEL SAMPLER IS SHARED, AND IT NEVER CLIPS THE CAPTURE.
+// `page.screenshot({ clip })` is not a passive read: Chromium is asked to put
+// that rectangle on screen, and a control the pointer is PARKED on can receive
+// a `mouseleave` it never earned. This file is the one most exposed to that —
+// three of its samples are taken right after a chart context-menu click, so the
+// pointer is sitting ON the chart, whose renderer tracks a hover datum of its
+// own. `samplePixels` captures the whole viewport and crops afterwards in-page;
+// `diffCount` is the one copy of the comparison that used to live in nine specs
+// at the same threshold. See `e2e/viewportSample.ts` for the full measurement.
+import { diffCount, samplePixels, type PixelClip } from "../viewportSample";
 
 /* eslint-disable @typescript-eslint/naming-convention */
 type AppWindow = Window & {
@@ -79,12 +89,8 @@ async function installAppImport(page: Page): Promise<void> {
   });
 }
 
-interface Clip {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+/** The rectangle shape the samplers take, in CSS pixels. */
+type Clip = PixelClip;
 
 /** The chart's client box, computed the way the renderer places its region. */
 async function chartClientBox(page: Page, chartId: string): Promise<Clip> {
@@ -126,6 +132,87 @@ async function chartClientBox(page: Page, chartId: string): Promise<Clip> {
   return box!;
 }
 
+/**
+ * A point in the chart's OUTER MARGIN, chart-local: inside the canvas, outside
+ * the plot area, and off every piece of furniture the layout measured. That is
+ * the pixel `hitTestChartElements` answers `chartArea` for — and, since the top
+ * and right margins stopped being dead pixels, it is the MOUSE's route from any
+ * element rung back out to the chart object (the keyboard's is Escape).
+ *
+ * Computed from the LIVE layout rather than hard-coded. The margins are a
+ * function of the legend, the axis titles and the tick-label bands, so a fixed
+ * offset would start landing on furniture the first time one of those changed,
+ * and the test would then be asserting something about the legend.
+ *
+ * The search stays clear of three things:
+ *   - every measured element rect, plus 3px, so a click cannot graze one;
+ *   - the top strip (y < COMMENT_TOP_RESERVED-ish, 40px here), which the
+ *     overlay's stepper pill owns — a click there STEPS the cues;
+ *   - 12px of the LEFT and RIGHT canvas edges. The floating region's resize
+ *     handles are the four CORNERS with a 10px half-extent
+ *     (`HANDLE_HIT_SIZE`, core/hooks/useMouseSelection/layout/
+ *     overlayResizeHandlers.ts), and that test is `dx <= 10 && dy <= 10`, so
+ *     keeping x more than 10px from both vertical edges clears all four
+ *     corners at any y. A press on a handle starts a resize and the chart's
+ *     own hit-test never runs.
+ * Among the survivors it takes the one furthest from those bounds, so the
+ * click has the most room around it.
+ */
+async function outerMarginPoint(page: Page, chartId: string): Promise<{ x: number; y: number }> {
+  const probe = await page.evaluate(
+    async ({ chartId, mod }) => {
+      type Rect = { x: number; y: number; width: number; height: number };
+      const m = (await (window as unknown as AppWindow).__appImport!(mod)) as {
+        getCachedChartData: (id: string) => {
+          layout?: {
+            width: number;
+            height: number;
+            plotArea: Rect;
+            elements?: Record<string, unknown>;
+          };
+        } | null;
+      };
+      const layout = m.getCachedChartData(chartId)?.layout;
+      if (!layout) return null;
+      const el = (layout.elements ?? {}) as Record<string, unknown>;
+      // `chartArea` is the whole canvas and is the TARGET, so it is not an
+      // obstacle. Everything else the hit-tester consults is.
+      const blocked: Rect[] = [layout.plotArea];
+      for (const key of ["title", "xAxisTitle", "yAxisTitle", "xAxisBand", "yAxisBand", "legend", "dataTable", "displayUnitLabel"]) {
+        const r = el[key] as Rect | undefined;
+        if (r) blocked.push(r);
+      }
+      for (const key of ["legendItems", "errorBars", "dataLabels"]) {
+        const list = el[key] as Array<{ rect: Rect }> | undefined;
+        if (list) for (const item of list) blocked.push(item.rect);
+      }
+      const PAD = 3;
+      const EDGE = 12; // clears the corner resize handles at any y
+      const PILL_STRIP = 40; // the stepper pill's own strip at the top
+      let best: { x: number; y: number; depth: number } | null = null;
+      for (let y = 2; y <= layout.height - 2; y += 2) {
+        if (y < PILL_STRIP) continue;
+        for (let x = EDGE; x <= layout.width - EDGE; x += 2) {
+          const hit = blocked.some(
+            (r) => x >= r.x - PAD && x <= r.x + r.width + PAD && y >= r.y - PAD && y <= r.y + r.height + PAD,
+          );
+          if (hit) continue;
+          const depth = Math.min(x - EDGE, layout.width - EDGE - x, y - PILL_STRIP, layout.height - y);
+          if (best === null || depth > best.depth) best = { x, y, depth };
+        }
+      }
+      return { best, layout: { width: layout.width, height: layout.height }, blocked };
+    },
+    { chartId, mod: "/extensions/Charts/rendering/chartRenderer.ts" },
+  );
+  expect(probe, `no painted layout for "${chartId}" — nothing to find a margin in`).not.toBeNull();
+  expect(
+    probe!.best,
+    `this chart has no free outer margin: canvas ${JSON.stringify(probe!.layout)}, furniture ${JSON.stringify(probe!.blocked)}`,
+  ).not.toBeNull();
+  return { x: probe!.best!.x, y: probe!.best!.y };
+}
+
 /** Viewport-relative clip of a cell range, from the app's LIVE geometry. */
 async function rangeClip(page: Page, from: string, to: string, pad = 2): Promise<Clip> {
   const geo = await readGridGeometry(page);
@@ -135,31 +222,43 @@ async function rangeClip(page: Page, from: string, to: string, pad = 2): Promise
   return { x: box.x + rect.x - pad, y: box.y + rect.y - pad, width: rect.width + pad * 2, height: rect.height + pad * 2 };
 }
 
-/** Raw RGBA of a clip, decoded in the page. */
-async function pixels(page: Page, clip: Clip): Promise<number[]> {
-  const png = await page.screenshot({ clip });
-  return page.evaluate(async (b64: string) => {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("no 2d context for pixel decode");
-    ctx.drawImage(bitmap, 0, 0);
-    return Array.from(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
-  }, png.toString("base64"));
-}
-
-function diffCount(a: number[], b: number[]): number {
-  if (a.length !== b.length) throw new Error(`capture sizes differ (${a.length} vs ${b.length}) — the clip moved`);
-  let n = 0;
-  for (let i = 0; i < a.length; i += 4) {
-    if (Math.abs(a[i] - b[i]) > 8 || Math.abs(a[i + 1] - b[i + 1]) > 8 || Math.abs(a[i + 2] - b[i + 2]) > 8) n++;
-  }
-  return n;
+/**
+ * Refuse to gesture at a grid pixel that something is sitting on top of.
+ *
+ * The grid canvas keeps its full width when a task pane docks; the pane is
+ * painted OVER it. So a cell centre derived from grid geometry is always a
+ * valid grid coordinate and yet may be unclickable, and a click there lands on
+ * the pane while the grid state stays exactly as it was. The only honest test
+ * is the DOM's own: whatever is topmost at that page point must be inside the
+ * spreadsheet's focus container. The grid's own overlay layers are, and any
+ * docked pane, dialog or menu is not.
+ *
+ * @param pt canvas-relative point, as `cellCenterScrollAware` returns.
+ */
+async function expectGridPixelIsFree(page: Page, pt: { x: number; y: number }, what: string): Promise<void> {
+  const verdict = await page.evaluate((p: { x: number; y: number }) => {
+    const canvas = document.querySelector("canvas");
+    if (!canvas) return { ok: false, why: "no grid canvas in the document", stack: [] as string[] };
+    const r = canvas.getBoundingClientRect();
+    const px = r.left + p.x;
+    const py = r.top + p.y;
+    if (p.x < 0 || p.y < 0 || p.x > r.width || p.y > r.height) {
+      return { ok: false, why: `off-canvas: point (${Math.round(p.x)}, ${Math.round(p.y)}) vs canvas ${Math.round(r.width)}x${Math.round(r.height)}`, stack: [] };
+    }
+    const stack = (document.elementsFromPoint(px, py) as HTMLElement[]).slice(0, 5).map((e) => {
+      const b = e.getBoundingClientRect();
+      const id = e.getAttribute("data-testid") ?? e.id ?? "";
+      return `${e.tagName}${id ? `[${id}]` : ""}.${String(e.className)} @${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)}`;
+    });
+    const top = document.elementFromPoint(px, py);
+    const container = document.querySelector('[data-focus-container="spreadsheet"]');
+    const ok = !!top && !!container && container.contains(top);
+    return { ok, why: ok ? "" : `page point (${Math.round(px)}, ${Math.round(py)}) is covered by something outside the grid`, stack };
+  }, pt);
+  expect(
+    verdict.ok,
+    `${what} is not clickable: ${verdict.why}\n  topmost first: ${verdict.stack.join("\n                 ")}`,
+  ).toBe(true);
 }
 
 interface OverlayView {
@@ -253,6 +352,17 @@ test.describe("Insight overlays, live", () => {
       return created.chartId;
     });
     await appPage.waitForTimeout(1200);
+    // THE CHART IS PLACED IN SHEET COORDINATES (x=60, y=30) BUT SAMPLED IN
+    // VIEWPORT ONES. The journey project shares one running app across specs,
+    // so the viewport arrives wherever the previous spec left it — this run
+    // opened at BF65, which put the whole chart 2663px off the left edge and
+    // every pixel sample below would have been taken of transparent black.
+    // `samplePixels` refuses that outright (viewportSample.ts), which is the
+    // right answer and not something to work around by clipping: scroll the
+    // origin back into view instead, explicitly, so the placement and the
+    // sampling agree about where the chart is.
+    await grid.navigateTo("A1");
+    await appPage.waitForTimeout(300);
     await waitForGridStable(appPage);
 
     await appPage.evaluate((id: string) => {
@@ -261,7 +371,7 @@ test.describe("Insight overlays, live", () => {
     await appPage.waitForTimeout(400);
 
     const box = await chartClientBox(appPage, chartId);
-    const off = await pixels(appPage, box);
+    const off = await samplePixels(appPage, box);
 
     // --- ON, through the chart's context menu -------------------------------
     await chartMenu(appPage, box, "Show points of interest");
@@ -277,7 +387,7 @@ test.describe("Insight overlays, live", () => {
     expect(overlay.step, "stepping is the default").toBe(0);
     expect(overlay.visible, "one point of interest is shown at a time").toBeLessThanOrEqual(overlay.cues.length);
 
-    const on = await pixels(appPage, box);
+    const on = await samplePixels(appPage, box);
     const drawn = diffCount(off, on);
     expect(drawn, "POSITIVE CONTROL: turning the overlay on must change the chart's pixels (a ring, the pill)").toBeGreaterThan(50);
 
@@ -374,15 +484,61 @@ test.describe("Insight overlays, live", () => {
     expect(JSON.parse(await ladderLevel()), "and the ladder has moved to that bar")
       .toMatchObject({ level: "dataPoint", seriesIndex: 0, categoryIndex: unringed });
 
-    // Leave the chart exactly as the overlay found it: chart level, no ring
+    // Leave the chart exactly as the overlay found it: CHART level, no ring
     // selected, step 0 — so every pixel comparison below still compares like
-    // with like. The click lands in the plot BACKGROUND, above the shortest
-    // bar: the TOP of the chart belongs to the stepper pill, which would step
-    // instead of clearing.
+    // with like. That takes TWO gestures, and which one does what is Excel's
+    // model rather than a detail of this test.
+    //
+    //  (1) THE PLOT BACKGROUND SELECTS THE PLOT AREA. It is a rung of the
+    //      ladder in its own right — nameable ("Plot Area"), paintable,
+    //      formattable, and reachable by the Up/Down element walk — and until
+    //      the furniture wave it was keyboard-reachable and MOUSE-unreachable,
+    //      because every non-datum hit funnelled into `{ level: "chart" }`.
+    //      This assertion is a survivor of that era: it read `{ level: "chart" }`
+    //      and was simply describing the defect. Standing on that rung costs
+    //      the reader nothing, because Delete there is a deliberate no-op —
+    //      Excel's Delete on a selected plot area destroys nothing either.
+    //      DO NOT "fix" this back to chart level. `chart-interaction.spec.ts`
+    //      ("a click where the gridlines are selects the PLOT AREA") asserts
+    //      the same pixel from the other side, and the two must agree.
+    //
+    //  (2) THE ROUTE BACK OUT IS THE OUTER MARGIN — outside the plot and off
+    //      every piece of furniture, which `hitTestChartElements` answers
+    //      `chartArea` for. That answer is exactly why the top and right
+    //      margins stopped being dead pixels; Escape is the keyboard's route.
+    //      Taking it here is not tidiness: `arrowsBelongToOverlayStep` requires
+    //      `level === "chart"`, so a ladder left parked on the plot area would
+    //      hand the next section's Right arrow to the element walk and the
+    //      overlay would never step.
+    //
+    // The plot-background click lands above the Jan bar: the TOP of the chart
+    // belongs to the stepper pill, which would step instead of clearing.
     const shortest = await barRect(0);
     await appPage.mouse.click(box.x + shortest.x + shortest.width / 2, box.y + shortest.y - 20);
     await appPage.waitForTimeout(250);
-    expect(JSON.parse(await ladderLevel()), "a click off the data drops back to chart level").toMatchObject({ level: "chart" });
+    expect(
+      JSON.parse(await ladderLevel()),
+      "a click on the plot BACKGROUND selects the plot area, as in Excel — not a way out of the chart",
+    ).toMatchObject({ level: "element", elementId: "plotArea" });
+    // And it clears the ring selection, because the assignment is
+    // UNCONDITIONAL (insight-overlays.md §5h): a click that lands on no cue
+    // clears it wherever it lands, background or unringed bar alike. Asserted
+    // here as well as on the bar above, since this is the gesture the rest of
+    // the journey relies on for its clean slate.
+    selected = await appPage.evaluate(
+      async ({ chartId, mod }) => ((await (window as unknown as AppWindow).__appImport!(mod)) as { getSelectedChartCue: (id: string) => { cueId: string; anchor: Record<string, unknown> } | null }).getSelectedChartCue(chartId),
+      { chartId, mod: CHART_CUES },
+    );
+    expect(selected, "a click on no cue clears the selected ring, plot background included").toBeNull();
+
+    const margin = await outerMarginPoint(appPage, chartId);
+    console.log(`[overlay-journey] outer-margin probe at chart-local (${margin.x}, ${margin.y})`);
+    await appPage.mouse.click(box.x + margin.x, box.y + margin.y);
+    await appPage.waitForTimeout(250);
+    expect(
+      JSON.parse(await ladderLevel()),
+      "the chart's outer margin is the mouse's way back out to chart level",
+    ).toMatchObject({ level: "chart" });
     await appPage.evaluate(
       async ({ chartId, mod }) => ((await (window as unknown as AppWindow).__appImport!(mod)) as { setChartCueStep: (id: string, s: number | "all") => void }).setChartCueStep(chartId, 0),
       { chartId, mod: CHART_CUES },
@@ -405,7 +561,7 @@ test.describe("Insight overlays, live", () => {
     overlay = await overlayOf(appPage, chartId);
     if (steps.length > 1) {
       expect(overlay.step, "the Right arrow steps to the next point of interest").toBe(1);
-      const stepped = await pixels(appPage, box);
+      const stepped = await samplePixels(appPage, box);
       expect(diffCount(on, stepped), "stepping must move the ring (the pixels must change)").toBeGreaterThan(20);
       await appPage.keyboard.press("ArrowLeft");
       await appPage.waitForTimeout(300);
@@ -442,12 +598,61 @@ test.describe("Insight overlays, live", () => {
     await appPage.waitForTimeout(800);
     overlay = await overlayOf(appPage, chartId);
     expect(overlay.comments.map((c) => [c.text, c.cueId, c.anchor?.categoryLabel])).toEqual([["Launch month", highest!.cueId, "Aug"]]);
-    const commented = await pixels(appPage, box);
+    const commented = await samplePixels(appPage, box);
     expect(diffCount(on, commented), "the comment box must be painted").toBeGreaterThan(20);
+
+    // THE MENU GESTURE LEFT THE PLOT AREA SELECTED, and that is correct.
+    // `chartMenu` right-clicks the plot background, and the context-menu
+    // handler STATES the rung outright (`setSubSelection(..., "plotArea")`)
+    // rather than nudging the ladder — deliberately, so that a right-click and
+    // a left-click on one pixel can never name two different rungs. Excel does
+    // the same: right-clicking the plot area selects it and shows its handles.
+    expect(
+      JSON.parse(await ladderLevel()),
+      "the right-click that opened the comment menu selects the same rung its left-click would",
+    ).toMatchObject({ level: "element", elementId: "plotArea" });
 
     // The stored baseline: every cue, the pill, the selected ring and the
     // comment, on the seeded data. The pointer is parked off the chart first
-    // so no hover tooltip rides into the frame.
+    // so no hover tooltip rides into the frame — and the ladder is parked back
+    // at chart level first too, for the same reason. This golden is a picture
+    // of the OVERLAY; the plot area's selection frame and its eight handles
+    // are chrome from the gesture that opened the menu, and leaving them in
+    // the image would mean re-blessing it every time the selection painter
+    // moves a handle by a pixel.
+    //
+    // NOT Escape, although Escape is the keyboard's way up the ladder: it is
+    // REFUSED here, and correctly. `chartOwnsKeystroke` requires GRID FOCUS,
+    // and the comment prompt's OK button still holds it — that is the gate
+    // whose own header records Delete destroying a chart while a button in the
+    // chart's Format pane had focus. Measured, not assumed: this assertion was
+    // written as an Escape first and the ladder did not move.
+    //
+    // So the mouse route again, and the cue re-selected afterwards, because a
+    // click that lands on no cue clears the selection wherever it lands — and
+    // the ring on Aug has to be the SELECTED one in the golden. It is set the
+    // same way it was set above, through the store.
+    const marginAgain = await outerMarginPoint(appPage, chartId);
+    await appPage.mouse.click(box.x + marginAgain.x, box.y + marginAgain.y);
+    await appPage.waitForTimeout(250);
+    expect(
+      JSON.parse(await ladderLevel()),
+      "the outer margin walks the ladder back out of the plot area to the chart",
+    ).toMatchObject({ level: "chart" });
+    await appPage.evaluate(
+      async ({ chartId, mod, cueId }) => {
+        const m = (await (window as unknown as AppWindow).__appImport!(mod)) as {
+          setSelectedChartCue: (id: string, c: string | null) => void;
+        };
+        m.setSelectedChartCue(chartId, cueId);
+      },
+      { chartId, mod: CHART_CUES, cueId: highest!.cueId },
+    );
+    await appPage.waitForTimeout(300);
+    expect(
+      (await overlayOf(appPage, chartId)).selectedCueId,
+      "the golden shows the SELECTED ring on Aug, so it has to be selected again after the click cleared it",
+    ).toBe(highest!.cueId);
     await appPage.mouse.move(4, 4);
     await appPage.waitForTimeout(300);
     await takeRegionScreenshot(appPage, "insight-overlay-chart-all", box);
@@ -585,11 +790,49 @@ test.describe("Insight overlays, live", () => {
     // --- THE RANGE, through the grid context menu ---------------------------
     await appPage.evaluate(() => (window as unknown as AppWindow).__CALCULA_CHARTS__!.deselectChart?.());
     await appPage.keyboard.press("Escape");
+    // CLEAR THE GRID OF FURNITURE FIRST. The grid canvas keeps its FULL WIDTH
+    // when a task pane docks — the pane is painted ON TOP of it, it does not
+    // shrink the canvas element. So a cell centre computed from grid geometry
+    // is always a valid grid coordinate and can still be unclickable, and a
+    // click there lands on the pane while the grid state stays exactly as it
+    // was: the range simply never forms, with nothing anywhere saying why.
+    //
+    // Measured live, not guessed: the journey project shares ONE app across
+    // spec files, chart-interaction.spec.ts sorts before this one, and it
+    // leaves the chart Format pane open — 319x520 at page x>=961. With the
+    // viewport parked at AE1 (below), AA13 computes to page x=974, under it.
+    // `deselectChart()` + Escape above does NOT close it: that pane belongs to
+    // the previous spec's chart, not to ours. Close it the way a user would.
+    const paneCloser = appPage.locator('button[title="Close Task Pane"]');
+    if (await paneCloser.count()) {
+      const leftOver = await appPage.evaluate(() =>
+        Array.from(document.querySelectorAll("[data-testid]"))
+          .filter((e) => /pane/i.test(e.getAttribute("data-testid") ?? ""))
+          .map((e) => e.getAttribute("data-testid")),
+      );
+      console.log(`[overlay-journey] closing a task pane left open by an earlier spec: ${JSON.stringify(leftOver)}`);
+      // `.click()` ON THE ELEMENT, not a synthesised mouse press at its centre.
+      // Playwright's click hit-tests the page first, and in a full journey run
+      // this timed out for 30s against "<div>…</div> intercepts pointer
+      // events" — some other spec's overlay was painted across the button.
+      // This is CLEANUP of another spec's residue, not the behaviour under
+      // test, so the honest thing is to invoke the product's own close handler
+      // on the product's own button and not to assert anything about whether
+      // that button was reachable by mouse at this instant.
+      await paneCloser.first().evaluate((el: HTMLElement) => el.click());
+      await appPage.waitForTimeout(400);
+    }
     // The Name Box scrolls MINIMALLY: jumping to Z1 parks Z at the right edge
     // and leaves AA off-canvas, so the shift-click that extends the selection
     // aims at nothing (measured on this spec's first run). Reveal a column
     // past the data first; then both columns are on screen for the gesture.
     await grid.navigateTo("AE1");
+    // Then prove the three pixels this section clicks are actually reachable,
+    // so the NEXT thing that paints over the grid fails by naming itself
+    // rather than as a baffling selection mismatch 40 lines further down.
+    await expectGridPixelIsFree(appPage, await grid.cellCenterScrollAware(`${CAT_COL_LETTER}1`), "Z1");
+    await expectGridPixelIsFree(appPage, await grid.cellCenterScrollAware(`${DATA_COL_LETTER}13`), "AA13");
+    await expectGridPixelIsFree(appPage, await grid.cellCenterScrollAware(`${DATA_COL_LETTER}5`), "AA5");
     await grid.selectRange(`${CAT_COL_LETTER}1`, `${DATA_COL_LETTER}13`);
     await appPage.waitForTimeout(300);
     const sel = await appPage.evaluate(
@@ -599,7 +842,7 @@ test.describe("Insight overlays, live", () => {
       startRow: 0, startCol: 25, endRow: 12, endCol: 26,
     });
     const cells = await rangeClip(appPage, `${CAT_COL_LETTER}1`, `${DATA_COL_LETTER}13`);
-    const cellsOff = await pixels(appPage, cells);
+    const cellsOff = await samplePixels(appPage, cells);
 
     // Right-click INSIDE the selection, in absolute page coordinates.
     const insideClip = await rangeClip(appPage, `${DATA_COL_LETTER}5`, `${DATA_COL_LETTER}5`, 0);
@@ -629,7 +872,7 @@ test.describe("Insight overlays, live", () => {
     expect(highestCell, `the sheet must mark the highest month's cell; got ${JSON.stringify(cellCues.cues.map((c) => c.description))}`).toBeTruthy();
     // Dec is now 900: row 13 in user terms is row index 12; Sales is column AA = 26.
     expect(highestCell).toMatchObject({ row: 12, col: 26, sheetIndex: 0 });
-    const cellsOn = await pixels(appPage, cells);
+    const cellsOn = await samplePixels(appPage, cells);
     expect(diffCount(cellsOff, cellsOn), "POSITIVE CONTROL: the cell decoration must be painted").toBeGreaterThan(20);
     await appPage.mouse.move(4, 4);
     await appPage.waitForTimeout(300);

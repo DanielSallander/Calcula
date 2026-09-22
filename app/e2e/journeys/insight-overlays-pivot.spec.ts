@@ -42,6 +42,16 @@ import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
 import { readGridGeometry, cellRangeRectFrom } from "../helpers/grid";
 import { takeRegionScreenshot, waitForGridStable } from "../helpers/screenshots";
+// THE PIXEL SAMPLER IS SHARED, AND IT NEVER CLIPS THE CAPTURE.
+// `page.screenshot({ clip })` is not a passive read: Chromium is asked to put
+// that rectangle on screen, and a control the pointer is PARKED on can receive
+// a `mouseleave` it never earned. Both of this file's sampling moments follow a
+// click inside the pivot, so the pointer sits inside the very rectangle being
+// measured. `samplePixelPatches` also takes BOTH patches out of ONE capture:
+// the Gadgets cell lies inside the pivot rectangle, and two captures are two
+// frames — a repaint between them would put half the evidence on each side of
+// it. See `e2e/viewportSample.ts` for the measurement behind all of this.
+import { diffCount, samplePixelPatches, type PixelClip } from "../viewportSample";
 
 /* eslint-disable @typescript-eslint/naming-convention */
 type AppWindow = Window & {
@@ -122,12 +132,8 @@ function colLetters(index: number): string {
 
 const ref = (row: number, col: number): string => `${colLetters(col)}${row + 1}`;
 
-interface Clip {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+/** The rectangle shape the samplers take, in CSS pixels. */
+type Clip = PixelClip;
 
 async function rangeClip(page: Page, from: string, to: string, pad = 2): Promise<Clip> {
   const geo = await readGridGeometry(page);
@@ -135,32 +141,6 @@ async function rangeClip(page: Page, from: string, to: string, pad = 2): Promise
   const box = await page.locator("canvas").first().boundingBox();
   if (!box) throw new Error("grid canvas has no bounding box");
   return { x: box.x + rect.x - pad, y: box.y + rect.y - pad, width: rect.width + pad * 2, height: rect.height + pad * 2 };
-}
-
-async function pixels(page: Page, clip: Clip): Promise<number[]> {
-  const png = await page.screenshot({ clip });
-  return page.evaluate(async (b64: string) => {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("no 2d context for pixel decode");
-    ctx.drawImage(bitmap, 0, 0);
-    return Array.from(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
-  }, png.toString("base64"));
-}
-
-function diffCount(a: number[], b: number[]): number {
-  if (a.length !== b.length) throw new Error(`capture sizes differ (${a.length} vs ${b.length}) — the clip moved`);
-  let n = 0;
-  for (let i = 0; i < a.length; i += 4) {
-    if (Math.abs(a[i] - b[i]) > 8 || Math.abs(a[i + 1] - b[i + 1]) > 8 || Math.abs(a[i + 2] - b[i + 2]) > 8) n++;
-  }
-  return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -381,8 +361,10 @@ test.describe("Insight overlays on a BI pivot, live", () => {
     await appPage.waitForTimeout(300);
     const pivotClip = await rangeClip(appPage, pivotFrom, pivotTo);
     const cellClip = await rangeClip(appPage, gadgetsRef, gadgetsRef, 0);
-    const off = await pixels(appPage, pivotClip);
-    const cellOff = await pixels(appPage, cellClip);
+    // ONE capture, two crops: the Gadgets cell lies INSIDE the pivot rectangle,
+    // so two separate captures could photograph two different frames and the
+    // "before" of the cell would not be the "before" of the pivot around it.
+    const [off, cellOff] = await samplePixelPatches(appPage, [pivotClip, cellClip]);
 
     // --- DIAGNOSTICS FIRST: the model's facts, and the mapper over the view --
     // Two direct calls, so a failure further down names its stage: what Rust
@@ -504,9 +486,12 @@ test.describe("Insight overlays on a BI pivot, live", () => {
       expect(c.row >= where.region.startRow && c.row <= where.region.endRow && c.col >= where.region.startCol && c.col <= where.region.endCol, `every cue lies inside the pivot: ${JSON.stringify(c)}`).toBe(true);
     }
 
-    const cellOn = await pixels(appPage, cellClip);
+    // The matching "after", again from ONE capture — and the two assertions
+    // moved BELOW it, because they used to sit between the two captures and so
+    // guaranteed a gap (and a repaint's worth of risk) between the cell's frame
+    // and the pivot's.
+    const [cellOn, on] = await samplePixelPatches(appPage, [cellClip, pivotClip]);
     expect(diffCount(cellOff, cellOn), "POSITIVE CONTROL: the Gadgets cell's pixels must change").toBeGreaterThan(10);
-    const on = await pixels(appPage, pivotClip);
     expect(diffCount(off, on)).toBeGreaterThan(10);
     await appPage.mouse.move(4, 4);
     await appPage.waitForTimeout(300);

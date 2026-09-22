@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 128,
+  "nextId": 130,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4712,6 +4712,73 @@
         ]
       },
       "notes": "Documented in docs/design/chart-interaction.md sections 6.11 (the band) and 6.13 (the font-size and derived-view follow-ups)."
+    },
+    {
+      "id": "BUG-0128",
+      "status": "fixed",
+      "discovered": "2026-09-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Found while verifying the chart-interaction / viewportSample work, 2026-09-22; reproduced and pinned as a unit test in the same pass."
+      },
+      "violation": {
+        "oracleId": "inline-editor-self-measurement-never-settles",
+        "message": "The grid's in-cell editor measures itself in a useLayoutEffect that had NO DEPENDENCY ARRAY, and the measurement feeds the size that feeds the next measurement (contentHeight is read at the box's current WIDTH, and the width is computed from measured.layerWidth, which the same effect sets). Its only bail-out was a FIXED-POINT test inside setMeasured -- 'the triple I just read equals the triple I am holding'. A fixed-point test cannot see a 2-CYCLE: a measurement that reads A, B, A, B never equals the value in state, so every pass committed, every commit re-ran the effect, and React threw 'Maximum update depth exceeded'. RootErrorBoundary then takes the whole window down while the user is halfway through typing a cell.",
+        "severity": "high"
+      },
+      "whyNobodyNoticed": "jsdom has no layout engine: scrollHeight is 0 and offsetParent is null, so the effect returns at its first guard in almost every unit test and the feedback path was never executed. The one file that emulates the two properties (InlineEditor.wrap.test.tsx) supplies a CONSTANT content height, which is a fixed point by construction. Convergence in the shipped app rests on the grid canvas layer being 'overflow: hidden' and absolutely positioned so its clientWidth/clientHeight cannot be changed by the editor -- an accident of CSS in Spreadsheet.styles.ts, three files away, that nothing states and nothing enforces. The effect also ran after EVERY render (including every parent render), so it forced a synchronous reflow of the grid on every keystroke, scroll frame and selection change, and nothing measured that either.",
+      "repro": {
+        "kind": "unit",
+        "description": "app: npx vitest run src/core/components/InlineEditor/InlineEditor.measureLoop.test.tsx. Two shapes, both of which threw 'Maximum update depth exceeded' against the pre-fix component: (1) 'settles when the measured content height ALTERNATES between two values' -- scrollHeight flips between LINE and 3*LINE on successive measurement passes; (2) 'settles when the oscillation reaches the box WIDTH' -- the grid layer reports 500 and 700 alternately, both narrower than the entry wants, so the clamped width really does change on every pass. (2) is the one that proves a dependency array alone is not the fix."
+      },
+      "triage": {
+        "verdict": "app",
+        "confidence": "high",
+        "rootCauseHypothesis": "A self-referential measurement whose termination test recognises only a fixed point. The component cannot see the CSS of the element it measures, so it cannot prove the measurement converges; it must instead be built to survive one that does not."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "Two independent guards, because there are two separable loops and neither guard covers the other (each is pinned by its own sabotage). (a) A real dependency array, [measureEpoch, expandedWidth]: the measurement's genuine inputs are the entry text, the applied box width, the cell's base geometry and zoom. contentHeight is an OUTPUT, so a new content height can no longer re-trigger the effect that produced it -- that ends loop (1) and also ends the forced reflow on every parent render. The capability the missing dependency array was silently providing (the layer can change size with no prop of this component changing -- a task pane, a window resize) is kept, but subscribed to as the event it is: a ResizeObserver on the grid layer plus a window resize listener, bumping layerTick, which is part of the epoch. (b) MAX_SETTLE_PASSES = 4, a budget of re-measurements per measurement epoch. Loop (2) reaches expandedWidth, which IS a dependency, so the dependency array does not end it -- the dep genuinely changed on every pass. A budget bounds a cycle of ANY length, where a cleverer equality test would only bound the lengths it was written for. When the budget runs out the box freezes at what it last read: one line wrong beats a window that is gone.",
+        "filesChanged": [
+          "app/src/core/components/InlineEditor/InlineEditor.tsx",
+          "app/src/core/components/InlineEditor/InlineEditor.measureLoop.test.tsx"
+        ]
+      },
+      "notes": "Sabotages, all run and all confirmed to change behaviour: removing the dependency array fails 'does not re-measure on a render that cannot have changed the layout' (4 measurements vs 2) while the budget still keeps the window alive; removing the budget (dependency array left in place) fails 'settles when the oscillation reaches the box WIDTH' with the real 'Maximum update depth exceeded'; raising MAX_SETTLE_PASSES to 100000 fails the same test, so the constant's VALUE is load-bearing and not merely the presence of the code. The first attempt at sabotage (b) was a NO-OP -- the repro as first written did not actually oscillate the width, because both layer widths were wider than the entry wanted and the clamp returned the same number each pass; the repro was corrected until it failed. A dependency array's own failure mode is the mirror image (not re-running when it should), so the same file adds the component-level coverage that did not exist: growing and shrinking text, a long formula, a zoom change, a scroll under the open editor, a column resize, and a window resize with no prop change."
+    },
+    {
+      "id": "BUG-0129",
+      "status": "fixed",
+      "discovered": "2026-09-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Found by the journey triage of the chart-interaction programme, 2026-09-22; reproduced alone on a fresh app and fixed in the same pass."
+      },
+      "violation": {
+        "oracleId": "delete-on-a-selected-floating-control-clears-cells-instead",
+        "message": "Pressing Delete with a floating control (shape, button, picture, checkbox) selected no longer deleted the control -- it CLEARED THE CELLS under the grid selection instead, and the control survived. Chain, each link measured live: (1) gridShouldTakeKeyboardFocus (app/src/core/components/Spreadsheet/gridPointerEntry.ts) began focusing [data-focus-container=\"spreadsheet\"] on every unclaimed grid mousedown -- the 'the grid takes the keyboard when it takes the press' change. (2) isGridFocused() is therefore TRUE after a Design-Mode click on a control. (3) handleGlobalKeyDown (app/src/api/keybindings.ts) is a capture-phase listener on WINDOW; its grid-scoped skip no longer fired, so the built-in Delete binding core.clearContents matched and ran preventDefault() + stopPropagation(). (4) The Controls extension's own handler was a capture-phase listener on DOCUMENT, i.e. strictly downstream of window capture, so it never ran and getSelectedFloatingControls() was never consulted. Not an inert dead key: a silent data-loss path.",
+        "severity": "high"
+      },
+      "whyNobodyNoticed": "The document listener had worked for as long as the grid did NOT take focus on a press, so nothing in it looked wrong and the change that broke it is three files away in Core with no textual connection to Controls. No unit test can see it either: the defect is an ORDERING property of two global listeners on two different event targets, and both are installed by side effect during extension activation, so it only exists in an assembled app. The live journey that caught it (e2e/journeys/shapes-hometab.spec.ts test 5) was already written and already failing in the full journey run, but was being read as run cascade rather than as a defect until it was re-run alone on a fresh app.",
+      "repro": {
+        "kind": "e2e",
+        "description": "app: npx playwright test --project=journey e2e/journeys/shapes-hometab.spec.ts -g \"5. deleting a BUTTON\". Fails at the assertion 'the button is gone from the backend' -- the control is still there after Delete. Reproduces alone on a fresh app, not only in the full run."
+      },
+      "triage": {
+        "verdict": "app",
+        "confidence": "high",
+        "rootCauseHypothesis": "An extension claimed a key with a global DOM listener rather than through the keybinding registry, so its claim could only ever be as strong as its position in the event path. The registry exists precisely to arbitrate this, and it already had the right instrument -- a `when` predicate, which the dispatcher prefers over an unguarded built-in because registration order cannot express 'only while my subject is selected'."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "Controls now claims Delete and Backspace through the registry with a `when` guard (getSelectedFloatingControls().size > 0 && isGridFocused()), mirroring the pattern Charts already uses for ext.charts.deleteSelection, and the pre-empted document capture listener is retired. Going through the registry also replaces three hand-rolled gates with the dispatcher's own: context: \"not-editing\" IS isEditing() || isClaimedKeystroke(event), which is the INPUT/TEXTAREA/contentEditable tag list plus the isKeyClaimed check; the dispatcher does the preventDefault/stopPropagation; and the guard adds a gate the old listener never had -- isGridFocused() -- which is the same defect Charts had already fixed ('select the object, click a button in a task pane, press Delete' used to destroy the object). Backspace carried no built-in binding and so was never pre-empted, but it is registered here too rather than left on a retired listener, because two answers to one question is how the next change moves the bug instead of fixing it.",
+        "filesChanged": [
+          "app/extensions/Controls/index.ts"
+        ]
+      },
+      "notes": "Verified by state change on one binary, not by a diff (git was denied in the session): shapes-hometab test 5 failed alone on a fresh app before the change and the whole 8-test file passed after it, same app.exe. The negative half was proved separately -- Delete with NO control selected must still clear cells -- by re-running spill-delete, undo-across-open, remaining-correctness and report-store (26/26 green), which includes the dedicated 'Delete on the origin' spill tests. Two further instances of the same class were NOT fixed and remain open: extensions/Controls/index.ts handleControlKeyboard and extensions/Controls/components/ControlContextMenu.tsx are document-level listeners on the same door, and anything that relied on 'the grid is not focused, so the grid-scoped binding is skipped' silently changed meaning when the grid started taking focus on press."
     }
   ]
 }

@@ -165,7 +165,24 @@
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
-import { samplePixels } from "../viewportSample";
+// THE SAMPLER AND THE COMPARISON ARE SHARED, AND THE CAPTURE IS NEVER CLIPPED.
+//
+// `samplePixels` photographs the WHOLE viewport and crops afterwards, inside
+// the page. This file is the one that paid for that: it measures a LIVE HOVER
+// (the Format pane's colour preview, test 8 below), and for four consecutive
+// runs it reported "the preview never paints" while the product was painting it
+// in ~85 ms every time. Read `../viewportSample.ts` before changing anything
+// here — its header carries BOTH the measured reproduction that indicted the
+// clipped capture AND the re-probe, the same day on the same machine, that
+// could not reproduce the cancelled hover and found a ~130 ms timing gap
+// instead. Either way the unclipped path is the one that has run 15/15 twice on
+// the surface that failed; the local wrapper this file used to carry is gone,
+// and `pixels` is now just that shared sampler under this file's own name.
+//
+// `diffCount` comes from the same module. It used to live here as a tenth
+// private copy of the identical twenty lines — the same one-fact-many-spellings
+// shape as the product defects this wave fixed.
+import { diffCount, samplePixels as pixels, type PixelClip } from "../viewportSample";
 import * as os from "os";
 import * as path from "path";
 
@@ -255,12 +272,14 @@ async function invoke<T = unknown>(page: Page, cmd: string, args: unknown = {}):
   ) as Promise<T>;
 }
 
-interface Clip {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+/**
+ * A rectangle in CSS pixels — the sampler's own input type, not a copy of it.
+ *
+ * This was a private `interface Clip` with the same four fields. Aliasing the
+ * real one means a geometry helper here and the sampler it feeds can never
+ * disagree about the shape without the compiler saying so.
+ */
+type Clip = PixelClip;
 
 interface Rect {
   x: number;
@@ -420,23 +439,6 @@ async function settleGrid(page: Page, budgetMs = 3000): Promise<void> {
 }
 
 /**
- * Raw RGBA of a clip, decoded in the page — and NOT through
- * `page.screenshot({ clip })`.
- *
- * THE INSTRUMENT USED TO CANCEL WHAT IT WAS POINTED AT. This file measures a
- * LIVE HOVER (the Format pane's colour preview, test 8 below), and a clipped
- * capture moves Chromium's viewport onto the clip: the pointer's hit-test
- * moves with it, the hovered swatch gets a `mouseleave` it never earned, and
- * the preview ends before the first sample is taken. Four runs in a row
- * reported "the preview never paints"; the product had painted it in ~85 ms
- * every time and the capture had ended it. The proof, and the four-way probe
- * that isolated the clip as the cause, are in `../viewportSample.ts`.
- */
-async function pixels(page: Page, clip: Clip): Promise<number[]> {
-  return samplePixels(page, clip);
-}
-
-/**
  * The mean colour of a clip.
  *
  * `diffCount` answers "did these pixels change", which is the right question for
@@ -467,15 +469,6 @@ function channelGap(a: { r: number; g: number; b: number }, b: { r: number; g: n
 
 function rgbText(c: { r: number; g: number; b: number }): string {
   return `rgb(${c.r},${c.g},${c.b})`;
-}
-
-function diffCount(a: number[], b: number[]): number {
-  if (a.length !== b.length) throw new Error(`capture sizes differ (${a.length} vs ${b.length}) — the clip moved`);
-  let n = 0;
-  for (let i = 0; i < a.length; i += 4) {
-    if (Math.abs(a[i] - b[i]) > 8 || Math.abs(a[i + 1] - b[i + 1]) > 8 || Math.abs(a[i + 2] - b[i + 2]) > 8) n++;
-  }
-  return n;
 }
 
 // ---------------------------------------------------------------------------

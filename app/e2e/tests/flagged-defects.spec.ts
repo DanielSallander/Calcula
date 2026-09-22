@@ -33,6 +33,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test, expect } from "../fixtures";
+import { samplePixels, diffCount } from "../viewportSample";
 
 // --- Geometry: columns this spec owns -------------------------------------
 const COL_E = 4; // aggregate DATA
@@ -439,7 +440,15 @@ test.describe("1. SUBTOTAL: manual hide vs filter hide", () => {
           height: 6 * cfg.defaultCellHeight,
         };
       });
-      const pixelsBefore = await page.screenshot({ clip });
+      // Sampled through `../viewportSample`: the capture is of the WHOLE
+      // viewport and the crop happens afterwards, inside the page. A clipped
+      // capture asks Chromium to put that rectangle on screen, so the sampler
+      // can disturb what it is measuring — a hover parked on a control has been
+      // measured being cancelled by the capture itself. The gesture here is a
+      // right-click menu, which leaves the pointer on the row header; nothing
+      // depends on a live hover, so this was never at risk. It moves anyway so
+      // that one decode exists instead of nine.
+      const pixelsBefore = await samplePixels(page, clip);
 
       // --- the real gesture: right-click the row header, click Hide ---
       await hideRowViaUI(page, HIDE_ROW);
@@ -451,12 +460,23 @@ test.describe("1. SUBTOTAL: manual hide vs filter hide", () => {
       expect(after.sub9, "SUBTOTAL(9) must STILL COUNT a hand-hidden row").toBe("150");
       expect(after.sub1, "SUBTOTAL(1) average must still count it").toBe("30");
 
-      const pixelsAfter = await page.screenshot({ clip });
+      const pixelsAfter = await samplePixels(page, clip);
+      // THE COMPARISON CHANGED MEANING WHEN THE SAMPLER DID, deliberately. The
+      // old assertion was `Buffer.compare` over two PNGs, which flags ANY byte
+      // — including encoder noise that never reached a pixel. `diffCount`
+      // counts pixels whose R, G or B moved by MORE than 8, so it is strictly
+      // the stronger claim: real repainted ink, not a different compression of
+      // the same picture. The gesture takes 150 to 140 in a rendered total, far
+      // above that hair; the count is printed so a future shrink toward zero is
+      // visible before it becomes a flake. `diffCount(a, b, 0)` would restore
+      // byte-level strictness if it ever needed to.
+      const repainted = diffCount(pixelsBefore, pixelsAfter);
+      console.log(`[flagged-defects] totals repaint: ${repainted} device pixels changed`);
       expect(
-        Buffer.compare(pixelsBefore, pixelsAfter),
+        repainted,
         "the totals must REPAINT on hide — a value that only updates on a later " +
           "unrelated edit is the bug, not the fix",
-      ).not.toBe(0);
+      ).toBeGreaterThan(0);
 
       // --- unhide through the real UI: everything comes back ---
       // Span the gap from the visible row ABOVE the hide to the last data row.

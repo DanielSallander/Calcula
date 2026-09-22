@@ -143,6 +143,28 @@ async function argSeparator(page: Page): Promise<string> {
   return locale.listSeparator || ",";
 }
 
+/** The decimal separator this build's locale uses — `.` on en-US, `,` on sv-SE. */
+async function decimalSeparator(page: Page): Promise<string> {
+  const locale = await invoke<{ decimalSeparator?: string }>(page, "get_locale_settings", {});
+  return locale.decimalSeparator || ".";
+}
+
+/**
+ * A numeric LITERAL respelled the way this machine's regional format writes it.
+ *
+ * THE HEADER'S LOCALE RULE APPLIED TO THE INPUT SIDE. Every numeric ASSERTION
+ * in this file already accepts either decimal separator (`numberFrom`), but the
+ * fixtures were typed with a hard-coded `.` — and a typed entry is parsed, not
+ * stored verbatim. `update_cell` runs the engine's typed-entry ladder
+ * (`core/engine/src/typed_entry.rs`), whose number rung accepts ONLY the
+ * locale's own decimal separator (`core/engine/src/number_text.rs`,
+ * `ParsePolicy::ENTRY`). Write `"1234.56"` on the sv-SE machine this suite runs
+ * on and it falls through every rung to TEXT.
+ */
+function localeNumber(literal: string, decimal: string): string {
+  return decimal === "." ? literal : literal.replace(".", decimal);
+}
+
 /** A number read out of a display string, tolerant of either decimal separator. */
 function numberFrom(display: string): number {
   // GROUPING FIRST, THEN THE DECIMAL MARK. A single `.replace(",", ".")` is a
@@ -173,8 +195,38 @@ test.describe("open-items §1 owner calls, proved live", () => {
 
     // CP1 = 1234.56, CP2 = -1234.56. The pair is the point: the positive must
     // be untouched by a change that only concerns negatives.
-    await invoke(appPage, "update_cell", { row: 0, col: 93, value: "1234.56" });
-    await invoke(appPage, "update_cell", { row: 1, col: 93, value: "-1234.56" });
+    //
+    // SPELLED IN THE MACHINE'S OWN REGIONAL FORMAT — see `localeNumber`. Typed
+    // with a hard-coded `.`, this fixture had ONE of its two cells parse on an
+    // sv-SE machine, and the failure looked like the subject of the test rather
+    // than like a fixture:
+    //
+    //   CP1 "1234.56"   the number rung refuses a foreign decimal mark, the
+    //                   date rung refuses it too, there is no leading sign, so
+    //                   the ladder's last line stores it as TEXT. A text cell
+    //                   accepts a currency style and paints no currency, so CP1
+    //                   rendered a bare "1234.56" and the FIRST assertion —
+    //                   "the currency symbol must still be painted" — failed
+    //                   with nothing whatever to do with negative currency.
+    //   CP2 "-1234.56"  survived by accident. A leading minus that is not a
+    //                   number starts a FORMULA, and a formula's decimals are
+    //                   invariant, so this half went in as `=-1234.56` and did
+    //                   become the number the test wanted.
+    //
+    // One of a matched pair parsing and the other not is the worst shape a
+    // fixture can take: the test still asserts everything it used to, and both
+    // cells are now literal numbers in every locale. No assertion below changed.
+    const dec = await decimalSeparator(appPage);
+    await invoke(appPage, "update_cell", {
+      row: 0,
+      col: 93,
+      value: localeNumber("1234.56", dec),
+    });
+    await invoke(appPage, "update_cell", {
+      row: 1,
+      col: 93,
+      value: localeNumber("-1234.56", dec),
+    });
     await applyFormatThroughProduct(appPage, [0, 1], [93], { numberFormat: "currency_usd" });
 
     const positive = await renderedCell(appPage, "CP1");

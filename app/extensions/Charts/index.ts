@@ -1445,7 +1445,19 @@ function activate(context: ExtensionContext): void {
     // selected — and "Add comment on this point…" then wrote the reader's
     // words onto a bar they had already clicked away from. The assignment is
     // unconditional now: a click that lands on no cue CLEARS the selection,
-    // exactly as a click on the plot background drops the ladder to chart level.
+    // because every click on a chart NAMES what it actually landed on instead
+    // of leaving the last thing selected.
+    //
+    // DO NOT restate that as "exactly as a click on the plot background drops
+    // the ladder to chart level" — it did say that, and it is false.
+    // `hitTestChartElements` (rendering/chartHitTesting.ts) answers `plotArea`
+    // for ANY non-datum pixel inside `layout.plotArea`, and `advanceSelection`
+    // (handlers/selectionHandler.ts) then parks the ladder on
+    // `{level:"element", elementId:"plotArea"}`. Only the OUTER MARGIN returns
+    // to chart level. That is Excel's model and it is asserted on the same
+    // pixel by both e2e/journeys/chart-interaction.spec.ts and
+    // e2e/journeys/insight-overlays.spec.ts — so a reader who "fixes" the
+    // behaviour to match the old sentence breaks two live journeys.
     if (getChartOverlay(click.chartId).cues.length > 0) {
       const datumHit = hitTestGeometry(local.localX, local.localY, cachedData.hitGeometry, cachedData.layout);
       const cue = isDatumHit(datumHit) ? cueAtDatum(visibleChartCues(click.chartId), datumHit) : null;

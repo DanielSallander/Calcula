@@ -42,6 +42,16 @@ import * as path from "node:path";
 import { test, expect } from "../fixtures";
 import { readGridGeometry, cellRangeRectFrom, parseCellRef } from "../helpers/grid";
 import { waitForGridStable } from "../helpers/screenshots";
+// THE PIXEL SAMPLER IS SHARED, AND IT NEVER CLIPS THE CAPTURE.
+// `page.screenshot({ clip })` is not a passive read: Chromium is asked to put
+// that rectangle on screen, and a control the pointer is PARKED on can receive
+// a `mouseleave` it never earned. This file is the one place in the tree where
+// the pointer sits INSIDE the rectangle being sampled: test 3c ends with a real
+// `mouse.move` onto cell B3, and test 3d's "before" is taken straight after,
+// over A1:B4. `samplePixels` captures the whole viewport and crops afterwards
+// in-page; `diffCount` is the one copy of the comparison that used to live in
+// nine specs at the same threshold. See `e2e/viewportSample.ts`.
+import { diffCount, samplePixels, type PixelClip } from "../viewportSample";
 
 const SAVE_FILE = path.join(os.tmpdir(), "calcula-correctness-cluster.cala");
 
@@ -154,12 +164,8 @@ async function renderedCell(page: Page, ref: string): Promise<string> {
 // Pixels
 // ---------------------------------------------------------------------------
 
-interface Clip {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+/** The rectangle shape the samplers take, in CSS pixels. */
+type Clip = PixelClip;
 
 /** Viewport-relative clip of a cell range, from the app's LIVE geometry. */
 async function rangeClip(page: Page, from: string, to: string, pad = 0): Promise<Clip> {
@@ -216,42 +222,6 @@ async function outlineBarWidth(page: Page): Promise<number> {
       .__CALCULA_GRID_STATE__ as unknown as { config: { outlineBarWidth?: number } };
     return gs.config.outlineBarWidth ?? 0;
   });
-}
-
-/** Raw RGBA of a clip, decoded in the page (no image dependency in Node). */
-async function pixels(page: Page, clip: Clip): Promise<number[]> {
-  const png = await page.screenshot({ clip });
-  return page.evaluate(async (b64: string) => {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("no 2d context for pixel decode");
-    ctx.drawImage(bitmap, 0, 0);
-    return Array.from(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
-  }, png.toString("base64"));
-}
-
-/** Pixels differing by more than a hair between two same-sized captures. */
-function diffCount(a: number[], b: number[]): number {
-  if (a.length !== b.length) {
-    throw new Error(`capture sizes differ (${a.length} vs ${b.length}) — the clip moved`);
-  }
-  let n = 0;
-  for (let i = 0; i < a.length; i += 4) {
-    if (
-      Math.abs(a[i] - b[i]) > 8 ||
-      Math.abs(a[i + 1] - b[i + 1]) > 8 ||
-      Math.abs(a[i + 2] - b[i + 2]) > 8
-    ) {
-      n++;
-    }
-  }
-  return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +325,7 @@ test.describe.serial("Correctness cluster (2026-08-07 defect batch)", () => {
       await activateSheetViaUI(page, 1);
       await waitForGridStable(page);
       const sheet2Clip = await rangeClip(page, "A1", "B2", 2);
-      const before = await pixels(page, sheet2Clip);
+      const before = await samplePixels(page, sheet2Clip);
       await activateSheetViaUI(page, 0);
 
       // --- THE REAL GESTURE: click the cell, type, press Enter. ---
@@ -376,7 +346,7 @@ test.describe.serial("Correctness cluster (2026-08-07 defect batch)", () => {
       expect(await renderedCell(page, "A2"), "rendered Sheet2!A2").toBe(want.sheet2A2);
       expect(await renderedCell(page, "B1"), "rendered Sheet2!B1").toBe(want.sheet2B1);
 
-      const after = await pixels(page, sheet2Clip);
+      const after = await samplePixels(page, sheet2Clip);
       expect(
         diffCount(before, after),
         "Sheet2 must REPAINT — identical pixels mean the summary sheet still shows the stale numbers",
@@ -485,9 +455,9 @@ test.describe.serial("Correctness cluster (2026-08-07 defect batch)", () => {
       //      could equally be the pivot-field update's own leftover overlay,
       //      or anything else on the grid that animates. ----
       const pivotClip = await rangeClip(page, "D1", "E5", 2);
-      const quiet1 = await pixels(page, pivotClip);
+      const quiet1 = await samplePixels(page, pivotClip);
       await page.waitForTimeout(1100);
-      const quiet2 = await pixels(page, pivotClip);
+      const quiet2 = await samplePixels(page, pivotClip);
       expect(
         diffCount(quiet1, quiet2),
         "the pivot region must already be static before the refresh — if it is not, something OTHER than refreshPivotCache is animating and the assertion below would be meaningless",
@@ -512,9 +482,9 @@ test.describe.serial("Correctness cluster (2026-08-07 defect batch)", () => {
       // Same measurement as the precondition, now after the refresh: a stuck
       // overlay cannot hold still, so two byte-identical captures ~1s apart
       // prove nothing is painting over the pivot.
-      const frame1 = await pixels(page, pivotClip);
+      const frame1 = await samplePixels(page, pivotClip);
       await page.waitForTimeout(1100);
-      const frame2 = await pixels(page, pivotClip);
+      const frame2 = await samplePixels(page, pivotClip);
       expect(
         diffCount(frame1, frame2),
         "the pivot region must be STATIC after the refresh — a moving pixel is the indeterminate progress bar still animating",
@@ -588,10 +558,10 @@ test.describe.serial("Correctness cluster (2026-08-07 defect batch)", () => {
       ).toBe(false);
 
       // Belt and braces on the pixels: still nothing animating.
-      const frame3 = await pixels(page, pivotClip);
+      const frame3 = await samplePixels(page, pivotClip);
       await page.waitForTimeout(1100);
       expect(
-        diffCount(frame3, await pixels(page, pivotClip)),
+        diffCount(frame3, await samplePixels(page, pivotClip)),
         "the pivot region must be static after the SECOND refresh too",
       ).toBe(0);
     } finally {
@@ -615,7 +585,7 @@ test.describe.serial("Correctness cluster (2026-08-07 defect batch)", () => {
       await waitForGridStable(page);
 
       const clip = await leftEdgeClip(page, 12);
-      const before = await pixels(page, clip);
+      const before = await samplePixels(page, clip);
       expect(await outlineBarWidth(page), "no outline bar to begin with").toBe(0);
 
       // The route that used to change 0 pixels: @api's own outline mutator,
@@ -634,7 +604,7 @@ test.describe.serial("Correctness cluster (2026-08-07 defect batch)", () => {
         await outlineBarWidth(page),
         "the FRONTEND must have learned about the group — a zero-width bar is the defect (renderOutlineBar returns early and nothing re-fetches)",
       ).toBeGreaterThan(0);
-      const after = await pixels(page, clip);
+      const after = await samplePixels(page, clip);
       expect(
         diffCount(before, after),
         "the outline bar must appear — this route used to move the backend and change 0 pixels",
@@ -657,7 +627,7 @@ test.describe.serial("Correctness cluster (2026-08-07 defect batch)", () => {
       await waitForGridStable(page);
 
       const clip = await leftEdgeClip(page, 12);
-      const before = await pixels(page, clip);
+      const before = await samplePixels(page, clip);
       expect(await outlineBarWidth(page), "no outline bar to begin with").toBe(0);
 
       // Data > Outline > Group.
@@ -696,7 +666,7 @@ test.describe.serial("Correctness cluster (2026-08-07 defect batch)", () => {
       expect(await outlineBarWidth(page), "Data > Group must raise the outline bar").toBeGreaterThan(
         0,
       );
-      const after = await pixels(page, clip);
+      const after = await samplePixels(page, clip);
       expect(
         diffCount(before, after),
         "Data > Group must draw an outline bar",
@@ -803,7 +773,7 @@ test.describe.serial("Correctness cluster (2026-08-07 defect batch)", () => {
       await waitForGridStable(page);
 
       const clip = await rangeClip(page, "A1", "B4", 2);
-      const before = await pixels(page, clip);
+      const before = await samplePixels(page, clip);
 
       const traced = await page.evaluate(async () => {
         const svc = (await (window as unknown as { __calcImport: (u: string) => Promise<unknown> })
@@ -816,7 +786,7 @@ test.describe.serial("Correctness cluster (2026-08-07 defect batch)", () => {
       await page.waitForTimeout(700);
       await waitForGridStable(page);
 
-      const after = await pixels(page, clip);
+      const after = await samplePixels(page, clip);
       expect(
         diffCount(before, after),
         "trace arrows must actually be painted",
@@ -975,10 +945,10 @@ test.describe.serial("Correctness cluster (2026-08-07 defect batch)", () => {
 
       // --- Pair 1: selection parked elsewhere (the case that always worked). ---
       await park();
-      const bareUnselected = await pixels(page, clip);
+      const bareUnselected = await samplePixels(page, clip);
       await addNote();
       await park();
-      const notedUnselected = await pixels(page, clip);
+      const notedUnselected = await samplePixels(page, clip);
       const unselectedIndicatorPx = diffCount(bareUnselected, notedUnselected);
       expect(
         unselectedIndicatorPx,
@@ -987,10 +957,10 @@ test.describe.serial("Correctness cluster (2026-08-07 defect batch)", () => {
 
       // --- Pair 2: the note cell is the ACTIVE cell (the defect). ---
       await selectNoteCell();
-      const notedSelected = await pixels(page, clip);
+      const notedSelected = await samplePixels(page, clip);
       await removeNotes();
       await selectNoteCell();
-      const bareSelected = await pixels(page, clip);
+      const bareSelected = await samplePixels(page, clip);
       const selectedIndicatorPx = diffCount(notedSelected, bareSelected);
 
       expect(

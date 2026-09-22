@@ -171,6 +171,19 @@ const FALLBACK_FONT_FAMILY = "Calibri, sans-serif";
 const FALLBACK_CHAR_RATIO = 0.6;
 
 /**
+ * Re-measurement passes the box is allowed inside one measurement epoch before
+ * it freezes at whatever it last read.
+ *
+ * The honest convergence is short: the first pass runs against the WINDOW bound
+ * (no layer measurement exists yet), the second against the grid layer's real
+ * edge, and a third confirms and stops on equality. Anything past that is the
+ * measurement disagreeing with itself, and the right outcome then is a box that
+ * is a line wrong -- not a window that is gone. See the effect below for why a
+ * budget rather than a cleverer equality test.
+ */
+const MAX_SETTLE_PASSES = 4;
+
+/**
  * Calculate the position and visibility of the inline editor.
  */
 function calculateEditorPosition(
@@ -358,6 +371,62 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
       });
 
   /**
+   * Bumped when the GRID LAYER changes size for a reason outside this component
+   * — a window resize, a task pane opening, the sidebar collapsing.
+   *
+   * That case is the whole reason the measurement effect below used to carry no
+   * dependency array at all. It is an EVENT, so it is subscribed to as one.
+   * Paying for it with a forced synchronous reflow after every render this
+   * component happens to be dragged through — every keystroke, every scroll
+   * frame, every selection change in the parent — was never the cheaper option,
+   * and it is what made the measurement re-enterable from anywhere.
+   */
+  const [layerTick, setLayerTick] = useState(0);
+
+  useLayoutEffect(() => {
+    const bump = () => setLayerTick((t) => t + 1);
+    window.addEventListener("resize", bump);
+
+    let observer: ResizeObserver | null = null;
+    const layer = inputRef.current?.offsetParent as HTMLElement | null;
+    // jsdom has no ResizeObserver. The window listener still covers a resize
+    // there, and the unit tests drive the layer's reported size directly.
+    if (layer && typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(bump);
+      observer.observe(layer);
+    }
+    return () => {
+      window.removeEventListener("resize", bump);
+      observer?.disconnect();
+    };
+    // Both deps are here because they are the two ways this component renders
+    // NOTHING -- scrolled out of view, and parked on another sheet during
+    // cross-sheet point mode. There is no element to find an offsetParent from
+    // in either state, so the observer has to be re-attached on the way back.
+  }, [logicalPos.visible, currentSheetIndex]);
+
+  /**
+   * Everything that can legitimately change what a measurement RETURNS, other
+   * than the measurement's own output.
+   *
+   * `expandedWidth` is deliberately absent even though the width is what the
+   * entry wraps against: it is derived from `measured.layerWidth`, so it is an
+   * output as much as an input, and treating it as an epoch would reset the
+   * budget below on exactly the feedback the budget exists to bound.
+   */
+  const measureEpoch = JSON.stringify([
+    editing.value,
+    editing.colSpan ?? 1,
+    boxX,
+    boxY,
+    baseWidth,
+    baseHeight,
+    z,
+    layerTick,
+  ]);
+  const settleRef = useRef<{ epoch: string; passes: number }>({ epoch: "", passes: 0 });
+
+  /**
    * Measure the wrapped entry and the grid layer, before the browser paints.
    *
    * `height: auto` FIRST, and this is the subtle part: `scrollHeight` never
@@ -367,14 +436,37 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
    * deleted the text again. Both writes happen inside one layout pass, so
    * nothing paints in between and there is no flicker.
    *
-   * Deliberately no dependency array. The layer's size can change without any
-   * prop of this component changing (a task pane opening, a window resize), and
-   * the state update below is a no-op when nothing moved, so re-running per
-   * render costs one layout read and converges immediately.
+   * THIS EFFECT FEEDS ITSELF, and that is the thing to hold on to. What it
+   * measures depends on the width the box is currently rendered at, and the
+   * width is computed from `measured.layerWidth`, which is what it sets. So the
+   * measurement is a function of its own output and there are two separable
+   * ways it can fail to settle:
+   *
+   *   1. `contentHeight` alternates. The dependency array ends that one:
+   *      `contentHeight` is not an input to the measurement, so a new value
+   *      cannot re-trigger the effect that produced it.
+   *   2. The alternation reaches the WIDTH. The dependency array does NOT end
+   *      that one — the dependency genuinely changed on every pass.
+   *
+   * The bail-out inside `setMeasured` recognises a FIXED POINT and nothing
+   * else: an oscillating triple never equals the one in state, so every pass
+   * committed, every commit re-ran the effect, and React threw "Maximum update
+   * depth exceeded" — which `RootErrorBoundary` turns into a dead window while
+   * the user is halfway through typing a cell. Hence `MAX_SETTLE_PASSES`: a
+   * budget, not a cleverer equality test, because a budget bounds a cycle of
+   * ANY length and this component cannot see the CSS of the element it is
+   * measuring (it lives in Spreadsheet.styles.ts, three files away).
+   * InlineEditor.measureLoop.test.tsx drives both shapes.
    */
   useLayoutEffect(() => {
     const el = inputRef.current;
     if (!el) return;
+
+    if (settleRef.current.epoch !== measureEpoch) {
+      settleRef.current = { epoch: measureEpoch, passes: 0 };
+    }
+    if (settleRef.current.passes >= MAX_SETTLE_PASSES) return;
+    settleRef.current.passes += 1;
 
     const previousHeight = el.style.height;
     el.style.height = "auto";
@@ -398,7 +490,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
         ? prev
         : { layerWidth, layerHeight, contentHeight }
     );
-  });
+  }, [measureEpoch, expandedWidth]);
 
   const position = {
     x: boxX,

@@ -66,6 +66,7 @@ import {
   type GridHelper,
 } from "../helpers/grid";
 import { waitForGridStable } from "../helpers/screenshots";
+import { samplePixelGrid, diffCount, type PixelSample } from "../viewportSample";
 
 const FILE_ALIVE = path.join(os.tmpdir(), "calcula-spill-delete-alive.cala");
 const FILE_DELETED = path.join(os.tmpdir(), "calcula-spill-delete-deleted.cala");
@@ -179,16 +180,21 @@ async function spillRanges(page: Page): Promise<SpillRange[]> {
 
 // ---------------------------------------------------------------------------
 // Pixels — "gone from the rendered grid" means gone from the canvas.
+//
+// SAMPLED THROUGH `../viewportSample`, NOT `page.screenshot({ clip })`. A
+// clipped capture is not a passive read: Chromium is asked to put that
+// rectangle on screen, so the sampler can perturb the very state it is
+// measuring — on one measured build a control the pointer was parked on
+// received a `mouseleave` it never earned. This spec never hovers, so it was
+// never at risk; it drops its own decode because one fact spelled nine times
+// over (nine private `pixels()`/`diffCount()` copies, already drifted into four
+// different refusal messages) is how the hazard survived unnoticed. The shared
+// sampler captures the whole viewport and crops afterwards, in device pixels,
+// so the `> 50` and `< 20` gates below still count exactly what they counted.
 // ---------------------------------------------------------------------------
 
-interface Capture {
-  data: number[];
-  width: number;
-  height: number;
-}
-
-/** Raw RGBA of the block's rectangle, decoded inside the page. */
-async function captureBlock(page: Page): Promise<Capture> {
+/** Raw RGBA of the block's rectangle, cropped out of an unclipped capture. */
+async function captureBlock(page: Page): Promise<PixelSample> {
   const geo = await readGridGeometry(page);
   const rect = cellRangeRectFrom(WHOLE[0], WHOLE[WHOLE.length - 1], geo);
   const box = await page.locator("canvas").first().boundingBox();
@@ -202,45 +208,7 @@ async function captureBlock(page: Page): Promise<Capture> {
     width: rect.width + pad * 2,
     height: rect.height + pad * 2,
   };
-  const png = await page.screenshot({ clip });
-  return page.evaluate(async (b64: string) => {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("no 2d context for the pixel decode");
-    ctx.drawImage(bitmap, 0, 0);
-    return {
-      data: Array.from(ctx.getImageData(0, 0, canvas.width, canvas.height).data),
-      width: canvas.width,
-      height: canvas.height,
-    };
-  }, png.toString("base64"));
-}
-
-/** Pixels differing by more than a hair between two same-sized captures. */
-function diffCount(a: Capture, b: Capture): number {
-  if (a.data.length !== b.data.length) {
-    throw new Error(
-      `capture sizes differ (${a.width}x${a.height} vs ${b.width}x${b.height}) — ` +
-        `the clip moved between captures, so the comparison means nothing`,
-    );
-  }
-  let n = 0;
-  for (let i = 0; i < a.data.length; i += 4) {
-    if (
-      Math.abs(a.data[i] - b.data[i]) > 8 ||
-      Math.abs(a.data[i + 1] - b.data[i + 1]) > 8 ||
-      Math.abs(a.data[i + 2] - b.data[i + 2]) > 8
-    ) {
-      n++;
-    }
-  }
-  return n;
+  return samplePixelGrid(page, clip);
 }
 
 // ---------------------------------------------------------------------------

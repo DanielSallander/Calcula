@@ -48,6 +48,7 @@ import * as path from "node:path";
 import { test, expect } from "../fixtures";
 import { readGridGeometry, cellRangeRectFrom, parseCellRef } from "../helpers/grid";
 import { waitForGridStable } from "../helpers/screenshots";
+import { diffCount, samplePixels, type PixelClip } from "../viewportSample";
 
 const SAVE_FILE = path.join(os.tmpdir(), "calcula-remaining-correctness.cala");
 
@@ -168,12 +169,13 @@ function numeric(display: string): number {
 // Pixels
 // ---------------------------------------------------------------------------
 
-interface Clip {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+/**
+ * A rectangle in CSS pixels — the sampler's own input type, not a copy of it.
+ * This was a private `interface Clip` with the same four fields; aliasing the
+ * real one means the geometry helpers below and the sampler they feed cannot
+ * drift apart without the compiler saying so.
+ */
+type Clip = PixelClip;
 
 /** Viewport-relative clip of a cell range, from the app's LIVE geometry. */
 async function rangeClip(page: Page, from: string, to: string, pad = 0): Promise<Clip> {
@@ -231,41 +233,26 @@ async function outlineBarWidth(page: Page): Promise<number> {
   });
 }
 
-/** Raw RGBA of a clip, decoded in the page (no image dependency in Node). */
-async function pixels(page: Page, clip: Clip): Promise<number[]> {
-  const png = await page.screenshot({ clip });
-  return page.evaluate(async (b64: string) => {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("no 2d context for pixel decode");
-    ctx.drawImage(bitmap, 0, 0);
-    return Array.from(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
-  }, png.toString("base64"));
-}
-
-/** Pixels differing by more than a hair between two same-sized captures. */
-function diffCount(a: number[], b: number[]): number {
-  if (a.length !== b.length) {
-    throw new Error(`capture sizes differ (${a.length} vs ${b.length}) — the clip moved`);
-  }
-  let n = 0;
-  for (let i = 0; i < a.length; i += 4) {
-    if (
-      Math.abs(a[i] - b[i]) > 8 ||
-      Math.abs(a[i + 1] - b[i + 1]) > 8 ||
-      Math.abs(a[i + 2] - b[i + 2]) > 8
-    ) {
-      n++;
-    }
-  }
-  return n;
-}
+// TWO DIFFERENT INSTRUMENTS LIVE BELOW. KEEP THEM STRAIGHT.
+//
+//   `samplePixels` (imported from `../viewportSample`) photographs the COMPOSITED
+//   PAGE — the canvas plus every overlay, menu and floating control drawn on top
+//   of it — and crops the result. That is the right instrument for "did the
+//   screen change", and it is the one the outline-gutter, the named-range and
+//   the headings probes below use.
+//
+//   `samplePatch` (just below) reads the grid canvas's OWN BITMAP through
+//   `getImageData`. It sees only what the grid renderer painted, misses anything
+//   composited over it, and needs no screenshot at all.
+//
+// The capture half of `samplePixels` used to live here as a private `pixels()`
+// taking `page.screenshot({ clip })`, with a private `diffCount` beside it —
+// the same pair, at the same threshold, in nine journey specs. The shared
+// sampler captures the WHOLE viewport and crops afterwards inside the page,
+// because a clipped capture asks Chromium to put that rectangle on screen and
+// is not a passive read; the measured evidence, and the day it failed to
+// reproduce, are in that module's header. `samplePatch` was never at risk from
+// that and is NOT migrated: it is an in-page readback with no screenshot in it.
 
 type Pixel = [number, number, number];
 
@@ -569,7 +556,7 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
       expect(await storedCell(page, "Sheet2", "A1"), "baseline: Sheet2!A1 = Sheet1!A2*2").toBe("40");
 
       const sheet1Clip = await rangeClip(page, "A1", "B3", 2);
-      const beforeSheet1 = await pixels(page, sheet1Clip);
+      const beforeSheet1 = await samplePixels(page, sheet1Clip);
 
       // ---- THE REAL GESTURE: select A1:A3, press Delete. ----
       await grid.selectRange("A1", "A3");
@@ -592,7 +579,7 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
         "and the CROSS-SHEET dependent must follow — 40 is the stale value",
       ).toBe("0");
 
-      const afterSheet1 = await pixels(page, sheet1Clip);
+      const afterSheet1 = await samplePixels(page, sheet1Clip);
       expect(
         diffCount(beforeSheet1, afterSheet1),
         "Sheet1 must repaint (the cleared cells and the new total)",
@@ -939,7 +926,7 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
       await waitForGridStable(page);
 
       const clip = await leftEdgeClip(page, 12);
-      const before = await pixels(page, clip);
+      const before = await samplePixels(page, clip);
       expect(await outlineBarWidth(page), "no outline bar to begin with").toBe(0);
 
       const result = await callModule<{ success: boolean }>(
@@ -956,7 +943,7 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
         await outlineBarWidth(page),
         "the grouped state must reach the renderer first — otherwise the undo assertion is vacuous",
       ).toBeGreaterThan(0);
-      const grouped = await pixels(page, clip);
+      const grouped = await samplePixels(page, clip);
       expect(diffCount(before, grouped), "the outline bar must have appeared").toBeGreaterThan(0);
 
       // ---- THE REAL GESTURE: Ctrl+Z on the grid. Nothing refreshed by hand. ----
@@ -969,7 +956,7 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
         await outlineBarWidth(page),
         "undo must collapse the outline bar in the RENDERER — a backend-only restore leaves a 36px gutter for a workbook with no groups",
       ).toBe(0);
-      const undone = await pixels(page, clip);
+      const undone = await samplePixels(page, clip);
       expect(
         diffCount(before, undone),
         "the left strip must be back to exactly what it was before the group existed",
@@ -1324,7 +1311,7 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
       await page.waitForTimeout(300);
       await waitForGridStable(page);
       const g1Clip = await rangeClip(page, "G1", "G1");
-      const before = await pixels(page, g1Clip);
+      const before = await samplePixels(page, g1Clip);
 
       // ---- Repoint the name, then make the forward state unambiguous. ----
       const updated = await invoke<{ success: boolean; error?: string }>(
@@ -1341,7 +1328,7 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
         await renderedCell(page, "G1"),
         "the name really moved — the undo below has something to undo",
       ).toBe("222");
-      const moved = await pixels(page, g1Clip);
+      const moved = await samplePixels(page, g1Clip);
       expect(
         diffCount(before, moved),
         "and the canvas really shows 222 — the pixel probe is wired",
@@ -1362,7 +1349,7 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
         "and the FORMULA that uses it shows the pre-change value with nothing recalculated by hand — 222 is the stale answer",
       ).toBe("111");
       expect(
-        diffCount(before, await pixels(page, g1Clip)),
+        diffCount(before, await samplePixels(page, g1Clip)),
         "and the CANVAS is back to the frame it had before the name moved — a correct value the renderer never heard about is still a wrong screen",
       ).toBe(0);
     } finally {
@@ -1406,7 +1393,7 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
       })();
 
       const inkOn = await headingInkFraction(page);
-      const framedOn = await pixels(page, topClip);
+      const framedOn = await samplePixels(page, topClip);
       expect(
         inkOn,
         "the headings must be painted to begin with — otherwise every assertion below is vacuous",
@@ -1428,7 +1415,7 @@ test.describe.serial("Remaining correctness (2026-08-08 batch)", () => {
         `the header glyphs must be gone from the canvas (dark-ink fraction ${inkOn} -> ${inkOff})`,
       ).toBeLessThan(0.001);
       expect(
-        diffCount(framedOn, await pixels(page, topClip)),
+        diffCount(framedOn, await samplePixels(page, topClip)),
         "and the top-left corner must really have repainted",
       ).toBeGreaterThan(0);
 

@@ -956,11 +956,40 @@ pass an option" is invisible to a type checker and to every green run on a page 
 which is exactly why it needs a test rather than a comment. Sabotage: put the `clip` back; that one
 test goes red (`expected false to be true`) and the other six stay green.
 
-**The lesson, generalised.** A sampler that perturbs the state it samples will report the
-perturbation as the product's behaviour, with complete confidence and a reproducible trace. Every
-pixel assertion taken while a pointer is PARKED on something is exposed to this; the ones taken
-with the pointer parked harmlessly are not, and are deliberately left on the clipped path, because
-a full-viewport capture is several times the bytes.
+**The lesson, generalised.** A sampler that perturbs — or merely outruns — the state it samples will
+report that as the product's behaviour, with complete confidence and a reproducible trace. A pixel
+test that flakes around a hover should suspect the instrument before the product.
+
+### 6.14a What §6.14 said next, and what actually happened (2026-09-22, same day)
+
+This section originally ended by saying the other pixel specs were **"deliberately left on the
+clipped path, because a full-viewport capture is several times the bytes."** Both halves of that are
+now superseded, and the correction is recorded rather than quietly edited away, because the reasoning
+is the interesting part.
+
+**The cost was measured instead of estimated.** It is real — x770 the bytes on a small patch, x3.0 on
+a large one — and it is **not the deciding quantity**: +4.5 to +5.9 s across all nine specs per run,
+against specs that budget 240–280 s each and spend it in `waitForTimeout`. Nothing is written to disk.
+
+**The mechanism above is NOT settled.** Re-probed the same day on the same machine against two
+independent hover state machines across seven clip geometries, with capture-phase listeners on every
+mouse and pointer event: **not one event fired**, and `visualViewport` and `elementFromPoint` never
+moved. What did reproduce is a ~130 ms timing gap between the clipped and unclipped paths against a
+product that paints in ~84 ms — which fits "intermittent, then four consecutive failures" just as
+well. The unclipped path is correct under either account, so the migration proceeded; but **Account A
+above should not be repeated as fact.**
+
+**The nine migrated anyway**, for a reason that is not the hazard: ten copies of one twenty-line
+`diffCount` at one threshold, with the refusal already spelled four different ways, is how a number
+drifts in nine places and nobody notices. Only `correctness-cluster` was genuinely exposed (its test
+3d samples a rectangle the pointer is parked inside); `insight-overlays` and `insight-overlays-pivot`
+sample with the pointer over the measured rectangle after a menu click; the other six never hover.
+
+**The general statement now lives in `docs/design/e2e-pixel-sampling.md`** — this is a harness fact,
+not a chart fact — together with the repo-wide guard
+(`app/e2e/__tests__/noClippedCapture.test.ts`, which parses every file under `app/e2e` at test time,
+covers `toHaveScreenshot({ clip })` as well, and carries a reason-checked allowlist for the three
+legitimate clipped captures).
 
 ---
 

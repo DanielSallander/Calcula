@@ -17,6 +17,8 @@ import {
   IconDesignMode,
   isKeyClaimed,
 } from "@api";
+import { CommandRegistry } from "@api/commands";
+import { registerKeybinding, isGridFocused } from "@api/keybindings";
 import { registerControlsProvider } from "@api/controlsService";
 import type { ControlPropertyValue } from "./lib/types";
 import type {
@@ -891,35 +893,62 @@ function activate(context: ExtensionContext): void {
 
   // -----------------------------------------------------------------------
   // 18. Delete selected floating control(s) on Delete/Backspace key
+  //
+  // THROUGH THE REGISTRY, NOT A DOCUMENT LISTENER. This used to be a
+  // capture-phase `document` keydown listener, and it worked only because the
+  // grid did not hold focus after a Design-Mode click on a shape. Once
+  // `gridShouldTakeKeyboardFocus` (core/components/Spreadsheet/gridPointerEntry.ts)
+  // started focusing `[data-focus-container="spreadsheet"]` on every unclaimed
+  // grid mousedown, `isGridFocused()` became TRUE with a control selected, so
+  // the built-in Delete binding (`core.clearContents`, GRID_SCOPED_COMMANDS)
+  // matched in the registry's WINDOW-capture dispatcher — which runs strictly
+  // before any `document` listener — and it called preventDefault() AND
+  // stopPropagation(). This listener was never reached again. The measured
+  // consequence was not an inert dead key: the control SURVIVED and the cells
+  // under the selection were CLEARED instead. Silent data loss, proved live by
+  // `e2e/journeys/shapes-hometab.spec.ts` test 5.
+  //
+  // The only honest way to say "the control owns this key WHILE a control is
+  // selected" is a `when` predicate: the dispatcher prefers a guarded binding
+  // over the unguarded built-in precisely because registration order cannot
+  // express that. This is the same shape Charts uses for its own Delete
+  // (`ext.charts.deleteSelection`, extensions/Charts/index.ts), and going
+  // through the registry brings the three gates the old listener hand-rolled:
+  //   * `context: "not-editing"` IS `isEditing() || isClaimedKeystroke(event)`
+  //     — the INPUT/TEXTAREA/contentEditable tag list AND the `isKeyClaimed`
+  //     check, without this file re-spelling either of them;
+  //   * `isGridFocused()` in the guard is the gate the old listener never had,
+  //     which is what made "select a shape, click a button in a task pane,
+  //     press Delete" destroy the shape (the identical defect Charts fixed);
+  //   * the dispatcher does the preventDefault/stopPropagation itself.
   // -----------------------------------------------------------------------
-  const handleDeleteKey = (e: KeyboardEvent) => {
-    if (e.key !== "Delete" && e.key !== "Backspace") return;
-    // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
-    // field, a shape's declared hit rectangle -- is not this extension's.
-    // The tag list below cannot see a <select> or a <button>; the claim can.
-    // See core/lib/pointerClaims.ts, and the census in
-    // core/lib/globalInputListeners.ts (a new global listener adds a row).
-    if (isKeyClaimed(e)) return;
-
-    // Don't intercept when editing a cell or input field
-    const target = e.target as HTMLElement;
-    if (
-      target.tagName === "INPUT" ||
-      target.tagName === "TEXTAREA" ||
-      target.isContentEditable
-    ) return;
-
-    const selectedIds = getSelectedFloatingControls();
-    if (selectedIds.size === 0) return;
-
-    // Prevent the grid from also handling this key
-    e.preventDefault();
-    e.stopPropagation();
-
+  const CONTROLS_DELETE_SELECTION_COMMAND = "ext.controls.deleteSelection";
+  CommandRegistry.register(CONTROLS_DELETE_SELECTION_COMMAND, () => {
+    if (getSelectedFloatingControls().size === 0) return;
     deleteSelectedControls();
-  };
-  document.addEventListener("keydown", handleDeleteKey, true); // capture phase
-  cleanupFns.push(() => document.removeEventListener("keydown", handleDeleteKey, true));
+  });
+  cleanupFns.push(() => CommandRegistry.unregister(CONTROLS_DELETE_SELECTION_COMMAND));
+  // Backspace carries no built-in binding, so it was never pre-empted and the
+  // old listener still served it. It is registered here all the same: leaving
+  // one key on a retired listener and one on the registry would be two answers
+  // to one question, and the next change to either would only move the bug.
+  for (const combo of ["Delete", "Backspace"] as const) {
+    cleanupFns.push(
+      registerKeybinding(
+        {
+          id: `ext.controls.deleteSelection.${combo.toLowerCase()}`,
+          combo,
+          commandId: CONTROLS_DELETE_SELECTION_COMMAND,
+          label: "Delete Selected Control",
+          category: "Editing",
+          context: "not-editing",
+          source: "extension",
+          extensionId: "calcula.controls",
+        },
+        () => getSelectedFloatingControls().size > 0 && isGridFocused(),
+      ),
+    );
+  }
 
   // -----------------------------------------------------------------------
   // 19. Load existing floating controls on startup

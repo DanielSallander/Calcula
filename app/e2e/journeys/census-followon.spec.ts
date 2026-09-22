@@ -55,6 +55,7 @@ import * as path from "node:path";
 import { test, expect } from "../fixtures";
 import { readGridGeometry, cellRangeRectFrom, parseCellRef, type GridHelper } from "../helpers/grid";
 import { waitForGridStable } from "../helpers/screenshots";
+import { diffCount, samplePixelGrid, type PixelClip, type PixelSample } from "../viewportSample";
 
 const SAVE_FILE = path.join(os.tmpdir(), "calcula-census-followon.cala");
 
@@ -165,12 +166,13 @@ async function activateSheetViaUI(page: Page, index: number): Promise<void> {
 // Pixels
 // ---------------------------------------------------------------------------
 
-interface Clip {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+/**
+ * A rectangle in CSS pixels — the sampler's own input type, not a copy of it.
+ * This was a private `interface Clip` with the same four fields; aliasing the
+ * real one means `rangeClip` below and the sampler it feeds cannot drift apart
+ * without the compiler saying so.
+ */
+type Clip = PixelClip;
 
 /** Viewport-relative clip of a cell range, from the app's LIVE geometry. */
 async function rangeClip(page: Page, from: string, to: string, pad = 0): Promise<Clip> {
@@ -186,59 +188,48 @@ async function rangeClip(page: Page, from: string, to: string, pad = 0): Promise
   };
 }
 
-interface PixelGrid {
-  data: number[];
-  width: number;
-  height: number;
-  /** Device pixels per CSS pixel in this capture. */
-  scale: number;
-}
-
-/**
- * Raw RGBA of a clip, decoded in the page (no image dependency in Node), plus
- * the capture's device scale — a screenshot is in DEVICE pixels and the clip is
- * in CSS pixels, so anything that compares a measured pixel column against a
- * CSS-space length must divide by this.
- */
-async function pixelGrid(page: Page, clip: Clip): Promise<PixelGrid> {
-  const png = await page.screenshot({ clip });
-  const decoded = await page.evaluate(async (b64: string) => {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("no 2d context for pixel decode");
-    ctx.drawImage(bitmap, 0, 0);
-    return {
-      data: Array.from(ctx.getImageData(0, 0, canvas.width, canvas.height).data),
-      width: canvas.width,
-      height: canvas.height,
-    };
-  }, png.toString("base64"));
-  return { ...decoded, scale: decoded.width / clip.width };
-}
-
-/** Pixels differing by more than a hair between two same-sized captures. */
-function diffCount(a: number[], b: number[]): number {
-  if (a.length !== b.length) {
-    throw new Error(`capture sizes differ (${a.length} vs ${b.length}) — the clip moved`);
-  }
-  let n = 0;
-  for (let i = 0; i < a.length; i += 4) {
-    if (
-      Math.abs(a[i] - b[i]) > 8 ||
-      Math.abs(a[i + 1] - b[i + 1]) > 8 ||
-      Math.abs(a[i + 2] - b[i + 2]) > 8
-    ) {
-      n++;
-    }
-  }
-  return n;
-}
+// THE DECODE AND THE DIFF LIVE IN `../viewportSample`, NOT HERE.
+//
+// This file used to carry its own `pixelGrid` (a `page.screenshot({ clip })`
+// plus an in-page decode) and its own `diffCount`. Nine journeys carried the
+// same pair, at the same threshold, with the refusal spelled four different
+// ways — one fact with nine spellings, which is how they drift.
+//
+// The shared sampler captures the WHOLE viewport and crops afterwards, inside
+// the page. A clipped capture asks Chromium to put that rectangle on screen,
+// which is not a passive read: it is why the shared helper exists at all (see
+// that module's header for the measured evidence and for the day it failed to
+// reproduce). Nothing in THIS spec hovers, so the clip was never hurting it —
+// but the copy was, and the copy is what is gone.
+//
+// `PixelSample` carries the same four fields the local `PixelGrid` did. `scale`
+// is device pixels per CSS pixel: a screenshot is in DEVICE pixels and a clip
+// is in CSS pixels, so anything comparing a measured pixel column against a
+// CSS-space length (see the underline probe in test 5) must divide by it.
+//
+// ONE NUMBER REALLY DID MOVE, AND IT WAS MEASURED RATHER THAN ASSUMED. `scale`
+// now comes from the crop rectangle the helper asks for, not from the width
+// Playwright's clipped PNG happened to come back with, and a cell boundary is
+// not on a whole CSS pixel (columns are 64.29 wide), so the two disagree.
+// Measured on the running app at dpr 2, on this test's own fixture — an
+// underlined WMWM in a default-width cell, sampled both ways at one clip:
+//
+//                        OLD (clipped)   NEW (shared helper)
+//   crop, device px      128x40          129x40
+//   scale                1.9910          2.0065
+//   background pixel     208,208,208     208,208,208   <- IDENTICAL
+//   longest run, CSS px  51.23           50.83
+//   underline ends at    53.74           53.33
+//   glyphs end at        52.74           52.33
+//
+// Everything this test asserts is a DIFFERENCE between two of those, and the
+// differences are unmoved: underline-minus-glyphs is 1.00 either way, and the
+// gap to the old-code clamp (cell 64.29 less 3px padding = 61.29) is 7.96 here
+// against 7.55 before, both far past the `> 4` the fixture demands. The
+// background `inkRows` takes from the crop's top-left pixel is the same
+// gridline byte on both paths, so the ink threshold means what it meant.
+// Test 5 prints the scale it used next to every measurement derived from it;
+// read that line rather than trusting this block if the numbers ever drift.
 
 // ===========================================================================
 
@@ -348,14 +339,14 @@ test.describe.serial("Census follow-on — proved on the running app", () => {
       await activateSheetViaUI(page, 1);
       await waitForGridStable(page);
       const clip = await rangeClip(page, "A1", "B2", 2);
-      const atHundred = await pixelGrid(page, clip);
+      const atHundred = await samplePixelGrid(page, clip);
       await activateSheetViaUI(page, 0);
 
       await grid.setCellValue("A1", "250");
       await page.waitForTimeout(600);
       await activateSheetViaUI(page, 1);
       await waitForGridStable(page);
-      const atTwoFifty = await pixelGrid(page, clip);
+      const atTwoFifty = await samplePixelGrid(page, clip);
       await activateSheetViaUI(page, 0);
 
       expect(
@@ -367,7 +358,7 @@ test.describe.serial("Census follow-on — proved on the running app", () => {
       await page.waitForTimeout(700);
       await activateSheetViaUI(page, 1);
       await waitForGridStable(page);
-      const afterUndo = await pixelGrid(page, clip);
+      const afterUndo = await samplePixelGrid(page, clip);
       await activateSheetViaUI(page, 0);
 
       expect(
@@ -648,15 +639,14 @@ test.describe.serial("Census follow-on — proved on the running app", () => {
   /** What LONG_ENTRY needs at the cell font; measured live, never assumed. */
   const LONG_ENTRY_MIN_PX = 200;
 
-  test("3. the inline editor expands over EMPTY neighbours and stops at an OCCUPIED one", async ({
+  test("3. the inline editor expands to fit the entry, over an OCCUPIED neighbour exactly as over an empty one", async ({
     appPage: page,
     grid,
   }) => {
     try {
       await newFile(page);
-      // AH10 is occupied so the OCCUPIED case has a wall; AF10/AG10 and
-      // AK10/AL10 are empty. Two independent cells so neither case can inherit
-      // the other's editor state.
+      // AH10 is occupied; AF10/AG10 and AK10/AL10 are empty. Two independent
+      // cells so neither case can inherit the other's editor state.
       await invoke(page, "update_cell", { row: 9, col: 33, value: "WALL" }); // AH10
       await page.evaluate(() => window.dispatchEvent(new Event("grid:refresh")));
       await page.waitForTimeout(300);
@@ -691,11 +681,33 @@ test.describe.serial("Census follow-on — proved on the running app", () => {
         `and it must HUG the text rather than swallowing the rest of the row (editor ${emptyW.toFixed(1)})`,
       ).toBeLessThan(cellW * 6);
 
-      // ---- CASE B: an OCCUPIED neighbour two columns along. AF10 may grow
-      //      over AG10 (empty) but must NOT cover AH10 (which holds "WALL").
-      //      Same text, same timing, and — enforced below — the same absence of
-      //      a viewport clamp, so the ONLY difference between A and B is the
-      //      wall. ----
+      // ---- CASE B: an OCCUPIED neighbour two columns along. AF10 grows over
+      //      AG10 (empty) AND over AH10 (which holds "WALL"), to the SAME width
+      //      as case A. Same text, same timing, and — enforced below — the same
+      //      absence of a viewport clamp, so the only difference between A and B
+      //      is the neighbour's content, and the editor's width must not depend
+      //      on it at all.
+      //
+      //      THIS ASSERTION USED TO BE ITS OPPOSITE ("must stop before the
+      //      occupied cell") AND THE PRODUCT DELIBERATELY REMOVED THAT RULE.
+      //      DO NOT "fix" it back. Excel's in-cell editor is an OVERLAY: while
+      //      an edit is open the box floats above the grid, covers whatever is
+      //      beside it regardless of content, and everything it covered repaints
+      //      untouched when the edit ends. Refusing to grow over a neighbour
+      //      that holds data is a real Excel rule, but it governs DISPLAY (how a
+      //      long value spills when it is NOT being edited), not EDITING, and
+      //      applying it here produced the opposite of parity: an entry with an
+      //      occupied neighbour had nowhere to go and scrolled inside one
+      //      column, which Excel never does. The whole argument, and the three
+      //      rules that replaced it, are in the header of
+      //      src/core/components/InlineEditor/expansion.ts; the exact-pixel unit
+      //      tests in expansion.test.ts state in their own header that the
+      //      removal of the "stops at the first occupied cell" assertions is the
+      //      point and not an omission. There is no occupancy input to
+      //      `computeExpandedEditorWidth` at all any more — it takes x,
+      //      baseWidth, desiredWidth and the GRID's right edge, and nothing
+      //      else — so a wall here could only come back by re-adding a backend
+      //      lookup to the keystroke path.
       await typeIntoEditor(page, grid, "AF10", LONG_ENTRY);
       await assertRoomToExpand(page, LONG_ENTRY_MIN_PX + cellW);
       const occupiedRight = await editorRight(page);
@@ -705,21 +717,23 @@ test.describe.serial("Census follow-on — proved on the running app", () => {
 
       expect(
         occupiedRight,
-        `the editor must stop before the occupied cell (editor right ${occupiedRight.toFixed(1)}, AH10 starts at ${wallClip.x.toFixed(1)})`,
-      ).toBeLessThanOrEqual(wallClip.x + 1);
+        `the editor must cover the occupied cell, not stop at it (editor right ${occupiedRight.toFixed(1)}, AH10 starts at ${wallClip.x.toFixed(1)})`,
+      ).toBeGreaterThan(wallClip.x);
 
-      // Teeth for CASE B: the SAME text at the SAME timing did expand in case
-      // A, so "did not expand over AH10" is a decision and not a lookup that
-      // had not answered yet. And it did use the one empty column it had.
+      // TEETH, and they are what keeps this a test rather than a tautology: the
+      // width must be the width the TEXT needs, which is the same number case A
+      // arrived at with nothing in the way. A box that swallowed the rest of the
+      // row would also be "greater than the wall", and so would the old
+      // one-column-scroll failure if the wall happened to sit close enough.
       const occupiedW = occupiedRight - (await rangeClip(page, "AF10", "AF10")).x;
       expect(
-        occupiedW,
-        "the editor must still have used the ONE empty neighbour it was allowed (AG10) — stopping at its own cell would be a different bug",
-      ).toBeGreaterThan(cellW * 1.5);
+        Math.abs(occupiedW - emptyW),
+        `the occupied case must come out the SAME width as the unobstructed one — the neighbour's content is not an input (empty ${emptyW.toFixed(1)}, occupied ${occupiedW.toFixed(1)})`,
+      ).toBeLessThanOrEqual(2);
       expect(
         occupiedW,
-        `and it must be MATERIALLY narrower than the unobstructed case (${emptyW.toFixed(1)}) — a few pixels apart would be coincidence, not a wall`,
-      ).toBeLessThan(emptyW - cellW);
+        "and it must still HUG the text rather than swallowing the rest of the row",
+      ).toBeLessThan(cellW * 6);
 
       console.log(
         `[census-followon] inline editor: cell ${cellW.toFixed(1)} CSS px | short entry ${shortW.toFixed(1)} | empty neighbours ${emptyW.toFixed(1)} | occupied neighbour ${occupiedW.toFixed(1)}`,
@@ -898,7 +912,7 @@ test.describe.serial("Census follow-on — proved on the running app", () => {
    * on white — a distance of 14, an order of magnitude under the threshold —
    * so they are not ink, but glyphs and rules are.
    */
-  function inkRows(px: PixelGrid, threshold = 60): InkRow[] {
+  function inkRows(px: PixelSample, threshold = 60): InkRow[] {
     const bg = [px.data[0], px.data[1], px.data[2]];
     const rows: InkRow[] = [];
     for (let y = 0; y < px.height; y++) {
@@ -978,7 +992,7 @@ test.describe.serial("Census follow-on — proved on the running app", () => {
       await waitForGridStable(page);
 
       const clip = await rangeClip(page, "AF20", "AF20");
-      const px = await pixelGrid(page, clip);
+      const px = await samplePixelGrid(page, clip);
       const rows = inkRows(px);
 
       // The underline is the row with the longest CONTIGUOUS run of ink; glyph
