@@ -68,24 +68,104 @@
  *     clear, the legend-entry hide, the two-area no-op, the chart destroy) sits
  *     behind a listener the key never reaches.
  *
- *  3. THE LIVE COLOUR PREVIEW SOMETIMES PAINTS NOTHING — a race, not a
- *     constant. Hovering a swatch always writes the previewed override into the
- *     store (measured: `paneIsPreviewing=true`, the override present), but in
- *     two runs out of four the chart had not repainted after MORE THAN TWO
- *     SECONDS with the pointer never leaving the swatch, and in the other two
- *     it painted promptly. The committed colour always appears, which is why
- *     the unit tier and a click-through never saw it. The probe here therefore
- *     measures the preview's paint LATENCY and prints it, rather than sampling
- *     once and reporting a coin toss.
+ *  3. THE LIVE COLOUR PREVIEW IS ARMED AND NEVER PAINTED. Re-measured on
+ *     2026-09-22 across four consecutive runs, and the earlier description of
+ *     it as "a race" was an artefact of WHEN the store was read. The sequence
+ *     is the same every time:
+ *
+ *       * the hover arms it — read 400 ms after the gesture,
+ *         `paneIsPreviewing=true` and the store holds
+ *         `{seriesIndex:0, categoryIndex:3, key:"UnitsApr",
+ *         color:"#636363"}`, with the right colour AND the right identity key;
+ *       * the chart NEVER repaints — every sample over a three-second poll
+ *         returns a pixel diff of exactly 0, with the pointer never leaving
+ *         the swatch;
+ *       * and by the end of that poll the preview has ended on its own:
+ *         `paneIsPreviewing=false`, the override gone from the store, without
+ *         a click or a pointer move.
+ *
+ *     The old ordering read the store only AFTER the poll, so it saw the third
+ *     state and reported "the hover handler never ran" — a different defect
+ *     with the same symptom. Both readings are now taken and printed. The
+ *     COMMIT half is unaffected and still passes end to end (one undo entry,
+ *     "Edit chart", the colour on screen, one undo takes it back), which is why
+ *     neither the unit tier nor a click-through ever saw this.
+ *
+ *     THE HARNESS IS NOT THE EXPLANATION, and that was checked rather than
+ *     assumed: a raw `page.mouse.move`, the same move with `steps: 8`, and
+ *     `locator.hover()` all arm the preview identically. The raw move is kept
+ *     as a printed probe above the gesture for exactly that reason.
  *
  * A fourth thing is measured and reported without being the subject of its own
  * journey: after a Format-pane button takes focus, a real left click on the
  * chart moves the selection ladder (proved by clicking a DIFFERENT bar and
  * watching the rung follow) but does NOT return DOM focus to the grid, so
  * Escape and the element walk stay dead until the reader clicks a cell.
+ *
+ * ===========================================================================
+ * WHAT THE SIXTH WAVE ADDED HERE (2026-09-22), AND WHAT EACH CASE PROVES
+ * ===========================================================================
+ * Journeys 1-8 above are the owner's original two sentences. Journeys 9-16
+ * are the two defects he found when he TESTED it, plus the furniture that
+ * became selectable in the same run.
+ *
+ *  9. OB-1 — "when I select an individual data point and give it a color I
+ *     cannot select a color for the entire series after that". The colour of a
+ *     series had TWO spellings and the Format pane wrote the losing one. The
+ *     journey seeds the state he was in (a name-keyed `seriesColors` already
+ *     present), colours one bar, then colours the SERIES, and asserts both
+ *     halves of Excel's precedence in PIXELS: every other bar follows the
+ *     series, the coloured bar keeps its own. Reset to Match Style on that bar
+ *     rejoins it — asserted as a COLOUR IDENTITY against its neighbour, not as
+ *     "it changed", because a diff against its own past would pass for a bar
+ *     that went some third colour.
+ *
+ * 10 + 11. OB-2 — the data table painted over the x tick labels and the axis
+ *     title. The decisive proof is a PIXEL IDENTITY rather than a rect
+ *     comparison: with a table shown on a category-X mark the labels belong to
+ *     the table alone, so flipping `xAxis.showLabels` must change nothing at
+ *     all, and it changed six large labels under the defect. The layout is
+ *     identical in both states, so there is no second explanation for a
+ *     difference. Its positive control is the same toggle with no table. 11 is
+ *     the horizontal-bar case, where the x labels are VALUES the table does not
+ *     repeat, so the band keeps all three occupants stacked in order.
+ *
+ * 12-15. The in-plot furniture — trendline, a series' error bars, one data
+ *     label, the data table — each SELECTED by a real click, watched to
+ *     RETARGET the pane, FORMATTED, and DELETED, with the chart's survival and
+ *     the cells' survival asserted after every Delete. Gridlines are asserted
+ *     to be REFUSED: a click where they are drawn selects the plot area, which
+ *     is what "no producer, so no element id" means to a reader.
+ *
+ * 16. A DEFAULT AREA CHART's one formatted datum. An area series is one
+ *     polygon and `showMarkers` defaults to false, so the pane used to accept a
+ *     colour that could never appear. The negative control is the half that
+ *     keeps a default area chart looking like one: a datum with no override
+ *     still gets no marker.
+ *
+ * THREE THINGS THESE CASES FOUND IN THE PRODUCT ON THE WAY IN, each of which
+ * is now a guard rather than a paragraph, because each one first appeared as a
+ * test that looked broken:
+ *
+ *   * AN ERROR BAR WHOSE EXTENT RUNS OFF THE TOP OF THE SCALE records a rect
+ *     with a NEGATIVE y. The painter clips, the rect does not, and a click
+ *     aimed at it lands ABOVE the chart — which is a click on the GRID, which
+ *     DESELECTS the chart. The ladder came back `{ level: "none" }`, reading
+ *     exactly like "error bars are not selectable".
+ *   * A DATA LABEL ON A BAR THAT REACHES THE TOP OF THE SCALE is clamped by
+ *     `drawBarLabels` to `plotArea.y + fontSize`, which puts it INSIDE its own
+ *     bar — where a datum beats furniture and the label cannot be clicked at
+ *     all. Excel's own labels never go inside an "above" placement.
+ *   * THE CHART CONTEXT MENU CAN OPEN OFF THE BOTTOM OF THE WINDOW. Its clamp
+ *     uses `estimatedHeight = 40 + (rows + 1) * 26`; over a DATA TABLE at the
+ *     default placement in a 1280x800 window the estimate came up short and
+ *     the menu's last row — always "Format <element>..." — rendered below the
+ *     viewport, visible and unclickable. The data-table journey now asserts the
+ *     menu fits and prints its geometry.
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
+import { samplePixels } from "../viewportSample";
 import * as os from "os";
 import * as path from "path";
 
@@ -112,6 +192,7 @@ const CHART_RENDERER = "/extensions/Charts/rendering/chartRenderer.ts";
 const GRID_OVERLAYS = "/src/api/gridOverlays.ts";
 const GRID_MODULE = "/src/api/grid.ts";
 const KEYBINDINGS = "/src/api/keybindings.ts";
+const FORMAT_PANE = "/extensions/Charts/components/ChartFormatPane.tsx";
 
 /** The seeded series. Six categories, all different heights, none of them zero. */
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"];
@@ -338,22 +419,54 @@ async function settleGrid(page: Page, budgetMs = 3000): Promise<void> {
   }
 }
 
-/** Raw RGBA of a clip, decoded in the page. */
+/**
+ * Raw RGBA of a clip, decoded in the page — and NOT through
+ * `page.screenshot({ clip })`.
+ *
+ * THE INSTRUMENT USED TO CANCEL WHAT IT WAS POINTED AT. This file measures a
+ * LIVE HOVER (the Format pane's colour preview, test 8 below), and a clipped
+ * capture moves Chromium's viewport onto the clip: the pointer's hit-test
+ * moves with it, the hovered swatch gets a `mouseleave` it never earned, and
+ * the preview ends before the first sample is taken. Four runs in a row
+ * reported "the preview never paints"; the product had painted it in ~85 ms
+ * every time and the capture had ended it. The proof, and the four-way probe
+ * that isolated the clip as the cause, are in `../viewportSample.ts`.
+ */
 async function pixels(page: Page, clip: Clip): Promise<number[]> {
-  const png = await page.screenshot({ clip });
-  return page.evaluate(async (b64: string) => {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("no 2d context for pixel decode");
-    ctx.drawImage(bitmap, 0, 0);
-    return Array.from(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
-  }, png.toString("base64"));
+  return samplePixels(page, clip);
+}
+
+/**
+ * The mean colour of a clip.
+ *
+ * `diffCount` answers "did these pixels change", which is the right question for
+ * "the reader can see it happened" and the WRONG one for "these two bars are now
+ * the same colour". The series-colour journey needs the second: after a reset,
+ * the point that had its own colour must come back to the colour its siblings
+ * are painted in, and a diff against its own past only says it stopped being
+ * orange. Sampled over a patch small enough to sit inside one bar's fill.
+ */
+function averageRgb(px: number[]): { r: number; g: number; b: number } {
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let n = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    r += px[i];
+    g += px[i + 1];
+    b += px[i + 2];
+    n++;
+  }
+  return { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n) };
+}
+
+/** The widest per-channel gap between two mean colours. */
+function channelGap(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }): number {
+  return Math.max(Math.abs(a.r - b.r), Math.abs(a.g - b.g), Math.abs(a.b - b.b));
+}
+
+function rgbText(c: { r: number; g: number; b: number }): string {
+  return `rgb(${c.r},${c.g},${c.b})`;
 }
 
 function diffCount(a: number[], b: number[]): number {
@@ -445,6 +558,89 @@ async function hitGeometry(page: Page, chartId: string): Promise<HitGeometryView
     },
     { chartId, mod: CHART_RENDERER },
   );
+}
+
+/** A trendline's recorded POLYLINE, chart-local. Never a bounding box. */
+interface TrendlineTrace {
+  seriesIndex: number;
+  trendlineIndex: number;
+  points: Array<{ x: number; y: number }>;
+}
+
+/**
+ * Everything `layout.elements` records, plus the plot area — all chart-local.
+ *
+ * `elementRect` above answers one named rect and is kept for the four cases that
+ * only ever want one. This reads the WHOLE set, because the band arithmetic the
+ * data-table work fixed is a statement about how several rects sit relative to
+ * one another, and reading them one call at a time would compare rects measured
+ * at different moments.
+ */
+interface LayoutView {
+  plotArea: Rect;
+  elements: {
+    family: string;
+    chartArea: Rect;
+    title?: Rect;
+    xAxisTitle?: Rect;
+    yAxisTitle?: Rect;
+    xAxisBand?: Rect;
+    yAxisBand?: Rect;
+    legend?: Rect;
+    dataTable?: Rect;
+    trendlines?: TrendlineTrace[];
+    errorBars?: Array<{ seriesIndex: number; rect: Rect }>;
+    dataLabels?: Array<{ seriesIndex: number; pointIndex: number; rect: Rect }>;
+    measured: string[];
+  } | null;
+}
+
+async function layoutView(page: Page, chartId: string): Promise<LayoutView> {
+  const view = await page.evaluate(
+    async ({ chartId, mod }) => {
+      const m = (await (window as unknown as AppWindow).__appImport!(mod)) as {
+        getCachedChartData: (id: string) => { layout?: unknown } | null;
+      };
+      const layout = m.getCachedChartData(chartId)?.layout as
+        | { plotArea: unknown; elements?: unknown }
+        | undefined;
+      if (layout === undefined) return null;
+      return JSON.parse(
+        JSON.stringify({ plotArea: layout.plotArea, elements: layout.elements ?? null }),
+      ) as LayoutView;
+    },
+    { chartId, mod: CHART_RENDERER },
+  );
+  expect(view, `no painted layout for "${chartId}" — it has not drawn yet`).not.toBeNull();
+  return view!;
+}
+
+/**
+ * Edit a spec through the PRODUCT'S OWN commit path — the same `applySpecPatch`
+ * every Format-pane control calls, so the repaint, the cache invalidation and
+ * the overlay re-sync are the product's and not the test's.
+ *
+ * Deliberately NOT `window.dispatchEvent(new Event("charts:refresh"))`: that
+ * event makes the extension RELOAD its store from the backend, which would
+ * discard a patch the 300 ms debounce has not saved yet and turn every
+ * assertion below it into a measurement of the previous spec.
+ */
+async function patchSpecLive(
+  page: Page,
+  chartId: string,
+  patch: Record<string, unknown>,
+): Promise<void> {
+  await page.evaluate(
+    async ({ chartId, patch, pane }) => {
+      const m = (await (window as unknown as AppWindow).__appImport!(pane)) as {
+        applySpecPatch: (id: string, build: (spec: unknown) => unknown) => void;
+      };
+      m.applySpecPatch(chartId, () => patch);
+    },
+    { chartId, patch, pane: FORMAT_PANE },
+  );
+  await page.waitForTimeout(600);
+  await settleGrid(page);
 }
 
 /** Does the store still hold this chart? */
@@ -691,6 +887,124 @@ async function pickFormatTab(page: Page, label: "Fill & Line" | "Options" | "Tex
 /** One swatch button in the pane, addressed by its field label and its hex. */
 function swatch(page: Page, field: string, hex: string) {
   return page.locator(`[data-chart-swatches="${field}"] [data-chart-swatch="${hex}"]`);
+}
+
+/**
+ * The same thing, SCOPED TO THE PANE.
+ *
+ * "Colour" is the label four different sections use (series fill, trendline
+ * line, error-bar line, data-label text), so an unscoped selector for it is a
+ * selector that will one day match something else on screen. The two labels
+ * `swatch` is used for above — "Fill colour", "Marker fill" — are unique.
+ */
+function paneSwatch(page: Page, field: string, hex: string) {
+  return page.locator(
+    `[data-testid="chart-format-pane"] [data-chart-swatches="${field}"] [data-chart-swatch="${hex}"]`,
+  );
+}
+
+/** The value a pane colour field is SHOWING — the read half of the control. */
+async function paneColorValue(page: Page, label: string): Promise<string> {
+  const input = page.locator(`[data-testid="chart-format-pane"] input[type="color"][aria-label="${label}"]`);
+  await expect(input, `the pane must offer a "${label}" colour field for this subject`).toBeVisible({
+    timeout: 5_000,
+  });
+  return (await input.inputValue()).toLowerCase();
+}
+
+/** Excel's Name Box wording for whatever the pane is targeting right now. */
+async function paneSubject(page: Page): Promise<string> {
+  return (await page.locator('[data-testid="chart-format-subject"]').innerText()).trim();
+}
+
+/**
+ * Two slow clicks at one point, then the ladder the handler reports.
+ *
+ * The first click on an UNSELECTED chart takes the object (`advanceSelection`
+ * only runs on a chart that is already selected); the second advances onto
+ * whatever is under the cursor. For the in-plot furniture there is no third
+ * rung — a trendline has no parts — so two clicks is the whole gesture.
+ */
+async function selectByTwoClicks(page: Page, at: { x: number; y: number }): Promise<Record<string, unknown>> {
+  await slowClick(page, at.x, at.y);
+  await slowClick(page, at.x, at.y);
+  return ladder(page);
+}
+
+/**
+ * Press Delete on a chart rung, having first clicked it back.
+ *
+ * The click is not a courtesy: `chartOwnsKeystroke` refuses unless the GRID
+ * holds DOM focus, and everything that formats a selection first puts focus on
+ * a pane control. The focus reading is asserted rather than assumed, because a
+ * Delete that silently belonged to nobody would look exactly like a Delete the
+ * chart refused on purpose.
+ */
+async function deleteSelectedRung(page: Page, at: { x: number; y: number }, label: string): Promise<void> {
+  await slowClick(page, at.x, at.y);
+  const focused = await gridFocused(page);
+  console.log(`[chart-interaction] before Delete on ${label}: gridFocused=${focused}`);
+  expect(focused, `the grid must hold focus or Delete never reaches the chart (${label})`).toBe(true);
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(900);
+}
+
+/**
+ * The cell guard the furniture Deletes are measured against.
+ *
+ * A1 is the cell the `appPage` fixture leaves selected, and clicking a chart
+ * does NOT move the grid's cell selection (it must not — a selection change
+ * deselects the chart), so a Delete that escapes to the grid runs Excel's
+ * `core.edit.clearContents` over exactly this cell. It is outside every chart
+ * this file places.
+ */
+const SENTINEL = "SENTINEL";
+
+async function seedSentinel(
+  page: Page,
+  grid: { setCellValueDirect: (ref: string, value: string) => Promise<void> },
+): Promise<void> {
+  await grid.setCellValueDirect("A1", SENTINEL);
+  await page.waitForTimeout(300);
+}
+
+/**
+ * Park the selection on the chart TITLE before a pixel measurement.
+ *
+ * `drawSelectionHighlights` paints a WHITE WASH over every datum that is not
+ * selected whenever the rung is "series" or "dataPoint". So a bar's colour read
+ * while a sibling is selected is that bar's colour under a veil, and two bars
+ * compared across different rungs are not comparable at all. An "element" rung
+ * paints a hairline box on the title and nothing whatever on the plot.
+ *
+ * Deselecting the chart would do as well for the pixels and would take the
+ * Format pane's subject with it, which is why the selection is MOVED rather
+ * than dropped.
+ */
+async function parkSelectionOnTitle(page: Page, chartId: string, box: Clip): Promise<void> {
+  const r = await elementRect(page, chartId, "title");
+  expect(r, "this journey's charts carry a title to park the selection on").not.toBeNull();
+  await slowClick(page, box.x + r!.x + r!.width / 2, box.y + r!.y + r!.height / 2);
+  expect(await ladder(page), "the parking click must land on the title").toMatchObject({
+    level: "element",
+    elementId: "title",
+  });
+  await page.mouse.move(4, 4);
+  await page.waitForTimeout(350);
+  await settleGrid(page);
+}
+
+/** The minimum distance from a page point to any of this chart's datum markers. */
+function nearestMarkerDistance(
+  markers: Array<{ cx: number; cy: number }>,
+  local: { x: number; y: number },
+): number {
+  let best = Number.POSITIVE_INFINITY;
+  for (const m of markers) {
+    const d = Math.hypot(m.cx - local.x, m.cy - local.y);
+    if (d < best) best = d;
+  }
+  return best;
 }
 
 // ===========================================================================
@@ -1507,14 +1821,87 @@ test.describe("Chart interaction, live", () => {
     const GREY = "#636363";
     const sw = swatch(appPage, "Fill colour", GREY);
     await expect(sw).toBeVisible();
-    // A REAL POINTER MOVE, not `locator.hover()`. The swatch previews on
-    // `onMouseEnter`, and the point of this journey is that the gestures are
-    // the ones a hand makes; moving through the strip is also what a reader
-    // actually does on the way to a colour.
+    /** The product's own account of the preview: the pane flag and the store. */
+    const previewStateNow = async (): Promise<{ previewing: boolean; overrides: string }> =>
+      appPage.evaluate(
+        async ({ chartId, pane, store }) => {
+          const w = window as unknown as AppWindow;
+          const p = (await w.__appImport!(pane)) as { paneIsPreviewing: () => boolean };
+          const s = (await w.__appImport!(store)) as {
+            getChartById: (id: string) => { spec: { dataPointOverrides?: unknown } } | null;
+          };
+          return {
+            previewing: p.paneIsPreviewing(),
+            overrides: JSON.stringify(s.getChartById(chartId)?.spec.dataPointOverrides ?? null),
+          };
+        },
+        { chartId, pane: FORMAT_PANE, store: CHART_STORE },
+      );
+
+    // ---- PROBE: THE RAW POINTER MOVE, MEASURED AND NOT ASSERTED -----------
+    //
+    // This WAS the gesture under test, on the stated ground that a raw
+    // `mouse.move` is what a hand makes and `locator.hover()` is not. On
+    // 2026-09-22 it stopped delivering, and the reason is worth keeping in the
+    // file rather than quietly swapping the line:
+    //
+    //   * `document.elementFromPoint` at the very coordinate answered
+    //     `<BUTTON data-chart-swatch="#636363">` — the pointer is over the
+    //     right control and the geometry is not in question.
+    //   * React's `onMouseEnter` never fired: `paneIsPreviewing=false`, nothing
+    //     in the store, nothing on screen. Reproduced on three consecutive runs.
+    //   * `steps: 8` — eight intermediate moves along the path — changed
+    //     nothing, so it is not a single-event coalescing problem.
+    //   * `locator.hover()` on the SAME element, from the same parked position,
+    //     previewed correctly every time, with the right colour AND the right
+    //     identity key.
+    //
+    // So the PRODUCT is fine and the harness gesture is what broke. The probe
+    // stays because it is the thing that regressed, printed on every run; the
+    // assertions below moved onto the gesture that actually reaches the
+    // product, which is still a real CDP pointer move and still previews on
+    // `onMouseEnter`.
     const swBox = await sw.boundingBox();
     expect(swBox, "the swatch must have a box to move the pointer onto").not.toBeNull();
+    const hoverPoint = { x: swBox!.x + swBox!.width / 2, y: swBox!.y + swBox!.height / 2 };
+    await appPage.mouse.move(hoverPoint.x, hoverPoint.y, { steps: 8 });
+    await appPage.waitForTimeout(500);
+    const rawProbe = await previewStateNow();
+    const underPointer = await appPage.evaluate(({ x, y }) => {
+      const el = document.elementFromPoint(x, y) as HTMLElement | null;
+      return {
+        tag: el?.tagName ?? "none",
+        swatch: el?.getAttribute("data-chart-swatch") ?? null,
+        label: el?.getAttribute("aria-label") ?? null,
+      };
+    }, hoverPoint);
+    console.log(
+      `[chart-interaction] RAW mouse.move probe at (${Math.round(hoverPoint.x)},${Math.round(hoverPoint.y)}): over <${underPointer.tag}> swatch=${underPointer.swatch} label=${JSON.stringify(underPointer.label)} -> paneIsPreviewing=${rawProbe.previewing} storeOverrides=${rawProbe.overrides}`,
+    );
+
+    // ---- THE GESTURE UNDER TEST -------------------------------------------
+    // Back to a clean pointer position first, so the hover below is a genuine
+    // ENTER and not a no-op on an element the pointer is already on.
+    await appPage.mouse.move(4, 4);
+    await appPage.waitForTimeout(300);
+    await settleGrid(appPage);
     const hoverStartedAt = Date.now();
-    await appPage.mouse.move(swBox!.x + swBox!.width / 2, swBox!.y + swBox!.height / 2);
+    await sw.hover();
+
+    // THE STORE IS READ IMMEDIATELY, BEFORE THE PAINT POLL, and the order is
+    // the finding rather than a detail. Read AFTER the three-second poll below
+    // — which is where it used to be read — the answer was
+    // `paneIsPreviewing=false` with nothing in the store, and that reads as
+    // "the hover handler never ran". Read here it is TRUE with the right
+    // colour and the right identity key. So the preview IS armed by the
+    // gesture, is never painted, and has lapsed again within three seconds.
+    // Two different facts, and the old ordering could only ever report one of
+    // them.
+    await appPage.waitForTimeout(400);
+    const previewState = await previewStateNow();
+    console.log(
+      `[chart-interaction] on hover (read IMMEDIATELY): paneIsPreviewing=${previewState.previewing} storeOverrides=${previewState.overrides}`,
+    );
 
     // HOW LONG THE PREVIEW TAKES TO APPEAR, sampled rather than assumed.
     //
@@ -1540,26 +1927,14 @@ test.describe("Chart interaction, live", () => {
       `[chart-interaction] preview paint latency: ${hoverLatencyMs < 0 ? `NEVER within ${HOVER_PAINT_BUDGET_MS}ms` : `${hoverLatencyMs}ms`} (diff ${hoverDiffFirstSeen})`,
     );
 
-    // WHAT THE PRODUCT THINKS IS HAPPENING, printed before anything is
-    // asserted. Without it a zero pixel diff reads as "the preview does not
-    // paint" when it might equally be "the hover handler never ran".
-    const previewState = await appPage.evaluate(
-      async ({ chartId, pane, store }) => {
-        const w = window as unknown as AppWindow;
-        const p = (await w.__appImport!(pane)) as { paneIsPreviewing: () => boolean };
-        const s = (await w.__appImport!(store)) as {
-          getChartById: (id: string) => { spec: { dataPointOverrides?: unknown } } | null;
-        };
-        return {
-          previewing: p.paneIsPreviewing(),
-          overrides: JSON.stringify(s.getChartById(chartId)?.spec.dataPointOverrides ?? null),
-        };
-      },
-      { chartId, pane: "/extensions/Charts/components/ChartFormatPane.tsx", store: CHART_STORE },
-    );
+    // AND WHAT IS LEFT OF IT AFTERWARDS, for the same reading taken late. The
+    // pointer has not moved and nothing has been clicked, so a preview that is
+    // no longer armed here has ended on its own.
+    const previewStateLate = await previewStateNow();
     console.log(
-      `[chart-interaction] on hover: paneIsPreviewing=${previewState.previewing} storeOverrides=${previewState.overrides}`,
+      `[chart-interaction] on hover (read AFTER the paint poll): paneIsPreviewing=${previewStateLate.previewing} storeOverrides=${previewStateLate.overrides}`,
     );
+
     // The STORE half is asserted too, so a zero pixel diff can never be read as
     // "the hover handler never ran". If this passes and the paint above did
     // not, the missing step is the repaint and nothing else.
@@ -1640,5 +2015,971 @@ test.describe("Chart interaction, live", () => {
     await flushChartSaves(appPage);
     await appPage.waitForTimeout(400);
     await invoke(appPage, "save_file", { path: CLEAN_BASELINE_FILE });
+  });
+
+  // ========================================================================
+  // 9 — THE OWNER'S FIRST BUG, LIVE
+  //
+  //   "when I select an individual data point and give it a color I cannot
+  //    select a color for the entire series after that"
+  //
+  // "The colour of a series" had TWO spellings and the Format pane wrote the
+  // losing one. `spec.seriesColors[name]` is applied onto the parsed series by
+  // `applySeriesColorOverrides`, so it is what the PAINTERS read;
+  // `spec.series[i].color` is the BASE that overwrites. The pane's swatch wrote
+  // the base, reported success, and changed nothing for any reader who had ever
+  // set a series colour from the ribbon Design panel.
+  //
+  // This journey seeds that exact state — a name-keyed colour already present —
+  // and then asserts BOTH halves of Excel's precedence: the series colour
+  // reaches every bar that has no colour of its own, and the one bar that does
+  // keeps it. Reset to Match Style on that bar rejoins it to the series.
+  // ========================================================================
+
+  test("OB-1: one bar's colour does not lock the SERIES colour — the series recolours around it and Reset rejoins it", async ({
+    appPage,
+    grid,
+  }) => {
+    test.setTimeout(420_000);
+    await installAppImport(appPage);
+    await seedData(grid);
+    await appPage.waitForTimeout(400);
+
+    const SEEDED_SERIES = "#a5a5a5";
+    // The one series `baseSpec` declares. Spelled once and used as a COMPUTED
+    // key below, because `seriesColors` is keyed by a series NAME — a piece of
+    // the user's data, not an identifier.
+    const SERIES_NAME = "Units";
+    const chartId = await makeChart(
+      appPage,
+      baseSpec("bar", {
+        title: "Series Colour Journey",
+        // THE OWNER'S STARTING STATE, seeded rather than assumed: a name-keyed
+        // series colour already in the spec.
+        seriesColors: { [SERIES_NAME]: SEEDED_SERIES },
+      }),
+      "SeriesColourJourney",
+    );
+
+    const TARGET = 3; // Apr, the tallest bar
+    const NEIGHBOUR = 1; // Feb
+
+    // --- reach the bar, and open the pane the swatches live in --------------
+    let box = await chartClientBox(appPage, chartId);
+    for (let i = 0; i < 3; i++) {
+      const at = await barCentre(appPage, chartId, box, TARGET);
+      await slowClick(appPage, at.x, at.y);
+    }
+    expect(await ladder(appPage), "three clicks reach the individual bar").toMatchObject({
+      level: "dataPoint",
+      seriesIndex: 0,
+      categoryIndex: TARGET,
+    });
+    let at = await barCentre(appPage, chartId, box, TARGET);
+    await openChartMenu(appPage, at.x, at.y);
+    await openFormatPaneFromMenu(appPage);
+    await pickFormatTab(appPage, "Fill & Line");
+
+    // RE-DERIVED WITH THE PANE OPEN, BEFORE ANY OF THE COORDINATES BELOW. A
+    // task pane takes horizontal space, so the chart's page position is not
+    // what it was when the menu was opened, and every click from here on —
+    // including the parking click on the title — is computed from this box.
+    await appPage.mouse.move(4, 4);
+    await appPage.waitForTimeout(300);
+    await settleGrid(appPage);
+    box = await chartClientBox(appPage, chartId);
+
+    // THE BASELINE IS TAKEN WITH THE SELECTION PARKED ON THE TITLE, and that is
+    // not fussiness: `drawSelectionHighlights` paints a WHITE WASH over every
+    // datum that is not selected whenever the rung is "series" or "dataPoint".
+    // A bar's colour read while a sibling is selected is that bar's colour under
+    // a veil, and two bars compared across different rungs are not comparable at
+    // all — which is precisely what this journey has to compare. An "element"
+    // rung paints a hairline box on the title and nothing on the plot.
+    await parkSelectionOnTitle(appPage, chartId, box);
+    const targetPatch = sampleBox(await barCentre(appPage, chartId, box, TARGET), 5);
+    const neighbourPatch = sampleBox(await barCentre(appPage, chartId, box, NEIGHBOUR), 5);
+    const targetSeeded = await pixels(appPage, targetPatch);
+    const neighbourSeeded = await pixels(appPage, neighbourPatch);
+    console.log(
+      `[chart-interaction] OB-1 seeded: target=${rgbText(averageRgb(targetSeeded))} neighbour=${rgbText(averageRgb(neighbourSeeded))}`,
+    );
+    expect(
+      channelGap(averageRgb(targetSeeded), averageRgb(neighbourSeeded)),
+      "POSITIVE CONTROL: with only a seeded SERIES colour, the two bars start identical",
+    ).toBeLessThanOrEqual(12);
+
+    // --- the point gets a colour of its own --------------------------------
+    for (let i = 0; i < 2; i++) {
+      const p = await barCentre(appPage, chartId, box, TARGET);
+      await slowClick(appPage, p.x, p.y);
+    }
+    expect(await ladder(appPage), "two clicks from the title rung reach the bar again").toMatchObject({
+      level: "dataPoint",
+      seriesIndex: 0,
+      categoryIndex: TARGET,
+    });
+    const ORANGE = "#ed7d31";
+    await swatch(appPage, "Fill colour", ORANGE).click();
+    await appPage.waitForTimeout(1200);
+    await settleGrid(appPage);
+
+    const withPoint = await rawSpec(appPage, chartId);
+    expect(withPoint.dataPointOverrides, "the point carries exactly one override").toHaveLength(1);
+    expect(String(withPoint.dataPointOverrides![0].color).toLowerCase()).toBe(ORANGE);
+
+    await parkSelectionOnTitle(appPage, chartId, box);
+    const targetOrange = await pixels(appPage, targetPatch);
+    const neighbourStillSeeded = await pixels(appPage, neighbourPatch);
+    console.log(
+      `[chart-interaction] OB-1 after the POINT colour: target=${rgbText(averageRgb(targetOrange))} neighbour=${rgbText(averageRgb(neighbourStillSeeded))}`,
+    );
+    expect(diffCount(targetSeeded, targetOrange), "the clicked bar took the colour").toBeGreaterThan(20);
+    expect(diffCount(neighbourSeeded, neighbourStillSeeded), "and no other bar moved").toBe(0);
+
+    // --- NOW THE WHOLE SERIES. This is the sentence that was broken. --------
+    at = await barCentre(appPage, chartId, box, NEIGHBOUR);
+    await slowClick(appPage, at.x, at.y);
+    expect(
+      await ladder(appPage),
+      "one click from the title rung enters the datum ladder at the SERIES",
+    ).toMatchObject({ level: "series", seriesIndex: 0 });
+    await expect(
+      appPage.locator('[data-testid="chart-format-pane"]'),
+      "the pane is still open and retargets on the selection change",
+    ).toBeVisible();
+    expect(await paneSubject(appPage), "and it now names the SERIES").toContain('Series 1 "Units"');
+
+    // THE READ HALF OF THE DEFECT. Measured in jsdom against the old code: with
+    // `seriesColors` seeded, this control showed the `#4472c4` fallback, because
+    // it read the index-keyed base instead of the name-keyed colour the chart is
+    // actually painted in.
+    expect(
+      await paneColorValue(appPage, "Colour"),
+      "the pane must SHOW the colour the painters use, not the base they overwrite",
+    ).toBe(SEEDED_SERIES);
+
+    const GREEN = "#70ad47";
+    await paneSwatch(appPage, "Colour", GREEN).click();
+    await appPage.waitForTimeout(1400);
+    await settleGrid(appPage);
+
+    // THE WRITE HALF.
+    const afterSeries = await rawSpec(appPage, chartId);
+    expect(
+      (afterSeries.seriesColors as Record<string, string> | undefined)?.[SERIES_NAME],
+      "THE REGRESSION THAT MUST NEVER COME BACK: the pane writes the spelling the painters read",
+    ).toBe(GREEN);
+    expect(
+      (afterSeries.series as Array<{ color?: string | null }> | undefined)?.[0]?.color,
+      "and leaves the index-keyed base alone — writing it is what made the swatch a no-op",
+    ).toBe("#4472C4");
+    expect(
+      afterSeries.dataPointOverrides,
+      "the point's own colour is untouched by a SERIES colour",
+    ).toHaveLength(1);
+
+    await parkSelectionOnTitle(appPage, chartId, box);
+    const targetAfterSeries = await pixels(appPage, targetPatch);
+    const neighbourGreen = await pixels(appPage, neighbourPatch);
+    console.log(
+      `[chart-interaction] OB-1 after the SERIES colour: target=${rgbText(averageRgb(targetAfterSeries))} neighbour=${rgbText(averageRgb(neighbourGreen))}`,
+    );
+    expect(
+      diffCount(neighbourStillSeeded, neighbourGreen),
+      "THE OWNER'S SENTENCE: the series colour must actually reach the bars that have none of their own",
+    ).toBeGreaterThan(20);
+    expect(
+      diffCount(targetOrange, targetAfterSeries),
+      "EXCEL'S PRECEDENCE: the bar with its own colour keeps it when the series is recoloured",
+    ).toBe(0);
+    expect(
+      channelGap(averageRgb(targetAfterSeries), averageRgb(neighbourGreen)),
+      "so the two bars are now genuinely different colours",
+    ).toBeGreaterThan(30);
+
+    // --- RESET TO MATCH STYLE on the POINT ---------------------------------
+    for (let i = 0; i < 2; i++) {
+      const p = await barCentre(appPage, chartId, box, TARGET);
+      await slowClick(appPage, p.x, p.y);
+    }
+    expect(await ladder(appPage), "back onto the coloured bar").toMatchObject({
+      level: "dataPoint",
+      seriesIndex: 0,
+      categoryIndex: TARGET,
+    });
+    const reset = appPage.locator('[data-testid="chart-reset-to-match-style"]');
+    await expect(reset, "the reset control is part of the pane header").toBeVisible();
+    expect(
+      await reset.getAttribute("data-reset-scope"),
+      "and it is scoped to THIS point, not the series and not the chart",
+    ).toBe("dataPoint");
+    expect(await reset.isEnabled(), "live, because this point has something manual on it").toBe(true);
+    await reset.click();
+    await appPage.waitForTimeout(1200);
+    await settleGrid(appPage);
+
+    const afterReset = await rawSpec(appPage, chartId);
+    expect(afterReset.dataPointOverrides ?? [], "the point's own colour is gone").toEqual([]);
+    expect(
+      (afterReset.seriesColors as Record<string, string> | undefined)?.[SERIES_NAME],
+      "and a POINT reset is not a SERIES reset — the series colour stands",
+    ).toBe(GREEN);
+
+    await parkSelectionOnTitle(appPage, chartId, box);
+    const targetRejoined = averageRgb(await pixels(appPage, targetPatch));
+    const neighbourNow = averageRgb(await pixels(appPage, neighbourPatch));
+    console.log(
+      `[chart-interaction] OB-1 after RESET: target=${rgbText(targetRejoined)} neighbour=${rgbText(neighbourNow)}`,
+    );
+    expect(
+      channelGap(targetRejoined, neighbourNow),
+      "THE POINT REJOINS THE SERIES COLOUR — a diff against its own past would only say it stopped being orange",
+    ).toBeLessThanOrEqual(12);
+
+    await removeChart(appPage, chartId);
+  });
+
+  // ========================================================================
+  // 10 + 11 — THE OWNER'S SECOND BUG, LIVE
+  //
+  //   "When I add a data table to be shown in the chart it overlaps the x axis
+  //    labels."
+  //
+  // The bottom band was computed in TWO places: `computeCartesianLayout`
+  // reserved a tick-label strip and an axis-title strip knowing nothing about
+  // the table, and `dispatchComputeLayout` then folded the table's height into
+  // `margin.bottom` afterwards. The band was big enough overall and nothing
+  // re-apportioned it, so the tick labels and the title were still painted at
+  // their original offsets — inside the table.
+  //
+  // THE DECISIVE PROOF IS A PIXEL IDENTITY, not a rect comparison. With a data
+  // table shown on a category-X mark, `specForMarkPaint` takes the tick labels
+  // away from the painters; so flipping `xAxis.showLabels` must change NOTHING
+  // on screen. Under the defect it changed six large labels. The layout is
+  // identical in both states (`xTickLabelBandHeight` is zero either way), so
+  // there is no second explanation for a difference.
+  // ========================================================================
+
+  test("OB-2: with a data table the category labels are painted ONCE, and the x-axis title sits BELOW the table", async ({
+    appPage,
+    grid,
+  }) => {
+    test.setTimeout(420_000);
+    await installAppImport(appPage);
+    await seedData(grid);
+    await appPage.waitForTimeout(400);
+
+    const chartId = await makeChart(
+      appPage,
+      baseSpec("bar", {
+        title: "Data Table Band Journey",
+        xAxis: { title: "Month" },
+        yAxis: { title: "Units" },
+        dataTable: { enabled: true },
+      }),
+      "DataTableBandJourney",
+    );
+
+    // --- THE BAND, AS THE LAYOUT RECORDS IT --------------------------------
+    const view = await layoutView(appPage, chartId);
+    const els = view.elements;
+    expect(els, "the chart must have painted element rects").not.toBeNull();
+    console.log(
+      `[chart-interaction] OB-2 band: plot=${JSON.stringify(view.plotArea)} table=${JSON.stringify(els!.dataTable)} xTitle=${JSON.stringify(els!.xAxisTitle)} xBand=${JSON.stringify(els!.xAxisBand)}`,
+    );
+
+    expect(els!.dataTable, "a data table that is enabled must record a rect to be hit-tested at").toBeTruthy();
+    expect(
+      els!.xAxisBand,
+      "NO TICK-LABEL BAND: the table's header row IS the category labelling, so a hit-testable strip there would select an axis the reader cannot see",
+    ).toBeUndefined();
+    // [plot] [tick labels: zero] [table] — `DATA_TABLE_TOP_GAP` is 4.
+    expect(
+      els!.dataTable!.y,
+      "the table hangs directly under the plot, with only the 4px gap",
+    ).toBeCloseTo(view.plotArea.y + view.plotArea.height + 4, 3);
+    expect(
+      els!.xAxisTitle,
+      "the x-axis title is still drawn — it is the thing that used to land IN the table",
+    ).toBeTruthy();
+    expect(
+      els!.xAxisTitle!.y,
+      "and it now starts BELOW the table's bottom edge",
+    ).toBeGreaterThanOrEqual(els!.dataTable!.y + els!.dataTable!.height);
+
+    // --- THE PIXEL IDENTITY ------------------------------------------------
+    // Taken with the chart UNSELECTED, so no selection border or datum wash is
+    // in either capture.
+    await appPage.mouse.move(4, 4);
+    await appPage.waitForTimeout(300);
+    await settleGrid(appPage);
+    const clip = await chartClientBox(appPage, chartId);
+    const labelsOn = await pixels(appPage, clip);
+    await patchSpecLive(appPage, chartId, { xAxis: { showLabels: false } });
+    // A NO-OP PATCH WOULD PASS THE IDENTITY BELOW. The spec is read back so an
+    // unchanged chart can never be mistaken for a chart that changed nothing;
+    // that the same call also REPAINTS is what the positive control proves.
+    expect(
+      (await rawSpec(appPage, chartId)).xAxis as { showLabels?: boolean },
+      "the toggle must have reached the spec, or the identity below measures nothing",
+    ).toMatchObject({ showLabels: false });
+    await appPage.mouse.move(4, 4);
+    await appPage.waitForTimeout(300);
+    const labelsOff = await pixels(appPage, clip);
+    const tableDiff = diffCount(labelsOn, labelsOff);
+    console.log(`[chart-interaction] OB-2 showLabels toggle WITH a table: ${tableDiff} px changed`);
+    expect(
+      tableDiff,
+      "THE OWNER'S SCREENSHOT: with a table shown, the tick labels belong to the table alone — toggling the axis' own labels must change nothing at all",
+    ).toBe(0);
+
+    // --- THE POSITIVE CONTROL: the toggle has teeth ------------------------
+    // Without a table, `showLabels` is the difference between six painted
+    // labels and none. If this half did not move, the identity above would be
+    // a test of a toggle that does nothing.
+    await patchSpecLive(appPage, chartId, {
+      dataTable: { enabled: false },
+      xAxis: { showLabels: true },
+    });
+    await appPage.mouse.move(4, 4);
+    await appPage.waitForTimeout(300);
+    const noTableLabelsOn = await pixels(appPage, clip);
+    await patchSpecLive(appPage, chartId, { xAxis: { showLabels: false } });
+    await appPage.mouse.move(4, 4);
+    await appPage.waitForTimeout(300);
+    const noTableLabelsOff = await pixels(appPage, clip);
+    const bareDiff = diffCount(noTableLabelsOn, noTableLabelsOff);
+    console.log(`[chart-interaction] OB-2 showLabels toggle with NO table: ${bareDiff} px changed`);
+    expect(
+      bareDiff,
+      "POSITIVE CONTROL: with no table, hiding the tick labels must visibly change the chart",
+    ).toBeGreaterThan(200);
+
+    // Back to the state the rest of this journey is about.
+    await patchSpecLive(appPage, chartId, {
+      dataTable: { enabled: true },
+      xAxis: { showLabels: true },
+    });
+
+    // --- THE TITLE IS SELECTABLE WHERE IT IS PAINTED -----------------------
+    const box = await chartClientBox(appPage, chartId);
+    const after = await layoutView(appPage, chartId);
+    const xTitle = after.elements?.xAxisTitle;
+    expect(xTitle, "the x-axis title rect must have come back with the table").toBeTruthy();
+    const titleAt = {
+      x: box.x + xTitle!.x + xTitle!.width / 2,
+      y: box.y + xTitle!.y + xTitle!.height / 2,
+    };
+    expect(
+      await selectByTwoClicks(appPage, titleAt),
+      "clicking the x-axis title where it is PAINTED must select it — a title you can see and cannot click is the drift this rect exists to prevent",
+    ).toMatchObject({ level: "element", elementId: "xAxisTitle" });
+
+    // --- AND THE TABLE ITSELF IS AN OBJECT ---------------------------------
+    const table = after.elements!.dataTable!;
+    const tableAt = { x: box.x + table.x + table.width / 2, y: box.y + table.y + table.height / 2 };
+    await slowClick(appPage, tableAt.x, tableAt.y);
+    expect(await ladder(appPage), "the data table is a rung of its own").toMatchObject({
+      level: "element",
+      elementId: "dataTable",
+    });
+
+    // --- GRIDLINES ARE STILL REFUSED, ON PURPOSE ---------------------------
+    // `CHART_ELEMENT_IDS` has no `gridlines` member: nothing records where a
+    // gridline is drawn, and a branch that answered "anywhere in the plot area"
+    // would steal every plot-area click. The live consequence, asserted rather
+    // than described: a click on the plot background — which is where the
+    // gridlines are — selects the PLOT AREA.
+    const bars = (await hitGeometry(appPage, chartId))?.rects ?? [];
+    const plotPoint = { x: after.plotArea.x + 4, y: after.plotArea.y + 6 };
+    const insideABar = bars.some(
+      (b) =>
+        plotPoint.x >= b.x && plotPoint.x <= b.x + b.width && plotPoint.y >= b.y && plotPoint.y <= b.y + b.height,
+    );
+    expect(insideABar, "the gridline probe must land on plot BACKGROUND, not on a bar").toBe(false);
+    await slowClick(appPage, box.x + plotPoint.x, box.y + plotPoint.y);
+    expect(
+      await ladder(appPage),
+      "a click where the gridlines are selects the PLOT AREA — gridlines have no id because they have no producer",
+    ).toMatchObject({ level: "element", elementId: "plotArea" });
+
+    await removeChart(appPage, chartId);
+  });
+
+  test("OB-2: a HORIZONTAL bar chart keeps its value tick labels and stacks the table below them", async ({
+    appPage,
+    grid,
+  }) => {
+    test.setTimeout(300_000);
+    await installAppImport(appPage);
+    await seedData(grid);
+    await appPage.waitForTimeout(400);
+
+    // A horizontal bar's x labels are VALUES, not the categories the table's
+    // header row repeats, so the table does NOT take them over
+    // (`VALUE_X_MARKS`). The band therefore has three occupants stacked in
+    // order — [plot] [value labels] [table] [axis title] — and the pixel
+    // identity used for the vertical case does not apply here BY DESIGN: the
+    // labels really are painted.
+    const chartId = await makeChart(
+      appPage,
+      baseSpec("horizontalBar", {
+        title: "Horizontal Table Journey",
+        xAxis: { title: "Units Sold" },
+        dataTable: { enabled: true },
+      }),
+      "HorizontalTableJourney",
+    );
+
+    const view = await layoutView(appPage, chartId);
+    const els = view.elements!;
+    console.log(
+      `[chart-interaction] OB-2 horizontal: plot=${JSON.stringify(view.plotArea)} xBand=${JSON.stringify(els.xAxisBand)} table=${JSON.stringify(els.dataTable)} xTitle=${JSON.stringify(els.xAxisTitle)}`,
+    );
+
+    expect(
+      els.xAxisBand,
+      "the VALUE tick labels keep their band — the table's header row does not repeat them",
+    ).toBeTruthy();
+    expect(els.dataTable, "and the table is still drawn").toBeTruthy();
+    expect(
+      els.dataTable!.y,
+      "the table starts below the label band, plus the 4px gap — one band, apportioned once",
+    ).toBeCloseTo(els.xAxisBand!.y + els.xAxisBand!.height + 4, 3);
+    expect(els.xAxisBand!.y, "which itself starts at the plot's bottom edge").toBeCloseTo(
+      view.plotArea.y + view.plotArea.height,
+      3,
+    );
+    expect(els.xAxisTitle, "the axis title is drawn").toBeTruthy();
+    expect(els.xAxisTitle!.y, "below the table, as in the vertical case").toBeGreaterThanOrEqual(
+      els.dataTable!.y + els.dataTable!.height,
+    );
+
+    // The label band and the table are two DIFFERENT objects, and each answers
+    // for its own pixels.
+    const box = await chartClientBox(appPage, chartId);
+    const bandAt = {
+      x: box.x + els.xAxisBand!.x + els.xAxisBand!.width / 2,
+      y: box.y + els.xAxisBand!.y + els.xAxisBand!.height / 2,
+    };
+    expect(
+      await selectByTwoClicks(appPage, bandAt),
+      "the value-label band still selects the X AXIS",
+    ).toMatchObject({ level: "axis", axisType: "x" });
+
+    const tableAt = {
+      x: box.x + els.dataTable!.x + els.dataTable!.width / 2,
+      y: box.y + els.dataTable!.y + els.dataTable!.height / 2,
+    };
+    await slowClick(appPage, tableAt.x, tableAt.y);
+    expect(await ladder(appPage), "and the strip below it is the TABLE").toMatchObject({
+      level: "element",
+      elementId: "dataTable",
+    });
+
+    await removeChart(appPage, chartId);
+  });
+
+  // ========================================================================
+  // 12-15 — the in-plot furniture became first-class (CI-12)
+  //
+  // All four were hit-testable, named by @api and recorded as rects by their
+  // painters for a whole wave, and the ladder still collapsed every one of them
+  // to `{ level: "chart" }`. Each of these four journeys does the same four
+  // things with a real pointer: SELECT it, watch the pane RETARGET, FORMAT it,
+  // and DELETE it — and each asserts that the chart survived the Delete and
+  // that the Delete never reached the cells.
+  // ========================================================================
+
+  test("a TRENDLINE is a rung: click it, format it, delete it — and the chart lives", async ({
+    appPage,
+    grid,
+  }) => {
+    test.setTimeout(300_000);
+    await installAppImport(appPage);
+    await seedData(grid);
+    await seedSentinel(appPage, grid);
+
+    const chartId = await makeChart(
+      appPage,
+      baseSpec("line", {
+        title: "Trendline Journey",
+        trendlines: [{ type: "linear", seriesIndex: 0 }],
+      }),
+      "TrendlineJourney",
+    );
+
+    /**
+     * A point ON the trendline that no datum marker can claim.
+     *
+     * A datum beats furniture — settled precedent — so a click on the stretch of
+     * trendline that runs through a marker selects the MARKER, and a test that
+     * clicked there would read as "the trendline is not selectable". The
+     * recorded polyline has one vertex per category, at the same x as the
+     * markers, so the midpoint of a segment is half a category step away from
+     * both of its neighbours.
+     */
+    const trendlinePoint = async (): Promise<{ x: number; y: number }> => {
+      const v = await layoutView(appPage, chartId);
+      const trace = v.elements?.trendlines?.[0];
+      expect(trace, "the trendline must have been PAINTED and recorded, or there is nothing to click").toBeTruthy();
+      const markers = (await hitGeometry(appPage, chartId))?.markers ?? [];
+      for (let i = 0; i + 1 < trace!.points.length; i++) {
+        const mid = {
+          x: (trace!.points[i].x + trace!.points[i + 1].x) / 2,
+          y: (trace!.points[i].y + trace!.points[i + 1].y) / 2,
+        };
+        if (nearestMarkerDistance(markers, mid) >= 16) return mid;
+      }
+      throw new Error("no stretch of the trendline is clear of a datum marker");
+    };
+
+    let box = await chartClientBox(appPage, chartId);
+    let local = await trendlinePoint();
+    let at = { x: box.x + local.x, y: box.y + local.y };
+    console.log(`[chart-interaction] trendline click at chart-local ${JSON.stringify(local)}`);
+
+    expect(
+      await selectByTwoClicks(appPage, at),
+      "clicking a trendline used to give you the CHART — it is its own rung now, and it carries its ordinal",
+    ).toMatchObject({ level: "element", elementId: "trendline", seriesIndex: 0, trendlineIndex: 0 });
+
+    await openChartMenu(appPage, at.x, at.y);
+    expect(await formatRowLabel(appPage), "and the menu names it").toBe("Format Trendline...");
+    await openFormatPaneFromMenu(appPage);
+    expect(await paneSubject(appPage), "the pane retargets onto the trendline, with its ordinal").toContain(
+      "Trendline 1",
+    );
+    await pickFormatTab(appPage, "Options");
+
+    await appPage.locator('[data-testid="chart-format-pane"] input[aria-label="Display R-squared value"]').click();
+    await appPage.waitForTimeout(900);
+    await settleGrid(appPage);
+    const formatted = await rawSpec(appPage, chartId);
+    expect(
+      (formatted.trendlines as Array<{ showRSquared?: boolean }> | undefined)?.[0]?.showRSquared,
+      "the pane formats the trendline it targeted",
+    ).toBe(true);
+
+    // The pane took horizontal space, so the chart moved: everything below is
+    // re-derived rather than reused.
+    box = await chartClientBox(appPage, chartId);
+    local = await trendlinePoint();
+    at = { x: box.x + local.x, y: box.y + local.y };
+    await deleteSelectedRung(appPage, at, "trendline");
+
+    const afterDelete = await rawSpec(appPage, chartId);
+    expect(afterDelete.trendlines ?? null, "Delete removes the trendline").toBeNull();
+    expect(await chartExists(appPage, chartId), "and NOT the chart").toBe(true);
+    expect(
+      (await layoutView(appPage, chartId)).elements?.trendlines ?? [],
+      "and it stops being painted, so it stops being a rung",
+    ).toEqual([]);
+    expect(await grid.getCellDisplayValue("A1"), "and the cells underneath are untouched").toBe(SENTINEL);
+
+    await removeChart(appPage, chartId);
+    await grid.setCellValueDirect("A1", "");
+  });
+
+  test("a series' ERROR BARS are a rung: per SERIES and never per point, formattable and deletable", async ({
+    appPage,
+    grid,
+  }) => {
+    test.setTimeout(300_000);
+    await installAppImport(appPage);
+    await seedData(grid);
+    await seedSentinel(appPage, grid);
+
+    const chartId = await makeChart(
+      appPage,
+      baseSpec("bar", {
+        title: "Error Bar Journey",
+        // AN EXPLICIT SCALE CEILING, and it is load-bearing rather than tidy.
+        // The tallest value is 60 and a +25% stem reaches 75; on an auto scale
+        // whose maximum IS 60 that stem is drawn off the top of the plot and
+        // the rect recorded for it has a NEGATIVE y. Measured 2026-09-22: the
+        // click then landed above the chart's own rectangle, which is a click
+        // on the GRID, which DESELECTS the chart — the ladder came back
+        // `{ level: "none" }` and read like "error bars are not selectable".
+        yAxis: { max: 100 },
+        // "plus" keeps every stem ABOVE its bar, so the click target is not
+        // inside a datum — a datum beats furniture.
+        markOptions: { errorBars: { enabled: true, type: "percentage", value: 25, direction: "plus" } },
+      }),
+      "ErrorBarJourney",
+    );
+
+    /** The top cap of the TALLEST drawn error bar, in chart-local space. */
+    const errorBarCap = async (): Promise<{ x: number; y: number }> => {
+      const v = await layoutView(appPage, chartId);
+      const bars = v.elements?.errorBars ?? [];
+      expect(bars.length, "error bars must have been drawn and recorded").toBeGreaterThan(0);
+      const tallest = bars.reduce((a, b) => (b.rect.height > a.rect.height ? b : a));
+      // The recorded rect is the stem's TRUE extent and is not clipped to the
+      // plot, so this guard is what keeps a scale change from silently turning
+      // the probe into a click on the grid. See the `yAxis.max` note above.
+      expect(
+        tallest.rect.y,
+        "the error bar must be drawn inside the plot, not off the top of the scale",
+      ).toBeGreaterThanOrEqual(v.plotArea.y - 1);
+      const point = { x: tallest.rect.x + tallest.rect.width / 2, y: Math.max(tallest.rect.y, v.plotArea.y) + 2 };
+      const rects = (await hitGeometry(appPage, chartId))?.rects ?? [];
+      const inABar = rects.some(
+        (r) => point.x >= r.x && point.x <= r.x + r.width && point.y >= r.y && point.y <= r.y + r.height,
+      );
+      expect(inABar, "the error-bar probe must land above the bar, not inside it").toBe(false);
+      return point;
+    };
+
+    let box = await chartClientBox(appPage, chartId);
+    let local = await errorBarCap();
+    let at = { x: box.x + local.x, y: box.y + local.y };
+    console.log(`[chart-interaction] error-bar click at chart-local ${JSON.stringify(local)}`);
+
+    const rung = await selectByTwoClicks(appPage, at);
+    expect(rung, "an error bar answers its SERIES").toMatchObject({
+      level: "element",
+      elementId: "errorBars",
+      seriesIndex: 0,
+    });
+    expect(
+      rung.categoryIndex,
+      "and carries NO point index — Excel has no per-point error bar, and a stray index would make two clicks on one object compare unequal",
+    ).toBeUndefined();
+
+    await openChartMenu(appPage, at.x, at.y);
+    expect(await formatRowLabel(appPage), "plural, because the object IS the whole set").toBe(
+      "Format Error Bars...",
+    );
+    await openFormatPaneFromMenu(appPage);
+    expect(await paneSubject(appPage)).toContain("Error Bars");
+    await pickFormatTab(appPage, "Options");
+
+    await appPage.locator('[data-testid="chart-format-pane"] input[aria-label="Value"]').fill("40");
+    await appPage.waitForTimeout(900);
+    await settleGrid(appPage);
+    const formatted = await rawSpec(appPage, chartId);
+    expect(
+      (formatted.markOptions as { errorBars?: { value?: number } } | undefined)?.errorBars?.value,
+      "the pane writes through the one mark-aware accessor",
+    ).toBe(40);
+
+    box = await chartClientBox(appPage, chartId);
+    local = await errorBarCap();
+    at = { x: box.x + local.x, y: box.y + local.y };
+    await deleteSelectedRung(appPage, at, "error bars");
+
+    const afterDelete = await rawSpec(appPage, chartId);
+    expect(
+      (afterDelete.markOptions as { errorBars?: { enabled?: boolean } } | undefined)?.errorBars?.enabled,
+      "the last series' bars going turns error bars off, rather than leaving an empty filter",
+    ).toBe(false);
+    expect(await chartExists(appPage, chartId), "and the chart lives").toBe(true);
+    expect(
+      (await layoutView(appPage, chartId)).elements?.errorBars ?? [],
+      "nothing is drawn for them any more",
+    ).toEqual([]);
+    expect(await grid.getCellDisplayValue("A1"), "and the cells are untouched").toBe(SENTINEL);
+
+    await removeChart(appPage, chartId);
+    await grid.setCellValueDirect("A1", "");
+  });
+
+  test("ONE DATA LABEL is a rung: per point, formattable, and Delete peels off that label alone", async ({
+    appPage,
+    grid,
+  }) => {
+    test.setTimeout(300_000);
+    await installAppImport(appPage);
+    await seedData(grid);
+    await seedSentinel(appPage, grid);
+
+    const TARGET = 3; // Apr
+    const chartId = await makeChart(
+      appPage,
+      baseSpec("bar", {
+        title: "Data Label Journey",
+        // THE SAME SCALE CEILING, for a different reason that has the same
+        // shape. `drawBarLabels` places an "above" label at `rect.y - 4` and
+        // then CLAMPS it to `plotArea.y + fontSize` — so the label of a bar
+        // that reaches the top of the scale is pushed back INSIDE its own bar,
+        // where a datum beats furniture and the label cannot be clicked at all.
+        // Measured 2026-09-22 on an auto scale, where Apr's 60 IS the maximum.
+        // A ceiling of 100 leaves every label above its bar, which is where a
+        // reader sees them.
+        yAxis: { max: 100 },
+        dataLabels: { enabled: true, position: "above" },
+      }),
+      "DataLabelJourney",
+    );
+
+    /** The centre of ONE painted label, checked to be clear of every bar. */
+    const labelCentre = async (): Promise<{ x: number; y: number }> => {
+      const v = await layoutView(appPage, chartId);
+      const found = (v.elements?.dataLabels ?? []).find(
+        (l) => l.seriesIndex === 0 && l.pointIndex === TARGET,
+      );
+      expect(found, `no data label was recorded for point ${TARGET}`).toBeTruthy();
+      const point = { x: found!.rect.x + found!.rect.width / 2, y: found!.rect.y + found!.rect.height / 2 };
+      const rects = (await hitGeometry(appPage, chartId))?.rects ?? [];
+      const inABar = rects.some(
+        (r) => point.x >= r.x && point.x <= r.x + r.width && point.y >= r.y && point.y <= r.y + r.height,
+      );
+      expect(inABar, "the label probe must land above the bar, not inside it").toBe(false);
+      return point;
+    };
+
+    let box = await chartClientBox(appPage, chartId);
+    let local = await labelCentre();
+    let at = { x: box.x + local.x, y: box.y + local.y };
+    console.log(`[chart-interaction] data-label click at chart-local ${JSON.stringify(local)}`);
+
+    expect(await selectByTwoClicks(appPage, at), "a data label carries BOTH indices — it is per point").toMatchObject({
+      level: "element",
+      elementId: "dataLabel",
+      seriesIndex: 0,
+      categoryIndex: TARGET,
+    });
+
+    await openChartMenu(appPage, at.x, at.y);
+    expect(await formatRowLabel(appPage), "singular, because there is one per point").toBe(
+      "Format Data Label...",
+    );
+    await openFormatPaneFromMenu(appPage);
+    expect(await paneSubject(appPage), "and the pane names the point it belongs to").toContain(
+      `Point ${TARGET + 1} "${MONTHS[TARGET]}" Data Label`,
+    );
+    await pickFormatTab(appPage, "Options");
+
+    // The number format is CHART-WIDE and the section title says so — the split
+    // of scope is stated on screen rather than implied. Removing THIS label is
+    // the per-point act, and that is what the Delete below exercises.
+    await appPage.locator('[data-testid="chart-format-pane"] input[aria-label="Number format"]').fill("0.0");
+    await appPage.waitForTimeout(900);
+    await settleGrid(appPage);
+    expect(
+      (await rawSpec(appPage, chartId)).dataLabels as { format?: string } | undefined,
+    ).toMatchObject({ format: "0.0" });
+
+    box = await chartClientBox(appPage, chartId);
+    local = await labelCentre();
+    at = { x: box.x + local.x, y: box.y + local.y };
+    await deleteSelectedRung(appPage, at, "data label");
+
+    const afterDelete = (await rawSpec(appPage, chartId)).dataLabels as
+      | { enabled?: boolean; hiddenPoints?: Array<{ seriesIndex: number; pointIndex: number }> }
+      | undefined;
+    expect(
+      afterDelete?.hiddenPoints,
+      "THAT point's label is suppressed — the coarser act (all of the series') is not the only act",
+    ).toEqual([{ seriesIndex: 0, pointIndex: TARGET }]);
+    expect(afterDelete?.enabled, "and every other label stays ON").toBe(true);
+    expect(await chartExists(appPage, chartId), "and the chart lives").toBe(true);
+    const stillDrawn = (await layoutView(appPage, chartId)).elements?.dataLabels ?? [];
+    expect(
+      stillDrawn.some((l) => l.seriesIndex === 0 && l.pointIndex === TARGET),
+      "the deleted label stops being painted",
+    ).toBe(false);
+    expect(stillDrawn.length, "and its siblings are still there").toBeGreaterThan(0);
+    expect(await grid.getCellDisplayValue("A1"), "and the cells are untouched").toBe(SENTINEL);
+
+    await removeChart(appPage, chartId);
+    await grid.setCellValueDirect("A1", "");
+  });
+
+  test("the DATA TABLE is a rung: one object, one section, one Delete", async ({ appPage, grid }) => {
+    test.setTimeout(300_000);
+    await installAppImport(appPage);
+    await seedData(grid);
+    await seedSentinel(appPage, grid);
+
+    // A SHALLOWER CHART, PLACED HIGH, and this is a WORKAROUND for a product
+    // defect rather than a preference — see the handoff note. A data table is
+    // the LOWEST thing on a chart, and the context menu opened over it is
+    // clamped with `estimatedHeight = 40 + (rows + 1) * 26`
+    // (components/ChartContextMenu.tsx). At the default placement (y 40, height
+    // 340) in a 1280x800 window the estimate came up short and the menu's LAST
+    // row — which is always "Format <element>..." — rendered BELOW the viewport:
+    // visible, enabled and stable, and unclickable (measured 2026-09-22,
+    // `locator.click` timed out for 30s on "element is outside of the
+    // viewport"). Raising the chart puts the menu back on screen; the menu's own
+    // geometry is printed below so a re-run says how much room there was.
+    const chartId = await makeChart(
+      appPage,
+      baseSpec("bar", {
+        title: "Data Table Object Journey",
+        xAxis: { title: "Month" },
+        dataTable: { enabled: true },
+      }),
+      "DataTableObjectJourney",
+      { x: 70, y: 8, width: 540, height: 240 },
+    );
+
+    /**
+     * A point in the table's TOP row rather than its centre: the same object,
+     * ~20px higher up the window, which is 20px more room for the menu.
+     */
+    const tableProbe = async (): Promise<{ x: number; y: number }> => {
+      const v = await layoutView(appPage, chartId);
+      const t = v.elements?.dataTable;
+      expect(t, "the data table must be drawn to be clicked").toBeTruthy();
+      return { x: t!.x + t!.width / 2, y: t!.y + Math.min(8, t!.height / 2) };
+    };
+
+    let box = await chartClientBox(appPage, chartId);
+    let local = await tableProbe();
+    let at = { x: box.x + local.x, y: box.y + local.y };
+
+    expect(await selectByTwoClicks(appPage, at), "the table carries no indices — there is one of it").toMatchObject({
+      level: "element",
+      elementId: "dataTable",
+    });
+
+    await openChartMenu(appPage, at.x, at.y);
+    expect(await formatRowLabel(appPage)).toBe("Format Data Table...");
+    const menuGeometry = await appPage.evaluate(() => {
+      const el = document.querySelector("[data-chart-context-menu]");
+      const r = el?.getBoundingClientRect();
+      return { top: r?.top ?? -1, bottom: r?.bottom ?? -1, viewport: window.innerHeight };
+    });
+    console.log(
+      `[chart-interaction] data-table menu: top=${Math.round(menuGeometry.top)} bottom=${Math.round(menuGeometry.bottom)} viewportHeight=${menuGeometry.viewport}`,
+    );
+    expect(
+      menuGeometry.bottom,
+      "THE MENU MUST FIT: its last row is the Format row, and a row below the viewport is a row nobody can click",
+    ).toBeLessThanOrEqual(menuGeometry.viewport);
+    await openFormatPaneFromMenu(appPage);
+    expect(await paneSubject(appPage)).toContain("Data Table");
+    // ONE TAB, so no tablist: `DataTableOptions` styles no text, and a tab with
+    // no fields is the dead tab this pane's header forbids.
+    expect(
+      await appPage.locator('[data-testid="chart-format-pane"] [role="tablist"]').count(),
+      "a single-tab subject shows no tab strip",
+    ).toBe(0);
+
+    await appPage.locator('[data-testid="chart-format-pane"] input[aria-label="Vertical borders"]').click();
+    await appPage.waitForTimeout(900);
+    await settleGrid(appPage);
+    expect(
+      (await rawSpec(appPage, chartId)).dataTable as { showVerticalBorder?: boolean } | undefined,
+    ).toMatchObject({ showVerticalBorder: false });
+
+    box = await chartClientBox(appPage, chartId);
+    local = await tableProbe();
+    at = { x: box.x + local.x, y: box.y + local.y };
+    await deleteSelectedRung(appPage, at, "data table");
+
+    const afterDelete = (await rawSpec(appPage, chartId)).dataTable as
+      | { enabled?: boolean; showVerticalBorder?: boolean }
+      | undefined;
+    expect(afterDelete?.enabled, "Delete turns the table off").toBe(false);
+    expect(
+      afterDelete?.showVerticalBorder,
+      "and keeps the rest of its options for when it comes back",
+    ).toBe(false);
+    expect(await chartExists(appPage, chartId), "and the chart lives").toBe(true);
+    expect(
+      (await layoutView(appPage, chartId)).elements?.dataTable,
+      "nothing is drawn for it any more",
+    ).toBeUndefined();
+    expect(await grid.getCellDisplayValue("A1"), "and the cells are untouched").toBe(SENTINEL);
+
+    await removeChart(appPage, chartId);
+    await grid.setCellValueDirect("A1", "");
+  });
+
+  // ========================================================================
+  // 16 — the reachability gap a DEFAULT AREA CHART had (chart-interaction §6.7)
+  //
+  // An area series is ONE polygon filled from the series colour and
+  // `showMarkers` defaults to FALSE, so on a default area chart there was no
+  // per-datum shape for "format this point" to reach: the pane accepted the
+  // colour, wrote it into the spec, dirtied the document — and nothing on
+  // screen changed. An overridden datum now gets a marker even though the
+  // series shows none, because the override IS the request for a distinct
+  // point. A datum with no override still gets nothing, which is the half that
+  // keeps a default area chart looking like an area chart.
+  // ========================================================================
+
+  test("an AREA chart with markers OFF paints a marker for the ONE datum that was formatted, and for no other", async ({
+    appPage,
+    grid,
+  }) => {
+    test.setTimeout(300_000);
+    await installAppImport(appPage);
+    await seedData(grid);
+    await appPage.waitForTimeout(400);
+
+    const chartId = await makeChart(
+      appPage,
+      baseSpec("area", { title: "Area Point Journey" }),
+      "AreaPointJourney",
+    );
+
+    const TARGET = 3;
+    const NEIGHBOUR = 1;
+
+    let box = await chartClientBox(appPage, chartId);
+    for (let i = 0; i < 3; i++) {
+      const p = await markerCentre(appPage, chartId, box, TARGET);
+      await slowClick(appPage, p.x, p.y);
+    }
+    expect(
+      await ladder(appPage),
+      "the datum is REACHABLE even with no marker painted — the hit geometry records one regardless",
+    ).toMatchObject({ level: "dataPoint", seriesIndex: 0, categoryIndex: TARGET });
+
+    const at = await markerCentre(appPage, chartId, box, TARGET);
+    await openChartMenu(appPage, at.x, at.y);
+    expect(await formatRowLabel(appPage), "an area datum is a Data Point like any other").toBe(
+      "Format Data Point...",
+    );
+    await openFormatPaneFromMenu(appPage);
+    await pickFormatTab(appPage, "Fill & Line");
+
+    // Re-derived with the pane OPEN, before the parking click uses it.
+    await appPage.mouse.move(4, 4);
+    await appPage.waitForTimeout(300);
+    await settleGrid(appPage);
+    box = await chartClientBox(appPage, chartId);
+    await parkSelectionOnTitle(appPage, chartId, box);
+    const targetPatch = sampleBox(await markerCentre(appPage, chartId, box, TARGET), 6);
+    const neighbourPatch = sampleBox(await markerCentre(appPage, chartId, box, NEIGHBOUR), 6);
+    const targetBefore = await pixels(appPage, targetPatch);
+    const neighbourBefore = await pixels(appPage, neighbourPatch);
+
+    for (let i = 0; i < 2; i++) {
+      const p = await markerCentre(appPage, chartId, box, TARGET);
+      await slowClick(appPage, p.x, p.y);
+    }
+    expect(await ladder(appPage)).toMatchObject({ level: "dataPoint", seriesIndex: 0, categoryIndex: TARGET });
+
+    const ORANGE = "#ed7d31";
+    await swatch(appPage, "Fill colour", ORANGE).click();
+    await appPage.waitForTimeout(1200);
+    await settleGrid(appPage);
+    await parkSelectionOnTitle(appPage, chartId, box);
+
+    const overrides = (await rawSpec(appPage, chartId)).dataPointOverrides;
+    expect(overrides, "one override, for the datum the reader clicked").toHaveLength(1);
+    expect(String(overrides![0].color).toLowerCase()).toBe(ORANGE);
+
+    const targetAfter = await pixels(appPage, targetPatch);
+    const neighbourAfter = await pixels(appPage, neighbourPatch);
+    console.log(
+      `[chart-interaction] area override: target diff=${diffCount(targetBefore, targetAfter)} neighbour diff=${diffCount(neighbourBefore, neighbourAfter)}`,
+    );
+    expect(
+      diffCount(targetBefore, targetAfter),
+      "THE GAP THIS CLOSED: the colour must APPEAR — a per-point override that paints nothing is a control that lies",
+    ).toBeGreaterThan(5);
+    expect(
+      diffCount(neighbourBefore, neighbourAfter),
+      "NEGATIVE CONTROL: a datum with no override still gets no marker, so a default area chart still looks like one",
+    ).toBe(0);
+
+    await removeChart(appPage, chartId);
   });
 });

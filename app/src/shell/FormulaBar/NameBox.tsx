@@ -399,8 +399,23 @@ export function NameBox(): React.ReactElement {
   const displayValue =
     (chartLabel !== "" ? chartLabel : null) ?? matchedName ?? matchedTable ?? displayAddress;
 
-  // Sync inputValue with displayValue when not editing
-  const [prevDisplay, setPrevDisplay] = useState(displayValue);
+  // Sync inputValue with displayValue when not editing.
+  //
+  // THE SENTINEL IS THE POINT. `prevDisplay` used to be seeded with the FIRST
+  // `displayValue`, while `inputValue` starts "" — so on the very first pass
+  // the two were already "equal", nothing reconciled them, and the Name Box
+  // rendered an EMPTY input until something moved. Mounting on a selection
+  // that never changes (the app's own first paint, a panel toggle, a re-mount
+  // after a sheet switch) showed a blank box where Excel shows "A1".
+  //
+  // `null` is a value `displayValue` can never take — it falls back through
+  // chart label -> name -> table -> `displayAddress`, and `displayAddress` is
+  // "A1" even with no selection — so seeding with it makes the FIRST render a
+  // change like any other, and the one branch below does the work for both the
+  // first pass and every later one. (Writing `setInputValue(displayValue)`
+  // into a mount effect instead would be a second copy of the same rule, on a
+  // different schedule, for the one case that is hardest to notice.)
+  const [prevDisplay, setPrevDisplay] = useState<string | null>(null);
   if (displayValue !== prevDisplay) {
     setPrevDisplay(displayValue);
     if (!isEditing) {

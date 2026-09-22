@@ -539,8 +539,16 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
       const extContext: ExtensionContext = {
         ...this.context,
         keybindings: {
-          register: (binding) =>
-            registerKeybinding({ ...binding, source: "extension", extensionId: id }),
+          // `when` is FORWARDED, not dropped. A one-parameter arrow here is
+          // assignable to IKeybindingsAPI['register'] whatever that signature
+          // says, so TypeScript never complained: an extension that passed a
+          // predicate through the facade simply had it swallowed and got a
+          // binding that fired everywhere. The base context above hands over
+          // `registerKeybinding` itself and always forwarded it; only this
+          // per-extension wrapper, which exists to stamp the attribution, did
+          // not.
+          register: (binding, when) =>
+            registerKeybinding({ ...binding, source: "extension", extensionId: id }, when),
           getAll: getAllKeybindings,
           getEffectiveCombo,
         },

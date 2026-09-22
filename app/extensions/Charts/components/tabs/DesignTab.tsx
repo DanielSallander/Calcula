@@ -6,6 +6,14 @@ import type { ChartSpec, ChartType, ChartMark, DataLabelSpec, DataTableOptions, 
 import { isCartesianChart } from "../../types";
 import { listChartMarks, getChartMarkMeta } from "@api/chartMarks";
 import { PALETTES, PALETTE_NAMES, getSeriesColor } from "../../rendering/chartTheme";
+import { readSeriesColor, seriesColorPatch } from "../../lib/chartDataReader";
+// The one answer to "which marks have error bars, and where do their options
+// live?" — reader, writer and mark list all from the painter that draws them.
+import {
+  getErrorBarOptions,
+  markSupportsErrorBars,
+  withErrorBarOptions,
+} from "../../rendering/errorBarPainter";
 import {
   FieldGroup,
   Label,
@@ -285,8 +293,8 @@ export function DesignTab({ spec, onSpecChange, previewSeriesNames }: DesignTabP
         )}
       </FieldGroup>
 
-      {/* Error Bars (bar, line, scatter only) */}
-      {(spec.mark === "bar" || spec.mark === "horizontalBar" || spec.mark === "line" || spec.mark === "scatter") && (
+      {/* Error Bars — the mark list is the painter's, not a fourth copy of it. */}
+      {markSupportsErrorBars(spec.mark) && (
         <ErrorBarsSection spec={spec} onSpecChange={onSpecChange} />
       )}
 
@@ -320,8 +328,16 @@ export function DesignTab({ spec, onSpecChange, previewSeriesNames }: DesignTabP
         <FieldGroup>
           <Label>Series Colors</Label>
           {previewSeriesNames.slice(0, 16).map((name, i) => {
-            const override = spec.seriesColors?.[name];
+            const override = readSeriesColor(spec, name);
             const effective = override ?? getSeriesColor(spec.palette, i, null);
+            // The ONE writer, shared with the Format pane and the ribbon
+            // Design panel. The dialog's own overlay REPLACES a spec key while
+            // the live store MERGES it, so the explicit-undefined clear this
+            // builds is the only form that is correct under both.
+            const write = (hex: string | null): void => {
+              const patch = seriesColorPatch(spec, name, hex);
+              if (patch !== null) onSpecChange(patch);
+            };
             return (
               <div
                 key={name}
@@ -330,11 +346,7 @@ export function DesignTab({ spec, onSpecChange, previewSeriesNames }: DesignTabP
                 <input
                   type="color"
                   value={/^#[0-9A-Fa-f]{6}$/.test(effective) ? effective : "#4E79A7"}
-                  onChange={(e) =>
-                    onSpecChange({
-                      seriesColors: { ...(spec.seriesColors ?? {}), [name]: e.target.value },
-                    })
-                  }
+                  onChange={(e) => write(e.target.value)}
                   title={`Color for "${name}"`}
                   style={{
                     width: 24,
@@ -358,11 +370,7 @@ export function DesignTab({ spec, onSpecChange, previewSeriesNames }: DesignTabP
                 </span>
                 {override && (
                   <button
-                    onClick={() => {
-                      const next = { ...(spec.seriesColors ?? {}) };
-                      delete next[name];
-                      onSpecChange({ seriesColors: next });
-                    }}
+                    onClick={() => write(null)}
                     style={{
                       fontSize: "11px",
                       padding: "1px 8px",
@@ -886,16 +894,19 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
 // ============================================================================
 
 function ErrorBarsSection({ spec, onSpecChange }: DesignTabProps): React.ReactElement {
-  const opts = spec.markOptions ?? {};
-  const errorBars: ErrorBarOptions = (opts as any).errorBars ?? {
+  // Read and write through the painter's own accessors. This section used to
+  // reach into `spec.markOptions` with two `as any` casts, which is how a write
+  // could land in a slot the painter never reads — the cast silences exactly
+  // the check that would have caught it.
+  const errorBars: ErrorBarOptions = getErrorBarOptions(spec) ?? {
     enabled: false,
     type: "standardError",
     direction: "both",
   };
 
   const updateErrorBars = (updates: Partial<ErrorBarOptions>) => {
-    const newEB = { ...errorBars, ...updates };
-    onSpecChange({ markOptions: { ...opts, errorBars: newEB } as any });
+    const patch = withErrorBarOptions(spec, { ...errorBars, ...updates });
+    if (patch) onSpecChange(patch);
   };
 
   return (

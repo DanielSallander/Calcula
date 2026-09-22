@@ -94,6 +94,86 @@ export interface ChartMarkLayout {
   elements?: ChartMarkElementRects;
 }
 
+/**
+ * ONE datum's per-point formatting, already RESOLVED by the host, handed to a
+ * custom mark so it can honour `spec.dataPointOverrides` without re-deriving
+ * them.
+ *
+ * WHY THE HOST RESOLVES IT. Turning `spec.dataPointOverrides` into "what colour
+ * is this datum" is not a lookup: an override is matched by identity KEY first
+ * and by index pair second, the index pair is in AUTHORING space (pre-filter)
+ * while a painter counts in PAINTER space (post-filter), a duplicated category
+ * label has a documented tie-break, and `invertIfNegative` replaces the fill.
+ * A mark that re-implemented that in script-land would be a THIRD spelling of
+ * the rule and would drift from the built-ins on the first change. So the host
+ * runs its own resolver and ships the answer.
+ *
+ * `seriesIndex` / `categoryIndex` are PAINTER space — the same indices the mark
+ * is looping over — so no translation is needed on the mark's side.
+ *
+ * Only datums an override actually reached appear (see
+ * {@link ChartMarkPaintContext.datumStyles}); everything else is the mark's own
+ * default, which the host does not know. A field that is `null` means "this
+ * override says nothing about it, keep your own".
+ */
+export interface ChartMarkDatumStyle {
+  /** PAINTER-space series index (post-filter) — the mark's own loop counter. */
+  seriesIndex: number;
+  /** PAINTER-space category index (post-filter) — the mark's own loop counter. */
+  categoryIndex: number;
+  /** Fill colour for this datum, or null when the override sets none. */
+  fill: string | null;
+  /** Alpha 0..1, or null. */
+  opacity: number | null;
+  borderColor: string | null;
+  borderWidth: number | null;
+  /**
+   * Marker shape name ("circle" | "square" | "diamond" | "triangle" | "cross" |
+   * "star" | "none"), or null. `"none"` means "paint nothing for this datum".
+   */
+  markerStyle: string | null;
+  markerSize: number | null;
+  markerFill: string | null;
+  markerBorderColor: string | null;
+  markerBorderWidth: number | null;
+  /** Radial pull-out distance in px. 0 when not exploded. */
+  explodeOffset: number;
+  /** True when `invertIfNegative` fired and `fill` is the inverted colour. */
+  inverted: boolean;
+  /**
+   * Gradient / pattern fill for this datum, or null. Opaque here because their
+   * shapes are Charts-internal (`GradientFill` / `PatternFill` in the Charts
+   * `types.ts`); they cross the worker boundary as plain cloned objects.
+   */
+  gradientFill: unknown;
+  patternFill: unknown;
+  /** How the override was matched — the host's own audit of the resolution. */
+  matchedBy: "key" | "index";
+}
+
+/**
+ * The paint payload a SANDBOXED mark's `markRenderer` receives as its second
+ * argument (`(ctx, paint, bounds) => ...`). Structural: the worker gets a
+ * structured CLONE of it, so everything here is plain data.
+ */
+export interface ChartMarkPaintContext {
+  /** The chart spec (cloned). */
+  spec: unknown;
+  /** The parsed chart data (cloned). */
+  data: unknown;
+  /** The laid-out chart — cast to {@link ChartMarkLayout}. */
+  layout: unknown;
+  /** The resolved render theme (cloned). */
+  theme: unknown;
+  /**
+   * The resolved per-point overrides, SPARSE: one entry per datum an override
+   * actually reached, and an EMPTY array when the chart has none. Read it
+   * rather than `spec.dataPointOverrides` — see {@link ChartMarkDatumStyle} for
+   * why the raw array is the wrong thing to index.
+   */
+  datumStyles: ChartMarkDatumStyle[];
+}
+
 /** Descriptive metadata for a chart mark (drives UI + axis classification). */
 export interface ChartMarkMeta {
   /** Human-readable name shown in the chart-type picker. */
@@ -116,6 +196,24 @@ export interface ChartMarkMeta {
    * marks. (Feature 2: full host-drawn chrome for sandboxed marks.)
    */
   yDomain?: [number, number];
+  /**
+   * The mark DECLARES that it honours `spec.dataPointOverrides` — that it reads
+   * {@link ChartMarkPaintContext.datumStyles} and paints the answer.
+   *
+   * WHY A DECLARATION AND NOT AN ASSUMPTION. A sandboxed mark's pixels arrive
+   * as an opaque `ImageBitmap`; the host hands it the resolved styles but
+   * cannot make it use them and cannot inspect the pixels to check. Without
+   * this flag the Format pane would accept "colour THIS point" on any custom
+   * mark and, for a mark that ignores the payload, nothing would happen — the
+   * same silent-no-op defect shape as a setting that writes to the wrong
+   * address. So the capability is opt-in and ASKABLE: see
+   * {@link chartMarkHonoursDataPointOverrides}, which is what a UI offering
+   * per-point formatting must consult.
+   *
+   * Built-in marks leave it unset — they all honour overrides, and the coverage
+   * test in the Charts extension proves it mark by mark.
+   */
+  honoursDataPointOverrides?: boolean;
 }
 
 /**
@@ -173,4 +271,25 @@ export function isChartMarkRegistered(mark: string): boolean {
 /** All registered mark ids, in registration order. */
 export function listChartMarks(): string[] {
   return [...registry.keys()];
+}
+
+/**
+ * Can a per-point override reach a datum on this mark?
+ *
+ * TRUE for every BUILT-IN mark (proved mark by mark by
+ * `dataPointOverrideCoverage.test.ts` in the Charts extension) and for a custom
+ * mark that DECLARED {@link ChartMarkMeta.honoursDataPointOverrides}. FALSE for
+ * a custom mark that did not — and for an unknown id, because a mark that is
+ * not registered cannot have promised anything.
+ *
+ * THE POINT OF ASKING. A UI that offers "format this single data point" must
+ * gate on this. Offering it for a mark that ignores the payload accepts a
+ * setting, writes it into the spec, dirties the document — and paints nothing.
+ * That is the defect shape this predicate exists to make impossible to ship
+ * again, and it is why the answer is a declaration rather than a guess.
+ */
+export function chartMarkHonoursDataPointOverrides(mark: string): boolean {
+  const meta = registry.get(mark)?.meta;
+  if (!meta) return false;
+  return meta.builtin === true || meta.honoursDataPointOverrides === true;
 }

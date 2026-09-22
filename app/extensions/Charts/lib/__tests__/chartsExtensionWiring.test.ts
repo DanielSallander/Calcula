@@ -18,7 +18,7 @@ function chartsIndexSource(): string {
 }
 
 describe("a chart edit made inside the debounce window reaches the file", () => {
-  it("flushes the pending chart saves on BEFORE_SAVE", () => {
+  it("flushes the pending chart saves from an AWAITED hook", () => {
     // `chartStore` batches persistence 300 ms deep. A title commit, a drag or a
     // resize finished just before Ctrl+S was still a pending setTimeout when
     // `save_file` serialised AppState, so the file got the OLD chart — and on
@@ -27,13 +27,19 @@ describe("a chart edit made inside the debounce window reaches the file", () => 
     // flushed left `is_modified` false and the close-without-saving prompt
     // never appeared. `flushPendingChartSaves` documented itself as "call this
     // before file save or app close" and had NO caller in the product at all.
+    //
+    // THIS ASSERTION USED TO NAME `AppEvents.BEFORE_SAVE`, and that hook was
+    // not enough: `emitAppEvent` does not await its listeners, so with two
+    // dirty charts the second `update_chart` was posted after `save_file`. The
+    // ordering itself is proved behaviourally in chartSaveFlushOrdering.test.ts;
+    // this is the wiring half.
     const source = chartsIndexSource();
     expect(source).toContain("flushPendingChartSaves");
 
-    const at = source.indexOf("AppEvents.BEFORE_SAVE, AppEvents.BEFORE_CLOSE");
-    expect(at, "Charts registers no BEFORE_SAVE / BEFORE_CLOSE listener").toBeGreaterThan(-1);
-    // The listener body, not merely the names somewhere in the file.
-    expect(source.slice(at, at + 200)).toContain("flushPendingChartSaves()");
+    const at = source.indexOf("registerLifecycleGuard(");
+    expect(at, "Charts registers no lifecycle guard for the flush").toBeGreaterThan(-1);
+    // The guard body, not merely the names somewhere in the file.
+    expect(source.slice(at, at + 400)).toContain("await flushPendingChartSaves()");
   });
 });
 

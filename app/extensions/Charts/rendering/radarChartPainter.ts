@@ -7,8 +7,8 @@ import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, RadarMarkOpt
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { seriesPaletteIndex } from "../lib/encodingResolver";
-import { resolveDatumStyle } from "../lib/dataPointOverrides";
-import { paintDatumMarker } from "./markerPainter";
+import { resolveDatumStyle, specHasDatumOverrides } from "../lib/dataPointOverrides";
+import { markerReachesDatum, paintDatumMarker } from "./markerPainter";
 import {
   computeRadialLayout,
   drawChartBackground,
@@ -190,7 +190,13 @@ export function paintRadarChart(
     // Markers. Resolved through the ONE shared resolver so a single vertex can
     // be recoloured, reshaped or hidden — the translation from painter space to
     // authoring space and the identity-key match both happen inside it.
-    if (showMarkers) {
+    //
+    // WITH MARKERS OFF the loop still runs for the overridden vertices only: a
+    // radar series is one polygon and its vertex marker is the only per-datum
+    // shape there is, so `showMarkers: false` would otherwise swallow "format
+    // this point" exactly as the area chart's default did (design doc §6.7
+    // gap 1). `markerReachesDatum` lets through only what an override reached.
+    if (showMarkers || specHasDatumOverrides(spec)) {
       for (let ci = 0; ci < points.length; ci++) {
         const p = points[ci];
         const style = resolveDatumStyle(spec, data, si, ci, {
@@ -198,6 +204,7 @@ export function paintRadarChart(
           markerStyle: "circle",
           markerSize: markerRadius,
         });
+        if (!markerReachesDatum(showMarkers, style.matchedBy)) continue;
         paintDatumMarker(ctx, p.x, p.y, {
           shape: style.markerStyle ?? "circle",
           size: style.markerSize ?? markerRadius,

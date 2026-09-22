@@ -19,15 +19,19 @@
 //          is public through @api/chartMarks, and a third-party or script-authored
 //          mark paints through rendering/sandboxMarkShim.ts: its pixels are an
 //          ImageBitmap rendered in a Worker realm and blitted into the plot
-//          rectangle, and NOTHING host-side applies dataPointOverrides to those
-//          pixels. So, stated explicitly rather than quietly excluded: a CUSTOM
-//          MARK DOES NOT GET PER-POINT OVERRIDES — not yet. The spec does reach
-//          the worker, so a sandboxed mark could choose to read
-//          `spec.dataPointOverrides` itself, but the host cannot make it, cannot
-//          check that it did, and this test must not pretend otherwise. An
-//          unscoped version of this test would go red the moment any custom mark
-//          is registered, which is a false alarm about the mark and a real loss
-//          of the guard over the built-ins.
+//          rectangle. The host now RESOLVES every override a datum receives and
+//          ships the answer to the worker as `paint.datumStyles`
+//          (`resolvedDatumStylesForMark`, lib/dataPointOverrides.ts), and a mark
+//          DECLARES whether it reads them
+//          (`ChartMarkMeta.honoursDataPointOverrides`; the pane and the context
+//          menu withhold per-point formatting from a mark that does not). What
+//          the host still cannot do is CHECK: the pixels are opaque, so a mark
+//          that declares and then ignores the payload is indistinguishable from
+//          one that honoured it. That is why the guard below stays scoped to the
+//          built-ins, whose call streams we can read — an unscoped version would
+//          go red the moment any custom mark is registered, which is a false
+//          alarm about the mark and a real loss of the guard over the built-ins.
+//          `reachability-sandboxDatumStyles.test.ts` covers the payload itself.
 
 import { describe, it, expect } from "vitest";
 import { registerChartMark as apiRegisterChartMark, unregisterChartMark } from "@api/chartMarks";
@@ -129,11 +133,13 @@ const MARK_FIXTURES: Record<string, MarkFixture> = {
   line: { data: MULTI, target: { seriesIndex: 0, categoryIndex: 1 }, filter: "series" },
   area: {
     data: MULTI,
-    // An area series paints ONE polygon and, by default, no per-datum shape at
-    // all (`showMarkers ?? false`) — there would be nothing for a per-point
-    // override to reach. Markers on is the configuration in which the property
-    // is even expressible for this mark.
-    specExtra: { markOptions: { showMarkers: true } as ChartSpec["markOptions"] },
+    // DELIBERATELY DEFAULT. An area series paints one polygon and shows no
+    // markers unless asked (`showMarkers ?? false`), and this fixture used to
+    // switch them on because there was otherwise no per-datum shape for an
+    // override to reach. That was the gap itself, not a property of the mark:
+    // the painter now grants a marker to an OVERRIDDEN datum with the series'
+    // markers off (areaChartPainter + `markerReachesDatum`), so the default
+    // chart — the one a reader actually inserts — is what this covers.
     target: { seriesIndex: 0, categoryIndex: 1 },
     filter: "series",
   },

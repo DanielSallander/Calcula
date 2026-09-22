@@ -22,6 +22,7 @@ import {
   recordYAxisTitleRect,
   recordYLabelBandRect,
   xAxisTitleBaselineY,
+  xLabelBandHeight,
   Y_AXIS_TITLE_X,
 } from "../markerPainter";
 import { drawCartesianAxes, rectContains } from "../chartPainterUtils";
@@ -181,7 +182,7 @@ describe("measured element rects", () => {
 
     it(`${c.name}: the measured x-axis title box ENDS on the baseline it was painted at`, () => {
       const layout = painted(c);
-      const baseline = xAxisTitleBaselineY(layout.plotArea, true);
+      const baseline = xAxisTitleBaselineY(layout.plotArea, xLabelBandHeight(c.spec, [], DEFAULT_CHART_THEME), DEFAULT_CHART_THEME);
       const r = layout.elements!.xAxisTitle!;
       expect(r.y + r.height).toBe(baseline);
       expect(r.x + r.width / 2).toBeCloseTo(layout.plotArea.x + layout.plotArea.width / 2, 6);
@@ -268,7 +269,7 @@ describe("axis rect arithmetic agrees with drawCartesianAxes", () => {
     const hand: ChartLayout = {
       width: W, height: H, margin: { ...ref.margin }, plotArea: { ...ref.plotArea },
     };
-    const baseline = xAxisTitleBaselineY(ref.plotArea, true);
+    const baseline = xAxisTitleBaselineY(ref.plotArea, xLabelBandHeight(spec, [], DEFAULT_CHART_THEME), DEFAULT_CHART_THEME);
     recordXAxisTitleRect(
       hand, ref.plotArea, "Quarter".length * MOCK_CHAR_PX, baseline, DEFAULT_CHART_THEME.axisTitleFontSize,
     );

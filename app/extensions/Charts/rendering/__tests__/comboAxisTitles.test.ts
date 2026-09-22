@@ -23,6 +23,7 @@ import { paintComboChart, computeComboLayout } from "../comboChartPainter";
 import {
   recordXAxisTitleRect,
   xAxisTitleBaselineY,
+  xLabelBandHeight,
 } from "../markerPainter";
 import { DEFAULT_CHART_THEME } from "../chartTheme";
 import { makeRecordingCtx } from "./dispatch-recordingCtx";
@@ -157,7 +158,7 @@ describe("combo chart x-axis title rect", () => {
       reference,
       layout.plotArea,
       X_TITLE.length * MOCK_CHAR_PX,
-      xAxisTitleBaselineY(layout.plotArea, true),
+      xAxisTitleBaselineY(layout.plotArea, xLabelBandHeight(spec, [], DEFAULT_CHART_THEME), DEFAULT_CHART_THEME),
       DEFAULT_CHART_THEME.axisTitleFontSize,
     );
 

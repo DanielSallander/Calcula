@@ -27,7 +27,11 @@ import { ChartEvents } from "../lib/chartEvents";
 import { PALETTES, PALETTE_NAMES, getSeriesColor } from "../rendering/chartTheme";
 import { CHART_DESIGN_TAB_ID, CHART_DIALOG_ID } from "../manifest";
 import { exportChartAsImage } from "../lib/chartExport";
-import { autoDetectSeriesForOrientation } from "../lib/chartDataReader";
+import {
+  autoDetectSeriesForOrientation,
+  readSeriesColor,
+  seriesColorPatch,
+} from "../lib/chartDataReader";
 import { resolveDataSource } from "../lib/dataSourceResolver";
 import { alertAsync } from "@api/dialogs";
 
@@ -994,8 +998,14 @@ export function SeriesColorsSection(_props: PanelSectionProps): React.ReactEleme
   if (seriesList.length === 0) return null;
   const idx = Math.min(seriesIdx, seriesList.length - 1);
   const name = seriesList[idx].name;
-  const override = spec.seriesColors?.[name];
+  const override = readSeriesColor(spec, name);
   const effective = override ?? getSeriesColor(spec.palette, idx, seriesList[idx].color ?? null);
+
+  /** Commit through the ONE writer, or do nothing when it says there is nothing to do. */
+  const write = (hex: string | null): void => {
+    const patch = seriesColorPatch(spec, name, hex);
+    if (patch !== null) updateSpec(patch);
+  };
 
   return (
     <div className={s.optionColumn} style={{ width: 150 }}>
@@ -1014,21 +1024,14 @@ export function SeriesColorsSection(_props: PanelSectionProps): React.ReactEleme
         <input
           type="color"
           value={toHex6(effective)}
-          onChange={(e) =>
-            updateSpec({ seriesColors: { ...(spec.seriesColors ?? {}), [name]: e.target.value } })
-          }
+          onChange={(e) => write(e.target.value)}
           title="Series color"
           style={{ width: 26, height: 20, padding: 0, border: "1px solid var(--border-default, #ccc)", borderRadius: 3, cursor: "pointer" }}
         />
         <button
           className={s.actionBtn}
           disabled={!override}
-          onClick={() => {
-            if (!spec.seriesColors) return;
-            const next = { ...spec.seriesColors };
-            delete next[name];
-            updateSpec({ seriesColors: next });
-          }}
+          onClick={() => write(null)}
           title="Reset this series to its palette color"
         >
           Auto

@@ -152,7 +152,21 @@ describe("computeCartesianLayout element rects", () => {
   });
 
   it("puts the x axis title below the label band and the y axis title on its side", () => {
-    expect(els.xAxisTitle!.y + els.xAxisTitle!.height).toBe(327 + 30);
+    // BELOW THE BAND, not 30px below the plot. The drop used to be that pixel
+    // literal while the band above it is `labelFontSize + 8` and the title's
+    // own box is `axisTitleFontSize` tall — two font sizes the Format pane lets
+    // the reader change, so the title was painted THROUGH the tick labels as
+    // soon as they grew. The band here is the same one `xAxisBand` reports.
+    const band = els.xAxisBand!;
+    expect(band.y).toBe(327);
+    expect(els.xAxisTitle!.y).toBe(band.y + band.height + 4);
+    expect(els.xAxisTitle!.height).toBe(DEFAULT_CHART_THEME.axisTitleFontSize);
+    expect(els.xAxisTitle!.y + els.xAxisTitle!.height).toBe(
+      327 + band.height + 4 + DEFAULT_CHART_THEME.axisTitleFontSize,
+    );
+    // The title's box must start BELOW every tick label, which is the whole
+    // point: the labels are painted from plotBottom + 4 downwards.
+    expect(els.xAxisTitle!.y).toBeGreaterThanOrEqual(327 + 4 + DEFAULT_CHART_THEME.labelFontSize);
     // Rotated -90deg: one font-size WIDE and the text length TALL.
     expect(els.yAxisTitle!.x).toBe(14);
     expect(els.yAxisTitle!.width).toBe(DEFAULT_CHART_THEME.axisTitleFontSize);

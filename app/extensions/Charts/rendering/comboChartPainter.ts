@@ -43,6 +43,7 @@ import {
   recordYAxisTitleRect,
   recordYLabelBandRect,
   xAxisTitleBaselineY,
+  xLabelBandHeight,
   Y_AXIS_TITLE_X,
 } from "./markerPainter";
 
@@ -475,7 +476,11 @@ function drawComboAxes(
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    const baselineY = xAxisTitleBaselineY(plotArea, spec.xAxis.showLabels);
+    const baselineY = xAxisTitleBaselineY(
+      plotArea,
+      xLabelBandHeight(spec, xScale.domain, theme),
+      theme,
+    );
     ctx.fillText(spec.xAxis.title, plotArea.x + plotArea.width / 2, baselineY);
     if (layout) {
       recordXAxisTitleRect(

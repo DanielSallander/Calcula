@@ -921,6 +921,8 @@ export function CreateChartDialog({
               onCategoryIndexChange={setCategoryIndex}
               series={series}
               onSeriesChange={setSeries}
+              spec={currentSpec}
+              onSpecChange={handleSpecChange}
               availableAxes={availableAxes}
               palette={palette}
               onInspectData={() => setShowDataInspector(true)}

@@ -50,16 +50,284 @@ function estimateXLabelBandHeight(
   data: ParsedChartData,
   theme: ChartRenderTheme,
 ): number {
+  // One formula, in xLabelBandHeight — the painters that draw their own axes
+  // need it from a tick list rather than from ParsedChartData, and a second
+  // spelling here is how the reserved band and the painted one drift.
+  return xLabelBandHeight(spec, data.categories, theme);
+}
+
+// ============================================================================
+// The data-table band
+// ============================================================================
+//
+// The bottom band below a cartesian plot used to be computed in TWO places: the
+// tick-label / axis-title reservations here, and the data table's height folded
+// into `margin.bottom` by `dispatchComputeLayout`. Neither knew about the
+// other, so with a data table on, the band was big enough overall while the
+// tick labels and the axis title were still painted at their old offsets —
+// ON TOP OF the table. (The owner's screenshot: "2023 2024 2025 2026" drawn
+// twice, large over small, with the axis title through the series row.)
+//
+// Everything about that band now lives here, and the fold happens inside
+// `computeCartesianLayout` / `computeRadialLayout` — the two functions every
+// mark's `computeLayout` bottoms out in — so there is exactly one place that
+// decides how tall it is and what goes in it. The order, top to bottom, is:
+// [plot] [x tick labels] [data table] [x-axis title].
+//
+// For a mark whose categories are on X the tick-label band is ZERO: the table's
+// header row IS the category labelling, and Excel draws one or the other, never
+// both. A horizontal bar chart keeps the band, because its x labels are VALUES
+// that the header row does not repeat — and they are painted 4px below the
+// plot, so a table that ignored them would land on top of them in exactly the
+// way the category labels landed on top of the table.
+
+/** Row height in pixels for each data table row. */
+export const DATA_TABLE_ROW_HEIGHT = 18;
+/** Gap between the tick-label band's bottom edge and the table's first row. */
+export const DATA_TABLE_TOP_GAP = 4;
+/**
+ * Clear air between the bottom of whatever the x-axis title hangs under — the
+ * tick-label band, the data table, or the plot edge itself — and the TOP of the
+ * title's glyph box.
+ *
+ * THE DROP IS NOT A PIXEL LITERAL. It used to be: 30 below the plot with tick
+ * labels, 16 without, and a hand-copied `(showLabels ? 26 : 16)` in
+ * `drawHorizontalAxes` for good measure. Every one of those numbers was a
+ * SILENT ASSUMPTION about two font sizes the Format pane lets the reader
+ * change. `computeCartesianLayout` reserves `theme.labelFontSize + 8` for the
+ * tick band and `theme.axisTitleFontSize + 6` for the title, while the painter
+ * dropped a constant 30 — so an x-axis title under 24px tick labels was painted
+ * THROUGH them (labels occupy plotBottom+4..+28, the title box plotBottom+18..
+ * +30), and a 20px title under a data table started 4px INSIDE the table's last
+ * row. Both are the two-formulas-one-band shape the data-table work removed for
+ * the table and left standing for the title.
+ *
+ * So the baseline is now DERIVED: whatever sits above, plus this gap, plus the
+ * title's own font size. The reservation and the paint move together because
+ * both are functions of the same two theme values.
+ */
+const X_TITLE_GAP_ABOVE = 4;
+
+/** A plot-area-shaped box. Structural, so a table rect is as good as a plot. */
+interface PlotLikeRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * The baseline the x-axis title is painted on, measured from the bottom edge of
+ * `box`. A "bottom" text baseline, so the title's glyph box ENDS here.
+ *
+ * `bandAbove` is the height of whatever is painted between `box`'s bottom edge
+ * and the title — the tick-label band below a plot, or 0 when the title hangs
+ * straight off a data table. The caller knows which labels it draws, so it
+ * measures the band; this function only decides the gap and the glyph height
+ * (see {@link X_TITLE_GAP_ABOVE}).
+ *
+ * Lives here rather than in markerPainter because BOTH the estimate
+ * (`computeCartesianElementRects`) and the five painters that draw their own
+ * axes have to agree with it, and markerPainter already imports this module —
+ * putting it the other way round would be an import cycle. It is re-exported
+ * from markerPainter, which is where its existing callers name it.
+ */
+export function xAxisTitleBaselineY(
+  box: PlotLikeRect,
+  bandAbove: number,
+  theme: ChartRenderTheme,
+): number {
+  return box.y + box.height + bandAbove + X_TITLE_GAP_ABOVE + theme.axisTitleFontSize;
+}
+
+/**
+ * The band the x tick labels a painter DRAWS occupy below the plot — the
+ * `bandAbove` an x-axis title has to clear.
+ *
+ * Takes the label STRINGS rather than the parsed data because the painters that
+ * draw their own axes (line, area, scatter, bubble, combo, histogram) have a
+ * tick list and no `ParsedChartData`, and a 90-degree band's height is a
+ * function of the longest label. Zero when the axis draws no labels.
+ */
+export function xLabelBandHeight(
+  spec: ChartSpec,
+  labels: ReadonlyArray<string>,
+  theme: ChartRenderTheme,
+): number {
+  if (!spec.xAxis.showLabels) return 0;
   if (spec.xAxis.labelAngle === 0) return theme.labelFontSize + 8;
   if (spec.xAxis.labelAngle === 45) return 30;
   // 90 degrees
-  const maxLen = Math.max(...data.categories.map((c) => c.length), 3);
+  const maxLen = Math.max(...labels.map((c) => c.length), 3);
   return Math.min(maxLen * 5, 60);
+}
+
+/**
+ * Marks whose HORIZONTAL axis carries values, not categories. A horizontal bar
+ * chart puts its categories on Y; a scatter/bubble x is numeric. Their x tick
+ * labels are not the thing the table's header row repeats, so the table never
+ * replaces them — it is still drawn below the plot with one column per
+ * category, exactly as Excel does for a bar-of-rows chart.
+ */
+const VALUE_X_MARKS = new Set(["horizontalBar", "scatter", "bubble"]);
+
+/**
+ * Height the data table's rows need, INCLUDING the gap above them.
+ *
+ * Kept on the bare `enabled` flag (rather than {@link chartShowsDataTable}) so
+ * it stays a pure function of the option and the series count. Callers that
+ * need "is a table actually drawn" ask {@link dataTableBandHeight}.
+ */
+export function computeDataTableHeight(
+  spec: ChartSpec,
+  data: ParsedChartData,
+): number {
+  if (!spec.dataTable?.enabled) return 0;
+  // One header row (categories) + one row per series
+  const rowCount = data.series.length + 1;
+  return rowCount * DATA_TABLE_ROW_HEIGHT + DATA_TABLE_TOP_GAP;
+}
+
+/**
+ * THE predicate: is a data table actually drawn under this plot?
+ *
+ * `paintDataTable` refuses to draw anything without both series and categories,
+ * so the layout must refuse to reserve space for it on exactly the same terms —
+ * otherwise the plot shrinks for a table nobody paints, and (worse) the tick
+ * labels are suppressed in favour of a header row that never appears.
+ */
+export function chartShowsDataTable(spec: ChartSpec, data: ParsedChartData): boolean {
+  return !!spec.dataTable?.enabled && data.series.length > 0 && data.categories.length > 0;
+}
+
+/**
+ * Does the data table stand in for the x tick labels on this mark? The ONE
+ * condition every consumer asks — the layout's band arithmetic, the element
+ * rects, and {@link specForMarkPaint}, which is what actually takes the labels
+ * away from the painters.
+ */
+export function dataTableReplacesXTickLabels(spec: ChartSpec, data: ParsedChartData): boolean {
+  return chartShowsDataTable(spec, data) && !VALUE_X_MARKS.has(spec.mark);
+}
+
+/** Height of the band the data table occupies, its top gap included. */
+export function dataTableBandHeight(spec: ChartSpec, data: ParsedChartData): number {
+  return chartShowsDataTable(spec, data) ? computeDataTableHeight(spec, data) : 0;
+}
+
+/**
+ * Height of the x tick-label band that is actually PAINTED under the plot —
+ * zero when nothing draws labels there, whether because the axis is set to hide
+ * them or because the data table has taken them over. The layout reserves this
+ * and the table is placed below it, so the two cannot overlap.
+ */
+export function xTickLabelBandHeight(
+  spec: ChartSpec,
+  data: ParsedChartData,
+  theme: ChartRenderTheme,
+): number {
+  if (!spec.xAxis.showLabels) return 0;
+  if (dataTableReplacesXTickLabels(spec, data)) return 0;
+  return estimateXLabelBandHeight(spec, data, theme);
+}
+
+/**
+ * The data table's grid box, derived from the plot area. `null` when no table
+ * is drawn. Both the layout's estimate and `paintDataTable`'s own geometry come
+ * from here, so the recorded rect and the painted grid cannot disagree.
+ */
+export function dataTableRect(
+  spec: ChartSpec,
+  data: ParsedChartData,
+  plotArea: { x: number; y: number; width: number; height: number },
+  theme: ChartRenderTheme,
+): ChartElementRect | null {
+  if (!chartShowsDataTable(spec, data)) return null;
+  return {
+    x: plotArea.x,
+    y: plotArea.y + plotArea.height + xTickLabelBandHeight(spec, data, theme) + DATA_TABLE_TOP_GAP,
+    width: plotArea.width,
+    height: computeDataTableHeight(spec, data) - DATA_TABLE_TOP_GAP,
+  };
+}
+
+/**
+ * The baseline the x-axis title is painted on when a data table is shown:
+ * BELOW the table, never through it. `null` when there is no table, in which
+ * case the ordinary drop (markerPainter's `xAxisTitleBaselineY`) applies
+ * unchanged.
+ */
+export function xAxisTitleBaselineBelowDataTable(
+  spec: ChartSpec,
+  data: ParsedChartData,
+  plotArea: { x: number; y: number; width: number; height: number },
+  theme: ChartRenderTheme,
+): number | null {
+  const table = dataTableRect(spec, data, plotArea, theme);
+  if (!table) return null;
+  // Measured from the TABLE's bottom edge, and nothing sits between the two —
+  // the tick labels, if any, are above the table — so the band above is ZERO.
+  return xAxisTitleBaselineY(table, 0, theme);
+}
+
+/**
+ * Does this layout have an x axis to hang a title on?
+ *
+ * `spec.xAxis.title` SURVIVES a mark change — switch a bar chart with an axis
+ * title to a pie and the string is still there — but a radial mark has no x
+ * axis: `pieChartPainter` never reads `spec.xAxis` at all, `computeRadialLayout`
+ * reserves no band for a title and `computeRadialElementRects` estimates no rect
+ * for one. So the data-table stage must not paint one either; it would land in a
+ * band nobody reserved, over a bottom legend or off the canvas, and record a
+ * measured `xAxisTitle` rect the layout never estimates.
+ *
+ * The family is the codebase's own division: every mark that reaches
+ * `computeRadialLayout` (pie, donut, radar, funnel, treemap, sunburst) is
+ * "radial". A layout with no rects yet is cartesian, matching
+ * {@link reflowChartElements}.
+ */
+export function layoutHasXAxis(layout: ChartLayout): boolean {
+  return (layout.elements?.family ?? "cartesian") !== "radial";
+}
+
+/**
+ * The spec the MARK PAINTERS see.
+ *
+ * When a data table is shown the category tick labels and the x-axis title are
+ * taken away from the painters HERE, in one place, instead of each painter
+ * growing its own copy of the condition. Every cartesian painter already gates
+ * its tick labels on `spec.xAxis.showLabels` and its title on
+ * `spec.xAxis.title` — `drawCartesianAxes`, `drawHorizontalAxes`, combo's own
+ * axes, pareto (via drawCartesianAxes), histogram, line, area, scatter and
+ * bubble alike — so one derived spec reaches all of them, including any mark
+ * registered from outside this repo. The table and the re-placed axis title are
+ * then painted by `dataTablePainter` after the mark.
+ *
+ * Returns `spec` itself when there is no table, so the ordinary path allocates
+ * nothing and is byte-identical to before.
+ */
+export function specForMarkPaint(spec: ChartSpec, data: ParsedChartData): ChartSpec {
+  if (!chartShowsDataTable(spec, data)) return spec;
+  return {
+    ...spec,
+    xAxis: {
+      ...spec.xAxis,
+      showLabels: dataTableReplacesXTickLabels(spec, data) ? false : spec.xAxis.showLabels,
+      title: null,
+    },
+  };
 }
 
 /**
  * Compute the layout (margins and plot area) for a cartesian chart.
  * Margins accommodate title, axis labels, and legend.
+ *
+ * `tableData` is THE DATA THE DATA TABLE DISPLAYS, which is not always `data`.
+ * A Pareto chart sorts its categories and a histogram's datums are BINS, so
+ * both paint their table from a derived view (`chartDataTableView`); reserving
+ * the band from the raw rows while painting the grid from the view is how a
+ * 3-series histogram reserved 40px for a 72px table and drew it over the x-axis
+ * title. It defaults to `data`, which is the truth for the other sixteen marks.
  */
 export function computeCartesianLayout(
   width: number,
@@ -67,6 +335,7 @@ export function computeCartesianLayout(
   spec: ChartSpec,
   data: ParsedChartData,
   theme: ChartRenderTheme,
+  tableData: ParsedChartData = data,
 ): ChartLayout {
   let top = 12;
   let right = 16;
@@ -86,10 +355,10 @@ export function computeCartesianLayout(
     left += theme.axisTitleFontSize + 6;
   }
 
-  // X-axis labels
-  if (spec.xAxis.showLabels) {
-    bottom += estimateXLabelBandHeight(spec, data, theme);
-  }
+  // X-axis labels — zero when the data table replaces them.
+  bottom += xTickLabelBandHeight(spec, tableData, theme);
+  // The data table sits between the tick labels and the x-axis title.
+  bottom += dataTableBandHeight(spec, tableData);
   if (spec.xAxis.title) {
     bottom += theme.axisTitleFontSize + 6;
   }
@@ -117,7 +386,7 @@ export function computeCartesianLayout(
   };
 
   const layout: ChartLayout = { width, height, margin: { top, right, bottom, left }, plotArea };
-  layout.elements = computeCartesianElementRects(layout, spec, data, theme);
+  layout.elements = computeCartesianElementRects(layout, spec, data, theme, tableData);
   return layout;
 }
 
@@ -131,6 +400,7 @@ export function computeRadialLayout(
   spec: ChartSpec,
   data: ParsedChartData,
   theme: ChartRenderTheme,
+  tableData: ParsedChartData = data,
 ): ChartLayout {
   let top = 12;
   let right = 16;
@@ -141,6 +411,12 @@ export function computeRadialLayout(
   if (spec.title) {
     top += theme.titleFontSize + 8;
   }
+
+  // A radial mark has no axes to collide with, but it can still carry a data
+  // table (nothing in the spec forbids it), and the table is painted below the
+  // plot exactly as it is for a cartesian chart — so the band is reserved here
+  // too rather than folded in by the dispatcher afterwards.
+  bottom += dataTableBandHeight(spec, tableData);
 
   // Legend
   if (spec.legend.visible && data.series.length > 0) {
@@ -165,7 +441,7 @@ export function computeRadialLayout(
   };
 
   const layout: ChartLayout = { width, height, margin: { top, right, bottom, left }, plotArea };
-  layout.elements = computeRadialElementRects(layout, spec, data, theme);
+  layout.elements = computeRadialElementRects(layout, spec, data, theme, tableData);
   return layout;
 }
 
@@ -176,10 +452,12 @@ export function computeRadialLayout(
 // See ChartElementRects in ../types for the full two-stage contract. In short:
 // the functions BELOW derive estimated rects from the margins; the PAINTERS
 // further down overwrite the ones they can measure via recordChartElementRect.
-// Any stage that mutates layout.margin / layout.plotArea after layout (the data
-// table in chartDispatch, pivot field buttons in chartRenderer, the secondary
-// axis in combo/pareto, the horizontal-bar relayout) must call
-// reflowChartElements afterwards and BEFORE painting.
+// Any stage that mutates layout.margin / layout.plotArea after layout (pivot
+// field buttons in chartRenderer, the secondary axis in combo/pareto, the
+// horizontal-bar relayout) must call reflowChartElements afterwards and BEFORE
+// painting. The data table used to be such a stage — it is now folded into
+// computeCartesianLayout / computeRadialLayout above, so there is nothing left
+// to reflow for it.
 
 /** Rough text width with no canvas context. ~0.55em per character. */
 function estimateTextWidth(text: string, fontSize: number): number {
@@ -352,6 +630,7 @@ export function computeCartesianElementRects(
   spec: ChartSpec,
   data: ParsedChartData,
   theme: ChartRenderTheme,
+  tableData: ParsedChartData = data,
 ): ChartElementRects {
   const pa = layout.plotArea;
   const els: ChartElementRects = {
@@ -362,7 +641,10 @@ export function computeCartesianElementRects(
 
   if (spec.title) els.title = estimateTitleRect(layout, spec.title, theme);
 
-  if (spec.xAxis.showLabels) {
+  // No tick-label band when the data table replaces the labels: nothing is
+  // painted there, and a hit-testable band over the table would select an
+  // "axis labels" object the reader cannot see.
+  if (spec.xAxis.showLabels && !dataTableReplacesXTickLabels(spec, tableData)) {
     els.xAxisBand = {
       x: pa.x,
       y: pa.y + pa.height,
@@ -375,10 +657,16 @@ export function computeCartesianElementRects(
     els.yAxisBand = { x: pa.x - w, y: pa.y, width: w, height: pa.height };
   }
 
+  const table = dataTableRect(spec, tableData, pa, theme);
+  if (table) els.dataTable = table;
+
   if (spec.xAxis.title) {
     // drawCartesianAxes paints it centered under the plot with a "bottom"
-    // baseline, so the box ends at that y.
-    const baselineY = pa.y + pa.height + (spec.xAxis.showLabels ? 30 : 16);
+    // baseline, so the box ends at that y. With a data table the title drops
+    // below the table instead — same helper the painter uses.
+    const baselineY =
+      xAxisTitleBaselineBelowDataTable(spec, tableData, pa, theme)
+      ?? xAxisTitleBaselineY(pa, xTickLabelBandHeight(spec, data, theme), theme);
     const w = estimateTextWidth(spec.xAxis.title, theme.axisTitleFontSize);
     els.xAxisTitle = {
       x: pa.x + pa.width / 2 - w / 2,
@@ -428,6 +716,7 @@ export function computeRadialElementRects(
   spec: ChartSpec,
   data: ParsedChartData,
   theme: ChartRenderTheme,
+  tableData: ParsedChartData = data,
 ): ChartElementRects {
   const els: ChartElementRects = {
     family: "radial",
@@ -435,6 +724,8 @@ export function computeRadialElementRects(
     measured: [],
   };
   if (spec.title) els.title = estimateTitleRect(layout, spec.title, theme);
+  const table = dataTableRect(spec, tableData, layout.plotArea, theme);
+  if (table) els.dataTable = table;
   if (spec.legend.visible) {
     const legend = estimateLegendRects(layout, spec, data.categories, theme);
     if (legend) {
@@ -450,10 +741,13 @@ export function computeRadialElementRects(
  * discarding any measured write-backs.
  *
  * Call this from any stage that mutates `layout.margin` or `layout.plotArea`
- * after the layout was computed — the data table folded into `margin.bottom`
- * (chartDispatch), pivot field buttons (chartRenderer), the secondary axis
- * (combo/pareto), the horizontal-bar relayout. Call it BEFORE painting: a
- * reflow after paint throws away the exact rects the painters measured.
+ * after the layout was computed — pivot field buttons (chartRenderer), the
+ * secondary axis (combo/pareto), the horizontal-bar relayout. Call it BEFORE
+ * painting: a reflow after paint throws away the exact rects the painters
+ * measured. The data table is no longer one of these stages; its band is part
+ * of the layout from the start, and the reflow reproduces it because
+ * `computeCartesianElementRects` derives it from the plot area like everything
+ * else.
  *
  * A layout with no `elements` yet (hand-built in a test) gets a fresh set; the
  * family is taken from the existing rects, defaulting to cartesian.
@@ -463,10 +757,11 @@ export function reflowChartElements(
   spec: ChartSpec,
   data: ParsedChartData,
   theme: ChartRenderTheme,
+  tableData: ParsedChartData = data,
 ): void {
   layout.elements = layout.elements?.family === "radial"
-    ? computeRadialElementRects(layout, spec, data, theme)
-    : computeCartesianElementRects(layout, spec, data, theme);
+    ? computeRadialElementRects(layout, spec, data, theme, tableData)
+    : computeCartesianElementRects(layout, spec, data, theme, tableData);
 }
 
 /**
@@ -929,7 +1224,15 @@ export function drawCartesianAxes(
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    const baselineY = plotArea.y + plotArea.height + (spec.xAxis.showLabels ? 30 : 16);
+    // The band above is what THIS painter drew: the tick labels it just painted
+    // (or nothing, when the axis hides them or the data table took them over —
+    // `specForMarkPaint` clears `showLabels` for that case, so xLabelBandHeight
+    // answers 0 without a second copy of the condition).
+    const baselineY = xAxisTitleBaselineY(
+      plotArea,
+      xLabelBandHeight(spec, xScale.domain, theme),
+      theme,
+    );
     ctx.fillText(spec.xAxis.title, plotArea.x + plotArea.width / 2, baselineY);
     if (layout) {
       recordXAxisTitleRect(ctx, layout, spec.xAxis.title, plotArea, baselineY, theme);
@@ -1251,7 +1554,17 @@ export function drawHorizontalAxes(
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    const baselineY = plotArea.y + plotArea.height + (spec.xAxis.showLabels ? 26 : 16);
+    // THE HAND-COPIED LITERAL IS GONE. This read `(showLabels ? 26 : 16)` — a
+    // fourth spelling of the drop, and 4px out of step with the 30 every other
+    // painter used. It only ever looked right because this painter passes
+    // `layout`, so the measured write-back overwrote the estimate. A horizontal
+    // bar chart's x labels are VALUES, drawn unrotated at the plot's bottom
+    // edge, so the band above the title is one label line.
+    const baselineY = xAxisTitleBaselineY(
+      plotArea,
+      spec.xAxis.showLabels ? theme.labelFontSize + 8 : 0,
+      theme,
+    );
     ctx.fillText(spec.xAxis.title, plotArea.x + plotArea.width / 2, baselineY);
     if (layout) {
       recordXAxisTitleRect(ctx, layout, spec.xAxis.title, plotArea, baselineY, theme);

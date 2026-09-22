@@ -303,17 +303,37 @@ describe("dataLabelPainter - slice label positioning", () => {
 // ============================================================================
 
 describe("dataLabelPainter - edge clipping", () => {
-  it("clamps bar labels to top of plot area", () => {
+  it("keeps an ABOVE label above the bar, even at the top of the scale", () => {
+    // THIS TEST USED TO PIN THE DEFECT. It clamped to "plotArea.y + fontSize"
+    // = 50, which is 8px INSIDE a bar whose top edge is 42 — and a datum beats
+    // furniture in the hit order, so a label box inside the bar's box can never
+    // be selected. Excel never puts an outside-end label inside the column; it
+    // lets it sit in the plot's top margin. The label is still kept on the
+    // canvas (y >= fontSize), which is the clamp that remains.
     const ctx = makeCtx();
-    // Bar near top edge, label would go above plot area
-    const bar = makeBar({ y: 42, height: 10 }); // above: y=42-4=38, but plotArea.y+fontSize=50
+    const bar = makeBar({ y: 42, height: 10 });
     const geometry: HitGeometry = { type: "bars", rects: [bar] };
 
     paintDataLabels(ctx, defaultData, makeSpec({ position: "above" }), defaultLayout, defaultTheme, geometry);
 
     const [, , y] = (ctx.fillText as ReturnType<typeof vi.fn>).mock.calls[0];
-    // Clamped to plotArea.y + fontSize = 40 + 10 = 50
-    expect(y).toBe(50);
+    expect(y).toBe(38);
+    expect(y).toBeLessThan(42);
+  });
+
+  it("an ABOVE label on a bar at the very top of the scale is still on the canvas", () => {
+    // The bar's top edge is ABOVE the plot's own top edge here, so "rect.y - 4"
+    // is negative and the clamp that matters is the canvas one.
+    const ctx = makeCtx();
+    const bar = makeBar({ y: 0, height: 100 });
+    const geometry: HitGeometry = { type: "bars", rects: [bar] };
+
+    paintDataLabels(ctx, defaultData, makeSpec({ position: "above" }), defaultLayout, defaultTheme, geometry);
+
+    const [, , y] = (ctx.fillText as ReturnType<typeof vi.fn>).mock.calls[0];
+    // fontSize, the smallest y a "bottom"-ish baseline can take and stay drawn.
+    expect(y).toBe(defaultTheme.labelFontSize);
+    expect(y).toBeGreaterThan(0);
   });
 
   it("clamps bar labels to bottom of plot area", () => {

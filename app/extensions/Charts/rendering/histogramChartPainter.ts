@@ -75,9 +75,15 @@ export function computeHistogramLayout(
   data: ParsedChartData,
   theme: ChartRenderTheme,
 ): ChartLayout {
-  // Build synthetic data for layout computation
+  // Build synthetic data for layout computation.
+  //
+  // It is also the TABLE data — `chartDataTableView` derives the same view for a
+  // histogram, and the two have to agree or the band reserved here is not the
+  // band `paintDataTable` fills. It reaches `computeCartesianLayout` as `data`,
+  // which is what the `tableData` parameter defaults to, so passing it once is
+  // enough; naming it here is the reminder that both readings are deliberate.
   const syntheticData = histogramResolveView(data, spec);
-  return computeCartesianLayout(width, height, spec, syntheticData, theme);
+  return computeCartesianLayout(width, height, spec, syntheticData, theme, syntheticData);
 }
 
 /**

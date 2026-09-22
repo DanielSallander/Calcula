@@ -237,12 +237,16 @@ export const CHART_ELEMENT_SELECTION_PAD = 2;
  * {@link drawSelectionHighlights}, `xAxis`/`yAxis` to the axis highlight, and
  * `filterButton`/`none` are not selectable furniture.
  *
- * `dataLabel`, `dataTable`, `errorBars` and `trendline` are hit-testable but
- * have NO element-level ladder route yet, and two of them could not be named by
- * a {@link ChartSubSelection} if they had one — it carries no `pointIndex` for
- * an element and no `trendlineIndex`. A trendline is also recorded as a POLYLINE
- * rather than a rect, so it needs a painter of its own rather than a box. They
- * join this list in the change that gives them a route.
+ * THE IN-PLOT FURNITURE IS HERE NOW, and not all of it is a box:
+ *
+ *   * `dataLabel` and `dataTable` have one measured rect each and take the
+ *     ordinary box.
+ *   * `errorBars` has MANY rects and ONE identity (Excel has no per-point error
+ *     bar), so it is boxed bar by bar by {@link drawErrorBarsSelectionHighlight}.
+ *   * `trendline` is recorded as a POLYLINE, because its bounding box would
+ *     cover the whole plot for any fit that runs corner to corner — the same
+ *     reason the hit test measures distance to a segment. It gets
+ *     {@link drawTrendlineSelectionHighlight}, a line with handles at its ends.
  */
 export const CHART_SELECTABLE_ELEMENT_IDS = [
   "title",
@@ -251,6 +255,10 @@ export const CHART_SELECTABLE_ELEMENT_IDS = [
   "legend",
   "legendEntry",
   "plotArea",
+  "trendline",
+  "errorBars",
+  "dataLabel",
+  "dataTable",
 ] as const;
 
 /** An element id that {@link drawElementSelectionHighlight} can paint. */
@@ -301,6 +309,7 @@ export function elementSelectionRect(
   layout: ChartLayout,
   elementId: SelectableChartElementId,
   seriesIndex?: number,
+  categoryIndex?: number,
 ): ChartElementRect | undefined {
   if (elementId === "plotArea") return layout.plotArea;
   const elements: ChartElementRects | undefined = layout.elements;
@@ -321,6 +330,25 @@ export function elementSelectionRect(
           : elements.legendItems?.find((i) => i.seriesIndex === seriesIndex);
       return entry?.rect ?? elements.legend;
     }
+    case "dataTable":
+      return elements.dataTable;
+    case "dataLabel": {
+      // Per POINT, so BOTH indices have to match. A label whose point has gone
+      // (the data reshaped under a live selection) gets NO fallback, unlike a
+      // legend entry: the legend at least still exists as a thing to point at,
+      // whereas "some other label of this series" would be a box over a datum
+      // the reader never selected.
+      if (seriesIndex === undefined || categoryIndex === undefined) return undefined;
+      return elements.dataLabels?.find(
+        (l) => l.seriesIndex === seriesIndex && l.pointIndex === categoryIndex,
+      )?.rect;
+    }
+    case "trendline":
+    case "errorBars":
+      // Not a single rect. A trendline is a polyline and error bars are many
+      // boxes under one identity; both have their own painters below, and
+      // answering a rect here would invite a caller to box the wrong shape.
+      return undefined;
   }
 }
 
@@ -374,6 +402,25 @@ export function elementSelectionBox(rect: ChartElementRect): ChartElementRect {
  * Returns true when something was painted, so a caller — or a test — can tell
  * "nothing to draw" from "drew it".
  */
+/**
+ * The rest of the sub-selection, plus the one environment fact.
+ *
+ * `elementId` and `seriesIndex` stay positional because every element that has
+ * an identity at all has a series; these two are the indices only SOME elements
+ * carry, and passing them positionally would mean four indices in a row that a
+ * caller can transpose silently. They are the same fields
+ * {@link ChartSubSelection} spells, so `paintSelectionChrome` copies them across
+ * rather than deriving anything.
+ */
+export interface ElementSelectionPaintOptions {
+  /** An in-place overlay text editor is open; a TEXT element's box stands down. */
+  textEditing?: boolean;
+  /** Which point, for the per-POINT furniture (`dataLabel`). */
+  categoryIndex?: number;
+  /** Which of the series' trendlines, for `trendline`. */
+  trendlineIndex?: number;
+}
+
 export function drawElementSelectionHighlight(
   ctx: CanvasRenderingContext2D,
   chartX: number,
@@ -381,13 +428,23 @@ export function drawElementSelectionHighlight(
   layout: ChartLayout | undefined,
   elementId: ChartElementId | undefined,
   seriesIndex?: number,
-  opts: { textEditing?: boolean } = {},
+  opts: ElementSelectionPaintOptions = {},
 ): boolean {
   if (!layout) return false;
   if (!isSelectableChartElement(elementId)) return false;
   if (opts.textEditing === true && TEXT_EDITABLE_ELEMENT_IDS.includes(elementId)) return false;
 
-  const measured = elementSelectionRect(layout, elementId, seriesIndex);
+  // The two elements that are not a box. Dispatched here rather than at the
+  // call site so there is ONE entry point for "paint the selected element" and
+  // a caller cannot reach the rect painter with a polyline.
+  if (elementId === "trendline") {
+    return drawTrendlineSelectionHighlight(ctx, chartX, chartY, layout, seriesIndex, opts.trendlineIndex);
+  }
+  if (elementId === "errorBars") {
+    return drawErrorBarsSelectionHighlight(ctx, chartX, chartY, layout, seriesIndex);
+  }
+
+  const measured = elementSelectionRect(layout, elementId, seriesIndex, opts.categoryIndex);
   if (!measured) return false;
   // A zero-area rect is a layout that has not measured this element yet; a box
   // around nothing is noise, not feedback.
@@ -407,6 +464,134 @@ export function drawElementSelectionHighlight(
   drawElementSelectionHandles(ctx, bx, by, box.width, box.height);
   ctx.restore();
   return true;
+}
+
+// ----------------------------------------------------------------------------
+// The furniture that is not a box
+// ----------------------------------------------------------------------------
+
+/**
+ * How much wider than the trendline's own stroke the selection stroke is drawn.
+ * The line under it is 2px by default and may be dashed; 4px solid in the
+ * selection colour reads as "this line is selected" without hiding the fit.
+ */
+const TRENDLINE_SELECTION_WIDTH = 4;
+
+/**
+ * A SELECTED TRENDLINE IS A LINE, NOT A BOX.
+ *
+ * Its bounding box is useless as chrome for exactly the reason it is useless as
+ * a hit target: a fit running from the plot's bottom-left to its top-right has a
+ * box covering the entire plot, so a box would say "the whole plot is selected"
+ * — and would sit on top of every bar underneath it. Excel highlights the line
+ * itself and puts handles at its ENDS, which is what this does: the recorded
+ * polyline is re-stroked in the selection colour, then one handle at each
+ * endpoint.
+ *
+ * TWO HANDLES, NOT SIX. The six-square set says "this rectangle, resizable on
+ * every side"; a line has two ends and nothing in between to drag, and drawing
+ * six squares round a line would be chrome describing a shape that is not there.
+ *
+ * `trendlineIndex` is required in practice and optional in the signature: a
+ * series can carry a linear fit AND a moving average, so matching on the series
+ * alone would highlight whichever was recorded first. When it is absent — a
+ * selection made before the index travelled, or a hand-built sub-selection —
+ * the series' FIRST recorded trendline is used, because painting nothing is the
+ * defect this whole file exists to close.
+ */
+export function drawTrendlineSelectionHighlight(
+  ctx: CanvasRenderingContext2D,
+  chartX: number,
+  chartY: number,
+  layout: ChartLayout,
+  seriesIndex?: number,
+  trendlineIndex?: number,
+): boolean {
+  const recorded = layout.elements?.trendlines;
+  if (!recorded || recorded.length === 0) return false;
+
+  const match =
+    recorded.find(
+      (t) =>
+        (seriesIndex === undefined || t.seriesIndex === seriesIndex) &&
+        (trendlineIndex === undefined || t.trendlineIndex === trendlineIndex),
+    ) ?? undefined;
+  if (!match || match.points.length < 2) return false;
+
+  ctx.save();
+  ctx.strokeStyle = CHART_SELECTION_COLOR;
+  ctx.lineWidth = TRENDLINE_SELECTION_WIDTH;
+  ctx.setLineDash([]);
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(chartX + match.points[0].x, chartY + match.points[0].y);
+  for (let i = 1; i < match.points.length; i++) {
+    ctx.lineTo(chartX + match.points[i].x, chartY + match.points[i].y);
+  }
+  ctx.stroke();
+
+  const first = match.points[0];
+  const last = match.points[match.points.length - 1];
+  ctx.fillStyle = CHART_SELECTION_COLOR;
+  for (const p of [first, last]) {
+    drawHandleSquare(ctx, chartX + p.x, chartY + p.y);
+  }
+  ctx.restore();
+  return true;
+}
+
+/**
+ * A SELECTED ERROR-BAR SET IS EVERY BAR OF THAT SERIES.
+ *
+ * Excel's error bars are a per-SERIES object with no per-point member — you
+ * cannot select the error bar on March alone — so selecting one selects them
+ * all, and the chrome has to say so. Each recorded bar gets its own hairline
+ * box; the alternative, a single union box, would span most of the plot and
+ * claim the empty space between the bars as part of the object.
+ *
+ * NO HANDLES, deliberately. A handle says "this one thing, here, with edges you
+ * can drag"; there are many boxes and none of them is the object. The boxes plus
+ * the Name Box's "Series 1 Error Bars" are the message, and adding six squares
+ * to each would turn a selection into a field of confetti.
+ *
+ * `seriesIndex` absent selects nothing rather than everything: an error-bar rung
+ * without a series is a rung that was never produced, and highlighting every
+ * series' bars for it would invent an object the format pane cannot target.
+ */
+export function drawErrorBarsSelectionHighlight(
+  ctx: CanvasRenderingContext2D,
+  chartX: number,
+  chartY: number,
+  layout: ChartLayout,
+  seriesIndex?: number,
+): boolean {
+  if (seriesIndex === undefined) return false;
+  const recorded = layout.elements?.errorBars;
+  if (!recorded || recorded.length === 0) return false;
+
+  const mine = recorded.filter((b) => b.seriesIndex === seriesIndex);
+  if (mine.length === 0) return false;
+
+  ctx.save();
+  ctx.strokeStyle = CHART_SELECTION_COLOR;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  let painted = false;
+  for (const bar of mine) {
+    if (bar.rect.width <= 0 && bar.rect.height <= 0) continue;
+    const box = elementSelectionBox(bar.rect);
+    ctx.strokeRect(chartX + box.x + 0.5, chartY + box.y + 0.5, box.width - 1, box.height - 1);
+    painted = true;
+  }
+  ctx.restore();
+  return painted;
+}
+
+/** One 5x5 selection square, centred on the point. */
+function drawHandleSquare(ctx: CanvasRenderingContext2D, cx: number, cy: number): void {
+  const size = 5;
+  ctx.fillRect(cx - size / 2, cy - size / 2, size, size);
 }
 
 /**

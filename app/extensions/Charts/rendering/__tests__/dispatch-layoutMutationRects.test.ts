@@ -1,11 +1,13 @@
 //! FILENAME: app/extensions/Charts/rendering/__tests__/dispatch-layoutMutationRects.test.ts
-// PURPOSE: Three stages mutate a chart layout AFTER the layout was computed —
-//          the combo secondary axis, the data table folded into margin.bottom,
-//          and the pivot field buttons. Every element rect except chartArea and
-//          title is a function of margin/plotArea, so each of those mutations
-//          must be followed by reflowChartElements BEFORE anything paints.
-//          These tests hold each site to that: a rect that is stale by exactly
-//          the height that was added is a click that lands on nothing.
+// PURPOSE: Two stages mutate a chart layout AFTER the layout was computed —
+//          the combo secondary axis and the pivot field buttons. Every element
+//          rect except chartArea and title is a function of margin/plotArea, so
+//          each of those mutations must be followed by reflowChartElements
+//          BEFORE anything paints. These tests hold each site to that: a rect
+//          that is stale by exactly the height that was added is a click that
+//          lands on nothing. The data table was a third such site; its band is
+//          now part of computeCartesianLayout, and site (b) below holds it to
+//          producing the same consistency without the after-the-fact mutation.
 
 import { describe, it, expect } from "vitest";
 import { computeComboLayout, paintComboChart } from "../comboChartPainter";
@@ -168,10 +170,18 @@ function titleAnchor(calls: string[], title: string): { x: number; y: number } |
 }
 
 // ============================================================================
-// Site (b): chartDispatch folds the data table into margin.bottom
+// Site (b): the data table's band inside computeCartesianLayout
 // ============================================================================
+//
+// This used to be a post-hoc mutation site like (a) and (c): chartDispatch
+// shortened the plot and grew margin.bottom after the mark's computeLayout had
+// already reserved a tick-label band. The band is now decided once, inside
+// computeCartesianLayout, and the tick labels are not reserved at all while the
+// table is on — so what these tests hold is that the plot still shrinks and
+// that every rect still matches the final margins. Where the labels and the
+// axis title END UP is dataTableLayout.test.ts's business.
 
-describe("the data table's margin.bottom reflows the element rects", () => {
+describe("the data table's band is part of the layout", () => {
   const withTable = (): ChartSpec =>
     makeSpec({
       dataTable: { enabled: true },
@@ -184,13 +194,16 @@ describe("the data table's margin.bottom reflows the element rects", () => {
     expect(on.plotArea.height).toBeLessThan(off.plotArea.height);
   });
 
-  it("the x-label band follows the shortened plot", () => {
+  it("the table's rect sits under the shortened plot, and the x-label band is gone", () => {
     const off = dispatchComputeLayout(600, 400, makeSpec(), DATA, DEFAULT_CHART_THEME);
     const on = dispatchComputeLayout(600, 400, withTable(), DATA, DEFAULT_CHART_THEME);
-    // Stale rects would leave the band at the OLD plot bottom, i.e. below the
-    // table, and every x-label hit test would miss by the table's height.
-    expect(on.elements!.xAxisBand!.y).toBe(on.plotArea.y + on.plotArea.height);
-    expect(on.elements!.xAxisBand!.y).toBeLessThan(off.elements!.xAxisBand!.y);
+    // No tick-label band: the table's header row IS the category labelling, so
+    // a band there would be a hit-testable box over an object nobody paints.
+    expect(off.elements!.xAxisBand).toBeDefined();
+    expect(on.elements!.xAxisBand).toBeUndefined();
+    // And the table's own rect follows the plot rather than the old bottom.
+    expect(on.elements!.dataTable!.y).toBe(on.plotArea.y + on.plotArea.height + 4);
+    expect(on.elements!.dataTable!.y).toBeLessThan(off.plotArea.y + off.plotArea.height);
   });
 
   it("every rect matches the FINAL margins", () => {

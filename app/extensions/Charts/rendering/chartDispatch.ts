@@ -38,9 +38,10 @@ import { paintTextMark } from "./textMarkPainter";
 import { paintMarkerMark } from "./markerPainter";
 import { paintTrendlines } from "./trendlinePainter";
 import { paintDataLabels } from "./dataLabelPainter";
-import { paintErrorBars } from "./errorBarPainter";
-import { paintDataTable, computeDataTableHeight } from "./dataTablePainter";
-import { reflowChartElements } from "./chartPainterUtils";
+import { paintErrorBars, markSupportsErrorBars } from "./errorBarPainter";
+import { paintDataTable, paintDataTableAxisTitle } from "./dataTablePainter";
+import { chartShowsDataTable, specForMarkPaint } from "./chartPainterUtils";
+import { chartDataTableView } from "../lib/dataTableView";
 
 // ============================================================================
 // Built-in Mark Registration
@@ -102,12 +103,28 @@ export function dispatchPaint(
     }
   }
 
-  // Paint the primary mark
-  paintMark(ctx, data, spec.mark, spec, layout, theme);
+  // THE DATA THE TABLE SHOWS, which is `data` for sixteen of the eighteen marks
+  // and a derived view for the other two (see chartDataTableView). Everything
+  // below that is about the table asks IT, never `data`: the band the layout
+  // reserved was computed from this same view, and the labels the table's header
+  // row takes over from the axis have to be the labels the plot is drawn from.
+  const tableData = chartDataTableView(spec, data);
 
-  // Paint error bars (after primary mark, before data labels)
-  const errorBarMarks = ["bar", "horizontalBar", "line", "scatter"];
-  if (errorBarMarks.includes(spec.mark)) {
+  // The spec the MARK PAINTERS see. Identical to `spec` unless a data table is
+  // shown, in which case the category tick labels and the x-axis title are
+  // taken away from them here (see specForMarkPaint) and drawn — once, in the
+  // right place — by the data-table stage at the bottom of this function.
+  const markSpec = specForMarkPaint(spec, tableData);
+
+  // Paint the primary mark
+  paintMark(ctx, data, spec.mark, markSpec, layout, theme);
+
+  // Paint error bars (after primary mark, before data labels). The mark list is
+  // the painter's own (`markSupportsErrorBars`), not a copy: a local array here
+  // and a switch in `getErrorBarOptions` are two spellings of one fact, and the
+  // first mark to grow error bars would have been readable, writable from the
+  // pane, and never drawn.
+  if (markSupportsErrorBars(spec.mark)) {
     const geometry = dispatchComputeGeometry(data, spec, layout, theme);
     if (geometry) {
       paintErrorBars(ctx, data, spec, layout, theme, geometry);
@@ -138,9 +155,11 @@ export function dispatchPaint(
       } else if (layer.mark === "marker") {
         paintMarkerMark(ctx, layerData, layer, spec, layout, theme);
       } else {
-        // Chart-type layer: build a temporary spec merging layer props with parent
+        // Chart-type layer: build a temporary spec merging layer props with
+        // parent. Built from markSpec, so a layer cannot re-introduce the tick
+        // labels the data table replaced.
         const layerSpec: ChartSpec = {
-          ...spec,
+          ...markSpec,
           mark: layer.mark,
           markOptions: layer.markOptions ?? spec.markOptions,
           series: layer.series ?? spec.series,
@@ -150,9 +169,11 @@ export function dispatchPaint(
     }
   }
 
-  // Paint data table (below the plot area, after everything else)
-  if (spec.dataTable?.enabled) {
-    paintDataTable(ctx, data, spec, layout, theme);
+  // Paint the data table and, below it, the x-axis title — the bottom band, in
+  // the one order Excel uses: [plot] [table] [axis title].
+  if (chartShowsDataTable(spec, tableData)) {
+    paintDataTable(ctx, tableData, spec, layout, theme);
+    paintDataTableAxisTitle(ctx, tableData, spec, layout, theme);
   }
 }
 
@@ -433,25 +454,18 @@ export function dispatchComputeLayout(
   theme: ChartRenderTheme,
 ): ChartLayout {
   // Unregistered marks fall back to the bar layout (always registered).
+  //
+  // The data table's band is NOT folded in here any more. It used to be: this
+  // function shortened the plot and grew margin.bottom after the fact, which
+  // left the tick-label and axis-title reservations inside computeCartesianLayout
+  // untouched — two places computing one band, and the painters kept drawing
+  // into the half that had moved. The band is now decided once, by
+  // computeCartesianLayout / computeRadialLayout, which every registered mark's
+  // computeLayout bottoms out in. A mark registered from outside that computes
+  // its own margins from scratch gets no data-table reservation, and that is
+  // the honest answer: this function cannot know where such a mark put its plot.
   const def = getChartMark(spec.mark) ?? getChartMark("bar")!;
-  const layout = def.computeLayout(width, height, spec, data, theme);
-
-  // Reserve space for data table below the plot area
-  const dtHeight = computeDataTableHeight(spec, data);
-  if (dtHeight > 0) {
-    layout.plotArea.height = Math.max(layout.plotArea.height - dtHeight, 40);
-    layout.margin.bottom += dtHeight;
-    // The mark's computeLayout already derived `layout.elements` from the
-    // margins it computed. We have just shortened the plot by the data-table
-    // height, so every rect that is a function of margin/plotArea — the axis
-    // bands, the axis titles, a bottom legend — is now wrong by exactly
-    // `dtHeight`, and a hit test on a stale rect lands on nothing. Recompute
-    // from the NEW numbers, before anything paints. (The reflow also clears
-    // `measured`, which is why it must never run AFTER a paint.)
-    reflowChartElements(layout, spec, data, theme);
-  }
-
-  return layout;
+  return def.computeLayout(width, height, spec, data, theme);
 }
 
 // ============================================================================

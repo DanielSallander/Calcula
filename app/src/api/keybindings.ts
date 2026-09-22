@@ -70,9 +70,26 @@ export interface ParsedCombo {
   meta: boolean;
 }
 
-/** Contract for the keybindings API on ExtensionContext */
+/**
+ * Contract for the keybindings API on ExtensionContext.
+ *
+ * `register` MUST mirror {@link registerKeybinding}, argument for argument. It
+ * did not: `registerKeybinding` grew a `when` predicate (Ctrl+1 and Delete,
+ * which Charts owns only while a chart element is selected) and this facade
+ * kept the one-argument shape. Charts works because it imports the free
+ * function directly — an extension that obeys the Facade Rule and takes
+ * `context.keybindings` could not express "only while my subject is selected"
+ * at all, and would silently lose the argument if it passed one, because a
+ * one-parameter arrow is assignable to a two-parameter signature in TypeScript.
+ * That is the whole trap: nothing goes red, the predicate is simply dropped and
+ * the binding fires everywhere.
+ *
+ * `when` is documented on {@link registerKeybinding}; the three rules
+ * (skipped-before-match, specific-beats-unguarded, a throw means "does not
+ * apply") are the function's, not the facade's, so there is one explanation.
+ */
 export interface IKeybindingsAPI {
-  register(binding: Omit<KeyBinding, "source">): () => void;
+  register(binding: Omit<KeyBinding, "source">, when?: () => boolean): () => void;
   getAll(): KeyBinding[];
   getEffectiveCombo(id: string): string;
 }

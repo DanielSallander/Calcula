@@ -239,6 +239,160 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   };
 }
 
+// ============================================================================
+// THE COLOUR OF A SERIES — one spelling, one reader, one writer
+// ============================================================================
+//
+// OB-1. "The colour of a series" used to have TWO spellings and the UI surfaces
+// disagreed about which one they meant:
+//
+//   * `spec.seriesColors[name]` — name-keyed, written by the ribbon Design
+//     panel and the dialog's Design tab, APPLIED HERE onto the parsed
+//     `data.series[i].color` and therefore the one the painters end up reading.
+//   * `spec.series[i].color`    — index-keyed, written by the Format pane's
+//     series swatch and OVERWRITTEN by the above.
+//
+// So a reader who had ever set a series colour from the Design panel found the
+// Format pane's swatch dead: it wrote a field the resolution stage then
+// discarded. And on a chart whose spec carries no `series[]` at all — a pivot,
+// a design query, anything compiled from an `encoding` block — the Format
+// pane's patch bailed on `spec.series?.[i] === undefined` and wrote nothing.
+//
+// The survivor is `seriesColors`, because it is the only one that can address
+// every data source and the only one that survives a filter. `series[].color`
+// stays in the spec as an AUTHORED/IMPORTED default (chartExamples, XLSX
+// import, the Insert Chart dialog's Data tab) and is the BASE the override
+// wins over; no formatting surface writes it any more. Reset to Match Style
+// still clears both, because an imported colour has to be clearable too.
+//
+// TWO SERIES CAN SHARE A NAME. `unambiguousDataPointKeyForDatum` refuses to
+// award an ambiguous datum key, and can afford to: the datum resolver has a
+// second addressing mode (the index pair) that the painter resolves just as
+// well. A series has no second mode left — a pivot series has no index-keyed
+// home in the spec at all — so refusing the key here would mean refusing the
+// colour. The defined behaviour is therefore that a name-keyed colour applies
+// to EVERY series answering to that name, and the surface that offers it SAYS
+// how many that is (`seriesNameArity`). Silent is the one thing it must not be.
+
+/**
+ * The stored manual colour of the series called `seriesName`, or undefined.
+ *
+ * This is the READ half of the one spelling; every surface that shows a series
+ * swatch goes through it, so a colour set on one surface is what the next one
+ * shows.
+ */
+export function readSeriesColor(
+  spec: Pick<ChartSpec, "seriesColors">,
+  seriesName: string | undefined,
+): string | undefined {
+  if (seriesName === undefined || seriesName === "") return undefined;
+  return spec.seriesColors?.[seriesName];
+}
+
+/**
+ * The marks whose painters resolve their fill from the PALETTE ALONE and never
+ * read `data.series[i].color` — which is where {@link applySeriesColorOverrides}
+ * puts a manual series colour, and therefore the only way a `spec.seriesColors`
+ * entry can reach a pixel.
+ *
+ * WHY THIS LIST EXISTS. The Format pane already refused a series swatch on a
+ * pie or a donut, with the right reason ("a pie takes each slice's colour from
+ * the palette"). That refusal was written as `mark === "pie" || mark ===
+ * "donut"` — and eight OTHER marks are in exactly the same position. On a
+ * histogram, two clicks reach `{ level: "series" }` (its bars report
+ * `seriesIndex: 0`), the pane rendered a live "Colour" swatch, the write landed
+ * in `spec.seriesColors[name]`, `applySeriesColorOverrides` duly copied it onto
+ * `data.series[0].color` — and `histogramChartPainter` paints
+ * `getSeriesColor(spec.palette, 0, null)`. The reader picked a colour, the
+ * document was dirtied, and nothing changed. Same for pareto, boxPlot, funnel,
+ * treemap and sunburst (palette by CATEGORY), waterfall (increase/decrease/total
+ * colours) and stock (up/down colours).
+ *
+ * The honest thing to offer on those marks is per-POINT formatting and the
+ * palette, which is what the pane now says.
+ *
+ * `seriesColorCoverage.test.ts` paints every built-in mark with and without a
+ * series colour and asserts this set is exactly the set whose call stream does
+ * not move — so the list cannot drift from the painters, in either direction.
+ */
+const SERIES_COLOUR_BLIND_MARKS = new Set([
+  "pie",
+  "donut",
+  "histogram",
+  "pareto",
+  "boxPlot",
+  "funnel",
+  "treemap",
+  "sunburst",
+  "waterfall",
+  "stock",
+]);
+
+/**
+ * Would a manual series colour actually be PAINTED on this mark?
+ *
+ * Asked by any surface that offers a series fill control. Unknown ids answer
+ * TRUE, the same asymmetry {@link markOffersPerPointFormatting} uses: a mark
+ * that never registered cannot be known to decline, and a false refusal is a
+ * lie about the product (it told a reader a bar chart had no series fill
+ * whenever the registry had not been populated yet).
+ */
+export function markReadsSeriesColor(mark: string): boolean {
+  return !SERIES_COLOUR_BLIND_MARKS.has(mark);
+}
+
+/** The marks that decline a series colour, for the coverage test to diff. */
+export function seriesColourBlindMarks(): string[] {
+  return [...SERIES_COLOUR_BLIND_MARKS];
+}
+
+/**
+ * How many parsed series answer to `seriesName`. Zero when the name is unknown.
+ *
+ * Takes the PARSED data rather than the spec because that is where a pivot's or
+ * a design query's series names exist at all.
+ */
+export function seriesNameArity(
+  data: { series: ReadonlyArray<{ name: string }> } | null | undefined,
+  seriesName: string | undefined,
+): number {
+  if (!data || seriesName === undefined || seriesName === "") return 0;
+  let n = 0;
+  for (const s of data.series) if (s.name === seriesName) n++;
+  return n;
+}
+
+/**
+ * The spec patch that sets (or, with `hex === null`, clears) the colour of the
+ * series called `seriesName`. Null means "commit nothing".
+ *
+ * A RECORD IS NOT AN ARRAY. `deepMergeSpec` (lib/chartStore.ts) replaces arrays
+ * wholesale but merges plain objects field by field, so a clear that simply
+ * left the key out of a smaller record would keep the colour it promised to
+ * remove — which is exactly why the Design panel's "Auto" button did nothing.
+ * A cleared name is therefore written as an EXPLICIT `undefined` (a key
+ * `deepMergeSpec` copies across and `JSON.stringify` then omits), and clearing
+ * the last one replaces the whole field.
+ */
+export function seriesColorPatch(
+  spec: Pick<ChartSpec, "seriesColors">,
+  seriesName: string | undefined,
+  hex: string | null,
+): Partial<ChartSpec> | null {
+  if (seriesName === undefined || seriesName === "") return null;
+  const current = spec.seriesColors ?? {};
+  if (hex !== null) {
+    if (current[seriesName] === hex) return null;
+    return { seriesColors: { ...current, [seriesName]: hex } };
+  }
+  if (!(seriesName in current)) return null;
+  const kept: Record<string, string> = { ...current };
+  delete kept[seriesName];
+  if (Object.keys(kept).length === 0) return { seriesColors: undefined };
+  const next: Record<string, string | undefined> = { ...kept, [seriesName]: undefined };
+  return { seriesColors: next as Record<string, string> };
+}
+
 /**
  * Apply the spec's name-keyed series color overrides to freshly parsed data.
  * Name-keyed (not index-keyed) so overrides survive filters/transforms and
@@ -252,7 +406,7 @@ function applySeriesColorOverrides(
 ): void {
   if (!seriesColors) return;
   for (const s of data.series) {
-    const override = seriesColors[s.name];
+    const override = readSeriesColor({ seriesColors }, s.name);
     if (override) s.color = override;
   }
 }

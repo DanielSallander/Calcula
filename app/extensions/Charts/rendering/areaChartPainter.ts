@@ -6,14 +6,16 @@ import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, AreaMarkOpti
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { seriesPaletteIndex } from "../lib/encodingResolver";
-import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { resolveDatumStyle, specHasDatumOverrides } from "../lib/dataPointOverrides";
 import { applyFillStyle } from "./gradientFill";
 import {
+  markerReachesDatum,
   paintDatumMarker,
   recordXAxisTitleRect,
   recordYAxisTitleRect,
   recordYLabelBandRect,
   xAxisTitleBaselineY,
+  xLabelBandHeight,
   Y_AXIS_TITLE_X,
 } from "./markerPainter";
 import { createLinearScale, createScaleFromSpec } from "./scales";
@@ -61,6 +63,8 @@ export function paintAreaChart(
   const fillOpacity = opts.fillOpacity ?? 0.3;
   const showMarkers = opts.showMarkers ?? false;
   const markerRadius = opts.markerRadius ?? 4;
+  /** Any per-point override at all — the gate on the marker loop when `showMarkers` is off. */
+  const specHasDataPointOverrides = specHasDatumOverrides(spec);
   // Support both old boolean `stacked` and new `stackMode`
   const stackMode: StackMode = opts.stackMode ?? (opts.stacked ? "stacked" : "none");
   const stacked = stackMode !== "none";
@@ -288,7 +292,22 @@ export function paintAreaChart(
     // moving to the next, where it used to draw every ring and then every core.
     // Markers within one series do not overlap at the same x, so the painted
     // result is the same; per-point styling is impossible in the two-pass shape.
-    if (showMarkers) {
+    //
+    // WHY THIS LOOP RUNS WITH MARKERS OFF (design doc §6.7, gap 1). An area
+    // series is ONE polygon filled from the SERIES colour, and `showMarkers`
+    // defaults to false — so on a DEFAULT area chart there was no per-datum
+    // shape for "format this point" to reach, and the pane's colour vanished
+    // into the spec without appearing anywhere. An OVERRIDDEN datum now gets a
+    // marker even when the series shows none: the override IS the request for a
+    // distinct point, and Excel's area charts answer it the same way.
+    //
+    // A chart with NO overrides is byte-identical to before. The loop is skipped
+    // outright when the spec carries none — `resolveDatumStyle` is pure, but
+    // skipping keeps the zero-override frame free rather than merely quiet —
+    // and `markerReachesDatum` leaves every un-overridden point unpainted while
+    // markers are off. `reachability-areaDefaultMarkers.test.ts` compares the
+    // two call streams rather than trusting this paragraph.
+    if (showMarkers || specHasDataPointOverrides) {
       for (let ci = 0; ci < points.length; ci++) {
         const pt = points[ci];
         const style = resolveDatumStyle(spec, data, si, ci, {
@@ -296,6 +315,7 @@ export function paintAreaChart(
           markerStyle: "circle",
           markerSize: markerRadius,
         });
+        if (!markerReachesDatum(showMarkers, style.matchedBy)) continue;
         paintDatumMarker(ctx, pt.x, pt.y, {
           shape: style.markerStyle ?? "circle",
           size: style.markerSize ?? markerRadius,
@@ -521,7 +541,11 @@ function drawAreaAxes(
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    const baselineY = xAxisTitleBaselineY(plotArea, spec.xAxis.showLabels);
+    const baselineY = xAxisTitleBaselineY(
+      plotArea,
+      xLabelBandHeight(spec, xAxis.ticks.map((t) => t.label), theme),
+      theme,
+    );
     ctx.fillText(spec.xAxis.title, plotArea.x + plotArea.width / 2, baselineY);
     if (layout) {
       recordXAxisTitleRect(

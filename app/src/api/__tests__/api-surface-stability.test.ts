@@ -2,6 +2,8 @@
 // PURPOSE: Verify public API surface stability — catch accidental breaking changes.
 
 import { describe, it, expect, beforeAll } from "vitest";
+import * as fs from "fs";
+import * as path from "path";
 
 // Warm the module graph ONCE with a generous budget (see the matching note
 // in facade-completeness.test.ts): a starved first import under full-suite
@@ -112,6 +114,153 @@ describe("api/index.ts chart seam re-exports", () => {
     const chartData = await import("../chartData");
     expect(barrel.setChartRightClickTarget).toBe(chartData.setChartRightClickTarget);
     expect(barrel.CHART_TARGET_ELEMENTS).toBe(chartData.CHART_TARGET_ELEMENTS);
+  });
+});
+
+// ============================================================================
+// keybindings.ts — the FACADE mirrors the FUNCTION it fronts
+// ============================================================================
+//
+// `IKeybindingsAPI` is what an extension receives as `context.keybindings`; it
+// fronts the free function `registerKeybinding`. The two drifted: the function
+// grew a `when` applicability predicate (Excel's Ctrl+1 formats CELLS except
+// while a chart element is selected, and Delete is the same shape), the facade
+// kept its one-argument signature, and Charts only works because it imports the
+// free function directly. An extension obeying the Facade Rule could not
+// express the same claim at all — and TypeScript would not have told it,
+// because a one-parameter arrow is assignable to a two-parameter method
+// signature, so an argument passed through the facade is silently dropped and
+// the binding fires everywhere.
+//
+// Runtime cannot see a type, so this reads the SOURCE at test time — the same
+// shape as interpreterReachDrift.test.ts reading manifest.rs. The direction is
+// fixed: `registerKeybinding` is the source of truth (it is the thing that
+// runs), and the facade must mirror its parameter list. The `binding`
+// parameter's TYPE is deliberately allowed to differ — the facade takes
+// `Omit<KeyBinding, "source">` because the host stamps the attribution — so
+// only its NAME is compared; every parameter after it must match exactly.
+
+const KEYBINDINGS_TS = path.resolve(__dirname, "../keybindings.ts");
+
+/**
+ * Split a parameter list on top-level commas ONLY.
+ *
+ * Deliberately depth-aware rather than `split(",")`: `Omit<KeyBinding,
+ * "source">` contains a comma, and a naive split reports the facade as taking
+ * three parameters named `binding`, `"source">` and `when`. That is exactly the
+ * failure mode this repo has already paid for once, in the `generate_handler!`
+ * recount that read 789 because four doc comments contained commas.
+ */
+function splitTopLevel(params: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const ch of params) {
+    if (ch === "<" || ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ">" || ch === ")" || ch === "]" || ch === "}") depth--;
+    if (ch === "," && depth === 0) {
+      out.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim() !== "") out.push(current.trim());
+  return out;
+}
+
+/** Everything between the parentheses of `<head>(...)`, brace/angle aware. */
+function paramListAfter(src: string, head: string): string {
+  const at = src.indexOf(head);
+  expect(at, `'${head}' not found in keybindings.ts`).toBeGreaterThan(-1);
+  const open = at + head.length - 1;
+  expect(src[open], `'${head}' does not end at its own '('`).toBe("(");
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === "(") depth++;
+    else if (src[i] === ")") {
+      depth--;
+      if (depth === 0) return src.slice(open + 1, i);
+    }
+  }
+  throw new Error(`unterminated parameter list for '${head}'`);
+}
+
+/** `when?: () => boolean` -> { name: "when", optional: true, type: "() => boolean" } */
+function parseParam(text: string): { name: string; optional: boolean; type: string } {
+  const colon = text.indexOf(":");
+  expect(colon, `parameter '${text}' has no type annotation`).toBeGreaterThan(0);
+  const rawName = text.slice(0, colon).trim();
+  const optional = rawName.endsWith("?");
+  return {
+    name: optional ? rawName.slice(0, -1) : rawName,
+    optional,
+    type: text.slice(colon + 1).trim(),
+  };
+}
+
+describe("api/keybindings.ts — IKeybindingsAPI mirrors registerKeybinding", () => {
+  const src = fs.readFileSync(KEYBINDINGS_TS, "utf8");
+
+  /** The facade's own body, so `register(` cannot match the free function. */
+  function facadeBody(): string {
+    const start = src.indexOf("export interface IKeybindingsAPI {");
+    expect(start, "IKeybindingsAPI is no longer declared in keybindings.ts").toBeGreaterThan(-1);
+    const end = src.indexOf("\n}", start);
+    expect(end).toBeGreaterThan(start);
+    return src.slice(start, end);
+  }
+
+  it("the parser reads the two signatures it claims to (self-check)", () => {
+    // A drift guard whose parser silently matched nothing would pass forever.
+    const fn = splitTopLevel(paramListAfter(src, "export function registerKeybinding("));
+    const facade = splitTopLevel(paramListAfter(facadeBody(), "register("));
+    // Deliberately NOT a length assertion on the facade: that is the drift the
+    // cases below exist to report, and a self-check that fails on the real
+    // defect stops being a check on the PARSER.
+    expect(fn.length).toBeGreaterThanOrEqual(2);
+    expect(facade.length).toBeGreaterThanOrEqual(1);
+    expect(parseParam(fn[0]).name).toBe("binding");
+    expect(parseParam(facade[0]).name).toBe("binding");
+    // The commas inside Omit<KeyBinding, "source"> must NOT have split it.
+    expect(parseParam(facade[0]).type).toContain("Omit<KeyBinding");
+  });
+
+  it("declares the same parameters, in the same order, with the same names", () => {
+    const fn = splitTopLevel(paramListAfter(src, "export function registerKeybinding(")).map(
+      parseParam,
+    );
+    const facade = splitTopLevel(paramListAfter(facadeBody(), "register(")).map(parseParam);
+
+    expect(
+      facade.map((p) => p.name),
+      "IKeybindingsAPI.register must accept every argument registerKeybinding does — " +
+        "an extension reaching the registry through context.keybindings cannot pass " +
+        "one that is not declared, and a wrapper that drops it type-checks silently. " +
+        "FIX: widen the facade in app/src/api/keybindings.ts AND forward the argument " +
+        "in the per-extension wrapper in app/src/shell/registries/ExtensionManager.ts.",
+    ).toEqual(fn.map((p) => p.name));
+  });
+
+  it("every parameter after `binding` matches the function's type exactly", () => {
+    // `binding` is exempt by design: the facade narrows it to
+    // Omit<KeyBinding, "source"> because the HOST stamps source/extensionId.
+    const fn = splitTopLevel(paramListAfter(src, "export function registerKeybinding(")).map(
+      parseParam,
+    );
+    const facade = splitTopLevel(paramListAfter(facadeBody(), "register(")).map(parseParam);
+
+    expect(facade.slice(1)).toEqual(fn.slice(1));
+  });
+
+  it("`when` is one of them, optional, and a boolean predicate", () => {
+    // Named explicitly so the failure reads as the thing that went wrong rather
+    // than as an array diff.
+    const facade = splitTopLevel(paramListAfter(facadeBody(), "register(")).map(parseParam);
+    const when = facade.find((p) => p.name === "when");
+    expect(when, "IKeybindingsAPI.register no longer declares `when`").toBeDefined();
+    expect(when!.optional).toBe(true);
+    expect(when!.type).toBe("() => boolean");
   });
 });
 

@@ -32,6 +32,7 @@
 //          not silently moved onto another bar.
 
 import { DEFAULT_OVERLAY_STYLE } from "@api/insightStyle";
+import type { DatumMatchKind } from "../lib/dataPointOverrides";
 import type {
   ChartSpec,
   ChartLayout,
@@ -161,6 +162,30 @@ export interface DatumMarkerPaint {
    * inside a diamond or a triangle is not a hollow marker, it is a blob.
    */
   hollow?: boolean;
+}
+
+/**
+ * Does this datum get a marker at all?
+ *
+ * THE OVERRIDE IS THE REQUEST. A per-point override is the reader saying "make
+ * THIS point distinct". On a mark whose series shows no markers, an area chart
+ * by default (`showMarkers ?? false`), there is no per-datum shape on screen
+ * for a colour to land on — so the Format pane accepted a colour, wrote it into
+ * the spec, dirtied the document, and the chart looked exactly the same. That
+ * is the same silent-no-op shape as writing to the wrong address; the fix is
+ * not to refuse the request but to GRANT it, which is also what Excel's area
+ * charts do when a single point is formatted.
+ *
+ * So: markers on, every datum gets one; markers off, only the datums an
+ * override actually reached. A chart with no overrides is unchanged down to the
+ * call stream, because nothing reaches any datum and this returns false for
+ * every one of them.
+ *
+ * Applies to any point-based mark that can be configured with its markers off —
+ * area (off by default), and line/radar when `showMarkers` is set to false.
+ */
+export function markerReachesDatum(showMarkers: boolean, matchedBy: DatumMatchKind): boolean {
+  return showMarkers || matchedBy !== "none";
 }
 
 /**
@@ -295,9 +320,6 @@ function strokeOutline(ctx: AnyCtx, color: string, width: number, stroke: () => 
 export const Y_AXIS_TITLE_X = 14;
 /** Gap between the widest y tick label's right edge and the axis line. */
 const Y_LABEL_GUTTER = 6;
-/** Distance from the plot's bottom edge to the x-axis title baseline. */
-const X_TITLE_DROP_WITH_LABELS = 30;
-const X_TITLE_DROP_BARE = 16;
 
 interface PlotRect {
   x: number;
@@ -309,10 +331,14 @@ interface PlotRect {
 /**
  * The baseline the x-axis title is painted on. A "bottom" baseline, so the
  * title's box ENDS here.
+ *
+ * The drop constants moved to `chartPainterUtils`, beside the layout that
+ * RESERVES the band for them and the element-rect estimate the hit test
+ * trusts — the data table's variant used to carry its own copy of the bare
+ * 16, and the estimate a hand-copied `(showLabels ? 30 : 16)`. Re-exported
+ * here because this is where the five self-drawing axis painters name it.
  */
-export function xAxisTitleBaselineY(plotArea: PlotRect, showLabels: boolean): number {
-  return plotArea.y + plotArea.height + (showLabels ? X_TITLE_DROP_WITH_LABELS : X_TITLE_DROP_BARE);
-}
+export { xAxisTitleBaselineY, xLabelBandHeight } from "./chartPainterUtils";
 
 /**
  * Write back the x-axis title's MEASURED box. `titleWidth` must have been

@@ -55,6 +55,28 @@ export function paintDataLabels(
   recordDataLabelRects(layout, recorded);
 }
 
+/**
+ * Has the reader removed THIS one label?
+ *
+ * `DataLabelSpec.hiddenPoints` is the per-LABEL suppression list — the same
+ * shape `LegendSpec.hiddenEntries` uses for legend rows, and for the same
+ * reason: a data label is an individually selectable object, so the finest act
+ * available on it must not be "remove the labels of its whole series".
+ *
+ * Read from `dl` inside each draw loop rather than threaded down as a
+ * fourteenth positional parameter. The three loops already carry `dl`, and a
+ * parameter list this long is where a filter gets passed to two of three
+ * callers and silently skipped by the third.
+ *
+ * Indices are PAINTER space on both sides — the list is written from a hit
+ * result, and a hit result is painter space.
+ */
+function isHiddenLabel(dl: DataLabelSpec, seriesIndex: number, pointIndex: number): boolean {
+  const hidden = dl.hiddenPoints;
+  if (!hidden || hidden.length === 0) return false;
+  return hidden.some((h) => h.seriesIndex === seriesIndex && h.pointIndex === pointIndex);
+}
+
 /** The recursive half: draws, and appends what it drew to `recorded`. */
 function paintDataLabelsInto(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
@@ -124,6 +146,7 @@ function drawBarLabels(
 
   for (const rect of rects) {
     if (seriesFilter && !seriesFilter.includes(rect.seriesIndex)) continue;
+    if (isHiddenLabel(dl, rect.seriesIndex, rect.categoryIndex)) continue;
     if (minValue != null && Math.abs(rect.value) < minValue) continue;
 
     const text = formatLabelText(contentFields, rect.value, rect.categoryName, rect.seriesName, data, separator, dl.format);
@@ -148,8 +171,18 @@ function drawBarLabels(
         break;
     }
 
-    // Clamp to plot area
-    y = Math.max(plotArea.y + fontSize, Math.min(y, plotArea.y + plotArea.height - 2));
+    // Clamp — but an "above" label is clamped against the CANVAS, not the plot.
+    //
+    // The single clamp to `plotArea.y + fontSize` put an "above" label INSIDE
+    // its own bar whenever that bar reached the top of the value scale, which
+    // is the ordinary case for the largest datum on an auto scale. Excel never
+    // does that: an outside-end label stays outside the column, overlapping the
+    // plot's top margin if it must. It also made the label unselectable — a
+    // datum beats furniture in the hit order, so a label box inside the bar's
+    // box can never be reached. The label is still kept on the canvas, so it
+    // cannot be pushed off the top edge.
+    const minY = pos === "above" ? fontSize : plotArea.y + fontSize;
+    y = Math.max(minY, Math.min(y, plotArea.y + plotArea.height - 2));
 
     const color = dl.color ?? ((pos === "inside" || pos === "center") ? "#ffffff" : "#333333");
     const box = drawLabelText(ctx, text, x, y, color, fontSize, bgColor);
@@ -181,6 +214,7 @@ function drawPointLabels(
 
   for (const marker of markers) {
     if (seriesFilter && !seriesFilter.includes(marker.seriesIndex)) continue;
+    if (isHiddenLabel(dl, marker.seriesIndex, marker.categoryIndex)) continue;
     if (minValue != null && Math.abs(marker.value) < minValue) continue;
 
     const text = formatLabelText(contentFields, marker.value, marker.categoryName, marker.seriesName, data, separator, dl.format);
@@ -230,6 +264,11 @@ function drawSliceLabels(
   recorded: RecordedLabel[],
 ): void {
   for (const arc of arcs) {
+    // A radial mark's series axis and category axis are the SAME axis, so the
+    // pair the suppression list was written with is (arc.seriesIndex,
+    // arc.seriesIndex) — the convention `hitTestSliceArcs` and the record below
+    // both already use.
+    if (isHiddenLabel(dl, arc.seriesIndex, arc.seriesIndex)) continue;
     if (minValue != null && Math.abs(arc.value) < minValue) continue;
 
     const text = formatLabelText(contentFields, arc.value, arc.label, "", data, separator, dl.format, arc.percent);

@@ -6,6 +6,7 @@ import React from "react";
 import type { ConnectionInfo } from "@api";
 import type { ChartSpec, ChartSeries, SeriesOrientation } from "../../types";
 import { getSeriesColor } from "../../rendering/chartTheme";
+import { readSeriesColor, seriesColorPatch } from "../../lib/chartDataReader";
 import { DesignQueryEditor } from "../DesignQueryEditor";
 import {
   FieldGroup,
@@ -49,6 +50,14 @@ interface DataTabProps {
   onCategoryIndexChange: (value: number) => void;
   series: ChartSeries[];
   onSeriesChange: (series: ChartSeries[]) => void;
+  /**
+   * The spec being composed, for the one series-colour spelling (OB-1). Null
+   * before the source range parses, which is exactly when there are no series
+   * to colour either.
+   */
+  spec: ChartSpec | null;
+  /** Emits a spec patch, the way the Design and Spec tabs do. */
+  onSpecChange: (updates: Partial<ChartSpec>) => void;
   /** Available column/row labels for category dropdown. */
   availableAxes: Array<{ index: number; label: string }>;
   /** Palette name for color previews. */
@@ -78,6 +87,8 @@ export function DataTab({
   onCategoryIndexChange,
   series,
   onSeriesChange,
+  spec,
+  onSpecChange,
   availableAxes,
   palette,
   onInspectData,
@@ -99,12 +110,25 @@ export function DataTab({
     }
   };
 
-  const handleSeriesColorChange = (sourceIndex: number, color: string) => {
-    onSeriesChange(
-      series.map((s) =>
-        s.sourceIndex === sourceIndex ? { ...s, color } : s,
-      ),
-    );
+  /**
+   * Set the colour of a series — through the ONE spelling (OB-1).
+   *
+   * This used to write `spec.series[i].color`, which is the BASE that
+   * `applySeriesColorOverrides` overwrites from `spec.seriesColors[name]`. So a
+   * series that had ever been coloured from the Format pane or the Design tab
+   * ignored this swatch, and the swatch went on showing the colour it had
+   * written rather than the one the chart was drawn with. It now reads and
+   * writes the same name-keyed field every other surface does, through
+   * `readSeriesColor` / `seriesColorPatch`.
+   *
+   * The patch goes to `onSpecChange` rather than `onSeriesChange` because
+   * `seriesColors` is not one of the dialog's managed fields; the dialog keeps
+   * it in the spec overlay, which REPLACES a key — the form the shared writer
+   * already builds for.
+   */
+  const handleSeriesColorChange = (seriesName: string, color: string) => {
+    const patch = seriesColorPatch(spec ?? {}, seriesName, color);
+    if (patch !== null) onSpecChange(patch);
   };
 
   // Build all possible series indices (all axes except the category axis)
@@ -285,11 +309,15 @@ export function DataTab({
                         onChange={(e) => handleSeriesToggle(idx, e.target.checked)}
                       />
                       <span style={{ flex: 1 }}>{axisLabel}</span>
-                      {isActive && (
+                      {isActive && seriesDef && (
                         <ColorSwatch
                           type="color"
-                          value={seriesDef?.color ?? getSeriesColor(palette, colorIndex, null)}
-                          onChange={(e) => handleSeriesColorChange(idx, e.target.value)}
+                          value={
+                            readSeriesColor(spec ?? {}, seriesDef.name)
+                            ?? seriesDef.color
+                            ?? getSeriesColor(palette, colorIndex, null)
+                          }
+                          onChange={(e) => handleSeriesColorChange(seriesDef.name, e.target.value)}
                           title="Series color"
                         />
                       )}

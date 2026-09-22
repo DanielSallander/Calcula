@@ -31,6 +31,7 @@ import {
   unregisterTaskPane,
   openTaskPane,
   removeTaskPaneContextKey,
+  registerLifecycleGuard,
 } from "@api";
 import { registerSandboxMark } from "./rendering/sandboxMarkShim";
 
@@ -38,8 +39,14 @@ import { registerSandboxMark } from "./rendering/sandboxMarkShim";
  * Excel's Ctrl+1 on a chart: format whatever is selected. Registered as a
  * command (not just a listener) so the keybinding registry, the command palette
  * and the macro recorder all see the same one door.
+ *
+ * THE ID ITSELF lives in ./types (CHART_FORMAT_SELECTION_COMMAND), because the
+ * context menu's "Format <element>..." verb has to invoke this very command and
+ * this file imports the context menu. A second literal there would be a route
+ * that works until one of the two strings is renamed — and an unknown command
+ * id is a silent no-op, not an error.
  */
-const CHART_FORMAT_PANE_COMMAND = "chart.format.selection";
+const CHART_FORMAT_PANE_COMMAND = CHART_FORMAT_SELECTION_COMMAND;
 
 /**
  * Excel's Delete on a selected chart element. A COMMAND, not just a listener,
@@ -104,6 +111,7 @@ import {
   chartOwnsKeystroke,
   arrowsBelongToOverlayStep,
   isChartAreaElement,
+  isFurnitureDeleteElement,
   selectionAfterHidingLegendEntry,
 } from "./handlers/selectionHandler";
 import type { ChartNavDirection } from "./handlers/selectionHandler";
@@ -163,7 +171,12 @@ import type { DataRangeRef } from "./types";
 import { QuickAccessPopup } from "./components/QuickAccessPopup";
 import { DataPointFormatDialog } from "./components/DataPointFormatDialog";
 import { AxisContextMenu } from "./components/AxisContextMenu";
-import { ChartContextMenu, hideLegendEntryPatch } from "./components/ChartContextMenu";
+import {
+  ChartContextMenu,
+  furnitureDeletePatch,
+  furnitureTargetFromSubSelection,
+  hideLegendEntryPatch,
+} from "./components/ChartContextMenu";
 import { FormatAxisDialog } from "./components/FormatAxisDialog";
 import {
   renderChart,
@@ -231,7 +244,11 @@ import { hitTestWidgetControls, isInWidgetArea } from "./rendering/paramWidgets"
 import { onAppEvent } from "@api/events";
 import { updateCell } from "@api/lib";
 import { ChartEvents } from "./lib/chartEvents";
-import { isPivotDataSource, isDesignQueryDataSource } from "./types";
+import {
+  CHART_FORMAT_SELECTION_COMMAND,
+  isPivotDataSource,
+  isDesignQueryDataSource,
+} from "./types";
 import { registerChartQueryProvider } from "./lib/chartQueryProvider";
 import type { PivotChartFieldButton } from "./types";
 import { PivotEvents } from "../_shared/lib/pivotEvents";
@@ -1633,12 +1650,27 @@ function activate(context: ExtensionContext): void {
       // nudging the ladder: a route missing from this list is a right-click
       // that lands somewhere the left-click would not, which is the two-
       // spellings defect the recorded subject exists to remove.
-      element === "plotArea"
+      element === "plotArea" ||
+      // The in-plot furniture, for the same reason: a rung the LEFT click can
+      // reach and the right click cannot is two spellings of one ladder.
+      element === "trendline" ||
+      element === "errorBars" ||
+      element === "dataLabel" ||
+      element === "dataTable"
     ) {
       setSubSelection(targetId, {
         level: "element",
         elementId: element,
         ...(hit?.seriesIndex !== undefined ? { seriesIndex: hit.seriesIndex } : {}),
+        // Only the element that HAS each index gets it. A stray categoryIndex
+        // on an errorBars rung would make two identical selections compare
+        // unequal, and Excel has no per-point error bar to name anyway.
+        ...(element === "dataLabel" && hit?.pointIndex !== undefined
+          ? { categoryIndex: hit.pointIndex }
+          : {}),
+        ...(element === "trendline" && hit?.trendlineIndex !== undefined
+          ? { trendlineIndex: hit.trendlineIndex }
+          : {}),
       });
     } else {
       // The chart area (the outer margin), a filter button, or a stale-cache
@@ -1688,6 +1720,7 @@ function activate(context: ExtensionContext): void {
       ...(painterSeries !== undefined ? { seriesIndex: painterSeries } : {}),
       ...(painterPoint !== undefined ? { pointIndex: painterPoint } : {}),
       ...(authoring ? { authoring } : {}),
+      ...(hit?.trendlineIndex !== undefined ? { trendlineIndex: hit.trendlineIndex } : {}),
       seriesName: hit?.seriesName,
       categoryName: hit?.categoryName,
       value: hit?.value,
@@ -2309,6 +2342,38 @@ function activate(context: ExtensionContext): void {
       return;
     }
 
+    // THE IN-PLOT FURNITURE REMOVES ITSELF — trendline, a series' error bars,
+    // one data label, the data table.
+    //
+    // THE BRANCH IS KEYED OFF THE SUBJECT, NOT OFF WHETHER A WRITE HAPPENED.
+    // That is the third time this rule has had to be written down here: a title
+    // that was already empty and a legend row that was already hidden both
+    // answer "nothing changed", and branching on the write made the second
+    // Delete -- the "did that work?" reflex -- fall through and destroy the
+    // chart. A trendline that has already gone and a data table that is already
+    // off are the same trap in new clothes, so the `return` is outside the
+    // `if (patch)`.
+    //
+    // ONE RESOLVER, shared with the context menu's "Delete <element>" rows
+    // (furnitureDeletePatch, components/ChartContextMenu.tsx) -- the same
+    // two-derivations-one-answer split hideLegendEntryPatch already uses.
+    if (sub.level === "element" && isFurnitureDeleteElement(sub.elementId)) {
+      const chart = getChartById(chartId);
+      const target = furnitureTargetFromSubSelection(sub);
+      const patch = chart && target ? furnitureDeletePatch(chart.spec, target) : null;
+      if (patch) {
+        updateChartSpec(chartId, patch);
+        invalidateChartCache(chartId);
+        // The selected rung has just stopped existing; leaving it selected is
+        // the stale-subject defect the cue rings already taught us.
+        setSubSelection(chartId, { level: "chart" });
+        requestOverlayRedraw();
+        emitChartSelectionEvent();
+        context.events.emit(AppEvents.GRID_REFRESH);
+      }
+      return;
+    }
+
     // THE TWO AREAS ARE NOT THE CHART OBJECT.
     //
     // `plotArea` became clickable in this wave and was already walkable by
@@ -2566,24 +2631,38 @@ function activate(context: ExtensionContext): void {
   // close-without-saving prompt never appeared. `flushPendingChartSaves`
   // documented itself as "call this before file save or app close" and had no
   // caller in the product at all — only an E2E test. FloatingRange, the sibling
-  // feature with the identical debounce, hooks exactly this event.
+  // feature with the identical debounce, hooks the BEFORE_SAVE event for this;
+  // charts cannot, for the reason below.
   //
-  // BEFORE_CLOSE is hooked as well as BEFORE_SAVE, and it is worth saying what
-  // it does and does not buy. The shell emits BEFORE_CLOSE and then awaits
-  // `isFileModified()`, and `emitAppEvent` does not await its listeners — so
-  // the flush and the dirty-flag read are two IPC calls in flight at once and
-  // the prompt is not GUARANTEED. What it does guarantee is that the edit
-  // reaches AppState at all, which is the difference between "the prompt might
-  // not appear" and "the work is gone". (CellBookmarks hit the same dispatcher
-  // limit and answered it with a write-through instead of a debounce; that is
-  // the shape this store would need for a guarantee.)
-  for (const evt of [AppEvents.BEFORE_SAVE, AppEvents.BEFORE_CLOSE]) {
-    cleanupFunctions.push(
-      context.events.on(evt, () => {
-        void flushPendingChartSaves();
-      }),
-    );
-  }
+  // THE HOOK HAS TO BE AWAITED, AND AN EVENT IS NOT.
+  //
+  // This was first written as a BEFORE_SAVE / BEFORE_CLOSE listener, and that
+  // is not enough: `emitAppEvent` is a synchronous `dispatchEvent` and does not
+  // await its listeners, while `flushDirtyCharts` awaits each `update_chart` in
+  // turn. Nudge chart A and chart B inside one 300 ms window — aligning two
+  // charts is the ordinary way to do that — and the listener runs only as far as
+  // A's first `await`; `save_file` is then posted, and B's `update_chart` does
+  // not go out until A's reply comes back. The recorded call order was
+  // ["update_chart", "save_file", "update_chart"], so the .cala on disk held A's
+  // edit and B's OLD spec while the UI reported a clean save.
+  //
+  // `registerLifecycleGuard` is the one hook the save and close paths AWAIT:
+  // `checkLifecycleGuards('save')` runs before `emitAppEvent(BEFORE_SAVE)` and
+  // before `save_file` (app/src/core/lib/file-api.ts), and
+  // `checkLifecycleGuards('close')` runs before `isFileModified()`
+  // (app/src/shell/Layout.tsx) — which is the read that decides whether the
+  // close-without-saving prompt appears at all. It is a VETO registry, so this
+  // guard always returns null: charts never cancel a save, they only insist on
+  // being in it. A guard that throws is treated as no objection, so a backend
+  // that refuses a chart write cannot trap the user in the app.
+  cleanupFunctions.push(
+    registerLifecycleGuard(async (action) => {
+      if (action === "save" || action === "close") {
+        await flushPendingChartSaves();
+      }
+      return null;
+    }),
+  );
 
   const handleDeleteRequest = (e: Event) => {
     const chartId = (e as CustomEvent).detail?.chartId as string | undefined;

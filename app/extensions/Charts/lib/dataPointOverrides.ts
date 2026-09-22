@@ -5,6 +5,8 @@
 // CONTEXT: Used by chart painters to look up and apply DataPointOverride
 //          settings for individual bars, slices, points, etc.
 
+import type { ChartMarkDatumStyle } from "@api/chartMarks";
+import { chartMarkHonoursDataPointOverrides, isChartMarkRegistered } from "@api/chartMarks";
 import type {
   DataPointOverride,
   ChartSpec,
@@ -14,6 +16,48 @@ import type {
   MarkerStyle,
 } from "../types";
 import { DATA_POINT_KEY_SEPARATOR, INVERTED_FILL_COLOR } from "../types";
+
+/**
+ * Should a UI offer "format this ONE data point" for this mark?
+ *
+ * ONE RULE, TWO DOORS. The Format pane's Data Point sections and the context
+ * menu's "Format Data Point..." verb both ask this, because a gate applied at
+ * one door is a gate the other walks around.
+ *
+ * REFUSE ONLY WHAT WE KNOW DECLINES. A custom mark paints in a Worker realm and
+ * returns an opaque ImageBitmap: the host ships it the resolved styles
+ * (`paint.datumStyles`) but cannot check that it used them, so the capability is
+ * a DECLARATION — {@link ChartMarkMeta.honoursDataPointOverrides} — and a
+ * registered mark that did not declare is refused. **An UNREGISTERED id is
+ * offered, not refused**, and that asymmetry is deliberate:
+ * `chartMarkHonoursDataPointOverrides` answers false for an unknown id (a mark
+ * that never registered cannot have promised anything), and treating that as a
+ * refusal made the pane tell the reader "this chart type does not support
+ * formatting a single data point" about a BAR CHART whenever the registry had
+ * not been populated yet. A false refusal is a lie about the product; the case
+ * it would have caught cannot arise, because an unregistered mark paints
+ * nothing — `paintMark` is a no-op for it — so there is no datum to right-click
+ * in the first place.
+ */
+export function markOffersPerPointFormatting(mark: string): boolean {
+  if (!isChartMarkRegistered(mark)) return true;
+  return chartMarkHonoursDataPointOverrides(mark);
+}
+
+/**
+ * Does this spec carry any per-point override at all?
+ *
+ * The gate three painters need on their marker loop: area, line and radar can
+ * all be configured with their markers OFF, and while they are, the loop runs
+ * only to let an overridden datum through ({@link markerReachesDatum} in
+ * rendering/markerPainter.ts). A chart with no overrides must skip the loop
+ * entirely so its call stream is byte-identical to before — and "no overrides"
+ * is one fact, so it is spelled once here rather than three times as
+ * `(spec.dataPointOverrides?.length ?? 0) > 0`.
+ */
+export function specHasDatumOverrides(spec: Pick<ChartSpec, "dataPointOverrides">): boolean {
+  return (spec.dataPointOverrides?.length ?? 0) > 0;
+}
 
 /**
  * Translate a PAINTER-space (post-filter) series/category index pair to
@@ -395,4 +439,69 @@ export function resolveDatumStyle(
     override,
     matchedBy,
   };
+}
+
+// ============================================================================
+// The same answer, shipped to a SANDBOXED mark
+// ============================================================================
+
+/**
+ * Every datum an override actually reaches, resolved, in PAINTER space — the
+ * payload a sandboxed/custom mark reads instead of `spec.dataPointOverrides`.
+ *
+ * WHY THIS EXISTS. A custom mark paints in a Worker realm and its pixels arrive
+ * as an opaque `ImageBitmap`, so the host cannot apply an override to them. The
+ * spec does cross to the worker, so the mark COULD read the raw array — but
+ * resolving it correctly means re-implementing key-before-index matching, the
+ * painter-to-authoring translation, the duplicate-label tie-break and
+ * `invertIfNegative`. That would be a THIRD spelling of a rule that already
+ * exists twice too often, in script-land where nothing in this repository can
+ * test it. So the host resolves and hands over the answer.
+ *
+ * SPARSE ON PURPOSE. Only datums with a match are listed, so a chart with no
+ * overrides produces `[]` and a 200x500 dataset does not clone 100,000 objects
+ * across the worker boundary on every repaint. The base is EMPTY — the host
+ * does not know a custom mark's palette, and inventing one would tell the mark
+ * that every datum is overridden. A `null` field therefore means "the user said
+ * nothing about this; keep your own default".
+ *
+ * Pure. The heavy lifting is {@link resolveDatumStyle}, one call per datum,
+ * behind the same memoised index every built-in painter uses.
+ */
+export function resolvedDatumStylesForMark(
+  spec: ChartSpec,
+  data: ParsedChartData,
+): ChartMarkDatumStyle[] {
+  const out: ChartMarkDatumStyle[] = [];
+  if (!spec.dataPointOverrides || spec.dataPointOverrides.length === 0) return out;
+
+  for (let si = 0; si < data.series.length; si++) {
+    for (let ci = 0; ci < data.categories.length; ci++) {
+      const style = resolveDatumStyle(spec, data, si, ci);
+      if (style.matchedBy === "none") continue;
+      out.push({
+        seriesIndex: si,
+        categoryIndex: ci,
+        // `resolveDatumStyle` reports "" for "no fill decided" because its
+        // built-in callers always pass a base colour. Across the worker
+        // boundary that empty string would read as a real colour, so it
+        // becomes the null every other field already uses.
+        fill: style.fill === "" ? null : style.fill,
+        opacity: style.opacity,
+        borderColor: style.borderColor,
+        borderWidth: style.borderWidth,
+        markerStyle: style.markerStyle,
+        markerSize: style.markerSize,
+        markerFill: style.markerFill,
+        markerBorderColor: style.markerBorderColor,
+        markerBorderWidth: style.markerBorderWidth,
+        explodeOffset: style.explodeOffset,
+        inverted: style.inverted,
+        gradientFill: style.gradientFill,
+        patternFill: style.patternFill,
+        matchedBy: style.matchedBy,
+      });
+    }
+  }
+  return out;
 }

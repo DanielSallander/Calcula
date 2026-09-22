@@ -42,6 +42,7 @@ import {
   elementSelectionBox,
   elementSelectionRect,
   isSelectableChartElement,
+  type ElementSelectionPaintOptions,
   type SelectableChartElementId,
 } from "../selectionHighlight";
 import {
@@ -78,9 +79,87 @@ function elements(): ChartElementRects {
       { seriesIndex: 1, rect: { x: 475, y: 69, width: 101, height: 17 } },
     ],
     displayUnitLabel: { x: 9, y: 21, width: 63, height: 13 },
+    // The in-plot furniture, recorded by its own painters. A trendline is a
+    // POLYLINE — its bounding box would cover the plot — and error bars are
+    // MANY rects under ONE identity, because Excel has no per-point error bar.
+    trendlines: [
+      { seriesIndex: 0, trendlineIndex: 0, points: [{ x: 71, y: 311 }, { x: 509, y: 97 }] },
+      { seriesIndex: 0, trendlineIndex: 1, points: [{ x: 71, y: 283 }, { x: 509, y: 151 }] },
+    ],
+    errorBars: [
+      { seriesIndex: 0, rect: { x: 121, y: 133, width: 7, height: 39 } },
+      { seriesIndex: 0, rect: { x: 213, y: 157, width: 7, height: 31 } },
+      { seriesIndex: 1, rect: { x: 305, y: 111, width: 7, height: 47 } },
+    ],
+    dataLabels: [
+      { seriesIndex: 0, pointIndex: 0, rect: { x: 113, y: 117, width: 23, height: 11 } },
+      { seriesIndex: 0, pointIndex: 1, rect: { x: 205, y: 141, width: 23, height: 11 } },
+    ],
+    dataTable: { x: 63, y: 331, width: 451, height: 43 },
     measured: ["title", "legend"],
   };
 }
+
+/**
+ * The instance indices each selectable element needs to name ONE of itself.
+ *
+ * Kept as a Record over the id union, so a new selectable element cannot be
+ * added without deciding here what identifies one — which is the question that
+ * had no answer at all before `ChartSubSelection` grew `trendlineIndex`.
+ */
+const INSTANCE: Record<
+  SelectableChartElementId,
+  { seriesIndex?: number; opts?: ElementSelectionPaintOptions }
+> = {
+  title: {},
+  xAxisTitle: {},
+  yAxisTitle: {},
+  legend: {},
+  plotArea: {},
+  dataTable: {},
+  legendEntry: { seriesIndex: 1 },
+  trendline: { seriesIndex: 0, opts: { trendlineIndex: 0 } },
+  errorBars: { seriesIndex: 0 },
+  dataLabel: { seriesIndex: 0, opts: { categoryIndex: 1 } },
+};
+
+/** Paint one element by id, handing it the indices that name an instance. */
+function paint(
+  ctx: CanvasRenderingContext2D,
+  lay: ChartLayout | undefined,
+  id: SelectableChartElementId,
+  chartX = 0,
+  chartY = 0,
+  extra: ElementSelectionPaintOptions = {},
+): boolean {
+  const i = INSTANCE[id];
+  return drawElementSelectionHighlight(ctx, chartX, chartY, lay, id, i.seriesIndex, {
+    ...i.opts,
+    ...extra,
+  });
+}
+
+/**
+ * How many 5x5 handle squares each element draws, and WHY the numbers differ.
+ *
+ * Six for a box (four corners plus the two edge midpoints). TWO for a
+ * trendline, because a line has two ends and nothing in between to drag —
+ * six squares around a line would be chrome describing a shape that is not
+ * there. NONE for error bars, because the object is the whole SET and no single
+ * one of its many boxes is the thing selected.
+ */
+const HANDLE_COUNT: Record<SelectableChartElementId, number> = {
+  title: 6,
+  xAxisTitle: 6,
+  yAxisTitle: 6,
+  legend: 6,
+  legendEntry: 6,
+  plotArea: 6,
+  dataLabel: 6,
+  dataTable: 6,
+  trendline: 2,
+  errorBars: 0,
+};
 
 /** A layout whose margins do NOT agree with the element rects above. */
 function layout(): ChartLayout {
@@ -121,14 +200,9 @@ describe("which elements get a selection box at all", () => {
       "yAxis", // drawAxisSelectionHighlight
       "filterButton", // its own pressed state
       "none", // nothing was hit
-      // Hit-testable, but with no element-level ladder route yet — and two of
-      // them could not be named by a ChartSubSelection if they had one (no
-      // pointIndex for an element, no trendlineIndex). A trendline is recorded
-      // as a POLYLINE, so it needs a painter of its own rather than a box.
-      "dataLabel",
-      "dataTable",
-      "errorBars",
-      "trendline",
+      // `dataLabel` / `dataTable` / `errorBars` / `trendline` have MOVED into
+      // ALL_SELECTABLE: the ladder stops on each of them, and two of them are
+      // painted by a shape of their own rather than by the box painter.
     ];
     expect([...ALL_SELECTABLE, ...notBoxedHere].sort()).toEqual([...CHART_ELEMENT_IDS].sort());
   });
@@ -141,10 +215,6 @@ describe("which elements get a selection box at all", () => {
       "yAxis",
       "filterButton",
       "none",
-      "dataLabel",
-      "dataTable",
-      "errorBars",
-      "trendline",
       undefined,
     ];
     for (const id of refused) {
@@ -161,8 +231,18 @@ describe("a distinct call stream per element id", () => {
     const streams = new Map<string, string>();
     for (const id of ALL_SELECTABLE) {
       const r = makeRecordingCtx();
-      expect(drawElementSelectionHighlight(r.ctx, 0, 0, layout(), id, 1)).toBe(true);
-      expect(r.calls.filter((c) => c.startsWith("strokeRect(")), `${id} draws one border`).toHaveLength(1);
+      expect(paint(r.ctx, layout(), id), `${id} must paint something`).toBe(true);
+      const borders = r.calls.filter((c) => c.startsWith("strokeRect("));
+      if (id === "trendline") {
+        // A line, not a box — see drawTrendlineSelectionHighlight.
+        expect(borders, "a trendline is not boxed").toHaveLength(0);
+        expect(r.calls.filter((c) => c === "stroke()"), "the line itself is stroked").toHaveLength(1);
+      } else if (id === "errorBars") {
+        // ONE identity, MANY boxes: every bar of series 0 in the fixture.
+        expect(borders, "each of the series' error bars is boxed").toHaveLength(2);
+      } else {
+        expect(borders, `${id} draws one border`).toHaveLength(1);
+      }
       streams.set(id, r.calls.join("|"));
     }
     expect(
@@ -205,10 +285,12 @@ describe("the rect painted is the MEASURED rect", () => {
       ["yAxisTitle", el.yAxisTitle!],
       ["legend", el.legend!],
       ["plotArea", lay.plotArea],
+      ["dataTable", el.dataTable!],
+      ["dataLabel", el.dataLabels![1].rect],
     ];
     for (const [id, rect] of cases) {
       const r = makeRecordingCtx();
-      drawElementSelectionHighlight(r.ctx, 40, 25, lay, id);
+      paint(r.ctx, lay, id, 40, 25);
       expect(r.calls, `${id} must box its measured rect`).toContain(expectedBorderCall(rect, 40, 25));
     }
   });
@@ -302,7 +384,7 @@ describe("nothing to paint", () => {
     const bare: ChartLayout = { ...layout(), elements: undefined };
     for (const id of ALL_SELECTABLE.filter((i) => i !== "plotArea")) {
       const r = makeRecordingCtx();
-      expect(drawElementSelectionHighlight(r.ctx, 0, 0, bare, id, 0), id).toBe(false);
+      expect(paint(r.ctx, bare, id), id).toBe(false);
       expect(r.calls, `${id} must paint nothing without measured rects`).toEqual([]);
     }
   });
@@ -356,10 +438,13 @@ describe("the wash rule the insight lens settled", () => {
   it("never washes anything, for any element", () => {
     for (const id of ALL_SELECTABLE) {
       const r = makeRecordingCtx();
-      drawElementSelectionHighlight(r.ctx, 0, 0, layout(), id, 0);
+      paint(r.ctx, layout(), id);
       expect(r.calls.join("|"), `${id} must not dim anything`).not.toContain("rgba(255, 255, 255, 0.55)");
-      // The only fills are the six 5x5 handle squares.
-      expect(r.calls.filter((c) => c.startsWith("fillRect(")), `${id} fills only handles`).toHaveLength(6);
+      // The only fills are handle squares, and how MANY is a property of the
+      // element's shape rather than a constant — see HANDLE_COUNT.
+      const fills = r.calls.filter((c) => c.startsWith("fillRect("));
+      expect(fills, `${id} fills only handles`).toHaveLength(HANDLE_COUNT[id]);
+      for (const f of fills) expect(f).toMatch(/^fillRect\(-?[\d.]+,-?[\d.]+,5,5\)$/);
       expect(r.calls.filter((c) => c === "fill()"), `${id} fills no path`).toHaveLength(0);
     }
   });

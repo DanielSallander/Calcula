@@ -69,12 +69,24 @@ import type {
   AxisLabelPosition,
   AxisSpec,
   ChartSpec,
+  DataLabelPosition,
+  DataLabelSpec,
   DataPointOverride,
+  DataTableOptions,
   DisplayUnit,
+  ErrorBarOptions,
   MarkerStyle,
   ThemeOverrides,
   TickMarkType,
+  TrendlineSpec,
 } from "../types";
+import { DATA_POINT_KEY_SEPARATOR } from "../types";
+import {
+  readSeriesColor,
+  seriesColorPatch,
+  seriesNameArity,
+  markReadsSeriesColor,
+} from "../lib/chartDataReader";
 import {
   getChartById,
   getPreviewBaseSpec,
@@ -84,18 +96,29 @@ import {
   updateChartSpec,
 } from "../lib/chartStore";
 import { getCachedChartData, invalidateChartCache } from "../rendering/chartRenderer";
-import { unambiguousDataPointKeyForDatum, toAuthoringIndices } from "../lib/dataPointOverrides";
+import {
+  markOffersPerPointFormatting,
+  unambiguousDataPointKeyForDatum,
+  toAuthoringIndices,
+} from "../lib/dataPointOverrides";
 import { datumAddress } from "../lib/datumAddress";
 // ONE resolver for "what does Reset to Match Style drop", shared with the
 // context menu that already owned it. Two derivations of the SCOPE (the
 // right-clicked element there, the current selection here), one answer about
 // what a reset removes — a second copy would drift on the first new style
 // field, and the field it forgot would be an override that cannot be cleared.
+// The same sharing applies to "remove this furniture": the Delete key, the
+// context menu's Delete rows and this pane's Remove buttons are three
+// derivations of one answer, and a second copy would drift the first time one
+// of these fields learned a new way to disappear.
 import {
+  furnitureDeletePatch,
   resetToMatchStyleScopePatch,
+  type FurnitureDeleteTarget,
   type ResetToMatchStyleScope,
 } from "./ChartContextMenu";
-import { getCurrentChartId, getSubSelection } from "../handlers/selectionHandler";
+import { getErrorBarOptions, withErrorBarOptions } from "../rendering/errorBarPainter";
+import { getCurrentChartId, getSubSelection, setSubSelection } from "../handlers/selectionHandler";
 import { ChartEvents } from "../lib/chartEvents";
 import { resolveChartTheme } from "../rendering/chartTheme";
 
@@ -149,6 +172,10 @@ export function publishCurrentChartSelection(): void {
     categoryIndex: sub.categoryIndex,
     axisType: sub.axisType,
     elementId: sub.elementId,
+    // Which of the series' trendlines. Without it two fits on one series are
+    // the SAME snapshot, so the registry's own change test suppresses the
+    // republish and the pane never retargets from one to the other.
+    trendlineIndex: sub.trendlineIndex,
     seriesName: seriesName || undefined,
     categoryName: categoryName || undefined,
   });
@@ -205,6 +232,10 @@ export type ChartFormatSubject =
   | "legendEntry"
   | "plotArea"
   | "chartArea"
+  | "trendline"
+  | "errorBars"
+  | "dataLabel"
+  | "dataTable"
   | "none";
 
 export function formatSubjectOf(sel: ChartSelectionSnapshot): ChartFormatSubject {
@@ -237,6 +268,14 @@ export function formatSubjectOf(sel: ChartSelectionSnapshot): ChartFormatSubject
           return "legendEntry";
         case "plotArea":
           return "plotArea";
+        case "trendline":
+          return "trendline";
+        case "errorBars":
+          return "errorBars";
+        case "dataLabel":
+          return "dataLabel";
+        case "dataTable":
+          return "dataTable";
         // `datum`, `filterButton`, `chartArea`, `none` and an absent id all
         // format the chart area, which is what Excel does for a click that
         // lands on chart furniture it has no panel for.
@@ -269,6 +308,17 @@ export function tabsForSubject(subject: ChartFormatSubject): ChartFormatTabId[] 
       return ["fill"];
     case "chartArea":
       return ["fill", "text"];
+    // The in-plot furniture. Options first for all four, as for an axis: a
+    // reader who selected a trendline came for its TYPE, not its dash pattern.
+    case "trendline":
+    case "errorBars":
+      return ["options", "fill"];
+    case "dataLabel":
+      return ["options", "text"];
+    case "dataTable":
+      // No Text tab: nothing in `DataTableOptions` styles the text, and a tab
+      // with no fields is the dead tab this pane's header forbids.
+      return ["options"];
     case "none":
       return [];
   }
@@ -391,6 +441,76 @@ export function endChartSpecPreview(): void {
 /** Test/diagnostic hook: is a pane-owned preview on screen right now? */
 export function paneIsPreviewing(): boolean {
   return paneHasPreview;
+}
+
+// ============================================================================
+// The way back UP the ladder (the owner's report)
+// ============================================================================
+//
+// "When I select an individual data point and give it a colour I cannot select
+// a colour for the entire series after that."
+//
+// He is right, and the ladder says why. `advanceSelection`
+// (handlers/selectionHandler.ts) has no arm that goes from a data point back to
+// its OWN series: at `level: "dataPoint"`, clicking a datum of the same series
+// selects that datum, and clicking a datum of a different series selects that
+// other series. So once the reader is on a point, every click inside that
+// series keeps them on a point, the pane shows the Data Point sections, and
+// "Series fill" — the control they are looking for — is simply not on screen.
+// The routes out are Escape (which is a keyboard gesture nothing advertises),
+// a click on the chart's outer margin followed by a click back on a bar, or
+// selecting a different series first. That is not a missing feature, it is an
+// unreachable control, and it is the same defect shape as a control that does
+// nothing: the reader asks for something the product can do and cannot get to
+// it.
+//
+// Excel's own answer is the Format pane's element PICKER, a combo box at the
+// top of the pane that lists the chart's parts. The one-rung version of that is
+// the button below: it is offered only where a rung above exists and it names
+// the series it will select, so the reader can see where it goes before
+// pressing it. The ladder itself is untouched — the click behaviour stays
+// Excel's, and this is a second door rather than a different staircase.
+
+/** Step the selection to the whole series and repaint. Persists nothing. */
+function selectWholeSeries(chartId: string, seriesIndex: number): void {
+  // A preview belongs to the control the pointer is on, and that control is
+  // about to be replaced by the series sections.
+  endChartSpecPreview();
+  setSubSelection(chartId, { level: "series", seriesIndex });
+  // The selection CHROME is painted from the sub-selection, so the raster has
+  // to be re-rendered — but nothing here writes to the spec, schedules a save
+  // or dirties the document.
+  invalidateChartCache(chartId);
+  syncChartRegions();
+  publishCurrentChartSelection();
+  emitAppEvent(AppEvents.GRID_REFRESH);
+}
+
+/** The "select the whole series" row, shown while a single datum is selected. */
+function StepUpToSeriesRow({
+  chartId,
+  seriesIndex,
+  seriesName,
+}: {
+  chartId: string;
+  seriesIndex: number;
+  seriesName: string | undefined;
+}): React.ReactElement {
+  const label =
+    seriesName !== undefined && seriesName !== ""
+      ? `Select the whole series "${seriesName}"`
+      : "Select the whole series";
+  return (
+    <button
+      type="button"
+      className={s.stepUp}
+      data-testid="chart-format-step-up-to-series"
+      title="Format every point in this series. A point you have coloured keeps its own colour, as it does in Excel."
+      onClick={() => selectWholeSeries(chartId, seriesIndex)}
+    >
+      {label}
+    </button>
+  );
 }
 
 /** Visual fields of a DataPointOverride — what makes one worth keeping. */
@@ -923,6 +1043,23 @@ const s = {
     text-overflow: ellipsis;
     white-space: nowrap;
   `,
+  stepUp: css`
+    display: block;
+    width: 100%;
+    margin-top: 6px;
+    border: 1px solid var(--border-color, #ccc);
+    background: transparent;
+    border-radius: 3px;
+    font-size: 11px;
+    padding: 3px 8px;
+    text-align: left;
+    cursor: pointer;
+    color: var(--text-primary, #222);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    &:hover { background: var(--button-hover-bg, rgba(0, 0, 0, 0.06)); }
+  `,
 };
 
 // ============================================================================
@@ -1186,6 +1323,30 @@ function DataPointSections({
   const override = readDataPointOverride(chartId, seriesIndex, categoryIndex);
   const chart = getChartById(chartId);
   const isRadial = chart?.spec.mark === "pie" || chart?.spec.mark === "donut";
+
+  // CAN A PER-POINT OVERRIDE REACH THIS MARK AT ALL? Every built-in says yes.
+  // A custom mark paints in a worker and its pixels come back as an opaque
+  // bitmap, so the host ships it the resolved styles and cannot check that it
+  // used them — which is why the answer is a DECLARATION the mark makes
+  // (`honoursDataPointOverrides`) rather than a guess the host makes for it.
+  // Offering these controls on a mark that ignores the payload would accept the
+  // colour, write it into the spec and dirty the document for a chart that
+  // never changes: the silent-no-op shape, in the one pane that exists to say
+  // what a selection can actually do. The rule itself — including why an
+  // UNREGISTERED mark is offered rather than refused — lives in
+  // `markOffersPerPointFormatting`, because the context menu asks it too.
+  if (chart && !markOffersPerPointFormatting(chart.spec.mark)) {
+    return (
+      <DialogSection title="Data point">
+        <div className={s.empty}>
+          This chart type does not support formatting a single data point. Its mark does not
+          declare that it reads per-point formatting, so a colour set here would never be
+          painted. Format the whole series instead.
+        </div>
+      </DialogSection>
+    );
+  }
+
   const set = (patch: ChartDatumFormatPatch): void =>
     commitDataPointOverride(chartId, seriesIndex, categoryIndex, patch);
   const show = (patch: ChartDatumFormatPatch): void =>
@@ -1275,49 +1436,166 @@ function DataPointSections({
   );
 }
 
+/**
+ * How many points of this series carry a colour of their own.
+ *
+ * Counted in AUTHORING space, the space `dataPointOverrides` is keyed in, and
+ * by the same two rules the resolver matches with: the identity key first
+ * (`seriesName|categoryLabel`), the stored series index second. Only an
+ * override that actually sets `color` counts — an exploded slice or a marker
+ * size is not a colour, and claiming it were would make the sentence a lie the
+ * first time somebody dragged a slice out.
+ */
+export function coloredPointCountForSeries(
+  spec: Pick<ChartSpec, "dataPointOverrides">,
+  authoringSeriesIndex: number,
+  seriesName: string | undefined,
+): number {
+  const overrides = spec.dataPointOverrides;
+  if (!overrides) return 0;
+  const prefix =
+    seriesName !== undefined && seriesName !== ""
+      ? `${seriesName}${DATA_POINT_KEY_SEPARATOR}`
+      : null;
+  let n = 0;
+  for (const o of overrides) {
+    if (o.color === undefined) continue;
+    if (o.key != null) {
+      if (prefix !== null && o.key.startsWith(prefix)) n++;
+      continue;
+    }
+    if (o.seriesIndex === authoringSeriesIndex) n++;
+  }
+  return n;
+}
+
+/** A hint line under a control, in the pane's secondary voice. */
+function Hint({ children }: { children: React.ReactNode }): React.ReactElement {
+  return (
+    <div style={{ fontSize: 11, color: "var(--text-secondary, #888)" }}>{children}</div>
+  );
+}
+
+/**
+ * What the pane SAYS when a mark has no series fill — one sentence per family,
+ * each naming where the colour actually comes from and what the reader can do
+ * instead. "Not supported" on its own teaches nothing; these send the reader to
+ * the control that works.
+ */
+const SERIES_FILL_REFUSAL: Record<string, string> = {
+  pie: "A pie takes each slice's colour from the palette, so the series has no fill of its own. Click one slice to colour it, or change the palette in Chart Design.",
+  donut: "A donut takes each slice's colour from the palette, so the series has no fill of its own. Click one slice to colour it, or change the palette in Chart Design.",
+  histogram: "A histogram paints one colour for every bin, taken from the palette. Click a single bar to colour it, or change the palette in Chart Design.",
+  pareto: "A Pareto colours its bars by position from the palette, not by series. Click a single bar to colour it, or change the palette in Chart Design.",
+  boxPlot: "A box plot colours one box per category from the palette. Click a single box to colour it, or change the palette in Chart Design.",
+  funnel: "A funnel colours one section per category from the palette. Click a single section to colour it, or change the palette in Chart Design.",
+  treemap: "A treemap colours one tile per category from the palette. Click a single tile to colour it, or change the palette in Chart Design.",
+  sunburst: "A sunburst colours its rings from the palette by branch. Click a single segment to colour it, or change the palette in Chart Design.",
+  waterfall: "A waterfall colours each bar by what it does — increase, decrease or total. Set those three colours in Chart Design, or click a single bar to override it.",
+  stock: "A stock chart colours each candle by whether the period closed up or down. Set those two colours in Chart Design, or click a single candle to override it.",
+  default: "This chart type paints its own colours rather than reading a series fill. Click a single data point to colour it, or change the palette in Chart Design.",
+};
+
 function SeriesSections({
   chartId,
   seriesIndex,
+  seriesName,
 }: {
   chartId: string;
   seriesIndex: number;
+  seriesName: string | undefined;
 }): React.ReactElement {
   const chart = getChartById(chartId);
-  const colour = chart?.spec.series?.[seriesIndex]?.color ?? undefined;
+  const cached = getCachedChartData(chartId);
+
+  // The NAME is the address, so it is resolved the same way the selection
+  // registry resolves it — parsed data first, the authored spec second — and
+  // not taken on trust from a snapshot that may predate a data refresh.
+  const name =
+    seriesName ??
+    cached?.data?.series?.[seriesIndex]?.name ??
+    chart?.spec.series?.[seriesIndex]?.name;
+
+  // TEN MARKS HAVE NO SERIES FILL AT ALL, not two. This gate used to name pie
+  // and donut and stop there, so a histogram, a pareto, a box plot, a funnel, a
+  // treemap, a sunburst, a waterfall and a stock chart all rendered a live
+  // "Colour" swatch whose write reached `spec.seriesColors`, reached
+  // `data.series[i].color`, and was then ignored by a painter that resolves its
+  // fill from the palette (or from its own up/down colours). A control that
+  // reports success and changes nothing is the exact shape of the defect this
+  // work item exists to remove, so the question is asked of the ONE list that
+  // the coverage test keeps honest.
+  const mark = chart?.spec.mark;
+  if (mark !== undefined && !markReadsSeriesColor(mark)) {
+    return (
+      <DialogSection title="Series fill">
+        <Hint>
+          {SERIES_FILL_REFUSAL[mark] ?? SERIES_FILL_REFUSAL.default}
+        </Hint>
+      </DialogSection>
+    );
+  }
+
+  if (name === undefined || name === "") {
+    return (
+      <DialogSection title="Series fill">
+        <Hint>
+          This series cannot be named yet, so its colour has nowhere to be stored.
+          Wait for the chart to finish drawing, or colour its points individually.
+        </Hint>
+      </DialogSection>
+    );
+  }
+
+  const colour = readSeriesColor(chart?.spec ?? {}, name);
+  const arity = seriesNameArity(cached?.data, name);
+  const authoring = toAuthoringIndices(cached?.data ?? {}, seriesIndex, 0);
+  const colouredPoints = coloredPointCountForSeries(
+    chart?.spec ?? {},
+    authoring.seriesIndex,
+    name,
+  );
 
   /**
-   * One builder for both the commit and the preview: the ARRAY HAZARD is the
-   * same either way, so the rebuild-from-the-read-array rule has to be written
-   * once. `deepMergeSpec` replaces arrays wholesale, so a rendered copy would
-   * discard any concurrent edit to a sibling series.
+   * One builder for both the commit and the preview, built from the spec handed
+   * in rather than the one this component rendered from: `deepMergeSpec` merges
+   * a record field by field, so a stale copy of `seriesColors` would resurrect a
+   * sibling's cleared colour.
    */
-  const seriesColourPatch =
+  const patchFor =
     (hex: string | null) =>
-    (spec: ChartSpec): Partial<ChartSpec> | null => {
-      if (spec.series?.[seriesIndex] === undefined) return null;
-      const series = spec.series.map((entry, i) =>
-        i === seriesIndex ? { ...entry, color: hex } : entry,
-      );
-      return { series };
-    };
-
-  const setColour = (hex: string | null): void => {
-    applySpecPatch(chartId, seriesColourPatch(hex));
-  };
+    (spec: ChartSpec): Partial<ChartSpec> | null =>
+      seriesColorPatch(spec, name, hex);
 
   return (
     <DialogSection title="Series fill">
       <ColorField
         label="Colour"
-        value={colour ?? undefined}
+        value={colour}
         fallback="#4472c4"
-        onChange={(hex) => setColour(hex)}
-        onClear={() => setColour(null)}
-        onPreview={(hex) => previewSpecPatch(chartId, seriesColourPatch(hex))}
+        onChange={(hex) => applySpecPatch(chartId, patchFor(hex))}
+        onClear={() => applySpecPatch(chartId, patchFor(null))}
+        onPreview={(hex) => previewSpecPatch(chartId, patchFor(hex))}
       />
-      <div style={{ fontSize: 11, color: "var(--text-secondary, #888)" }}>
+      <Hint>
         Cleared, the series takes its colour from the chart palette (Chart Design).
-      </div>
+      </Hint>
+      {arity > 1 && (
+        <Hint>
+          {arity} series are named &ldquo;{name}&rdquo; — this colour applies to all of
+          them. Rename one in the chart&apos;s data to colour them apart.
+        </Hint>
+      )}
+      {colouredPoints > 0 && (
+        <Hint>
+          {colouredPoints === 1
+            ? "1 point in this series has its own colour and will keep it."
+            : `${colouredPoints} points in this series have their own colour and will keep it.`}{" "}
+          That is what Excel does. Reset to Match Style, above, clears{" "}
+          {colouredPoints === 1 ? "it" : "them"} — along with this series&apos; own
+          colour.
+        </Hint>
+      )}
     </DialogSection>
   );
 }
@@ -1751,10 +2029,442 @@ function ChartAreaSections({
 }
 
 // ============================================================================
+// The in-plot furniture (CI-12)
+// ============================================================================
+
+/**
+ * ONE "remove this furniture" button, wired to the SAME resolver the Delete key
+ * and the context menu use.
+ *
+ * DISABLED rather than hidden when there is nothing to remove, exactly as
+ * "Reset to Match Style" is here and for the same stated reason: the pane is a
+ * properties surface, so a greyed control teaches what the act would do; the
+ * MENU hides its twin instead, because a menu item that does nothing trains the
+ * reader to skip the menu.
+ *
+ * Both the enabled state and the click ask `furnitureDeletePatch`, so the button
+ * cannot offer a removal that then does nothing.
+ */
+function RemoveFurnitureRow({
+  chartId,
+  target,
+  label,
+}: {
+  chartId: string;
+  target: FurnitureDeleteTarget;
+  label: string;
+}): React.ReactElement {
+  const chart = getChartById(chartId);
+  const patch = chart ? furnitureDeletePatch(chart.spec, target) : null;
+  return (
+    <div className={s.resetRow}>
+      <button
+        type="button"
+        className={s.reset}
+        data-testid="chart-remove-furniture"
+        data-furniture={target.element}
+        disabled={patch === null}
+        title={patch === null ? `Nothing to remove.` : label}
+        onClick={() => {
+          // MOVED BEFORE THE WRITE, the same order the context menu's twin
+          // uses: `applySpecPatch` ends in a CHART_UPDATED, which is what makes
+          // the selection publisher re-read the ladder. Moving afterwards would
+          // republish the rung that has just stopped existing first, and this
+          // pane's body is KEYED on the subject — so it would remount twice and
+          // the reader would see the removed element's sections flash back.
+          setSubSelection(chartId, { level: "chart" });
+          applySpecPatch(chartId, (spec) => furnitureDeletePatch(spec, target));
+        }}
+      >
+        {label}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * ONE trendline's properties.
+ *
+ * Addressed by `trendlineIndex` — the ordinal, not the series — because one
+ * series can carry a linear fit AND a moving average, and a pane that wrote by
+ * series would edit whichever was declared first. A selection made before the
+ * ordinal travelled falls back to the series' first trendline, which is the
+ * same fallback the painter makes, so the pane edits the line the reader can
+ * see highlighted.
+ */
+function TrendlineSections({
+  chartId,
+  tab,
+  seriesIndex,
+  trendlineIndex,
+}: {
+  chartId: string;
+  tab: ChartFormatTabId;
+  seriesIndex?: number;
+  trendlineIndex?: number;
+}): React.ReactElement {
+  const chart = getChartById(chartId);
+  const all = chart?.spec.trendlines ?? [];
+  const at =
+    trendlineIndex !== undefined && trendlineIndex >= 0 && trendlineIndex < all.length
+      ? trendlineIndex
+      : all.findIndex((t) => (t.seriesIndex ?? 0) === (seriesIndex ?? 0));
+  const trendline = at >= 0 ? all[at] : undefined;
+
+  // RE-READ AT COMMIT TIME. `deepMergeSpec` replaces arrays wholesale, so a
+  // patch built from the array this render captured would discard a trendline
+  // added in between by the spec editor or a script.
+  const set = (patch: Partial<TrendlineSpec>): void => {
+    applySpecPatch(chartId, (spec) => {
+      const list = spec.trendlines ?? [];
+      if (at < 0 || at >= list.length) return null;
+      return { trendlines: list.map((t, i) => (i === at ? { ...t, ...patch } : t)) };
+    });
+  };
+
+  if (trendline === undefined) {
+    return (
+      <DialogSection title="Trendline">
+        <div className={s.empty}>This trendline is no longer on the chart.</div>
+      </DialogSection>
+    );
+  }
+
+  if (tab === "fill") {
+    return (
+      <DialogSection title="Trendline line">
+        <ColorField
+          label="Colour"
+          value={trendline.color ?? undefined}
+          fallback="#555555"
+          onChange={(hex) => set({ color: hex })}
+          onClear={() => set({ color: null })}
+        />
+        <NumberField
+          label="Width (px)"
+          value={trendline.lineWidth ?? null}
+          placeholder="2"
+          onCommit={(n) => set({ lineWidth: n === null ? undefined : n })}
+        />
+        <SelectField<"dashed" | "solid">
+          label="Style"
+          value={(trendline.strokeDash ?? [6, 3]).length > 0 ? "dashed" : "solid"}
+          options={[
+            ["dashed", "Dashed"],
+            ["solid", "Solid"],
+          ]}
+          onChange={(style) => set({ strokeDash: style === "solid" ? [] : [6, 3] })}
+        />
+      </DialogSection>
+    );
+  }
+
+  return (
+    <>
+      <DialogSection title="Trendline">
+        <SelectField<TrendlineSpec["type"]>
+          label="Type"
+          value={trendline.type}
+          options={[
+            ["linear", "Linear"],
+            ["exponential", "Exponential"],
+            ["logarithmic", "Logarithmic"],
+            ["power", "Power"],
+            ["polynomial", "Polynomial"],
+            ["movingAverage", "Moving average"],
+          ]}
+          onChange={(type) => set({ type })}
+        />
+        {trendline.type === "polynomial" && (
+          <NumberField
+            label="Order"
+            value={trendline.polynomialDegree ?? null}
+            placeholder="2"
+            onCommit={(n) => set({ polynomialDegree: n === null ? undefined : n })}
+          />
+        )}
+        {trendline.type === "movingAverage" && (
+          <NumberField
+            label="Period"
+            value={trendline.movingAveragePeriod ?? null}
+            placeholder="3"
+            onCommit={(n) => set({ movingAveragePeriod: n === null ? undefined : n })}
+          />
+        )}
+        <CheckField
+          label="Display equation on chart"
+          checked={trendline.showEquation === true}
+          onChange={(showEquation) => set({ showEquation })}
+        />
+        <CheckField
+          label="Display R-squared value"
+          checked={trendline.showRSquared === true}
+          onChange={(showRSquared) => set({ showRSquared })}
+        />
+      </DialogSection>
+      <RemoveFurnitureRow
+        chartId={chartId}
+        target={{ element: "trendline", seriesIndex, trendlineIndex: at }}
+        label="Remove Trendline"
+      />
+    </>
+  );
+}
+
+/**
+ * A SERIES' error bars.
+ *
+ * Everything except the removal is CHART-WIDE, and the section says so rather
+ * than pretending otherwise: `ErrorBarOptions` lives under `markOptions` and
+ * there is one of it. Excel's own Format Error Bars pane has the same shape —
+ * the amount and the style are shared, and the only per-series act is removing
+ * them. `seriesFilter` is what makes that act possible at all.
+ */
+function ErrorBarSections({
+  chartId,
+  tab,
+  seriesIndex,
+}: {
+  chartId: string;
+  tab: ChartFormatTabId;
+  seriesIndex?: number;
+}): React.ReactElement {
+  const chart = getChartById(chartId);
+  const opts = chart ? getErrorBarOptions(chart.spec) : undefined;
+
+  const set = (patch: Partial<ErrorBarOptions>): void => {
+    applySpecPatch(chartId, (spec) => {
+      const current = getErrorBarOptions(spec);
+      if (!current) return null;
+      return withErrorBarOptions(spec, { ...current, ...patch });
+    });
+  };
+
+  if (!opts) {
+    return (
+      <DialogSection title="Error bars">
+        <div className={s.empty}>This chart no longer has error bars.</div>
+      </DialogSection>
+    );
+  }
+
+  if (tab === "fill") {
+    return (
+      <DialogSection title="Error bar line">
+        <ColorField
+          label="Colour"
+          value={opts.color}
+          fallback="#333333"
+          onChange={(hex) => set({ color: hex })}
+          onClear={() => set({ color: undefined })}
+        />
+        <NumberField
+          label="Width (px)"
+          value={opts.lineWidth ?? null}
+          placeholder="1.5"
+          onCommit={(n) => set({ lineWidth: n === null ? undefined : n })}
+        />
+      </DialogSection>
+    );
+  }
+
+  return (
+    <>
+      <DialogSection title="Error bars (all series)">
+        <SelectField<ErrorBarOptions["direction"]>
+          label="Direction"
+          value={opts.direction}
+          options={[
+            ["both", "Both"],
+            ["plus", "Plus"],
+            ["minus", "Minus"],
+          ]}
+          onChange={(direction) => set({ direction })}
+        />
+        <SelectField<ErrorBarOptions["type"]>
+          label="Amount"
+          value={opts.type}
+          options={[
+            ["standardError", "Standard error"],
+            ["percentage", "Percentage"],
+            ["standardDeviation", "Standard deviation"],
+            ["custom", "Fixed value"],
+          ]}
+          onChange={(type) => set({ type })}
+        />
+        {opts.type !== "standardError" && (
+          <NumberField
+            label="Value"
+            value={opts.value ?? null}
+            placeholder="10"
+            onCommit={(n) => set({ value: n === null ? undefined : n })}
+          />
+        )}
+      </DialogSection>
+      <RemoveFurnitureRow
+        chartId={chartId}
+        target={{ element: "errorBars", seriesIndex }}
+        label="Remove This Series' Error Bars"
+      />
+    </>
+  );
+}
+
+/**
+ * ONE data label.
+ *
+ * SPLIT OF SCOPE, STATED ON SCREEN. Removing THIS label is per point
+ * (`hiddenPoints`); every other control edits `DataLabelSpec`, which is
+ * chart-wide, and the section titles say which is which. Claiming otherwise
+ * would be the "complete-LOOKING statement that is incomplete" defect the
+ * insights work already paid for: a reader who sets a number format on one
+ * label and sees all twelve change has been told a lie by the UI.
+ */
+function DataLabelSections({
+  chartId,
+  tab,
+  seriesIndex,
+  categoryIndex,
+}: {
+  chartId: string;
+  tab: ChartFormatTabId;
+  seriesIndex?: number;
+  categoryIndex?: number;
+}): React.ReactElement {
+  const chart = getChartById(chartId);
+  const dl = chart?.spec.dataLabels;
+
+  const set = (patch: Partial<DataLabelSpec>): void => {
+    applySpecPatch(chartId, (spec) => {
+      const current = spec.dataLabels;
+      if (!current) return null;
+      return { dataLabels: { ...current, ...patch } };
+    });
+  };
+
+  if (!dl) {
+    return (
+      <DialogSection title="Data label">
+        <div className={s.empty}>This chart no longer shows data labels.</div>
+      </DialogSection>
+    );
+  }
+
+  if (tab === "text") {
+    return (
+      <DialogSection title="Data label text (all labels)">
+        <ColorField
+          label="Colour"
+          value={dl.color}
+          fallback="#333333"
+          onChange={(hex) => set({ color: hex })}
+          onClear={() => set({ color: undefined })}
+        />
+        <NumberField
+          label="Size (px)"
+          value={dl.fontSize ?? null}
+          placeholder="10"
+          onCommit={(n) => set({ fontSize: n === null ? undefined : n })}
+        />
+      </DialogSection>
+    );
+  }
+
+  return (
+    <>
+      <DialogSection title="Data labels (all labels)">
+        <SelectField<DataLabelPosition>
+          label="Position"
+          value={dl.position ?? "auto"}
+          options={[
+            ["auto", "Auto"],
+            ["above", "Above"],
+            ["below", "Below"],
+            ["center", "Centre"],
+            ["inside", "Inside"],
+            ["outside", "Outside"],
+          ]}
+          onChange={(position) => set({ position })}
+        />
+        <TextField
+          label="Number format"
+          value={dl.format ?? ""}
+          placeholder="auto"
+          onChange={(format) => set({ format: format === "" ? undefined : format })}
+        />
+      </DialogSection>
+      <RemoveFurnitureRow
+        chartId={chartId}
+        target={{ element: "dataLabel", seriesIndex, pointIndex: categoryIndex }}
+        label="Remove This Label"
+      />
+    </>
+  );
+}
+
+/** The data-table grid below the plot area. One object, one section. */
+function DataTableSections({ chartId }: { chartId: string }): React.ReactElement {
+  const chart = getChartById(chartId);
+  const table = chart?.spec.dataTable;
+
+  const set = (patch: Partial<DataTableOptions>): void => {
+    applySpecPatch(chartId, (spec) =>
+      spec.dataTable ? { dataTable: { ...spec.dataTable, ...patch } } : null,
+    );
+  };
+
+  if (!table) {
+    return (
+      <DialogSection title="Data table">
+        <div className={s.empty}>This chart no longer shows a data table.</div>
+      </DialogSection>
+    );
+  }
+
+  return (
+    <>
+      <DialogSection title="Data table">
+        <CheckField
+          label="Show legend keys"
+          checked={table.showLegendKeys !== false}
+          onChange={(showLegendKeys) => set({ showLegendKeys })}
+        />
+        <CheckField
+          label="Horizontal borders"
+          checked={table.showHorizontalBorder !== false}
+          onChange={(showHorizontalBorder) => set({ showHorizontalBorder })}
+        />
+        <CheckField
+          label="Vertical borders"
+          checked={table.showVerticalBorder !== false}
+          onChange={(showVerticalBorder) => set({ showVerticalBorder })}
+        />
+        <CheckField
+          label="Outline border"
+          checked={table.showOutlineBorder !== false}
+          onChange={(showOutlineBorder) => set({ showOutlineBorder })}
+        />
+      </DialogSection>
+      <RemoveFurnitureRow
+        chartId={chartId}
+        target={{ element: "dataTable" }}
+        label="Remove Data Table"
+      />
+    </>
+  );
+}
+
+// ============================================================================
 // The pane
 // ============================================================================
 
-/** Identity of the thing being formatted, used to reseed local field state. */
+/**
+ * Identity of the thing being formatted, used to reseed local field state.
+ *
+ * `trendlineIndex` is part of it: two trendlines on one series differ in
+ * nothing else, so without it the pane would keep the previous line's draft
+ * values in its fields when the reader walked from one to the other.
+ */
 function subjectKey(sel: ChartSelectionSnapshot): string {
   return [
     sel.chartId ?? "",
@@ -1763,6 +2473,7 @@ function subjectKey(sel: ChartSelectionSnapshot): string {
     sel.axisType ?? "",
     sel.seriesIndex ?? "",
     sel.categoryIndex ?? "",
+    sel.trendlineIndex ?? "",
   ].join("|");
 }
 
@@ -1875,7 +2586,13 @@ export function ChartFormatPane(_props: TaskPaneViewProps): React.ReactElement {
           />
         );
       case "series":
-        return <SeriesSections chartId={chartId} seriesIndex={selection.seriesIndex ?? 0} />;
+        return (
+          <SeriesSections
+            chartId={chartId}
+            seriesIndex={selection.seriesIndex ?? 0}
+            seriesName={selection.seriesName}
+          />
+        );
       case "title":
       case "xAxisTitle":
       case "yAxisTitle":
@@ -1895,6 +2612,30 @@ export function ChartFormatPane(_props: TaskPaneViewProps): React.ReactElement {
         return <PlotAreaSections chartId={chartId} />;
       case "chartArea":
         return <ChartAreaSections chartId={chartId} tab={activeTab} />;
+      case "trendline":
+        return (
+          <TrendlineSections
+            chartId={chartId}
+            tab={activeTab}
+            seriesIndex={selection.seriesIndex}
+            trendlineIndex={selection.trendlineIndex}
+          />
+        );
+      case "errorBars":
+        return (
+          <ErrorBarSections chartId={chartId} tab={activeTab} seriesIndex={selection.seriesIndex} />
+        );
+      case "dataLabel":
+        return (
+          <DataLabelSections
+            chartId={chartId}
+            tab={activeTab}
+            seriesIndex={selection.seriesIndex}
+            categoryIndex={selection.categoryIndex}
+          />
+        );
+      case "dataTable":
+        return <DataTableSections chartId={chartId} />;
       default:
         return null;
     }
@@ -1910,6 +2651,15 @@ export function ChartFormatPane(_props: TaskPaneViewProps): React.ReactElement {
         {/* Outside the keyed body: the reset is a property of the SELECTION,
             not of the active tab, and it must not be remounted by a retarget. */}
         <ResetToMatchStyleRow chartId={chartId} selection={selection} />
+        {/* The way back UP one rung. Offered only from a single datum, which is
+            the one rung the click ladder cannot leave for its own parent. */}
+        {subject === "dataPoint" && (
+          <StepUpToSeriesRow
+            chartId={chartId}
+            seriesIndex={selection.seriesIndex ?? 0}
+            seriesName={selection.seriesName}
+          />
+        )}
       </div>
 
       {tabs.length > 1 && (

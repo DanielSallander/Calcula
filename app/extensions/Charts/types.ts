@@ -136,6 +136,22 @@ export interface ErrorBarOptions {
   color?: string;
   /** Line width in pixels. Default: 1.5 */
   lineWidth?: number;
+  /**
+   * Draw error bars only for these series indices, in PAINTER space. Null or
+   * absent = every series, which is what every spec written before this field
+   * existed means.
+   *
+   * WHY IT EXISTS, AND WHY IT IS A FILTER RATHER THAN A PER-SERIES OBJECT.
+   * Error bars are a per-SERIES object in Excel and in our hit taxonomy — a hit
+   * answers the series with no point index — but the CONFIG here is chart-wide,
+   * reached through `spec.markOptions`. So "delete the error bars on the series
+   * I selected" had no spelling at all: the only available act was `enabled:
+   * false`, which strips them from every series. The narrowest honest fix is the
+   * one {@link DataLabelSpec.seriesFilter} already uses for the same shape of
+   * problem, so there is one idiom rather than two. Per-series *styling* would
+   * need a real per-series object and is not what this is.
+   */
+  seriesFilter?: number[] | null;
 }
 
 /** Options specific to bar and horizontal bar charts. */
@@ -589,7 +605,16 @@ export interface ChartSeries {
   name: string;
   /** Column or row index within the data range that holds this series' values. */
   sourceIndex: number;
-  /** Override color (hex). Null = use palette color. */
+  /**
+   * AUTHORED colour (hex). Null = use the palette colour.
+   *
+   * This is an authoring/import default — XLSX import, `chartExamples`, the
+   * Insert Chart dialog's Data tab — and it is the BASE that
+   * `spec.seriesColors[name]` wins over. No FORMATTING surface writes it: a
+   * colour set on a selected series goes to `seriesColors`, because this field
+   * cannot address a pivot or design-query series and its index moves under a
+   * filter. See the OB-1 note in lib/chartDataReader.ts.
+   */
   color: string | null;
   /** Per-data-point visual encoding overrides. */
   encoding?: SeriesEncoding;
@@ -1097,6 +1122,39 @@ export interface DataLabelSpec {
   seriesFilter?: number[] | null;
   /** Minimum value threshold — hide labels for values below this. Default: null. */
   minValue?: number | null;
+  /**
+   * Individual labels the reader has removed, as (series, point) pairs in
+   * PAINTER space — the same space {@link seriesFilter} indexes and the space
+   * the hit test answers in.
+   *
+   * WHY IT EXISTS. A data label is a per-POINT object in Excel and in our own
+   * hit taxonomy: `hitTestChartElements` answers `dataLabel` with BOTH indices,
+   * the ladder stops on that one label and the Format pane targets it. Without
+   * this field the finest act available on the selected label was to remove the
+   * labels of its whole SERIES — exactly the "the coarser act is the only act"
+   * trap that `LegendSpec.hiddenEntries` was added to close for legend rows, and
+   * for the same reason the shape mirrors it: a list of things that are NOT
+   * drawn, rather than a list of things that are.
+   *
+   * ABSENT or empty means nothing is suppressed. It is NOT a formatting
+   * override — a label carries no per-point style here — so it lives on the
+   * label spec rather than on {@link DataPointOverride}.
+   */
+  hiddenPoints?: DataLabelPointRef[];
+}
+
+/**
+ * One (series, point) pair naming a single data label, in PAINTER space.
+ *
+ * A named interface rather than an inline object type so the schema drift guard
+ * (`chartSpecSchema.test.ts`) can mirror it like every other nested definition;
+ * an inline type contributes no interface for it to read.
+ */
+export interface DataLabelPointRef {
+  /** Painter-space series index. */
+  seriesIndex: number;
+  /** Painter-space point (category) index within that series. */
+  pointIndex: number;
 }
 
 // ============================================================================
@@ -1427,11 +1485,19 @@ export interface ChartSpec {
   /** Color palette name. */
   palette: string;
   /**
-   * Per-series color overrides keyed by SERIES NAME (hex strings). Name-keyed
-   * so they work for every data source — pivot/design-query series have no
-   * `series` entries and indices shift under filters. Applied when data is
-   * resolved (readChartDataResolved); painters read `data.series[i].color`.
-   * Wins over `series[].color`.
+   * Per-series color overrides keyed by SERIES NAME (hex strings).
+   *
+   * THE ONE SPELLING for "the colour of a series", and the only one any
+   * formatting surface writes: the Format pane, the ribbon Design panel and the
+   * dialog's Design tab all go through `seriesColorPatch` / `readSeriesColor`
+   * (lib/chartDataReader.ts). Name-keyed so it works for every data source —
+   * pivot/design-query series have no `series` entries at all, and indices
+   * shift under filters. Applied when data is resolved
+   * (readChartDataResolved); painters read `data.series[i].color`. Wins over
+   * `series[].color`, which is why writing that one instead was a silent no-op.
+   *
+   * A name that two series share colours BOTH; the surface offering the swatch
+   * reports the count (`seriesNameArity`) rather than picking one silently.
    */
   seriesColors?: Record<string, string>;
   /** Mark-specific options (type depends on `mark`). */
@@ -1630,16 +1696,29 @@ export function hasRenderableData(data: ParsedChartData | null | undefined): dat
  *   - Tick LABELS are not separable from their axis — Excel refuses to select
  *     one, and so do we: they are part of `xAxis` / `yAxis`.
  *
- * `gridlines` is STILL deliberately NOT here, re-checked when the furniture wave
- * (trendline / errorBars / dataLabel / dataTable) landed. Excel addresses
- * gridlines — all-or-none per axis per major/minor, never one line — but nothing
- * in {@link ChartLayout} records where they are drawn: `drawHorizontalGridLines`
- * / `drawVerticalGridLines` compute their ticks inside the call and are invoked
- * by twelve painters that never hand them a layout to write back to. A
- * `gridlines` member would therefore be dead on arrival, which is the exact
- * defect this list exists to prevent. It belongs with the change that threads a
- * layout into those two painters and records the tick geometry, and the drift
- * test will demand a producer on the day it is added.
+ * `gridlines` is STILL deliberately NOT here — re-checked a THIRD time when the
+ * furniture became selectable (trendline / errorBars / dataLabel / dataTable
+ * gained ladder rungs, selection paint, pane sections and Delete). Excel
+ * addresses gridlines all-or-none per axis per major/minor, never one line, so
+ * the id itself is not the problem; the PRODUCER is. Nothing in
+ * {@link ChartLayout} records where a gridline is drawn:
+ * `drawHorizontalGridLines` / `drawVerticalGridLines` (rendering/
+ * chartPainterUtils.ts) compute `scale.ticks(5)` INSIDE the call, take no
+ * layout, and are invoked from THIRTEEN call sites across twelve painter files
+ * (area, bar, boxPlot, bubble, combo, histogram, horizontalBar, line, pareto,
+ * scatter, stock, waterfall, plus chartPainterUtils' own chrome pass). Giving
+ * gridlines a rect collection therefore means changing both painters' signatures
+ * and every one of those call sites — fourteen files, none of which this change
+ * owns.
+ *
+ * There is no shortcut that stays honest, either. The layout carries no scale,
+ * so a hit-tester cannot re-derive the tick positions; and a `gridlines` branch
+ * that simply answered "anywhere in the plot area" would steal every plot-area
+ * click, which is the same class of defect as the insight ring that stole the
+ * click from a bar (docs/design/insight-overlays.md section 5h). So the id waits
+ * for the change that threads a layout into those two painters, and
+ * `elementHitTest-drift.test.ts` will demand a real producer on the day it is
+ * added.
  */
 export const CHART_ELEMENT_IDS = [
   "chartArea",
@@ -1662,6 +1741,21 @@ export const CHART_ELEMENT_IDS = [
 
 /** Name of the chart element a hit landed on. Derived from {@link CHART_ELEMENT_IDS}. */
 export type ChartElementId = (typeof CHART_ELEMENT_IDS)[number];
+
+/**
+ * The command that opens the Format task pane on the CURRENT chart selection —
+ * Excel's Ctrl+1, and the context menu's "Format <element>..." verb for every
+ * element whose properties live in that pane.
+ *
+ * It lives in this vocabulary module rather than beside its registration in
+ * `index.ts` for one reason: the context menu has to invoke it, `index.ts`
+ * imports the context menu, and an id declared at the registration site would
+ * have to travel back the other way. A string typed twice is a route that works
+ * until somebody renames one of them, which is precisely the failure the
+ * published command registry cannot detect — an unknown command id is a silent
+ * no-op, not an error.
+ */
+export const CHART_FORMAT_SELECTION_COMMAND = "chart.format.selection";
 
 /**
  * Result of hit-testing a point within a chart — Excel's
@@ -1733,17 +1827,52 @@ export interface ChartHitResult {
  */
 export type ChartSelectionLevel = "none" | "chart" | "series" | "dataPoint" | "axis" | "element";
 
-/** Sub-selection state within a selected chart. */
+/**
+ * Sub-selection state within a selected chart.
+ *
+ * WHICH INSTANCE, NOT JUST WHICH KIND. `elementId` names the KIND of furniture;
+ * three of the kinds exist several times over on one chart and the selection has
+ * to say which one:
+ *
+ *   * `trendline` — one series can carry a linear fit AND a moving average, so
+ *     {@link seriesIndex} alone is ambiguous. {@link trendlineIndex} settles it.
+ *   * `dataLabel` — per POINT, so both {@link seriesIndex} and
+ *     {@link categoryIndex} travel.
+ *   * `errorBars` — per SERIES and never per point (Excel has no per-point error
+ *     bar), so {@link seriesIndex} alone is the whole identity and
+ *     `categoryIndex` must stay ABSENT. That asymmetry is Excel's and is
+ *     reproduced on purpose; see {@link CHART_ELEMENT_IDS}.
+ *
+ * THE INDEX FIELDS ARE REUSED RATHER THAN RENAMED PER ELEMENT. A data label's
+ * point IS a category index and a gridline set's axis IS an axis type, so a
+ * `pointIndex` beside `categoryIndex` would be a second spelling of one fact —
+ * the defect class the element taxonomy exists to remove. Only `trendlineIndex`
+ * is genuinely new, and it is spelled exactly as
+ * {@link ChartHitResult.trendlineIndex} already spells it, so the hit result
+ * copies straight across.
+ */
 export interface ChartSubSelection {
   level: ChartSelectionLevel;
-  /** Selected series index (set at "series", "dataPoint" and legend-entry "element" levels). */
+  /**
+   * Selected series index. Set at "series", "dataPoint", and at the "element"
+   * level for `legendEntry`, `trendline`, `errorBars` and `dataLabel`.
+   */
   seriesIndex?: number;
-  /** Selected category index (set at "dataPoint" level). */
+  /**
+   * Selected category index. Set at "dataPoint" level, and at the "element"
+   * level for `dataLabel` — the point the label belongs to. Deliberately ABSENT
+   * for `errorBars`.
+   */
   categoryIndex?: number;
   /** Selected axis type (set at "axis" level). */
   axisType?: "x" | "y";
   /** Which element is selected (set at "element" level). */
   elementId?: ChartElementId;
+  /**
+   * Which of the series' trendlines — an index into `spec.trendlines`, NOT into
+   * the series list. Set only for `elementId: "trendline"`.
+   */
+  trendlineIndex?: number;
 }
 
 // ============================================================================
@@ -1873,9 +2002,13 @@ export type ChartElementKey =
  *    their key to {@link measured}.
  *
  * MARGIN CHANGES AFTER LAYOUT: several stages mutate `layout.margin` and
- * `layout.plotArea` between the two stages (the data table folded into
- * `margin.bottom` in chartDispatch, pivot field buttons in chartRenderer,
- * the secondary axis in combo/pareto, the horizontal-bar relayout). Every rect
+ * `layout.plotArea` between the two stages (pivot field buttons in
+ * chartRenderer, the secondary axis in combo/pareto, the horizontal-bar
+ * relayout). The data table used to be one of them, folded into `margin.bottom`
+ * by chartDispatch AFTER computeCartesianLayout had already reserved a
+ * tick-label band — two places computing one band, which is how the category
+ * labels ended up painted on top of the table. Its band is now part of the
+ * layout stage itself. Every rect
  * here EXCEPT `chartArea` and `title` is a function of `margin`/`plotArea`, so a
  * stale `elements` would point at the wrong pixels. Such a stage MUST call
  * `reflowChartElements(layout, spec, data, theme)` (chartPainterUtils) right
@@ -1893,11 +2026,25 @@ export interface ChartElementRects {
   chartArea: ChartElementRect;
   /** The chart title. Anchored to the canvas top edge, not to `margin.top`. */
   title?: ChartElementRect;
-  /** The X axis title, below the x-axis label band. */
+  /**
+   * The X axis title. Below the x-axis label band normally; below the DATA
+   * TABLE when one is shown, because the table occupies the band the title
+   * used to sit in.
+   *
+   * Always ABSENT on a radial layout, even when `spec.xAxis.title` is set — a
+   * pie has no x axis, `computeRadialLayout` reserves no band for a title, and
+   * `spec.xAxis.title` survives a mark change, so a bar chart switched to a pie
+   * still carries the string. `layoutHasXAxis` is the gate.
+   */
   xAxisTitle?: ChartElementRect;
   /** The Y axis title, rotated, in the left margin. */
   yAxisTitle?: ChartElementRect;
-  /** The horizontal strip holding the X axis tick labels. */
+  /**
+   * The horizontal strip holding the X axis tick labels. ABSENT when a data
+   * table has taken the labels over (every cartesian mark except horizontalBar
+   * / scatter / bubble, whose x labels are values the table does not repeat) —
+   * nothing is painted there, so nothing may be hit-tested there either.
+   */
   xAxisBand?: ChartElementRect;
   /** The vertical strip holding the Y axis tick labels. */
   yAxisBand?: ChartElementRect;
@@ -1942,7 +2089,13 @@ export interface ChartElementRects {
    * hit test answers.
    */
   dataLabels?: Array<{ seriesIndex: number; pointIndex: number; rect: ChartElementRect }>;
-  /** The data-table grid below the plot area, when `spec.dataTable` is enabled. */
+  /**
+   * The data-table grid, when `spec.dataTable` is enabled AND there is
+   * something to draw. It spans the plot area exactly, one equal column per
+   * category, so each column is centred on its own bar; the legend-key
+   * swatches sit in the margin to its LEFT and are outside this box, the way
+   * Excel keeps the row headers outside the plot span.
+   */
   dataTable?: ChartElementRect;
   /**
    * Keys whose rect is MEASURED truth written back by a painter, rather than

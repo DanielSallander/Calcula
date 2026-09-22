@@ -105,6 +105,14 @@ export interface ChartSelectionTarget {
   /** Set at "element" level. */
   elementId?: ChartSelectionElementId;
   /**
+   * Which of the series' trendlines, for `elementId: "trendline"`. An index
+   * into the spec's trendline list, NOT into the series list: one series can
+   * carry a linear fit and a moving average at once, and without this the two
+   * are the same snapshot — so the pane would retarget to neither and the Name
+   * Box would print one name for two objects.
+   */
+  trendlineIndex?: number;
+  /**
    * The resolved series name, when the publisher knows it. Used only to make
    * the display name readable; the ordinal is always available as a fallback.
    */
@@ -227,14 +235,32 @@ export function chartSelectionDisplayName(target: ChartSelectionTarget): string 
           return target.seriesIndex == null
             ? "Legend Entry"
             : `${seriesLabel()} Legend Entry`;
-        case "trendline":
-          return target.seriesIndex == null ? "Trendline" : `${seriesLabel()} Trendline`;
+        case "trendline": {
+          // The ORDINAL is part of the name, because a series can carry two
+          // trendlines and a reader looking at "Series 1 Trendline" twice over
+          // has no way to tell which one the pane is about to edit. Excel's
+          // Chart Elements dropdown does the same ("Series 1 Trendline 1").
+          const which =
+            target.trendlineIndex == null ? "Trendline" : `Trendline ${target.trendlineIndex + 1}`;
+          return target.seriesIndex == null ? which : `${seriesLabel()} ${which}`;
+        }
         case "errorBars":
           // Per SERIES, never per point — Excel has no per-point error bar, so
           // the name must never grow a category.
           return target.seriesIndex == null ? "Error Bars" : `${seriesLabel()} Error Bars`;
-        case "dataLabel":
-          return target.seriesIndex == null ? "Data Label" : `${seriesLabel()} Data Label`;
+        case "dataLabel": {
+          // Per POINT, so the point is named — the same wording the dataPoint
+          // rung uses, for the same reason: "Series 1 Data Label" over a chart
+          // with twelve of them names nothing.
+          const c = target.categoryIndex;
+          const point =
+            c == null
+              ? "Data Label"
+              : target.categoryName
+                ? `Point ${c + 1} "${target.categoryName}" Data Label`
+                : `Point ${c + 1} Data Label`;
+          return target.seriesIndex == null ? point : `${seriesLabel()} ${point}`;
+        }
         case "dataTable":
           return "Data Table";
         case "plotArea":
@@ -277,6 +303,7 @@ function sameSelection(a: ChartSelectionSnapshot, b: ChartSelectionSnapshot): bo
     a.categoryIndex === b.categoryIndex &&
     a.axisType === b.axisType &&
     a.elementId === b.elementId &&
+    a.trendlineIndex === b.trendlineIndex &&
     a.seriesName === b.seriesName &&
     a.categoryName === b.categoryName &&
     a.displayName === b.displayName

@@ -146,10 +146,16 @@ async function paint(): Promise<void> {
 }
 
 /**
- * Mount, then move the selection — because the box syncs its input text on a
- * CHANGE of the displayed value and starts empty, so a component that never
- * saw the selection move shows nothing at all. Mounting on A1 and then landing
- * on the block under test is also what the app does.
+ * Mount, then move the selection onto the block under test.
+ *
+ * The second paint is here because that is what the app does — mount on A1,
+ * then land somewhere — NOT because the box needs a change to show anything.
+ * It used to: `prevDisplay` was seeded with the first `displayValue` while the
+ * input's own state started "", so the first pass reconciled nothing and the
+ * box rendered EMPTY until something moved. This helper's old comment said so
+ * out loud and worked around it. The blank first render is fixed (`prevDisplay`
+ * is seeded with a null sentinel), and `mountOnly` below asserts the fix
+ * rather than accommodating it.
  */
 async function render(
   selection?: { startRow: number; startCol: number; endRow: number; endCol: number },
@@ -159,6 +165,20 @@ async function render(
     gridState.selection = selection;
     await paint();
   }
+}
+
+/**
+ * Mount on whatever `gridState.selection` already says and paint ONCE. The
+ * shape that used to produce a blank box.
+ */
+async function mountOnly(selection: {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}): Promise<void> {
+  gridState.selection = selection;
+  await paint();
 }
 
 function box(): HTMLInputElement {
@@ -239,6 +259,60 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
+
+describe("Name Box - the FIRST render already shows the address", () => {
+  // The defect: `prevDisplay` was seeded with the first `displayValue` and
+  // `inputValue` with "", so the reconciling branch never ran on the first
+  // pass. Nothing threw, nothing logged — the box was simply blank until the
+  // user moved, and every test in this file was written to move first, which
+  // is how it survived. These cases mount and look, with no movement at all.
+
+  it("shows the active cell's address on mount, with nothing moving", async () => {
+    await mountOnly({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 });
+
+    expect(box().value).toBe("A1");
+  });
+
+  it("shows a RANGE address on mount, not an empty box", async () => {
+    await mountOnly({ startRow: 2, startCol: 1, endRow: 5, endCol: 3 });
+
+    expect(box().value).toBe("B3:D6");
+  });
+
+  it("shows a table's name on mount when the selection already IS its data", async () => {
+    // The async table match lands AFTER the first paint, so this also pins
+    // that the sentinel does not swallow the later change: the box goes
+    // address -> "Sales" and never blank.
+    getTableAtCellMock.mockResolvedValue(SALES);
+    resolveStructuredReferenceMock.mockImplementation(async (ref: string) =>
+      ref === "Sales[#Data]"
+        ? { success: true, resolved: SALES_DATA }
+        : { success: false, error: "Table not found" },
+    );
+
+    await mountOnly({ startRow: 5, startCol: 0, endRow: 8, endCol: 2 });
+
+    expect(box().value).toBe("Sales");
+  });
+
+  it("the mounted box round-trips: what it shows on the first render is accepted", async () => {
+    // A blank box is not merely ugly — Enter on it takes the empty-value
+    // branch and does nothing. With the address present, the box's own first
+    // reading navigates.
+    await mountOnly({ startRow: 3, startCol: 2, endRow: 3, endCol: 2 });
+    const shown = box().value;
+    expect(shown).toBe("C4");
+
+    await commit(shown);
+
+    expect(lastSelection()).toMatchObject({
+      startRow: 3,
+      startCol: 2,
+      endRow: 3,
+      endCol: 2,
+    });
+  });
+});
 
 describe("Name Box - showing a table's name", () => {
   beforeEach(() => {

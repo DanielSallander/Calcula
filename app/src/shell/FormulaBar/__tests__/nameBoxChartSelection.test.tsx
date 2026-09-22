@@ -98,10 +98,19 @@ async function paint(): Promise<void> {
 }
 
 /**
- * Mount, then move the selection — the box syncs its input text on a CHANGE of
- * the displayed value and starts empty, so a component that never saw anything
- * move shows nothing at all. Same shape as nameBoxTables.test.tsx, and the same
- * shape as the app, which mounts on A1 and then lands somewhere.
+ * Mount, then move the selection.
+ *
+ * THIS IS NO LONGER A WORKAROUND. The box used to render EMPTY until something
+ * moved — it seeded its "last displayed value" with the first one, so the very
+ * first pass looked like no change at all — and this helper existed to step past
+ * that. The sentinel fix (NameBox.tsx: `prevDisplay` starts `null`, a value
+ * `displayValue` can never take) makes the first render a change like any other,
+ * and `nameBoxTables.test.tsx` now asserts the first paint directly.
+ *
+ * The second paint stays because it is what the APP does — mount on A1, then
+ * land somewhere — and because every case in this file is about what happens
+ * AFTER a chart selection is published. Keeping it means these cases exercise
+ * the transition rather than the mount.
  */
 async function render(): Promise<void> {
   await paint();

@@ -14,6 +14,7 @@ import {
   recordYAxisTitleRect,
   recordYLabelBandRect,
   xAxisTitleBaselineY,
+  xLabelBandHeight,
   Y_AXIS_TITLE_X,
 } from "./markerPainter";
 import { createLinearScale, createScaleFromSpec } from "./scales";
@@ -245,7 +246,11 @@ function drawBubbleAxes(
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    const baselineY = xAxisTitleBaselineY(plotArea, spec.xAxis.showLabels);
+    const baselineY = xAxisTitleBaselineY(
+      plotArea,
+      xLabelBandHeight(spec, xAxis.ticks.map((t) => t.label), theme),
+      theme,
+    );
     ctx.fillText(spec.xAxis.title, plotArea.x + plotArea.width / 2, baselineY);
     if (layout) {
       recordXAxisTitleRect(

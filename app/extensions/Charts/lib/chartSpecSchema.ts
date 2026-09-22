@@ -908,6 +908,21 @@ export const chartSpecJsonSchema: object = {
           type: ["number", "null"],
           description: "Hide labels for values below this threshold. Null = no threshold. Default: null.",
         },
+        hiddenPoints: {
+          type: "array",
+          items: { $ref: "#/definitions/DataLabelPointRef" },
+          description: "Individual labels removed by the reader, as (series, point) pairs in painter space. Absent or empty = nothing suppressed.",
+        },
+      },
+      additionalProperties: false,
+    },
+    DataLabelPointRef: {
+      type: "object",
+      description: "One (series, point) pair naming a single data label, in painter (post-filter) space.",
+      required: ["seriesIndex", "pointIndex"],
+      properties: {
+        seriesIndex: { type: "integer", minimum: 0, description: "Painter-space series index." },
+        pointIndex: { type: "integer", minimum: 0, description: "Painter-space point (category) index within that series." },
       },
       additionalProperties: false,
     },
@@ -1146,6 +1161,11 @@ export const chartSpecJsonSchema: object = {
         direction: { type: "string", enum: ["both", "plus", "minus"], description: "Which direction to draw error bars. Default: \"both\"." },
         color: { type: "string", description: "Override color (hex). Default: \"#333333\"." },
         lineWidth: { type: "number", minimum: 0, description: "Line width in pixels. Default: 1.5." },
+        seriesFilter: {
+          type: ["array", "null"],
+          items: { type: "integer", minimum: 0 },
+          description: "Draw error bars only for these series indices (painter space). Null or absent = every series.",
+        },
       },
       additionalProperties: false,
     },
@@ -1367,6 +1387,63 @@ export function generateSpecReference(): string {
   lines.push("| hiddenEntries | integer[] | Legend rows to omit while the data stays plotted (series indices; category indices for pie/donut) |");
   lines.push("");
 
+  // THE ONE DataLabelSpec SECTION. There were briefly two — this one, added
+  // with `hiddenPoints`, and an older one further down that predated it — so
+  // the generated reference documented the same type twice and the second table
+  // was missing the new field. A reader (or a model) that scrolled to the wrong
+  // one would conclude `hiddenPoints` does not exist. The two are merged here,
+  // keeping the older table's Default column and its example.
+  lines.push("## DataLabelSpec");
+  lines.push("");
+  lines.push("Labels drawn on the data points — values, categories or percentages. Every");
+  lines.push("label is individually selectable, so it is individually removable:");
+  lines.push("`hiddenPoints` is the per-LABEL suppression list, the same shape as");
+  lines.push("`legend.hiddenEntries`, while `seriesFilter` works per series.");
+  lines.push("");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| enabled | boolean | false | Show data labels |");
+  lines.push("| content | string[] | [\"value\"] | value, category, seriesName, and/or percent |");
+  lines.push("| position | string | \"auto\" | auto, above, below, center, inside, or outside |");
+  lines.push("| fontSize | number | 10 | Font size (px) |");
+  lines.push("| color | string | auto | Text color (hex). Auto = from background |");
+  lines.push("| backgroundColor | string \\| null | null | Badge background. Null = none |");
+  lines.push("| format | string | auto | Number format (e.g. \"$,.2f\") |");
+  lines.push("| separator | string | \" - \" | Joins multiple content fields |");
+  lines.push("| seriesFilter | integer[] \\| null | null | Label only these series (painter space). Null = all |");
+  lines.push("| minValue | number \\| null | null | Hide labels below this value |");
+  lines.push("| hiddenPoints | DataLabelPointRef[] | absent | Individual labels removed by the reader |");
+  lines.push("");
+  lines.push("Example: Show values above bars:");
+  lines.push("  \"dataLabels\": { \"enabled\": true, \"content\": [\"value\"], \"position\": \"above\" }");
+  lines.push("");
+
+  lines.push("## DataLabelPointRef");
+  lines.push("");
+  lines.push("| Property | Type | Description |");
+  lines.push("|----------|------|-------------|");
+  lines.push("| seriesIndex | integer | Painter-space series index |");
+  lines.push("| pointIndex | integer | Painter-space point index within that series |");
+  lines.push("");
+
+  lines.push("## ErrorBarOptions");
+  lines.push("");
+  lines.push("Lives under `markOptions` for bar, horizontalBar, line and scatter. Error bars");
+  lines.push("are a per-SERIES object with no per-point member — Excel has no error bar on");
+  lines.push("March alone — so `seriesFilter` is how one series' bars are removed without");
+  lines.push("stripping them from the whole chart.");
+  lines.push("");
+  lines.push("| Property | Type | Description |");
+  lines.push("|----------|------|-------------|");
+  lines.push("| enabled | boolean | Show error bars |");
+  lines.push("| type | string | standardError, percentage, standardDeviation, or custom |");
+  lines.push("| value | number | Percentage, stddev multiplier, or custom amount. Default: 10 |");
+  lines.push("| direction | string | both, plus, or minus |");
+  lines.push("| color | string | Override color (hex). Default: \"#333333\" |");
+  lines.push("| lineWidth | number | Line width (px). Default: 1.5 |");
+  lines.push("| seriesFilter | integer[] \\| null | Draw bars only for these series (painter space). Null = all |");
+  lines.push("");
+
   lines.push("## DataPointOverride");
   lines.push("");
   lines.push("Formats ONE data point independently of its series. Matched by `key` first");
@@ -1401,6 +1478,26 @@ export function generateSpecReference(): string {
   lines.push("| foreground | string | - | Pattern ink color (hex) |");
   lines.push("| background | string | datum fill | Color behind the pattern |");
   lines.push("| size | number | 8 | Repeating cell size (px) |");
+  lines.push("");
+
+  // GradientFill had NO section here at all, though it is a schema definition a
+  // script can set (`dataPointOverrides[].gradientFill`, `markOptions.fill`) and
+  // the Monaco editor accepts. Its fields were therefore discoverable only by
+  // reading the schema source — the exact gap the reference exists to close.
+  lines.push("## GradientFill");
+  lines.push("");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| type | string | - | linear or radial |");
+  lines.push("| direction | string | \"topToBottom\" | Linear only: topToBottom, bottomToTop, leftToRight, rightToLeft, topLeftToBottomRight, bottomRightToTopLeft, topRightToBottomLeft, bottomLeftToTopRight |");
+  lines.push("| stops | GradientStop[] | - | Colour stops, at least 2 |");
+  lines.push("");
+  lines.push("## GradientStop");
+  lines.push("");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| offset | number | - | Position along the gradient, 0 to 1 |");
+  lines.push("| color | string | - | Colour at that stop (hex) |");
   lines.push("");
 
   lines.push("## Mark Options by Chart Type");
@@ -1602,26 +1699,9 @@ export function generateSpecReference(): string {
   lines.push("  \"layers\": [{ \"mark\": \"rule\", \"markOptions\": { \"y\": 1000, \"strokeDash\": [6, 3], \"label\": \"Target\" } }]");
   lines.push("");
 
-  lines.push("## DataLabelSpec");
-  lines.push("");
-  lines.push("Display values, categories, or percentages directly on chart data points.");
-  lines.push("");
-  lines.push("| Property | Type | Default | Description |");
-  lines.push("|----------|------|---------|-------------|");
-  lines.push("| enabled | boolean | false | Show data labels |");
-  lines.push("| content | string[] | [\"value\"] | What to show: value, category, seriesName, percent |");
-  lines.push("| position | string | \"auto\" | auto, above, below, center, inside, outside |");
-  lines.push("| fontSize | number | 10 | Font size (px) |");
-  lines.push("| color | string | auto | Text color |");
-  lines.push("| backgroundColor | string \\| null | null | Badge background color |");
-  lines.push("| format | string | auto | Number format (e.g. \"$,.2f\") |");
-  lines.push("| separator | string | \" - \" | Separator between content fields |");
-  lines.push("| seriesFilter | number[] \\| null | null | Show only for these series indices |");
-  lines.push("| minValue | number \\| null | null | Hide labels below this value |");
-  lines.push("");
-  lines.push("Example: Show values above bars:");
-  lines.push("  \"dataLabels\": { \"enabled\": true, \"content\": [\"value\"], \"position\": \"above\" }");
-  lines.push("");
+  // (The second DataLabelSpec section that used to stand here is gone — it is
+  //  merged into the one beside DataLabelPointRef above, which is the type it
+  //  references.)
 
   lines.push("## Data Transforms");
   lines.push("");

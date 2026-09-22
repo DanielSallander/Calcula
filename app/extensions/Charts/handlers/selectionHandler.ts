@@ -278,6 +278,45 @@ export function advanceSelection(chartId: string, hitResult: ChartHitResult): vo
     return;
   }
 
+  // THE IN-PLOT FURNITURE IS A RUNG, NOT A FALL-THROUGH.
+  //
+  // These four were hit-testable, named by @api and recorded as rects by their
+  // painters for a whole wave, and the ladder still collapsed every one of them
+  // to `{ level: "chart" }` — click a trendline, get the chart. That is the
+  // dead-member defect the taxonomy exists to prevent, pointing outward: the
+  // product could SAY what was under the cursor and could not SELECT it.
+  //
+  // Each carries exactly the identity its own granularity needs, copied from
+  // the hit result rather than re-derived: a trendline its series AND its
+  // trendline index (one series can carry a linear fit and a moving average at
+  // once), a data label both indices, error bars the series ALONE — Excel has
+  // no per-point error bar and inventing one would make the Format pane target
+  // an object that does not exist — and the data table nothing, because there is
+  // one of it.
+  //
+  // There is NO second click that drills further. A trendline has no parts, and
+  // a data label is already the finest thing on the chart; the legend's
+  // whole-then-part shape exists because a legend genuinely contains rows.
+  if (
+    element === "trendline" ||
+    element === "errorBars" ||
+    element === "dataLabel" ||
+    element === "dataTable"
+  ) {
+    subSelection = {
+      level: "element",
+      elementId: element,
+      ...(hitResult.seriesIndex !== undefined ? { seriesIndex: hitResult.seriesIndex } : {}),
+      ...(element === "dataLabel" && hitResult.pointIndex !== undefined
+        ? { categoryIndex: hitResult.pointIndex }
+        : {}),
+      ...(element === "trendline" && hitResult.trendlineIndex !== undefined
+        ? { trendlineIndex: hitResult.trendlineIndex }
+        : {}),
+    };
+    return;
+  }
+
   // THE PLOT AREA IS A RUNG, NOT A WAY OUT.
   //
   // It was reachable by KEYBOARD (`buildChartNavGroups` emits it), paintable
@@ -646,6 +685,73 @@ export function buildChartNavGroups(
     groups.push({ id: "yAxisTitle", members: [{ level: "element", elementId: "yAxisTitle" }] });
   }
 
+  // ---- The in-plot furniture, from the rects its painters RECORDED ----------
+  //
+  // Same rule as the rest of the walk: the groups come from what was drawn, not
+  // from what the spec asks for. A trendline whose fit produced fewer than two
+  // points is not painted and records nothing, so it is not a rung — which is
+  // what keeps the keyboard from addressing an object the mouse cannot reach.
+  //
+  // ONE GROUP PER TRENDLINE, because two trendlines on one series are two
+  // objects with two formats; one group per SERIES for error bars, because
+  // Excel has no finer error-bar object; and one group per series for data
+  // labels with a MEMBER per point, which is the whole-then-part shape the
+  // legend and the series groups already use — except that there is no "all the
+  // labels of this series" object to stand at, so member 0 is the first label
+  // rather than a whole. Stated rather than left to be discovered: the walk's
+  // "member 0 is the whole thing" convention genuinely does not apply here, and
+  // inventing a per-series label object so that it would apply is how a rung
+  // with nothing behind it gets created.
+  for (const t of el?.trendlines ?? []) {
+    groups.push({
+      id: `trendline:${t.seriesIndex}:${t.trendlineIndex}`,
+      members: [
+        {
+          level: "element",
+          elementId: "trendline",
+          seriesIndex: t.seriesIndex,
+          trendlineIndex: t.trendlineIndex,
+        },
+      ],
+    });
+  }
+
+  const errorBarSeries: number[] = [];
+  for (const b of el?.errorBars ?? []) {
+    if (!errorBarSeries.includes(b.seriesIndex)) errorBarSeries.push(b.seriesIndex);
+  }
+  for (const seriesIndex of errorBarSeries) {
+    groups.push({
+      id: `errorBars:${seriesIndex}`,
+      members: [{ level: "element", elementId: "errorBars", seriesIndex }],
+    });
+  }
+
+  const labelsBySeries = new Map<number, number[]>();
+  for (const l of el?.dataLabels ?? []) {
+    let points = labelsBySeries.get(l.seriesIndex);
+    if (points === undefined) {
+      points = [];
+      labelsBySeries.set(l.seriesIndex, points);
+    }
+    if (!points.includes(l.pointIndex)) points.push(l.pointIndex);
+  }
+  for (const seriesIndex of [...labelsBySeries.keys()].sort((a, b) => a - b)) {
+    groups.push({
+      id: `dataLabels:${seriesIndex}`,
+      members: (labelsBySeries.get(seriesIndex) ?? []).map((categoryIndex) => ({
+        level: "element" as const,
+        elementId: "dataLabel" as const,
+        seriesIndex,
+        categoryIndex,
+      })),
+    });
+  }
+
+  if (el?.dataTable) {
+    groups.push({ id: "dataTable", members: [{ level: "element", elementId: "dataTable" }] });
+  }
+
   if (geometry !== null) {
     const bySeries = new Map<number, number[]>();
     for (const { seriesIndex, categoryIndex } of geometryDatumIndices(geometry)) {
@@ -683,8 +789,25 @@ function sameRung(a: ChartSubSelection, b: ChartSubSelection): boolean {
       return a.seriesIndex === b.seriesIndex && a.categoryIndex === b.categoryIndex;
     case "element":
       if (a.elementId !== b.elementId) return false;
-      // A legend entry is only itself when it stands for the same series.
-      return a.elementId === "legendEntry" ? a.seriesIndex === b.seriesIndex : true;
+      // IDENTITY IS PER ELEMENT, because granularity is per element. Comparing
+      // every index for every id would make two DIFFERENT trendlines on one
+      // series look alike (both carry the same seriesIndex) while making two
+      // error-bar rungs look different if one of them ever picked up a stray
+      // categoryIndex. Each id is compared on exactly the fields it is allowed
+      // to carry — the same list {@link ChartSubSelection} documents.
+      switch (a.elementId) {
+        case "legendEntry":
+        case "errorBars":
+          return a.seriesIndex === b.seriesIndex;
+        case "trendline":
+          return a.seriesIndex === b.seriesIndex && a.trendlineIndex === b.trendlineIndex;
+        case "dataLabel":
+          return a.seriesIndex === b.seriesIndex && a.categoryIndex === b.categoryIndex;
+        default:
+          // Singletons: title, the two axis titles, the legend box, the two
+          // areas, the data table. The id IS the identity.
+          return true;
+      }
   }
 }
 
@@ -756,10 +879,29 @@ export function escapeLevelUp(sub: ChartSubSelection): ChartSubSelection | null 
     case "axis":
       return { level: "chart" };
     case "element":
-      // Inside the legend, the whole legend is the level above an entry.
-      return sub.elementId === "legendEntry"
-        ? { level: "element", elementId: "legend" }
-        : { level: "chart" };
+      // ONE LEVEL UP MEANS THE THING THIS ONE BELONGS TO, and only when that
+      // thing is certain to be a rung the walk can stand on.
+      //
+      // A legend entry's parent is the legend box. A trendline's and an error
+      // bar set's parent is the SERIES they track: if the furniture was drawn
+      // at all, that series has geometry, so the rung exists. A data label's
+      // parent is the POINT it labels, for the same reason.
+      //
+      // Everything else — the titles, the legend box, the data table, the two
+      // areas — belongs to the chart and nothing smaller.
+      if (sub.elementId === "legendEntry") return { level: "element", elementId: "legend" };
+      if (
+        (sub.elementId === "trendline" || sub.elementId === "errorBars") &&
+        sub.seriesIndex != null
+      ) {
+        return { level: "series", seriesIndex: sub.seriesIndex };
+      }
+      if (sub.elementId === "dataLabel" && sub.seriesIndex != null) {
+        return sub.categoryIndex == null
+          ? { level: "series", seriesIndex: sub.seriesIndex }
+          : { level: "dataPoint", seriesIndex: sub.seriesIndex, categoryIndex: sub.categoryIndex };
+      }
+      return { level: "chart" };
     case "chart":
     case "none":
       return null;
@@ -794,6 +936,37 @@ export const CHART_AREA_ELEMENT_IDS: readonly ChartElementId[] = ["plotArea", "c
 /** Is this element rung one of the two AREAS, where Delete is a no-op? */
 export function isChartAreaElement(id: ChartElementId | undefined): boolean {
   return id !== undefined && CHART_AREA_ELEMENT_IDS.includes(id);
+}
+
+/**
+ * The element rungs whose Delete removes THAT PIECE OF FURNITURE.
+ *
+ * The recipe lives in `furnitureDeletePatch`
+ * (components/ChartContextMenu.tsx) — one resolver shared by the Delete key and
+ * by the menu's "Delete <element>" rows, the same two-derivations-one-answer
+ * split `resetToMatchStyleScopePatch` and `hideLegendEntryPatch` already use.
+ * This list is what the index.ts listener branches on and what the walk's own
+ * coverage test reads, so a furniture group added to
+ * {@link buildChartNavGroups} without a Delete meaning goes red by name rather
+ * than falling through to the destroy arm.
+ *
+ * THE BRANCH IS KEYED OFF THE SUBJECT, NEVER OFF WHETHER A WRITE HAPPENED. That
+ * lesson has been paid for twice here: an already-cleared title and an
+ * already-hidden legend row both answer "nothing changed", and a listener that
+ * treated that as "not mine" let the second Delete — the "did that work?"
+ * reflex — destroy the whole chart. A trendline that has already gone and a
+ * data table that is already off are the same trap in new clothes.
+ */
+export const CHART_FURNITURE_DELETE_ELEMENT_IDS: readonly ChartElementId[] = [
+  "trendline",
+  "errorBars",
+  "dataLabel",
+  "dataTable",
+];
+
+/** Is this element rung one whose Delete removes the furniture itself? */
+export function isFurnitureDeleteElement(id: ChartElementId | undefined): boolean {
+  return id !== undefined && CHART_FURNITURE_DELETE_ELEMENT_IDS.includes(id);
 }
 
 // ============================================================================

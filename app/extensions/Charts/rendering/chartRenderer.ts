@@ -1363,11 +1363,17 @@ export function paintSelectionChrome(
   } else if (subSel.level === "axis" && subSel.axisType) {
     drawAxisSelectionHighlight(ctx, canvasX, canvasY, cachedData.layout, subSel.axisType);
   } else if (subSel.level === "element") {
-    // The furniture: title, axis titles, legend, one legend entry, plot area.
+    // The furniture: title, axis titles, legend, one legend entry, plot area,
+    // and the in-plot set — one trendline (painted as a LINE), a series' error
+    // bars (painted bar by bar), one data label, the data table.
     // The rects come from `layout.elements` (and `layout.plotArea`), which is
     // where the painters wrote what they MEASURED; nothing here re-derives a box
     // from the margins, because every rect but `chartArea`/`title` moves when a
     // later stage edits them.
+    // The indices that name WHICH instance travel with the id: a trendline's
+    // ordinal (one series can carry two fits) and a data label's point. Copied
+    // from the sub-selection rather than derived, so the painter cannot pick a
+    // different trendline than the one the ladder selected.
     drawElementSelectionHighlight(
       ctx,
       canvasX,
@@ -1375,7 +1381,11 @@ export function paintSelectionChrome(
       cachedData.layout,
       subSel.elementId,
       subSel.seriesIndex,
-      { textEditing: opts.textEditing },
+      {
+        textEditing: opts.textEditing,
+        categoryIndex: subSel.categoryIndex,
+        trendlineIndex: subSel.trendlineIndex,
+      },
     );
   }
 }

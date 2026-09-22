@@ -48,10 +48,11 @@
 //             linear trendline for that series outright, which is what Excel's
 //             dialog defaults to anyway; the rest lives in the Design panel.
 
-import React, { useEffect, useRef, useSyncExternalStore } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
 import { css } from "@emotion/css";
 import type { OverlayProps } from "@api/uiTypes";
 import { showDialog } from "@api";
+import { CommandRegistry } from "@api/commands";
 import { emitAppEvent, AppEvents } from "@api/events";
 import {
   getChartContextMenuContributions,
@@ -66,15 +67,30 @@ import {
 
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
 import { getCachedChartData, invalidateChartCache } from "../rendering/chartRenderer";
+// The ONE answer to "where do this chart's error-bar options live?" — a
+// mark-dependent switch that the painter owns and this file must not re-spell.
+import { getErrorBarOptions, withErrorBarOptions } from "../rendering/errorBarPainter";
 import {
   selectionAfterHidingLegendEntry,
   setSubSelection,
 } from "../handlers/selectionHandler";
-import { dataPointKey } from "../lib/dataPointOverrides";
+// `markOffersPerPointFormatting` is the ONE rule behind both doors into
+// per-point formatting — this menu's verb and the Format pane's sections. See
+// `pointIsFormattable` below.
+import { dataPointKey, markOffersPerPointFormatting } from "../lib/dataPointOverrides";
 import { ChartEvents } from "../lib/chartEvents";
 import { CHART_DIALOG_ID } from "../manifest";
-import { DATA_POINT_KEY_SEPARATOR, isPivotDataSource } from "../types";
-import type { ChartSpec, DataPointOverride } from "../types";
+import {
+  CHART_FORMAT_SELECTION_COMMAND,
+  DATA_POINT_KEY_SEPARATOR,
+  isPivotDataSource,
+} from "../types";
+import type {
+  ChartSpec,
+  ChartSubSelection,
+  DataPointOverride,
+  ErrorBarOptions,
+} from "../types";
 
 // ============================================================================
 // Contributed items (from @api/chartContextMenu)
@@ -156,11 +172,169 @@ export interface MenuSubject {
   seriesIndex?: number;
   /** Painter-space point index. ABSENT = the whole series. */
   pointIndex?: number;
+  /**
+   * Which of the series' trendlines was right-clicked — an index into
+   * `spec.trendlines`. Set only for `element: "trendline"`, because one series
+   * can carry a linear fit and a moving average and the series index alone
+   * cannot tell "Delete Trendline" which one to remove.
+   */
+  trendlineIndex?: number;
   /** Authoring-space pair for `dataPointOverrides`, when the recorder supplied it. */
   authoring?: { seriesIndex: number; pointIndex: number };
   seriesName?: string;
   categoryName?: string;
   axisType?: "x" | "y";
+}
+
+/**
+ * WHAT "DELETE THIS FURNITURE" MEANS, for the four in-plot elements.
+ *
+ * ONE RESOLVER, TWO DERIVATIONS — the shape {@link resetToMatchStyleScopePatch}
+ * and {@link hideLegendEntryPatch} already established. The Delete KEY derives
+ * its target from the selection ladder ({@link furnitureTargetFromSubSelection})
+ * and this menu derives it from the RIGHT-CLICKED element
+ * ({@link furnitureTargetFromSubject}); both ask this function for the patch,
+ * because a second copy would drift the first time one of these fields learned
+ * a new way to disappear.
+ *
+ * Indices are PAINTER space throughout — the space the hit test answers in, the
+ * space `dataLabels.seriesFilter` is already documented in, and the space the
+ * two new suppression fields are declared in. There is no authoring translation
+ * here BECAUSE there is nothing to translate against: unlike
+ * `dataPointOverrides`, none of these four is keyed by datum identity.
+ */
+export type FurnitureDeleteTarget =
+  | { element: "trendline"; seriesIndex?: number; trendlineIndex?: number }
+  | { element: "errorBars"; seriesIndex?: number }
+  | { element: "dataLabel"; seriesIndex?: number; pointIndex?: number }
+  | { element: "dataTable" };
+
+/**
+ * The spec patch that removes `target`, or null when there is nothing to remove.
+ *
+ * NULL IS NOT "NOT MINE". Every caller consumes the keystroke or hides the menu
+ * row on its own terms; returning null only says the spec already looks the way
+ * the reader is asking for. That distinction is the one this programme has paid
+ * for twice — an already-cleared title and an already-hidden legend row both
+ * answer "nothing changed", and a Delete listener that read that as "not mine"
+ * let the second press destroy the chart.
+ */
+export function furnitureDeletePatch(
+  spec: ChartSpec,
+  target: FurnitureDeleteTarget,
+): Partial<ChartSpec> | null {
+  switch (target.element) {
+    case "dataTable":
+      return spec.dataTable?.enabled
+        ? { dataTable: { ...spec.dataTable, enabled: false } }
+        : null;
+
+    case "trendline": {
+      const all = spec.trendlines ?? [];
+      if (all.length === 0) return null;
+      // The ORDINAL first: one series can carry a linear fit and a moving
+      // average at once, and removing "the one for series 2" would then remove
+      // whichever happened to be written first. The series-only fallback is for
+      // a target built before the ordinal travelled.
+      const at =
+        target.trendlineIndex !== undefined && target.trendlineIndex >= 0 && target.trendlineIndex < all.length
+          ? target.trendlineIndex
+          : all.findIndex((t) => (t.seriesIndex ?? 0) === (target.seriesIndex ?? 0));
+      if (at < 0) return null;
+      const kept = all.filter((_, i) => i !== at);
+      return { trendlines: kept.length > 0 ? kept : undefined };
+    }
+
+    case "errorBars": {
+      const si = target.seriesIndex;
+      if (si === undefined) return null;
+      const opts = getErrorBarOptions(spec);
+      if (!opts || !opts.enabled) return null;
+      const filter = opts.seriesFilter ?? null;
+      if (filter !== null && !filter.includes(si)) return null; // already gone
+
+      let next: ErrorBarOptions;
+      if (filter !== null) {
+        const kept = filter.filter((i) => i !== si);
+        next = kept.length > 0
+          ? { ...opts, enabled: true, seriesFilter: kept }
+          : { ...opts, enabled: false, seriesFilter: null };
+      } else {
+        // No filter yet means "every series". Turning one off has to enumerate
+        // the others, and a spec whose series are not enumerable (a pivot or
+        // design-query chart, where `spec.series` is empty) cannot say "all of
+        // them except this one" — the same null case `dataLabelRow` documents.
+        // Falling back to `enabled: false` there would strip the error bars off
+        // every series, which is the coarser act this field exists to avoid.
+        const others = spec.series.map((_, i) => i).filter((i) => i !== si);
+        if (spec.series.length === 0) return null;
+        next = others.length > 0
+          ? { ...opts, enabled: true, seriesFilter: others }
+          : { ...opts, enabled: false, seriesFilter: null };
+      }
+      // The WRITE half of getErrorBarOptions, from the same module and gated on
+      // the same mark list — never a hand-spread of `spec.markOptions`, which is
+      // a nineteen-arm union and cannot legally grow an `errorBars` property.
+      return withErrorBarOptions(spec, next);
+    }
+
+    case "dataLabel": {
+      const si = target.seriesIndex;
+      const pi = target.pointIndex;
+      if (si === undefined || pi === undefined) return null;
+      const dl = spec.dataLabels;
+      if (!dl || !dl.enabled) return null;
+      const hidden = dl.hiddenPoints ?? [];
+      if (hidden.some((h) => h.seriesIndex === si && h.pointIndex === pi)) return null;
+      return {
+        dataLabels: { ...dl, hiddenPoints: [...hidden, { seriesIndex: si, pointIndex: pi }] },
+      };
+    }
+  }
+}
+
+/**
+ * The SELECTION ladder's rung, as a delete target. Returns null for a rung that
+ * is not one of the four.
+ */
+export function furnitureTargetFromSubSelection(
+  sub: ChartSubSelection,
+): FurnitureDeleteTarget | null {
+  if (sub.level !== "element") return null;
+  switch (sub.elementId) {
+    case "trendline":
+      return { element: "trendline", seriesIndex: sub.seriesIndex, trendlineIndex: sub.trendlineIndex };
+    case "errorBars":
+      return { element: "errorBars", seriesIndex: sub.seriesIndex };
+    case "dataLabel":
+      // The ladder spells a data label's point as `categoryIndex` — the same
+      // field a dataPoint rung uses, because it is the same index.
+      return { element: "dataLabel", seriesIndex: sub.seriesIndex, pointIndex: sub.categoryIndex };
+    case "dataTable":
+      return { element: "dataTable" };
+    default:
+      return null;
+  }
+}
+
+/** The RIGHT-CLICKED element, as a delete target. Null when it is not one of the four. */
+export function furnitureTargetFromSubject(subject: MenuSubject): FurnitureDeleteTarget | null {
+  switch (subject.element) {
+    case "trendline":
+      return {
+        element: "trendline",
+        seriesIndex: subject.seriesIndex,
+        trendlineIndex: subject.trendlineIndex,
+      };
+    case "errorBars":
+      return { element: "errorBars", seriesIndex: subject.seriesIndex };
+    case "dataLabel":
+      return { element: "dataLabel", seriesIndex: subject.seriesIndex, pointIndex: subject.pointIndex };
+    case "dataTable":
+      return { element: "dataTable" };
+    default:
+      return null;
+  }
 }
 
 /** A datum target with no point index is the whole SERIES (Excel's PointIndex = -1). */
@@ -192,6 +366,19 @@ function elementName(element: ChartTargetElement, hasPoint: boolean): string {
       return "Legend";
     case "legendEntry":
       return "Legend Entry";
+    // The in-plot furniture, in Excel's own words. "Error Bars" is plural
+    // because the object IS the whole set for a series — there is no per-point
+    // error bar — while "Data Label" is singular because there is one per point.
+    // The number is not decoration: it is how the reader learns what a Delete
+    // here is about to take away.
+    case "trendline":
+      return "Trendline";
+    case "errorBars":
+      return "Error Bars";
+    case "dataLabel":
+      return "Data Label";
+    case "dataTable":
+      return "Data Table";
     // A filter button, the chart frame and a miss are all "the object" as far
     // as a menu verb is concerned.
     case "filterButton":
@@ -222,6 +409,7 @@ export function subjectFor(target: ChartRightClickTarget | null): MenuSubject {
     identity,
     ...(target.seriesIndex !== undefined ? { seriesIndex: target.seriesIndex } : {}),
     ...(target.pointIndex !== undefined ? { pointIndex: target.pointIndex } : {}),
+    ...(target.trendlineIndex !== undefined ? { trendlineIndex: target.trendlineIndex } : {}),
     ...(target.authoring ? { authoring: target.authoring } : {}),
     ...(target.seriesName !== undefined ? { seriesName: target.seriesName } : {}),
     ...(target.categoryName !== undefined ? { categoryName: target.categoryName } : {}),
@@ -269,10 +457,14 @@ export type ResetToMatchStyleScope =
  *
  * THREE PLACES HOLD A MANUAL FILL, and a reset that missed one would leave the
  * trap it exists to remove: `dataPointOverrides` (per datum), `seriesColors`
- * (name-keyed, what the ribbon writes) and `series[].color` (index-keyed, what
- * THIS pane's series swatch writes). At chart level `config.theme` goes too —
- * that is the "and every per-element style back to the theme" half of Excel's
- * "all formatting, including overrides, is reset".
+ * (name-keyed — since OB-1 the ONE spelling every formatting surface writes)
+ * and `series[].color` (index-keyed, now written only by AUTHORING: XLSX
+ * import, the chart examples, the Insert Chart dialog's Data tab). The third
+ * is still cleared here precisely because nothing else clears it: an imported
+ * colour a reader cannot get rid of is the same trap in a different field. At
+ * chart level `config.theme` goes too — that is the "and every per-element
+ * style back to the theme" half of Excel's "all formatting, including
+ * overrides, is reset".
  */
 export function resetToMatchStyleScopePatch(
   spec: ChartSpec,
@@ -499,6 +691,31 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
     return () => document.removeEventListener("keydown", handler, true);
   }, [onClose]);
 
+  // KEEP THE WHOLE MENU ON SCREEN, FROM ITS MEASURED BOX.
+  //
+  // The inline style below clamps from an ESTIMATE — `40 + rows * 26` — and an
+  // estimate that comes up short puts the last row below the viewport, where it
+  // is visible, enabled and unclickable. The row that falls off is always the
+  // last one, which is always "Format <element>...", and over a data table (the
+  // lowest object on a chart) it fell off at the default placement in a
+  // 1280x800 window: Playwright reported "element is visible, enabled and
+  // stable" and then "element is outside of the viewport" on every retry, for
+  // thirty seconds.
+  //
+  // So the estimate only decides where the menu is FIRST laid out; the real
+  // height then decides where it sits. `useLayoutEffect` runs before paint, so
+  // the correction is never seen, and it runs after EVERY render because a
+  // contribution can arrive (useSyncExternalStore) and change the row count.
+  // The width is measured for the same reason — the 200px reserve was a guess
+  // about the longest label in the menu.
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!el || screenX == null || screenY == null) return;
+    const { width, height } = el.getBoundingClientRect();
+    el.style.left = `${Math.max(0, Math.min(screenX, window.innerWidth - width))}px`;
+    el.style.top = `${Math.max(0, Math.min(screenY, window.innerHeight - height))}px`;
+  });
+
   if (!chart || chartId == null || screenX == null || screenY == null) return null;
 
   const spec = chart.spec;
@@ -626,6 +843,35 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
     }
   }
 
+  // THE IN-PLOT FURNITURE'S OWN DELETE. One row, one subject, the subject in
+  // the label — the deviation this menu already records for the shared "Delete
+  // Chart" item, applied consistently: a destructive verb whose subject changes
+  // rung by rung is the ambiguity the recorded subject exists to remove.
+  //
+  // The row is offered only when the patch is real, for the reason
+  // `hideLegendEntryPatch`'s twin is: a menu item that does nothing trains the
+  // reader to skip the menu. (The Delete KEY behaves differently and must: it
+  // consumes the keystroke either way, because a second press falling through
+  // to the destroy arm is how a chart disappears.)
+  const furnitureTarget = furnitureTargetFromSubject(subject);
+  if (furnitureTarget) {
+    const patch = furnitureDeletePatch(spec, furnitureTarget);
+    if (patch) {
+      rows.push({
+        id: `delete:${furnitureTarget.element}`,
+        label: `Delete ${subject.name}`,
+        run: () => {
+          // The rung being deleted stops existing; leaving it selected is the
+          // stale-subject defect the cue rings taught us. Moved BEFORE the
+          // write so `applySpec`'s CHART_UPDATED republishes the rung the
+          // reader has actually been moved to.
+          setSubSelection(chartId, { level: "chart" });
+          applySpec(patch);
+        },
+      });
+    }
+  }
+
   if ((subject.element === "legend" || subject.element === "legendEntry") && spec.legend?.visible) {
     rows.push({
       id: "deleteLegend",
@@ -688,6 +934,17 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
   // Format <element>... — ALWAYS last
   // --------------------------------------------------------------------------
 
+  // CAN THIS POINT BE FORMATTED AT ALL? A per-point override reaches every
+  // built-in mark, but a CUSTOM mark paints in a worker and only the mark itself
+  // can say whether it reads the resolved styles the host ships it. On a mark
+  // that does not, the Format Data Point dialog would take a colour, write it
+  // into the spec, dirty the document — and paint nothing. The verb is therefore
+  // WITHHELD rather than offered and then quietly ignored; Delete Chart, Reset
+  // to Match Style, Change Chart Type and Select Data all still stand, and the
+  // whole SERIES is still formattable from the Design tab.
+  const pointIsFormattable =
+    !isPointSubject(subject) || markOffersPerPointFormatting(spec.mark);
+
   const formatRow: MenuRow = {
     id: "formatElement",
     label: `Format ${subject.element === "legendEntry" ? "Legend" : subject.name}...`,
@@ -712,6 +969,18 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
         });
         return;
       }
+      if (furnitureTarget) {
+        // The retargeting Format PANE, not the chart dialog. The four in-plot
+        // elements have sections there and nowhere else, and the selection has
+        // ALREADY been moved to the right-clicked element by the handler that
+        // opened this menu — so the pane targets what the reader clicked rather
+        // than what was selected before. Routed through the command registry
+        // because that is the same door Ctrl+1 uses; a second call to
+        // `openTaskPane` here would be a second way in that could forget to
+        // republish the selection first.
+        void CommandRegistry.execute(CHART_FORMAT_SELECTION_COMMAND);
+        return;
+      }
       // Everything else formats from the chart dialog's Design tab, which is
       // where title / legend / series appearance actually lives.
       openChartDialog("design");
@@ -720,9 +989,12 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
 
   const visibleContributions = visibleFor(contributions, chartId);
 
-  // Clamp to the viewport using the row count rather than a fixed 96px: the
-  // menu is now between six and ten rows tall depending on the element, and a
-  // constant reserve puts the last items off-screen near the bottom edge.
+  // The FIRST placement, from the row count. It is only a starting point — the
+  // layout effect above re-places the menu from its measured box before the
+  // browser paints, which is what actually guarantees the last row is
+  // clickable. Kept because a first layout at roughly the right place keeps the
+  // correction to a few pixels (and because a hand-built DOM in a test that
+  // never runs effects still gets a sane top).
   const estimatedHeight = 40 + (rows.length + visibleContributions.length + 1) * 26;
 
   return (
@@ -784,18 +1056,20 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
         </div>
       ))}
 
-      <div className={styles.divider} />
+      {pointIsFormattable && <div className={styles.divider} />}
 
-      <div
-        className={styles.item}
-        data-chart-menu-item={formatRow.id}
-        onClick={() => {
-          onClose();
-          formatRow.run();
-        }}
-      >
-        {formatRow.label}
-      </div>
+      {pointIsFormattable && (
+        <div
+          className={styles.item}
+          data-chart-menu-item={formatRow.id}
+          onClick={() => {
+            onClose();
+            formatRow.run();
+          }}
+        >
+          {formatRow.label}
+        </div>
+      )}
     </div>
   );
 }

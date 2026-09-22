@@ -212,11 +212,39 @@ export function ChartMarksDialog(props: DialogProps): React.ReactElement | null 
                     <span style={s.hint}>Leave blank to use the data extent.</span>
                   </div>
                 )}
+                {/*
+                  THE ONE THING ONLY THE AUTHOR KNOWS. The host resolves every
+                  per-point override and ships the answer in `paint.datumStyles`,
+                  but the mark's pixels come back as an opaque bitmap, so nothing
+                  here can check that the body read it. Until this is ticked, the
+                  Format pane and the right-click menu WITHHOLD "format this data
+                  point" for charts using this mark — better a verb that is
+                  absent than one that accepts a colour and paints nothing.
+                */}
+                <div style={s.row}>
+                  <label style={{ ...s.label, display: "flex", alignItems: "center", gap: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={current.honoursDataPointOverrides === true}
+                      onChange={(e) => patch({ honoursDataPointOverrides: e.target.checked })}
+                    />
+                    Honours per-point formatting (reads <code>paint.datumStyles</code>)
+                  </label>
+                  <span style={s.hint}>
+                    Tick this only if your paint body applies <code>paint.datumStyles</code> — a SPARSE
+                    list (one entry per datum the reader formatted), each carrying{" "}
+                    <code>{"{ seriesIndex, categoryIndex, fill, opacity, markerStyle, … }"}</code> in your
+                    own painter-space indices, with <code>null</code> for anything the override does not set.
+                    Read that list, never <code>paint.spec.dataPointOverrides</code>, which is keyed
+                    differently. Leave this clear and Calcula will not offer per-point formatting on this
+                    mark at all.
+                  </span>
+                </div>
                 <div style={s.row}>
                   <label style={s.label}>Paint body (JavaScript — runs sandboxed, paint only)</label>
                   <textarea style={s.code} value={current.body} spellCheck={false} onChange={(e) => patch({ body: e.target.value })} />
                   <span style={s.hint}>
-                    Available: <code>ctx</code> (2D context), <code>paint</code> ({"{ spec, data, layout, theme }"}), <code>b</code> ({"{ x, y, width, height }"}).
+                    Available: <code>ctx</code> (2D context), <code>paint</code> ({"{ spec, data, layout, theme, datumStyles }"}), <code>b</code> ({"{ x, y, width, height }"}).
                     Optionally <code>return {"{ rects: [{ x, y, w, h, seriesIndex, categoryIndex, value }] }"}</code> (plot-local coords) for tooltips/selection.
                   </span>
                 </div>

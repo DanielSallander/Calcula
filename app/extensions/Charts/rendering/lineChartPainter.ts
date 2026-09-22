@@ -7,13 +7,15 @@ import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, LineMarkOpti
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { seriesPaletteIndex } from "../lib/encodingResolver";
-import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { resolveDatumStyle, specHasDatumOverrides } from "../lib/dataPointOverrides";
 import {
+  markerReachesDatum,
   paintDatumMarker,
   recordXAxisTitleRect,
   recordYAxisTitleRect,
   recordYLabelBandRect,
   xAxisTitleBaselineY,
+  xLabelBandHeight,
   Y_AXIS_TITLE_X,
 } from "./markerPainter";
 import { createLinearScale, createScaleFromSpec } from "./scales";
@@ -165,7 +167,15 @@ export function paintLineChart(
     // shared resolver: it translates painter (si,ci) into authoring space and
     // matches the datum's identity key before its index, so an override stays
     // on the point the user formatted even after a filter or a row insert.
-    if (showMarkers) {
+    //
+    // THE LOOP ALSO RUNS WITH MARKERS OFF, for the overridden datums only. A
+    // line series' per-datum shape IS its marker, so with `showMarkers: false`
+    // the reader who formats one point had nowhere for the colour to land — the
+    // same gap the area chart had by default (design doc §6.7 gap 1), reached
+    // here by a setting instead of a default. `markerReachesDatum` grants a
+    // marker to exactly the datums an override reached and to no others, so a
+    // chart with no overrides never enters the loop and is unchanged.
+    if (showMarkers || specHasDatumOverrides(spec)) {
       for (let ci = 0; ci < points.length; ci++) {
         const pt = points[ci];
         const style = resolveDatumStyle(spec, data, si, ci, {
@@ -173,6 +183,7 @@ export function paintLineChart(
           markerStyle: "circle",
           markerSize: markerRadius,
         });
+        if (!markerReachesDatum(showMarkers, style.matchedBy)) continue;
         paintDatumMarker(ctx, pt.x, pt.y, {
           shape: style.markerStyle ?? "circle",
           size: style.markerSize ?? markerRadius,
@@ -429,7 +440,11 @@ function drawLineAxes(
     ctx.font = `${theme.axisTitleFontSize}px ${theme.fontFamily}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    const baselineY = xAxisTitleBaselineY(plotArea, spec.xAxis.showLabels);
+    const baselineY = xAxisTitleBaselineY(
+      plotArea,
+      xLabelBandHeight(spec, xAxis.ticks.map((t) => t.label), theme),
+      theme,
+    );
     ctx.fillText(spec.xAxis.title, plotArea.x + plotArea.width / 2, baselineY);
     if (layout) {
       recordXAxisTitleRect(

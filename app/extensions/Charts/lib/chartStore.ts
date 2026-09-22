@@ -349,6 +349,21 @@ function restoreInPlace(target: ChartDefinition, source: ChartDefinition): void 
  *   it would be the original lie in a new costume.
  */
 function rollbackToPersisted(chartId: string): "reverted" | "removed" {
+  // THE PREVIEW'S RESTORE TOKEN IS NOW A LIE, so it is dropped BEFORE the
+  // rollback rather than restored by it.
+  //
+  // `activePreview.original` is the spec the preview merged onto — the edit the
+  // backend has just REFUSED. Leaving it standing meant the next mouse-out put
+  // the refused edit straight back on the canvas, seconds after a modal said
+  // "Nothing was written to the workbook, so what you see now matches what is
+  // stored", and the next real edit deep-merged onto it and persisted it. The
+  // token cannot be spent (`restoreChartSpecPreview` would write the refused
+  // spec back) and it cannot be kept, so it is discarded; the chart is about to
+  // be overwritten with the last CONFIRMED version, which is the only state a
+  // restore could honestly produce.
+  if (activePreview !== null && activePreview.chartId === chartId) {
+    activePreview = null;
+  }
   const snapshot = persistedSnapshots.get(chartId);
   const index = charts.findIndex((c) => c.chartId === chartId);
   if (!snapshot) {

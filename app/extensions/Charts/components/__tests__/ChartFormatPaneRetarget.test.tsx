@@ -12,10 +12,12 @@
 //          is faithful for what is under test. The real `deepMergeSpec`
 //          (lib/chartStore.ts) merges nested plain objects field-by-field and
 //          REPLACES ARRAYS WHOLESALE. Every patch this pane builds is either an
-//          array (`dataPointOverrides`, `series`) or a fully rebuilt object
-//          (`xAxis`, `legend`, `config`), so an assign and a deep merge agree
-//          on all of them — and the array half is the rule the hazard case is
-//          about, reproduced exactly.
+//          array (`dataPointOverrides`) or a fully rebuilt object (`xAxis`,
+//          `legend`, `config`, and `seriesColors` — which carries EVERY kept
+//          key plus an explicit `undefined` for a cleared one precisely so
+//          that a merge and a replace produce the same record), so an assign
+//          and a deep merge agree on all of them — and the array half is the
+//          rule the hazard case is about, reproduced exactly.
 //
 //          THE CONCURRENCY CASE IS THE ONE THAT CAUGHT A REAL DEFECT CLASS. A
 //          pane that caches `spec.dataPointOverrides` at render and writes its
@@ -405,14 +407,16 @@ describe("a concurrent edit inside the debounce window", () => {
     await mount();
 
     // The other writer colours the SECOND series while the pane is showing the
-    // first. `series` is an array, so a cached copy would replace it wholesale.
-    store!.spec = {
-      ...store!.spec,
-      series: [store!.spec.series[0], { ...store!.spec.series[1], color: "#00ff00" }],
-    };
+    // first. OB-1 made `seriesColors` the ONE spelling, and the pane rebuilds
+    // that record wholesale from the freshly read spec — a copy cached at
+    // render time would drop the concurrent key on the way back out.
+    store!.spec = { ...store!.spec, seriesColors: { Costs: "#00ff00" } };
 
     await change(field<HTMLInputElement>("Colour"), "#ff0000");
 
-    expect(store?.spec.series.map((s) => s.color)).toEqual(["#ff0000", "#00ff00"]);
+    expect(store?.spec.seriesColors).toEqual({ Costs: "#00ff00", Sales: "#ff0000" });
+    // And the index-keyed spelling is left alone: no formatting surface writes
+    // it any more, so nothing the reader does here can out-rank itself.
+    expect(store?.spec.series.map((s) => s.color)).toEqual([null, null]);
   });
 });

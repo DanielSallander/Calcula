@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 126,
+  "nextId": 128,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4638,6 +4638,80 @@
         ]
       },
       "notes": "Documented in docs/design/chart-interaction.md section 6.2, which states the final Delete precedence order. The claim is deliberately asked TWICE -- once at each listener's door and again inside `chartOwnsKeystroke` -- because the census in app/src/core/lib/globalInputListeners.ts requires a claim-guarded file to consult a claim predicate where its listener lives, and globalInputListeners.test.ts enforces it."
+    },
+    {
+      "id": "BUG-0126",
+      "status": "fixed",
+      "discovered": "2026-09-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Owner's live test of the chart-interaction waves, 2026-09-22"
+      },
+      "violation": {
+        "oracleId": "chart-series-colour-unreachable-after-a-per-point-override",
+        "message": "The owner, verbatim: \"when I select an individual data point and give it a color I cannot select a color for the entire series after that.\" Two independent causes, both confirmed in code. (1) THE LADDER HAS NO WAY BACK UP. `advanceSelection` (app/extensions/Charts/handlers/selectionHandler.ts:363) has no arm from a data point to its OWN series: at `level: \"dataPoint\"` a click on a datum of the same series selects THAT datum and a click on another series selects that other series, so every click inside the series keeps the reader on a point. The Format pane shows the Data Point sections and \"Series fill\" is not on screen at all. The routes out were Escape (advertised nowhere), a trip to the chart's outer margin and back, or selecting a different series first. (2) ON TEN MARKS THE CONTROL WAS A LIE ANYWAY. `SeriesSections` refused a series swatch only for `mark === \"pie\" || mark === \"donut\"` (app/extensions/Charts/components/ChartFormatPane.tsx:1416). Eight other built-in marks -- histogram, pareto, boxPlot, funnel, treemap, sunburst, waterfall, stock -- resolve their fill from the palette or from their own up/down colours and never read `data.series[i].color`, which is the only channel `spec.seriesColors` has to a pixel. On a histogram the swatch was live, the write reached `spec.seriesColors`, `applySeriesColorOverrides` copied it onto the parsed data, and `histogramChartPainter` painted `getSeriesColor(spec.palette, 0, null)`. Nothing changed and the document was dirtied.",
+        "severity": "high"
+      },
+      "whyNobodyNoticed": "Each half hides the other. On a bar chart the swatch works, so the defect reads as \"I cannot get back to the series\" -- a navigation complaint that sounds like a preference. On a histogram the reader who does get back to the series finds a control that reports success, so it reads as \"the colour did not take\" -- a rendering complaint. Neither is testable from the rung the unit tests start on: every Format-pane test published the selection it wanted directly into `@api/chartSelection`, which is the one thing a reader cannot do, and every series-colour test asserted the SPEC changed rather than the CANVAS.",
+      "repro": {
+        "kind": "unit",
+        "description": "app: `npx vitest run extensions/Charts/components/__tests__/ChartFormatPaneStepUp.test.tsx extensions/Charts/rendering/__tests__/seriesColorCoverage.test.ts`. Manually: insert a bar chart, click a bar twice to reach one datum, colour it from the Format pane, then try to colour the whole series -- pre-fix no click inside that series leaves the data-point rung. For the second half, insert a HISTOGRAM, click a bar twice, set the series Colour: pre-fix the swatch accepts it, the title bar shows the document as modified, and no bar changes."
+      },
+      "triage": {
+        "verdict": "app",
+        "confidence": "high",
+        "rootCauseHypothesis": "A selection ladder that only descends, and a refusal written as a two-mark comparison instead of as a question about what the painter reads."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "(1) A SECOND DOOR, NOT A DIFFERENT STAIRCASE. The click ladder stays Excel's; the Format pane grows a \"Select the whole series\" row while a single datum is selected (`StepUpToSeriesRow` / `selectWholeSeries`, app/extensions/Charts/components/ChartFormatPane.tsx), which names the series it will select and moves the sub-selection one rung up. It writes nothing -- no spec merge, no save, no dirty flag -- and repaints because the selection chrome is drawn from the sub-selection. It is the one-rung version of Excel's element picker at the top of its own Format pane. (2) `markReadsSeriesColor` (app/extensions/Charts/lib/chartDataReader.ts) replaces the two-mark comparison, and the pane refuses with a sentence per family that says where the colour actually comes from and what to do instead. `rendering/__tests__/seriesColorCoverage.test.ts` paints every built-in mark with and without a manual series colour and asserts the refusal list is EXACTLY the set whose call stream does not move -- in both directions, so a painter that starts or stops reading it fails the build.",
+        "filesChanged": [
+          "app/extensions/Charts/components/ChartFormatPane.tsx",
+          "app/extensions/Charts/lib/chartDataReader.ts",
+          "app/extensions/Charts/components/__tests__/ChartFormatPaneStepUp.test.tsx",
+          "app/extensions/Charts/rendering/__tests__/seriesColorCoverage.test.ts"
+        ]
+      },
+      "notes": "Documented in docs/design/chart-interaction.md section 6.13. The refusal keeps the asymmetry `markOffersPerPointFormatting` uses: an UNREGISTERED mark is offered the swatch rather than refused it, because a mark that never registered cannot be known to decline and a false refusal told a reader that a bar chart had no series fill whenever the registry was not yet populated."
+    },
+    {
+      "id": "BUG-0127",
+      "status": "fixed",
+      "discovered": "2026-09-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Owner's live test of the chart-interaction waves, 2026-09-22 (screenshot attached to the report)"
+      },
+      "violation": {
+        "oracleId": "chart-data-table-overlaps-the-category-axis-labels",
+        "message": "\"When I add a data table to be shown in the chart it overlaps the x axis labels.\" The band below a cartesian plot was computed in TWO places: `computeCartesianLayout` reserved `labelFontSize + 8` for the tick labels and `axisTitleFontSize + 6` for the axis title, knowing nothing about the table, and `dispatchComputeLayout` folded the table's height into `margin.bottom` AFTERWARDS. The band was big enough overall and nothing re-apportioned it, so the tick labels and the axis title kept their original offsets and were painted INSIDE the table -- the same four category strings drawn twice, large over small, with the axis title through the table's series row.",
+        "severity": "high"
+      },
+      "whyNobodyNoticed": "Both halves were individually correct and individually tested: the layout reserved the right space for the labels, and the dispatcher reserved the right space for the table. Nothing owned the ORDER of the band, so no test could be written against it -- and the data table is not on by default, so every other chart test ran down the path where the two agree.",
+      "repro": {
+        "kind": "unit",
+        "description": "app: `npx vitest run extensions/Charts/rendering/__tests__/dataTableLayout.test.ts extensions/Charts/rendering/__tests__/dataTableDerivedViews.test.ts extensions/Charts/rendering/__tests__/axisTitleBandFonts.test.ts`. Manually: insert a bar chart with an x-axis title, turn the data table on in the chart dialog's Design tab -- pre-fix the category labels are painted over the table's header row."
+      },
+      "triage": {
+        "verdict": "app",
+        "confidence": "high",
+        "rootCauseHypothesis": "One band, two owners. Every later defect in the same family had the same shape: a pixel measurement derived in one place and consumed in another that did not know the first had moved."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "THE BAND HAS ONE OWNER. `computeCartesianLayout` / `computeRadialLayout` -- the two functions every registered mark's `computeLayout` bottoms out in -- reserve it in the order [plot] [x tick labels] [data table] [x-axis title], and the dispatcher's fold is gone. The tick band is ZERO where the categories are on X (the table's header row IS the labelling, as in Excel) and kept for horizontalBar/scatter/bubble, whose x labels are values the header does not repeat. `specForMarkPaint` takes the labels and the title away from the mark painters in ONE place. Three follow-ups closed in the verification round: the title's drop is now DERIVED from the two theme font sizes instead of the literals 30/16/26, so it clears the labels at any size; the table is painted from the mark's own view (`chartDataTableView`), so a histogram's table transcribes its BINS and a Pareto's its SORTED categories rather than overrunning the reserved band and mislabelling every column; and the reserved band for those two marks is measured from the same view.",
+        "filesChanged": [
+          "app/extensions/Charts/rendering/chartPainterUtils.ts",
+          "app/extensions/Charts/rendering/dataTablePainter.ts",
+          "app/extensions/Charts/rendering/chartDispatch.ts",
+          "app/extensions/Charts/lib/dataTableView.ts",
+          "app/extensions/Charts/rendering/histogramChartPainter.ts",
+          "app/extensions/Charts/rendering/paretoChartPainter.ts"
+        ]
+      },
+      "notes": "Documented in docs/design/chart-interaction.md sections 6.11 (the band) and 6.13 (the font-size and derived-view follow-ups)."
     }
   ]
 }

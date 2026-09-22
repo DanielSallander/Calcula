@@ -499,12 +499,27 @@ function interfaceProperties(src: string, name: string): string[] {
   return props;
 }
 
-/** Nested definitions that must mirror a types.ts interface 1:1. */
+/**
+ * Nested definitions that must mirror a types.ts interface 1:1.
+ *
+ * THE LIST IS THE GUARD'S REACH, so a type that grows a field while nobody is
+ * looking at it is exactly the type that belongs here. `DataLabelSpec`,
+ * `ErrorBarOptions` and `DataLabelPointRef` were added after the furniture wave
+ * declared `DataLabelSpec.hiddenPoints` and `ErrorBarOptions.seriesFilter`:
+ * both WERE mirrored into the schema by hand, correctly, and nothing would have
+ * caught it if they had not been. A spec field missing from the schema is
+ * REFUSED at the broker gate (`validateChartSpec`) and red-underlined in the
+ * Monaco editor, so the failure is a script that cannot set a field the product
+ * supports.
+ */
 const NESTED_MIRRORS: Array<{ definition: string; interfaceName: string }> = [
   { definition: "DataPointOverride", interfaceName: "DataPointOverride" },
   { definition: "LegendSpec", interfaceName: "LegendSpec" },
   { definition: "PatternFill", interfaceName: "PatternFill" },
   { definition: "GradientFill", interfaceName: "GradientFill" },
+  { definition: "DataLabelSpec", interfaceName: "DataLabelSpec" },
+  { definition: "DataLabelPointRef", interfaceName: "DataLabelPointRef" },
+  { definition: "ErrorBarOptions", interfaceName: "ErrorBarOptions" },
 ];
 
 describe("chartSpecJsonSchema nested drift guard", () => {
@@ -534,11 +549,30 @@ describe("chartSpecJsonSchema nested drift guard", () => {
     });
   }
 
-  it("every new DataPointOverride property is documented in the reference", () => {
+  it("every mirrored definition is documented in the reference, property by property", () => {
+    // THE THIRD CONSUMER. The schema feeds the broker gate, the Monaco editor
+    // AND this generated reference — the one a script author (or a model) reads
+    // to find out what a field is called. A field that exists in two of the
+    // three is a field the reader cannot discover.
     const ref = generateSpecReference();
-    expect(ref).toContain("## DataPointOverride");
-    for (const prop of Object.keys(DEFS.DataPointOverride.properties)) {
-      expect(ref, `reference table is missing ${prop}`).toContain(`| ${prop} |`);
+    for (const { definition } of NESTED_MIRRORS) {
+      expect(ref, `reference has no ## ${definition} section`).toContain(`## ${definition}`);
+      for (const prop of Object.keys(DEFS[definition].properties)) {
+        expect(ref, `${definition} reference table is missing ${prop}`).toContain(`| ${prop} |`);
+      }
+    }
+  });
+
+  it("documents each mirrored type EXACTLY ONCE", () => {
+    // `## DataLabelSpec` was briefly emitted twice — the second table predated
+    // `hiddenPoints` and did not list it — so the same type was documented in
+    // two places and one of them was wrong. The property loop above cannot see
+    // that: `toContain` is satisfied by the good table while the stale one sits
+    // below it.
+    const ref = generateSpecReference();
+    for (const { definition } of NESTED_MIRRORS) {
+      const count = ref.split(`## ${definition}`).length - 1;
+      expect(count, `## ${definition} appears ${count} times in the reference`).toBe(1);
     }
   });
 

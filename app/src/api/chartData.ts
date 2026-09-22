@@ -219,6 +219,17 @@ export interface ChartRightClickTarget {
    * the painter pair, which is identical whenever no filter is active.
    */
   authoring?: { seriesIndex: number; pointIndex: number };
+  /**
+   * Which of the series' trendlines was under the cursor — an index into
+   * `spec.trendlines`, NOT into the series list. Set only for
+   * `element: "trendline"`.
+   *
+   * It is a THIRD index rather than a reuse of `pointIndex` because it means
+   * something else entirely: one series can carry a linear fit and a moving
+   * average at once, so "Delete Trendline" on series 2 is ambiguous without it
+   * and would remove whichever was written first.
+   */
+  trendlineIndex?: number;
   /** Resolved series name, as drawn. */
   seriesName?: string;
   /** Resolved category label, as drawn. */

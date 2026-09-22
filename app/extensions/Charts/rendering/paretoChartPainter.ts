@@ -100,8 +100,14 @@ export function computeParetoLayout(
   data: ParsedChartData,
   theme: ChartRenderTheme,
 ): ChartLayout {
-  // Use cartesian layout but add extra right margin for secondary axis
-  const layout = computeCartesianLayout(width, height, spec, data, theme);
+  // Use cartesian layout but add extra right margin for secondary axis.
+  //
+  // The data table shows the SORTED, single-series view (`chartDataTableView`),
+  // so the band reserved for it is measured from that view too — a Pareto over
+  // three source series would otherwise reserve four table rows for a grid that
+  // paints two.
+  const tableData = paretoResolveView(data);
+  const layout = computeCartesianLayout(width, height, spec, data, theme, tableData);
 
   // Add right margin for the percentage axis
   const extraRight = 50;
@@ -115,7 +121,7 @@ export function computeParetoLayout(
   // function of it — a right-hand legend in particular would still be anchored
   // 50px into the percentage axis. Reflow BEFORE anything paints (a reflow after
   // paint would throw away the painters' measured rects).
-  reflowChartElements(layout, spec, data, theme);
+  reflowChartElements(layout, spec, data, theme, tableData);
 
   return layout;
 }

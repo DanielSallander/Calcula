@@ -30,14 +30,44 @@ export interface ChartMarkScript {
   label: string;
   /** Axis family (drives axis classification). */
   layoutFamily: MarkLayoutFamily;
-  /** JS body. Has `ctx` (OffscreenCanvas 2D), `paint` ({spec,data,layout,theme}),
-   *  and `b` ({x:0,y:0,width,height} local plot bounds). May `return { rects:[...] }`
-   *  (local-coord hit geometry) for per-datum tooltips/selection. */
+  /** JS body. Has `ctx` (OffscreenCanvas 2D), `paint`
+   *  ({spec,data,layout,theme,datumStyles}), and `b` ({x:0,y:0,width,height}
+   *  local plot bounds). May `return { rects:[...] }` (local-coord hit geometry)
+   *  for per-datum tooltips/selection. See {@link honoursDataPointOverrides} for
+   *  what `paint.datumStyles` is and why it is not `spec.dataPointOverrides`. */
   body: string;
   description?: string;
   /** Optional explicit Y domain `[min,max]` so the host-drawn Y axis aligns with
    *  the values the mark maps into the plot (cartesian only). */
   yDomain?: [number, number];
+  /**
+   * THE MARK PROMISES TO HONOUR PER-POINT FORMATTING.
+   *
+   * `paint.datumStyles` is a SPARSE array of the datums a `dataPointOverrides`
+   * entry actually reaches, already resolved by the host and indexed in the
+   * mark's OWN (painter-space) coordinates:
+   *
+   * ```js
+   * for (const d of paint.datumStyles) {
+   *   // d.seriesIndex / d.categoryIndex are the indices you are looping over
+   *   // d.fill / d.opacity / d.borderColor / d.borderWidth / d.markerStyle ...
+   *   //   are null when the user's override says nothing about them
+   * }
+   * ```
+   *
+   * READ THAT, NEVER `paint.spec.dataPointOverrides`. The raw array is keyed in
+   * AUTHORING space (pre-filter) and matched by identity KEY before index, with
+   * a tie-break for duplicated category labels and an `invertIfNegative` rule.
+   * Re-implementing that here would be a third copy of it, in the one place
+   * nothing in the product can test.
+   *
+   * Set this to `true` only when the body actually paints those styles. The
+   * host clips and blits an opaque `ImageBitmap`, so it cannot check the claim
+   * — but the flag is what the Format pane asks before it offers "format this
+   * single data point", and a mark that ignores the payload while claiming it
+   * gives the reader a setting that silently does nothing.
+   */
+  honoursDataPointOverrides?: boolean;
 }
 
 /** A library of sandboxed marks, persisted with the workbook. */
@@ -51,7 +81,12 @@ export interface ChartMarkLibrary {
 export type SandboxMarkRegistrar = (
   scriptId: string,
   markId: string,
-  meta: { label: string; layoutFamily: MarkLayoutFamily; yDomain?: [number, number] },
+  meta: {
+    label: string;
+    layoutFamily: MarkLayoutFamily;
+    yDomain?: [number, number];
+    honoursDataPointOverrides?: boolean;
+  },
 ) => void;
 
 const PERSIST_SCRIPT_ID = "__calcula_chart_marks__";
@@ -173,7 +208,16 @@ async function rawInstall(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar
     // hostMountScript resolves AFTER the worker ran setup() (which called
     // render.markRenderer -> hookRegistered), so the markRenderer hook is declared
     // and findWorkerForInstance("chartMark", scriptId) will match.
-    registrar(scriptId, markId, { label: m.label?.trim() || markId, layoutFamily: m.layoutFamily, yDomain: m.yDomain });
+    // `honoursDataPointOverrides` travels VERBATIM from the authored record to
+    // the registry meta: it is the mark's own declaration, and the host has no
+    // basis to infer it (the pixels are opaque) or to default it to true (that
+    // would re-open the silent no-op the flag exists to close).
+    registrar(scriptId, markId, {
+      label: m.label?.trim() || markId,
+      layoutFamily: m.layoutFamily,
+      yDomain: m.yDomain,
+      honoursDataPointOverrides: m.honoursDataPointOverrides,
+    });
     installed.push({ markId, scriptId });
   }
 }

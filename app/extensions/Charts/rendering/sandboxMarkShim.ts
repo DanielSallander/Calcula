@@ -8,13 +8,19 @@
 //          plot pixels and never reaches the real canvas/DOM or any ambient-world
 //          capability. The mark may also return per-datum hit geometry (sanitized
 //          host-side), which the shim offsets into chart space for tooltips/select.
+//          The paint payload also carries `datumStyles` — the host's OWN resolved
+//          per-point overrides, in the mark's own painter-space indices — because
+//          the host cannot apply an override to opaque worker pixels and must not
+//          make a mark re-derive which datum an override names.
 // CONTEXT: dispatchPaint stays a single synchronous chokepoint; the sandboxed-ness
 //          is invisible to it because the registered paint IS this shim. The 18
 //          built-in marks are untouched (they keep painting synchronously).
 
 import { getChartMarkBitmap, getChartMarkGeometry } from "@api";
+import type { ChartMarkPaintContext } from "@api/chartMarks";
 import type { ChartMarkMeta, ChartMarkDefinition } from "./markRegistry";
 import { registerChartMark } from "./markRegistry";
+import { resolvedDatumStylesForMark } from "../lib/dataPointOverrides";
 import { computeCartesianLayout, computeRadialLayout, drawCartesianChrome, drawRadialChrome } from "./chartPainterUtils";
 import type { ChartSpec, ChartLayout, ParsedChartData, HitGeometry, BarRect } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
@@ -64,6 +70,20 @@ export function buildSandboxMarkDefinition(
   return {
     meta: { ...meta, builtin: false, sandboxed: true },
 
+    // NOTE ON PER-POINT OVERRIDES (design doc §6.7, gap 2). The host cannot
+    // apply `spec.dataPointOverrides` to an opaque worker bitmap, so the mark
+    // has to do it — but it must not RE-DERIVE which datum an override names.
+    // The paint payload therefore carries `datumStyles`, the host's own
+    // resolver's answer in the mark's own (painter-space) indices. Whether the
+    // mark then USES it is a promise it declares
+    // (`meta.honoursDataPointOverrides`), because the pixels are opaque and a
+    // promise that cannot be checked is at least one that can be ASKED about —
+    // see `chartMarkHonoursDataPointOverrides` in @api/chartMarks, which is
+    // what a per-point formatting UI must gate on. Shipping the payload to a
+    // mark that did not declare costs one empty array on a chart with no
+    // overrides, so it is shipped unconditionally: a mark that starts honouring
+    // them needs a flag change, not a host change.
+
     paint(ctx, data: ParsedChartData, spec: ChartSpec, layout: ChartLayout, theme: ChartRenderTheme): void {
       // Host owns the FULL chrome (background + axes/grid/legend/title, or a radial
       // frame) so the chart is complete + themed even while the worker bitmap is in
@@ -84,7 +104,19 @@ export function buildSandboxMarkDefinition(
       // The worker paints in LOCAL coords (origin 0,0, plot-sized); ship it the
       // structured-clone paint context. Returns the cached bitmap, or null (and
       // single-flight-requests one) on a miss — then paint nothing this frame.
-      const bmp = getChartMarkBitmap(scriptId, key, { spec, data, layout, theme }, plotW, plotH, dpr);
+      //
+      // `datumStyles` needs NO extra cache-key input: it is a pure function of
+      // (spec, data), and `key` already hashes both. A spec whose overrides
+      // changed is a different key, so the bitmap is re-rendered with the new
+      // styles rather than served stale.
+      const paintContext: ChartMarkPaintContext = {
+        spec,
+        data,
+        layout,
+        theme,
+        datumStyles: resolvedDatumStylesForMark(spec, data),
+      };
+      const bmp = getChartMarkBitmap(scriptId, key, paintContext, plotW, plotH, dpr);
       if (!bmp) return;
 
       // Clip to the plot rect so a buggy/malicious bitmap can't overpaint chrome.
