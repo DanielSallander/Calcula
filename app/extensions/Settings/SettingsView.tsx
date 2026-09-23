@@ -1,8 +1,23 @@
 //! FILENAME: app/extensions/Settings/SettingsView.tsx
 // PURPOSE: Settings panel for the Activity Bar
 // CONTEXT: Contains user preferences like file explorer open behavior
+//
+//          Calcula Clusters: the page switcher is the @api SegmentedTabs strip
+//          (role="tablist", arrow keys, one tab stop) and section headers use
+//          the one panel header recipe — 12px/600, sentence case — shared with
+//          sidebar sections and Group headers. Chrome paints with LT tokens.
+//
+//          The four tab labels are longer than a 320px panel is wide, so the
+//          strip keeps each tab at its natural width and SCROLLS sideways when
+//          the panel is narrow (it fills the width when there is room). The
+//          selected tab is scrolled into view, which matters for the deep link
+//          to Script Security, the last tab.
+//
+//          E2E CONTRACT: each tab is a <button> whose text is exactly its label
+//          (appearance-skins.spec finds `button` with text /^Appearance$/).
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { css } from "@emotion/css";
 import type { ActivityViewProps } from "@api/uiTypes";
 import {
   getLocaleSettings,
@@ -11,16 +26,32 @@ import {
   type LocaleSettings,
   type SupportedLocaleEntry,
 } from "@api/locale";
+import {
+  Dropdown,
+  FONT_FAMILY,
+  FONT_MONO,
+  HEADER_FONT_SIZE,
+  LT,
+  SegmentedTabs,
+  type DropdownOption,
+  type SegmentedTab,
+} from "@api/layout";
 import { KeybindingsPage } from "./components/KeybindingsPage";
 import { AppearancePage } from "./components/AppearancePage";
 import { ScriptSecurityPage } from "./components/ScriptSecurityPage";
-
-const h = React.createElement;
 
 export type SettingsTab = "general" | "appearance" | "keybindings" | "scriptSecurity";
 
 /** Window event that selects a Settings tab (detail = SettingsTab). */
 export const SETTINGS_SHOW_TAB_EVENT = "calcula:settings-show-tab";
+
+/** The tabs, in strip order. Labels are also the E2E handles (see header). */
+const SETTINGS_TABS: ReadonlyArray<SegmentedTab & { id: SettingsTab }> = [
+  { id: "general", label: "General" },
+  { id: "appearance", label: "Appearance" },
+  { id: "keybindings", label: "Keyboard Shortcuts" },
+  { id: "scriptSecurity", label: "Script Security" },
+];
 
 // ============================================================================
 // Settings Storage
@@ -37,6 +68,148 @@ import {
 export { getSettings, type FileOpenMode };
 
 // ============================================================================
+// Styles
+// ============================================================================
+
+const s = {
+  container: css`
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    font-family: ${FONT_FAMILY};
+    background-color: ${LT.panel};
+    color: ${LT.text};
+  `,
+  /** Scroll host for the strip: sideways only, thin, no layout jump. */
+  tabBar: css`
+    flex-shrink: 0;
+    padding: 10px 12px 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    border-bottom: 1px solid ${LT.controlDivider};
+  `,
+  /** Natural-width tabs that still fill the strip when it is wider. The
+   *  primitive fills the panel with inline styles (width 100%, flex 1 per
+   *  tab), which would squeeze "Keyboard Shortcuts" into a third of its text;
+   *  only !important out-ranks an inline style. */
+  tabStrip: css`
+    && {
+      width: max-content !important;
+      min-width: 100%;
+    }
+
+    && > [role="tab"] {
+      flex: 1 0 auto !important;
+    }
+  `,
+  generalContent: css`
+    flex: 1;
+    overflow: auto;
+    padding: 14px 16px;
+  `,
+  section: css`
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 22px;
+  `,
+  /** The one panel header recipe: 12px/600, sentence case. */
+  sectionTitle: css`
+    margin: 0;
+    font-size: ${HEADER_FONT_SIZE}px;
+    font-weight: 600;
+    line-height: 16px;
+    color: ${LT.text};
+  `,
+  setting: css`
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  `,
+  settingLabel: css`
+    font-size: 12px;
+    font-weight: 500;
+    color: ${LT.text};
+  `,
+  radioGroup: css`
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-left: 2px;
+  `,
+  radioLabel: css`
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: ${LT.text};
+    cursor: pointer;
+  `,
+  radioInput: css`
+    margin: 0;
+    cursor: pointer;
+    accent-color: ${LT.stateAccent};
+  `,
+  settingHint: css`
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.5;
+    color: ${LT.textSecondary};
+  `,
+  localePreview: css`
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: ${LT.radiusControl};
+    background: ${LT.surface};
+    box-shadow: inset 0 0 0 1px ${LT.controlBorder};
+  `,
+  previewRow: css`
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+  `,
+  previewLabel: css`
+    color: ${LT.textSecondary};
+    font-weight: 500;
+  `,
+  previewValue: css`
+    color: ${LT.text};
+    font-family: ${FONT_MONO};
+    text-align: right;
+  `,
+};
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+function describeDecimal(sep: string): string {
+  if (sep === ".") return ". (period)";
+  if (sep === ",") return ", (comma)";
+  return sep;
+}
+
+function describeThousands(sep: string): string {
+  if (sep === ",") return ", (comma)";
+  if (sep === ".") return ". (period)";
+  if (sep === " ") return "(space)";
+  if (sep === "'") return "' (apostrophe)";
+  return sep;
+}
+
+function describeList(sep: string): string {
+  if (sep === ",") return ", (comma)  e.g. SUM(A1,B1)";
+  if (sep === ";") return "; (semicolon)  e.g. SUM(A1;B1)";
+  return sep;
+}
+
+// ============================================================================
 // Settings View Component
 // ============================================================================
 
@@ -48,6 +221,7 @@ export function SettingsView(_props: ActivityViewProps): React.ReactElement {
   const [localeOverride, setLocaleOverride] = useState<string>(
     localStorage.getItem("calcula.locale") || "system"
   );
+  const tabBarRef = useRef<HTMLDivElement>(null);
 
   // Listen for external changes
   useEffect(() => {
@@ -68,6 +242,12 @@ export function SettingsView(_props: ActivityViewProps): React.ReactElement {
     return () => window.removeEventListener(SETTINGS_SHOW_TAB_EVENT, handler);
   }, []);
 
+  // A narrow panel scrolls the strip; keep the selected tab visible.
+  useEffect(() => {
+    const selected = tabBarRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+    selected?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [activeTab]);
+
   // Load locale settings
   useEffect(() => {
     getLocaleSettings().then(setLocaleState);
@@ -80,269 +260,136 @@ export function SettingsView(_props: ActivityViewProps): React.ReactElement {
     saveSettings(next);
   }, [settings]);
 
-  const handleLocaleChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
-    const value = (e.target as HTMLSelectElement).value;
+  const handleLocaleChange = useCallback((value: string) => {
     setLocaleOverride(value);
     setLocale(value).then(setLocaleState);
   }, []);
 
-  // Tab bar + content
-  return h("div", { style: styles.container },
-    // Tab bar
-    h("div", { style: styles.tabBar },
-      h("button", {
-        style: activeTab === "general" ? { ...styles.tab, ...styles.tabActive } : styles.tab,
-        onClick: () => setActiveTab("general"),
-      }, "General"),
-      h("button", {
-        style: activeTab === "appearance" ? { ...styles.tab, ...styles.tabActive } : styles.tab,
-        onClick: () => setActiveTab("appearance"),
-      }, "Appearance"),
-      h("button", {
-        style: activeTab === "keybindings" ? { ...styles.tab, ...styles.tabActive } : styles.tab,
-        onClick: () => setActiveTab("keybindings"),
-      }, "Keyboard Shortcuts"),
-      h("button", {
-        style: activeTab === "scriptSecurity" ? { ...styles.tab, ...styles.tabActive } : styles.tab,
-        onClick: () => setActiveTab("scriptSecurity"),
-      }, "Script Security"),
-    ),
+  const localeOptions: DropdownOption<string>[] = [
+    { value: "system", label: "System default" },
+    ...supportedLocales.map((l) => ({ value: l.localeId, label: l.displayName })),
+  ];
 
-    // Appearance tab
-    activeTab === "appearance" && h(AppearancePage, null),
+  return (
+    <div className={s.container}>
+      {/* Tab bar */}
+      <div ref={tabBarRef} className={s.tabBar}>
+        <SegmentedTabs
+          tabs={SETTINGS_TABS}
+          value={activeTab}
+          onChange={(id) => setActiveTab(id as SettingsTab)}
+          ariaLabel="Settings pages"
+          testIdPrefix="settings-tab-"
+          className={s.tabStrip}
+        />
+      </div>
 
-    // Keybindings tab
-    activeTab === "keybindings" && h(KeybindingsPage, null),
+      {/* Appearance tab */}
+      {activeTab === "appearance" && <AppearancePage />}
 
-    // Script Security tab (the destination every script prompt points at)
-    activeTab === "scriptSecurity" && h(ScriptSecurityPage, null),
+      {/* Keybindings tab */}
+      {activeTab === "keybindings" && <KeybindingsPage />}
 
-    // General tab
-    activeTab === "general" && h("div", { style: styles.generalContent },
-    // Section: Regional Settings
-    h("div", { style: styles.section },
-      h("div", { style: styles.sectionTitle }, "Regional Settings"),
+      {/* Script Security tab (the destination every script prompt points at) */}
+      {activeTab === "scriptSecurity" && <ScriptSecurityPage />}
 
-      h("div", { style: styles.setting },
-        h("div", { style: styles.settingLabel }, "Locale"),
-        h("select", {
-          style: styles.select,
-          value: localeOverride,
-          onChange: handleLocaleChange,
-        },
-          h("option", { value: "system" }, "System default"),
-          ...supportedLocales.map(l =>
-            h("option", { key: l.localeId, value: l.localeId }, l.displayName)
-          ),
-        ),
-        h("div", { style: styles.settingHint },
-          "Controls decimal separators, formula argument separators, date formats, and currency display."
-        ),
-      ),
+      {/* General tab */}
+      {activeTab === "general" && (
+        <div className={s.generalContent} data-testid="settings-general">
+          {/* Section: Regional settings */}
+          <section className={s.section} aria-labelledby="settings-regional-heading">
+            <h3 id="settings-regional-heading" className={s.sectionTitle}>
+              Regional settings
+            </h3>
 
-      // Locale preview
-      locale && h("div", { style: styles.localePreview },
-        h("div", { style: styles.previewRow },
-          h("span", { style: styles.previewLabel }, "Decimal separator:"),
-          h("span", { style: styles.previewValue },
-            locale.decimalSeparator === "." ? '. (period)' :
-            locale.decimalSeparator === "," ? ', (comma)' : locale.decimalSeparator
-          ),
-        ),
-        h("div", { style: styles.previewRow },
-          h("span", { style: styles.previewLabel }, "Thousands separator:"),
-          h("span", { style: styles.previewValue },
-            locale.thousandsSeparator === "," ? ', (comma)' :
-            locale.thousandsSeparator === "." ? '. (period)' :
-            locale.thousandsSeparator === "\u00A0" ? '(space)' :
-            locale.thousandsSeparator === "'" ? "' (apostrophe)" :
-            locale.thousandsSeparator
-          ),
-        ),
-        h("div", { style: styles.previewRow },
-          h("span", { style: styles.previewLabel }, "Formula separator:"),
-          h("span", { style: styles.previewValue },
-            locale.listSeparator === "," ? ', (comma)  e.g. SUM(A1,B1)' :
-            locale.listSeparator === ";" ? '; (semicolon)  e.g. SUM(A1;B1)' :
-            locale.listSeparator
-          ),
-        ),
-        h("div", { style: styles.previewRow },
-          h("span", { style: styles.previewLabel }, "Date format:"),
-          h("span", { style: styles.previewValue }, locale.dateFormat),
-        ),
-        h("div", { style: styles.previewRow },
-          h("span", { style: styles.previewLabel }, "Number example:"),
-          h("span", { style: styles.previewValue },
-            `1${locale.thousandsSeparator}234${locale.thousandsSeparator}567${locale.decimalSeparator}89`
-          ),
-        ),
-      ),
-    ),
+            <div className={s.setting}>
+              <div className={s.settingLabel}>Locale</div>
+              <Dropdown<string>
+                ariaLabel="Locale"
+                value={localeOverride}
+                options={localeOptions}
+                onChange={handleLocaleChange}
+                placeholder={localeOverride}
+                testId="settings-locale"
+                optionTestIdPrefix="settings-locale-"
+              />
+              <p className={s.settingHint}>
+                Controls decimal separators, formula argument separators, date formats, and currency display.
+              </p>
+            </div>
 
-    // Section: File Explorer
-    h("div", { style: styles.section },
-      h("div", { style: styles.sectionTitle }, "File Explorer"),
+            {/* Locale preview */}
+            {locale && (
+              <div className={s.localePreview} data-testid="settings-locale-preview">
+                <div className={s.previewRow}>
+                  <span className={s.previewLabel}>Decimal separator:</span>
+                  <span className={s.previewValue}>{describeDecimal(locale.decimalSeparator)}</span>
+                </div>
+                <div className={s.previewRow}>
+                  <span className={s.previewLabel}>Thousands separator:</span>
+                  <span className={s.previewValue}>{describeThousands(locale.thousandsSeparator)}</span>
+                </div>
+                <div className={s.previewRow}>
+                  <span className={s.previewLabel}>Formula separator:</span>
+                  <span className={s.previewValue}>{describeList(locale.listSeparator)}</span>
+                </div>
+                <div className={s.previewRow}>
+                  <span className={s.previewLabel}>Date format:</span>
+                  <span className={s.previewValue}>{locale.dateFormat}</span>
+                </div>
+                <div className={s.previewRow}>
+                  <span className={s.previewLabel}>Number example:</span>
+                  <span className={s.previewValue}>
+                    {`1${locale.thousandsSeparator}234${locale.thousandsSeparator}567${locale.decimalSeparator}89`}
+                  </span>
+                </div>
+              </div>
+            )}
+          </section>
 
-      h("div", { style: styles.setting },
-        h("div", { style: styles.settingLabel }, "Single-click opens file in:"),
-        h("div", { style: styles.radioGroup },
-          h("label", { style: styles.radioLabel },
-            h("input", {
-              type: "radio",
-              name: "fileClickAction",
-              value: "preview",
-              checked: settings.fileClickAction === "preview",
-              onChange: () => updateFileClickAction("preview"),
-              style: styles.radioInput,
-            }),
-            h("span", null, "Side panel preview"),
-          ),
-          h("label", { style: styles.radioLabel },
-            h("input", {
-              type: "radio",
-              name: "fileClickAction",
-              value: "taskpane",
-              checked: settings.fileClickAction === "taskpane",
-              onChange: () => updateFileClickAction("taskpane"),
-              style: styles.radioInput,
-            }),
-            h("span", null, "Task pane (right side)"),
-          ),
-        ),
-        h("div", { style: styles.settingHint },
-          settings.fileClickAction === "preview"
-            ? "Single-click previews below the tree. Double-click opens in the task pane."
-            : "Single-click opens directly in the task pane on the right side."
-        ),
-      ),
-    ),
-    ), // end generalContent
+          {/* Section: File Explorer */}
+          <section className={s.section} aria-labelledby="settings-explorer-heading">
+            <h3 id="settings-explorer-heading" className={s.sectionTitle}>
+              File Explorer
+            </h3>
+
+            <div className={s.setting}>
+              <div className={s.settingLabel} id="settings-file-click-label">
+                Single-click opens file in:
+              </div>
+              <div className={s.radioGroup} role="radiogroup" aria-labelledby="settings-file-click-label">
+                <label className={s.radioLabel}>
+                  <input
+                    type="radio"
+                    name="fileClickAction"
+                    value="preview"
+                    checked={settings.fileClickAction === "preview"}
+                    onChange={() => updateFileClickAction("preview")}
+                    className={s.radioInput}
+                  />
+                  <span>Side panel preview</span>
+                </label>
+                <label className={s.radioLabel}>
+                  <input
+                    type="radio"
+                    name="fileClickAction"
+                    value="taskpane"
+                    checked={settings.fileClickAction === "taskpane"}
+                    onChange={() => updateFileClickAction("taskpane")}
+                    className={s.radioInput}
+                  />
+                  <span>Task pane (right side)</span>
+                </label>
+              </div>
+              <p className={s.settingHint}>
+                {settings.fileClickAction === "preview"
+                  ? "Single-click previews below the tree. Double-click opens in the task pane."
+                  : "Single-click opens directly in the task pane on the right side."}
+              </p>
+            </div>
+          </section>
+        </div>
+      )}
+    </div>
   );
 }
-
-// ============================================================================
-// Styles
-// ============================================================================
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    display: "flex",
-    flexDirection: "column",
-    height: "100%",
-    overflow: "hidden",
-    fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
-    backgroundColor: "var(--panel-bg)",
-    color: "var(--text-primary)",
-  },
-  tabBar: {
-    display: "flex",
-    gap: 0,
-    borderBottom: "1px solid var(--border-default)",
-    padding: "0 12px",
-    flexShrink: 0,
-  },
-  tab: {
-    padding: "10px 16px",
-    fontSize: 12,
-    fontWeight: 500,
-    color: "var(--text-secondary)",
-    backgroundColor: "transparent",
-    border: "none",
-    borderBottom: "2px solid transparent",
-    cursor: "pointer",
-    outline: "none",
-  },
-  tabActive: {
-    color: "var(--text-primary)",
-    fontWeight: 600,
-    borderBottomColor: "var(--accent-primary)",
-  },
-  generalContent: {
-    flex: 1,
-    overflow: "auto",
-    padding: "14px 16px",
-  },
-  section: {
-    marginBottom: 24,
-  },
-  sectionTitle: {
-    fontSize: 11,
-    fontWeight: 600,
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.04em",
-    color: "var(--text-secondary)",
-    marginBottom: 14,
-    paddingBottom: 6,
-    borderBottom: "1px solid var(--border-default)",
-  },
-  setting: {
-    marginBottom: 16,
-  },
-  settingLabel: {
-    fontSize: 12,
-    fontWeight: 500,
-    color: "var(--text-primary)",
-    marginBottom: 10,
-  },
-  radioGroup: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 8,
-    marginLeft: 2,
-  },
-  radioLabel: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    fontSize: 12,
-    color: "var(--text-secondary)",
-    cursor: "pointer",
-  },
-  radioInput: {
-    margin: 0,
-    cursor: "pointer",
-    accentColor: "var(--accent-primary)",
-  },
-  settingHint: {
-    fontSize: 11,
-    color: "var(--text-tertiary)",
-    marginTop: 10,
-    lineHeight: "1.5",
-  },
-  select: {
-    width: "100%",
-    padding: "6px 8px",
-    fontSize: 12,
-    borderRadius: 4,
-    border: "1px solid var(--border-default)",
-    backgroundColor: "var(--bg-surface)",
-    color: "var(--text-primary)",
-    cursor: "pointer",
-    outline: "none",
-  },
-  localePreview: {
-    marginTop: 12,
-    padding: "10px 12px",
-    backgroundColor: "var(--bg-surface)",
-    borderRadius: 4,
-    border: "1px solid var(--border-default)",
-    display: "flex",
-    flexDirection: "column",
-    gap: 6,
-  },
-  previewRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    fontSize: 11,
-  },
-  previewLabel: {
-    color: "var(--text-secondary)",
-    fontWeight: 500,
-  },
-  previewValue: {
-    color: "var(--text-primary)",
-    fontFamily: "'Cascadia Code', 'Consolas', monospace",
-  },
-};

@@ -7,6 +7,8 @@ import type {
   DialogProps,
 } from "@api";
 import type { PanelDefinition } from "@api/uiTypes";
+import { RibbonIcon, type RibbonIconProps } from "@api/ribbonIcons";
+import { ICON_SIZE_MD, ICON_SIZE_SM } from "@api/layout";
 import React from "react";
 import { InsertSlicerDialog } from "./components/InsertSlicerDialog";
 import { SlicerSettingsDialog } from "./components/SlicerSettingsDialog";
@@ -40,9 +42,19 @@ export const SlicerManifest: AddInManifest = {
 // Contextual Slicer Panel (ribbon-placed)
 // ============================================================================
 
-const SLICER_TAB_COLOR = "#548235"; // Green accent (distinct from table blue)
+/**
+ * Contextual-tab accent: the skin's slicer accent, with the tab's historical
+ * green as the fallback when a skin predates the token. The Timeline tab
+ * shares the token — both are slicers.
+ */
+const SLICER_TAB_COLOR = "var(--tab-accent-slicer, #548235)";
 
 export const SLICER_OPTIONS_TAB_ID = "slicer-options";
+
+/** A section icon at the launcher / sidebar-header size (24). */
+function sectionIcon(Icon: React.ComponentType<RibbonIconProps>): React.ReactElement {
+  return React.createElement(Icon, { size: ICON_SIZE_MD });
+}
 
 /**
  * Location-agnostic panel definition for the contextual "Slicer" tab.
@@ -55,17 +67,19 @@ export const SLICER_OPTIONS_TAB_ID = "slicer-options";
 export const SlicerOptionsPanelDefinition: PanelDefinition = {
   id: SLICER_OPTIONS_TAB_ID,
   title: "Slicer",
-  icon: null,
+  icon: React.createElement(RibbonIcon.Slicer, { size: ICON_SIZE_SM }),
   sections: [
     {
       id: "slicer-options.properties",
       label: "Properties",
+      icon: sectionIcon(RibbonIcon.Pencil),
       component: SlicerPropertiesSection,
       collapsePriority: 4,
     },
     {
       id: "slicer-options.buttons",
       label: "Buttons",
+      icon: sectionIcon(RibbonIcon.Layout),
       component: SlicerButtonsSection,
       collapsePriority: 3,
     },
@@ -74,18 +88,21 @@ export const SlicerOptionsPanelDefinition: PanelDefinition = {
       // tab; priority 0 keeps it first in line for launcher demotion.
       id: "slicer-options.styles",
       label: "Slicer Styles",
+      icon: sectionIcon(RibbonIcon.Palette),
       component: SlicerStylesSection,
       collapsePriority: 0,
     },
     {
       id: "slicer-options.size",
       label: "Size",
+      icon: sectionIcon(RibbonIcon.Resize),
       component: SlicerSizeSection,
       collapsePriority: 2,
     },
     {
       id: "slicer-options.actions",
       label: "Actions",
+      icon: sectionIcon(RibbonIcon.Slicer),
       component: SlicerActionsSection,
       collapsePriority: 1,
     },

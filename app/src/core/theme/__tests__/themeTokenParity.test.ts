@@ -31,34 +31,29 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { THEME_TOKENS } from "../tokens";
+import { defaultTheme } from "../defaultTheme";
+// A source file with its comments removed.
+//
+// NOT decoration. This guard's own subject files EXPLAIN the phantom names in
+// prose — including, in one case, the exact invalid declaration
+// `1px solid var(--border-color)` quoted as the thing not to do. A textual scan
+// handed the raw file reports those explanations as violations, so a file is
+// penalised for documenting the bug it fixed. This repo has the same defect on
+// record one layer over, where a `word(` inside a comment fabricated a call edge
+// in the store census.
+//
+// It was a local two-regex function until layoutThemeParity.test.ts showed the
+// regex version deletes CODE: a line comment mentioning a glob like
+// `src/core/**` contains `/**`, which it read as a block-comment opener. The
+// shared table here survived only because the next `*/` happened to sit just
+// above TOKENS. See ./sourceText.ts.
+import { codeOf } from "./sourceText";
 
 const SHARED_TOKENS = join(process.cwd(), "extensions/_shared/lib/themeTokens.ts");
 
 /** Every `--name` the theme declares. */
 function declaredNames(): Set<string> {
   return new Set(Object.values(THEME_TOKENS));
-}
-
-/**
- * A source file with its comments removed.
- *
- * NOT decoration. This guard's own subject files EXPLAIN the phantom names in
- * prose — including, in one case, the exact invalid declaration
- * `1px solid var(--border-color)` quoted as the thing not to do. A textual scan
- * handed the raw file reports those explanations as violations, so a file is
- * penalised for documenting the bug it fixed. This repo has the same defect on
- * record one layer over, where a `word(` inside a comment fabricated a call edge
- * in the store census.
- */
-function codeOf(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .split("\n")
-    .map((line) => {
-      const i = line.indexOf("//");
-      return i >= 0 ? line.slice(0, i) : line;
-    })
-    .join("\n");
 }
 
 /** Every `var(--name)` written in a file's CODE. */
@@ -90,6 +85,28 @@ describe("the shared token table names only real theme tokens", () => {
     const bare = Array.from(src.matchAll(/var\(\s*(--[a-z0-9-]+)\s*\)/gi), (m) => m[1]);
     expect(bare, `these names have no fallback: ${bare.join(", ")}`).toEqual([]);
   });
+
+  it("every plain-hex fallback IS the light baseline's value", () => {
+    // The table's promise is "degrade to the light palette". A fallback that
+    // drifted from the baseline breaks it invisibly: the surface looks right
+    // with the skin loaded and subtly wrong in the one window that has none.
+    // `--text-tertiary` had drifted to #9ca3af against a baseline of #888888
+    // until this case was added. Only plain-hex pairs are compared — a
+    // baseline written as var() or color-mix() has no literal to match.
+    const src = codeOf(readFileSync(SHARED_TOKENS, "utf8"));
+    const drift: string[] = [];
+    for (const m of src.matchAll(/var\(\s*(--[a-z0-9-]+)\s*,\s*(#[0-9a-f]{3,8})\s*\)/gi)) {
+      const baseline = defaultTheme[m[1]];
+      if (
+        baseline !== undefined &&
+        /^#[0-9a-f]{3,8}$/i.test(baseline) &&
+        baseline.toLowerCase() !== m[2].toLowerCase()
+      ) {
+        drift.push(`${m[1]}: fallback ${m[2]}, light baseline ${baseline}`);
+      }
+    }
+    expect(drift).toEqual([]);
+  });
 });
 
 describe("shared surfaces do not invent token names", () => {
@@ -107,6 +124,17 @@ describe("shared surfaces do not invent token names", () => {
     // followed the skin.
     "extensions/Reports/components/CreateReportDialog.tsx",
     "extensions/Reports/components/EditReportDialog.tsx",
+    // The Calcula Clusters chrome (2026-09-23): the frame, the rail, the side
+    // panel, the task pane, toasts and the status bar were retokenised with
+    // their light baselines as fallbacks, and must stay on declared names.
+    "src/shell/Ribbon/RibbonContainer.styles.ts",
+    "src/shell/components/SectionChrome.tsx",
+    "src/shell/ActivityBar/ActivityBar.styles.ts",
+    "src/shell/ActivityBar/SidePanel.tsx",
+    "src/shell/TaskPane/TaskPane.styles.ts",
+    "src/shell/Toast/Toast.tsx",
+    "src/shell/StatusBar.tsx",
+    "extensions/_shared/components/jsonToggle/JsonToggleEditor.tsx",
   ];
 
   for (const rel of FILES) {

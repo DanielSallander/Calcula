@@ -24,8 +24,19 @@
 //          would give the user two places to disagree about one workbook, so
 //          this section reports what is armed and links to the per-workbook
 //          "Code in This File" panel, which owns pause/cancel.
+//
+//          Calcula Clusters: section headers use the one panel header recipe
+//          the General and Appearance pages use (12px/600, sentence case, LT
+//          tokens, a real <h3> naming its <section>), and the page's buttons
+//          are the @api/layout Button (outlined, compact; the destructive ones
+//          in the danger tone). The level picker stays native radios (there is
+//          no radio primitive, and tests/journeys select them by name), and the
+//          revocable capability chips stay the page's own (a chip that IS a
+//          button with a trailing "x" has no straight @api equivalent).
 
 import React, { useCallback, useEffect, useState } from "react";
+import { css } from "@emotion/css";
+import { Button, FONT_FAMILY, HEADER_FONT_SIZE, LT } from "@api/layout";
 import {
   SCRIPT_SECURITY_LEVELS,
   SCRIPT_SECURITY_LEVEL_INFO,
@@ -66,6 +77,10 @@ import { confirmAsync } from "@api/dialogs";
  *  fails the build until it is phrased for the user, and this one silently did
  *  not — it would have degraded to the raw id ("distribution.writeback") in a
  *  security page, which is exactly the drift this program shipped twice. */
+/* eslint-disable @typescript-eslint/naming-convention --
+ * The keys ARE the capability ids ("net.fetch"), the one vocabulary shared with
+ * the broker and ALL_CAPABILITY_IDS; any other spelling would stop the map
+ * matching the ids it is keyed by. */
 const CAP_LABEL: Record<CapabilityId, string> = {
   "net.fetch": "Network",
   "bi.query": "BI query",
@@ -86,6 +101,7 @@ const CAP_LABEL: Record<CapabilityId, string> = {
   "distribution.publish": "Publish applications",
   "distribution.subscribe": "Subscribe to applications",
 };
+/* eslint-enable @typescript-eslint/naming-convention */
 
 /** Label for a capability id that arrives as an untrusted string (a persisted
  *  trust record can name an id this build no longer knows). Unknown ids show
@@ -111,19 +127,21 @@ function splitPath(displayPath: string): { name: string; folder: string } {
 // Styles (match the other Settings pages)
 // ============================================================================
 
+/** The one panel header recipe (AppearancePage / SettingsView): 12px/600,
+ *  sentence case, painted with LT. The bottom margin is this page's block
+ *  flow standing in for the flex gap those pages lay their sections out with. */
+const sectionTitleClass = css`
+  margin: 0 0 10px;
+  font-family: ${FONT_FAMILY};
+  font-size: ${HEADER_FONT_SIZE}px;
+  font-weight: 600;
+  line-height: 16px;
+  color: ${LT.text};
+`;
+
 const styles: Record<string, React.CSSProperties> = {
   content: { flex: 1, overflow: "auto", padding: "14px 16px" },
   section: { marginBottom: 24 },
-  sectionTitle: {
-    fontSize: 11,
-    fontWeight: 600,
-    textTransform: "uppercase",
-    letterSpacing: "0.04em",
-    color: "var(--text-secondary)",
-    marginBottom: 12,
-    paddingBottom: 6,
-    borderBottom: "1px solid var(--border-default)",
-  },
   intro: {
     fontSize: 11,
     color: "var(--text-tertiary)",
@@ -169,26 +187,6 @@ const styles: Record<string, React.CSSProperties> = {
     color: "var(--text-secondary)",
     whiteSpace: "nowrap",
   },
-  button: {
-    fontSize: 11,
-    padding: "3px 10px",
-    borderRadius: 3,
-    border: "1px solid var(--border-default)",
-    backgroundColor: "transparent",
-    color: "var(--text-primary)",
-    cursor: "pointer",
-    whiteSpace: "nowrap",
-  },
-  dangerButton: {
-    fontSize: 11,
-    padding: "3px 10px",
-    borderRadius: 3,
-    border: "1px solid var(--border-default)",
-    backgroundColor: "transparent",
-    color: "var(--text-danger, #B3261E)",
-    cursor: "pointer",
-    whiteSpace: "nowrap",
-  },
   empty: {
     fontSize: 11,
     color: "var(--text-tertiary)",
@@ -202,7 +200,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "1px 5px",
     borderRadius: 3,
     backgroundColor: "var(--accent-primary)",
-    color: "#fff",
+    color: LT.onAccent,
     marginLeft: 6,
     verticalAlign: "middle",
   },
@@ -335,8 +333,13 @@ export function ScriptSecurityPage(): React.ReactElement {
       )}
 
       {/* ---------------------------------------------------------------- */}
-      <div style={styles.section}>
-        <div style={styles.sectionTitle}>Script Security</div>
+      {/* "Script Security" keeps its capitals: it is the setting's NAME, the
+          one every script prompt sends the user to (as "File Explorer" is on
+          the General page). */}
+      <section style={styles.section} aria-labelledby="script-security-level-heading">
+        <h3 id="script-security-level-heading" className={sectionTitleClass}>
+          Script Security
+        </h3>
         <div style={styles.intro}>
           Controls whether user-authored code — object scripts, chart marks and
           transforms, worksheet-function libraries, notebooks, one-off scripts,
@@ -367,11 +370,13 @@ export function ScriptSecurityPage(): React.ReactElement {
             </label>
           );
         })}
-      </div>
+      </section>
 
       {/* ---------------------------------------------------------------- */}
-      <div style={styles.section}>
-        <div style={styles.sectionTitle}>Scheduled Jobs</div>
+      <section style={styles.section} aria-labelledby="script-security-jobs-heading">
+        <h3 id="script-security-jobs-heading" className={sectionTitleClass}>
+          Scheduled jobs
+        </h3>
         <div style={styles.intro}>
           Code in the open workbook that runs on a timer, without you starting
           it. Every firing re-checks the script's capabilities, and nothing runs
@@ -402,18 +407,22 @@ export function ScriptSecurityPage(): React.ReactElement {
             ))}
           </>
         )}
-        <button
+        <Button
           type="button"
-          style={{ ...styles.button, marginTop: 10 }}
+          variant="outlined"
+          size="sm"
+          style={{ marginTop: 10 }}
           onClick={() => openPanel(CODE_IN_THIS_FILE_PANEL_ID)}
         >
           Review scheduled jobs
-        </button>
-      </div>
+        </Button>
+      </section>
 
       {/* ---------------------------------------------------------------- */}
-      <div style={styles.section}>
-        <div style={styles.sectionTitle}>Trusted Workbooks</div>
+      <section style={styles.section} aria-labelledby="script-security-trusted-heading">
+        <h3 id="script-security-trusted-heading" className={sectionTitleClass}>
+          Trusted workbooks
+        </h3>
         <div style={styles.intro}>
           Workbooks whose OWN scripts you allowed to run without asking again.
           Trust is stored on this computer only — it is never written into the
@@ -443,16 +452,18 @@ export function ScriptSecurityPage(): React.ReactElement {
                   </div>
                   {folder && <div style={styles.wbFolder}>{folder}</div>}
                 </div>
-                <button
+                <Button
                   type="button"
-                  style={styles.dangerButton}
+                  variant="outlined"
+                  size="sm"
+                  tone="danger"
                   onClick={() => {
                     revokeWorkbookRunTrust(record.workbookKey);
                     refresh();
                   }}
                 >
                   Revoke trust
-                </button>
+                </Button>
               </div>
               <div style={styles.meta}>
                 Trusted {formatWhen(runTrust.trustedAt)} &middot;{" "}
@@ -482,11 +493,13 @@ export function ScriptSecurityPage(): React.ReactElement {
             </div>
           );
         })}
-      </div>
+      </section>
 
       {/* ---------------------------------------------------------------- */}
-      <div style={styles.section}>
-        <div style={styles.sectionTitle}>Script Capability Grants</div>
+      <section style={styles.section} aria-labelledby="script-security-script-grants-heading">
+        <h3 id="script-security-script-grants-heading" className={sectionTitleClass}>
+          Script capability grants
+        </h3>
         <div style={styles.intro}>
           Capabilities you answered <strong>Always allow in this workbook</strong>{" "}
           to, for one script. Each grant is tied to that script&apos;s exact code:
@@ -552,9 +565,11 @@ export function ScriptSecurityPage(): React.ReactElement {
                       </div>
                     )}
                   </span>
-                  <button
+                  <Button
                     type="button"
-                    style={styles.dangerButton}
+                    variant="outlined"
+                    size="sm"
+                    tone="danger"
                     onClick={() => {
                       void revokeScriptCapabilityGrants(
                         record.workbookKey,
@@ -563,17 +578,19 @@ export function ScriptSecurityPage(): React.ReactElement {
                     }}
                   >
                     Revoke all
-                  </button>
+                  </Button>
                 </div>
               ))}
             </div>
           );
         })}
-      </div>
+      </section>
 
       {/* ---------------------------------------------------------------- */}
-      <div style={styles.section}>
-        <div style={styles.sectionTitle}>Notebook Capability Grants</div>
+      <section style={styles.section} aria-labelledby="script-security-notebook-grants-heading">
+        <h3 id="script-security-notebook-grants-heading" className={sectionTitleClass}>
+          Notebook capability grants
+        </h3>
         <div style={styles.intro}>
           Capabilities you approved for a specific notebook, remembered so that
           re-running it does not ask again. Revoking takes effect immediately —
@@ -596,16 +613,18 @@ export function ScriptSecurityPage(): React.ReactElement {
                   </div>
                   {folder && <div style={styles.wbFolder}>{folder}</div>}
                 </div>
-                <button
+                <Button
                   type="button"
-                  style={styles.dangerButton}
+                  variant="outlined"
+                  size="sm"
+                  tone="danger"
                   onClick={() => {
                     revokeWorkbookTrustEntirely(record.workbookKey);
                     refresh();
                   }}
                 >
                   Forget workbook
-                </button>
+                </Button>
               </div>
               {record.notebookGrants.map((grant) => (
                 <div key={grant.notebookId} style={styles.notebookRow}>
@@ -623,9 +642,10 @@ export function ScriptSecurityPage(): React.ReactElement {
                       ))}
                     </span>
                   </span>
-                  <button
+                  <Button
                     type="button"
-                    style={styles.button}
+                    variant="outlined"
+                    size="sm"
                     onClick={() => {
                       void revokeNotebookCapabilityGrants(record.workbookKey, grant.notebookId).then(
                         refresh,
@@ -633,20 +653,22 @@ export function ScriptSecurityPage(): React.ReactElement {
                     }}
                   >
                     Revoke
-                  </button>
+                  </Button>
                 </div>
               ))}
             </div>
           );
         })}
-      </div>
+      </section>
 
       {/* ---------------------------------------------------------------- */}
       {records.length > 0 && (
         <div style={styles.section}>
-          <button
+          <Button
             type="button"
-            style={styles.dangerButton}
+            variant="outlined"
+            size="sm"
+            tone="danger"
             onClick={() => {
               // AWAITED (in an IIFE — the JSX handler stays sync). The bare
               // form made this destructive action unconditional: Cancel also
@@ -668,7 +690,7 @@ export function ScriptSecurityPage(): React.ReactElement {
             }}
           >
             Clear all trust decisions
-          </button>
+          </Button>
           <div style={{ ...styles.intro, marginTop: 8, marginBottom: 0 }}>
             Consent for code that arrived in a .calp package is separate: it is
             stored inside the workbook (so it survives a copy) and is managed per

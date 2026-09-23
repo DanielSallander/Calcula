@@ -12,15 +12,45 @@
 //               handler from the sandbox, so an add-in cannot capture input or
 //               run code the user did not trigger.
 //            2. NO MARKUP CROSSES. `icon` is a TOKEN looked up in the host's
-//               own RibbonIcon set; an unknown token falls back to a generic
-//               glyph. An add-in can never inject an image, an SVG or a style.
+//               own RibbonIcon set; an unknown token falls back to the host's
+//               generic add-in glyph. An add-in can never inject an image, an
+//               SVG or a style. Labels and tooltips are rendered as text.
 //            3. ATTRIBUTION IS HOST-DRAWN. Every group is headed by the
 //               extension's name (from the authoritative manifest), so a
 //               sandboxed surface can never pass itself off as part of the app.
+//
+//          Calcula Clusters shape. Each contribution GROUP is its own
+//          PanelSection (buildAddInsSections), so add-in groups are measured and
+//          width-demoted one at a time like any built-in cluster. The section's
+//          LABEL is the attribution heading ("<extension name> - <group>") and
+//          the section declares captionMode "always", so the shell's cluster
+//          caption draws it in the band and keeps drawing it when the user
+//          hides ribbon labels — hiding labels must never strip the only
+//          attribution on a sandboxed button. Where the shell draws NO header
+//          for the section (a sidebar panel with a single section, and a
+//          single-section panel demoted to the panel-titled launcher — both
+//          only when exactly one group exists), the section draws the heading
+//          itself; with several groups the sidebar headers and launcher labels
+//          carry it, and drawing it again would only duplicate it.
+//
+//          Buttons are CommandButton heroes, so in the band every group is ONE
+//          TALL ROW of 61px heroes (the fill rule, @api/layout tokens.ts) and a
+//          sandboxed add-in inherits the built-in look without writing CSS.
 
 import React, { useSyncExternalStore } from "react";
-import { CommandRegistry, RibbonIcon } from "@api";
-import type { PanelSectionProps } from "@api/uiTypes";
+import { CommandRegistry } from "@api/commands";
+import { RibbonIcon } from "@api/ribbonIcons";
+import type { PanelSection, PanelSectionProps } from "@api/uiTypes";
+import {
+  ActionRow,
+  FONT_FAMILY,
+  GAP_XS,
+  HERO_ICON_SIZE,
+  ICON_SIZE_MD,
+  LT,
+  CommandButton,
+  useSurfaceLayout,
+} from "@api/layout";
 import {
   listExtensionRibbonButtons,
   subscribeToExtensionContributions,
@@ -28,32 +58,28 @@ import {
 
 type IconToken = keyof typeof RibbonIcon;
 
-/** Generic fallback: a puzzle piece, for an unknown or absent icon token. */
-function GenericAddInIcon(): React.ReactElement {
+/**
+ * The host's generic add-in glyph: the fallback for an unknown or absent icon
+ * token, the Add-ins tab icon and the Extensions rail icon. It IS
+ * `RibbonIcon.AddIn` (the puzzle piece), so it follows the one duotone set;
+ * the wrapper only carries `data-addin-glyph`, which marks "the fallback was
+ * used" for tests without a second drawing to keep in step.
+ */
+export function AddInGlyph({ size = 16 }: { size?: number }): React.ReactElement {
   return (
-    <svg
-      width={16}
-      height={16}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.6}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      style={{ display: "block", flex: "none" }}
-      aria-hidden
-    >
-      <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
-    </svg>
+    <span data-addin-glyph="" style={{ display: "inline-flex", flex: "none" }} aria-hidden>
+      <RibbonIcon.AddIn size={size} />
+    </span>
   );
 }
 
-function renderIcon(token: string | undefined): React.ReactElement {
+/** Resolve an add-in's icon TOKEN against the host's own icon set. */
+export function resolveAddInIcon(token: string | undefined, size: number): React.ReactElement {
   if (token && Object.prototype.hasOwnProperty.call(RibbonIcon, token)) {
     const Icon = RibbonIcon[token as IconToken];
-    return <Icon size={16} />;
+    return <Icon size={size} />;
   }
-  return <GenericAddInIcon />;
+  return <AddInGlyph size={size} />;
 }
 
 interface ButtonRow {
@@ -68,11 +94,17 @@ interface ButtonRow {
   commandId: string;
 }
 
+/** One contribution group: the host-drawn attribution heading and its buttons. */
+export interface AddInGroup {
+  heading: string;
+  buttons: ButtonRow[];
+}
+
 /** Group the flat contribution list by extension, then by the extension's own
  *  group label. Ordering is (extension name, group label, order, label) — all
  *  host-decided, so one add-in cannot push itself in front of another with a
- *  large negative order. */
-function collectRows(): Array<{ heading: string; buttons: ButtonRow[] }> {
+ *  large negative order. Always computed fresh from the registry. */
+export function computeAddInGroups(): AddInGroup[] {
   const rows: ButtonRow[] = listExtensionRibbonButtons().map((c) => ({
     extId: c.extId,
     extName: c.extName,
@@ -100,129 +132,160 @@ function collectRows(): Array<{ heading: string; buttons: ButtonRow[] }> {
     }));
 }
 
-/** External store over the contribution registry: the snapshot is memoized so
- *  useSyncExternalStore sees a stable reference between notifications. */
-type Snapshot = ReturnType<typeof collectRows>;
-let snapshot: Snapshot | null = null;
+// ============================================================================
+// External store over the contribution registry
+// ============================================================================
+
+/** The memoized snapshot, so useSyncExternalStore sees a stable reference
+ *  between notifications. */
+let snapshot: AddInGroup[] | null = null;
+let invalidationInstalled = false;
+
+/**
+ * Drop the memo on EVERY registry change, not only while a section is
+ * mounted. Without this, a change that lands while the Add-ins tab is not on
+ * screen leaves the memo stale, and the section mounts showing the old
+ * buttons until the next change.
+ */
+function ensureInvalidation(): void {
+  if (invalidationInstalled) return;
+  invalidationInstalled = true;
+  subscribeToExtensionContributions(() => {
+    snapshot = null;
+  });
+}
 
 const contributionStore = {
   subscribe(onChange: () => void): () => void {
+    ensureInvalidation();
     return subscribeToExtensionContributions(() => {
       snapshot = null;
       onChange();
     });
   },
-  getSnapshot(): Snapshot {
-    if (snapshot === null) snapshot = collectRows();
+  getSnapshot(): AddInGroup[] {
+    ensureInvalidation();
+    if (snapshot === null) snapshot = computeAddInGroups();
     return snapshot;
   },
 };
 
-export function AddInsRibbonSection(_props: PanelSectionProps): React.ReactElement {
+// ============================================================================
+// Section component (one per contribution group)
+// ============================================================================
+
+const attributionStyle: React.CSSProperties = {
+  fontFamily: FONT_FAMILY,
+  fontSize: 11,
+  fontWeight: 600,
+  lineHeight: "13px",
+  color: LT.textSecondary,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  minWidth: 0,
+};
+
+function runAddInCommand(commandId: string): void {
+  // The ONLY thing a click does: run the extension's own registered command.
+  // Errors are contained here so a broken add-in cannot take the ribbon down
+  // with it.
+  try {
+    void Promise.resolve(CommandRegistry.execute(commandId)).catch((e) =>
+      console.error(`[add-ins] command ${commandId} failed:`, e),
+    );
+  } catch (e) {
+    console.error(`[add-ins] command ${commandId} failed:`, e);
+  }
+}
+
+/** The buttons of ONE contribution group, painted by the host. */
+export function AddInGroupSection({ heading }: { heading: string }): React.ReactElement | null {
   const groups = useSyncExternalStore(
     contributionStore.subscribe,
     contributionStore.getSnapshot,
     contributionStore.getSnapshot,
   );
+  const layout = useSurfaceLayout();
+  const group = groups.find((g) => g.heading === heading);
+  // The group vanished between a registry change and the panel's
+  // re-registration: render nothing rather than an empty cluster.
+  if (!group) return null;
 
-  if (groups.length === 0) {
-    return (
-      <div style={styles.empty}>
-        No add-in has contributed a ribbon button. Installed add-ins appear here
-        automatically.
-      </div>
-    );
-  }
+  const buttons = (
+    <ActionRow gap={GAP_XS}>
+      {group.buttons.map((b) => (
+        <CommandButton
+          key={`${b.extId}:${b.id}`}
+          icon={resolveAddInIcon(b.icon, HERO_ICON_SIZE)}
+          label={b.label}
+          tooltip={b.tooltip ? `${b.tooltip} (${b.extName})` : `${b.label} (${b.extName})`}
+          data-testid={`addin-button-${b.extId}:${b.id}`}
+          onClick={() => runAddInCommand(b.commandId)}
+        />
+      ))}
+    </ActionRow>
+  );
+
+  // Band: the cluster caption (section label, captionMode "always") is the
+  // attribution. Elsewhere, draw it only where the shell draws no header.
+  const drawOwnHeading = layout.container !== "band" && groups.length === 1;
+  if (!drawOwnHeading) return buttons;
 
   return (
-    <div style={styles.root}>
-      {groups.map((group) => (
-        <div key={group.heading} style={styles.group}>
-          <div style={styles.buttons}>
-            {group.buttons.map((b) => (
-              <button
-                key={`${b.extId}:${b.id}`}
-                type="button"
-                style={styles.button}
-                title={b.tooltip ? `${b.tooltip} (${b.extName})` : `${b.label} (${b.extName})`}
-                onClick={() => {
-                  // The ONLY thing a click does: run the extension's own
-                  // registered command. Errors are contained here so a broken
-                  // add-in cannot take the ribbon down with it.
-                  void Promise.resolve(CommandRegistry.execute(b.commandId)).catch((e) =>
-                    console.error(`[add-ins] command ${b.commandId} failed:`, e),
-                  );
-                }}
-              >
-                {renderIcon(b.icon)}
-                <span style={styles.buttonLabel}>{b.label}</span>
-              </button>
-            ))}
-          </div>
-          {/* Host-drawn attribution: never overridable by the add-in. */}
-          <div style={styles.heading}>{group.heading}</div>
-        </div>
-      ))}
+    <div style={{ display: "flex", flexDirection: "column", gap: GAP_XS, minWidth: 0 }}>
+      {/* Host-drawn attribution: never overridable by the add-in. */}
+      <div style={attributionStyle} data-testid="addin-attribution" title={group.heading}>
+        {group.heading}
+      </div>
+      {buttons}
     </div>
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  root: {
-    display: "flex",
-    flexDirection: "row",
-    alignItems: "stretch",
-    gap: 8,
-  },
-  group: {
-    display: "flex",
-    flexDirection: "column",
-    justifyContent: "space-between",
-    gap: 2,
-    padding: "0 6px",
-    borderRight: "1px solid var(--border-subtle, #e0e0e0)",
-  },
-  buttons: {
-    display: "flex",
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 2,
-  },
-  button: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    gap: 2,
-    minWidth: 48,
-    maxWidth: 96,
-    padding: "4px 6px",
-    background: "transparent",
-    border: "1px solid transparent",
-    borderRadius: 4,
-    cursor: "pointer",
-    color: "var(--text-primary, #333)",
-    font: "inherit",
-    fontSize: 11,
-  },
-  buttonLabel: {
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-    maxWidth: 84,
-  },
-  heading: {
-    fontSize: 10,
-    color: "var(--text-secondary, #777)",
-    textAlign: "center",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-    maxWidth: 200,
-  },
-  empty: {
-    fontSize: 11,
-    color: "var(--text-secondary, #888)",
-    padding: "6px 10px",
-    maxWidth: 320,
-  },
-};
+/** One component identity per heading, so re-registering the panel with the
+ *  same groups never remounts a group's buttons. */
+const sectionComponents = new Map<string, React.ComponentType<PanelSectionProps>>();
+
+export function addInGroupSection(heading: string): React.ComponentType<PanelSectionProps> {
+  const existing = sectionComponents.get(heading);
+  if (existing) return existing;
+  const Component = (_props: PanelSectionProps): React.ReactElement | null => (
+    <AddInGroupSection heading={heading} />
+  );
+  Component.displayName = `AddInGroupSection(${heading})`;
+  sectionComponents.set(heading, Component);
+  return Component;
+}
+
+/** A section id derived from the heading: deterministic and unique (headings
+ *  are unique by construction, and encodeURIComponent is injective). */
+export function addInSectionId(heading: string): string {
+  return `extensions.addins.${encodeURIComponent(heading)}`;
+}
+
+/** The Add-ins panel's sections: one per contribution group. */
+export function buildAddInsSections(groups: AddInGroup[] = computeAddInGroups()): PanelSection[] {
+  return groups.map((g) => ({
+    id: addInSectionId(g.heading),
+    // Host-drawn attribution: the cluster caption / sidebar header / launcher
+    // label, from the authoritative manifest name — never from the add-in.
+    label: g.heading,
+    // Resolved against the host's own icon set, like every button icon.
+    icon: resolveAddInIcon(g.buttons[0]?.icon, ICON_SIZE_MD),
+    component: addInGroupSection(g.heading),
+    // Heroes are 61px — exactly the band's content box — so no height probe;
+    // width is still measured, so a narrow band demotes groups one at a time.
+    ribbonPresentation: "inline" as const,
+    // Attribution survives the "hide ribbon labels" preference.
+    captionMode: "always" as const,
+  }));
+}
+
+/** Change key for the panel registration: the set of groups and the icons
+ *  their sections show. Buttons changing WITHIN a group re-render through the
+ *  store instead and need no re-registration. */
+export function addInSectionsKey(groups: AddInGroup[]): string | null {
+  if (groups.length === 0) return null;
+  return JSON.stringify(groups.map((g) => [g.heading, g.buttons[0]?.icon ?? ""]));
+}

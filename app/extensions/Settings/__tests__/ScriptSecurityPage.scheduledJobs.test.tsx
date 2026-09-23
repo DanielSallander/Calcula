@@ -95,7 +95,10 @@ afterEach(() => {
 describe("ScriptSecurityPage — scheduled jobs", () => {
   it("says plainly that nothing is scheduled", async () => {
     await render();
-    expect(container.textContent).toContain("Scheduled Jobs");
+    // The section heading (the panel header recipe: sentence case).
+    const heading = container.querySelector("#script-security-jobs-heading");
+    expect(heading?.tagName).toBe("H3");
+    expect(heading?.textContent).toBe("Scheduled jobs");
     expect(container.textContent).toContain(
       "No scripts are scheduled to run in this workbook.",
     );

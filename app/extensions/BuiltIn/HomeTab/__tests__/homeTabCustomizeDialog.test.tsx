@@ -19,6 +19,7 @@ vi.mock("@api", () => {
   return { RibbonIcon: new Proxy({}, { get: () => Stub }) };
 });
 
+import { findHardcodedColours } from "@api/layout";
 import { HomeTabCustomizeDialog } from "../components/HomeTabCustomizeDialog";
 import { DEFAULT_LAYOUT, LAYOUT_VERSION, type HomeTabLayout } from "../homeTabConfig";
 
@@ -211,6 +212,27 @@ describe("Reset to Default", () => {
     expect(stored.version).toBe(LAYOUT_VERSION);
     expect(layoutChangedEvents).toBe(1);
     expect(closed).toBe(1);
+  });
+});
+
+// ============================================================================
+// Look
+// ============================================================================
+
+describe("the dialog follows the skin", () => {
+  it("paints with tokens only", async () => {
+    await render();
+    expect(container.querySelector("[data-hometab-customize-dialog]")).not.toBeNull();
+    expect(findHardcodedColours(container)).toEqual([]);
+  });
+
+  it("keeps both pickers NATIVE selects (the Customize journey drives them with selectOption)", async () => {
+    await render();
+    expect(container.querySelector("select[data-hometab-add-to]")).not.toBeNull();
+    const iconPicker = container.querySelector(
+      "[data-hometab-group='font'] select[title='Launcher icon (shown when this group collapses)']"
+    );
+    expect(iconPicker).not.toBeNull();
   });
 });
 

@@ -22,6 +22,20 @@ async function setPlacement(page: Page, placement: "sidebar" | "ribbon"): Promis
 }
 
 /**
+ * Put the Animation panel back where it was declared AND forget the override.
+ * setPlacement("sidebar") after a move leaves {animation.timeline: "sidebar"}
+ * in calcula-panel-placements, which the persisted-state residue guard
+ * (journeys/zz-persisted-residue) reads as a reconfigured app.
+ */
+async function resetPlacement(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    (window as unknown as {
+      __CALCULA_PANEL_REGISTRY__: { resetPlacement: (id: string) => void };
+    }).__CALCULA_PANEL_REGISTRY__.resetPlacement("animation.timeline");
+  });
+}
+
+/**
  * Make a ribbon section's content reachable: inline content is returned as-is;
  * width-demoted sections are opened via their launcher button first.
  */
@@ -97,7 +111,7 @@ test.describe("Panel placement freedom", () => {
     } finally {
       // Never leak a ribbon placement into other specs (it persists in
       // localStorage and animation.spec.ts expects the sidebar default).
-      await setPlacement(page, "sidebar").catch(() => {});
+      await resetPlacement(page).catch(() => {});
 
       // AND never leak the two things this test turns on, which cost more than
       // the placement did (docs/design/open-decisions-2026-08.md sec 3a/3b):

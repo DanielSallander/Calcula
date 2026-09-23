@@ -2,7 +2,7 @@
 // PURPOSE: Shared React hook for Phase C — GUI/JSON toggle on config panels.
 // CONTEXT: Manages json mode state, fetches JSON on toggle-on, applies on request.
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback } from "react";
 import { getObjectJson, setObjectJson } from "@api/jsonView";
 
 export interface UseJsonToggleResult {

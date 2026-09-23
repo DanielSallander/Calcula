@@ -252,9 +252,124 @@ const modelEditorColorConfigs = [
   },
 ]
 
+// =============================================================================
+// CALCULA CLUSTERS: the redesigned chrome paints with tokens only
+// =============================================================================
+// The ribbon + sidebar redesign (docs/design/ribbon-design-system.md) moved
+// every ribbon tab, the cluster chrome, the rail, the side and task panes and
+// the mini toolbar onto theme tokens, so a skin — including a company's own —
+// restyles all of it. This rule is what keeps it that way: the drift that made
+// the Chart Design tab hardcode Office blue/orange/grey into its icons was
+// never a decision, it was a convenient literal at a time.
+//
+// DIFFERENT FROM THE MODEL EDITOR RULE ABOVE, deliberately. There, literals
+// live only in components/theme.ts. Here the shell and extensions write
+// `var(--token, #lightFallback)` inline — the fallback half is the documented
+// idiom (extensions/_shared/lib/themeTokens.ts, src/api/layout/theme.ts), and a
+// bare var() can invalidate a whole shorthand when a token is missing. So a
+// literal is allowed ONLY inside a string that also contains `var(`; a string
+// that carries a colour and no var() is the defect.
+//
+// Categorical colour DATA (chart palettes, style presets, standard colours) is
+// not chrome: it lives in data modules outside this list, or is listed in the
+// ignores below with the reason, and its rendered element carries
+// data-colour-data so findHardcodedColours skips it in tests.
+const CHROME_HEX_MESSAGE =
+  'Hardcoded colour in redesigned chrome. Paint with LT (@api/layout), TOKENS ' +
+  '(extensions/_shared/lib/themeTokens.ts) or var(--token, #lightFallback) so the ' +
+  "surface follows the user's skin. Categorical colour DATA belongs in a data " +
+  'module (and its element gets data-colour-data), not in a component.'
+
+const chromeColorConfigs = [
+  {
+    files: [
+      'src/api/layout/**/*.{ts,tsx}',
+      'src/api/icons/**/*.{ts,tsx}',
+      'src/api/ribbonIcons.tsx',
+      'src/shell/Ribbon/**/*.{ts,tsx}',
+      'src/shell/components/**/*.{ts,tsx}',
+      'src/shell/ActivityBar/**/*.{ts,tsx}',
+      'src/shell/TaskPane/**/*.{ts,tsx}',
+      'src/shell/Toast/**/*.{ts,tsx}',
+      'src/shell/StatusBar.tsx',
+      'src/shell/Overlays/MiniFormatToolbar/**/*.{ts,tsx}',
+      'extensions/Charts/components/ChartDesignSections.tsx',
+      'extensions/Charts/components/ChartFilterDropdown.tsx',
+      'extensions/Charts/components/chartTypeCatalog.ts',
+      'extensions/Charts/components/ChartJsonPane.tsx',
+      'extensions/BuiltIn/HomeTab/**/*.{ts,tsx}',
+      'extensions/BuiltIn/DocumentTheme/**/*.{ts,tsx}',
+      'extensions/Pivot/components/PivotAnalyzeSections.tsx',
+      'extensions/Pivot/components/PivotDesignSections.tsx',
+      'extensions/Pivot/components/PivotTableStylesGallery.tsx',
+      'extensions/Table/components/TableDesignTab.tsx',
+      'extensions/Table/components/TableStylesGallery.tsx',
+      'extensions/Table/components/TableJsonPane.tsx',
+      'extensions/Slicer/components/SlicerOptionsSections.tsx',
+      'extensions/Slicer/components/SlicerStylesGallery.tsx',
+      'extensions/TimelineSlicer/components/TimelineSlicerOptionsTab.tsx',
+      'extensions/Sparklines/components/SparklineDesignSections.tsx',
+      'extensions/Sparklines/components/SparklineColorPicker.tsx',
+      'extensions/ControlsPane/components/**/*.{ts,tsx}',
+      'extensions/Reports/components/ReportTabSection.tsx',
+      'extensions/ExtensionsManager/AddInsRibbonSection.tsx',
+      'extensions/Animation/components/TimelineSections.tsx',
+      'extensions/Settings/components/**/*.{ts,tsx}',
+      'extensions/Settings/SettingsView.tsx',
+      'extensions/_template/**/*.{ts,tsx}',
+      // The shared pickers and panes the ribbon, the panes and the dialogs
+      // open: once a colour picker follows the skin, a dialog that hosts it
+      // must not repaint it in Office blue.
+      'extensions/BuiltIn/FormatCellsDialog/components/ColorPicker.tsx',
+      'extensions/_shared/components/FieldList.tsx',
+      'extensions/_shared/components/EditorStyles.ts',
+      'extensions/_shared/components/jsonToggle/**/*.{ts,tsx}',
+    ],
+    ignores: [
+      // The token layer: literals here are the fallback half of var().
+      'src/api/layout/theme.ts',
+      // Colour DATA: the Office standard row and the quick set.
+      'src/api/layout/colors.ts',
+      // The colour-literal detector itself names colours in its pattern.
+      'src/api/layout/testing.ts',
+      '**/__tests__/**',
+      '**/*.test.{ts,tsx}',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector:
+            'Literal[value=/^(?![\\s\\S]*var\\()[\\s\\S]*#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})\\b/]',
+          message: CHROME_HEX_MESSAGE,
+        },
+        {
+          selector:
+            'TemplateElement[value.raw=/^(?![\\s\\S]*var\\()[\\s\\S]*#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})\\b/]',
+          message: CHROME_HEX_MESSAGE,
+        },
+        {
+          selector:
+            'Literal[value=/^(?:red|blue|green|orange|yellow|purple|pink|brown|cyan|magenta|white|black|gray|grey|lime|navy|teal|olive|maroon|silver|gold)$/i]',
+          message: CHROME_HEX_MESSAGE,
+        },
+        {
+          selector: 'Literal[value=/^(?![\\s\\S]*var\\()[\\s\\S]*\\brgba?\\(/]',
+          message: CHROME_HEX_MESSAGE,
+        },
+        {
+          selector: 'TemplateElement[value.raw=/^(?![\\s\\S]*var\\()[\\s\\S]*\\brgba?\\(/]',
+          message: CHROME_HEX_MESSAGE,
+        },
+      ],
+    },
+  },
+]
+
 export const boundaryConfigs = [
   ...dialogGuardConfigs,
   ...modelEditorColorConfigs,
+  ...chromeColorConfigs,
 
   // FACADE RULE: Extensions must ONLY import from src/api (no deep core/shell),
   // and must NOT reach the raw @api/backend invokeBackend door (A3).

@@ -117,18 +117,26 @@ export function SectionCell({
     }
   }, [isLauncher, section.id]);
 
-  useEffect(() => {
-    return () => {
-      cellObserverRef.current?.disconnect();
-      cellObserverRef.current = null;
-    };
-  }, []);
+  // NO unmount-only effect disconnects the observer: React calls the ref with
+  // null on unmount, and measureRef disconnects there. An effect cleanup that
+  // disconnected it was run by React 18 StrictMode's SIMULATED unmount, which
+  // does not re-run callback refs, so in dev the cell reported its width once at
+  // mount and never again (sectionWidthProbe.test.tsx, "StrictMode").
 
   const Section = section.component as React.ComponentType<PanelSectionProps>;
 
+  // Both forms render the SAME SectionChrome (same element at the same
+  // position), so React keeps the measured cell element across the swap and
+  // the caption — the section label — stays its last element child either way.
   if (isLauncher) {
     return (
-      <SectionChrome isFirst={isFirst} isLast={isLast} measureRef={measureRef}>
+      <SectionChrome
+        label={section.label}
+        isFirst={isFirst}
+        isLast={isLast}
+        captionMode={section.captionMode}
+        measureRef={measureRef}
+      >
         <Launcher
           label={launcherTitle ?? section.label}
           icon={launcherIcon ?? section.icon}
@@ -146,15 +154,35 @@ export function SectionCell({
       label={section.label}
       isFirst={isFirst}
       isLast={isLast}
+      captionMode={section.captionMode}
       measureRef={measureRef}
     >
-      {/* Clip box: bounds the visible content to the band while the unclipped
-          sizer below reveals the natural content size to the ResizeObserver. */}
-      <div style={{ height: "100%", overflow: "hidden" }}>
+      {/* Clip box: bounds the visible content to the card's content box while
+          the sizer inside reveals the natural content size to the
+          ResizeObserver. A column flex box so the sizer can centre with auto
+          margins: auto margins never go negative, so content taller than the
+          box overflows DOWNWARD (and is clipped at the bottom) instead of
+          being cut on both edges the way align-items:center would. */}
+      <div
+        style={{
+          height: "100%",
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
         <div
           ref={probeRef}
           data-section-sizer=""
-          style={{ width: "max-content", minWidth: "100%" }}
+          style={{
+            // flex:none is load-bearing: a shrinkable sizer would be squeezed
+            // to the box and the probe would never see a too-tall section.
+            flex: "none",
+            width: "max-content",
+            minWidth: "100%",
+            marginTop: "auto",
+            marginBottom: "auto",
+          }}
         >
           <SurfaceLayoutProvider value={bandLayout()}>
             <Section placement="ribbon" />

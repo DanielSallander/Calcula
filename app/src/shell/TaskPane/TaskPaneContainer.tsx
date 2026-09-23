@@ -1,12 +1,19 @@
 //! FILENAME: app/src/shell/TaskPane/TaskPaneContainer.tsx
 // PURPOSE: Main Task Pane container with resize, tabs, and content rendering
-// CONTEXT: Renders the task pane sidebar with dynamic content from registered views
+// CONTEXT: Renders the task pane sidebar with dynamic content from registered views.
+//          Chrome is tokens only (TaskPane.styles.ts): a --shadow-raised frame,
+//          the shared 40px header, a 2px --state-accent resize line, and the
+//          RibbonIcon.Panel empty state.
 
 import React, { useCallback, useRef, useEffect, useState } from "react";
 import { useTaskPaneStore } from "./useTaskPaneStore";
 import { TaskPaneExtensions } from "../../api/ui";
+import { RibbonIcon } from "../../api/ribbonIcons";
 import { TaskPaneHeader } from "./TaskPaneHeader";
 import * as S from "./TaskPane.styles";
+
+/** The empty state's pane glyph. */
+const EMPTY_STATE_ICON_SIZE = 40;
 
 export function TaskPaneContainer(): React.ReactElement {
   const {
@@ -100,7 +107,10 @@ export function TaskPaneContainer(): React.ReactElement {
       $dockMode={dockMode}
     >
       <S.TaskPaneContent $isVisible={shouldBeVisible}>
-        <S.ResizeHandle onMouseDown={handleResizeStart} />
+        <S.ResizeHandle
+          data-resizing={isResizing ? "true" : undefined}
+          onMouseDown={handleResizeStart}
+        />
 
         <TaskPaneHeader onClose={close} />
 
@@ -113,7 +123,9 @@ export function TaskPaneContainer(): React.ReactElement {
             />
           ) : (
             <S.EmptyState>
-              <S.EmptyStateIcon>[?]</S.EmptyStateIcon>
+              <S.EmptyStateIcon aria-hidden>
+                <RibbonIcon.Panel size={EMPTY_STATE_ICON_SIZE} />
+              </S.EmptyStateIcon>
               <S.EmptyStateText>No pane selected</S.EmptyStateText>
             </S.EmptyState>
           )}

@@ -2,6 +2,7 @@
 // PURPOSE: Extension manifest and definitions for the Controls pane.
 
 import React from "react";
+import { RibbonIcon } from "@api";
 import type { AddInManifest, DialogDefinition, DialogProps } from "@api";
 import type { PanelDefinition } from "@api/ui";
 import { ControlsPaneSection } from "./components/ControlsPaneSection";
@@ -25,18 +26,23 @@ export const ControlsPaneManifest: AddInManifest = {
 /**
  * Location-agnostic "Controls" panel (ribbon-placed by default; movable to the
  * sidebar). Single section: a mixed strip of filter cards and control cards.
+ * Not a contextual tab, so it carries no ribbonColor (its presence is what
+ * marks a tab contextual).
  */
 export const ControlsPanePanelDefinition: PanelDefinition = {
   id: CONTROLS_PANE_TAB_ID,
   title: "Controls",
-  icon: null,
+  // Activity-bar glyph, and the launcher of the fully demoted panel.
+  icon: React.createElement(RibbonIcon.Controls, { size: 20 }),
   sections: [
     {
       id: "controls-pane.items",
       label: "Controls",
+      icon: React.createElement(RibbonIcon.Controls, { size: 24 }),
       component: ControlsPaneSection,
-      // The item cards are a fixed-height (56px) band-designed strip;
-      // trust it inline and skip the shell's height probe.
+      // The item cards are a fixed-height (56px) band-designed strip beside
+      // a 61px Add hero — exactly the cluster's content box; trust it inline
+      // and skip the shell's height probe.
       ribbonPresentation: "inline",
     },
   ],

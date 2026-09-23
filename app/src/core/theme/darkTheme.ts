@@ -173,7 +173,85 @@ export const darkTheme: Record<string, string> = {
   [THEME_TOKENS.BUTTON_PRESSED_BORDER]: "color-mix(in srgb, var(--accent-primary) 55%, transparent)",
 
   // --- Ribbon icon accents (@api ribbonIcons) ---
-  [THEME_TOKENS.ICON_ACCENT]: "var(--accent-primary)",
+  // Follows the state colour, as in the light baseline (see defaultTheme.ts).
+  [THEME_TOKENS.ICON_ACCENT]: "var(--state-accent)",
   // Lightened like TEXT_ERROR: #c42b1c is only ~2.7:1 on the dark panel bg.
   [THEME_TOKENS.ICON_DANGER]: "#f87171",
+
+  // --- Calcula Clusters: shape + motion (identical to light — geometry is not
+  //     a colour and does not change with the base) ---
+  [THEME_TOKENS.RADIUS_CONTROL]: "8px",
+  [THEME_TOKENS.RADIUS_CLUSTER]: "12px",
+  [THEME_TOKENS.RADIUS_POPOVER]: "12px",
+  [THEME_TOKENS.RADIUS_PILL]: "999px",
+  [THEME_TOKENS.MOTION_HOVER]: "120ms cubic-bezier(0.2, 0, 0, 1)",
+  [THEME_TOKENS.MOTION_POPOVER]: "140ms cubic-bezier(0.2, 0, 0, 1)",
+  [THEME_TOKENS.MOTION_PANEL]: "180ms cubic-bezier(0.2, 0, 0, 1)",
+
+  // --- Calcula Clusters: elevation ---
+  // Much heavier alphas than light: a 6% shadow is invisible on #252526, and
+  // elevation on a dark ground reads through darkness, not through a tint.
+  [THEME_TOKENS.SHADOW_CLUSTER_HOVER]: "0 1px 2px rgba(0, 0, 0, 0.45)",
+  [THEME_TOKENS.SHADOW_POPOVER]: "0 8px 24px rgba(0, 0, 0, 0.55), 0 1px 3px rgba(0, 0, 0, 0.4)",
+  [THEME_TOKENS.SHADOW_TOOLBAR]: "0 4px 16px rgba(0, 0, 0, 0.6)",
+  [THEME_TOKENS.SHADOW_RAISED]: "0 6px 16px rgba(0, 0, 0, 0.5)",
+
+  // --- Calcula Clusters: state colour ---
+  // Lightened, never reused: the light value #047857 is under 3:1 on the dark
+  // surface — the same trap ICON_DANGER and the tone foregrounds fell into.
+  [THEME_TOKENS.STATE_ACCENT]: "#34d399",
+  [THEME_TOKENS.FOCUS_RING_COLOR]: "var(--state-accent)",
+  [THEME_TOKENS.FOCUS_RING]: "0 0 0 2px var(--bg-surface), 0 0 0 4px var(--focus-ring-color)",
+
+  // --- Calcula Clusters: ribbon surfaces ---
+  [THEME_TOKENS.RIBBON_FRAME_BG]: "#1f1f20",
+  [THEME_TOKENS.RIBBON_BAND_BG]: "#252526",
+  [THEME_TOKENS.RIBBON_CLUSTER_BG]: "#2b2b2e",
+  [THEME_TOKENS.RIBBON_CLUSTER_BORDER]: "#38383b",
+  [THEME_TOKENS.RIBBON_CLUSTER_BORDER_HOVER]: "#4a4a4f",
+  [THEME_TOKENS.RIBBON_GROUP_LABEL_FG]: "#9ca3af",
+  [THEME_TOKENS.RIBBON_TAB_INDICATOR]: "var(--state-accent)",
+
+  // --- Calcula Clusters: controls ---
+  [THEME_TOKENS.CONTROL_BORDER]: "#3f3f46",
+  [THEME_TOKENS.CONTROL_DIVIDER]: "#3a3a3d",
+  [THEME_TOKENS.CONTROL_TRACK]: "#3f3f46",
+  [THEME_TOKENS.CHIP_BG]: "#303033",
+  [THEME_TOKENS.CHIP_BORDER]: "#3f3f46",
+  // The tooltip INVERTS with the base (light chip on a dark app), which is why
+  // it is a token pair rather than "always dark".
+  [THEME_TOKENS.TOOLTIP_BG]: "#f3f4f6",
+  [THEME_TOKENS.TOOLTIP_FG]: "#111827",
+  [THEME_TOKENS.KBD_BG]: "rgba(17, 24, 39, 0.10)",
+  [THEME_TOKENS.BADGE_BG]: "var(--accent-color)",
+  [THEME_TOKENS.BADGE_FG]: "#ffffff",
+
+  // --- Calcula Clusters: duotone icon ground ---
+  // A little more ink than light (34% vs 30%): a light tint on a dark ground
+  // loses more separation than a dark tint on a light one.
+  [THEME_TOKENS.ICON_FILL_SOFT]: "color-mix(in srgb, currentColor 34%, transparent)",
+
+  // --- Calcula Clusters: contextual tab accents (each >= 4.5:1 on the frame) ---
+  [THEME_TOKENS.TAB_ACCENT_CHART]: "#7aa7ff",
+  [THEME_TOKENS.TAB_ACCENT_TABLE]: "#4fd1c0",
+  [THEME_TOKENS.TAB_ACCENT_PIVOT]: "#5fd08a",
+  [THEME_TOKENS.TAB_ACCENT_SLICER]: "#b39cff",
+  [THEME_TOKENS.TAB_ACCENT_SPARKLINE]: "#fb923c",
+  [THEME_TOKENS.TAB_ACCENT_REPORT]: "#fbbf24",
+
+  // --- Calcula Clusters: sidebar activity bar + status bar ---
+  [THEME_TOKENS.ACTIVITY_BAR_BG]: "#1b1b1c",
+  [THEME_TOKENS.ACTIVITY_BAR_FG]: "#a1a1aa",
+  [THEME_TOKENS.ACTIVITY_BAR_FG_ACTIVE]: "#f5f5f5",
+  [THEME_TOKENS.ACTIVITY_BAR_ITEM_HOVER_BG]: "rgba(255, 255, 255, 0.07)",
+  [THEME_TOKENS.ACTIVITY_BAR_ITEM_ACTIVE_BG]: "color-mix(in srgb, var(--state-accent) 24%, transparent)",
+  [THEME_TOKENS.ACTIVITY_BAR_INDICATOR]: "var(--state-accent)",
+  [THEME_TOKENS.SIDE_PANEL_HEADER_BG]: "var(--panel-bg)",
+  [THEME_TOKENS.STATUS_BAR_BG]: "#1b5e3a",
+  [THEME_TOKENS.STATUS_BAR_FG]: "#ffffff",
+  [THEME_TOKENS.BORDER_SUBTLE]: "#303033",
+
+  // --- Aliases for names callers already spelled (see tokens.ts) ---
+  [THEME_TOKENS.BORDER_COLOR]: "var(--border-default)",
+  [THEME_TOKENS.INPUT_BG]: "var(--bg-surface)",
 };

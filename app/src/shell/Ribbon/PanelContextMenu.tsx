@@ -1,11 +1,35 @@
 //! FILENAME: app/src/shell/Ribbon/PanelContextMenu.tsx
 // PURPOSE: Context menu for moving panels between sidebar and ribbon
 // CONTEXT: Shown on right-click of ribbon tab headers, activity bar icons,
-// and side panel headers. Part of the location-agnostic panel system.
+//          and side panel headers. Part of the location-agnostic panel system.
+//
+//          Wears the Clusters card chrome (the same recipe as a card Popover:
+//          --bg-surface, a 1px --ribbon-cluster-border hairline, --radius-popover,
+//          --shadow-popover, 8px padding) with 30px rows, so it reads as one of
+//          the ribbon's own overlays. Tokens only.
+//
+//          CONTRACT: the items stay PLAIN <button> elements with the exact
+//          labels "Move to Sidebar" / "Move to Ribbon" / "Edit Script..." —
+//          e2e/tests/panel-placement.spec.ts drives them with
+//          getByRole("button", { name: /Move to .../ }). Do not give them a
+//          menuitem role.
+//
+//          Rendered in a body portal at the pointer, clamped into the
+//          viewport: it opens from the ribbon, whose frame is its own stacking
+//          context, and from the rail and the side panel.
 
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import ReactDOM from "react-dom";
+import { css, cx } from "@emotion/css";
 import type { PanelPlacement } from "../../api/uiTypes";
 import { emitAppEvent } from "../../api/events";
+import { LT, FONT_FAMILY, ICON_SIZE_SM, MENU_ROW_HEIGHT } from "../../api/layout";
+import { RibbonIcon } from "../../api/ribbonIcons";
+import {
+  getRibbonLabelMode,
+  setRibbonLabelMode,
+  subscribeToAppearance,
+} from "../../api/appearance";
 
 export interface PanelContextMenuProps {
   /** Screen coordinates where the menu should appear */
@@ -29,8 +53,93 @@ export interface PanelContextMenuProps {
   onClose: () => void;
 }
 
+/** Keep the menu this far from the viewport edge. */
+const VIEWPORT_MARGIN = 4;
+
+const styles = {
+  menu: css`
+    position: fixed;
+    z-index: 10000;
+    box-sizing: border-box;
+    min-width: 200px;
+    padding: 8px;
+    background: ${LT.surface};
+    border: 1px solid ${LT.clusterBorder};
+    border-radius: ${LT.radiusPopover};
+    box-shadow: ${LT.shadowPopover};
+    font-family: ${FONT_FAMILY};
+    color: ${LT.text};
+  `,
+  item: css`
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    box-sizing: border-box;
+    width: 100%;
+    min-height: ${MENU_ROW_HEIGHT}px;
+    padding: 0 9px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: ${LT.text};
+    cursor: pointer;
+    font-family: ${FONT_FAMILY};
+    font-size: 12px;
+    line-height: 1.2;
+    text-align: left;
+    transition: background-color ${LT.motionHover};
+
+    &:hover {
+      background: ${LT.hover};
+    }
+
+    &:active {
+      background: ${LT.active};
+    }
+
+    &:focus-visible {
+      outline: none;
+      box-shadow: ${LT.focusRing};
+    }
+  `,
+  /** A row that carries a hint line grows past 30px instead of clipping it. */
+  itemWithHint: css`
+    padding-top: 5px;
+    padding-bottom: 5px;
+  `,
+  icon: css`
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: ${ICON_SIZE_SM}px;
+    height: ${ICON_SIZE_SM}px;
+  `,
+  text: css`
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    min-width: 0;
+  `,
+  hint: css`
+    font-size: 11px;
+    color: ${LT.textSecondary};
+  `,
+  separator: css`
+    height: 1px;
+    margin: 5px 6px;
+    background: ${LT.controlDivider};
+  `,
+};
+
+function readLabelsShown(): boolean {
+  return getRibbonLabelMode() === "show";
+}
+
 /**
- * Minimal context menu with "Move to Sidebar" / "Move to Ribbon" option.
+ * "Move to Sidebar" / "Move to Ribbon", the ribbon's group-label toggle, and
+ * "Edit Script...".
  */
 export function PanelContextMenu({
   position,
@@ -43,6 +152,23 @@ export function PanelContextMenu({
   onClose,
 }: PanelContextMenuProps): React.ReactElement {
   const menuRef = useRef<HTMLDivElement>(null);
+  const [placed, setPlaced] = useState<{ left: number; top: number }>({
+    left: position.x,
+    top: position.y,
+  });
+  const labelsShown = useSyncExternalStore(subscribeToAppearance, readLabelsShown, () => true);
+
+  // Clamp into the viewport once the menu's real size is known (before paint).
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const maxLeft = window.innerWidth - rect.width - VIEWPORT_MARGIN;
+    const maxTop = window.innerHeight - rect.height - VIEWPORT_MARGIN;
+    const left = Math.max(VIEWPORT_MARGIN, Math.min(position.x, maxLeft));
+    const top = Math.max(VIEWPORT_MARGIN, Math.min(position.y, maxTop));
+    setPlaced((prev) => (prev.left === left && prev.top === top ? prev : { left, top }));
+  }, [position.x, position.y]);
 
   // Close on outside click or Escape
   useEffect(() => {
@@ -70,9 +196,16 @@ export function PanelContextMenu({
 
   const targetPlacement: PanelPlacement = currentPlacement === "ribbon" ? "sidebar" : "ribbon";
   const label = currentPlacement === "ribbon" ? "Move to Sidebar" : "Move to Ribbon";
+  // Group captions are a ribbon preference: offered where the ribbon is.
+  const showLabelToggle = currentPlacement === "ribbon";
 
   const handleMoveClick = () => {
     onMove(targetPlacement);
+    onClose();
+  };
+
+  const handleToggleLabels = () => {
+    setRibbonLabelMode(labelsShown ? "hide" : "show");
     onClose();
   };
 
@@ -85,88 +218,54 @@ export function PanelContextMenu({
     onClose();
   };
 
-  const menuItemStyle: React.CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    width: "100%",
-    padding: "6px 16px",
-    border: "none",
-    backgroundColor: "transparent",
-    cursor: "pointer",
-    fontSize: "12px",
-    color: "var(--ctx-menu-text)",
-    fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
-    textAlign: "left",
-  };
+  const hasLayoutItems = canMoveToTarget || showLabelToggle;
 
-  const handleMouseEnter = (e: React.MouseEvent) => {
-    (e.target as HTMLElement).style.backgroundColor = "var(--ctx-menu-item-hover-bg)";
-  };
-  const handleMouseLeave = (e: React.MouseEvent) => {
-    (e.target as HTMLElement).style.backgroundColor = "transparent";
-  };
-
-  return (
+  const menu = (
     <div
       ref={menuRef}
-      style={{
-        position: "fixed",
-        left: position.x,
-        top: position.y,
-        zIndex: 10000,
-        backgroundColor: "var(--ctx-menu-bg)",
-        border: "1px solid var(--ctx-menu-border)",
-        borderRadius: 4,
-        boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
-        padding: "4px 0",
-        minWidth: 160,
-      }}
+      className={styles.menu}
+      style={{ left: placed.left, top: placed.top }}
+      data-panel-context-menu=""
     >
       {canMoveToTarget && (
-        <>
-          <button
-            onClick={handleMoveClick}
-            style={menuItemStyle}
-            onMouseEnter={handleMouseEnter}
-            onMouseLeave={handleMouseLeave}
-          >
+        <button
+          type="button"
+          onClick={handleMoveClick}
+          className={cx(styles.item, moveHint && styles.itemWithHint)}
+        >
+          <span className={styles.icon} aria-hidden>
             {targetPlacement === "sidebar" ? (
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--text-secondary)" strokeWidth="1.2">
-                <rect x="1" y="2" width="14" height="12" rx="1" />
-                <line x1="5" y1="2" x2="5" y2="14" />
-              </svg>
+              <RibbonIcon.Sidebar size={ICON_SIZE_SM} />
             ) : (
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--text-secondary)" strokeWidth="1.2">
-                <rect x="1" y="2" width="14" height="12" rx="1" />
-                <line x1="1" y1="5" x2="15" y2="5" />
-              </svg>
+              <RibbonIcon.Ribbon size={ICON_SIZE_SM} />
             )}
-            <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
-              {label}
-              {moveHint && (
-                <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>{moveHint}</span>
-              )}
-            </span>
-          </button>
-
-          {/* Separator */}
-          <div style={{ height: 1, backgroundColor: "var(--ctx-menu-separator)", margin: "4px 0" }} />
-        </>
+          </span>
+          <span className={styles.text}>
+            {label}
+            {moveHint && <span className={styles.hint}>{moveHint}</span>}
+          </span>
+        </button>
       )}
 
-      <button
-        onClick={handleEditScript}
-        style={menuItemStyle}
-        onMouseEnter={handleMouseEnter}
-        onMouseLeave={handleMouseLeave}
-      >
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--text-secondary)" strokeWidth="1.2">
-          <path d="M2 12l1-4 7-7 3 3-7 7-4 1z" />
-          <path d="M10 4l3 3" />
-        </svg>
+      {showLabelToggle && (
+        <button type="button" onClick={handleToggleLabels} className={styles.item}>
+          <span className={styles.icon} aria-hidden>
+            <RibbonIcon.Text size={ICON_SIZE_SM} />
+          </span>
+          {labelsShown ? "Hide group labels" : "Show group labels"}
+        </button>
+      )}
+
+      {hasLayoutItems && <div className={styles.separator} role="separator" />}
+
+      <button type="button" onClick={handleEditScript} className={styles.item}>
+        <span className={styles.icon} aria-hidden>
+          <RibbonIcon.Pencil size={ICON_SIZE_SM} />
+        </span>
         Edit Script...
       </button>
     </div>
   );
+
+  return typeof document === "undefined" ? menu : ReactDOM.createPortal(menu, document.body);
 }

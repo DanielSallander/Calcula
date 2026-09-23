@@ -2,15 +2,57 @@
 // PURPOSE: Mini format toolbar that appears above the context menu on right-click.
 // CONTEXT: Shell overlay component. Uses the public API (applyFormatting) to apply
 //          formatting to the current selection. Similar to Excel's mini toolbar.
+//
+//          Built from the @api/layout control grammar, so the app has ONE toolbar
+//          language (Calcula Clusters, Open.dc.html board 4): the floating pill
+//          (MiniFormatToolbar.styles.ts) holds the ribbon's own Segmented pills,
+//          28px IconButtons with RibbonIcon glyphs, ColorSwatch bars with the
+//          shared ColorPopover, and the shared Select. B / I / U / S stay
+//          typographic, as they do on the Home tab.
+//
+//          TOOLTIPS open ABOVE the pill (placement "top"): below it is the
+//          context menu the user is about to use. Each carries the control's
+//          shortcut chip where the grid has one (the formatting shortcuts live
+//          in the grid's own keyboard handler, not the keybinding registry, so
+//          they are literals here). Every control asks for that through its OWN
+//          props (`tooltipPlacement`, `tooltipZIndex`, ColorSwatch `zIndex`),
+//          so each control shows exactly one tooltip. The two font Selects are
+//          the exception only in form: a native <select> has no tooltip prop,
+//          so a Tooltip attaches to it directly (it clones the element, adding
+//          no wrapper).
+//
+//          LAYERS. The palettes and tooltips are portalled to <body>, and the
+//          pill sits above the context menu, so each overlay is handed a
+//          numeric layer above both (MINI_TOOLBAR_LAYER and
+//          MINI_TOOLBAR_TOOLTIP_LAYER in the styles file).
+//
+//          PRESSES stay inside the toolbar: its root stops mousedown so the
+//          context menu below does not treat a press on the toolbar as an
+//          outside click and close. The same stop hides those presses from an
+//          open colour palette's own outside-press dismissal, so the toolbar
+//          closes the palette itself when a press inside the toolbar lands
+//          outside that palette and its trigger (onMouseDownCapture below).
+//
+//          ONE PALETTE AT A TIME. The toolbar owns which colour palette is open
+//          (`openColour`) and hands it to both ColorSwatches as controlled
+//          `open` / `onOpenChange`, so opening Fill closes Font colour by
+//          construction — no swatch is remounted, and focus and DOM identity
+//          survive the switch.
 
-import React, { useEffect, useRef, useState, useCallback } from "react";
-import {
-  getCell,
-  getStyle,
-  applyFormatting,
-} from "../../../api/lib";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { getCell, getStyle, applyFormatting } from "../../../api/lib";
 import { cellEvents } from "../../../api";
 import type { GridMenuContext } from "../../../api/extensions";
+import {
+  ColorSwatch,
+  IconButton,
+  QUICK_COLORS,
+  Segmented,
+  Select,
+  Tooltip,
+} from "../../../api/layout";
+import { RibbonIcon } from "../../../api/ribbonIcons";
+import { DEFAULT_STYLE as CELL_DEFAULT_STYLE } from "../../../core/types/types";
 import * as S from "./MiniFormatToolbar.styles";
 
 // ============================================================================
@@ -38,14 +80,30 @@ const FONT_SIZES: number[] = [
   8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 36, 48, 72,
 ];
 
-const QUICK_COLORS = [
-  // Row 1 - Dark colors
-  "#000000", "#404040", "#808080", "#bfbfbf", "#ffffff",
-  "#c00000", "#ff0000", "#ffc000", "#ffff00", "#92d050",
-  // Row 2 - Theme accents
-  "#00b050", "#00b0f0", "#0070c0", "#002060", "#7030a0",
-  "#ff6699", "#ff9933", "#cccc00", "#66cc66", "#33cccc",
-];
+/** Icon size inside a 28px control. */
+const ICON = 20;
+
+/** Field widths: the longest font name in FONT_LIST, and "72" + chevron. */
+const FONT_SELECT_WIDTH = 112;
+const SIZE_SELECT_WIDTH = 56;
+
+/** The two colour triggers. At most one palette is open at a time, and the
+ *  toolbar owns which (see the header). */
+type ColourSlot = "text" | "fill";
+
+/** data-testid of each toolbar control (all prefixed, see the styles file). */
+const tid = (name: string): string => `${S.TESTID_PREFIX}${name}`;
+const COLOUR_TESTID: Record<ColourSlot, string> = {
+  text: tid("text-color"),
+  fill: tid("fill-color"),
+};
+
+/** Tooltip props for every IconButton on the pill: above it (the context menu
+ *  is below), at a layer above the menu and any open palette. */
+const TOP_TIP = {
+  tooltipPlacement: "top",
+  tooltipZIndex: S.MINI_TOOLBAR_TOOLTIP_LAYER,
+} as const;
 
 // ============================================================================
 // Types
@@ -83,8 +141,9 @@ const DEFAULT_STYLE: CurrentStyle = {
   italic: false,
   underline: "none",
   strikethrough: false,
-  textColor: "#000000",
-  backgroundColor: "#ffffff",
+  // A cell with no style of its own paints with the Core's defaults.
+  textColor: CELL_DEFAULT_STYLE.textColor,
+  backgroundColor: CELL_DEFAULT_STYLE.backgroundColor,
   textAlign: "general",
 };
 
@@ -107,58 +166,6 @@ function getSelectionRange(context: GridMenuContext) {
 }
 
 // ============================================================================
-// Color Picker Popover (inline)
-// ============================================================================
-
-function InlineColorPicker({
-  colors,
-  currentColor,
-  onPick,
-  onClose,
-}: {
-  colors: string[];
-  currentColor: string;
-  onPick: (color: string) => void;
-  onClose: () => void;
-}): React.ReactElement {
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handle = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    const timeout = setTimeout(() => {
-      document.addEventListener("mousedown", handle);
-    }, 0);
-    return () => {
-      clearTimeout(timeout);
-      document.removeEventListener("mousedown", handle);
-    };
-  }, [onClose]);
-
-  return (
-    <S.ColorDropdown ref={ref} onClick={(e) => e.stopPropagation()}>
-      <S.ColorGrid>
-        {colors.map((color) => (
-          <S.ColorCell
-            key={color}
-            $color={color}
-            $selected={currentColor.toLowerCase() === color.toLowerCase()}
-            onClick={() => {
-              onPick(color);
-              onClose();
-            }}
-            title={color}
-          />
-        ))}
-      </S.ColorGrid>
-    </S.ColorDropdown>
-  );
-}
-
-// ============================================================================
 // Main Component
 // ============================================================================
 
@@ -166,12 +173,20 @@ export function MiniFormatToolbar({
   position,
   anchor,
   context,
-  onClose,
 }: MiniFormatToolbarProps): React.ReactElement {
   const toolbarRef = useRef<HTMLDivElement>(null);
   const [style, setStyle] = useState<CurrentStyle>(DEFAULT_STYLE);
-  const [textColorOpen, setTextColorOpen] = useState(false);
-  const [fillColorOpen, setFillColorOpen] = useState(false);
+  // Which colour palette is open, if any. The ColorSwatches are controlled by
+  // it, so there is one copy of this state and opening one palette closes the
+  // other by construction (see the header).
+  const [openColour, setOpenColour] = useState<ColourSlot | null>(null);
+
+  /** A swatch asked to open or close its palette. Closing only clears the
+   *  slot if it is still the open one: a stale close from the other swatch
+   *  must never shut the palette that just opened. */
+  const setColourOpen = useCallback((slot: ColourSlot, open: boolean) => {
+    setOpenColour((prev) => (open ? slot : prev === slot ? null : prev));
+  }, []);
 
   // Load the active cell's current style
   useEffect(() => {
@@ -191,8 +206,8 @@ export function MiniFormatToolbar({
           italic: !!s.italic,
           underline: s.underline || "none",
           strikethrough: !!s.strikethrough,
-          textColor: s.textColor || "#000000",
-          backgroundColor: s.backgroundColor || "#ffffff",
+          textColor: s.textColor || CELL_DEFAULT_STYLE.textColor,
+          backgroundColor: s.backgroundColor || CELL_DEFAULT_STYLE.backgroundColor,
           textAlign: s.textAlign || "general",
         });
       } catch (err) {
@@ -229,6 +244,26 @@ export function MiniFormatToolbar({
     el.style.left = `${x}px`;
     el.style.top = `${y}px`;
   }, [position, anchor]);
+
+  // Close the open colour palette when a press inside the toolbar lands
+  // outside it and its own trigger. The palette is portalled to <body>, but a
+  // press inside it still reaches this capture handler through the React tree,
+  // so it is recognised and left alone. See the header.
+  const closeStrayColourPopover = useCallback(
+    (target: EventTarget | null) => {
+      const slot = openColour;
+      const root = toolbarRef.current;
+      if (slot === null || !root || !(target instanceof Node)) return;
+      const trigger = root.querySelector(`[data-testid="${COLOUR_TESTID[slot]}"]`);
+      if (trigger && trigger.contains(target)) return;
+      const flyout = document
+        .querySelector(`[data-testid="${COLOUR_TESTID[slot]}-popover"]`)
+        ?.closest("[data-section-flyout]");
+      if (flyout && flyout.contains(target)) return;
+      setColourOpen(slot, false);
+    },
+    [openColour, setColourOpen],
+  );
 
   // Apply formatting helper
   const apply = useCallback(
@@ -360,10 +395,24 @@ export function MiniFormatToolbar({
 
   const disabled = !context.selection;
 
+  // A cell whose font or size is not in the lists still shows what it is,
+  // instead of the select silently displaying the first option.
+  const fontOptions = FONT_LIST.includes(style.fontFamily)
+    ? FONT_LIST
+    : [style.fontFamily, ...FONT_LIST];
+  const sizeOptions = FONT_SIZES.includes(style.fontSize)
+    ? FONT_SIZES
+    : [...FONT_SIZES, style.fontSize].sort((a, b) => a - b);
+
   return (
-    <S.ToolbarContainer
+    <div
       ref={toolbarRef}
+      className={S.toolbar}
       style={{ left: position.x, top: position.y }}
+      role="toolbar"
+      aria-label="Format"
+      data-testid={tid("toolbar")}
+      onMouseDownCapture={(e) => closeStrayColourPopover(e.target)}
       onMouseDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => {
@@ -371,230 +420,208 @@ export function MiniFormatToolbar({
         e.stopPropagation();
       }}
     >
-      {/* Font Family & Size */}
-      <S.ButtonGroup>
-        <S.FontFamilySelect
+      {/* Font family & size. A native <select> has no tooltip prop, so the
+          Tooltip attaches to it directly (it clones, it does not wrap). */}
+      <Tooltip content="Font" placement="top" zIndex={S.MINI_TOOLBAR_TOOLTIP_LAYER}>
+        <Select
+          width={FONT_SELECT_WIDTH}
           value={style.fontFamily}
           onChange={changeFontFamily}
           disabled={disabled}
-          title="Font"
+          aria-label="Font"
+          data-testid={tid("font")}
         >
-          {FONT_LIST.map((f) => (
+          {fontOptions.map((f) => (
             <option key={f} value={f}>
               {f}
             </option>
           ))}
-        </S.FontFamilySelect>
+        </Select>
+      </Tooltip>
 
-        <S.FontSizeSelect
+      <Tooltip content="Font size" placement="top" zIndex={S.MINI_TOOLBAR_TOOLTIP_LAYER}>
+        <Select
+          width={SIZE_SELECT_WIDTH}
           value={style.fontSize}
           onChange={changeFontSize}
           disabled={disabled}
-          title="Font Size"
+          aria-label="Font size"
+          data-testid={tid("size")}
         >
-          {FONT_SIZES.map((s) => (
+          {sizeOptions.map((s) => (
             <option key={s} value={s}>
               {s}
             </option>
           ))}
-        </S.FontSizeSelect>
+        </Select>
+      </Tooltip>
 
-        <S.ToolbarButton
+      <Segmented ariaLabel="Font size steps">
+        <IconButton
+          {...TOP_TIP}
+          icon={<RibbonIcon.FontSizeUp size={ICON} />}
+          label="Increase font size"
           onClick={increaseFontSize}
           disabled={disabled}
-          title="Increase Font Size"
-        >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <text x="1" y="12" fontSize="11" fontWeight="bold" fill="currentColor">A</text>
-            <text x="9" y="8" fontSize="7" fontWeight="bold" fill="currentColor">A</text>
-          </svg>
-        </S.ToolbarButton>
-
-        <S.ToolbarButton
+          data-testid={tid("grow")}
+        />
+        <IconButton
+          {...TOP_TIP}
+          icon={<RibbonIcon.FontSizeDown size={ICON} />}
+          label="Decrease font size"
           onClick={decreaseFontSize}
           disabled={disabled}
-          title="Decrease Font Size"
-        >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <text x="1" y="12" fontSize="8" fontWeight="bold" fill="currentColor">A</text>
-            <text x="8" y="12" fontSize="11" fontWeight="bold" fill="currentColor">A</text>
-          </svg>
-        </S.ToolbarButton>
-      </S.ButtonGroup>
+          data-testid={tid("shrink")}
+        />
+      </Segmented>
 
       {/* Bold, Italic, Underline, Strikethrough */}
-      <S.ButtonGroup>
-        <S.ToolbarButton
-          $active={style.bold}
+      <Segmented ariaLabel="Emphasis">
+        <IconButton
+          {...TOP_TIP}
+          icon={<span className={S.glyph.bold}>B</span>}
+          label="Bold"
+          shortcut="Ctrl+B"
+          pressed={style.bold}
           onClick={toggleBold}
           disabled={disabled}
-          title="Bold (Ctrl+B)"
-        >
-          <strong>B</strong>
-        </S.ToolbarButton>
-
-        <S.ToolbarButton
-          $active={style.italic}
+          data-testid={tid("bold")}
+        />
+        <IconButton
+          {...TOP_TIP}
+          icon={<span className={S.glyph.italic}>I</span>}
+          label="Italic"
+          shortcut="Ctrl+I"
+          pressed={style.italic}
           onClick={toggleItalic}
           disabled={disabled}
-          title="Italic (Ctrl+I)"
-        >
-          <em style={{ fontFamily: "serif" }}>I</em>
-        </S.ToolbarButton>
-
-        <S.ToolbarButton
-          $active={style.underline !== "none"}
+          data-testid={tid("italic")}
+        />
+        <IconButton
+          {...TOP_TIP}
+          icon={<span className={S.glyph.underline}>U</span>}
+          label="Underline"
+          shortcut="Ctrl+U"
+          pressed={style.underline !== "none"}
           onClick={toggleUnderline}
           disabled={disabled}
-          title="Underline (Ctrl+U)"
-        >
-          <span style={{ textDecoration: "underline" }}>U</span>
-        </S.ToolbarButton>
-
-        <S.ToolbarButton
-          $active={style.strikethrough}
+          data-testid={tid("underline")}
+        />
+        <IconButton
+          {...TOP_TIP}
+          icon={<span className={S.glyph.strikethrough}>S</span>}
+          label="Strikethrough"
+          shortcut="Ctrl+5"
+          pressed={style.strikethrough}
           onClick={toggleStrikethrough}
           disabled={disabled}
-          title="Strikethrough"
-        >
-          <span style={{ textDecoration: "line-through" }}>S</span>
-        </S.ToolbarButton>
-      </S.ButtonGroup>
+          data-testid={tid("strikethrough")}
+        />
+      </Segmented>
 
-      {/* Text Color & Fill Color */}
-      <S.ButtonGroup>
-        <div style={{ position: "relative" }}>
-          <S.ToolbarButton
-            onClick={() => {
-              setTextColorOpen(!textColorOpen);
-              setFillColorOpen(false);
-            }}
-            disabled={disabled}
-            title="Font Color"
-          >
-            <span style={{ fontWeight: "bold", fontSize: "12px" }}>A</span>
-            <S.ColorIndicator $color={style.textColor} />
-          </S.ToolbarButton>
-          {textColorOpen && (
-            <InlineColorPicker
-              colors={QUICK_COLORS}
-              currentColor={style.textColor}
-              onPick={changeTextColor}
-              onClose={() => setTextColorOpen(false)}
-            />
-          )}
-        </div>
-
-        <div style={{ position: "relative" }}>
-          <S.ToolbarButton
-            onClick={() => {
-              setFillColorOpen(!fillColorOpen);
-              setTextColorOpen(false);
-            }}
-            disabled={disabled}
-            title="Fill Color"
-          >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <rect x="1" y="1" width="12" height="10" rx="1" fill={style.backgroundColor} stroke="currentColor" strokeWidth="1" />
-            </svg>
-            <S.ColorIndicator $color={style.backgroundColor} />
-          </S.ToolbarButton>
-          {fillColorOpen && (
-            <InlineColorPicker
-              colors={QUICK_COLORS}
-              currentColor={style.backgroundColor}
-              onPick={changeFillColor}
-              onClose={() => setFillColorOpen(false)}
-            />
-          )}
-        </div>
-      </S.ButtonGroup>
+      {/* Text colour & fill colour: one palette open at a time (see the
+          header). The palette opens at MINI_TOOLBAR_LAYER; ColorSwatch lays
+          its swatch tooltips and its own trigger tooltip above that. */}
+      <span className={S.colourPair}>
+        <ColorSwatch
+          variant="bar"
+          icon={<RibbonIcon.FontColor size={ICON} />}
+          label="Font colour"
+          tooltipPlacement="top"
+          zIndex={S.MINI_TOOLBAR_LAYER}
+          open={openColour === "text"}
+          onOpenChange={(open) => setColourOpen("text", open)}
+          color={style.textColor}
+          onChange={changeTextColor}
+          colors={QUICK_COLORS}
+          showTheme={false}
+          disabled={disabled}
+          testId={COLOUR_TESTID.text}
+        />
+        <ColorSwatch
+          variant="bar"
+          icon={<RibbonIcon.FillColor size={ICON} />}
+          label="Fill colour"
+          tooltipPlacement="top"
+          zIndex={S.MINI_TOOLBAR_LAYER}
+          open={openColour === "fill"}
+          onOpenChange={(open) => setColourOpen("fill", open)}
+          color={style.backgroundColor}
+          onChange={changeFillColor}
+          colors={QUICK_COLORS}
+          showTheme={false}
+          disabled={disabled}
+          testId={COLOUR_TESTID.fill}
+        />
+      </span>
 
       {/* Alignment */}
-      <S.ButtonGroup>
-        <S.ToolbarButton
-          $active={style.textAlign === "left"}
+      <Segmented ariaLabel="Horizontal alignment">
+        <IconButton
+          {...TOP_TIP}
+          icon={<RibbonIcon.AlignLeft size={ICON} />}
+          label="Align left"
+          pressed={style.textAlign === "left"}
           onClick={() => changeAlign("left")}
           disabled={disabled}
-          title="Align Left"
-        >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <line x1="2" y1="3" x2="12" y2="3" />
-            <line x1="2" y1="6" x2="9" y2="6" />
-            <line x1="2" y1="9" x2="12" y2="9" />
-            <line x1="2" y1="12" x2="9" y2="12" />
-          </svg>
-        </S.ToolbarButton>
-
-        <S.ToolbarButton
-          $active={style.textAlign === "center"}
+          data-testid={tid("align-left")}
+        />
+        <IconButton
+          {...TOP_TIP}
+          icon={<RibbonIcon.AlignCenter size={ICON} />}
+          label="Center"
+          pressed={style.textAlign === "center"}
           onClick={() => changeAlign("center")}
           disabled={disabled}
-          title="Align Center"
-        >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <line x1="2" y1="3" x2="12" y2="3" />
-            <line x1="3.5" y1="6" x2="10.5" y2="6" />
-            <line x1="2" y1="9" x2="12" y2="9" />
-            <line x1="3.5" y1="12" x2="10.5" y2="12" />
-          </svg>
-        </S.ToolbarButton>
-
-        <S.ToolbarButton
-          $active={style.textAlign === "right"}
+          data-testid={tid("align-center")}
+        />
+        <IconButton
+          {...TOP_TIP}
+          icon={<RibbonIcon.AlignRight size={ICON} />}
+          label="Align right"
+          pressed={style.textAlign === "right"}
           onClick={() => changeAlign("right")}
           disabled={disabled}
-          title="Align Right"
-        >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <line x1="2" y1="3" x2="12" y2="3" />
-            <line x1="5" y1="6" x2="12" y2="6" />
-            <line x1="2" y1="9" x2="12" y2="9" />
-            <line x1="5" y1="12" x2="12" y2="12" />
-          </svg>
-        </S.ToolbarButton>
-      </S.ButtonGroup>
+          data-testid={tid("align-right")}
+        />
+      </Segmented>
 
-      {/* Number Format shortcuts */}
-      <S.ButtonGroup>
-        <S.ToolbarButton
+      {/* Number format shortcuts */}
+      <Segmented ariaLabel="Number format">
+        <IconButton
+          {...TOP_TIP}
+          icon={<RibbonIcon.Percent size={ICON} />}
+          label="Percent style"
+          shortcut="Ctrl+Shift+%"
           onClick={applyPercentFormat}
           disabled={disabled}
-          title="Percent Style"
-        >
-          <span style={{ fontSize: "11px", fontWeight: 500 }}>%</span>
-        </S.ToolbarButton>
-
-        <S.ToolbarButton
+          data-testid={tid("percent")}
+        />
+        <IconButton
+          {...TOP_TIP}
+          icon={<RibbonIcon.Comma size={ICON} />}
+          label="Comma style"
           onClick={applyCommaFormat}
           disabled={disabled}
-          title="Comma Style"
-        >
-          <span style={{ fontSize: "11px", fontWeight: 500 }}>,</span>
-        </S.ToolbarButton>
-
-        <S.ToolbarButton
+          data-testid={tid("comma")}
+        />
+        <IconButton
+          {...TOP_TIP}
+          icon={<RibbonIcon.DecimalIncrease size={ICON} />}
+          label="Increase decimal"
           onClick={increaseDecimals}
           disabled={disabled}
-          title="Increase Decimal"
-        >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <text x="0" y="11" fontSize="8" fill="currentColor">.0</text>
-            <text x="8" y="6" fontSize="7" fill="currentColor">+</text>
-          </svg>
-        </S.ToolbarButton>
-
-        <S.ToolbarButton
+          data-testid={tid("decimal-increase")}
+        />
+        <IconButton
+          {...TOP_TIP}
+          icon={<RibbonIcon.DecimalDecrease size={ICON} />}
+          label="Decrease decimal"
           onClick={decreaseDecimals}
           disabled={disabled}
-          title="Decrease Decimal"
-        >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <text x="0" y="11" fontSize="8" fill="currentColor">.0</text>
-            <text x="8" y="6" fontSize="7" fill="currentColor">-</text>
-          </svg>
-        </S.ToolbarButton>
-      </S.ButtonGroup>
-    </S.ToolbarContainer>
+          data-testid={tid("decimal-decrease")}
+        />
+      </Segmented>
+    </div>
   );
 }

@@ -1,34 +1,31 @@
 //! FILENAME: app/extensions/BuiltIn/DocumentTheme/components/ThemeFontPicker.tsx
-//! PURPOSE: Dropdown to view/switch theme font pairs with live preview on hover.
+//! PURPOSE: The Page Layout "Fonts" hero: a CommandButton that opens a card
+//!          list of theme font pairs, each previewed in its own faces, with a
+//!          live preview on hover.
+//! CONTEXT: Composed from @api/layout primitives only (Calcula Clusters); the
+//!          hand-rolled styled-components hero and dropdown are gone. The
+//!          preview contract is unchanged from the old picker:
+//!            - opening snapshots the document theme;
+//!            - hovering a row applies that pair to the grid temporarily;
+//!            - leaving the list, or closing without a pick, restores the
+//!              snapshot;
+//!            - clicking a row commits it (and the snapshot follows the commit).
 
-import React, { useState, useEffect, useRef } from "react";
-import styled from "styled-components";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { ThemeDefinitionData } from "@api";
-import {
-  getDocumentTheme,
-  setDocumentTheme,
-} from "@api/theme";
+import { getDocumentTheme, setDocumentTheme } from "@api/theme";
 import { onAppEvent, AppEvents } from "@api/events";
-import { Popover } from "@api/layout";
+import { CommandButton, HERO_ICON_SIZE, Menu, MenuItem, Popover } from "@api/layout";
+import { RibbonIcon } from "@api/ribbonIcons";
+import { FONT_PAIRS, fontPairTestId } from "../lib/themeChoices";
 
-const v = (name: string) => `var(${name})`;
-
-/** Predefined font pairs (matching common Excel font combinations). */
-const FONT_PAIRS: { heading: string; body: string }[] = [
-  { heading: "Calibri Light", body: "Calibri" },
-  { heading: "Cambria", body: "Calibri" },
-  { heading: "Century Gothic", body: "Century Gothic" },
-  { heading: "Trebuchet MS", body: "Trebuchet MS" },
-  { heading: "Georgia", body: "Verdana" },
-  { heading: "Arial", body: "Arial" },
-  { heading: "Segoe UI", body: "Segoe UI" },
-  { heading: "Consolas", body: "Consolas" },
-];
+/** Card width: the heading face at 14px plus the body face as a trailing hint. */
+const PICKER_WIDTH = 280;
 
 export function ThemeFontPicker(): React.ReactElement {
   const [isOpen, setIsOpen] = useState(false);
   const [currentTheme, setCurrentTheme] = useState<ThemeDefinitionData | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
 
   // Snapshot of the theme when the dropdown opens, used to revert preview
   const originalThemeRef = useRef<ThemeDefinitionData | null>(null);
@@ -36,11 +33,19 @@ export function ThemeFontPicker(): React.ReactElement {
   const committedRef = useRef(false);
 
   useEffect(() => {
-    getDocumentTheme().then(setCurrentTheme);
+    let alive = true;
+    getDocumentTheme()
+      .then((t) => {
+        if (alive) setCurrentTheme(t);
+      })
+      .catch(console.error);
     const unsub = onAppEvent(AppEvents.THEME_CHANGED, (detail: { theme?: ThemeDefinitionData }) => {
       if (detail?.theme) setCurrentTheme(detail.theme);
     });
-    return unsub;
+    return () => {
+      alive = false;
+      unsub();
+    };
   }, []);
 
   // Capture original theme when dropdown opens; revert on close if no commit
@@ -51,9 +56,11 @@ export function ThemeFontPicker(): React.ReactElement {
     }
     if (!isOpen && originalThemeRef.current && !committedRef.current) {
       // Dropdown closed without a selection - revert preview
-      setDocumentTheme(originalThemeRef.current);
+      void setDocumentTheme(originalThemeRef.current);
     }
   }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const close = useCallback(() => setIsOpen(false), []);
 
   /** Live-preview: temporarily apply hovered font pair to the grid. */
   const handlePreview = async (pair: { heading: string; body: string }) => {
@@ -66,7 +73,7 @@ export function ThemeFontPicker(): React.ReactElement {
     await setDocumentTheme(preview);
   };
 
-  /** Revert to the original theme when the mouse leaves the dropdown. */
+  /** Revert to the original theme when the mouse leaves the list. */
   const handleRevertPreview = async () => {
     if (originalThemeRef.current && !committedRef.current) {
       await setDocumentTheme(originalThemeRef.current);
@@ -93,132 +100,44 @@ export function ThemeFontPicker(): React.ReactElement {
     currentTheme?.fonts?.body === pair.body;
 
   return (
-    <Container ref={containerRef}>
-      <FontButton onClick={() => setIsOpen(!isOpen)} title="Theme Fonts">
-        <FontIcon>Aa</FontIcon>
-        <ButtonLabel>Fonts</ButtonLabel>
-        <Arrow>{isOpen ? "\u25B2" : "\u25BC"}</Arrow>
-      </FontButton>
+    <>
+      <CommandButton
+        ref={setAnchor}
+        icon={<RibbonIcon.Fonts size={HERO_ICON_SIZE} />}
+        label="Fonts"
+        chevron
+        tooltip="Theme Fonts"
+        aria-haspopup="dialog"
+        aria-expanded={isOpen}
+        data-testid="page-layout-fonts"
+        onClick={() => setIsOpen((open) => !open)}
+      />
 
       <Popover
-        anchorEl={containerRef.current}
+        anchorEl={anchor}
         open={isOpen}
-        onClose={() => setIsOpen(false)}
+        onClose={close}
+        card
+        heading="Theme Fonts"
+        width={PICKER_WIDTH}
       >
-        <Dropdown onMouseLeave={handleRevertPreview}>
-          <DropdownTitle>Theme Fonts</DropdownTitle>
-          <FontList>
-            {FONT_PAIRS.map((pair) => (
-              <FontItem
-                key={`${pair.heading}-${pair.body}`}
-                $active={isActive(pair)}
-                onClick={() => handleApply(pair)}
-                onMouseEnter={() => handlePreview(pair)}
-              >
-                <FontPreview>
-                  <HeadingPreview style={{ fontFamily: pair.heading }}>
-                    {pair.heading}
-                  </HeadingPreview>
-                  <BodyPreview style={{ fontFamily: pair.body }}>
-                    {pair.body}
-                  </BodyPreview>
-                </FontPreview>
-              </FontItem>
-            ))}
-          </FontList>
-        </Dropdown>
+        <Menu ariaLabel="Theme Fonts" onMouseLeave={() => void handleRevertPreview()}>
+          {FONT_PAIRS.map((pair) => (
+            <MenuItem
+              key={`${pair.heading}-${pair.body}`}
+              role="menuitemradio"
+              checked={isActive(pair)}
+              onSelect={() => void handleApply(pair)}
+              onMouseEnter={() => void handlePreview(pair)}
+              title={`Headings: ${pair.heading} / Body: ${pair.body}`}
+              testId={fontPairTestId(pair)}
+              hint={<span style={{ fontFamily: pair.body }}>{pair.body}</span>}
+            >
+              <span style={{ fontFamily: pair.heading, fontSize: 14 }}>{pair.heading}</span>
+            </MenuItem>
+          ))}
+        </Menu>
       </Popover>
-    </Container>
+    </>
   );
 }
-
-const Container = styled.div`
-  position: relative;
-`;
-
-const FontButton = styled.button`
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 8px;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 3px;
-  cursor: pointer;
-  color: ${v("--text-primary")};
-
-  &:hover {
-    background: ${v("--button-hover-bg")};
-    border-color: ${v("--border-default")};
-  }
-`;
-
-const FontIcon = styled.span`
-  font-size: 16px;
-  font-weight: 300;
-`;
-
-const ButtonLabel = styled.span`
-  font-size: 11px;
-`;
-
-const Arrow = styled.span`
-  font-size: 7px;
-  color: ${v("--text-secondary")};
-`;
-
-/* Dropdown chrome only — the hosting Popover owns positioning/dismissal. */
-const Dropdown = styled.div`
-  padding: 8px;
-  background: ${v("--panel-bg")};
-  border: 1px solid ${v("--border-default")};
-  border-radius: 6px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  min-width: 240px;
-  max-height: 320px;
-  overflow-y: auto;
-`;
-
-const DropdownTitle = styled.div`
-  font-size: 11px;
-  font-weight: 600;
-  color: ${v("--text-secondary")};
-  margin-bottom: 6px;
-`;
-
-const FontList = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-`;
-
-const FontItem = styled.button<{ $active: boolean }>`
-  display: flex;
-  padding: 6px 8px;
-  background: ${(p) => (p.$active ? v("--ribbon-btn-hover-bg") : "transparent")};
-  border: 1px solid ${(p) => (p.$active ? v("--accent-primary") : "transparent")};
-  border-radius: 4px;
-  cursor: pointer;
-  text-align: left;
-
-  &:hover {
-    background: ${v("--button-hover-bg")};
-  }
-`;
-
-const FontPreview = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-`;
-
-const HeadingPreview = styled.span`
-  font-size: 14px;
-  color: ${v("--text-primary")};
-`;
-
-const BodyPreview = styled.span`
-  font-size: 11px;
-  color: ${v("--text-secondary")};
-`;

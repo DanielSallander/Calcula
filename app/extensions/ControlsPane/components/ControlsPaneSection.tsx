@@ -8,14 +8,27 @@
 //          when filters span more than one model connection, the FILTER subset
 //          keeps its per-connection grouping headers while controls list first
 //          in their own implicit group.
-// CONTEXT: "+" opens the AddItemMenu (Filter... / control kinds). Drag-reorder
+// CONTEXT: "Add" opens the AddItemMenu (Filter... / control kinds). Drag-reorder
 //          v1: every card is wrapped in an HTML5-draggable wrapper; a drop
 //          rewrites `order` via each entity's own update command (midpoint
 //          integer when a gap exists, else a sequential rewrite of all orders).
+//
+//          Fill rule (Calcula Clusters): the band strip is exactly the
+//          cluster's 61px content box — ONE TALL ROW. The Add hero is 61px and
+//          the chip-cards are 56px, centred in it; nothing here is a lone
+//          short row.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import type { PanelSectionProps } from "@api/ui";
-import { Stack, ControlRow, StatusText, useSurfaceLayout } from "@api/layout";
+import {
+  BAND_MAX_CONTENT_HEIGHT,
+  CLUSTER_GAP,
+  ControlRow,
+  Stack,
+  StatusText,
+  useSurfaceLayout,
+} from "@api/layout";
+import { sectionHeadingStyle } from "./paneChrome";
 import { FilterPaneEvents } from "../lib/filterPaneEvents";
 import { ControlsPaneEvents } from "../lib/controlsPaneEvents";
 import { getConnectionName, refreshCache } from "../lib/filterPaneStore";
@@ -250,14 +263,14 @@ export function ControlsPaneSection(
 
   const emptyHint =
     items.length === 0 ? (
-      <StatusText>Click + to add filters and controls</StatusText>
+      <StatusText>Click Add to add filters and controls</StatusText>
     ) : null;
 
   // Band: one horizontal strip of band-designed 56px cards in merged order.
   // The shell owns overflow handling.
   if (band) {
     return (
-      <div style={styles.bandStrip}>
+      <div style={styles.bandStrip} data-testid="controls-pane-strip">
         <AddItemMenu />
         {emptyHint}
         {items.map((item) => renderDraggableItem(item))}
@@ -281,6 +294,7 @@ export function ControlsPaneSection(
   return (
     <Stack gap={6}>
       <ControlRow gap={6}>
+        {/* The add row: the hero renders as a standard 28px button here. */}
         <AddItemMenu />
         {emptyHint}
       </ControlRow>
@@ -311,9 +325,8 @@ const styles: Record<string, React.CSSProperties> = {
   bandStrip: {
     display: "flex",
     alignItems: "center",
-    height: "100%",
-    gap: "6px",
-    padding: "0 4px",
+    height: BAND_MAX_CONTENT_HEIGHT,
+    gap: CLUSTER_GAP,
   },
   dragWrapperBand: {
     display: "flex",
@@ -325,15 +338,10 @@ const styles: Record<string, React.CSSProperties> = {
     width: "100%",
     minWidth: 0,
   },
+  // Per-connection grouping header: the one pane heading recipe (12px/600,
+  // sentence case — no uppercase, no letter-spacing).
   groupHeader: {
-    fontSize: "10px",
-    fontWeight: 600,
-    color: "#777",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.4px",
-    marginTop: "4px",
-    whiteSpace: "nowrap" as const,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
+    ...sectionHeadingStyle,
+    marginTop: 4,
   },
 };

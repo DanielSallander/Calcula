@@ -115,7 +115,15 @@ export const GOLDEN_AFFECTING_KEYS: Array<{
     // Written only by an explicit user choice (src/core/theme/skinLoader.ts:20).
     // Absent means `resolveEffectiveSkinId` falls back to BUILTIN_DEFAULT_SKIN_ID
     // = LIGHT_SKIN_ID (src/core/theme/builtInSkins.ts:13).
-    isClean: (raw) => raw === undefined || raw === "light" || raw === '"light"',
+    // "calcula.light" is LIGHT_SKIN_ID, the value an explicit Light choice
+    // actually writes; the bare "light" spellings were never stored and only
+    // survive as harmless tolerance.
+    isClean: (raw) =>
+      raw === undefined ||
+      raw === "calcula.light" ||
+      raw === '"calcula.light"' ||
+      raw === "light" ||
+      raw === '"light"',
   },
   {
     key: "calcula-panel-placements",
@@ -138,6 +146,26 @@ export const GOLDEN_AFFECTING_KEYS: Array<{
       if (raw === undefined) return true;
       const v = parsed(raw);
       return !!v && typeof v === "object" && Object.values(v as object).every((x) => !x);
+    },
+  },
+  {
+    key: "calcula.appearance.ribbonLabels",
+    consequence:
+      "hidden group captions change every ribbon golden and the cluster widths the demotion model measures",
+    // src/core/theme/skinLoader.ts: "hide" is the only value ever written —
+    // choosing "show" REMOVES the key, so absent is the one clean state.
+    isClean: (raw) => raw === undefined,
+  },
+  {
+    key: "calcula.appearance.userTokens",
+    consequence:
+      "a user accent or token override recolours every ribbon, rail and focus ring in every later capture",
+    // src/core/theme/skinLoader.ts: setUserTokenOverrides(null) or an empty
+    // map removes the key.
+    isClean: (raw) => {
+      if (raw === undefined) return true;
+      const v = parsed(raw);
+      return !!v && typeof v === "object" && Object.keys(v as object).length === 0;
     },
   },
   {
@@ -165,6 +193,21 @@ export const GOLDEN_AFFECTING_KEYS: Array<{
     },
   },
   {
+    key: "calcula-activity-bar",
+    consequence:
+      "a resized side panel changes the grid width in every later capture taken with a sidebar view open",
+    // zustand/persist writes this unprompted; `partialize` persists ONLY
+    // {width} (src/shell/ActivityBar/useActivityBarStore.ts). DEFAULT_WIDTH is
+    // 480 * 2/3 = 320. The side panel's resize handle is a 4px strip on its
+    // right edge (src/shell/ActivityBar/SidePanel.tsx), so a drag that starts
+    // near that edge can change it.
+    isClean: (raw) => {
+      if (raw === undefined) return true;
+      const s = zustandState(raw);
+      return s.width === undefined || s.width === 320;
+    },
+  },
+  {
     key: "calcula.extensions.disabled",
     consequence: "a disabled extension removes a whole ribbon group from every golden",
     // src/shell/registries/extensionDisabledStore.ts:8 — absent or empty = all enabled.
@@ -179,7 +222,8 @@ export const GOLDEN_AFFECTING_KEYS: Array<{
     key: "calcula.locale",
     consequence:
       "src/api/locale.ts pushes a saved override into the BACKEND on first read, silently changing the formula argument separator for the whole next run",
-    // extensions/Settings/SettingsView.tsx:49 reads it as `|| "system"`.
+    // extensions/Settings/SettingsView.tsx (the General page's locale picker)
+    // reads it as `|| "system"`; src/api/locale.ts LOCALE_OVERRIDE_KEY owns it.
     isClean: (raw) => raw === undefined || raw === "system" || raw === '"system"',
   },
 ];

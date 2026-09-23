@@ -145,7 +145,7 @@ const RULE_TYPE_OPTIONS: { value: RuleType; label: string }[] = [
 // Component
 // ============================================================================
 
-export function RuleEditor({ rule, onChange, isNew }: RuleEditorProps): React.ReactElement {
+export function RuleEditor({ rule, onChange, isNew: _isNew }: RuleEditorProps): React.ReactElement {
   // Handle condition type change
   const handleConditionTypeChange = useCallback((type: RuleType) => {
     let newCondition: RuleCondition;
@@ -512,6 +512,7 @@ export function RuleEditor({ rule, onChange, isNew }: RuleEditorProps): React.Re
             <div style={styles.formGroup}>
               <label style={styles.label}>Background Color</label>
               <ColorPicker
+                label="Background colour"
                 value={rule.style.backgroundColor}
                 onChange={(color) => handleStyleChange({ 
                   ...rule.style, 
@@ -522,6 +523,7 @@ export function RuleEditor({ rule, onChange, isNew }: RuleEditorProps): React.Re
             <div style={styles.formGroup}>
               <label style={styles.label}>Text Color</label>
               <ColorPicker
+                label="Text colour"
                 value={rule.style.textColor}
                 onChange={(color) => handleStyleChange({ 
                   ...rule.style, 

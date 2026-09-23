@@ -4,14 +4,18 @@
 //          the @api CellRange facade (display strings, empties skipped),
 //          re-read on the "grid:refresh" window event and on open.
 // CONTEXT: Selecting an item commits { kind: "text" } (one backend write, one
-//          undo entry, one GET.CONTROLVALUE dependent recalc). The item list
-//          renders in a portal above the grid canvas (position: fixed,
-//          zIndex 10000 — the FilterDropdown idiom), never a bare <select>.
+//          undo entry, one GET.CONTROLVALUE dependent recalc).
+//
+//          Drawn by the @api Dropdown — the value picker of the control
+//          grammar: a 28px token trigger and a card Popover listbox with the
+//          listbox keyboard model (arrows, Home/End, type-ahead). It replaced
+//          a hand-rolled position:fixed portal list with its own outside-click
+//          and Escape listeners; the Popover owns dismissal now.
 
-import React, { useState, useCallback, useEffect, useRef } from "react";
-import { createPortal } from "react-dom";
+import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { CellRange, getSheets } from "@api";
-import { useSurfaceLayout } from "@api/layout";
+import { Dropdown, useSurfaceLayout } from "@api/layout";
+import type { DropdownOption } from "@api/layout";
 import { setChartParamValue } from "@api/chartParams";
 import type { ControlValue } from "@api/controlValues";
 import type { PaneControl } from "../lib/controlsPaneTypes";
@@ -28,8 +32,15 @@ const FALLBACK_CONFIG: DropdownConfig = {
 /** Cap cell-range reads so a whole-column reference stays cheap. */
 const MAX_RANGE_CELLS = 1000;
 
-const LIST_MIN_WIDTH = 160;
-const LIST_MAX_HEIGHT = 240;
+/** Band trigger width: fills a card at its minimum width. */
+const BAND_TRIGGER_WIDTH = 140;
+
+/** Keys that open the list from the trigger (and so re-read a range). */
+const OPEN_KEYS = new Set(["ArrowDown", "ArrowUp", "Enter", " "]);
+
+/** The placeholder row's value when a source has no items. It is only ever
+ *  offered when there are NO real items, so it cannot shadow one. */
+const NO_ITEMS_VALUE = "__controls_pane_no_items__";
 
 /**
  * Read a cell-range source's items: display strings in range order
@@ -90,11 +101,7 @@ export function DropdownControl({ control }: Props): React.ReactElement {
   const [items, setItems] = useState<string[]>(
     source.type === "static" ? source.items.filter((i) => i !== "") : [],
   );
-  const [open, setOpen] = useState(false);
-  const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-  const closedAtRef = useRef(0);
+  const wrapperRef = useRef<HTMLSpanElement>(null);
   // Guards stale async range reads (source changed / unmounted mid-flight).
   const loadSeqRef = useRef(0);
 
@@ -132,21 +139,19 @@ export function DropdownControl({ control }: Props): React.ReactElement {
     };
   }, [loadItems, source.type]);
 
-  const toggleOpen = useCallback(() => {
-    // Same close/reopen guard as RibbonFilterCard's dropdown arrow.
-    if (Date.now() - closedAtRef.current < 200) return;
-    if (!open && triggerRef.current) {
-      setAnchorRect(triggerRef.current.getBoundingClientRect());
-      // Cell-range sources: re-read on open so the list is always fresh.
-      if (source.type === "cellRange") loadItems();
-    }
-    setOpen((prev) => !prev);
-  }, [open, source.type, loadItems]);
-
-  const handleClose = useCallback(() => {
-    closedAtRef.current = Date.now();
-    setOpen(false);
-  }, []);
+  // Cell-range sources: re-read when the list is being OPENED so it is always
+  // fresh. The Dropdown owns its open state, so the opening gesture is read
+  // at the trigger — a press or an opening key that lands on the trigger
+  // itself. React events from the portalled list bubble here too; the DOM
+  // containment test keeps a click on an option from triggering a re-read.
+  const refreshOnOpen = useCallback(
+    (target: EventTarget | null) => {
+      if (source.type !== "cellRange") return;
+      if (!(target instanceof Node) || !wrapperRef.current?.contains(target)) return;
+      loadItems();
+    },
+    [source.type, loadItems],
+  );
 
   // Optional chart-param binding (D9/Phase 7): a selection also drives the
   // bound chart param (numeric strings as numbers — params bound to axis
@@ -156,7 +161,6 @@ export function DropdownControl({ control }: Props): React.ReactElement {
   const handleSelect = useCallback(
     (value: string) => {
       setSelected(value);
-      handleClose();
       const committed: ControlValue = { kind: "text", value };
       void commitValue(control.id, committed);
       if (chartTarget) {
@@ -168,170 +172,56 @@ export function DropdownControl({ control }: Props): React.ReactElement {
         );
       }
     },
-    [control.id, handleClose, chartTarget],
+    [control.id, chartTarget],
   );
 
-  // Close on outside click (delayed registration, FilterDropdown pattern).
-  useEffect(() => {
-    if (!open) return;
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (listRef.current?.contains(target)) return;
-      if (triggerRef.current?.contains(target)) return;
-      handleClose();
-    };
-    const timer = setTimeout(() => {
-      document.addEventListener("mousedown", handleClick);
-    }, 0);
-    return () => {
-      clearTimeout(timer);
-      document.removeEventListener("mousedown", handleClick);
-    };
-  }, [open, handleClose]);
-
-  // Close on Escape
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") handleClose();
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [open, handleClose]);
+  // An empty source still opens to a visible "No items" row (disabled, so it
+  // can never be chosen), as the old list did.
+  const options: DropdownOption<string>[] = useMemo(
+    () =>
+      items.length === 0
+        ? [{ value: NO_ITEMS_VALUE, label: "No items", disabled: true }]
+        : items.map((item) => ({ value: item, label: item })),
+    [items],
+  );
 
   const hasSelection = selected !== null && selected !== "";
 
-  // List geometry: below the trigger, at least as wide as the trigger,
-  // clamped to the viewport.
-  const listWidth = Math.max(anchorRect?.width ?? 0, LIST_MIN_WIDTH);
-  const listTop = (anchorRect?.bottom ?? 0) + 2;
-  const listLeft = Math.min(
-    anchorRect?.left ?? 0,
-    window.innerWidth - listWidth - 8,
-  );
+  // A committed value that is not (or no longer) in the list still shows on
+  // the trigger, exactly as the old hand-rolled trigger did: the Dropdown
+  // shows its placeholder when the value matches no option, so the value
+  // itself is offered as that text.
+  const inList = hasSelection && items.includes(selected as string);
+  const triggerText = hasSelection && !inList ? (selected as string) : placeholder;
 
   return (
-    <>
-      <button
-        ref={triggerRef}
-        style={{
-          ...styles.trigger,
-          fontSize: band ? "11px" : "12px",
-        }}
-        onClick={toggleOpen}
-        title={hasSelection ? (selected as string) : placeholder}
-      >
-        <span
-          style={{
-            ...styles.triggerText,
-            ...(hasSelection ? {} : styles.placeholderText),
-          }}
-        >
-          {hasSelection ? selected : placeholder}
-        </span>
-        <span style={styles.arrow}>{open ? "▲" : "▼"}</span>
-      </button>
-
-      {open &&
-        anchorRect &&
-        createPortal(
-          <div
-            ref={listRef}
-            style={{
-              ...styles.list,
-              left: listLeft,
-              top: listTop,
-              width: listWidth,
-            }}
-          >
-            {items.map((item, i) => (
-              <button
-                key={`${item}-${i}`}
-                style={{
-                  ...styles.item,
-                  ...(item === selected ? styles.itemSelected : {}),
-                }}
-                onClick={() => handleSelect(item)}
-              >
-                {item}
-              </button>
-            ))}
-            {items.length === 0 && <div style={styles.noItems}>No items</div>}
-          </div>,
-          document.body,
-        )}
-    </>
+    <span
+      ref={wrapperRef}
+      style={styles.wrapper}
+      title={hasSelection ? (selected as string) : placeholder}
+      onPointerDownCapture={(e) => refreshOnOpen(e.target)}
+      onKeyDownCapture={(e) => {
+        if (OPEN_KEYS.has(e.key)) refreshOnOpen(e.target);
+      }}
+    >
+      <Dropdown<string>
+        value={hasSelection ? (selected as string) : ""}
+        options={options}
+        onChange={handleSelect}
+        placeholder={triggerText}
+        width={band ? BAND_TRIGGER_WIDTH : undefined}
+        ariaLabel={control.name}
+        optionTestIdPrefix="controls-pane-dropdown-option-"
+      />
+    </span>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  trigger: {
+  wrapper: {
     display: "flex",
     alignItems: "center",
-    gap: "4px",
-    width: "100%",
-    minWidth: 0,
-    padding: "3px 6px",
-    border: "1px solid #d1d5db",
-    borderRadius: 3,
-    background: "#f9fafb",
-    color: "#333",
-    cursor: "pointer",
-    textAlign: "left",
-    boxSizing: "border-box",
-  },
-  triggerText: {
     flex: 1,
     minWidth: 0,
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-  },
-  placeholderText: {
-    color: "#8a8a8a",
-    fontStyle: "italic",
-  },
-  arrow: {
-    fontSize: "9px",
-    color: "#555",
-    flexShrink: 0,
-  },
-  list: {
-    position: "fixed",
-    maxHeight: LIST_MAX_HEIGHT,
-    overflowY: "auto",
-    backgroundColor: "#fff",
-    border: "1px solid #d1d5db",
-    borderRadius: 4,
-    boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-    zIndex: 10000,
-    display: "flex",
-    flexDirection: "column",
-    padding: "4px 0",
-    boxSizing: "border-box",
-  },
-  item: {
-    display: "block",
-    width: "100%",
-    border: "none",
-    background: "none",
-    cursor: "pointer",
-    textAlign: "left",
-    padding: "4px 12px",
-    fontSize: 12,
-    color: "#333",
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-  },
-  itemSelected: {
-    background: "#edf4fc",
-    fontWeight: 600,
-  },
-  noItems: {
-    padding: "6px 12px",
-    color: "#999",
-    fontStyle: "italic",
-    fontSize: 12,
   },
 };

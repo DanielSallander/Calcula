@@ -1,11 +1,20 @@
 //! FILENAME: app/extensions/BuiltIn/HomeTab/components/homeTabIcons.tsx
-// PURPOSE: Maps Home tab item ids to their ribbon SVG icons.
-// CONTEXT: Items with typographic identities (B, I, U, S, x², x₂, the "A" of
-// Font Color) intentionally stay as styled text — Excel renders those as
-// letters too — so they are absent here and callers fall back to item.icon.
+// PURPOSE: Maps Home tab item ids and group icon ids to the duotone RibbonIcon set.
+// CONTEXT: Every ALL_ITEMS id resolves to a RibbonIcon EXCEPT the deliberately
+//          typographic ones (TYPOGRAPHIC_ITEM_IDS): B, I, U, S, x², x₂ and the
+//          four Number glyphs (%, ",", ".0", "0."). Excel renders those as
+//          letters too, and they read faster than any drawing of them, so they
+//          are absent here and callers fall back to the catalog's `item.icon`
+//          text. The Font colour "A" is the one letter that IS drawn: the
+//          ColorSwatch bar needs an SVG over its 4px colour bar, and
+//          RibbonIcon.FontColor is exactly that A (see api/icons/home.tsx).
+//
+//          The maps hold icon COMPONENTS, keyed by id: a persisted layout
+//          stores only the id (`HomeTabGroup.iconId`), never a React element.
 
 import React from "react";
 import { RibbonIcon, type RibbonIconProps } from "@api";
+import { LAUNCHER_ICON_SIZE as API_LAUNCHER_ICON_SIZE } from "@api/layout";
 
 const ICONS: Record<string, React.ComponentType<RibbonIconProps>> = {
   // Clipboard
@@ -13,11 +22,15 @@ const ICONS: Record<string, React.ComponentType<RibbonIconProps>> = {
   copy: RibbonIcon.Copy,
   paste: RibbonIcon.Paste,
   formatPainter: RibbonIcon.FormatPainter,
-  // Font
+  // Font (fontName/fontSize render as Dropdowns in the ribbon; their icons
+  // show in the customize dialog)
+  fontName: RibbonIcon.Fonts,
+  fontSize: RibbonIcon.Text,
   increaseFontSize: RibbonIcon.FontSizeUp,
   decreaseFontSize: RibbonIcon.FontSizeDown,
-  formatCells: RibbonIcon.FormatCells,
+  textColor: RibbonIcon.FontColor,
   backgroundColor: RibbonIcon.FillColor,
+  formatCells: RibbonIcon.FormatCells,
   // Alignment
   alignTop: RibbonIcon.AlignTop,
   alignMiddle: RibbonIcon.AlignMiddle,
@@ -29,13 +42,9 @@ const ICONS: Record<string, React.ComponentType<RibbonIconProps>> = {
   increaseIndent: RibbonIcon.IndentIncrease,
   decreaseIndent: RibbonIcon.IndentDecrease,
   mergeCells: RibbonIcon.MergeCells,
-  // Number (numberFormat renders as a Select in the ribbon; its icon shows in
-  // the customize dialog)
+  // Number (numberFormat renders as a Dropdown in the ribbon; its icon shows
+  // in the customize dialog)
   numberFormat: RibbonIcon.NumberFormat,
-  percentFormat: RibbonIcon.Percent,
-  commaFormat: RibbonIcon.Comma,
-  increaseDecimal: RibbonIcon.DecimalIncrease,
-  decreaseDecimal: RibbonIcon.DecimalDecrease,
   // Styles
   cellStyles: RibbonIcon.CellStyles,
   // Cells
@@ -50,10 +59,33 @@ const ICONS: Record<string, React.ComponentType<RibbonIconProps>> = {
   clearContents: RibbonIcon.ClearContents,
   clearFormatting: RibbonIcon.ClearFormatting,
   clearAll: RibbonIcon.ClearAll,
+  // Layout (the separator paints nothing in the ribbon; its chip in the
+  // customize dialog shows the page-break glyph)
+  rowBreak: RibbonIcon.Breaks,
 };
+
+/**
+ * Items that stay TEXT on purpose. The approved design keeps these
+ * typographic in the band — B/I/U/S, x²/x₂ and the Number group's
+ * %, ",", ".0", "0." — because the letters ARE the command's identity.
+ * `homeTabIcon` returns null for them, so every caller renders `item.icon`.
+ */
+export const TYPOGRAPHIC_ITEM_IDS: ReadonlySet<string> = new Set([
+  "bold",
+  "italic",
+  "underline",
+  "strikethrough",
+  "superscript",
+  "subscript",
+  "percentFormat",
+  "commaFormat",
+  "increaseDecimal",
+  "decreaseDecimal",
+]);
 
 /** SVG icon for a Home tab item, or null for text-glyph items (B, I, U...). */
 export function homeTabIcon(itemId: string, size?: number): React.ReactNode | null {
+  if (TYPOGRAPHIC_ITEM_IDS.has(itemId)) return null;
   const Icon = ICONS[itemId];
   return Icon ? <Icon size={size} /> : null;
 }
@@ -62,13 +94,21 @@ export function homeTabIcon(itemId: string, size?: number): React.ReactNode | nu
 // Group launcher glyphs
 // ============================================================================
 
-/** Size a group launcher glyph renders at in the ribbon band. */
-export const LAUNCHER_ICON_SIZE = 20;
+/** Size a group glyph renders at: the launcher's 24px icon (the Clusters
+ *  LAUNCHER_ICON_SIZE), the same icon a sidebar section header shows. */
+export const LAUNCHER_ICON_SIZE = API_LAUNCHER_ICON_SIZE;
 
 /** Glyph id -> icon component. The persisted layout stores only the ID
- *  (`HomeTabGroup.iconId`); React elements must never enter localStorage. */
+ *  (`HomeTabGroup.iconId`); React elements must never enter localStorage.
+ *
+ *  KEYS ONLY GROW: a saved layout names one of these ids, and an id that
+ *  disappears silently turns that user's launcher into the fallback glyph. */
 const GROUP_ICON_COMPONENTS: Record<string, React.ComponentType<RibbonIconProps>> = {
   clipboard: RibbonIcon.Paste,
+  // The Font group was a bare "A" text glyph. It is the "Aa" drawing now: still
+  // letters (the group's buttons are letters), but in the set's own language,
+  // at the launcher's 24px like every other group.
+  font: RibbonIcon.Fonts,
   alignment: RibbonIcon.AlignLeft,
   number: RibbonIcon.NumberFormat,
   styles: RibbonIcon.CellStyles,
@@ -85,24 +125,15 @@ const GROUP_ICON_COMPONENTS: Record<string, React.ComponentType<RibbonIconProps>
   deleteRow: RibbonIcon.DeleteRow,
 };
 
-/** The Font group is typographic on purpose: its in-group buttons are letters
- *  (B, I, U), so its launcher is an "A" rather than an SVG. */
-const GROUP_TEXT_GLYPHS: Record<string, string> = { font: "A" };
-
 /** Glyph used when a group names no icon and its id matches nothing. */
 export const GROUP_ICON_FALLBACK_ID = "format";
 
 /** Every glyph a group may choose, in menu order. */
-export const GROUP_ICON_IDS: string[] = [
-  ...Object.keys(GROUP_TEXT_GLYPHS),
-  ...Object.keys(GROUP_ICON_COMPONENTS),
-].sort();
+export const GROUP_ICON_IDS: string[] = Object.keys(GROUP_ICON_COMPONENTS).sort();
 
 /** Launcher glyph for a group icon id, or null when the id is unknown. */
 export function groupIcon(iconId: string | undefined, size?: number): React.ReactNode | null {
   if (!iconId) return null;
-  const text = GROUP_TEXT_GLYPHS[iconId];
-  if (text) return text;
   const Icon = GROUP_ICON_COMPONENTS[iconId];
   return Icon ? <Icon size={size ?? LAUNCHER_ICON_SIZE} /> : null;
 }
@@ -123,24 +154,8 @@ export function groupIconFor(
   );
 }
 
-/** Gear glyph for the "Customize Home Tab..." View-menu entry. Drawn here
- *  rather than in @api because it is this extension's own affordance. */
+/** Gear glyph for the "Customize Home Tab..." View-menu entry: the set's own
+ *  Settings drawing, so the menu item matches every other icon in the app. */
 export function HomeTabCustomizeIcon({ size = 14 }: RibbonIconProps): React.ReactElement {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.3}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      style={{ display: "block", flex: "none" }}
-      aria-hidden
-    >
-      <circle cx="8" cy="8" r="2.4" />
-      <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" />
-    </svg>
-  );
+  return <RibbonIcon.Settings size={size} />;
 }

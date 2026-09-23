@@ -1,9 +1,33 @@
-//! FILENAME: app/extensions/BuiltIn/HomeTab/components/CellStylesGallery.tsx
+//! FILENAME: app/extensions/_shared/components/CellStylesGallery.tsx
 // PURPOSE: Cell Styles gallery for the Home tab ribbon and Format menu.
 // CONTEXT: Provides predefined cell styles matching Excel's Cell Styles gallery.
+//
+//          The catalog (CELL_STYLES) is colour DATA — each entry is the
+//          formatting a style writes into cells — so its literals stay. The
+//          gallery around it is the ONE @api StyleGallery: a grouped, keyboard-
+//          operable listbox of thumbnails (arrows move, Enter/Space/click
+//          apply), each thumbnail a small drawing of a cell in that style. It
+//          used to be a hand-rolled grid of buttons on the MENU's dark
+//          background (#2b2b2b fallback), so "Heading 1"'s dark blue text sat on
+//          near-black; a thumbnail now shows what the cell will look like — the
+//          style's own fill and text colour, and the grid's own background and
+//          text where the style sets none.
+//
+//          The gallery always renders as a grid, never as the band strip: it is
+//          hosted INSIDE a popover (the Home "Cell Styles" hero) or a menu (the
+//          Format menu), and a popover portalled out of the ribbon band would
+//          otherwise inherit the band's surface layout through React context.
 
-import React, { useRef } from "react";
+import React, { useCallback, useMemo } from "react";
 import { css } from "@emotion/css";
+import {
+  LT,
+  FONT_FAMILY,
+  StyleGallery,
+  SurfaceLayoutProvider,
+  popoverLayout,
+} from "@api/layout";
+import type { StyleGalleryItem, StyleThumbSize } from "@api/layout";
 
 // ============================================================================
 // Style Definitions
@@ -210,119 +234,168 @@ export const CELL_STYLES_BY_ID = new Map(CELL_STYLES.map((s) => [s.id, s]));
 // Category metadata
 // ---------------------------------------------------------------------------
 
-const CATEGORY_LABELS: Record<string, string> = {
-  "good-bad-neutral": "Good, Bad and Neutral",
-  "data-model": "Data and Model",
-  "titles-headings": "Titles and Headings",
-  "themed": "Themed Cell Styles",
-  "number-format": "Number Format",
-};
+type CellStyleCategory = CellStyleDefinition["category"];
 
-const CATEGORY_ORDER = [
-  "good-bad-neutral",
-  "data-model",
-  "titles-headings",
-  "themed",
-  "number-format",
+/** Heading per category, in gallery order. */
+const CATEGORIES: ReadonlyArray<readonly [CellStyleCategory, string]> = [
+  ["good-bad-neutral", "Good, Bad and Neutral"],
+  ["data-model", "Data and Model"],
+  ["titles-headings", "Titles and Headings"],
+  ["themed", "Themed Cell Styles"],
+  ["number-format", "Number Format"],
 ];
 
 // ============================================================================
-// Gallery Styles
+// Gallery geometry + chrome
 // ============================================================================
 
-const galStyles = {
-  container: css`
-    padding: 10px 12px;
-    background: var(--menu-dropdown-bg, #2b2b2b);
-    width: 460px;
-    max-height: 520px;
-    overflow-y: auto;
+/** One thumbnail: wide enough for "20% - Accent1" at 11px, as tall as a row. */
+const THUMB_SIZE: StyleThumbSize = { w: 76, h: 26 };
 
-    &::-webkit-scrollbar {
-      width: 6px;
-    }
-    &::-webkit-scrollbar-thumb {
-      background: #555;
-      border-radius: 3px;
-    }
-  `,
-  categoryLabel: css`
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-secondary, #aaa);
-    padding: 8px 0 4px 0;
-    border-bottom: 1px solid var(--menu-separator, #444);
-    margin-bottom: 5px;
+/** Six columns: the themed block reads as one accent per column, one tint
+ *  level per row (20%, 40%, 60%, full), exactly as Excel lays it out. */
+const GALLERY_COLUMNS = 6;
 
-    &:first-child {
-      padding-top: 0;
-    }
-  `,
-  grid: css`
-    display: grid;
-    gap: 3px;
-    margin-bottom: 4px;
-  `,
-  styleItem: css`
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 28px;
-    padding: 2px 6px;
-    border: 1px solid var(--menu-separator, #555);
-    border-radius: 2px;
-    cursor: pointer;
-    font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    background: var(--menu-dropdown-bg, #2b2b2b);
-    color: var(--text-primary, #e0e0e0);
+/** The cell a style leaves unset looks like the grid's own cell. */
+const CELL_DEFAULT_BG = "var(--grid-bg, #ffffff)";
+const CELL_DEFAULT_FG = "var(--grid-text, #000000)";
+/** Hairline around a thumbnail with no border of its own, so a white "Normal"
+ *  cell is still visible on a white popover. */
+const CELL_EDGE = "var(--grid-line, #e0e0e0)";
 
-    &:hover {
-      outline: 2px solid var(--accent-primary, #0078d4);
-      outline-offset: -1px;
-      z-index: 1;
-    }
-  `,
-};
+const galleryRoot = css`
+  box-sizing: border-box;
+  max-height: 520px;
+  overflow-y: auto;
+  font-family: ${FONT_FAMILY};
+  color: ${LT.text};
+`;
+
+/** Inline (a menu's custom content): the menu draws the chrome. */
+const inlineChrome = css`
+  padding: 4px 8px 8px;
+`;
+
+/** Standalone (inside the Home hero's plain Popover): the card chrome every
+ *  Clusters popover shares. */
+const cardChrome = css`
+  padding: 8px;
+  background: ${LT.surface};
+  border: 1px solid ${LT.clusterBorder};
+  border-radius: ${LT.radiusPopover};
+  box-shadow: ${LT.shadowPopover};
+`;
+
+const thumbCell = css`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 0 4px;
+  overflow: hidden;
+  line-height: 1;
+`;
+
+const thumbText = css`
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
 
 // ============================================================================
-// Helper: Build preview inline styles
+// Helper: the thumbnail drawing
 // ============================================================================
 
-function getItemStyle(def: CellStyleDefinition): React.CSSProperties {
+/** Excel's automatic cell colours: a style that "sets" them sets nothing a
+ *  thumbnail should paint over the grid's own look. */
+function isAutomaticText(color: string | undefined): boolean {
+  return !color || color.toLowerCase() === "#000000";
+}
+function isAutomaticFill(color: string | undefined): boolean {
+  return !color || color.toLowerCase() === "#ffffff";
+}
+
+function borderCss(edge: { style: string; color: string } | undefined): string | undefined {
+  if (!edge || edge.style === "none") return undefined;
+  if (edge.style === "double") return `3px double ${edge.color}`;
+  if (edge.style === "thick") return `2px solid ${edge.color}`;
+  return `1px solid ${edge.color}`;
+}
+
+/**
+ * Inline styles that draw a cell in the given style. Exported for tests: the
+ * values are DATA (the style's own colours) plus the grid's tokens for what the
+ * style leaves unset.
+ */
+export function cellStyleThumbStyle(def: CellStyleDefinition): React.CSSProperties {
   const f = def.formatting;
-  const style: React.CSSProperties = {};
+  const style: React.CSSProperties = {
+    background: isAutomaticFill(f.backgroundColor) ? CELL_DEFAULT_BG : f.backgroundColor,
+    color: isAutomaticText(f.textColor) ? CELL_DEFAULT_FG : f.textColor,
+    fontSize: 11,
+  };
   if (f.bold) style.fontWeight = 700;
   if (f.italic) style.fontStyle = "italic";
   if (f.underline && f.underline !== "none") style.textDecoration = "underline";
-  if (f.textColor) style.color = f.textColor;
-  if (f.backgroundColor && f.backgroundColor !== "#ffffff") {
-    style.backgroundColor = f.backgroundColor;
-    style.borderColor = f.backgroundColor;
+
+  const top = borderCss(f.borderTop);
+  const bottom = borderCss(f.borderBottom);
+  const left = borderCss(f.borderLeft);
+  const right = borderCss(f.borderRight);
+  if (top) style.borderTop = top;
+  if (bottom) style.borderBottom = bottom;
+  if (left) style.borderLeft = left;
+  if (right) style.borderRight = right;
+  if (!top && !bottom && !left && !right && isAutomaticFill(f.backgroundColor)) {
+    style.boxShadow = `inset 0 0 0 1px ${CELL_EDGE}`;
   }
-  if (f.borderBottom) {
-    const w = f.borderBottom.style === "thick" ? "2px" :
-              f.borderBottom.style === "double" ? "3px" : "1px";
-    const s = f.borderBottom.style === "double" ? "double" : "solid";
-    style.borderBottom = `${w} ${s} ${f.borderBottom.color}`;
-  }
-  if (f.borderTop) {
-    const w = f.borderTop.style === "thick" ? "2px" : "1px";
-    style.borderTop = `${w} solid ${f.borderTop.color}`;
-  }
-  // Scale heading/title font sizes for preview
+
+  // Scale heading/title font sizes for the thumbnail.
   if (f.fontSize) {
-    if (f.fontSize >= 18) style.fontSize = "14px";
-    else if (f.fontSize >= 15) style.fontSize = "13px";
-    else if (f.fontSize >= 13) style.fontSize = "12px";
-    else style.fontSize = `${f.fontSize}px`;
-  } else {
-    style.fontSize = "11px";
+    if (f.fontSize >= 18) style.fontSize = 14;
+    else if (f.fontSize >= 15) style.fontSize = 13;
+    else if (f.fontSize >= 13) style.fontSize = 12;
+    else style.fontSize = f.fontSize;
   }
   return style;
 }
+
+function renderCellThumb(def: CellStyleDefinition, size: StyleThumbSize): React.ReactNode {
+  return (
+    <span
+      className={thumbCell}
+      style={{ ...cellStyleThumbStyle(def), width: size.w, height: size.h }}
+      data-colour-data=""
+    >
+      <span className={thumbText}>{def.name}</span>
+    </span>
+  );
+}
+
+/** The gallery items, grouped in category order. */
+const GALLERY_ITEMS: StyleGalleryItem[] = CATEGORIES.flatMap(([cat, heading]) =>
+  CELL_STYLES.filter((s) => s.category === cat).map(
+    (def): StyleGalleryItem => ({
+      id: def.id,
+      name: def.name,
+      group: heading,
+      renderThumb: (size) => renderCellThumb(def, size),
+    }),
+  ),
+);
+
+/** What "Normal" writes: every property back to the workbook default. */
+const NORMAL_RESET: CellStyleDefinition["formatting"] = {
+  bold: false, italic: false, underline: "none",
+  fontSize: 11, textColor: "#000000", backgroundColor: "#ffffff",
+  numberFormat: "General",
+  borderTop: { style: "none", color: "#000000" },
+  borderBottom: { style: "none", color: "#000000" },
+  borderLeft: { style: "none", color: "#000000" },
+  borderRight: { style: "none", color: "#000000" },
+};
 
 // ============================================================================
 // Component
@@ -338,75 +411,34 @@ interface CellStylesGalleryProps {
 }
 
 export function CellStylesGallery({ onApplyStyle, onClose, inline }: CellStylesGalleryProps) {
-  const ref = useRef<HTMLDivElement>(null);
+  const layout = useMemo(() => popoverLayout(), []);
 
-  const handleClick = (def: CellStyleDefinition) => {
-    if (def.id === "normal") {
-      onApplyStyle({
-        bold: false, italic: false, underline: "none",
-        fontSize: 11, textColor: "#000000", backgroundColor: "#ffffff",
-        numberFormat: "General",
-        borderTop: { style: "none", color: "#000000" },
-        borderBottom: { style: "none", color: "#000000" },
-        borderLeft: { style: "none", color: "#000000" },
-        borderRight: { style: "none", color: "#000000" },
-      });
-    } else {
-      onApplyStyle(def.formatting);
-    }
-    onClose();
-  };
-
-  // Group styles by category
-  const grouped = CATEGORY_ORDER.map((cat) => ({
-    category: cat,
-    label: CATEGORY_LABELS[cat],
-    items: CELL_STYLES.filter((s) => s.category === cat),
-  })).filter((g) => g.items.length > 0);
-
-  // Determine grid columns per category
-  const getGridCols = (category: string): number => {
-    switch (category) {
-      case "themed": return 6;       // 6 accent columns
-      case "titles-headings": return 6;
-      case "number-format": return 5;
-      default: return 4;
-    }
-  };
-
-  // Dropdown chrome only — the hosting Popover owns positioning/dismissal.
-  const wrapperClass = inline
-    ? galStyles.container
-    : css`
-        border: 1px solid var(--menu-border, #555);
-        border-radius: 4px;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-        ${galStyles.container}
-      `;
+  const handleChoose = useCallback(
+    (id: string) => {
+      const def = CELL_STYLES_BY_ID.get(id);
+      if (!def) return;
+      onApplyStyle(def.id === "normal" ? NORMAL_RESET : def.formatting);
+      onClose();
+    },
+    [onApplyStyle, onClose],
+  );
 
   return (
-    <div ref={ref} className={wrapperClass}>
-      {grouped.map((group) => (
-        <div key={group.category}>
-          <div className={galStyles.categoryLabel}>{group.label}</div>
-          <div
-            className={galStyles.grid}
-            style={{ gridTemplateColumns: `repeat(${getGridCols(group.category)}, 1fr)` }}
-          >
-            {group.items.map((def) => (
-              <button
-                key={def.id}
-                className={galStyles.styleItem}
-                style={getItemStyle(def)}
-                title={def.name}
-                onClick={() => handleClick(def)}
-              >
-                {def.name}
-              </button>
-            ))}
-          </div>
-        </div>
-      ))}
+    <div
+      className={`${galleryRoot} ${inline ? inlineChrome : cardChrome}`}
+      data-testid="cell-styles-gallery"
+    >
+      <SurfaceLayoutProvider value={layout}>
+        <StyleGallery
+          items={GALLERY_ITEMS}
+          value={null}
+          onChange={handleChoose}
+          label="Cell styles"
+          thumbSize={THUMB_SIZE}
+          columns={GALLERY_COLUMNS}
+          testIdPrefix="cell-style"
+        />
+      </SurfaceLayoutProvider>
     </div>
   );
 }

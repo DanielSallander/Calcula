@@ -8,66 +8,94 @@
 //          lib/pivotPanelStore. One section per former ribbon group; the shell
 //          owns group chrome, labels and width-collapse (replaces the
 //          monolithic PivotDesignTab).
+//
+//          Built from the @api/layout control grammar only (Input, Checkbox,
+//          Dropdown, Field, StyleGallery), and every section follows THE FILL
+//          RULE of the Clusters redesign: in the band its content is either
+//          one tall 61px row (the styles gallery) or two 28px rows with a 5px
+//          gap (every other section), so no cluster is a short row floating in
+//          a tall card. In a sidebar or flyout the same JSX flows vertically.
+//
+//          This file is chrome: colours come only from LT tokens.
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { css } from '@emotion/css';
+import React, { useState, useEffect, useCallback, useId, useRef } from 'react';
+import { css, cx } from '@emotion/css';
 import type { PanelSectionProps } from '@api/uiTypes';
-import { ControlRow, Field, FieldGrid, Input, Stack } from '@api/layout';
+import {
+  Checkbox,
+  ControlRow,
+  Dropdown,
+  Field,
+  FieldGrid,
+  Input,
+  LT,
+  Stack,
+  CONTROL_HEIGHT_MD,
+  FONT_FAMILY,
+  LABEL_FONT_SIZE,
+  ROW_GAP,
+  useSurfaceLayout,
+  type DropdownOption,
+} from '@api/layout';
 import { getPivotTableInfo, updatePivotProperties } from '../lib/pivot-api';
 import { usePivotPanelState, updateSharedLayout } from '../lib/pivotPanelStore';
+import { setPivotStylePreview } from '../lib/pivotStyles';
 import type { ReportLayout, ValuesPosition } from './types';
 import { PivotTableStylesGallery, DEFAULT_PIVOT_STYLE_ID } from './PivotTableStylesGallery';
 
 // ============================================================================
-// Styles
+// Styles (tokens only)
 // ============================================================================
 
 const sectionStyles = {
+  /** "Select a PivotTable..." — fills the content box, centred. */
   disabledMessage: css`
     display: flex;
     align-items: center;
     height: 100%;
-    color: var(--text-tertiary, #999);
+    color: ${LT.textTertiary};
     font-style: italic;
     font-size: 12px;
     white-space: nowrap;
-    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+    font-family: ${FONT_FAMILY};
   `,
-  checkboxLabel: css`
+  /** Caption row above a field: two rows of 28 fill the band's 61px box. */
+  twoRows: css`
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: ${ROW_GAP}px;
+    min-width: 0;
+  `,
+  caption: css`
+    font-family: ${FONT_FAMILY};
+    font-size: ${LABEL_FONT_SIZE}px;
+    font-weight: 400;
+    line-height: 13px;
+    color: ${LT.textSecondary};
+    white-space: nowrap;
+  `,
+  /** In the band the caption is a full 28px row, so the pair is 28 + 5 + 28. */
+  captionBand: css`
     display: flex;
     align-items: center;
-    gap: 4px;
-    cursor: pointer;
-    white-space: nowrap;
-    font-size: 11px;
-    color: var(--text-primary, #333);
-    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
-
-    input {
-      cursor: pointer;
-    }
-  `,
-  select: css`
-    padding: 3px 6px;
-    border: 1px solid var(--border-default, #d0d0d0);
-    border-radius: 4px;
-    font-size: 11px;
-    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
-    background: var(--bg-surface, #fff);
-    color: var(--text-primary, #1a1a1a);
-    cursor: pointer;
-    min-width: 80px;
-
-    &:hover {
-      border-color: var(--text-tertiary, #999);
-    }
-
-    &:focus {
-      outline: none;
-      border-color: var(--accent-primary, #005fb8);
-    }
+    height: ${CONTROL_HEIGHT_MD}px;
   `,
 };
+
+/** Width of the name box in the band (fits "PivotTable12"). */
+const NAME_INPUT_BAND_WIDTH = 140;
+
+const REPORT_LAYOUT_OPTIONS: ReadonlyArray<DropdownOption<ReportLayout>> = [
+  { value: 'compact', label: 'Compact' },
+  { value: 'outline', label: 'Outline' },
+  { value: 'tabular', label: 'Tabular' },
+];
+
+const VALUES_POSITION_OPTIONS: ReadonlyArray<DropdownOption<ValuesPosition>> = [
+  { value: 'columns', label: 'Columns' },
+  { value: 'rows', label: 'Rows' },
+];
 
 // ============================================================================
 // PivotTable Name section
@@ -75,6 +103,9 @@ const sectionStyles = {
 
 export function DesignNameSection(_props: PanelSectionProps): React.ReactElement {
   const { layoutState } = usePivotPanelState();
+  const layout = useSurfaceLayout();
+  const band = layout.container === 'band';
+  const inputId = useId();
   const [pivotName, setPivotName] = useState('');
   const [savedName, setSavedName] = useState('');
   const nameInputRef = useRef<HTMLInputElement>(null);
@@ -120,12 +151,20 @@ export function DesignNameSection(_props: PanelSectionProps): React.ReactElement
   }
 
   return (
-    <ControlRow>
+    <div className={sectionStyles.twoRows}>
+      <label
+        htmlFor={inputId}
+        className={cx(sectionStyles.caption, band && sectionStyles.captionBand)}
+      >
+        PivotTable Name:
+      </label>
       <Input
+        id={inputId}
         ref={nameInputRef}
         type="text"
-        width={140}
+        width={band ? NAME_INPUT_BAND_WIDTH : undefined}
         value={pivotName}
+        data-testid="pivot-design-name"
         onChange={(e) => setPivotName(e.target.value)}
         onBlur={savePivotName}
         onKeyDown={(e) => {
@@ -135,7 +174,7 @@ export function DesignNameSection(_props: PanelSectionProps): React.ReactElement
           }
         }}
       />
-    </ControlRow>
+    </div>
   );
 }
 
@@ -152,27 +191,19 @@ export function DesignGrandTotalsSection(_props: PanelSectionProps): React.React
   const { layout } = layoutState;
 
   return (
-    <Stack gap={4}>
-      <label className={sectionStyles.checkboxLabel}>
-        <input
-          type="checkbox"
-          checked={layout.showRowGrandTotals ?? true}
-          onChange={(e) =>
-            updateSharedLayout({ showRowGrandTotals: e.target.checked })
-          }
-        />
-        Row Totals
-      </label>
-      <label className={sectionStyles.checkboxLabel}>
-        <input
-          type="checkbox"
-          checked={layout.showColumnGrandTotals ?? true}
-          onChange={(e) =>
-            updateSharedLayout({ showColumnGrandTotals: e.target.checked })
-          }
-        />
-        Column Totals
-      </label>
+    <Stack gap={ROW_GAP}>
+      <Checkbox
+        label="Row Totals"
+        checked={layout.showRowGrandTotals ?? true}
+        onChange={(checked) => updateSharedLayout({ showRowGrandTotals: checked })}
+        testId="pivot-design-row-totals"
+      />
+      <Checkbox
+        label="Column Totals"
+        checked={layout.showColumnGrandTotals ?? true}
+        onChange={(checked) => updateSharedLayout({ showColumnGrandTotals: checked })}
+        testId="pivot-design-column-totals"
+      />
     </Stack>
   );
 }
@@ -183,6 +214,20 @@ export function DesignGrandTotalsSection(_props: PanelSectionProps): React.React
 
 export function DesignStylesSection(_props: PanelSectionProps): React.ReactElement | null {
   const { layoutState } = usePivotPanelState();
+  const pivotId = layoutState?.pivotId ?? null;
+
+  // The preview is transient: it paints the pivot in the hovered style and
+  // touches nothing persisted, so it must never outlive the pivot it was
+  // started on. The gallery ends it on every exit of its own; this ends it if
+  // the active pivot changes underneath a standing preview.
+  useEffect(() => {
+    return () => setPivotStylePreview(null, null);
+  }, [pivotId]);
+
+  const handlePreview = useCallback(
+    (styleId: string | null) => setPivotStylePreview(pivotId, styleId),
+    [pivotId],
+  );
 
   if (!layoutState) {
     return null;
@@ -194,6 +239,7 @@ export function DesignStylesSection(_props: PanelSectionProps): React.ReactEleme
       selectedStyleId={layout.styleId ?? DEFAULT_PIVOT_STYLE_ID}
       onStyleSelect={(styleId) => updateSharedLayout({ styleId })}
       onStyleClear={() => updateSharedLayout({ styleId: '' })}
+      onStylePreview={handlePreview}
     />
   );
 }
@@ -204,43 +250,43 @@ export function DesignStylesSection(_props: PanelSectionProps): React.ReactEleme
 
 export function DesignReportLayoutSection(_props: PanelSectionProps): React.ReactElement | null {
   const { layoutState } = usePivotPanelState();
+  const surface = useSurfaceLayout();
 
   if (!layoutState) {
     return null;
   }
   const { layout } = layoutState;
 
-  return (
-    <FieldGrid>
+  const fields = (
+    <>
       <Field label="Layout:">
-        <select
-          className={sectionStyles.select}
+        <Dropdown<ReportLayout>
+          ariaLabel="Report layout"
           value={layout.reportLayout ?? 'compact'}
-          onChange={(e) =>
-            updateSharedLayout({ reportLayout: e.target.value as ReportLayout })
-          }
-        >
-          <option value="compact">Compact</option>
-          <option value="outline">Outline</option>
-          <option value="tabular">Tabular</option>
-        </select>
+          options={REPORT_LAYOUT_OPTIONS}
+          onChange={(value) => updateSharedLayout({ reportLayout: value })}
+          testId="pivot-design-report-layout"
+          optionTestIdPrefix="pivot-design-report-layout-"
+        />
       </Field>
       <Field label="Values:">
-        <select
-          className={sectionStyles.select}
+        <Dropdown<ValuesPosition>
+          ariaLabel="Values position"
           value={layout.valuesPosition ?? 'columns'}
-          onChange={(e) =>
-            updateSharedLayout({
-              valuesPosition: e.target.value as ValuesPosition,
-            })
-          }
-        >
-          <option value="columns">Columns</option>
-          <option value="rows">Rows</option>
-        </select>
+          options={VALUES_POSITION_OPTIONS}
+          onChange={(value) => updateSharedLayout({ valuesPosition: value })}
+          testId="pivot-design-values-position"
+          optionTestIdPrefix="pivot-design-values-position-"
+        />
       </Field>
-    </FieldGrid>
+    </>
   );
+
+  // Band: the two fields stack as 28 + 5 + 28. Panel: label-above fields,
+  // two columns when the panel is wide enough.
+  return surface.container === 'band'
+    ? <Stack gap={ROW_GAP}>{fields}</Stack>
+    : <FieldGrid>{fields}</FieldGrid>;
 }
 
 // ============================================================================
@@ -257,49 +303,33 @@ export function DesignDisplaySection(_props: PanelSectionProps): React.ReactElem
 
   return (
     <ControlRow gap={12}>
-      <Stack gap={4}>
-        <label className={sectionStyles.checkboxLabel}>
-          <input
-            type="checkbox"
-            checked={layout.repeatRowLabels ?? false}
-            onChange={(e) =>
-              updateSharedLayout({ repeatRowLabels: e.target.checked })
-            }
-          />
-          Repeat Labels
-        </label>
-        <label className={sectionStyles.checkboxLabel}>
-          <input
-            type="checkbox"
-            checked={layout.showEmptyRows ?? false}
-            onChange={(e) =>
-              updateSharedLayout({ showEmptyRows: e.target.checked })
-            }
-          />
-          Empty Rows
-        </label>
+      <Stack gap={ROW_GAP}>
+        <Checkbox
+          label="Repeat Labels"
+          checked={layout.repeatRowLabels ?? false}
+          onChange={(checked) => updateSharedLayout({ repeatRowLabels: checked })}
+          testId="pivot-design-repeat-labels"
+        />
+        <Checkbox
+          label="Empty Rows"
+          checked={layout.showEmptyRows ?? false}
+          onChange={(checked) => updateSharedLayout({ showEmptyRows: checked })}
+          testId="pivot-design-empty-rows"
+        />
       </Stack>
-      <Stack gap={4}>
-        <label className={sectionStyles.checkboxLabel}>
-          <input
-            type="checkbox"
-            checked={layout.showEmptyCols ?? false}
-            onChange={(e) =>
-              updateSharedLayout({ showEmptyCols: e.target.checked })
-            }
-          />
-          Empty Cols
-        </label>
-        <label className={sectionStyles.checkboxLabel}>
-          <input
-            type="checkbox"
-            checked={layout.autoFitColumnWidths ?? true}
-            onChange={(e) =>
-              updateSharedLayout({ autoFitColumnWidths: e.target.checked })
-            }
-          />
-          Autofit Columns
-        </label>
+      <Stack gap={ROW_GAP}>
+        <Checkbox
+          label="Empty Cols"
+          checked={layout.showEmptyCols ?? false}
+          onChange={(checked) => updateSharedLayout({ showEmptyCols: checked })}
+          testId="pivot-design-empty-cols"
+        />
+        <Checkbox
+          label="Autofit Columns"
+          checked={layout.autoFitColumnWidths ?? true}
+          onChange={(checked) => updateSharedLayout({ autoFitColumnWidths: checked })}
+          testId="pivot-design-autofit-columns"
+        />
       </Stack>
     </ControlRow>
   );

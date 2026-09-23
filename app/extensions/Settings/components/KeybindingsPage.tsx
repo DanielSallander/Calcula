@@ -2,14 +2,22 @@
 // PURPOSE: Settings page for viewing and customizing keyboard shortcuts.
 // CONTEXT: Displays all registered keybindings grouped by category with
 //          search/filter, inline editing, conflict detection, and reset.
+//
+//          Calcula Clusters: headers use the one panel header recipe the
+//          General and Appearance pages use (12px/600, sentence case, LT
+//          tokens), the buttons, text fields and selects are the @api/layout
+//          Button / Input / Select, and every colour is an LT token, so the
+//          page follows the skin (the old literals left a white form and green
+//          category labels on a Dark skin). The table, the inline key capture
+//          and every handler are unchanged.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { css } from "@emotion/css";
 import {
   getAllKeybindings,
   getCategories,
   getEffectiveCombo,
   hasUserOverride,
-  getDefaultCombo,
   setUserKeybinding,
   resetUserKeybinding,
   resetAllKeybindings,
@@ -24,8 +32,20 @@ import {
   type KeyBinding,
 } from "@api/keybindings";
 import { confirmAsync } from "@api/dialogs";
+import { Button, FONT_FAMILY, FONT_MONO, HEADER_FONT_SIZE, Input, LT, Select } from "@api/layout";
 
 const h = React.createElement;
+
+/** The one panel header recipe (AppearancePage / SettingsView): 12px/600,
+ *  sentence case, painted with LT. */
+const sectionTitleClass = css`
+  margin: 0;
+  font-family: ${FONT_FAMILY};
+  font-size: ${HEADER_FONT_SIZE}px;
+  font-weight: 600;
+  line-height: 16px;
+  color: ${LT.text};
+`;
 
 // ============================================================================
 // Keybinding Row (individual shortcut)
@@ -119,18 +139,14 @@ function KeybindingRow(props: KeybindingRowProps): React.ReactElement {
         h("span", { style: rowStyles.label }, binding.label),
         h("span", { style: rowStyles.commandId }, binding.commandId),
       ),
-      // Capture area
+      // Capture area (JSX, so the ref is visibly a ref prop rather than an
+      // object handed to a function during render)
       h("td", { style: rowStyles.cellCombo },
-        h("div", {
-          ref: captureRef,
-          tabIndex: 0,
-          style: rowStyles.captureBox,
-          onKeyDown: handleKeyDown,
-        },
-          capturedCombo
+        <div ref={captureRef} tabIndex={0} style={rowStyles.captureBox} onKeyDown={handleKeyDown}>
+          {capturedCombo
             ? h("span", { style: rowStyles.capturedText }, capturedCombo)
-            : h("span", { style: rowStyles.captureHint }, "Press key combination..."),
-        ),
+            : h("span", { style: rowStyles.captureHint }, "Press key combination...")}
+        </div>,
         conflicts.length > 0 && h("div", { style: rowStyles.conflictWarning },
           "Conflict with: " + conflicts.map((c) => c.label).join(", ")
         ),
@@ -139,13 +155,19 @@ function KeybindingRow(props: KeybindingRowProps): React.ReactElement {
       h("td", { style: rowStyles.cellSource }, sourceLabel),
       // Actions
       h("td", { style: rowStyles.cellActions },
-        capturedCombo && h("button", {
-          style: { ...rowStyles.actionBtn, ...rowStyles.saveBtn },
+        capturedCombo && h(Button, {
+          type: "button",
+          variant: "outlined",
+          size: "sm",
+          style: rowStyles.actionBtn,
           onClick: handleSave,
           title: "Accept",
         }, "Accept"),
-        h("button", {
-          style: { ...rowStyles.actionBtn, ...rowStyles.cancelBtn },
+        h(Button, {
+          type: "button",
+          variant: "outlined",
+          size: "sm",
+          style: rowStyles.actionBtn,
           onClick: handleCancel,
           title: "Cancel",
         }, "Cancel"),
@@ -176,18 +198,29 @@ function KeybindingRow(props: KeybindingRowProps): React.ReactElement {
     h("td", { style: rowStyles.cellSource }, sourceLabel),
     // Actions
     h("td", { style: rowStyles.cellActions },
-      mayEdit && h("button", {
+      mayEdit && h(Button, {
+        type: "button",
+        variant: "outlined",
+        size: "sm",
         style: rowStyles.actionBtn,
         onClick: onStartEdit,
         title: "Edit shortcut",
       }, "Edit"),
-      isOverridden && h("button", {
-        style: { ...rowStyles.actionBtn, ...rowStyles.resetBtn },
+      isOverridden && h(Button, {
+        type: "button",
+        variant: "outlined",
+        size: "sm",
+        tone: "danger",
+        style: rowStyles.actionBtn,
         onClick: onReset,
         title: "Reset to default",
       }, "Reset"),
-      onDelete && h("button", {
-        style: { ...rowStyles.actionBtn, color: "#d32f2f" },
+      onDelete && h(Button, {
+        type: "button",
+        variant: "outlined",
+        size: "sm",
+        tone: "danger",
+        style: rowStyles.actionBtn,
         onClick: onDelete,
         title: isScript
           ? "Take this shortcut back from the script"
@@ -308,14 +341,18 @@ export function KeybindingsPage(): React.ReactElement {
   return h("div", { style: pageStyles.container },
     // Header
     h("div", { style: pageStyles.header },
-      h("div", { style: pageStyles.title }, "Keyboard Shortcuts"),
+      h("h3", { className: sectionTitleClass }, "Keyboard shortcuts"),
       h("div", { style: pageStyles.headerActions },
-        h("button", {
-          style: pageStyles.addBtn,
+        h(Button, {
+          type: "button",
+          variant: "outlined",
+          size: "sm",
           onClick: () => setShowAddForm(true),
         }, "+ Add Shortcut"),
-        h("button", {
-          style: pageStyles.resetAllBtn,
+        h(Button, {
+          type: "button",
+          variant: "outlined",
+          size: "sm",
           onClick: () => void handleResetAll(),
         }, "Reset All"),
       ),
@@ -323,23 +360,22 @@ export function KeybindingsPage(): React.ReactElement {
 
     // Add Shortcut Form (inline)
     showAddForm && h("div", { style: pageStyles.addForm },
-      h("div", { style: pageStyles.addFormTitle }, "Add New Keyboard Shortcut"),
+      h("h3", { className: sectionTitleClass, style: pageStyles.addFormTitle }, "Add new keyboard shortcut"),
       h("div", { style: pageStyles.addFormRow },
         h("label", { style: pageStyles.addFormLabel }, "Label:"),
-        h("input", {
+        h(Input, {
           type: "text",
           placeholder: "My Shortcut",
           value: addLabel,
           onChange: (e: React.ChangeEvent<HTMLInputElement>) => setAddLabel(e.target.value),
-          style: pageStyles.addFormInput,
+          style: pageStyles.addFormField,
         }),
       ),
       h("div", { style: pageStyles.addFormRow },
         h("label", { style: pageStyles.addFormLabel }, "Command:"),
-        h("select", {
+        h(Select, {
           value: addCommandId,
           onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setAddCommandId(e.target.value),
-          style: pageStyles.addFormInput,
         },
           h("option", { value: "" }, "-- Select a command --"),
           ...availableCommands.map((cmd) =>
@@ -349,61 +385,61 @@ export function KeybindingsPage(): React.ReactElement {
       ),
       h("div", { style: pageStyles.addFormRow },
         h("label", { style: pageStyles.addFormLabel }, "Shortcut:"),
-        h("div", {
-          ref: addCaptureRef,
-          tabIndex: 0,
-          style: {
-            ...pageStyles.addFormInput,
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            minHeight: 28,
-            backgroundColor: addCombo ? "#fff" : "#fffde7",
-            outline: "none",
-          },
-          onFocus: () => { /* ready to capture */ },
-          onKeyDown: (e: React.KeyboardEvent) => {
+        <div
+          ref={addCaptureRef}
+          tabIndex={0}
+          style={{
+            ...pageStyles.addFormCapture,
+            backgroundColor: addCombo ? LT.inputBg : LT.warnBg,
+          }}
+          onFocus={() => { /* ready to capture */ }}
+          onKeyDown={(e: React.KeyboardEvent) => {
             e.preventDefault();
             e.stopPropagation();
             if (e.key === "Escape") { setAddCombo(""); return; }
             const combo = eventToCombo(e.nativeEvent);
             if (combo) setAddCombo(formatCombo(combo));
-          },
-        }, addCombo || "Click here and press a key combination..."),
+          }}
+        >
+          {addCombo || "Click here and press a key combination..."}
+        </div>,
       ),
       h("div", { style: pageStyles.addFormRow },
         h("label", { style: pageStyles.addFormLabel }, "Category:"),
-        h("input", {
+        h(Input, {
           type: "text",
           placeholder: "Custom",
           value: addCategory,
           onChange: (e: React.ChangeEvent<HTMLInputElement>) => setAddCategory(e.target.value),
-          style: pageStyles.addFormInput,
+          style: pageStyles.addFormField,
         }),
       ),
       h("div", { style: pageStyles.addFormRow },
         h("label", { style: pageStyles.addFormLabel }, "Context:"),
-        h("select", {
+        h(Select, {
           value: addContext,
           onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setAddContext(e.target.value as "always" | "editing" | "not-editing"),
-          style: pageStyles.addFormInput,
         },
           h("option", { value: "always" }, "Always"),
           h("option", { value: "not-editing" }, "When not editing"),
           h("option", { value: "editing" }, "When editing"),
         ),
       ),
-      addCombo && findConflicts(addCombo).length > 0 && h("div", { style: { color: "#d32f2f", fontSize: 12, padding: "4px 0 0 120px" } },
+      addCombo && findConflicts(addCombo).length > 0 && h("div", { style: pageStyles.addFormConflict },
         "Warning: conflicts with ", findConflicts(addCombo).map((c) => c.label).join(", "),
       ),
       h("div", { style: pageStyles.addFormActions },
-        h("button", {
-          style: pageStyles.addFormOkBtn,
+        h(Button, {
+          type: "button",
+          variant: "outlined",
+          size: "sm",
           onClick: handleAddSubmit,
           disabled: !addCombo || !addCommandId,
         }, "Add"),
-        h("button", {
-          style: pageStyles.addFormCancelBtn,
+        h(Button, {
+          type: "button",
+          variant: "outlined",
+          size: "sm",
           onClick: handleAddCancel,
         }, "Cancel"),
       ),
@@ -411,12 +447,11 @@ export function KeybindingsPage(): React.ReactElement {
 
     // Search
     h("div", { style: pageStyles.searchContainer },
-      h("input", {
+      h(Input, {
         type: "text",
         placeholder: "Search shortcuts...",
         value: searchTerm,
         onChange: (e: React.ChangeEvent<HTMLInputElement>) => setSearchTerm((e.target as HTMLInputElement).value),
-        style: pageStyles.searchInput,
       }),
     ),
 
@@ -486,7 +521,7 @@ export function KeybindingsPage(): React.ReactElement {
 }
 
 // ============================================================================
-// Page Styles
+// Page Styles (every colour is an LT token)
 // ============================================================================
 
 const pageStyles: Record<string, React.CSSProperties> = {
@@ -495,54 +530,30 @@ const pageStyles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     height: "100%",
     overflow: "hidden",
-    fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+    fontFamily: FONT_FAMILY,
+    color: LT.text,
   },
   header: {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
+    gap: 8,
     padding: "14px 16px 10px",
-    borderBottom: "1px solid #e0e0e0",
-  },
-  title: {
-    fontSize: 14,
-    fontWeight: 600,
-    color: "#333",
+    borderBottom: `1px solid ${LT.controlDivider}`,
   },
   headerActions: {
     display: "flex",
     gap: 8,
   },
-  addBtn: {
-    fontSize: 11,
-    padding: "4px 12px",
-    border: "1px solid #0078d4",
-    borderRadius: 4,
-    backgroundColor: "#0078d4",
-    color: "#fff",
-    cursor: "pointer",
-  },
-  resetAllBtn: {
-    fontSize: 11,
-    padding: "4px 12px",
-    border: "1px solid #ccc",
-    borderRadius: 4,
-    backgroundColor: "#fff",
-    color: "#666",
-    cursor: "pointer",
-  },
   addForm: {
     padding: "12px 16px",
     margin: "0 16px 8px",
-    borderRadius: 6,
-    backgroundColor: "#f5f8ff",
-    border: "1px solid #c8d8e8",
+    borderRadius: LT.radiusCluster,
+    backgroundColor: LT.clusterBg,
+    border: `1px solid ${LT.clusterBorder}`,
   },
   addFormTitle: {
-    fontSize: 13,
-    fontWeight: 600,
     marginBottom: 10,
-    color: "#333",
   },
   addFormRow: {
     display: "flex",
@@ -553,17 +564,36 @@ const pageStyles: Record<string, React.CSSProperties> = {
   addFormLabel: {
     width: 110,
     fontSize: 12,
-    color: "#555",
+    color: LT.textSecondary,
     textAlign: "right" as const,
     flexShrink: 0,
   },
-  addFormInput: {
+  /** An @api Input in a form row: takes the rest of the row. */
+  addFormField: {
     flex: 1,
+    minWidth: 0,
+  },
+  /** The key-capture box: the field chrome, drawn here because it is a
+   *  focusable div, not an input (it swallows the keystroke it records). */
+  addFormCapture: {
+    flex: 1,
+    minWidth: 0,
+    boxSizing: "border-box" as const,
+    display: "flex",
+    alignItems: "center",
+    minHeight: 28,
+    padding: "0 8px",
     fontSize: 12,
-    padding: "4px 8px",
-    border: "1px solid #ccc",
-    borderRadius: 3,
-    backgroundColor: "#fff",
+    color: LT.text,
+    border: `1px solid ${LT.controlBorder}`,
+    borderRadius: LT.radiusControl,
+    cursor: "pointer",
+    outline: "none",
+  },
+  addFormConflict: {
+    color: LT.dangerFg,
+    fontSize: 12,
+    padding: "4px 0 0 120px",
   },
   addFormActions: {
     display: "flex",
@@ -571,37 +601,8 @@ const pageStyles: Record<string, React.CSSProperties> = {
     gap: 8,
     marginTop: 4,
   },
-  addFormOkBtn: {
-    fontSize: 12,
-    padding: "5px 16px",
-    border: "1px solid #0078d4",
-    borderRadius: 3,
-    backgroundColor: "#0078d4",
-    color: "#fff",
-    cursor: "pointer",
-  },
-  addFormCancelBtn: {
-    fontSize: 12,
-    padding: "5px 16px",
-    border: "1px solid #ccc",
-    borderRadius: 3,
-    backgroundColor: "#fff",
-    color: "#666",
-    cursor: "pointer",
-  },
   searchContainer: {
     padding: "10px 16px",
-  },
-  searchInput: {
-    width: "100%",
-    padding: "7px 10px",
-    fontSize: 12,
-    borderRadius: 4,
-    border: "1px solid #ccc",
-    backgroundColor: "#fff",
-    color: "#333",
-    outline: "none",
-    boxSizing: "border-box" as const,
   },
   tableContainer: {
     flex: 1,
@@ -616,47 +617,45 @@ const pageStyles: Record<string, React.CSSProperties> = {
   th: {
     textAlign: "left" as const,
     padding: "8px 8px",
-    fontSize: 11,
+    fontSize: HEADER_FONT_SIZE,
     fontWeight: 600,
-    color: "#777",
-    borderBottom: "2px solid #e0e0e0",
+    lineHeight: "16px",
+    color: LT.textSecondary,
+    borderBottom: `1px solid ${LT.border}`,
     position: "sticky" as const,
     top: 0,
-    backgroundColor: "#fafafa",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.04em",
+    backgroundColor: LT.panel,
   },
+  /** A category is a section of the table: the panel header recipe. */
   categoryHeader: {
-    padding: "10px 8px 4px",
-    fontSize: 11,
+    padding: "12px 8px 4px",
+    fontSize: HEADER_FONT_SIZE,
     fontWeight: 600,
-    color: "#10b981",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.04em",
-    borderBottom: "1px solid #f0f0f0",
-    backgroundColor: "#f9fafb",
+    lineHeight: "16px",
+    color: LT.text,
+    borderBottom: `1px solid ${LT.controlDivider}`,
   },
   emptyState: {
     textAlign: "center" as const,
     padding: "24px 8px",
-    color: "#999",
+    color: LT.textTertiary,
     fontSize: 12,
   },
   footer: {
     padding: "10px 16px",
     fontSize: 11,
-    color: "#999",
-    borderTop: "1px solid #e0e0e0",
+    color: LT.textTertiary,
+    borderTop: `1px solid ${LT.controlDivider}`,
   },
 };
 
 // ============================================================================
-// Row Styles
+// Row Styles (every colour is an LT token)
 // ============================================================================
 
 const rowStyles: Record<string, React.CSSProperties> = {
   row: {
-    borderBottom: "1px solid #f0f0f0",
+    borderBottom: `1px solid ${LT.controlDivider}`,
   },
   cellLabel: {
     padding: "6px 8px",
@@ -666,14 +665,14 @@ const rowStyles: Record<string, React.CSSProperties> = {
     display: "block",
     fontSize: 12,
     fontWeight: 500,
-    color: "#333",
+    color: LT.text,
   },
   commandId: {
     display: "block",
     fontSize: 10,
-    color: "#aaa",
+    color: LT.textTertiary,
     marginTop: 1,
-    fontFamily: "'Cascadia Code', 'Consolas', monospace",
+    fontFamily: FONT_MONO,
   },
   cellCombo: {
     padding: "6px 8px",
@@ -683,48 +682,49 @@ const rowStyles: Record<string, React.CSSProperties> = {
     display: "inline-block",
     padding: "2px 8px",
     fontSize: 11,
-    fontFamily: "'Cascadia Code', 'Consolas', monospace",
-    backgroundColor: "#f0f0f0",
-    borderRadius: 3,
-    border: "1px solid #ddd",
+    fontFamily: FONT_MONO,
+    color: LT.text,
+    backgroundColor: LT.clusterBg,
+    borderRadius: 4,
+    border: `1px solid ${LT.controlBorder}`,
     cursor: "pointer",
     userSelect: "none" as const,
   },
   overridden: {
     fontWeight: 700,
-    backgroundColor: "#e8f5e9",
-    borderColor: "#a5d6a7",
+    backgroundColor: LT.pressed,
+    borderColor: LT.pressedBorder,
   },
   captureBox: {
     padding: "6px 10px",
     fontSize: 12,
-    fontFamily: "'Cascadia Code', 'Consolas', monospace",
-    backgroundColor: "#fff8e1",
+    fontFamily: FONT_MONO,
+    backgroundColor: LT.warnBg,
     borderRadius: 4,
-    border: "2px solid #ffc107",
+    border: `2px solid ${LT.warnFg}`,
     outline: "none",
     minWidth: 120,
     textAlign: "center" as const,
   },
   capturedText: {
     fontWeight: 600,
-    color: "#333",
+    color: LT.text,
   },
   captureHint: {
-    color: "#999",
+    color: LT.textTertiary,
     fontStyle: "italic" as const,
     fontSize: 11,
   },
   conflictWarning: {
     marginTop: 4,
     fontSize: 10,
-    color: "#e65100",
+    color: LT.warnFg,
     fontWeight: 500,
   },
   cellSource: {
     padding: "6px 8px",
     fontSize: 11,
-    color: "#888",
+    color: LT.textSecondary,
     verticalAlign: "middle" as const,
   },
   cellActions: {
@@ -732,27 +732,8 @@ const rowStyles: Record<string, React.CSSProperties> = {
     verticalAlign: "middle" as const,
     whiteSpace: "nowrap" as const,
   },
+  /** Spacing between the @api Buttons in the Actions cell. */
   actionBtn: {
-    fontSize: 11,
-    padding: "2px 10px",
-    border: "1px solid #ddd",
-    borderRadius: 3,
-    backgroundColor: "#fff",
-    color: "#555",
-    cursor: "pointer",
     marginRight: 4,
-  },
-  saveBtn: {
-    borderColor: "#10b981",
-    color: "#10b981",
-    fontWeight: 600,
-  },
-  cancelBtn: {
-    borderColor: "#ccc",
-    color: "#999",
-  },
-  resetBtn: {
-    borderColor: "#ef9a9a",
-    color: "#c62828",
   },
 };

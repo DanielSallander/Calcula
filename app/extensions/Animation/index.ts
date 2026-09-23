@@ -20,6 +20,8 @@ import {
   unregisterMenuItem,
 } from "@api/ui";
 import { onAppEvent, AppEvents } from "@api/events";
+import { ICON_SIZE_MD } from "@api/layout";
+import { RibbonIcon } from "@api/ribbonIcons";
 import { animationBackend } from "./lib/animationBackend";
 import { playbackEngine } from "./lib/animationEngine";
 import { loadAnimations, resetAnimations } from "./lib/animationStore";
@@ -45,19 +47,43 @@ function activate(context: ExtensionContext): void {
   // through the same capability check as ctx.invokeBackend (A3).
   animationBackend.set(context.invokeBackend);
 
-  // Timeline panel: four @api/layout sections. In the sidebar they stack
-  // vertically; in the ribbon the driver/transport/export rows render inline
-  // while the saved-animations list and Monte Carlo histogram demote to
-  // launcher flyouts — so the panel is freely movable to either surface.
+  // Timeline panel: four @api/layout sections — the reference DUAL-SURFACE
+  // panel. In the sidebar they stack vertically; in the ribbon each fills its
+  // cluster by the fill rule (driver and transport as two 28px rows, export as
+  // a row of heroes) while the saved-animations list and Monte Carlo
+  // histogram demote to launcher flyouts — so the panel is freely movable to
+  // either surface. Section icons are the sidebar headers' and the launchers'.
+  const sectionIcon = (icon: (typeof RibbonIcon)[keyof typeof RibbonIcon]) =>
+    React.createElement(icon, { size: ICON_SIZE_MD });
   context.ui.panels.register({
     id: PANEL_ID,
     title: "Animation",
-    icon: React.createElement(FilmIcon),
+    icon: sectionIcon(RibbonIcon.Play),
     sections: [
-      { id: `${PANEL_ID}.saved`, label: "Animations", component: SavedAnimationsSection },
-      { id: `${PANEL_ID}.driver`, label: "Driver", component: DriverSection },
-      { id: `${PANEL_ID}.playback`, label: "Playback", component: TransportSection },
-      { id: `${PANEL_ID}.export`, label: "Export", component: ExportSection },
+      {
+        id: `${PANEL_ID}.saved`,
+        label: "Animations",
+        icon: sectionIcon(RibbonIcon.Folder),
+        component: SavedAnimationsSection,
+      },
+      {
+        id: `${PANEL_ID}.driver`,
+        label: "Driver",
+        icon: sectionIcon(RibbonIcon.Clock),
+        component: DriverSection,
+      },
+      {
+        id: `${PANEL_ID}.playback`,
+        label: "Playback",
+        icon: sectionIcon(RibbonIcon.Play),
+        component: TransportSection,
+      },
+      {
+        id: `${PANEL_ID}.export`,
+        label: "Export",
+        icon: sectionIcon(RibbonIcon.Download),
+        component: ExportSection,
+      },
     ],
     defaultPlacement: "sidebar",
     priority: 12,

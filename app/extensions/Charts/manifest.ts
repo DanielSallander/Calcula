@@ -1,6 +1,10 @@
 //! FILENAME: app/extensions/Charts/manifest.ts
 // PURPOSE: Chart extension manifest and registration definitions.
 // CONTEXT: Defines what the Chart extension contributes to the application.
+//
+//          Icons come from `@api/ribbonIcons` (not the `@api` barrel) so the
+//          selection-handler tests, which mock `@api` with only the panel
+//          calls, can still build the panel definition.
 
 import type {
   AddInManifest,
@@ -8,10 +12,12 @@ import type {
   DialogProps,
 } from "@api";
 import type { PanelDefinition, TaskPaneViewDefinition } from "@api/uiTypes";
+import { RibbonIcon } from "@api/ribbonIcons";
 import React from "react";
 import { CreateChartDialog } from "./components/CreateChartDialog";
 import { buildChartDesignSections } from "./components/ChartDesignSections";
 import { CHART_FORMAT_PANE_ID, ChartFormatPane } from "./components/ChartFormatPane";
+import { CHART_JSON_PANE_ID, ChartJsonPane } from "./components/ChartJsonPane";
 
 // ============================================================================
 // Extension Manifest
@@ -30,8 +36,11 @@ export const ChartManifest: AddInManifest = {
 // Contextual Design Panel (registered dynamically when a chart is selected)
 // ============================================================================
 
-/** Accent color for chart contextual tab (Excel-style blue-ish) */
-const CHART_TAB_COLOR = "#4472c4";
+/**
+ * Accent for the chart contextual tab: the skin's chart-tab token, with the
+ * former Excel-style blue as the fallback for a skin that predates it.
+ */
+const CHART_TAB_COLOR = "var(--tab-accent-chart, #4472c4)";
 
 /** Ribbon-tab sort order for the contextual Design panel. */
 const CHART_TAB_ORDER = 501;
@@ -41,14 +50,14 @@ export const CHART_DESIGN_TAB_ID = "chart-design";
 /**
  * Build the Chart Design panel definition for the currently selected chart.
  * A builder (not a constant) because the section list depends on the chart
- * type — the Stacking/Axes/Trendline groups only apply to some marks, exactly
- * as the former monolithic tab rendered them conditionally.
+ * type — the Layout cluster only applies to axis charts (see
+ * buildChartDesignSections for why it is the only conditional one).
  */
 export function buildChartDesignPanelDefinition(): PanelDefinition {
   return {
     id: CHART_DESIGN_TAB_ID,
     title: "Chart Design",
-    icon: null,
+    icon: React.createElement(RibbonIcon.ChartColumn, { size: 20 }),
     sections: buildChartDesignSections(),
     defaultPlacement: "ribbon",
     ribbonOrder: CHART_TAB_ORDER,
@@ -78,10 +87,31 @@ export { CHART_FORMAT_PANE_ID } from "./components/ChartFormatPane";
 export const ChartFormatPaneDefinition: TaskPaneViewDefinition = {
   id: CHART_FORMAT_PANE_ID,
   title: "Format Chart",
-  icon: "[F]",
+  icon: React.createElement(RibbonIcon.FormatPoint, { size: 16 }),
   component: ChartFormatPane,
   contextKeys: ["chart"],
   priority: 100,
+  closable: true,
+};
+
+// ============================================================================
+// Task Pane Registration — the Chart JSON pane
+// ============================================================================
+
+/**
+ * The chart's stored entry as editable JSON. Opened and closed by the Chart
+ * Design band's JSON hero (it replaced a fixed-position overlay); it follows
+ * the published chart selection, like the Format pane.
+ */
+export { CHART_JSON_PANE_ID } from "./components/ChartJsonPane";
+
+export const ChartJsonPaneDefinition: TaskPaneViewDefinition = {
+  id: CHART_JSON_PANE_ID,
+  title: "Chart JSON",
+  icon: React.createElement(RibbonIcon.Code, { size: 16 }),
+  component: ChartJsonPane,
+  contextKeys: ["chart"],
+  priority: 90,
   closable: true,
 };
 

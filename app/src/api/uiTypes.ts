@@ -307,8 +307,9 @@ export interface PanelSectionProps {
 /**
  * How a section presents in the ribbon band:
  * - "auto" (default): the Shell measures the rendered section; if it exceeds
- *   the ~80px usable band height it demotes to a launcher button whose flyout
- *   hosts the full content vertically.
+ *   the cluster's 61px content box (BAND_MAX_CONTENT_HEIGHT, with 2px of
+ *   slack: DEMOTE_HEIGHT in @api/layout) it demotes to a launcher button
+ *   whose flyout hosts the full content vertically.
  * - "inline": trusted to fit the band's height; never height-demoted (the
  *   band's overflow clip is the only height backstop). Declare on known-compact
  *   sections. Width is still measured: when the band is too narrow, the
@@ -319,6 +320,19 @@ export interface PanelSectionProps {
  *   the probe render entirely.
  */
 export type SectionRibbonPresentation = "auto" | "inline" | "launcher";
+
+/**
+ * Whether a section's ribbon caption follows the user's "hide group labels"
+ * preference:
+ * - "default": the caption hides with every other caption when the user hides
+ *   group labels (the card keeps the label as its accessible name and title).
+ * - "always": the caption stays visible even when the user hides group labels.
+ *   For a caption that carries information the section cannot lose — the
+ *   Add-ins section uses it, because its caption is the HOST-drawn attribution
+ *   naming which add-in contributed the buttons, and a sandboxed surface must
+ *   never lose that attribution to a cosmetic preference.
+ */
+export type SectionCaptionMode = "default" | "always";
 
 /**
  * A named section within a panel.
@@ -332,8 +346,13 @@ export interface PanelSection {
   id: string;
   /** Display label (shown as group label in ribbon, collapsible header in sidebar) */
   label: string;
-  /** Optional icon for the section */
+  /** Section icon: a RibbonIcon element at 24 (`<RibbonIcon.Group size={24} />`).
+   *  Shown on the section's launcher when it demotes, and in its sidebar header
+   *  (fitted to 22px there). Omitted: the generic group glyph. */
   icon?: React.ReactNode;
+  /** Ribbon caption behaviour under the user's hide-group-labels preference.
+   *  Default "default" (hides with the others); see SectionCaptionMode. */
+  captionMode?: SectionCaptionMode;
   /** The component to render as section content */
   component: React.ComponentType<PanelSectionProps>;
   /** Ribbon hosting mode. Default "auto" (measured). */
@@ -358,7 +377,10 @@ export interface PanelDefinition {
   id: string;
   /** Display title */
   title: string;
-  /** Icon (React element) for activity bar icons and ribbon tabs */
+  /** Icon (React element) for the activity bar and for the launcher of a
+   *  fully demoted single-section ribbon panel: a RibbonIcon element at 20
+   *  (`<RibbonIcon.ChartColumn size={20} />`). A panel with no icon falls back to
+   *  the generic group glyph in the sidebar. */
   icon: React.ReactNode;
   /** Sections that compose this panel's content.
    *  The Shell renders them horizontally (ribbon) or vertically (sidebar).
@@ -383,7 +405,11 @@ export interface PanelDefinition {
   closable?: boolean;
   /** Whether the user can move this panel between locations. Default: true */
   movable?: boolean;
-  /** Ribbon-specific: accent color for contextual tabs (e.g., "#217346") */
+  /** Ribbon-specific: accent colour of a contextual tab — its label and its
+   *  active indicator. Pass a theme token with a light fallback so skins can
+   *  retint it: `"var(--tab-accent-pivot, #1a7a43)"` (tokens: --tab-accent-chart,
+   *  -table, -pivot, -slicer, -sparkline, -report). Its presence is also what
+   *  marks the tab as contextual. */
   ribbonColor?: string;
   /** Ribbon-specific: sort order when displayed as a ribbon tab (lower = first) */
   ribbonOrder?: number;

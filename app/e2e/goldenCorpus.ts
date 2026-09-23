@@ -917,52 +917,62 @@ export const PRESSED_ACCENT_MEDIAN_BAND = 12;
  * from the open dropdown, and `PRESSED_ACCENT_BAND` (150) exists for exactly
  * that: a drift of a dozen pixels is antialiasing, a drift of 500 is a toggle
  * appearing or disappearing.
+ *
+ * RE-MEASURED 2026-09-23 FOR THE CALCULA CLUSTERS RIBBON (every number below
+ * replaced by a reading of the re-recorded file, not derived). The Home band
+ * was rebuilt: the alignment toggles are 28px controls inside a segmented pill
+ * in a padded cluster, so the SAME lit toggle (Bottom Align) now reads 494 px
+ * centred at x=579, identically in all six files. Two things changed with it:
+ * the open File / Edit menus no longer graze the box (the menus are narrower
+ * than the old dropdowns reached), and the open Data menu no longer COVERS it,
+ * so menu-data-open is now a lit golden like the rest. The "covered" example
+ * the reader test needs moved to ribbon-minimized (the band collapsed: 0 px).
  */
 export const EMPTY_DOCUMENT_GOLDENS: EmptyDocumentGolden[] = [
   {
     file: "visual/__screenshots__/core-visual.spec.ts/core-empty-grid.png",
     spec: "visual/core-visual.spec.ts",
     capture: "core-empty-grid",
-    expectedPressedAccent: 546,
-    expectedPressedAccentMedianX: 460,
+    expectedPressedAccent: 494,
+    expectedPressedAccentMedianX: 579,
   },
   {
     file: "visual/__screenshots__/core-visual.spec.ts/ribbon-core-default-ribbon.png",
     spec: "visual/core-visual.spec.ts",
     capture: "core-default-ribbon",
-    expectedPressedAccent: 546,
-    expectedPressedAccentMedianX: 460,
+    expectedPressedAccent: 494,
+    expectedPressedAccentMedianX: 579,
   },
   {
     file: "visual/__screenshots__/core-visual.spec.ts/menu-file-open.png",
     spec: "visual/core-visual.spec.ts",
     capture: "menu-file-open",
-    expectedPressedAccent: 534,
-    expectedPressedAccentMedianX: 460,
+    expectedPressedAccent: 494,
+    expectedPressedAccentMedianX: 579,
   },
   {
     file: "visual/__screenshots__/core-visual.spec.ts/menu-edit-open.png",
     spec: "visual/core-visual.spec.ts",
     capture: "menu-edit-open",
-    expectedPressedAccent: 533,
-    expectedPressedAccentMedianX: 460,
+    expectedPressedAccent: 494,
+    expectedPressedAccentMedianX: 579,
   },
   {
-    // The open Data menu covers the alignment-toggle cluster, so the lit
-    // toggle is not in frame at all — the reading is ribbon-iconography AA,
-    // and its median is a statistic over that noise rather than over a box.
+    // Before the Clusters ribbon the open Data menu covered the alignment
+    // cluster (29 px of AA noise, no box). The narrower menu no longer reaches
+    // the toggle, so this is a lit golden like the others (re-measured).
     file: "visual/__screenshots__/core-visual.spec.ts/menu-data-open.png",
     spec: "visual/core-visual.spec.ts",
     capture: "menu-data-open",
-    expectedPressedAccent: 29,
-    expectedPressedAccentMedianX: null,
+    expectedPressedAccent: 494,
+    expectedPressedAccentMedianX: 579,
   },
   {
     file: "tests/__screenshots__/grid-rendering.spec.ts/empty-grid-full-window.png",
     spec: "tests/grid-rendering.spec.ts",
     capture: "empty-grid-full-window",
-    expectedPressedAccent: 546,
-    expectedPressedAccentMedianX: 460,
+    expectedPressedAccent: 494,
+    expectedPressedAccentMedianX: 579,
   },
 ];
 
@@ -1075,23 +1085,25 @@ export function describeStaleRibbonState(
     `-- BOTTOM ALIGN, because the document default style is ` +
     `VerticalAlign::${DOCUMENT_DEFAULT_VERTICAL_ALIGN.toUpperCase()} (Excel ` +
     `parity: a fresh cell is Horizontal General, Vertical Bottom) and the ` +
-    `ribbon reports the DEFAULT style for an empty cell since BUG-0062 (~546 px ` +
-    `when fully visible, centred at x=460 in a 1280-wide capture). No ` +
+    `ribbon reports the DEFAULT style for an empty cell since BUG-0062 (~494 px ` +
+    `when fully visible, centred at x=579 in a 1280-wide capture of the Calcula ` +
+    `Clusters Home band). No ` +
     `horizontal-alignment toggle lights at all: a default cell is General and ` +
     `the ribbon has no General button.\n` +
     `  A reading far BELOW the count pin is the pre-BUG-0062 face (null style, ` +
     `everything dark, font box "system-ui"); a reading far ABOVE it is a ` +
     `BUG-0028-style latch (the PREVIOUS cell's toggles still lit, ~+500 px per ` +
     `extra box). A reading with the RIGHT count at the WRONG x is a golden of ` +
-    `the pre-parity build: Center Vertically sat 33 px to the LEFT of Bottom ` +
-    `Align (median x=427 rather than 460), same box, same fill, same row -- ` +
+    `the pre-parity build: Center Vertically sits one button to the LEFT of ` +
+    `Bottom Align, same box, same fill, same row (before the Clusters ribbon the ` +
+    `lit box read ~546 px at x=460; a golden reading that is of the old band) -- ` +
     `which is precisely why counting alone stopped being enough.\n` +
     `  THIS AXIS IS INVISIBLE TO BOTH CHECKS ABOVE: dpr and colour profile ask ` +
     `which MACHINE took the picture. This asks which BUILD did. A corpus can be ` +
     `perfectly consistent about the display and still contain a screenshot of a ` +
     `bug that has been fixed.\n` +
-    `  The toggle fill is ${PRESSED_ACCENT_FILL.join(",")} over a 30x26 box -- ` +
-    `one box is ~590 pixels against a 200-pixel comparator budget, so a golden ` +
+    `  The toggle fill is ${PRESSED_ACCENT_FILL.join(",")} over a 28x28 box in a ` +
+    `segmented pill -- one box is ~494 pixels against a 200-pixel comparator budget, so a golden ` +
     `on the wrong side cannot pass its spec either. Re-record with ` +
     `--update-snapshots=changed, never "all", and attribute the diff first.`
   );

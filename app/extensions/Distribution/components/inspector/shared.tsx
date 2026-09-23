@@ -4,6 +4,7 @@
 //          do not load the app skin), plus small presentation helpers.
 
 import React from "react";
+import { Badge as ApiBadge } from "@api/layout";
 
 export const ACCENT = "#0f6cbd";
 export const MUTED = "#6b7076";
@@ -91,7 +92,16 @@ export const inputStyle: React.CSSProperties = {
   borderRadius: 3,
 };
 
-/** Small colored pill (trust status, capability, verify result...). */
+/**
+ * Small colored pill (trust status, capability, verify result...).
+ *
+ * A thin wrapper over the ONE @api Badge: the pill's shape, font and white
+ * text come from it; this wrapper adds only what a WORD label needs that a
+ * count does not (text padding, a gap to the next pill) and the caller's
+ * status colour as the fill. The status colours are this window's own
+ * constants (ACCENT, OK_GREEN, ...), because the inspector is a standalone
+ * window that does not load the app skin.
+ */
 export function Badge({
   color,
   children,
@@ -100,20 +110,18 @@ export function Badge({
   children: React.ReactNode;
 }): React.ReactElement {
   return (
-    <span
+    <ApiBadge
+      size={16}
       style={{
-        display: "inline-block",
-        padding: "1px 8px",
-        borderRadius: 9,
-        fontSize: 11,
-        fontWeight: 600,
-        color: "#fff",
         background: color,
+        padding: "0 8px",
+        fontSize: 11,
         marginRight: 4,
+        verticalAlign: "middle",
       }}
     >
       {children}
-    </span>
+    </ApiBadge>
   );
 }
 

@@ -46,14 +46,39 @@ vi.mock("../components/HomeTabCustomizeDialog", () => ({
 }));
 
 // homeTabIcons pulls the ribbon icon set off the @api barrel; a stub keeps the
-// barrel (which reaches every extension) out of this test's module graph.
+// barrel (which reaches every extension) out of this test's module graph. One
+// NAMED stub per key, so a test can tell which drawing a section chose.
 vi.mock("@api", () => {
-  const Stub = () => null;
-  return { RibbonIcon: new Proxy({}, { get: () => Stub }) };
+  const stubs = new Map<string, (() => null) & { displayName?: string }>();
+  return {
+    RibbonIcon: new Proxy(
+      {},
+      {
+        get: (_target, key) => {
+          const name = String(key);
+          let stub = stubs.get(name);
+          if (!stub) {
+            stub = Object.assign(() => null, { displayName: name });
+            stubs.set(name, stub);
+          }
+          return stub;
+        },
+      }
+    ),
+  };
 });
 
+import React from "react";
+import { LAUNCHER_ICON_SIZE } from "@api/layout";
 import extension, { buildSections } from "../index";
 import { DEFAULT_LAYOUT, type HomeTabLayout } from "../homeTabConfig";
+
+/** Which RibbonIcon key a section's glyph element draws, and at what size. */
+function glyphOf(icon: unknown): { key: string | undefined; size: unknown } {
+  expect(React.isValidElement(icon), "a section glyph is a RibbonIcon element").toBe(true);
+  const el = icon as React.ReactElement<{ size?: number }, { displayName?: string }>;
+  return { key: el.type.displayName, size: el.props.size };
+}
 
 beforeEach(() => {
   localStorage.clear();
@@ -100,9 +125,18 @@ describe("buildSections(DEFAULT_LAYOUT)", () => {
     for (const s of sections()) expect(s.ribbonPresentation).toBe("inline");
   });
 
-  it("gives every section a launcher glyph, with Font staying typographic", () => {
-    for (const s of sections()) expect(s.icon).toBeTruthy();
-    expect(sections()[1].icon).toBe("A");
+  it("gives every section a drawn launcher glyph at the launcher's 24px", () => {
+    // The Clusters launcher and the sidebar header draw a section's icon in
+    // a 34px slot at 24; a text glyph (Font used to be a bare "A") cannot be
+    // sized with the rest of the set.
+    expect(LAUNCHER_ICON_SIZE).toBe(24);
+    for (const s of sections()) {
+      const { key, size } = glyphOf(s.icon);
+      expect(key, `${s.id} names a RibbonIcon key`).toBeTruthy();
+      expect(size, `${s.id} glyph size`).toBe(LAUNCHER_ICON_SIZE);
+    }
+    // Font keeps its letters: the "Aa" drawing, not an abstract picture.
+    expect(glyphOf(sections()[1].icon).key).toBe("Fonts");
   });
 
   it("falls back for a user-created group instead of rendering nothing", () => {
@@ -111,7 +145,8 @@ describe("buildSections(DEFAULT_LAYOUT)", () => {
       groups: [{ id: "my-macros", label: "My Macros", items: ["undo"] }],
     };
     const [section] = buildSections(custom);
-    expect(section.icon).toBeTruthy();
+    // The generic fallback id ("format") is the Format Cells drawing.
+    expect(glyphOf(section.icon).key).toBe("FormatCells");
     // No collapsePriority declared => collapses last, so a group the user
     // asked for survives the squeeze.
     expect(section.collapsePriority).toBe(99);
@@ -122,7 +157,7 @@ describe("buildSections(DEFAULT_LAYOUT)", () => {
       version: 1,
       groups: [{ id: "my-macros", label: "My Macros", iconId: "font", items: ["undo"] }],
     };
-    expect(buildSections(custom)[0].icon).toBe("A");
+    expect(glyphOf(buildSections(custom)[0].icon).key).toBe("Fonts");
   });
 });
 

@@ -1,8 +1,21 @@
 //! FILENAME: app/src/shell/TaskPane/TaskPane.styles.ts
-// PURPOSE: Styled components for Task Pane
-// CONTEXT: Uses CSS-in-JS via styled-components
+// PURPOSE: Styled components for the Task Pane frame
+// CONTEXT: CSS-in-JS via styled-components. Calcula Clusters redesign: the pane
+//          shares the side panel's header recipe (40px row, 12px/600 sentence-
+//          case title, 16px view-icon slot, @api IconButtons) and paints only
+//          with tokens — `var(--token, #lightFallback)`, the fallback being the
+//          light baseline (eslint.boundaries.js, chromeColorConfigs). The
+//          hand-rolled tab strip, tab and close-button styles are gone: several
+//          open views switch through the @api SegmentedTabs pill instead.
 
 import styled from "styled-components";
+import { FONT_FAMILY, HEADER_FONT_SIZE } from "../../api/layout";
+
+/** Header row height, shared with the side panel. */
+export const TASK_PANE_HEADER_HEIGHT = 40;
+
+/** Side of the view-icon slot in the header and in each tab. */
+export const TASK_PANE_TAB_ICON_SIZE = 16;
 
 export const TaskPaneWrapper = styled.div<{
   $width: number;
@@ -15,12 +28,12 @@ export const TaskPaneWrapper = styled.div<{
   top: 0;
   bottom: 0;
   z-index: 100;
-  
+
   display: flex;
   flex-direction: column;
   height: 100%;
-  background-color: var(--panel-bg);
-  border-left: 1px solid var(--border-default);
+  background-color: var(--panel-bg, #f9fafb);
+  border-left: 1px solid var(--border-default, #d1d5db);
   overflow: hidden;
 
   /* Fixed width */
@@ -31,11 +44,12 @@ export const TaskPaneWrapper = styled.div<{
      position:fixed elements (e.g. Monaco suggest widget) inside the pane,
      where overflow:hidden clips them.  Using right avoids this. */
   right: ${({ $isOpen, $width }) => ($isOpen ? "0" : `-${$width}px`)};
-  transition: right 0.15s ease-out;
-  
+  transition: right var(--motion-panel, 180ms cubic-bezier(0.2, 0, 0, 1));
+
   /* Shadow only when open */
-  box-shadow: ${({ $isOpen }) => ($isOpen ? "-4px 0 12px rgba(0, 0, 0, 0.1)" : "none")};
-  
+  box-shadow: ${({ $isOpen }) =>
+    $isOpen ? "var(--shadow-raised, 0 6px 16px rgba(16, 24, 40, 0.14))" : "none"};
+
   /* Prevent interaction when closed */
   pointer-events: ${({ $isOpen }) => ($isOpen ? "auto" : "none")};
 `;
@@ -50,6 +64,8 @@ export const TaskPaneContent = styled.div<{ $isVisible: boolean }>`
   transition-delay: ${({ $isVisible }) => ($isVisible ? "0.05s" : "0s")};
 `;
 
+/** 4px grab area on the left edge; a 2px accent line shows on hover and
+ *  while dragging (the side panel's handle, mirrored). */
 export const ResizeHandle = styled.div`
   position: absolute;
   left: 0;
@@ -60,112 +76,92 @@ export const ResizeHandle = styled.div`
   background: transparent;
   z-index: 10;
 
-  &:hover,
-  &:active {
-    background: var(--accent-color);
+  &::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 2px;
+    background: var(--state-accent, #047857);
+    opacity: 0;
+    transition: opacity var(--motion-hover, 120ms cubic-bezier(0.2, 0, 0, 1));
+    pointer-events: none;
+  }
+
+  &:hover::after,
+  &:active::after,
+  &[data-resizing="true"]::after {
+    opacity: 1;
   }
 `;
 
 export const Header = styled.div`
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  min-height: 36px;
-  padding: 0 8px;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-default);
+  gap: 8px;
+  box-sizing: border-box;
+  height: ${TASK_PANE_HEADER_HEIGHT}px;
+  min-height: ${TASK_PANE_HEADER_HEIGHT}px;
+  padding: 0 8px 0 12px;
+  background: var(--side-panel-header-bg, var(--panel-bg, #f9fafb));
+  border-bottom: 1px solid var(--border-default, #d1d5db);
   flex-shrink: 0;
 `;
 
-export const TabStrip = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 2px;
+/** Single open view: its title, in the sidebar's one header recipe. */
+export const HeaderTitle = styled.span`
   flex: 1;
-  overflow-x: auto;
-  overflow-y: hidden;
-
-  /* Hide scrollbar but allow scrolling */
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-  &::-webkit-scrollbar {
-    display: none;
-  }
-`;
-
-export const Tab = styled.button<{ $active: boolean }>`
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: none;
-  border-radius: 4px 4px 0 0;
-  background: ${({ $active }) => ($active ? "var(--panel-bg)" : "transparent")};
-  color: ${({ $active }) => ($active ? "var(--text-primary)" : "var(--text-secondary)")};
-  font-size: 12px;
-  font-weight: ${({ $active }) => ($active ? 600 : 400)};
-  cursor: pointer;
+  min-width: 0;
+  font-family: ${FONT_FAMILY};
+  font-size: ${HEADER_FONT_SIZE}px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-primary, #111827);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  transition: background 0.1s, color 0.1s;
-
-  &:hover {
-    background: ${({ $active }) => ($active ? "var(--panel-bg)" : "var(--bg-surface-disabled)")};
-    color: var(--text-primary);
-  }
 `;
 
-export const TabIcon = styled.span`
-  font-size: 14px;
+/** Several open views: the SegmentedTabs pill takes the free width. */
+export const TabsSlot = styled.div`
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
 `;
 
-export const TabCloseButton = styled.span`
-  display: flex;
+/** The view's icon in a 16px box, whatever size its author drew. */
+export const TabIcon = styled.span`
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  margin-left: 4px;
-  border: none;
-  border-radius: 3px;
-  background: transparent;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
+  flex: none;
+  width: ${TASK_PANE_TAB_ICON_SIZE}px;
+  height: ${TASK_PANE_TAB_ICON_SIZE}px;
+  overflow: hidden;
 
-  &:hover {
-    background: var(--bg-surface-disabled);
-    color: var(--text-primary);
+  & svg {
+    width: ${TASK_PANE_TAB_ICON_SIZE}px;
+    height: ${TASK_PANE_TAB_ICON_SIZE}px;
+    flex: none;
   }
 `;
 
 export const HeaderActions = styled.div`
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin-left: 8px;
+  gap: 2px;
+  flex: none;
 `;
 
-export const HeaderButton = styled.button`
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 16px;
-  cursor: pointer;
-
-  &:hover {
-    background: var(--bg-surface-disabled);
-    color: var(--text-primary);
-  }
+/** Hairline between "close this view" and "close the pane". */
+export const HeaderDivider = styled.span`
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: var(--control-divider, #e5e7eb);
+  flex: none;
 `;
 
 export const Content = styled.div`
@@ -180,19 +176,22 @@ export const EmptyState = styled.div`
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 12px;
   height: 100%;
   padding: 24px;
-  color: var(--text-tertiary);
+  color: var(--text-tertiary, #888888);
   text-align: center;
+  font-family: ${FONT_FAMILY};
   font-size: 13px;
 `;
 
 export const EmptyStateIcon = styled.div`
-  font-size: 48px;
-  margin-bottom: 16px;
-  opacity: 0.5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary, #888888);
 `;
 
 export const EmptyStateText = styled.p`
-  margin: 0 0 8px 0;
+  margin: 0;
 `;

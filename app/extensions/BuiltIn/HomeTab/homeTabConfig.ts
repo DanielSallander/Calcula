@@ -37,6 +37,18 @@ export interface HomeTabItem {
    *  (Excel's big Paste). Plain click actions only. */
   hero?: boolean;
   /**
+   * The Segmented pill this command joins when it sits next to another
+   * command of the same segment in one ribbon row (B|I|U|S, the alignment
+   * runs, the indent pair, the decimals pair).
+   *
+   * CATALOG-ONLY: this lives on the catalog entry, never on a layout, so it
+   * is never persisted and a saved `calcula.homeTab.layout` stays
+   * byte-identical. The ribbon joins a run AFTER it has chunked the group
+   * into rows, so a segment can never move a command to another row — a run
+   * the user split with a row break simply becomes two pills.
+   */
+  segment?: string;
+  /**
    * Layout version this command first shipped in (default 1 = "was already
    * there when layouts became versioned").
    *
@@ -100,10 +112,10 @@ export const ALL_ITEMS: HomeTabItem[] = [
   { id: "fontSize", label: "Font Size", tooltip: "Font Size", type: "dropdown", category: "Font" },
   { id: "increaseFontSize", label: "Increase Font Size", tooltip: "Increase Font Size", type: "button", icon: "A˄", category: "Font" },
   { id: "decreaseFontSize", label: "Decrease Font Size", tooltip: "Decrease Font Size", type: "button", icon: "A˅", category: "Font" },
-  { id: "bold", label: "Bold", tooltip: "Bold (Ctrl+B)", type: "toggle", icon: "B", category: "Font" },
-  { id: "italic", label: "Italic", tooltip: "Italic (Ctrl+I)", type: "toggle", icon: "I", category: "Font" },
-  { id: "underline", label: "Underline", tooltip: "Underline (Ctrl+U)", type: "toggle", icon: "U", category: "Font" },
-  { id: "strikethrough", label: "Strikethrough", tooltip: "Strikethrough", type: "toggle", icon: "S", category: "Font" },
+  { id: "bold", label: "Bold", tooltip: "Bold (Ctrl+B)", type: "toggle", icon: "B", category: "Font", segment: "emphasis" },
+  { id: "italic", label: "Italic", tooltip: "Italic (Ctrl+I)", type: "toggle", icon: "I", category: "Font", segment: "emphasis" },
+  { id: "underline", label: "Underline", tooltip: "Underline (Ctrl+U)", type: "toggle", icon: "U", category: "Font", segment: "emphasis" },
+  { id: "strikethrough", label: "Strikethrough", tooltip: "Strikethrough", type: "toggle", icon: "S", category: "Font", segment: "emphasis" },
   { id: "superscript", label: "Superscript", tooltip: "Superscript (Ctrl+Shift+=)", type: "toggle", icon: "x\u00B2", category: "Font" },
   { id: "subscript", label: "Subscript", tooltip: "Subscript (Ctrl+=)", type: "toggle", icon: "x\u2082", category: "Font" },
   { id: "textColor", label: "Text Color", tooltip: "Font Color", type: "color", icon: "A", category: "Font" },
@@ -111,23 +123,26 @@ export const ALL_ITEMS: HomeTabItem[] = [
   { id: "formatCells", label: "Format Cells", shortLabel: "Format", tooltip: "Format Cells... (Ctrl+1)", type: "button", icon: "\u2630", category: "Font" },
 
   // --- Alignment ---
-  { id: "alignTop", label: "Top Align", tooltip: "Align Top", type: "toggle", icon: "\u2912", category: "Alignment" },
-  { id: "alignMiddle", label: "Middle Align", tooltip: "Center Vertically", type: "toggle", icon: "\u21C5", category: "Alignment" },
-  { id: "alignBottom", label: "Bottom Align", tooltip: "Align Bottom", type: "toggle", icon: "\u2913", category: "Alignment" },
-  { id: "alignLeft", label: "Align Left", tooltip: "Align Left", type: "toggle", icon: "\u2261", category: "Alignment" },
-  { id: "alignCenter", label: "Center", tooltip: "Center", type: "toggle", icon: "\u2550", category: "Alignment" },
-  { id: "alignRight", label: "Align Right", tooltip: "Align Right", type: "toggle", icon: "\u2261", category: "Alignment" },
+  { id: "alignTop", label: "Top Align", tooltip: "Align Top", type: "toggle", icon: "\u2912", category: "Alignment", segment: "valign" },
+  { id: "alignMiddle", label: "Middle Align", tooltip: "Center Vertically", type: "toggle", icon: "\u21C5", category: "Alignment", segment: "valign" },
+  { id: "alignBottom", label: "Bottom Align", tooltip: "Align Bottom", type: "toggle", icon: "\u2913", category: "Alignment", segment: "valign" },
+  // The text fallbacks of Left and Right were both U+2261, so wherever
+  // the drawn icon was unavailable the two read as the same command. They are
+  // now a mirrored pair: the left half block and the right half block.
+  { id: "alignLeft", label: "Align Left", tooltip: "Align Left", type: "toggle", icon: "\u258C", category: "Alignment", segment: "halign" },
+  { id: "alignCenter", label: "Center", tooltip: "Center", type: "toggle", icon: "\u2550", category: "Alignment", segment: "halign" },
+  { id: "alignRight", label: "Align Right", tooltip: "Align Right", type: "toggle", icon: "\u2590", category: "Alignment", segment: "halign" },
   { id: "wrapText", label: "Wrap Text", tooltip: "Wrap Text", type: "toggle", icon: "\u21B5", category: "Alignment" },
-  { id: "increaseIndent", label: "Increase Indent", tooltip: "Increase Indent", type: "button", icon: "\u21E5", category: "Alignment" },
-  { id: "decreaseIndent", label: "Decrease Indent", tooltip: "Decrease Indent", type: "button", icon: "\u21E4", category: "Alignment" },
+  { id: "increaseIndent", label: "Increase Indent", tooltip: "Increase Indent", type: "button", icon: "\u21E5", category: "Alignment", segment: "indent" },
+  { id: "decreaseIndent", label: "Decrease Indent", tooltip: "Decrease Indent", type: "button", icon: "\u21E4", category: "Alignment", segment: "indent" },
   { id: "mergeCells", label: "Merge Cells", tooltip: "Merge Cells", type: "button", icon: "\u29EA", category: "Alignment" },
 
   // --- Number ---
   { id: "numberFormat", label: "Number Format", tooltip: "Number Format", type: "dropdown", icon: "#", category: "Number" },
   { id: "percentFormat", label: "Percent", tooltip: "Percent Style (%)", type: "button", icon: "%", category: "Number" },
   { id: "commaFormat", label: "Comma", tooltip: "Comma Style (,)", type: "button", icon: ",", category: "Number" },
-  { id: "increaseDecimal", label: "Increase Decimal", tooltip: "Increase Decimal", type: "button", icon: ".0", category: "Number" },
-  { id: "decreaseDecimal", label: "Decrease Decimal", tooltip: "Decrease Decimal", type: "button", icon: "0.", category: "Number" },
+  { id: "increaseDecimal", label: "Increase Decimal", tooltip: "Increase Decimal", type: "button", icon: ".0", category: "Number", segment: "decimals" },
+  { id: "decreaseDecimal", label: "Decrease Decimal", tooltip: "Decrease Decimal", type: "button", icon: "0.", category: "Number", segment: "decimals" },
 
   // --- Editing ---
   { id: "undo", label: "Undo", tooltip: "Undo (Ctrl+Z)", type: "button", icon: "\u21B6", category: "Editing" },

@@ -1,30 +1,29 @@
 //! FILENAME: app/src/api/layout/primitives/Input.tsx
-// PURPOSE: Standard text/number input atom at the shared field height.
+// PURPOSE: Standard text input atom at the shared field height.
 // CONTEXT: Companion to Field/FieldGrid so extensions stop hand-rolling input
 //          CSS. In the band, inputs default to a compact width unless the
 //          author sets one (a full-width input makes no sense inline).
+//
+//          The chrome is the one text-entry recipe shared with Select and
+//          NumberField (`fieldChrome` in ./fields.tsx): FIELD_HEIGHT (28px),
+//          the control radius, a 1px LT.controlBorder on LT.inputBg, and on
+//          focus the LT.focusRing plus an LT.stateAccent border. The old input
+//          drew a 1px outline in --accent-color on a 4px radius, which matched
+//          neither the buttons beside it nor the skin's focus colour.
+//
+//          `className` is cx-merged AFTER the chrome, so a caller's emotion
+//          class overrides it regardless of stylesheet insertion order.
 
 import React from "react";
 import { css, cx } from "@emotion/css";
 import { useSurfaceLayout } from "../context";
-import { FIELD_HEIGHT, FONT_FAMILY } from "../tokens";
+import { fieldChrome } from "./fields";
 
-const base = css`
-  height: ${FIELD_HEIGHT}px;
-  box-sizing: border-box;
-  padding: 0 6px;
-  border: 1px solid var(--border-default, #d0d0d0);
-  border-radius: 4px;
-  background: var(--input-bg, #fff);
-  color: var(--text-primary, #333);
-  font-family: ${FONT_FAMILY};
-  font-size: 12px;
-  min-width: 0;
+/** Band default width when the caller sets none. */
+const BAND_INPUT_WIDTH = 64;
 
-  &:focus {
-    outline: 1px solid var(--accent-color, #0078d4);
-    outline-offset: -1px;
-  }
+const inputPadding = css`
+  padding: 0 8px;
 `;
 
 export interface LayoutInputProps
@@ -42,9 +41,9 @@ export const Input = React.forwardRef<HTMLInputElement, LayoutInputProps>(
     return (
       <input
         ref={ref}
-        className={cx(base, className)}
+        className={cx(fieldChrome, inputPadding, className)}
         style={{
-          width: width ?? (band ? 64 : "100%"),
+          width: width ?? (band ? BAND_INPUT_WIDTH : "100%"),
           ...style,
         }}
         {...rest}

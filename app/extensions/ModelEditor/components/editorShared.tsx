@@ -5,6 +5,7 @@
 
 import React, { useCallback, useEffect, useId, useRef } from "react";
 import type { ModelMeasureInfo, ModelOverview, RoleFilterDto } from "@api";
+import { Badge as ApiBadge } from "@api/layout";
 import { FONT, LINE, ME, PAD, RADIUS, SHADOW, SIZE, SPACE } from "./theme";
 
 // ============================================================================
@@ -265,8 +266,20 @@ export function ErrorBanner({
 // neutral/warn/ok, so OverviewSection mapped `level === "error"` onto `warn`
 // and every validation error rendered in warning yellow. That was not an edge
 // case — `bi_model_validate` only ever emits `level: "error"`, so the one tone
-// it can produce was the one tone that was wrong. (Stage 2 replaces these
-// literals with the --tone-* skin tokens; the shape stays.)
+// it can produce was the one tone that was wrong.
+//
+// A thin wrapper over the ONE @api Badge (the pill every surface of the app
+// shares: shape, font, no-wrap). The Model Editor's four tones are tinted
+// labels rather than the app's solid count pills, so this wrapper supplies
+// each tone's --tone-* pair from ME and the padding a WORD needs; everything
+// it paints is a token, as the window's hex ban requires.
+const BADGE_TONES = {
+  neutral: { bg: ME.sunken, fg: ME.text2 },
+  warn: { bg: ME.warnBg, fg: ME.warnFg },
+  ok: { bg: ME.okBg, fg: ME.okFg },
+  error: { bg: ME.dangerBg, fg: ME.dangerFg },
+} as const;
+
 export function Badge({
   children,
   tone = "neutral",
@@ -274,26 +287,23 @@ export function Badge({
   children: React.ReactNode;
   tone?: "neutral" | "warn" | "ok" | "error";
 }): React.ReactElement {
-  const colors = {
-    neutral: { bg: ME.sunken, fg: ME.text2 },
-    warn: { bg: ME.warnBg, fg: ME.warnFg },
-    ok: { bg: ME.okBg, fg: ME.okFg },
-    error: { bg: ME.dangerBg, fg: ME.dangerFg },
-  }[tone];
+  const colors = BADGE_TONES[tone];
   return (
-    <span
+    <ApiBadge
+      tone={tone === "error" ? "danger" : "neutral"}
+      size={16}
       style={{
         background: colors.bg,
         color: colors.fg,
+        boxShadow: "none",
         borderRadius: RADIUS.pill,
-        padding: "2px 8px",
+        padding: "0 8px",
         fontSize: FONT.xs,
         fontWeight: 500,
-        whiteSpace: "nowrap",
       }}
     >
       {children}
-    </span>
+    </ApiBadge>
   );
 }
 

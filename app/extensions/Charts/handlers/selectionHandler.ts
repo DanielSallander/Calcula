@@ -109,11 +109,20 @@ function registerDesignPanel(): void {
 }
 
 /**
- * Re-register the Design panel when the applicable section set changes (e.g.
- * the chart type switches bar -> pie and the Stacking/Trendline groups no
- * longer apply) — mirroring the former monolithic tab's conditional
- * RibbonGroup rendering. No-op when the section list is unchanged, so
- * in-section editing (title typing, etc.) never remounts the panel.
+ * Re-register the Design panel when the applicable section set changes.
+ *
+ * Since the Clusters rebuild the band has six clusters and exactly ONE of them
+ * is conditional: Layout exists only for axis charts. So the id fingerprint
+ * below changes only on an axis <-> radial flip (bar -> pie, pie -> line);
+ * every other type switch (bar -> line, pie -> donut) re-renders the same
+ * section components in place, which is what removed the remount flash the
+ * old fourteen-section band showed on nearly every type change. The per-mark
+ * differences (which Elements toggles exist, which mark options Layout shows,
+ * whether the Trendline row applies) live INSIDE the sections, which re-read
+ * the spec on CHART_UPDATED.
+ *
+ * No-op when the section list is unchanged, so in-section editing (title
+ * typing, slider drags) never remounts the panel.
  */
 function refreshDesignPanelSections(): void {
   if (!designTabRegistered) return;
@@ -155,7 +164,7 @@ export function selectChart(chartId: string): void {
       window.addEventListener(ChartEvents.CHART_UPDATED, handleChartUpdatedForDesignPanel);
     } else {
       // Switching directly to a different chart: its type may need a
-      // different section set (e.g. bar -> pie drops Stacking/Trendline).
+      // different section set (bar -> pie drops the Layout cluster).
       refreshDesignPanelSections();
     }
   }

@@ -2,7 +2,8 @@
 // PURPOSE: Status bar component at the bottom of the application.
 // CONTEXT: Renders the grid's MODE readout and the selection summary on the
 //          left, extension items on the right (including the zoom slider
-//          registered by the ZoomSlider extension).
+//          registered by the ZoomSlider extension). Painted with the
+//          --status-bar-bg / --status-bar-fg tokens (Calcula Clusters).
 
 import React, { useState, useEffect, useCallback } from "react";
 import {
@@ -85,15 +86,18 @@ export function StatusBar(_props: StatusBarProps): React.ReactElement {
     <div
       data-testid="status-bar"
       onContextMenu={handleContextMenu}
+      // Tokens with their light baselines as fallbacks: Light renders exactly
+      // the Excel green / white it always did (the goldens hold), Dark gets
+      // --status-bar-bg's deeper green, and a skin may repaint either.
       style={{
         height: "24px",
-        backgroundColor: "#217346",
+        backgroundColor: "var(--status-bar-bg, #217346)",
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
         padding: "0 12px",
         fontSize: "12px",
-        color: "#ffffff",
+        color: "var(--status-bar-fg, #ffffff)",
       }}
     >
       {/* Left zone */}

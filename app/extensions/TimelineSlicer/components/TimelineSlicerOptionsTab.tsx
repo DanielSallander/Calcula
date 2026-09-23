@@ -5,10 +5,29 @@
 //          TimelineOptionsPanelDefinition in ../manifest.ts); the shell owns
 //          group chrome, labels, and width-collapse behavior, so sections only
 //          render their inner controls with @api/layout primitives.
+//
+//          Calcula Clusters: every section fills the band's 61px content box
+//          with ONE TALL ROW (the fill rule, @api/layout tokens.ts) — the time
+//          level is a tall SegmentedChoice (one radio group: arrow keys move
+//          and select, one Tab crosses it), and the actions are CommandButton
+//          heroes. "Clear Filter" is genuinely disabled while no range is
+//          selected, rather than drawn at half opacity and left clickable.
+//          Outside the band the same controls render at the standard 28px.
+//
+//          Colours come only from the icon set and the primitives.
 
 import React, { useState, useEffect } from "react";
 import { showDialog } from "@api";
-import { ControlRow, ActionRow, Button, ToggleButton } from "@api/layout";
+import {
+  ActionRow,
+  CommandButton,
+  GAP_XS,
+  HERO_ICON_SIZE,
+  SegmentedChoice,
+  useSurfaceLayout,
+  type SegmentedChoiceOption,
+} from "@api/layout";
+import { RibbonIcon } from "@api/ribbonIcons";
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import { TimelineSlicerEvents } from "../lib/timelineSlicerEvents";
 import {
@@ -72,12 +91,18 @@ function useSelectedTimeline(): [
 // Section: Level
 // ============================================================================
 
-const LEVELS: TimelineLevel[] = ["years", "quarters", "months", "days"];
-const LEVEL_LABELS = ["Years", "Quarters", "Months", "Days"];
+/** The time levels, coarsest first, with their visible names. */
+const LEVEL_OPTIONS: ReadonlyArray<SegmentedChoiceOption<TimelineLevel>> = [
+  { value: "years", label: "Years", tooltip: "Show Years" },
+  { value: "quarters", label: "Quarters", tooltip: "Show Quarters" },
+  { value: "months", label: "Months", tooltip: "Show Months" },
+  { value: "days", label: "Days", tooltip: "Show Days" },
+];
 
 /** Time-level switcher (Years / Quarters / Months / Days). */
 export function TimelineLevelSection(): React.ReactElement | null {
   const [timeline, setTimeline] = useSelectedTimeline();
+  const band = useSurfaceLayout().container === "band";
 
   const handleLevelChange = async (level: TimelineLevel) => {
     if (!timeline) return;
@@ -89,19 +114,14 @@ export function TimelineLevelSection(): React.ReactElement | null {
   if (!timeline) return null;
 
   return (
-    <ControlRow gap={2}>
-      {LEVELS.map((level, i) => (
-        <ToggleButton
-          key={level}
-          size="sm"
-          active={timeline.level === level}
-          onClick={() => handleLevelChange(level)}
-          title={`Show ${LEVEL_LABELS[i]}`}
-        >
-          {LEVEL_LABELS[i]}
-        </ToggleButton>
-      ))}
-    </ControlRow>
+    <SegmentedChoice<TimelineLevel>
+      ariaLabel="Time level"
+      // One tall row in the band; a standard 28px pill in a panel or flyout.
+      size={band ? "tall" : "md"}
+      value={timeline.level}
+      options={LEVEL_OPTIONS}
+      onChange={handleLevelChange}
+    />
   );
 }
 
@@ -122,22 +142,17 @@ export function TimelineFilterSection(): React.ReactElement | null {
 
   if (!timeline) return null;
 
+  const hasFilter = timeline.selectionStart !== null;
+
   return (
-    <ActionRow>
-      <Button
+    <ActionRow gap={GAP_XS}>
+      <CommandButton
+        icon={<RibbonIcon.ClearFilter size={HERO_ICON_SIZE} />}
+        label="Clear Filter"
         onClick={handleClearFilter}
-        title="Clear the timeline filter"
-        style={{
-          opacity: timeline.selectionStart !== null ? 1 : 0.5,
-        }}
-      >
-        <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M3 4h16l-5 6v5l-4 2V10z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"/>
-          <line x1="15" y1="15" x2="19" y2="19" stroke="#c42b1c" strokeWidth="2"/>
-          <line x1="19" y1="15" x2="15" y2="19" stroke="#c42b1c" strokeWidth="2"/>
-        </svg>
-        Clear Filter
-      </Button>
+        tooltip={hasFilter ? "Clear the timeline filter" : "The timeline has no filter to clear"}
+        disabled={!hasFilter}
+      />
     </ActionRow>
   );
 }
@@ -163,22 +178,19 @@ export function TimelineActionsSection(): React.ReactElement | null {
   if (!timeline) return null;
 
   return (
-    <ActionRow>
-      <Button onClick={handleSettings} title="Timeline Settings">
-        <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M11 14a3 3 0 100-6 3 3 0 000 6z" stroke="currentColor" strokeWidth="1.4"/>
-          <path d="M9.5 2.5l-.4 1.7a7 7 0 00-1.8 1l-1.6-.6L4.2 6.8l1.2 1.2a7 7 0 000 2l-1.2 1.2 1.5 2.2 1.6-.6a7 7 0 001.8 1l.4 1.7h3l.4-1.7a7 7 0 001.8-1l1.6.6 1.5-2.2-1.2-1.2a7 7 0 000-2l1.2-1.2-1.5-2.2-1.6.6a7 7 0 00-1.8-1l-.4-1.7z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
-        </svg>
-        Settings
-      </Button>
-      <Button
+    <ActionRow gap={GAP_XS}>
+      <CommandButton
+        icon={<RibbonIcon.Settings size={HERO_ICON_SIZE} />}
+        label="Settings"
+        onClick={handleSettings}
+        tooltip="Timeline Settings"
+      />
+      <CommandButton
+        icon={<RibbonIcon.Delete size={HERO_ICON_SIZE} />}
+        label="Delete"
         onClick={handleDelete}
-        title="Delete this Timeline"
-        style={{ color: "#c42b1c" }}
-      >
-        <span>&#x2716;</span>
-        Delete
-      </Button>
+        tooltip="Delete this Timeline"
+      />
     </ActionRow>
   );
 }

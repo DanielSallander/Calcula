@@ -6,6 +6,7 @@ import styled from "styled-components";
 import { useFormatCellsStore, type FillMode } from "../hooks/useFormatCellsState";
 import { ColorPicker } from "../components/ColorPicker";
 import type { PatternType, GradientDirection } from "@api";
+import { LT, QUICK_COLORS, colorLabel, sameColor } from "@api/layout";
 
 const v = (name: string) => `var(${name})`;
 
@@ -41,16 +42,10 @@ const GRADIENT_DIRECTIONS: { id: GradientDirection; label: string; icon: string 
   { id: "fromCenter", label: "From Center", icon: "\u25CE" },
 ];
 
-const QUICK_COLORS = [
-  "#ffffff", "#f8f9fa", "#f1f3f5", "#e9ecef", "#dee2e6",
-  "#fff3bf", "#fff9db", "#fff0f6", "#f8f0fc", "#f3f0ff",
-  "#e7f5ff", "#e3fafc", "#d3f9d8", "#ebfbee", "#fff4e6",
-  "#ffe3e3", "#ffc9c9", "#ffa8a8", "#ff8787", "#ff6b6b",
-  "#ffd43b", "#fcc419", "#fab005", "#f59f00", "#f08c00",
-  "#69db7c", "#51cf66", "#40c057", "#37b24d", "#2f9e44",
-  "#74c0fc", "#4dabf7", "#339af0", "#228be6", "#1c7ed6",
-  "#b197fc", "#9775fa", "#845ef7", "#7950f2", "#7048e8",
-];
+// The Solid fill's "Quick Colors" are the ONE quick-pick set (@api/layout's
+// QUICK_COLORS, the set the mini toolbar and the chart pickers offer), so a
+// colour picked here and one picked there compare equal. This tab used to type
+// out a forty-colour set of its own that matched nothing else in the app.
 
 // ============================================================================
 // Component
@@ -106,14 +101,17 @@ export function FillTab(): React.ReactElement {
           <PickerColumn>
             <Section>
               <SectionTitle>Quick Colors</SectionTitle>
-              <QuickColorGrid>
+              <QuickColorGrid role="group" aria-label="Quick colors">
                 {QUICK_COLORS.map((color) => (
                   <QuickColorCell
                     key={color}
-                    $color={color}
-                    $selected={backgroundColor.toLowerCase() === color.toLowerCase()}
+                    type="button"
+                    style={{ background: color }}
+                    data-colour-data=""
+                    aria-label={colorLabel(color)}
+                    aria-pressed={sameColor(backgroundColor, color)}
                     onClick={() => setBackgroundColor(color)}
-                    title={color}
+                    title={colorLabel(color)}
                   />
                 ))}
               </QuickColorGrid>
@@ -521,11 +519,11 @@ const ModeRow = styled.div`
   gap: 16px;
 `;
 
-// 240px, not narrower: ColorPicker's dropdown is min-width 220px and it opens
-// inside this column, so anything tighter cuts off the palette and the hex box.
+// Sized by its content (the labelled colour swatches). The palette opens as a
+// popover portalled to <body>, so this column no longer has to be wide enough
+// to hold it; when the dialog is dragged narrow, the swatch row wraps instead.
 const ColorColumn = styled.div`
-  flex: 0 1 240px;
-  min-width: 220px;
+  flex: 0 1 auto;
 `;
 
 // min-width: 0 so the swatch/pattern grids reflow inside the column rather than
@@ -582,31 +580,43 @@ const FillModeButton = styled.button<{ $active: boolean }>`
   }
 `;
 
-// auto-fill, not a fixed 10 columns: the cells are square, so a fixed count turns
-// every pixel of width 1:1 into height (40 swatches were 4 rows of 46px). Width
-// now buys COLUMNS and the swatches stay near Excel's size.
+// Two rows of ten, the shape QUICK_COLORS is designed in (grey ramp + warm half
+// over cool half + companions). Each track is CAPPED at 22px: the cells are
+// square, so an uncapped `1fr` would turn every pixel of column width into
+// swatch height. Narrow, the tracks shrink rather than reflow the rows.
 const QuickColorGrid = styled.div`
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(20px, 1fr));
+  grid-template-columns: repeat(10, minmax(0, 22px));
   gap: 3px;
 `;
 
-const QuickColorCell = styled.button<{ $color: string; $selected: boolean }>`
+// The swatch's paint is DATA (inline `background`, `data-colour-data`); every
+// ring around it is a token, the same recipe as the @api ColorPopover swatch.
+const QuickColorCell = styled.button`
   width: 100%;
   aspect-ratio: 1;
-  min-width: 20px;
-  border: ${(p) =>
-    p.$selected
-      ? `2px solid ${v("--accent-primary")}`
-      : `1px solid ${v("--border-default")}`};
-  border-radius: 3px;
-  background-color: ${(p) => p.$color};
-  cursor: pointer;
   padding: 0;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px ${LT.controlDivider};
+  transition: box-shadow ${LT.motionHover};
 
   &:hover {
-    border: 2px solid ${v("--text-primary")};
-    transform: scale(1.1);
+    box-shadow:
+      inset 0 0 0 2px ${LT.text},
+      inset 0 0 0 3px ${LT.surface};
+  }
+
+  &[aria-pressed="true"] {
+    box-shadow:
+      inset 0 0 0 2px ${LT.stateAccent},
+      inset 0 0 0 3px ${LT.surface};
+  }
+
+  &:focus-visible {
+    outline: none;
+    box-shadow: ${LT.focusRing};
   }
 `;
 

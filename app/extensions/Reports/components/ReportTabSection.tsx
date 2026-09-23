@@ -1,14 +1,34 @@
 //! FILENAME: app/extensions/Reports/components/ReportTabSection.tsx
 // PURPOSE: The contextual "Report" ribbon tab — registered while the selection
 //   sits inside a report region (see reportSelectionHandler). Mirrors the pivot
-//   Analyze contextual-tab pattern: a PanelDefinition with big-button sections.
+//   Analyze contextual-tab pattern: a PanelDefinition with hero sections.
+// CONTEXT: Composed from @api/layout primitives (Calcula Clusters). Every
+//   command is a CommandButton hero with a RibbonIcon, so each section's band
+//   content is ONE TALL ROW of 61px heroes (the fill rule in @api/layout
+//   tokens.ts); in the sidebar the same heroes render as 28px buttons. The
+//   former emotion hero recipe and its emoji/unicode glyph icons are gone.
+//
+//   E2E contract: the contextual TAB is found as the only <button> whose text is
+//   exactly "Report" (e2e/journeys/report-store.spec.ts), so no hero in this
+//   tab may be labelled "Report" — the info section shows the report's own name
+//   as text, never as a button.
 
 import React, { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { css } from "@emotion/css";
 import { showDialog } from "@api";
-import type { PanelDefinition } from "@api/uiTypes";
-import type { PanelSectionProps } from "@api/uiTypes";
-import { ActionRow } from "@api/layout";
+import type { PanelDefinition, PanelSectionProps } from "@api/uiTypes";
+import {
+  ActionRow,
+  CommandButton,
+  FONT_FAMILY,
+  GAP_MD,
+  GAP_XS,
+  HERO_ICON_SIZE,
+  ICON_SIZE_MD,
+  ICON_SIZE_SM,
+  LT,
+} from "@api/layout";
+import { RibbonIcon } from "@api/ribbonIcons";
 import { EDIT_DIALOG_ID, MANAGE_DIALOG_ID } from "../dialogIds";
 import { cellRef } from "../lib/cellRef";
 import { deleteReport, refreshOneReport } from "../lib/reportRefresh";
@@ -21,47 +41,20 @@ import type { ReportInfo } from "../types";
 import { confirmAsync, alertAsync } from "@api/dialogs";
 
 const styles = {
-  button: css`
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 2px;
-    padding: 4px 10px;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    background: transparent;
-    cursor: pointer;
-    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
-    font-size: 11px;
-    color: var(--text-primary, #333);
-    white-space: nowrap;
-
-    &:hover {
-      background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
-    }
-
-    &:disabled {
-      opacity: 0.5;
-      cursor: default;
-    }
-  `,
-  buttonIcon: css`
-    font-size: 16px;
-    line-height: 1;
-  `,
   info: css`
     display: flex;
     flex-direction: column;
     justify-content: center;
     gap: 2px;
-    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+    font-family: ${FONT_FAMILY};
     padding: 0 4px;
     min-width: 0;
   `,
   name: css`
     font-size: 12px;
     font-weight: 600;
-    color: var(--text-primary, #333);
+    line-height: 16px;
+    color: ${LT.text};
     max-width: 160px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -69,7 +62,8 @@ const styles = {
   `,
   location: css`
     font-size: 11px;
-    color: var(--text-secondary, #666);
+    line-height: 13px;
+    color: ${LT.textSecondary};
     white-space: nowrap;
   `,
 };
@@ -89,8 +83,8 @@ export function ReportInfoSection(_props: PanelSectionProps): React.ReactElement
   const report = useActiveReport();
   if (!report) return null;
   return (
-    <ActionRow gap={8}>
-      <div className={styles.info}>
+    <ActionRow gap={GAP_MD}>
+      <div className={styles.info} data-testid="report-tab-info">
         <span className={styles.name} title={report.name}>
           {report.name}
         </span>
@@ -98,14 +92,13 @@ export function ReportInfoSection(_props: PanelSectionProps): React.ReactElement
           at {cellRef(report.anchorRow, report.anchorCol)}
         </span>
       </div>
-      <button
-        className={styles.button}
+      <CommandButton
+        icon={<RibbonIcon.Pencil size={HERO_ICON_SIZE} />}
+        label="Edit Query"
+        tooltip="Edit this report's design query"
+        data-testid="report-tab-edit-query"
         onClick={() => showDialog(EDIT_DIALOG_ID, { reportId: report.id })}
-        title="Edit this report's design query"
-      >
-        <span className={styles.buttonIcon}>✎</span>
-        Edit Query
-      </button>
+      />
     </ActionRow>
   );
 }
@@ -156,41 +149,49 @@ export function ReportActionsSection(_props: PanelSectionProps): React.ReactElem
 
   if (!report) return null;
   return (
-    <ActionRow gap={8}>
-      <button className={styles.button} onClick={onRefresh} disabled={busy} title="Re-run the design query">
-        <span className={styles.buttonIcon}>↻</span>
-        Refresh
-      </button>
-      <button className={styles.button} onClick={onDelete} disabled={busy} title="Delete the report and clear its cells">
-        <span className={styles.buttonIcon}>🗑</span>
-        Delete
-      </button>
-      <button
-        className={styles.button}
+    <ActionRow gap={GAP_XS}>
+      <CommandButton
+        icon={<RibbonIcon.Refresh size={HERO_ICON_SIZE} />}
+        label="Refresh"
+        tooltip="Re-run the design query"
+        data-testid="report-tab-refresh"
+        disabled={busy}
+        onClick={() => void onRefresh()}
+      />
+      <CommandButton
+        icon={<RibbonIcon.Delete size={HERO_ICON_SIZE} />}
+        label="Delete"
+        tooltip="Delete the report and clear its cells"
+        data-testid="report-tab-delete"
+        disabled={busy}
+        onClick={() => void onDelete()}
+      />
+      <CommandButton
+        icon={<RibbonIcon.More size={HERO_ICON_SIZE} />}
+        label="Manage"
+        tooltip="List, refresh or delete any report"
+        data-testid="report-tab-manage"
         onClick={() => showDialog(MANAGE_DIALOG_ID, {})}
-        title="List, refresh or delete any report"
-      >
-        <span className={styles.buttonIcon}>☰</span>
-        Manage
-      </button>
+      />
     </ActionRow>
   );
 }
 
-// Accent matches the Reports dialogs' accent green.
-const REPORT_TAB_COLOR = "#2e7d5b";
+/** The Report tab's accent: the skin's report accent token, falling back to the
+ *  Reports dialogs' accent green the tab used before tokens existed. */
+const REPORT_TAB_COLOR = "var(--tab-accent-report, #2e7d5b)";
 
 export const REPORT_TAB_ID = "report-tab";
 
 export const ReportPanelDefinition: PanelDefinition = {
   id: REPORT_TAB_ID,
   title: "Report",
-  icon: null,
+  icon: <RibbonIcon.Report size={ICON_SIZE_SM} />,
   sections: [
     {
       id: "report-tab.report",
       label: "Report",
-      icon: "📄",
+      icon: <RibbonIcon.Report size={ICON_SIZE_MD} />,
       component: ReportInfoSection,
       ribbonPresentation: "inline",
       collapsePriority: 1,
@@ -198,7 +199,7 @@ export const ReportPanelDefinition: PanelDefinition = {
     {
       id: "report-tab.actions",
       label: "Actions",
-      icon: "⚡",
+      icon: <RibbonIcon.Lightning size={ICON_SIZE_MD} />,
       component: ReportActionsSection,
       ribbonPresentation: "inline",
       collapsePriority: 2,

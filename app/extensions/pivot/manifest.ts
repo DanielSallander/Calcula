@@ -10,6 +10,8 @@ import type {
 } from "@api";
 import { emitAppEvent } from "@api";
 import type { PanelDefinition } from "@api/uiTypes";
+import { RibbonIcon } from "@api/ribbonIcons";
+import { ICON_SIZE_MD, ICON_SIZE_SM } from "@api/layout";
 import { PivotEditorView } from "./components/PivotEditorView";
 import {
   DesignNameSection,
@@ -52,8 +54,22 @@ export const PivotManifest: AddInManifest = {
   commands: [],
 };
 
-// Accent color for pivot contextual tabs (Excel-style green)
-const PIVOT_TAB_COLOR = "#217346";
+// Accent for the pivot contextual tabs: the skin's pivot accent token, with
+// the old Excel green as the fallback for a window that never loaded a skin.
+const PIVOT_TAB_COLOR = "var(--tab-accent-pivot, #217346)";
+
+/** A RibbonIcon drawing (one member of the namespace). */
+type RibbonIconDrawing = (props: { size?: number }) => React.ReactElement;
+
+/** A section's icon: the duotone RibbonIcon at the launcher/sidebar size (24). */
+function sectionIcon(icon: RibbonIconDrawing): React.ReactElement {
+  return React.createElement(icon, { size: ICON_SIZE_MD });
+}
+
+/** A panel's icon: the tab / activity-rail size (20). */
+function panelIcon(icon: RibbonIconDrawing): React.ReactElement {
+  return React.createElement(icon, { size: ICON_SIZE_SM });
+}
 
 // "Pivot Table" analyze contextual panel - registered dynamically when a pivot
 // is selected. One section per former ribbon group; collapsePriority mirrors
@@ -63,12 +79,12 @@ export const PIVOT_ANALYZE_TAB_ID = "pivot-analyze";
 export const PivotAnalyzePanelDefinition: PanelDefinition = {
   id: PIVOT_ANALYZE_TAB_ID,
   title: "Pivot Table",
-  icon: null,
+  icon: panelIcon(RibbonIcon.Pivot),
   sections: [
     {
       id: "pivot-analyze.pivotTable",
       label: "PivotTable",
-      icon: "📊",
+      icon: sectionIcon(RibbonIcon.Pivot),
       component: AnalyzePivotTableSection,
       ribbonPresentation: "inline",
       collapsePriority: 1,
@@ -76,7 +92,7 @@ export const PivotAnalyzePanelDefinition: PanelDefinition = {
     {
       id: "pivot-analyze.data",
       label: "Data",
-      icon: "↻",
+      icon: sectionIcon(RibbonIcon.Refresh),
       component: AnalyzeDataSection,
       ribbonPresentation: "inline",
       collapsePriority: 3,
@@ -84,7 +100,7 @@ export const PivotAnalyzePanelDefinition: PanelDefinition = {
     {
       id: "pivot-analyze.actions",
       label: "Actions",
-      icon: "⚡",
+      icon: sectionIcon(RibbonIcon.Lightning),
       component: AnalyzeActionsSection,
       ribbonPresentation: "inline",
       collapsePriority: 2,
@@ -92,7 +108,7 @@ export const PivotAnalyzePanelDefinition: PanelDefinition = {
     {
       id: "pivot-analyze.calculations",
       label: "Calculations",
-      icon: "fx",
+      icon: sectionIcon(RibbonIcon.Fx),
       component: AnalyzeCalculationsSection,
       ribbonPresentation: "inline",
       collapsePriority: 4,
@@ -112,25 +128,26 @@ export const PIVOT_DESIGN_TAB_ID = "pivot-design";
 export const PivotDesignPanelDefinition: PanelDefinition = {
   id: PIVOT_DESIGN_TAB_ID,
   title: "Pivot Table Design",
-  icon: null,
+  icon: panelIcon(RibbonIcon.Pivot),
   sections: [
     {
       id: "pivot-design.name",
       label: "PivotTable Name",
-      icon: "⚙",
+      icon: sectionIcon(RibbonIcon.Pencil),
       component: DesignNameSection,
       collapsePriority: 1,
     },
     {
       id: "pivot-design.grandTotals",
       label: "Grand Totals",
-      icon: "Σ",
+      icon: sectionIcon(RibbonIcon.GrandTotals),
       component: DesignGrandTotalsSection,
       collapsePriority: 2,
     },
     {
       id: "pivot-design.styles",
       label: "PivotTable Styles",
+      icon: sectionIcon(RibbonIcon.TableStyle),
       component: DesignStylesSection,
       ribbonPresentation: "inline",
       collapsePriority: 100,
@@ -139,14 +156,14 @@ export const PivotDesignPanelDefinition: PanelDefinition = {
     {
       id: "pivot-design.reportLayout",
       label: "Report Layout",
-      icon: "☰",
+      icon: sectionIcon(RibbonIcon.ReportLayout),
       component: DesignReportLayoutSection,
       collapsePriority: 3,
     },
     {
       id: "pivot-design.display",
       label: "Display",
-      icon: "▣",
+      icon: sectionIcon(RibbonIcon.Eye),
       component: DesignDisplaySection,
       collapsePriority: 4,
     },
@@ -166,7 +183,7 @@ export const PIVOT_PANE_ID = "pivot-editor";
 export const PivotPaneDefinition: TaskPaneViewDefinition = {
   id: PIVOT_PANE_ID,
   title: "PivotTable Fields",
-  icon: "[P]",
+  icon: React.createElement(RibbonIcon.PivotFields, { size: 16 }),
   component: PivotEditorView,
   contextKeys: ["pivot"],
   priority: 100,

@@ -13,7 +13,9 @@ import {
 import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
 import { getSlicerById, getCachedItems } from "../lib/slicerStore";
 import { isSlicerSelected } from "../handlers/selectionHandler";
-import { SLICER_STYLES_BY_ID } from "../components/SlicerStylesGallery";
+// The style DATA module, not the gallery component: the canvas renderer must
+// not pull a React component (and its @api/layout chrome) into the paint path.
+import { SLICER_STYLES_BY_ID } from "../lib/slicerStyles";
 import type { Slicer, SlicerItem } from "../lib/slicerTypes";
 import { getSlicerItemRenderer, getSlicerStyleOverrides } from "./customRenderers";
 import { getSlicerItemBitmap, hasSlicerItemBitmapRenderer } from "@api";
@@ -31,39 +33,50 @@ const SCROLLBAR_WIDTH = 8;
 const SCROLLBAR_MIN_THUMB = 20;
 const SELECT_ALL_LABEL = "Select all";
 
-// Legacy style presets (for backward compatibility with old IDs)
-const LEGACY_STYLE_COLORS: Record<string, StyleColors> = {
-  SlicerStyleLight1: {
-    bg: "#FFFFFF",
-    headerBg: "#4472C4",
-    headerFg: "#FFFFFF",
-    selectedBg: "#4472C4",
-    selectedFg: "#FFFFFF",
-    itemBg: "#edf2f9",
-    itemFg: "#333333",
-    border: "#8faadc",
-  },
-  SlicerStyleLight2: {
-    bg: "#FFFFFF",
-    headerBg: "#ED7D31",
-    headerFg: "#FFFFFF",
-    selectedBg: "#ED7D31",
-    selectedFg: "#FFFFFF",
-    itemBg: "#fdf2eb",
-    itemFg: "#333333",
-    border: "#f4b183",
-  },
-  SlicerStyleDark1: {
-    bg: "#333333",
-    headerBg: "#4472C4",
-    headerFg: "#FFFFFF",
-    selectedBg: "#4472C4",
-    selectedFg: "#FFFFFF",
-    itemBg: "#444444",
-    itemFg: "#EEEEEE",
-    border: "#555555",
-  },
-};
+// Legacy style presets (for backward compatibility with old IDs). A Map, not
+// an object literal: the keys are Excel's stored preset names, which the
+// repo's camelCase naming rule would reject as property names.
+const LEGACY_STYLE_COLORS: ReadonlyMap<string, StyleColors> = new Map([
+  [
+    "SlicerStyleLight1",
+    {
+      bg: "#FFFFFF",
+      headerBg: "#4472C4",
+      headerFg: "#FFFFFF",
+      selectedBg: "#4472C4",
+      selectedFg: "#FFFFFF",
+      itemBg: "#edf2f9",
+      itemFg: "#333333",
+      border: "#8faadc",
+    },
+  ],
+  [
+    "SlicerStyleLight2",
+    {
+      bg: "#FFFFFF",
+      headerBg: "#ED7D31",
+      headerFg: "#FFFFFF",
+      selectedBg: "#ED7D31",
+      selectedFg: "#FFFFFF",
+      itemBg: "#fdf2eb",
+      itemFg: "#333333",
+      border: "#f4b183",
+    },
+  ],
+  [
+    "SlicerStyleDark1",
+    {
+      bg: "#333333",
+      headerBg: "#4472C4",
+      headerFg: "#FFFFFF",
+      selectedBg: "#4472C4",
+      selectedFg: "#FFFFFF",
+      itemBg: "#444444",
+      itemFg: "#EEEEEE",
+      border: "#555555",
+    },
+  ],
+]);
 
 interface StyleColors {
   bg: string;
@@ -76,14 +89,14 @@ interface StyleColors {
   border: string;
 }
 
-const DEFAULT_COLORS: StyleColors = LEGACY_STYLE_COLORS.SlicerStyleLight1;
+const DEFAULT_COLORS: StyleColors = LEGACY_STYLE_COLORS.get("SlicerStyleLight1")!;
 
 function getStyleColors(preset: string): StyleColors {
   const galleryStyle = SLICER_STYLES_BY_ID.get(preset);
   if (galleryStyle) {
     return galleryStyle.thumb;
   }
-  return LEGACY_STYLE_COLORS[preset] || DEFAULT_COLORS;
+  return LEGACY_STYLE_COLORS.get(preset) ?? DEFAULT_COLORS;
 }
 
 // ============================================================================
@@ -662,7 +675,6 @@ export function getSlicerHitDetail(
   const preLayout = computeLayout(slicer, items.length, bounds.width, viewportH);
   const scrollbarW = preLayout.needsScroll && !preLayout.isHorizontal ? SCROLLBAR_WIDTH : 0;
   const layout = scrollbarW > 0 ? computeLayout(slicer, items.length, bounds.width - scrollbarW, viewportH) : preLayout;
-  const itemAreaW = bounds.width - scrollbarW;
   const itemRelX = relX;
   const itemRelY = relY - headerH;
 

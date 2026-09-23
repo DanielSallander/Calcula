@@ -45,8 +45,14 @@ button {
   color: inherit;
 }
 
+/* The global keyboard-focus mark for any button that does not draw its own.
+   Same 2px inset outline as before; only the colour moved onto the theme, so
+   it follows the skin's state accent like the @api/layout primitives' ring
+   does (they set outline:none and draw var(--focus-ring) as a box-shadow). It
+   stays an OUTLINE here on purpose: a global box-shadow would overwrite the
+   inset box-shadow borders that segmented controls draw with. */
 button:focus-visible {
-  outline: 2px solid #0078d4;
+  outline: 2px solid var(--focus-ring-color, #047857);
   outline-offset: -1px;
 }
 
@@ -56,9 +62,31 @@ button:focus-visible {
   -webkit-user-select: none;
 }
 
-/* Global checkbox accent color */
+/* Global checkbox accent color — the skin's state accent, which is held to 3:1
+   against the surface in tokens.test.ts (the brand green is not). */
 input[type="checkbox"] {
-  accent-color: #0078d4;
+  accent-color: var(--state-accent, #047857);
+}
+
+/* Reduced motion, honoured globally. skinLoader.apply() stamps
+   data-reduced-motion from the OS prefers-reduced-motion query or the
+   Settings > Appearance toggle; this collapses every CSS transition and
+   animation in the app to an instant change, so no component has to remember
+   to check the flag. 0.01ms rather than 0 so transitionend / animationend
+   still fire and code waiting on them does not hang. */
+html[data-reduced-motion="true"] *,
+html[data-reduced-motion="true"] *::before,
+html[data-reduced-motion="true"] *::after {
+  transition-duration: 0.01ms !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+}
+
+/* The descendant selectors above do not match <html> itself, which is the
+   element that carries smooth page scrolling. */
+html[data-reduced-motion="true"] {
+  scroll-behavior: auto !important;
 }
 
 /* Scrollbar styling */

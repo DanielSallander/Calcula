@@ -104,12 +104,34 @@ describe("org skin trust states", () => {
     // Both name-conflict states are red. They are reachable only through the
     // shared `.calp` vocabulary today (the org pull runs RequirePinned), but a
     // total map with a benign-looking row is exactly how a state added later
-    // ships unnoticed.
-    for (const status of ["notPinnedNameConflict", "firstUseAcceptedNameConflict"]) {
+    // ships unnoticed. "Red" is the Chip's DANGER tone since the Clusters
+    // redesign — a token (--tone-danger-fg), so it follows the skin and high
+    // contrast rather than being a fixed #c5221f the chrome hex ban forbids.
+    const toneFor = (status: string): string => {
       const row = map![0].match(new RegExp(`\\n  ${status}: \\{[\\s\\S]*?\\n  \\},`));
       expect(row, `no row for ${status}`).toBeTruthy();
-      expect(row![0], `${status} must be red`).toContain('color: "#c5221f"');
+      const tone = row![0].match(/tone: "([a-z]+)"/);
+      expect(tone, `${status} has no tone`).toBeTruthy();
+      return tone![1];
+    };
+    for (const status of ["notPinnedNameConflict", "firstUseAcceptedNameConflict"]) {
+      expect(toneFor(status), `${status} must be red`).toBe("danger");
     }
+    // The two "not applied" states are red too, and only `verified` is green.
+    expect(toneFor("notPinned")).toBe("danger");
+    expect(toneFor("unknown")).toBe("danger");
+    for (const status of RUST_STATUSES) {
+      if (status === "verified") continue;
+      expect(toneFor(status), `SkinTrust "${status}" must not read as ok`).not.toBe("ok");
+    }
+    expect(toneFor("verified")).toBe("ok");
+  });
+
+  it("an unrecognised trust state renders as danger, never as benign text", () => {
+    const fallback = PAGE.match(/function trustPresentation\([\s\S]*?\n\}/);
+    expect(fallback, "trustPresentation moved or was renamed").toBeTruthy();
+    expect(fallback![0]).toMatch(/tone: "danger"/);
+    expect(fallback![0]).toMatch(/unrecognised/);
   });
 
   it("the skin trust map is exhaustive over the Rust enum, with no wildcard", () => {

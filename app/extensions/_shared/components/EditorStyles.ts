@@ -2,8 +2,32 @@
 // PURPOSE: Shared editor styles for Pivot and Tablix field editors.
 // CONTEXT: Emotion CSS-in-JS styles for the field list, drop zones, and related UI.
 // DESIGN: Windows 11 Fluent Design with Segoe UI, 4px/8px radii, subtle hover states.
+//
+// COLOURS ARE TOKENS. This file used to paint with ~35 GitHub Primer literals
+// (#24292f, #d0d7de, #0969da, #ddf4ff, ...), so the field editors stayed light
+// grey on white under the Dark skin and under any organisation skin. Every
+// colour below is a declared theme token — TOKENS from ../lib/themeTokens, or a
+// `var(--token, lightBaseline)` for the few tokens that table does not carry —
+// and each was chosen for being the nearest light value to the Primer literal it
+// replaces, so the light look is essentially unchanged:
+//
+//   #fafbfc -> panel-bg            #e1e4e8 -> control-divider
+//   #24292f -> text-primary        #656d76 -> text-secondary
+//   #8b949e -> text-tertiary       #d0d7de -> border-default / control-border
+//   #f0f2f5 -> border-subtle       #f6f8fa / #eaeef2 -> button hover / active
+//   #0969da -> accent-color        #ddf4ff -> tone-info-bg
+//   #cf222e / #ffebe9 -> tone-danger-fg / -bg
 
 import { css } from '@emotion/css';
+import { TOKENS } from '../lib/themeTokens';
+
+// Tokens the shared table does not carry, spelled with their light baselines.
+const SHADOW_SUBTLE = 'var(--shadow-cluster-hover, 0 1px 2px rgba(16, 24, 40, 0.06))';
+const BORDER_HOVER = 'var(--ribbon-cluster-border-hover, #d1d5db)';
+const SCROLL_THUMB = 'var(--scrollbar-thumb-bg-default, #c0c0c0)';
+const SCROLL_THUMB_HOVER = 'var(--scrollbar-thumb-bg-hover, #a0a0a0)';
+/** The old rgba(9, 105, 218, 0.15) focus halo, as a tint of the accent. */
+const ACCENT_HALO = `color-mix(in srgb, ${TOKENS.accent} 15%, transparent)`;
 
 // Shared scrollbar mixin
 const scrollbarMixin = `
@@ -18,10 +42,10 @@ const scrollbarMixin = `
     border-radius: 5px;
   }
   &:hover::-webkit-scrollbar-thumb {
-    background: rgba(0, 0, 0, 0.15);
+    background: ${SCROLL_THUMB};
   }
   &::-webkit-scrollbar-thumb:hover {
-    background: rgba(0, 0, 0, 0.25);
+    background: ${SCROLL_THUMB_HOVER};
   }
 `;
 
@@ -32,8 +56,8 @@ export const styles = {
     width: 100%;
     min-width: 240px;
     height: 100%;
-    background: #fafbfc;
-    border-left: 1px solid #e1e4e8;
+    background: ${TOKENS.panelBg};
+    border-left: 1px solid ${TOKENS.controlDivider};
     font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
     font-size: 12px;
     overflow: hidden;
@@ -44,13 +68,13 @@ export const styles = {
     align-items: center;
     justify-content: space-between;
     padding: 10px 14px;
-    background: #fff;
-    border-bottom: 1px solid #e1e4e8;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+    background: ${TOKENS.surfaceBg};
+    border-bottom: 1px solid ${TOKENS.controlDivider};
+    box-shadow: ${SHADOW_SUBTLE};
     font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
     font-weight: 600;
     font-size: 13px;
-    color: #24292f;
+    color: ${TOKENS.textPrimary};
     flex-shrink: 0;
   `,
 
@@ -64,15 +88,15 @@ export const styles = {
     width: 24px;
     height: 24px;
     padding: 0;
-    color: #656d76;
+    color: ${TOKENS.textSecondary};
     font-size: 16px;
     line-height: 1;
     border-radius: 4px;
     transition: background 0.12s, color 0.12s;
 
     &:hover {
-      background: #eaeef2;
-      color: #24292f;
+      background: ${TOKENS.buttonHoverBg};
+      color: ${TOKENS.textPrimary};
     }
   `,
 
@@ -94,15 +118,15 @@ export const styles = {
 
   sectionTitle: css`
     font-weight: 500;
-    color: #656d76;
+    color: ${TOKENS.textSecondary};
     margin-bottom: 6px;
     font-size: 11px;
     letter-spacing: 0.2px;
   `,
 
   fieldList: css`
-    background: #fff;
-    border: 1px solid #d0d7de;
+    background: ${TOKENS.surfaceBg};
+    border: 1px solid ${TOKENS.border};
     border-radius: 6px;
     flex: 1;
     min-height: 80px;
@@ -117,7 +141,7 @@ export const styles = {
     padding: 5px 10px;
     cursor: grab;
     user-select: none;
-    border-bottom: 1px solid #f0f2f5;
+    border-bottom: 1px solid ${TOKENS.borderSubtle};
     transition: background 0.1s ease;
     box-sizing: border-box;
 
@@ -126,16 +150,16 @@ export const styles = {
     }
 
     &:hover {
-      background: #f6f8fa;
+      background: ${TOKENS.buttonHoverBg};
     }
 
     &:active {
-      background: #eaeef2;
+      background: ${TOKENS.buttonActiveBg};
     }
 
     &.dragging {
       opacity: 0.4;
-      background: #ddf4ff;
+      background: ${TOKENS.infoBg};
     }
   `,
 
@@ -143,14 +167,14 @@ export const styles = {
     margin-right: 8px;
     cursor: pointer;
     flex-shrink: 0;
-    accent-color: #0969da;
+    accent-color: ${TOKENS.accent};
     width: 14px;
     height: 14px;
   `,
 
   fieldName: css`
     flex: 1;
-    color: #24292f;
+    color: ${TOKENS.textPrimary};
     font-size: 12px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -159,7 +183,7 @@ export const styles = {
   `,
 
   fieldTypeIcon: css`
-    color: #8b949e;
+    color: ${TOKENS.textTertiary};
     font-size: 10px;
     margin-left: 4px;
     flex-shrink: 0;
@@ -175,8 +199,8 @@ export const styles = {
   `,
 
   dropZone: css`
-    background: #fff;
-    border: 1px solid #d0d7de;
+    background: ${TOKENS.surfaceBg};
+    border: 1px solid ${TOKENS.border};
     border-radius: 6px;
     min-height: 48px;
     padding: 6px 8px;
@@ -188,9 +212,9 @@ export const styles = {
     ${scrollbarMixin}
 
     &.drag-over {
-      border-color: #0969da;
-      background: #ddf4ff;
-      box-shadow: 0 0 0 1px #0969da;
+      border-color: ${TOKENS.accent};
+      background: ${TOKENS.infoBg};
+      box-shadow: 0 0 0 1px ${TOKENS.accent};
       border-width: 1px;
       padding: 6px 8px;
     }
@@ -203,7 +227,7 @@ export const styles = {
   dropZoneTitle: css`
     font-size: 10px;
     font-weight: 600;
-    color: #656d76;
+    color: ${TOKENS.textSecondary};
     text-transform: uppercase;
     margin-bottom: 4px;
     letter-spacing: 0.3px;
@@ -217,7 +241,7 @@ export const styles = {
   `,
 
   dropZonePlaceholder: css`
-    color: #8b949e;
+    color: ${TOKENS.textTertiary};
     font-size: 11px;
     font-style: italic;
     text-align: center;
@@ -228,8 +252,8 @@ export const styles = {
     display: flex;
     align-items: center;
     padding: 3px 8px;
-    background: #f6f8fa;
-    border: 1px solid #d0d7de;
+    background: ${TOKENS.clusterBg};
+    border: 1px solid ${TOKENS.controlBorder};
     border-radius: 4px;
     margin-bottom: 3px;
     cursor: grab;
@@ -238,9 +262,9 @@ export const styles = {
     transition: background 0.1s ease, border-color 0.1s ease, box-shadow 0.1s ease;
 
     &:hover {
-      background: #eaeef2;
-      border-color: #afb8c1;
-      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+      background: ${TOKENS.buttonActiveBg};
+      border-color: ${BORDER_HOVER};
+      box-shadow: ${SHADOW_SUBTLE};
     }
 
     &.dragging {
@@ -258,7 +282,7 @@ export const styles = {
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
-    color: #24292f;
+    color: ${TOKENS.textPrimary};
   `,
 
   zoneFieldRemove: css`
@@ -271,7 +295,7 @@ export const styles = {
     width: 18px;
     height: 18px;
     padding: 0;
-    color: #8b949e;
+    color: ${TOKENS.textTertiary};
     font-size: 14px;
     line-height: 1;
     margin-left: 2px;
@@ -280,8 +304,8 @@ export const styles = {
     transition: background 0.1s, color 0.1s;
 
     &:hover {
-      color: #cf222e;
-      background: #ffebe9;
+      color: ${TOKENS.dangerFg};
+      background: ${TOKENS.dangerBg};
     }
   `,
 
@@ -295,7 +319,7 @@ export const styles = {
     width: 18px;
     height: 18px;
     padding: 0;
-    color: #656d76;
+    color: ${TOKENS.textSecondary};
     font-size: 8px;
     margin-left: auto;
     border-radius: 3px;
@@ -304,17 +328,17 @@ export const styles = {
     transition: background 0.1s, color 0.1s;
 
     &:hover {
-      background: #eaeef2;
-      color: #24292f;
+      background: ${TOKENS.buttonHoverBg};
+      color: ${TOKENS.textPrimary};
     }
   `,
 
   aggregationMenu: css`
     position: absolute;
-    background: #fff;
-    border: 1px solid #d0d7de;
+    background: ${TOKENS.surfaceBg};
+    border: 1px solid ${TOKENS.border};
     border-radius: 8px;
-    box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);
+    box-shadow: ${TOKENS.shadowPopover};
     z-index: 1000;
     min-width: 150px;
     padding: 4px 0;
@@ -329,16 +353,16 @@ export const styles = {
     border: none;
     cursor: pointer;
     font-size: 12px;
-    color: #24292f;
+    color: ${TOKENS.textPrimary};
     transition: background 0.08s;
 
     &:hover {
-      background: #f6f8fa;
+      background: ${TOKENS.buttonHoverBg};
     }
 
     &.selected {
-      background: #ddf4ff;
-      color: #0969da;
+      background: ${TOKENS.infoBg};
+      color: ${TOKENS.accent};
     }
   `,
 
@@ -347,8 +371,8 @@ export const styles = {
     align-items: center;
     justify-content: space-between;
     padding: 8px 10px;
-    border-top: 1px solid #d0d7de;
-    background: #fff;
+    border-top: 1px solid ${TOKENS.border};
+    background: ${TOKENS.surfaceBg};
     flex-shrink: 0;
   `,
 
@@ -357,12 +381,12 @@ export const styles = {
     align-items: center;
     gap: 6px;
     font-size: 11px;
-    color: #24292f;
+    color: ${TOKENS.textPrimary};
     cursor: pointer;
     user-select: none;
 
     input {
-      accent-color: #0969da;
+      accent-color: ${TOKENS.accent};
       width: 13px;
       height: 13px;
       cursor: pointer;
@@ -373,16 +397,16 @@ export const styles = {
     padding: 4px 14px;
     font-size: 11px;
     font-family: inherit;
-    border: 1px solid #d0d7de;
+    border: 1px solid ${TOKENS.controlBorder};
     border-radius: 4px;
-    background: #f6f8fa;
-    color: #24292f;
+    background: ${TOKENS.clusterBg};
+    color: ${TOKENS.textPrimary};
     cursor: pointer;
     transition: background 0.12s, border-color 0.12s;
 
     &:hover:not(:disabled) {
-      background: #eaeef2;
-      border-color: #afb8c1;
+      background: ${TOKENS.buttonActiveBg};
+      border-color: ${BORDER_HOVER};
     }
 
     &:disabled {
@@ -394,7 +418,7 @@ export const styles = {
   layoutSection: css`
     margin-top: 12px;
     padding-top: 12px;
-    border-top: 1px solid #d0d7de;
+    border-top: 1px solid ${TOKENS.border};
   `,
 
   layoutOption: css`
@@ -402,26 +426,27 @@ export const styles = {
     align-items: center;
     margin-bottom: 6px;
     font-size: 12px;
-    color: #24292f;
+    color: ${TOKENS.textPrimary};
 
     input {
       margin-right: 8px;
-      accent-color: #0969da;
+      accent-color: ${TOKENS.accent};
     }
 
     select {
       margin-left: 8px;
       padding: 4px 8px;
-      border: 1px solid #d0d7de;
+      border: 1px solid ${TOKENS.controlBorder};
       border-radius: 6px;
       font-size: 11px;
       font-family: inherit;
-      background: #fff;
+      background: ${TOKENS.surfaceBg};
+      color: ${TOKENS.textPrimary};
 
       &:focus {
         outline: none;
-        border-color: #0969da;
-        box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.15);
+        border-color: ${TOKENS.accent};
+        box-shadow: 0 0 0 2px ${ACCENT_HALO};
       }
     }
   `,

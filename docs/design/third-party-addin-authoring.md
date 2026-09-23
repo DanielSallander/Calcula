@@ -1,8 +1,10 @@
 # Third-Party Add-in Authoring — the trust-escalation decision
 
-**Date:** 2026-07-31 (decision) / 2026-08-01 (slice 1 shipped) / 2026-08-01 (G0 on-ramp shipped)
+**Date:** 2026-07-31 (decision) / 2026-08-01 (slice 1 shipped) / 2026-08-01 (G0 on-ramp shipped) /
+2026-09-23 (ribbon buttons re-rendered in the Calcula Clusters design system)
 **Status:** Decision below stands unchanged. **Slice 1 is implemented — see §6. The signing +
-install on-ramp is implemented — see §7.**
+install on-ramp is implemented — see §7. How an add-in's ribbon buttons render now, and the icon
+tokens it may name, is §8.**
 **Answers:** `docs/design/scripting-vba-review.md` §6.1 + roadmap item 15.
 **Related:** `docs/design/extensibility-review-2026-07.md` (2026-07-01) recommendation 3, which
 raised the same fork and deliberately left it open.
@@ -400,7 +402,7 @@ renders or registers it. No component, no markup, no closure, ever.
 | **Worksheet functions** | `ctx.formulas.registerFunction(name, {params, description, volatile}, impl)` | a real `registerFunction` UDF whose `implementation` RPCs back into the worker | needs `formula.udf` ⇒ effectively signature-gated |
 | Commands | `ctx.commands.register(id, handler)` | `CommandRegistry` under `ext:<extId>:<id>`, never `scriptSafe` | pre-existing; now ceiling-gated |
 | Menu items | `ctx.ui.menus.registerMenuItem(menuId, item)` | a real menu item whose action runs the extension's own command | pre-existing; now ceiling-gated |
-| **Ribbon buttons** | `ctx.ui.ribbon.registerButton({id,label,group,icon,command,order})` | a host-drawn button in the **Add-ins** ribbon tab | `icon` is a TOKEN from `RibbonIcon`; unknown ⇒ generic glyph |
+| **Ribbon buttons** | `ctx.ui.ribbon.registerButton({id,label,group,icon,tooltip,command,order})` | a host-drawn `CommandButton` hero in the **Add-ins** ribbon tab, one cluster per group (§8) | `icon` is a TOKEN from `RibbonIcon` (170 keys, §8.3); unknown ⇒ generic glyph |
 | **Keyboard shortcuts** | `ctx.keybindings.register({id,combo,command,label})` | a real `KeyBinding` with `category` = the extension's name | host owns the listener; no keystroke reaches the sandbox |
 | **Cell styling** | `ctx.grid.cellStyles.register(id, batchHandler)` + `.invalidate()` | a `registerCellRenderCache` SWR cache | one-frame lag by construction; every override sanitized key-by-key |
 | **File import** | `ctx.fileFormats.registerImporter(format, importer)` | a `registerFileFormat` with an importer only | host does the I/O; result rebuilt field-by-field |
@@ -828,3 +830,119 @@ edited. Its README points at `calcula-sign` instead.
    dependency in the app crate and a zip-slip surface, for a format an add-in does not need.
 5. **No update check.** Re-running the installer over a newer copy is the update path; there is no
    feed and no notification, only a report of what is currently installed.
+
+---
+
+## 8. Ribbon buttons and icon tokens after the Calcula Clusters redesign (2026-09-23)
+
+The ribbon was rebuilt on one design system (`docs/design/ribbon-design-system.md`); the icon set
+was redrawn and grown (`docs/design/ICONS.md`). Nothing in the **descriptor** changed — an add-in
+that registered a ribbon button before the redesign registers it the same way now and gets the new
+look without a rebuild. What changed is what the host draws from it.
+
+### 8.1 What the host renders
+
+`ctx.ui.ribbon.registerButton(button)` takes an `ExtRibbonButtonData`
+(`app/src/api/scriptHost/extensionProtocol.ts`):
+
+```ts
+{
+  id: string;          // declared in contributes.ribbonButtons
+  label: string;       // hero caption, <= 48 chars (cut host-side)
+  group?: string;      // cluster name, <= 48 chars; default "Commands"
+  icon?: string;       // a RibbonIcon KEY (8.3) — never markup
+  tooltip?: string;    // <= 240 chars
+  order?: number;      // within the group only
+  command: string;     // one of the add-in's OWN commands
+}
+```
+
+The trusted `app/extensions/ExtensionsManager/AddInsRibbonSection.tsx` turns the registry into the
+**Add-ins** tab:
+
+- **One cluster per contribution group.** Each `(extension, group)` pair becomes its own
+  `PanelSection`, so in a narrow window add-in groups demote to launchers one at a time, exactly
+  like built-in clusters, instead of the whole tab clipping. The tab itself registers only while at
+  least one add-in has a button, and re-registers only when the set of groups (or a group's section
+  icon, which is its first button's) changes; buttons changing inside a group re-render in place.
+- **Each button is a `CommandButton`.** In the band that is a 61px hero (a 34px icon slot with the
+  icon at 30, the label at 11px/500 underneath, ellipsised past 92px) — ONE TALL ROW, the fill
+  rule's first form, so an add-in cluster lines up with every built-in one. Moved to the sidebar
+  (right-click the tab, *Move to Sidebar*) or demoted into a launcher flyout, the same button renders
+  as a 28px button with the icon fitted to 20. The add-in chooses none of this.
+- **The tooltip is host-composed:** `"<tooltip> (<extension name>)"`, or `"<label> (<extension
+  name>)"` without one. The name comes from the authoritative manifest, never from the add-in.
+- **Attribution is the cluster caption.** The section's label is `"<extension name> - <group>"`,
+  drawn by the shell under the cluster, and the section declares `captionMode: "always"`: the user's
+  *Hide group labels* preference hides every other caption and keeps this one, because a sandboxed
+  surface must never lose its attribution to a cosmetic setting. Where the shell draws no caption (a
+  single-group panel in the sidebar or in its panel-titled launcher) the section draws the heading
+  itself (`data-testid="addin-attribution"`).
+- **Ordering is host-decided:** by attribution heading, then `order`, then label. An add-in cannot
+  push itself in front of another with a large negative `order`.
+- **A click runs only the declared command,** through the `CommandRegistry`, with any failure
+  contained so a broken add-in cannot take the ribbon down. No callback crosses the boundary.
+
+Test ids: `addin-button-<extId>:<buttonId>` on each hero; the section id is
+`extensions.addins.<encodeURIComponent(heading)>`, so its launcher is
+`section-launcher-extensions.addins.<...>`. Pinned by
+`app/extensions/ExtensionsManager/__tests__/addInsRibbonSection.test.tsx`, which also renders every
+surface and asserts no hardcoded colour.
+
+### 8.2 How the icon token resolves
+
+`resolveAddInIcon(token, size)` looks the string up with an OWN-PROPERTY check against the host's
+`RibbonIcon` namespace (so `"constructor"` or `"__proto__"` cannot reach anything) and renders that
+component at the size the slot wants. An unknown, misspelled or absent token renders the host's
+generic add-in glyph (`AddInGlyph`, which is `RibbonIcon.AddIn`, a duotone puzzle piece): the button still works, it just loses its
+picture, and **nothing reports the miss**. Check your token against 8.3 before you ship.
+
+An add-in can never supply an image, an SVG path, a style or a colour. The icon follows the user's
+skin because every drawing paints with the theme's icon channels (soft, strong, accent), which is
+also why an add-in button looks right in Dark, Calcula Soft, a company skin and High contrast
+without the author doing anything.
+
+**Keys only grow.** The host treats the key list as a public contract: keys may be redrawn, never
+renamed or removed, so a token that resolves today resolves in every later build (ICONS.md §3). The
+example add-in's `"Percent"` (`docs/examples/addin-tax-tools/tax-tools.js`) is one of the 34 keys
+frozen since before this redesign.
+
+### 8.3 The token vocabulary (170 keys, 2026-09-23)
+
+Authoritative list and drawing rules: `docs/design/ICONS.md` §4. By family:
+
+| Family | Tokens |
+|---|---|
+| **Clipboard and history** | Cut, Copy, Paste, FormatPainter, Undo, Redo |
+| **Font and fill** | FontSizeUp, FontSizeDown, FontColor, FillColor, Superscript, Subscript, FormatCells, CellStyles |
+| **Alignment** | AlignTop, AlignMiddle, AlignBottom, AlignLeft, AlignCenter, AlignRight, WrapText, IndentIncrease, IndentDecrease, MergeCells |
+| **Number** | Percent, Comma, NumberFormat, DecimalIncrease, DecimalDecrease |
+| **Cells and editing** | InsertRow, InsertColumn, DeleteRow, DeleteColumn, Find, Replace, ClearContents, ClearFormatting, ClearAll |
+| **Chart types** | ChartColumn, ChartBar, ChartLine, ChartArea, ChartPie, ChartDonut, ChartScatter, ChartWaterfall, ChartCombo, ChartRadar, ChartBubble, ChartHistogram, ChartFunnel, ChartTreemap, ChartStock, ChartBoxPlot, ChartSunburst, ChartPareto |
+| **Chart furniture and marks** | ChartTitle, Gridlines, Legend, AxisLabels, DataLabels, Grouped, Stacked, Stacked100, SecondaryAxis, Trendline, MarkOptions, LineStraight, LineSmooth, LineStep, Markers, Palette, Series, Filter, SwitchRowCol |
+| **Chart actions** | EditChart, SaveImage, FormatPoint, Code |
+| **Data objects** | Table, Pivot, Slicer, Timeline, Sparkline, Report, Connection |
+| **Pivot** | PivotFields, CalcField, FilterPages, Fx, ChangeSource, Subtotals, GrandTotals, ReportLayout, BlankRows, Expand, Collapse, ClearFilter |
+| **Sparkline types** | SparkLine, SparkColumn, SparkWinLoss |
+| **Table style options** | TableStyle, BandedRows, BandedColumns, HeaderRow, TotalRow, FirstColumn, LastColumn, FilterButton |
+| **Page layout** | Theme, Fonts, Colors, Effects, Margins, Orientation, PageSize, PrintArea, Breaks, Background |
+| **Verbs** | Check, Plus, Minus, Refresh, Delete, Pencil, Download, Upload, Save, Sort, Search, Link, Lightning |
+| **Transport** | Play, Pause, Stop, StepForward, StepBack, Loop |
+| **Status** | Info, Warn, Error, Success |
+| **Structure** | Group, More, MoreHorizontal, Close, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Sidebar, Ribbon, Panel, Layout, Resize |
+| **Things** | Settings, Text, Pointer, Keyboard, Image, Lock, Eye, Calendar, Clock, Script, Model, Controls, Database, Folder, AddIn |
+
+Tokens are case-sensitive PascalCase: `"Refresh"` resolves, `"refresh"` falls back to the generic
+glyph. Pick the icon for what the button DOES (a verb) or the object it acts on, and prefer a verb
+for a command: two add-ins that both show `Table` for different actions read as one.
+
+### 8.4 A trusted (built-in) extension, for comparison
+
+A built-in extension is not limited to descriptors: it registers a whole `PanelDefinition` through
+`context.ui.panels.register(...)` and composes its sections from `@api/layout` primitives —
+`CommandButton`, `SegmentedChoice`, `Dropdown`, `Checkbox`, `Tooltip` and the rest — with a
+`RibbonIcon` element as each section's icon. `app/extensions/_template/components/MyRibbonSections.tsx`
+and `templatePanel.tsx` are the worked example, with the fill rule taught in their comments and a
+test that renders both sections on every surface and asserts `findHardcodedColours` is empty. The
+host-rendered sandboxed path above and the trusted path produce the same chrome, because both end in
+the same primitives; that is the point of "host-owned chrome, extension-owned content" (§4.6).

@@ -9,13 +9,27 @@
 // remove/move are INDEX-based, never equality-based. (2) NOTHING IS WRITTEN
 // UNTIL SAVE. Reset hands back the default layout and touches no storage, so
 // Reset-then-Cancel is a true no-op.
+//
+// LOOK. Painted with theme tokens only (LT from @api/layout, and the dialog
+// tokens every other dialog uses), so the dialog follows the skin; the
+// buttons are @api/layout primitives and the arrows / close marks are the
+// RibbonIcon set. Three things are deliberately NOT restyled into something
+// else, because tests and journeys drive them:
+//   - both pickers stay NATIVE selects (@api Select): the Customize journey
+//     drives `[data-hometab-add-to]` with Playwright's selectOption;
+//   - an item chip's controls keep their `title`s ("Move left", "Move right",
+//     "Remove item"), which homeTabCustomizeDialog.test.tsx anchors on, and
+//     the remove control stays a <span> for the same reason;
+//   - every `data-hometab-*` hook stays on the element it was on.
 
 import React, { useState, useEffect, useCallback } from "react";
 import { css } from "@emotion/css";
+import { RibbonIcon } from "@api";
 import type { DialogProps } from "@api/uiTypes";
 import { useDialogWindow } from "@api/dialogWindow";
 import { DialogBody, DialogPane, dialogWidth, dialogHeight } from "@api/dialogLayout";
 import { alertAsync } from "@api/dialogs";
+import { Button, IconButton, Input, LT, Select, FONT_FAMILY } from "@api/layout";
 import {
   loadLayout,
   saveLayout,
@@ -36,24 +50,24 @@ const backdrop = css`
   position: fixed;
   inset: 0;
   z-index: 1050;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--dialog-overlay-bg, rgba(0, 0, 0, 0.5));
   display: flex;
   align-items: center;
   justify-content: center;
 `;
 
 const dialog = css`
-  background: var(--panel-bg, #2a2a2a);
-  border: 1px solid var(--border-default, #444);
-  border-radius: 8px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  background: var(--dialog-bg, #ffffff);
+  border: 1px solid var(--dialog-border, #d1d5db);
+  border-radius: ${LT.radiusPopover};
+  box-shadow: ${LT.shadowRaised};
   width: ${dialogWidth(1000)};
   height: ${dialogHeight(680, 0.85)};
   max-height: 85vh;
   display: flex;
   flex-direction: column;
-  color: var(--text-primary, #e0e0e0);
-  font-family: "Segoe UI", system-ui, sans-serif;
+  color: ${LT.text};
+  font-family: ${FONT_FAMILY};
   font-size: 13px;
 `;
 
@@ -61,126 +75,159 @@ const header = css`
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border-default, #444);
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid ${LT.border};
   flex-shrink: 0;
 `;
 
 const title = css`
   font-weight: 600;
-  font-size: 15px;
-`;
-
-const closeBtn = css`
-  background: transparent;
-  border: none;
-  color: var(--text-secondary, #aaa);
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: 4px;
   font-size: 14px;
-
-  &:hover {
-    background: var(--grid-bg, #333);
-    color: var(--text-primary, #e0e0e0);
-  }
+  color: var(--dialog-title-text, #111827);
 `;
 
+/** The one header recipe (12px/600, sentence case) the ribbon redesign uses
+ *  for every section heading in a pane. */
 const sectionLabel = css`
   font-weight: 600;
-  font-size: 13px;
-  color: var(--text-secondary, #aaa);
-  margin-bottom: 4px;
+  font-size: 12px;
+  color: ${LT.text};
+  margin-bottom: 8px;
 `;
 
+/** A group reads as the ribbon cluster it becomes: the cluster tint, the
+ *  cluster radius, a hairline instead of a border. */
 const groupCard = css`
-  border: 1px solid var(--border-default, #444);
-  border-radius: 6px;
+  border-radius: ${LT.radiusCluster};
   padding: 10px 12px;
-  background: var(--grid-bg, #1e1e1e);
+  background: ${LT.clusterBg};
+  box-shadow: inset 0 0 0 1px ${LT.clusterBorder};
 `;
 
 const groupHeader = css`
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   margin-bottom: 8px;
 `;
 
 const groupTitle = css`
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
   font-weight: 600;
   font-size: 13px;
 `;
 
+const groupGlyph = css`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 20px;
+`;
+
 const groupActions = css`
   display: flex;
+  align-items: center;
   gap: 4px;
-`;
-
-const smallBtn = css`
-  padding: 2px 8px;
-  font-size: 11px;
-  border: 1px solid var(--border-default, #444);
-  border-radius: 3px;
-  background: transparent;
-  color: var(--text-secondary, #aaa);
-  cursor: pointer;
-
-  &:hover {
-    background: var(--border-default, #444);
-    color: var(--text-primary, #e0e0e0);
-  }
-`;
-
-const dangerBtn = css`
-  ${smallBtn};
-  &:hover {
-    background: #dc2626;
-    color: #fff;
-    border-color: #dc2626;
-  }
+  flex: none;
 `;
 
 const itemList = css`
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 6px;
 `;
 
+/** A placed item: the Chip recipe (pill, chip surface, inset hairline) with
+ *  its three controls inside it. */
 const itemChip = css`
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 8px;
-  border: 1px solid var(--border-default, #444);
-  border-radius: 4px;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 4px;
+  border-radius: ${LT.radiusPill};
+  background: ${LT.chipBg};
+  box-shadow: inset 0 0 0 1px ${LT.chipBorder};
+  color: ${LT.text};
   font-size: 12px;
-  background: var(--panel-bg, #2a2a2a);
+  line-height: 1;
+  white-space: nowrap;
   cursor: default;
 `;
 
-const chipRemove = css`
-  cursor: pointer;
-  color: var(--text-secondary, #aaa);
-  font-size: 10px;
-  margin-left: 2px;
+const chipGlyph = css`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: 16px;
+  font-size: 12px;
+  font-weight: 600;
+`;
 
-  &:hover {
-    color: #dc2626;
+/** The round 20px controls inside a chip (move left / right, remove). */
+const chipControl = css`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: ${LT.textSecondary};
+  cursor: pointer;
+  transition:
+    background-color ${LT.motionHover},
+    color ${LT.motionHover};
+
+  &:hover:not(:disabled) {
+    background: ${LT.hover};
+    color: ${LT.text};
+  }
+
+  &:focus-visible {
+    outline: none;
+    box-shadow: ${LT.focusRing};
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 `;
 
-/** The palette owns its own pane now, so it no longer needs a dashed box to
- *  say "this is a different thing" — the divider says it. */
+/** Remove is destructive: it hovers in the danger tone. */
+const chipRemoveTone = css`
+  &:hover {
+    background: ${LT.dangerBg};
+    color: ${LT.dangerFg};
+  }
+`;
+
+/** The palette owns its own pane, so it needs no box to say "this is a
+ *  different thing" — the divider says it. */
 const addSection = css`
   display: flex;
   flex-direction: column;
 `;
 
-const addSectionHeader = css`
-  font-weight: 600;
-  font-size: 13px;
+const addToRow = css`
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 8px;
+  font-size: 12px;
 `;
 
 const categorySection = css`
@@ -189,39 +236,47 @@ const categorySection = css`
 
 const categoryLabel = css`
   font-size: 11px;
-  color: var(--text-secondary, #aaa);
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-  margin-bottom: 4px;
+  font-weight: 600;
+  color: ${LT.textSecondary};
+  margin: 6px 0;
 `;
 
+/** An addable command: the same pill as a placed chip, so the palette and
+ *  the arrangement read as one vocabulary. */
 const addableItem = css`
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
-  border: 1px solid var(--border-default, #444);
-  border-radius: 4px;
+  gap: 6px;
+  box-sizing: border-box;
+  height: 28px;
+  margin: 0 6px 6px 0;
+  padding: 0 10px 0 7px;
+  border: none;
+  border-radius: ${LT.radiusPill};
+  background-color: ${LT.chipBg};
+  box-shadow: inset 0 0 0 1px ${LT.chipBorder};
+  color: ${LT.text};
+  font-family: ${FONT_FAMILY};
   font-size: 12px;
-  background: transparent;
-  color: var(--text-primary, #e0e0e0);
+  line-height: 1;
   cursor: pointer;
-  margin: 2px;
+  transition:
+    background-color ${LT.motionHover},
+    box-shadow ${LT.motionHover};
 
-  &:hover {
-    background: var(--border-default, #444);
-    border-color: var(--accent-primary, #0078d4);
+  &:hover:not(:disabled) {
+    background-image: linear-gradient(${LT.hover}, ${LT.hover});
+    box-shadow: inset 0 0 0 1px ${LT.stateAccent};
   }
-`;
 
-const addableItemDisabled = css`
-  ${addableItem};
-  opacity: 0.35;
-  cursor: not-allowed;
+  &:focus-visible {
+    outline: none;
+    box-shadow: ${LT.focusRing};
+  }
 
-  &:hover {
-    background: transparent;
-    border-color: var(--border-default, #444);
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 `;
 
@@ -231,70 +286,36 @@ const footer = css`
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
-  border-top: 1px solid var(--border-default, #444);
+  border-top: 1px solid ${LT.border};
   flex-shrink: 0;
 `;
 
-const primaryBtn = css`
-  padding: 6px 20px;
-  font-size: 13px;
-  border-radius: 4px;
-  cursor: pointer;
-  min-width: 80px;
-  background: var(--accent-primary, #0078d4);
-  color: #ffffff;
-  border: 1px solid var(--accent-primary, #0078d4);
+/** Save: the dialog's one primary action, on the state accent. */
+const primaryButton = css`
+  && {
+    background: ${LT.stateAccent};
+    border-color: ${LT.stateAccent};
+    color: ${LT.onAccent};
+  }
 
-  &:hover { opacity: 0.85; }
-  &:active { opacity: 0.7; }
+  &&:hover:not(:disabled) {
+    background: linear-gradient(${LT.active}, ${LT.active}), ${LT.stateAccent};
+  }
 `;
 
-const secondaryBtn = css`
-  padding: 6px 20px;
-  font-size: 13px;
-  border-radius: 4px;
-  cursor: pointer;
-  min-width: 80px;
-  background: var(--grid-bg, #333);
-  color: var(--text-primary, #e0e0e0);
-  border: 1px solid var(--border-default, #444);
-
-  &:hover { opacity: 0.85; }
-  &:active { opacity: 0.7; }
-`;
+const FOOTER_BUTTON_STYLE: React.CSSProperties = { minWidth: 80 };
 
 const newGroupRow = css`
   display: flex;
+  align-items: center;
   gap: 8px;
   margin-top: 8px;
 `;
 
-const newGroupInput = css`
-  flex: 1;
-  padding: 4px 8px;
+const emptyGroup = css`
+  color: ${LT.textSecondary};
+  font-style: italic;
   font-size: 12px;
-  border: 1px solid var(--border-default, #444);
-  border-radius: 4px;
-  background: var(--grid-bg, #1e1e1e);
-  color: var(--text-primary, #e0e0e0);
-  font-family: inherit;
-  outline: none;
-
-  &:focus { border-color: var(--accent-primary, #0078d4); }
-`;
-
-const selectGroup = css`
-  padding: 4px 8px;
-  font-size: 12px;
-  border: 1px solid var(--border-default, #444);
-  border-radius: 4px;
-  background: var(--grid-bg, #1e1e1e);
-  color: var(--text-primary, #e0e0e0);
-  font-family: inherit;
-  outline: none;
-  margin-bottom: 8px;
-
-  &:focus { border-color: var(--accent-primary, #0078d4); }
 `;
 
 // ============================================================================
@@ -490,7 +511,12 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
         {/* Header — drag handle */}
         <div className={header} onMouseDown={win.onHeaderMouseDown}>
           <span className={title}>Customize Home Tab</span>
-          <button className={closeBtn} onClick={onClose}>X</button>
+          <IconButton
+            size="sm"
+            icon={<RibbonIcon.Close size={16} />}
+            label="Close"
+            onClick={onClose}
+          />
         </div>
 
         {/* Body — the arrangement you are building on the left, the palette you
@@ -501,7 +527,7 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
           <DialogPane scroll grow={1.15} minWidth={280} data-testid="hometab-current-groups">
           {/* Current Groups */}
           <div>
-            <div className={sectionLabel}>Current Groups</div>
+            <div className={sectionLabel}>Current groups</div>
             {layout.groups.map((group, gIdx) => (
               <div
                 key={group.id}
@@ -510,19 +536,17 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
                 style={{ marginBottom: 8 }}
               >
                 <div className={groupHeader}>
-                  <span className={groupTitle} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ display: "inline-flex", alignItems: "center", width: 16, justifyContent: "center" }}>
-                      {groupIconFor(group, 16)}
-                    </span>
+                  <span className={groupTitle}>
+                    <span className={groupGlyph}>{groupIconFor(group, 20)}</span>
                     {group.label}
                   </span>
                   <div className={groupActions}>
-                    <select
-                      className={selectGroup}
-                      style={{ marginBottom: 0 }}
+                    <Select
+                      width={150}
                       value={group.iconId ?? ""}
                       onChange={(e) => setGroupIcon(group.id, e.target.value)}
                       title="Launcher icon (shown when this group collapses)"
+                      aria-label={`Launcher icon for ${group.label}`}
                     >
                       <option value="">Icon: default</option>
                       {GROUP_ICON_IDS.map((iconId) => (
@@ -530,30 +554,30 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
                           {iconId}
                         </option>
                       ))}
-                    </select>
-                    <button
-                      className={smallBtn}
+                    </Select>
+                    <IconButton
+                      size="sm"
+                      icon={<RibbonIcon.ChevronLeft size={16} />}
+                      label="Move group left"
                       onClick={() => moveGroup(group.id, -1)}
                       disabled={gIdx === 0}
-                      title="Move group left"
-                    >
-                      {"<"}
-                    </button>
-                    <button
-                      className={smallBtn}
+                    />
+                    <IconButton
+                      size="sm"
+                      icon={<RibbonIcon.ChevronRight size={16} />}
+                      label="Move group right"
                       onClick={() => moveGroup(group.id, 1)}
                       disabled={gIdx === layout.groups.length - 1}
-                      title="Move group right"
-                    >
-                      {">"}
-                    </button>
-                    <button
-                      className={dangerBtn}
+                    />
+                    <Button
+                      size="sm"
+                      tone="danger"
+                      icon={<RibbonIcon.Delete size={16} />}
+                      tooltip="Remove group"
                       onClick={() => removeGroup(group.id)}
-                      title="Remove group"
                     >
                       Remove
-                    </button>
+                    </Button>
                   </div>
                 </div>
                 <div className={itemList}>
@@ -570,40 +594,51 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
                         data-hometab-chip-index={iIdx}
                       >
                         <button
-                          className={smallBtn}
+                          type="button"
+                          className={chipControl}
                           data-hometab-chip-left=""
                           onClick={() => moveItem(group.id, iIdx, -1)}
                           disabled={iIdx === 0}
-                          style={{ padding: "0 3px", fontSize: "9px", border: "none" }}
                           title="Move left"
+                          aria-label={`Move ${item.label} left`}
                         >
-                          {"<"}
+                          <RibbonIcon.ChevronLeft size={12} />
                         </button>
-                        <span style={{ fontSize: "12px", display: "inline-flex", alignItems: "center" }}>
-                          {homeTabIcon(item.id, 12) ?? item.icon}
+                        <span className={chipGlyph} aria-hidden>
+                          {homeTabIcon(item.id, 16) ?? item.icon}
                         </span>
                         {item.label}
                         <button
-                          className={smallBtn}
+                          type="button"
+                          className={chipControl}
                           onClick={() => moveItem(group.id, iIdx, 1)}
                           disabled={iIdx === group.items.length - 1}
-                          style={{ padding: "0 3px", fontSize: "9px", border: "none" }}
                           title="Move right"
+                          aria-label={`Move ${item.label} right`}
                         >
-                          {">"}
+                          <RibbonIcon.ChevronRight size={12} />
                         </button>
                         <span
-                          className={chipRemove}
+                          role="button"
+                          tabIndex={0}
+                          className={`${chipControl} ${chipRemoveTone}`}
                           onClick={() => removeItem(group.id, iIdx)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              removeItem(group.id, iIdx);
+                            }
+                          }}
                           title="Remove item"
+                          aria-label={`Remove ${item.label}`}
                         >
-                          X
+                          <RibbonIcon.Close size={12} />
                         </span>
                       </span>
                     );
                   })}
                   {group.items.length === 0 && (
-                    <span style={{ color: "var(--text-secondary, #888)", fontStyle: "italic", fontSize: "12px" }}>
+                    <span className={emptyGroup}>
                       Empty group - add items below or it will be removed on save
                     </span>
                   )}
@@ -613,33 +648,38 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
 
             {/* New group */}
             <div className={newGroupRow}>
-              <input
-                className={newGroupInput}
+              <Input
                 type="text"
                 placeholder="New group name..."
+                aria-label="New group name"
                 value={newGroupName}
                 onChange={(e) => setNewGroupName(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") addGroup();
                 }}
+                style={{ flex: 1 }}
               />
-              <button className={smallBtn} onClick={addGroup}>
+              <Button
+                variant="outlined"
+                icon={<RibbonIcon.Plus size={16} />}
+                onClick={addGroup}
+              >
                 Add Group
-              </button>
+              </Button>
             </div>
           </div>
 
           </DialogPane>
 
-          <DialogPane scroll minWidth={260} style={{ borderLeft: "1px solid var(--border-default, #444)" }} data-testid="hometab-available-commands">
+          <DialogPane scroll minWidth={260} style={{ borderLeft: `1px solid ${LT.border}` }} data-testid="hometab-available-commands">
           {/* Available Items */}
           <div className={addSection}>
-            <div className={addSectionHeader}>Available Commands</div>
+            <div className={sectionLabel}>Available commands</div>
             {layout.groups.length > 0 && (
-              <div style={{ marginBottom: 8 }}>
-                <span style={{ fontSize: "12px", marginRight: 8 }}>Add to:</span>
-                <select
-                  className={selectGroup}
+              <label className={addToRow}>
+                <span>Add to:</span>
+                <Select
+                  width={180}
                   data-hometab-add-to=""
                   value={addToGroupId}
                   onChange={(e) => setAddToGroupId(e.target.value)}
@@ -649,8 +689,8 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
                       {g.label}
                     </option>
                   ))}
-                </select>
-              </div>
+                </Select>
+              </label>
             )}
             {categories.map((cat) => {
               const catItems = ALL_ITEMS.filter((i) => i.category === cat);
@@ -662,8 +702,9 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
                       const isUsed = usedItemIds.has(item.id);
                       return (
                         <button
+                          type="button"
                           key={item.id}
-                          className={isUsed ? addableItemDisabled : addableItem}
+                          className={addableItem}
                           data-hometab-add={item.id}
                           disabled={isUsed || !addToGroupId}
                           onClick={() => {
@@ -673,8 +714,8 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
                           }}
                           title={isUsed ? "Already in a group" : `Add to ${layout.groups.find((g) => g.id === addToGroupId)?.label ?? "group"}`}
                         >
-                          <span style={{ display: "inline-flex", alignItems: "center" }}>
-                            {homeTabIcon(item.id, 12) ?? item.icon}
+                          <span className={chipGlyph} aria-hidden>
+                            {homeTabIcon(item.id, 16) ?? item.icon}
                           </span>
                           {item.label}
                         </button>
@@ -690,16 +731,32 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
 
         {/* Footer */}
         <div className={footer}>
-          <button className={secondaryBtn} data-hometab-reset="" onClick={handleReset}>
+          <Button
+            variant="outlined"
+            style={FOOTER_BUTTON_STYLE}
+            data-hometab-reset=""
+            onClick={handleReset}
+          >
             Reset to Default
-          </button>
+          </Button>
           <div style={{ display: "flex", gap: 8 }}>
-            <button className={secondaryBtn} data-hometab-cancel="" onClick={onClose}>
+            <Button
+              variant="outlined"
+              style={FOOTER_BUTTON_STYLE}
+              data-hometab-cancel=""
+              onClick={onClose}
+            >
               Cancel
-            </button>
-            <button className={primaryBtn} data-hometab-save="" onClick={() => void handleSave()}>
+            </Button>
+            <Button
+              variant="outlined"
+              className={primaryButton}
+              style={FOOTER_BUTTON_STYLE}
+              data-hometab-save=""
+              onClick={() => void handleSave()}
+            >
               Save
-            </button>
+            </Button>
           </div>
         </div>
         {win.resizeHandles}

@@ -4,9 +4,12 @@
 //          one GET.CONTROLVALUE dependent recalc).
 // CONTEXT: Rendered inside ControlCard; the config label sits next to the box
 //          (it may differ from the control name shown in the card header).
+//          Drawn by the @api Checkbox — a real <input type="checkbox"> on
+//          token chrome (11px text and one 28px row in the band, 12px in the
+//          sidebar) — instead of an OS box that stayed white in Dark.
 
 import React, { useState, useCallback, useEffect } from "react";
-import { useSurfaceLayout } from "@api/layout";
+import { Checkbox } from "@api/layout";
 import type { ControlValue } from "@api/controlValues";
 import type { PaneControl } from "../lib/controlsPaneTypes";
 import { commitValue } from "../lib/controlsPaneStore";
@@ -18,9 +21,6 @@ interface Props {
 }
 
 export function CheckboxControl({ control }: Props): React.ReactElement {
-  const layout = useSurfaceLayout();
-  const band = layout.container === "band";
-
   const label =
     control.config.type === "checkbox"
       ? (control.config as CheckboxConfig).label
@@ -36,49 +36,30 @@ export function CheckboxControl({ control }: Props): React.ReactElement {
     setChecked(committedChecked);
   }, [committedChecked]);
 
-  const handleToggle = useCallback(() => {
-    const next = !checked;
-    setChecked(next);
-    const committed: ControlValue = { kind: "boolean", value: next };
-    void commitValue(control.id, committed);
-  }, [checked, control.id]);
+  const handleToggle = useCallback(
+    (next: boolean) => {
+      setChecked(next);
+      const committed: ControlValue = { kind: "boolean", value: next };
+      void commitValue(control.id, committed);
+    },
+    [control.id],
+  );
 
   return (
-    <label
-      style={{
-        ...styles.row,
-        fontSize: band ? "11px" : "12px",
-      }}
+    <Checkbox
+      checked={checked}
+      onChange={handleToggle}
+      label={label}
+      // With no visible label the box still needs a name.
+      aria-label={label ? undefined : control.name}
       title={label || control.name}
-    >
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={handleToggle}
-        style={styles.checkbox}
-      />
-      {label && <span style={styles.label}>{label}</span>}
-    </label>
+      style={styles.row}
+    />
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
   row: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
     minWidth: 0,
-    cursor: "pointer",
-    color: "#333",
-  },
-  checkbox: {
-    margin: 0,
-    cursor: "pointer",
-    flexShrink: 0,
-  },
-  label: {
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
   },
 };

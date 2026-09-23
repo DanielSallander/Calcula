@@ -26,8 +26,18 @@ export function DialogContainer(): React.ReactElement {
   // Close the topmost Escape-dismissible dialog on Escape (capture phase so
   // Monaco can't swallow it). Dialogs with dismissOnEscape === false are
   // non-modal floating windows: Escape passes through to the grid untouched.
+  //
+  // EXCEPT when the key comes from inside a popover the dialog opened (a colour
+  // palette, a Dropdown list, a Menu — every @api/layout overlay is portalled
+  // into a `[data-section-flyout]`). That Escape belongs to the popover, which
+  // closes itself and hands focus back to its trigger. Taking it here closed
+  // the whole Format Cells dialog — without its reset() — when the user only
+  // meant to dismiss the colour palette, because this capture listener runs
+  // before anything the popover or the dialog can do.
   const handleEscape = useCallback((e: KeyboardEvent) => {
     if (e.key !== "Escape") return;
+    const target = e.target instanceof Element ? e.target : null;
+    if (target?.closest("[data-section-flyout]")) return;
     const dismissible = activeDialogs.filter(
       (d) => d.definition.dismissOnEscape !== false
     );

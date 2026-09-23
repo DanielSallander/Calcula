@@ -1,32 +1,14 @@
-//! FILENAME: app/extensions/JsonView/components/JsonToggleButton.tsx
-// PURPOSE: Small toggle button (</>)  for switching between GUI and JSON mode.
-// CONTEXT: Phase C — placed in config panel headers/toolbars.
+//! FILENAME: app/extensions/_shared/components/jsonToggle/JsonToggleButton.tsx
+// PURPOSE: Small toggle button for switching a config surface between its GUI
+//          and its JSON form.
+// CONTEXT: Used in the headers of the PivotTable Fields pane and the Slicer
+//          Settings dialog. The Chart and Table ribbons no longer use it: their
+//          JSON views are task panes toggled from a CommandButton. Built on the
+//          @api/layout IconButton so it follows the skin (pressed = on).
 
 import React from "react";
-
-const baseStyle: React.CSSProperties = {
-  background: "none",
-  border: "1px solid transparent",
-  borderRadius: "3px",
-  cursor: "pointer",
-  fontSize: "12px",
-  fontFamily: "'Cascadia Code', 'Consolas', monospace",
-  padding: "2px 6px",
-  lineHeight: 1,
-  transition: "all 0.15s",
-};
-
-const inactiveStyle: React.CSSProperties = {
-  ...baseStyle,
-  color: "#888",
-};
-
-const activeStyle: React.CSSProperties = {
-  ...baseStyle,
-  color: "#569cd6",
-  borderColor: "#569cd6",
-  backgroundColor: "rgba(86, 156, 214, 0.1)",
-};
+import { IconButton, ICON_SIZE_SM } from "@api/layout";
+import { RibbonIcon } from "@api/ribbonIcons";
 
 interface JsonToggleButtonProps {
   isActive: boolean;
@@ -42,16 +24,15 @@ export function JsonToggleButton({
   title = "Toggle JSON view",
 }: JsonToggleButtonProps): React.ReactElement {
   return (
-    <button
-      style={{
-        ...(isActive ? activeStyle : inactiveStyle),
-        ...(disabled ? { opacity: 0.4, cursor: "default" } : {}),
-      }}
+    <IconButton
+      icon={<RibbonIcon.Code size={ICON_SIZE_SM} />}
+      label={title}
+      title={title}
+      tooltip={false}
+      size="sm"
+      pressed={isActive}
       onClick={onClick}
       disabled={disabled}
-      title={title}
-    >
-      {"</>"}
-    </button>
+    />
   );
 }

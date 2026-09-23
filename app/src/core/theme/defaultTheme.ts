@@ -165,6 +165,85 @@ export const defaultTheme: Record<string, string> = {
   [THEME_TOKENS.BUTTON_PRESSED_BORDER]: 'color-mix(in srgb, var(--accent-primary) 45%, transparent)',
 
   // --- Ribbon icon accents (@api ribbonIcons) ---
-  [THEME_TOKENS.ICON_ACCENT]: 'var(--accent-primary)',
+  // The accent channel of the duotone icon set follows the STATE colour, not
+  // the brand green: an icon's accent is a small filled shape on the band, and
+  // #10b981 is only ~2.5:1 there.
+  [THEME_TOKENS.ICON_ACCENT]: 'var(--state-accent)',
   [THEME_TOKENS.ICON_DANGER]: '#c42b1c',
+
+  // --- Calcula Clusters: shape + motion ---
+  [THEME_TOKENS.RADIUS_CONTROL]: '8px',
+  [THEME_TOKENS.RADIUS_CLUSTER]: '12px',
+  [THEME_TOKENS.RADIUS_POPOVER]: '12px',
+  [THEME_TOKENS.RADIUS_PILL]: '999px',
+  [THEME_TOKENS.MOTION_HOVER]: '120ms cubic-bezier(0.2, 0, 0, 1)',
+  [THEME_TOKENS.MOTION_POPOVER]: '140ms cubic-bezier(0.2, 0, 0, 1)',
+  [THEME_TOKENS.MOTION_PANEL]: '180ms cubic-bezier(0.2, 0, 0, 1)',
+
+  // --- Calcula Clusters: elevation ---
+  [THEME_TOKENS.SHADOW_CLUSTER_HOVER]: '0 1px 2px rgba(16, 24, 40, 0.06)',
+  [THEME_TOKENS.SHADOW_POPOVER]: '0 8px 24px rgba(16, 24, 40, 0.12), 0 1px 3px rgba(16, 24, 40, 0.08)',
+  [THEME_TOKENS.SHADOW_TOOLBAR]: '0 4px 16px rgba(16, 24, 40, 0.14)',
+  [THEME_TOKENS.SHADOW_RAISED]: '0 6px 16px rgba(16, 24, 40, 0.14)',
+
+  // --- Calcula Clusters: state colour ---
+  // 5.5:1 on the surface and 5.0:1 on a cluster card; tokens.test.ts holds it
+  // to the 3:1 non-text minimum against both.
+  [THEME_TOKENS.STATE_ACCENT]: '#047857',
+  [THEME_TOKENS.FOCUS_RING_COLOR]: 'var(--state-accent)',
+  // Two rings: an inner gap in the surface colour so the accent ring reads on
+  // ANY control background, including a pressed (accent-tinted) one.
+  [THEME_TOKENS.FOCUS_RING]: '0 0 0 2px var(--bg-surface), 0 0 0 4px var(--focus-ring-color)',
+
+  // --- Calcula Clusters: ribbon surfaces ---
+  [THEME_TOKENS.RIBBON_FRAME_BG]: '#f9fafb',
+  [THEME_TOKENS.RIBBON_BAND_BG]: '#ffffff',
+  [THEME_TOKENS.RIBBON_CLUSTER_BG]: '#f3f4f6',
+  [THEME_TOKENS.RIBBON_CLUSTER_BORDER]: '#e5e7eb',
+  [THEME_TOKENS.RIBBON_CLUSTER_BORDER_HOVER]: '#d1d5db',
+  // The mockup's #6b7280 measured 4.39:1 on the cluster card (#f3f4f6) and
+  // 4.25:1 on Calcula Soft's card, which inherits this value — under the 4.5:1
+  // an 11px caption needs. #666d7a is the same hue one small lightness step
+  // darker: the least change that clears 4.5:1 on every built-in card.
+  [THEME_TOKENS.RIBBON_GROUP_LABEL_FG]: '#666d7a',
+  [THEME_TOKENS.RIBBON_TAB_INDICATOR]: 'var(--state-accent)',
+
+  // --- Calcula Clusters: controls ---
+  [THEME_TOKENS.CONTROL_BORDER]: '#d1d5db',
+  [THEME_TOKENS.CONTROL_DIVIDER]: '#e5e7eb',
+  [THEME_TOKENS.CONTROL_TRACK]: '#e5e7eb',
+  [THEME_TOKENS.CHIP_BG]: '#ffffff',
+  [THEME_TOKENS.CHIP_BORDER]: '#e5e7eb',
+  [THEME_TOKENS.TOOLTIP_BG]: '#111827',
+  [THEME_TOKENS.TOOLTIP_FG]: '#f9fafb',
+  [THEME_TOKENS.KBD_BG]: 'rgba(255, 255, 255, 0.16)',
+  [THEME_TOKENS.BADGE_BG]: 'var(--accent-color)',
+  [THEME_TOKENS.BADGE_FG]: '#ffffff',
+
+  // --- Calcula Clusters: duotone icon ground ---
+  [THEME_TOKENS.ICON_FILL_SOFT]: 'color-mix(in srgb, currentColor 30%, transparent)',
+
+  // --- Calcula Clusters: contextual tab accents (each >= 4.5:1 on the frame) ---
+  [THEME_TOKENS.TAB_ACCENT_CHART]: '#1d5fd0',
+  [THEME_TOKENS.TAB_ACCENT_TABLE]: '#0b7a6b',
+  [THEME_TOKENS.TAB_ACCENT_PIVOT]: '#1a7a43',
+  [THEME_TOKENS.TAB_ACCENT_SLICER]: '#6a48c9',
+  [THEME_TOKENS.TAB_ACCENT_SPARKLINE]: '#b8410a',
+  [THEME_TOKENS.TAB_ACCENT_REPORT]: '#8a3d0b',
+
+  // --- Calcula Clusters: sidebar activity bar + status bar ---
+  [THEME_TOKENS.ACTIVITY_BAR_BG]: '#f3f4f6',
+  [THEME_TOKENS.ACTIVITY_BAR_FG]: '#4b5563',
+  [THEME_TOKENS.ACTIVITY_BAR_FG_ACTIVE]: '#111827',
+  [THEME_TOKENS.ACTIVITY_BAR_ITEM_HOVER_BG]: 'rgba(17, 24, 39, 0.06)',
+  [THEME_TOKENS.ACTIVITY_BAR_ITEM_ACTIVE_BG]: 'color-mix(in srgb, var(--state-accent) 14%, transparent)',
+  [THEME_TOKENS.ACTIVITY_BAR_INDICATOR]: 'var(--state-accent)',
+  [THEME_TOKENS.SIDE_PANEL_HEADER_BG]: 'var(--panel-bg)',
+  [THEME_TOKENS.STATUS_BAR_BG]: '#217346',
+  [THEME_TOKENS.STATUS_BAR_FG]: '#ffffff',
+  [THEME_TOKENS.BORDER_SUBTLE]: '#eef0f3',
+
+  // --- Aliases for names callers already spelled (see tokens.ts) ---
+  [THEME_TOKENS.BORDER_COLOR]: 'var(--border-default)',
+  [THEME_TOKENS.INPUT_BG]: 'var(--bg-surface)',
 };

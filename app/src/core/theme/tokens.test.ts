@@ -13,39 +13,11 @@ import { describe, expect, it } from "vitest";
 import { THEME_TOKENS } from "./tokens";
 import { defaultTheme } from "./defaultTheme";
 import { darkTheme } from "./darkTheme";
+// WCAG relative luminance / contrast. Shared with skinLoader.test.ts, which
+// holds every built-in SKIN to the same bars after merging.
+import { contrast } from "./__tests__/wcag";
 
 const ALL_TOKENS = Object.values(THEME_TOKENS) as string[];
-
-// --- WCAG relative luminance / contrast -------------------------------------
-
-function parseHex(hex: string): [number, number, number] | null {
-  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
-  if (!m) return null;
-  const h = m[1].length === 3 ? m[1].split("").map((c) => c + c).join("") : m[1];
-  return [
-    parseInt(h.slice(0, 2), 16),
-    parseInt(h.slice(2, 4), 16),
-    parseInt(h.slice(4, 6), 16),
-  ];
-}
-
-function luminance(rgb: [number, number, number]): number {
-  const [r, g, b] = rgb.map((v) => {
-    const s = v / 255;
-    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
-function contrast(a: string, b: string): number {
-  const ca = parseHex(a);
-  const cb = parseHex(b);
-  if (!ca || !cb) throw new Error(`not a plain hex pair: ${a} / ${b}`);
-  const la = luminance(ca);
-  const lb = luminance(cb);
-  const [hi, lo] = la > lb ? [la, lb] : [lb, la];
-  return (hi + 0.05) / (lo + 0.05);
-}
 
 describe("theme token completeness", () => {
   it("every declared token has a value in the LIGHT baseline", () => {
@@ -102,6 +74,97 @@ describe("semantic tone pairs are legible", () => {
       expect(darkTheme[key], `${key} was copied from the light baseline`).not.toBe(
         defaultTheme[key],
       );
+    }
+  });
+});
+
+// --- Calcula Clusters -------------------------------------------------------
+//
+// The ribbon redesign introduced a STATE colour, a tinted cluster card, six
+// contextual tab accents, a tooltip that inverts with the base and a sidebar
+// activity bar. Every one of those is a foreground on a new background, and
+// every pair below is one the mockup was reviewed on in LIGHT only — the same
+// blind spot the tone pairs above exist for. The bars:
+//   3:1   WCAG 1.4.11 non-text contrast — a checkbox tick, a focus ring, a
+//         pressed-state edge, a tab indicator. The state accent is never text.
+//   4.5:1 WCAG 1.4.3 body text — group captions (11px), tab labels (12px),
+//         tooltip text (12px) and activity-bar glyphs, all well under the
+//         18.66px-bold "large text" exemption.
+//
+// Every value measured here must be PLAIN HEX in the baseline; `contrast()`
+// throws on a var() or a color-mix(), so a future edit that turns one of these
+// into a reference fails loudly instead of being skipped.
+
+const BASELINES = [
+  ["light", defaultTheme],
+  ["dark", darkTheme],
+] as const;
+
+const TAB_ACCENTS = [
+  THEME_TOKENS.TAB_ACCENT_CHART,
+  THEME_TOKENS.TAB_ACCENT_TABLE,
+  THEME_TOKENS.TAB_ACCENT_PIVOT,
+  THEME_TOKENS.TAB_ACCENT_SLICER,
+  THEME_TOKENS.TAB_ACCENT_SPARKLINE,
+  THEME_TOKENS.TAB_ACCENT_REPORT,
+] as const;
+
+describe("Calcula Clusters tokens are legible in both baselines", () => {
+  for (const [name, theme] of BASELINES) {
+    it(`${name}: the state accent clears 3:1 on the surface and on a cluster card`, () => {
+      const accent = theme[THEME_TOKENS.STATE_ACCENT];
+      expect(contrast(accent, theme[THEME_TOKENS.BG_SURFACE])).toBeGreaterThanOrEqual(3);
+      expect(contrast(accent, theme[THEME_TOKENS.RIBBON_CLUSTER_BG])).toBeGreaterThanOrEqual(3);
+    });
+
+    for (const tab of TAB_ACCENTS) {
+      it(`${name}: ${tab} reads as text on the ribbon frame`, () => {
+        expect(
+          contrast(theme[tab], theme[THEME_TOKENS.RIBBON_FRAME_BG]),
+        ).toBeGreaterThanOrEqual(4.5);
+      });
+    }
+
+    it(`${name}: the group caption reads on the band AND on a cluster card`, () => {
+      // Both. The caption sits on the band beneath its card, but the card is
+      // the darker of the two grounds this token can land on, and a token is
+      // only safe to reuse if it reads on both. The mockup's #6b7280 passed the
+      // band (4.83) while failing the card (4.39) — exactly the case a
+      // band-only check would have waved through.
+      const fg = theme[THEME_TOKENS.RIBBON_GROUP_LABEL_FG];
+      expect(contrast(fg, theme[THEME_TOKENS.RIBBON_BAND_BG])).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(fg, theme[THEME_TOKENS.RIBBON_CLUSTER_BG])).toBeGreaterThanOrEqual(4.5);
+    });
+
+    it(`${name}: tooltip text reads on the tooltip`, () => {
+      expect(
+        contrast(theme[THEME_TOKENS.TOOLTIP_FG], theme[THEME_TOKENS.TOOLTIP_BG]),
+      ).toBeGreaterThanOrEqual(4.5);
+    });
+
+    it(`${name}: activity-bar glyphs read on the activity bar`, () => {
+      expect(
+        contrast(theme[THEME_TOKENS.ACTIVITY_BAR_FG], theme[THEME_TOKENS.ACTIVITY_BAR_BG]),
+      ).toBeGreaterThanOrEqual(4.5);
+    });
+  }
+
+  it("the state accent is a genuinely different value in dark", () => {
+    // The light value is under 3:1 on the dark surface; copying it across is
+    // the ICON_DANGER mistake again.
+    expect(darkTheme[THEME_TOKENS.STATE_ACCENT]).not.toBe(defaultTheme[THEME_TOKENS.STATE_ACCENT]);
+  });
+
+  it("the icon accent, focus ring and tab indicator all FOLLOW the state accent", () => {
+    // They are references, not copies, so a skin that changes --state-accent
+    // (Calcula Soft does) recolours every one of them without restating it.
+    // A literal here would be a second source of truth that drifts on the
+    // first skin that retunes the accent.
+    for (const [, theme] of BASELINES) {
+      expect(theme[THEME_TOKENS.ICON_ACCENT]).toBe("var(--state-accent)");
+      expect(theme[THEME_TOKENS.FOCUS_RING_COLOR]).toBe("var(--state-accent)");
+      expect(theme[THEME_TOKENS.RIBBON_TAB_INDICATOR]).toBe("var(--state-accent)");
+      expect(theme[THEME_TOKENS.ACTIVITY_BAR_INDICATOR]).toBe("var(--state-accent)");
     }
   });
 });

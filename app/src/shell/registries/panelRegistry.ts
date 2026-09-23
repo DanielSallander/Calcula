@@ -12,26 +12,25 @@ import type { PanelService } from "../../api/ui";
 import { usePanelPlacementStore } from "./usePanelPlacementStore";
 import { SectionSidebarRenderer, SectionRibbonRenderer } from "../components/SectionRenderers";
 import { emitAppEvent, onAppEvent } from "../../api/events";
+import { RibbonIcon } from "../../api/ribbonIcons";
+
+/** Rail icon size for the fallback glyph (the rail normalises icons itself). */
+const FALLBACK_PANEL_ICON_SIZE = 24;
 
 /**
- * Generate a letter-based fallback icon from a panel title.
- * Used when ribbon tabs (which have no icon) are moved to the sidebar.
+ * The icon a panel shows in the activity rail when it declares none (legacy
+ * ribbon tabs moved to the sidebar): the generic group glyph from the one
+ * RibbonIcon set, so it wears the same duotone as every other rail icon.
+ * It used to be a letter drawn in an SVG <text>, which the icon rules forbid
+ * and which read as a different icon family.
  */
-function createLetterIcon(title: string): React.ReactElement {
-  const letter = title.charAt(0).toUpperCase();
-  return React.createElement(
-    "svg",
-    { width: 24, height: 24, viewBox: "0 0 24 24" },
-    React.createElement("text", {
-      x: "12",
-      y: "17",
-      textAnchor: "middle",
-      fontSize: "14",
-      fontWeight: "600",
-      fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
-      fill: "currentColor",
-    }, letter)
-  );
+function fallbackPanelIcon(): React.ReactElement {
+  return React.createElement(RibbonIcon.Group, { size: FALLBACK_PANEL_ICON_SIZE });
+}
+
+/** Whether a declared icon is actually something to render. */
+function hasIcon(icon: React.ReactNode): boolean {
+  return icon !== undefined && icon !== null && icon !== false && icon !== "";
 }
 
 /** All placements, used as the default when a panel doesn't restrict itself. */
@@ -204,6 +203,33 @@ class PanelRegistryImpl implements PanelService {
     });
   }
 
+  /**
+   * Drop the user's placement override for a panel: it returns to its declared
+   * default placement, and the persisted map FORGETS it rather than recording
+   * the default explicitly. `setPlacement(id, default)` is not the same thing:
+   * it leaves `{id: default}` in `calcula-panel-placements`, which the E2E
+   * residue guard (e2e/volatilePersistedState.ts) rightly reads as a
+   * reconfigured app — an explicit entry keeps the panel pinned there even if
+   * the panel's own default later changes.
+   */
+  resetPlacement(panelId: string): void {
+    const panel = this.panels.get(panelId);
+    if (!panel) return;
+    const current = this.getPlacement(panelId);
+    usePanelPlacementStore.getState().resetPlacement(panelId);
+    const next = this.getPlacement(panelId);
+    if (next === current) return;
+
+    this.unprojectPanel(panelId, current);
+    this.projectPanel(panel, next);
+    this.notifyChange();
+    emitAppEvent("panel:placementChanged", {
+      panelId,
+      oldPlacement: current,
+      newPlacement: next,
+    });
+  }
+
   // =========================================================================
   // OPEN / CLOSE
   // =========================================================================
@@ -262,6 +288,9 @@ class PanelRegistryImpl implements PanelService {
   // =========================================================================
 
   private projectToSidebar(panel: PanelDefinition): void {
+    // The sections go through AS-IS — icon, captionMode and every other field
+    // reach the renderer untouched, so a section's icon shows in its sidebar
+    // header without the registry knowing anything about it.
     const sections = panel.sections;
     // SectionSidebarRenderer handles both shapes: a single section fills the
     // panel directly (no chrome), multiple sections stack collapsibly. It also
@@ -273,7 +302,7 @@ class PanelRegistryImpl implements PanelService {
     const activityViewDef: ActivityViewDefinition = {
       id: panel.id,
       title: panel.title,
-      icon: panel.icon ?? createLetterIcon(panel.title),
+      icon: hasIcon(panel.icon) ? panel.icon : fallbackPanelIcon(),
       component: SidebarComponent,
       priority: panel.priority ?? 0,
       bottom: panel.sidebarBottom ?? false,
@@ -293,6 +322,7 @@ class PanelRegistryImpl implements PanelService {
     // their sidebar projection.
     if (panel.hidden) return;
 
+    // Sections as-is (icon and captionMode reach SectionCell/SectionChrome).
     const sections = panel.sections;
     // Always render through SectionRibbonRenderer so every section — including
     // a single one — is measured and demoted to a launcher if it cannot fit

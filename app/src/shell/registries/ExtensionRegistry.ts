@@ -160,6 +160,11 @@ class ExtensionRegistryImpl {
     this.notifyRegistryChange();
   }
 
+  /** Whether a group with this id is currently parked here. */
+  hasRibbonGroup(groupId: string): boolean {
+    return this.ribbonGroups.has(groupId);
+  }
+
   getRibbonTabs(): RibbonTabDefinition[] {
     return Array.from(this.ribbonTabs.values()).sort((a, b) => a.order - b.order);
   }
@@ -172,6 +177,26 @@ class ExtensionRegistryImpl {
     return Array.from(this.ribbonGroups.values())
       .filter((group) => group.tabId === tabId)
       .sort((a, b) => a.order - b.order);
+  }
+
+  /**
+   * Remove and return every group parked for `tabId`, sorted by order.
+   *
+   * Groups land here when they are registered BEFORE their tab (and through
+   * registerAddIn, which registers a manifest's groups here directly). The
+   * shell's bootstrap adopts them into the tab's panel as measured sections
+   * and drains them from here in the same step, so a raw group can never be
+   * rendered outside the section renderer's measurement. One notification for
+   * the whole drain, and none when nothing was parked.
+   */
+  drainRibbonGroupsForTab(tabId: string): RibbonGroupDefinition[] {
+    const drained = this.getRibbonGroupsForTab(tabId);
+    if (drained.length === 0) return drained;
+    for (const group of drained) {
+      this.ribbonGroups.delete(group.id);
+    }
+    this.notifyRegistryChange();
+    return drained;
   }
 
   // =========================================================================

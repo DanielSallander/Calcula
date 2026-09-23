@@ -1,153 +1,129 @@
 //! FILENAME: app/src/shell/Overlays/MiniFormatToolbar/MiniFormatToolbar.styles.ts
-// PURPOSE: Styled components for the Mini Format Toolbar overlay.
-// CONTEXT: Appears above the grid context menu on right-click, similar to Excel.
+// PURPOSE: Chrome of the Mini Format Toolbar — the floating pill above the grid
+//          context menu (Calcula Clusters, Open.dc.html board 4).
+// CONTEXT: The toolbar used to be its own little design system: 24px square
+//          buttons with 3px corners, a hand-rolled 14px colour grid, divider
+//          rules between groups and native selects in the OS look. It now
+//          composes the SAME @api/layout controls the ribbon does (Segmented
+//          pills, 28px IconButtons, ColorSwatch + ColorPopover, Select) and this
+//          file draws only what is the toolbar's own: the pill it floats in, and
+//          the stacking layers the overlays it opens are given.
+//
+//          THE PILL obeys the fill rule like a ribbon cluster: equal padding on
+//          all four sides around one 28px row (6 top/bottom + 28 = 40 inside a
+//          1px hairline), the cluster tint as its background, the popover
+//          radius and the toolbar shadow. Every value is a token, so a skin
+//          restyles the toolbar with the ribbon.
+//
+//          LAYERING. The toolbar floats one step above the context menu. The
+//          @api overlays it opens are portalled to <body> at their own default
+//          layers (Popover 1100, Tooltip 1200), which is right everywhere else
+//          but would draw a colour palette or a tooltip BEHIND the context menu
+//          it opens over. So the toolbar hands each overlay an explicit layer
+//          through the primitives' `zIndex` / `tooltipZIndex` props — no global
+//          stylesheet rule, nothing that outlives the toolbar.
+//
+//          Colours come only from tokens (LT); this folder is under the chrome
+//          hex ban in eslint.boundaries.js.
 
-import styled, { css } from "styled-components";
+import { css } from "@emotion/css";
+import { FONT_FAMILY, LT } from "../../../api/layout";
 
-const v = (name: string) => `var(${name})`;
+// ============================================================================
+// Identity
+// ============================================================================
 
-export const ToolbarContainer = styled.div`
+/** Prefix of every data-testid this toolbar renders — including the bodies of
+ *  the colour popovers it opens. */
+export const TESTID_PREFIX = "mini-format-";
+
+// ============================================================================
+// Layers
+// ============================================================================
+
+/**
+ * The context menu's layer. `--z-context-menu` is a theme token, and both
+ * built-in themes pin it at 10000 (core/theme/defaultTheme.ts and
+ * darkTheme.ts). The pill follows the token itself (it must sit exactly one
+ * step above the menu, whatever a theme says), but the overlays it opens take
+ * a NUMBER — the z-index props of Popover / Tooltip / ColorSwatch are numeric —
+ * so the value is mirrored here, and the unit tests fail if a theme moves the
+ * menu above the layers derived from it.
+ */
+export const CONTEXT_MENU_LAYER = 10000;
+
+/** The pill: one step above the context menu it sits over. */
+export const TOOLBAR_Z_INDEX = `calc(var(--z-context-menu, ${CONTEXT_MENU_LAYER}) + 1)`;
+
+/**
+ * The overlays the toolbar opens — its two colour palettes — one step above
+ * the pill (10002). ColorSwatch stacks its own tooltips over this layer: the
+ * palette's swatch tooltips at +1, the trigger's tooltip at +2.
+ */
+export const MINI_TOOLBAR_LAYER = CONTEXT_MENU_LAYER + 2;
+
+/** Every other tooltip on the toolbar: the same layer as a colour trigger's
+ *  (MINI_TOOLBAR_LAYER + 2), so no tooltip is ever drawn under an open
+ *  palette. */
+export const MINI_TOOLBAR_TOOLTIP_LAYER = MINI_TOOLBAR_LAYER + 2;
+
+// ============================================================================
+// The pill
+// ============================================================================
+
+export const toolbar = css`
   position: fixed;
-  display: flex;
+  z-index: ${TOOLBAR_Z_INDEX};
+  display: inline-flex;
   align-items: center;
-  gap: 1px;
-  padding: 3px 4px;
-  background-color: ${v("--ctx-menu-bg")};
-  border: 1px solid ${v("--ctx-menu-border")};
-  border-radius: 4px;
-  box-shadow: ${v("--ctx-menu-shadow")};
-  z-index: calc(${v("--z-context-menu")} + 1);
+  gap: 5px;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid ${LT.clusterBorder};
+  border-radius: ${LT.radiusPopover};
+  background: ${LT.clusterBg};
+  box-shadow: ${LT.shadowToolbar};
+  color: ${LT.text};
+  font-family: ${FONT_FAMILY};
+  white-space: nowrap;
   user-select: none;
 `;
 
-/** Wrapper for a group of related buttons with a subtle separator */
-export const ButtonGroup = styled.div`
-  display: flex;
+/** Font colour + fill colour: two standalone swatches, closer to each other
+ *  than to their neighbours. */
+export const colourPair = css`
+  display: inline-flex;
   align-items: center;
-  gap: 1px;
-
-  & + & {
-    margin-left: 2px;
-    padding-left: 3px;
-    border-left: 1px solid ${v("--ctx-menu-separator")};
-  }
-`;
-
-export const ToolbarButton = styled.button<{
-  $active?: boolean;
-  disabled?: boolean;
-}>`
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 3px;
-  background: transparent;
-  color: ${v("--text-primary")};
-  cursor: pointer;
-  font-size: 12px;
-  line-height: 1;
-  position: relative;
-  flex-shrink: 0;
-
-  ${(props) =>
-    props.disabled
-      ? css`
-          color: ${v("--text-disabled")};
-          cursor: default;
-        `
-      : css`
-          &:hover {
-            background-color: ${v("--ctx-menu-item-hover-bg")};
-            border-color: ${v("--ctx-menu-border")};
-          }
-        `}
-
-  ${(props) =>
-    props.$active &&
-    !props.disabled &&
-    css`
-      background-color: ${v("--ctx-menu-item-hover-bg")};
-      border-color: ${v("--ctx-menu-border")};
-    `}
-`;
-
-/** Small select for font family / font size */
-export const MiniSelect = styled.select`
-  height: 22px;
-  padding: 0 2px;
-  border: 1px solid ${v("--ctx-menu-border")};
-  border-radius: 3px;
-  background: ${v("--ctx-menu-bg")};
-  color: ${v("--text-primary")};
-  font-size: 11px;
-  cursor: pointer;
-  outline: none;
-
-  &:hover {
-    border-color: ${v("--text-secondary")};
-  }
-
-  &:focus {
-    border-color: var(--accent-color);
-  }
-`;
-
-export const FontFamilySelect = styled(MiniSelect)`
-  width: 90px;
-`;
-
-export const FontSizeSelect = styled(MiniSelect)`
-  width: 38px;
-  text-align: center;
-`;
-
-/** Color indicator bar under font/highlight icon buttons */
-export const ColorIndicator = styled.span<{ $color: string }>`
-  position: absolute;
-  bottom: 2px;
-  left: 4px;
-  right: 4px;
-  height: 3px;
-  background-color: ${(p) => p.$color};
-  border-radius: 1px;
-`;
-
-/** Color picker dropdown that appears below a color button */
-export const ColorDropdown = styled.div`
-  position: absolute;
-  top: 100%;
-  left: 0;
-  z-index: 1;
-  margin-top: 2px;
-  padding: 6px;
-  background: ${v("--ctx-menu-bg")};
-  border: 1px solid ${v("--ctx-menu-border")};
-  border-radius: 4px;
-  box-shadow: ${v("--ctx-menu-shadow")};
-`;
-
-export const ColorGrid = styled.div`
-  display: grid;
-  grid-template-columns: repeat(10, 1fr);
   gap: 2px;
 `;
 
-export const ColorCell = styled.button<{ $color: string; $selected?: boolean }>`
-  width: 14px;
-  height: 14px;
-  padding: 0;
-  border: ${(p) =>
-    p.$selected ? "2px solid var(--accent-color)" : "1px solid rgba(128,128,128,0.3)"};
-  border-radius: 2px;
-  background-color: ${(p) => p.$color};
-  cursor: pointer;
+// ============================================================================
+// Typographic glyphs (B / I / U / S stay letters, as in Excel and the Home tab)
+// ============================================================================
 
-  &:hover {
-    border: 2px solid ${v("--text-primary")};
-    transform: scale(1.15);
-  }
+const letter = css`
+  display: inline-block;
+  font-family: ${FONT_FAMILY};
+  font-size: 14px;
+  line-height: 1;
 `;
+
+export const glyph = {
+  bold: css`
+    ${letter};
+    font-weight: 700;
+  `,
+  italic: css`
+    ${letter};
+    font-family: Georgia, "Times New Roman", serif;
+    font-style: italic;
+  `,
+  underline: css`
+    ${letter};
+    text-decoration: underline;
+  `,
+  strikethrough: css`
+    ${letter};
+    text-decoration: line-through;
+  `,
+};

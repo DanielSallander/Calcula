@@ -1,9 +1,14 @@
-//! FILENAME: app/extensions/JsonView/components/JsonToggleEditor.tsx
+//! FILENAME: app/extensions/_shared/components/jsonToggle/JsonToggleEditor.tsx
 // PURPOSE: The editor panel shown when a GUI/JSON toggle is active.
-// CONTEXT: Phase C — renders Monaco editor + Apply/Revert bar, used inside
-//          existing config panels when JSON mode is toggled on.
+// CONTEXT: Renders the Monaco editor + an Apply/Revert bar. Used inside the
+//          PivotTable Fields pane, the Slicer Settings dialog and the Chart and
+//          Table JSON task panes. The code area stays Monaco's own dark theme
+//          (a code editor, like the Spec tab); the chrome around it — action
+//          bar, buttons, error line — paints from the skin tokens so it sits in
+//          a light task pane without a hardcoded dark strip.
 
 import React from "react";
+import { Button, LT } from "@api/layout";
 import { MonacoJsonEditor } from "./MonacoJsonEditor";
 
 const s = {
@@ -11,7 +16,7 @@ const s = {
     display: "flex",
     flexDirection: "column" as const,
     height: "100%",
-    backgroundColor: "#1e1e1e",
+    backgroundColor: LT.surface,
   },
   editor: {
     flex: 1,
@@ -20,40 +25,17 @@ const s = {
   actionBar: {
     display: "flex",
     alignItems: "center",
-    gap: "4px",
+    gap: "6px",
     padding: "6px 8px",
-    borderTop: "1px solid #333",
+    borderTop: `1px solid ${LT.border}`,
     flexShrink: 0,
   },
-  applyBtn: {
-    backgroundColor: "#0e639c",
-    color: "#ffffff",
-    border: "none",
-    borderRadius: "3px",
-    padding: "4px 10px",
-    fontSize: "12px",
-    cursor: "pointer",
-    fontFamily: "'Segoe UI', sans-serif",
-  },
-  revertBtn: {
-    backgroundColor: "#3c3c3c",
-    color: "#cccccc",
-    border: "1px solid #555",
-    borderRadius: "3px",
-    padding: "4px 10px",
-    fontSize: "12px",
-    cursor: "pointer",
-    fontFamily: "'Segoe UI', sans-serif",
-  },
-  disabled: {
-    opacity: 0.5,
-    cursor: "default" as const,
-  },
   errorBar: {
-    padding: "3px 8px",
+    padding: "4px 8px",
     fontSize: "11px",
-    color: "#f48771",
-    borderTop: "1px solid #333",
+    color: LT.dangerFg,
+    background: LT.dangerBg,
+    borderTop: `1px solid ${LT.border}`,
     flexShrink: 0,
   },
 };
@@ -85,22 +67,18 @@ export function JsonToggleEditor({
         <MonacoJsonEditor value={json} onChange={onChange} readOnly={loading} />
       </div>
       <div style={s.actionBar}>
-        <button
-          style={{ ...s.applyBtn, ...(canApply ? {} : s.disabled) }}
-          onClick={onApply}
-          disabled={!canApply}
-        >
+        <Button variant="outlined" onClick={onApply} disabled={!canApply}>
           Apply
-        </button>
-        <button
-          style={{ ...s.revertBtn, ...(dirty ? {} : s.disabled) }}
-          onClick={onRevert}
-          disabled={!dirty}
-        >
+        </Button>
+        <Button variant="outlined" onClick={onRevert} disabled={!dirty}>
           Revert
-        </button>
+        </Button>
       </div>
-      {error ? <div style={s.errorBar}>{error}</div> : null}
+      {error ? (
+        <div style={s.errorBar} role="alert">
+          {error}
+        </div>
+      ) : null}
     </div>
   );
 }

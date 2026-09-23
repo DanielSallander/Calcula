@@ -1,4 +1,9 @@
 //! FILENAME: app/src/core/theme/tokens.ts
+// PURPOSE: The semantic CSS custom-property names of the application chrome.
+// CONTEXT: Every name here must have a value in BOTH baselines (defaultTheme.ts
+//          and darkTheme.ts) — tokens.test.ts fails on a missing value and on a
+//          stray one. Skins, the user's own token overrides and the
+//          accessibility transforms all key their deltas by these names.
 /**
  * These are the semantic keys for your application.
  * Extensions will eventually be able to override the values of these variables.
@@ -169,4 +174,94 @@ export const THEME_TOKENS = {
   TONE_OK_BG: '--tone-ok-bg',
   TONE_INFO_FG: '--tone-info-fg',
   TONE_INFO_BG: '--tone-info-bg',
+
+  // --- Calcula Clusters: shape + motion ---
+  // Radii and motion are tokens rather than constants so a skin can change the
+  // FEEL of the chrome without a line of code: Calcula Soft rounds everything a
+  // step further, Calcula Contrast squares it off. The motion values carry
+  // their easing so a primitive writes `transition: background LT.motionHover`
+  // and never re-types a cubic-bezier.
+  RADIUS_CONTROL: '--radius-control',
+  RADIUS_CLUSTER: '--radius-cluster',
+  RADIUS_POPOVER: '--radius-popover',
+  RADIUS_PILL: '--radius-pill',
+  MOTION_HOVER: '--motion-hover',
+  MOTION_POPOVER: '--motion-popover',
+  MOTION_PANEL: '--motion-panel',
+
+  // --- Calcula Clusters: elevation ---
+  SHADOW_CLUSTER_HOVER: '--shadow-cluster-hover',
+  SHADOW_POPOVER: '--shadow-popover',
+  SHADOW_TOOLBAR: '--shadow-toolbar',
+  SHADOW_RAISED: '--shadow-raised',
+
+  // --- Calcula Clusters: state colour ---
+  // A NEW token, not a retune of ACCENT_PRIMARY. The brand green #10b981 is
+  // only ~2.5:1 on white, which is fine for a filled selection rectangle and
+  // not fine for a checkbox tick, a focus ring or a pressed-state edge — the
+  // WCAG 1.4.11 non-text minimum is 3:1. Retuning ACCENT_PRIMARY would have
+  // darkened the grid selection and every existing consumer with it; a
+  // separate state colour darkens only the controls that need to be legible.
+  STATE_ACCENT: '--state-accent',
+  FOCUS_RING_COLOR: '--focus-ring-color',
+  FOCUS_RING: '--focus-ring',
+
+  // --- Calcula Clusters: ribbon surfaces ---
+  RIBBON_FRAME_BG: '--ribbon-frame-bg',
+  RIBBON_BAND_BG: '--ribbon-band-bg',
+  RIBBON_CLUSTER_BG: '--ribbon-cluster-bg',
+  RIBBON_CLUSTER_BORDER: '--ribbon-cluster-border',
+  RIBBON_CLUSTER_BORDER_HOVER: '--ribbon-cluster-border-hover',
+  RIBBON_GROUP_LABEL_FG: '--ribbon-group-label-fg',
+  RIBBON_TAB_INDICATOR: '--ribbon-tab-indicator',
+
+  // --- Calcula Clusters: the one control grammar (@api/layout primitives) ---
+  CONTROL_BORDER: '--control-border',
+  CONTROL_DIVIDER: '--control-divider',
+  CONTROL_TRACK: '--control-track',
+  CHIP_BG: '--chip-bg',
+  CHIP_BORDER: '--chip-border',
+  TOOLTIP_BG: '--tooltip-bg',
+  TOOLTIP_FG: '--tooltip-fg',
+  KBD_BG: '--kbd-bg',
+  BADGE_BG: '--badge-bg',
+  BADGE_FG: '--badge-fg',
+
+  // --- Calcula Clusters: duotone icon ground ---
+  // The SOFT channel of the icon set. A tint of currentColor rather than a
+  // fixed grey, so the silhouette keeps the same separation on the band, on a
+  // tinted cluster, on a pressed button and in high contrast.
+  ICON_FILL_SOFT: '--icon-fill-soft',
+
+  // --- Calcula Clusters: contextual tab accents ---
+  // One per contextual tab family. Each is text on the ribbon frame, so each
+  // is held to 4.5:1 against RIBBON_FRAME_BG in tokens.test.ts.
+  TAB_ACCENT_CHART: '--tab-accent-chart',
+  TAB_ACCENT_TABLE: '--tab-accent-table',
+  TAB_ACCENT_PIVOT: '--tab-accent-pivot',
+  TAB_ACCENT_SLICER: '--tab-accent-slicer',
+  TAB_ACCENT_SPARKLINE: '--tab-accent-sparkline',
+  TAB_ACCENT_REPORT: '--tab-accent-report',
+
+  // --- Calcula Clusters: sidebar activity bar + status bar ---
+  ACTIVITY_BAR_BG: '--activity-bar-bg',
+  ACTIVITY_BAR_FG: '--activity-bar-fg',
+  ACTIVITY_BAR_FG_ACTIVE: '--activity-bar-fg-active',
+  ACTIVITY_BAR_ITEM_HOVER_BG: '--activity-bar-item-hover-bg',
+  ACTIVITY_BAR_ITEM_ACTIVE_BG: '--activity-bar-item-active-bg',
+  ACTIVITY_BAR_INDICATOR: '--activity-bar-indicator',
+  SIDE_PANEL_HEADER_BG: '--side-panel-header-bg',
+  STATUS_BAR_BG: '--status-bar-bg',
+  STATUS_BAR_FG: '--status-bar-fg',
+  BORDER_SUBTLE: '--border-subtle',
+
+  // --- Aliases for names that were already in use ---
+  // These two were INVENTED by callers long before they existed here (see
+  // __tests__/themeTokenParity.test.ts for the history), so every such surface
+  // silently took its literal fallback and never followed the skin. Declaring
+  // them as aliases of the real tokens makes the surfaces that still spell them
+  // this way theme-correct at once; new code should use BORDER_DEFAULT and
+  // BG_SURFACE (or the @api/layout LT table) directly.
+  BORDER_COLOR: '--border-color',
+  INPUT_BG: '--input-bg',
 } as const;

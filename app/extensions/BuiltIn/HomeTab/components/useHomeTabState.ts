@@ -7,7 +7,6 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useGridState, cellEvents } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
 import { CommandRegistry, CoreCommands } from "@api/commands";
-import { DialogExtensions } from "@api/ui";
 import {
   getCell,
   getStyle,
@@ -360,13 +359,17 @@ export function useHomeTabState() {
     [currentStyle, currentCellData]
   );
 
-  // Get current color for color items. Falls back per-field so a partial
-  // style object can never surface undefined to color consumers.
+  // Get current color for color items, or null while no style is known (no
+  // selection yet, or the first read still in flight). Null is what the
+  // ColorSwatch draws as "no colour" — an empty outline — which is the truth
+  // in that moment; the old black/white fallbacks were a guess the ribbon
+  // presented as the cell's colour. Falls back per-field so a partial style
+  // object can never surface undefined to color consumers.
   const getCurrentColor = useCallback(
-    (itemId: string): string => {
-      if (itemId === "textColor") return currentStyle?.textColor ?? "#000000";
-      if (itemId === "backgroundColor") return currentStyle?.backgroundColor ?? "#ffffff";
-      return "#000000";
+    (itemId: string): string | null => {
+      if (itemId === "textColor") return currentStyle?.textColor ?? null;
+      if (itemId === "backgroundColor") return currentStyle?.backgroundColor ?? null;
+      return null;
     },
     [currentStyle]
   );

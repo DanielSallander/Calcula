@@ -5,6 +5,8 @@ import type {
   AddInManifest,
   TaskPaneViewDefinition,
 } from "@api";
+import React from "react";
+import { RibbonIcon } from "@api";
 import { BiPane } from "./components/BiPane";
 import { ConnectionsPane } from "./components/ConnectionsPane";
 
@@ -33,7 +35,7 @@ export const BI_PANE_ID = "bi-pane";
 export const BiPaneDefinition: TaskPaneViewDefinition = {
   id: BI_PANE_ID,
   title: "Business Intelligence",
-  icon: "[BI]",
+  icon: React.createElement(RibbonIcon.Model, { size: 16 }),
   component: BiPane,
   contextKeys: ["bi"],
   priority: 90,
@@ -52,7 +54,7 @@ export const CONNECTIONS_PANE_ID = "connections-pane";
 export const ConnectionsPaneDefinition: TaskPaneViewDefinition = {
   id: CONNECTIONS_PANE_ID,
   title: "Workbook Connections",
-  icon: "[Conn]",
+  icon: React.createElement(RibbonIcon.Connection, { size: 16 }),
   component: ConnectionsPane,
   contextKeys: ["connections"],
   priority: 85,

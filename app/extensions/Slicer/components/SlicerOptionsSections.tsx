@@ -10,11 +10,42 @@
 //          module-level snapshot fed by SLICER_UPDATED / "slicer:deselected"
 //          window events (one listener set + one computed-attrs fetch total,
 //          ref-counted by mounted sections).
+//
+//          Calcula Clusters: every section fills the band's 61px content box
+//          one of the two sanctioned ways (@api/layout tokens.ts, "the fill
+//          rule") — Properties, Buttons and Size as TWO 28px ROWS (28 + 5 +
+//          28), Slicer Styles and Actions as ONE TALL ROW (the StyleGallery
+//          strip; four CommandButton heroes). An attribute driven by computed
+//          properties is a genuinely DISABLED control carrying the explanation
+//          as its title — not a dimmed, pointer-events:none wrapper, which left
+//          the control focusable and operable from the keyboard.
+//
+//          Colours come only from LT (@api/layout); style thumbnails are data.
 
 import React, { useEffect, useState } from "react";
 import { css } from "@emotion/css";
 import type { PanelSectionProps } from "@api/uiTypes";
-import { ActionRow, Button, Field, Input, Stack } from "@api/layout";
+import {
+  ActionRow,
+  Checkbox,
+  CommandButton,
+  ControlGrid,
+  ControlGridBreak,
+  Dropdown,
+  Field,
+  FIELD_HEIGHT,
+  FONT_FAMILY,
+  GAP_XS,
+  HERO_ICON_SIZE,
+  Input,
+  LABEL_FONT_SIZE,
+  LT,
+  ROW_GAP,
+  Stack,
+  useSurfaceLayout,
+  type DropdownOption,
+} from "@api/layout";
+import { RibbonIcon } from "@api/ribbonIcons";
 import { showDialog } from "@api";
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import {
@@ -177,112 +208,82 @@ async function updateAllSlicers(
 }
 
 // ============================================================================
-// SVG Icons
-// ============================================================================
-
-const SettingsIcon = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M10 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" stroke="currentColor" strokeWidth="1.3" />
-    <path d="M16.2 12.2a1.3 1.3 0 00.26 1.43l.05.05a1.58 1.58 0 01-1.12 2.69 1.58 1.58 0 01-1.12-.46l-.05-.05a1.3 1.3 0 00-1.43-.26 1.3 1.3 0 00-.79 1.19v.14a1.58 1.58 0 01-3.16 0v-.07a1.3 1.3 0 00-.85-1.19 1.3 1.3 0 00-1.43.26l-.05.05a1.58 1.58 0 11-2.23-2.23l.05-.05a1.3 1.3 0 00.26-1.43 1.3 1.3 0 00-1.19-.79h-.14a1.58 1.58 0 010-3.16h.07a1.3 1.3 0 001.19-.85 1.3 1.3 0 00-.26-1.43l-.05-.05a1.58 1.58 0 112.23-2.23l.05.05a1.3 1.3 0 001.43.26h.06a1.3 1.3 0 00.79-1.19v-.14a1.58 1.58 0 013.16 0v.07a1.3 1.3 0 00.79 1.19 1.3 1.3 0 001.43-.26l.05-.05a1.58 1.58 0 112.23 2.23l-.05.05a1.3 1.3 0 00-.26 1.43v.06a1.3 1.3 0 001.19.79h.14a1.58 1.58 0 010 3.16h-.07a1.3 1.3 0 00-1.19.79z" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-);
-
-const ComputedIcon = () => (
-  <svg width="20" height="20" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M3 5h10M3 9h8M3 13h9M3 17h6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-    <path d="M15.5 10.5c.8-2 1.4-3.2 2-3.2s1 .5 1.2.8" stroke="#217346" strokeWidth="1.3" strokeLinecap="round" fill="none"/>
-    <path d="M14 15.5l4-4" stroke="#217346" strokeWidth="1.3" strokeLinecap="round"/>
-  </svg>
-);
-
-const ConnectionsIcon = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <rect x="2" y="3" width="6" height="5" rx="1" stroke="currentColor" strokeWidth="1.2" />
-    <rect x="12" y="3" width="6" height="5" rx="1" stroke="currentColor" strokeWidth="1.2" />
-    <rect x="7" y="12" width="6" height="5" rx="1" stroke="currentColor" strokeWidth="1.2" />
-    <path d="M5 8v2.5a1.5 1.5 0 001.5 1.5H7M15 8v2.5a1.5 1.5 0 01-1.5 1.5H13" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-  </svg>
-);
-
-const DeleteIcon = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M6 6l8 8M14 6l-8 8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-  </svg>
-);
-
-// ============================================================================
 // Styles (only the bits @api/layout has no primitive for)
 // ============================================================================
 
 const styles = {
+  /** Empty state: shown in the Properties cluster when nothing is selected. */
   disabledMessage: css`
     display: flex;
     align-items: center;
     justify-content: center;
     width: 100%;
     height: 100%;
-    color: #999;
+    color: ${LT.textTertiary};
+    font-family: ${FONT_FAMILY};
     font-style: italic;
     font-size: 12px;
   `,
-  checkboxLabel: css`
+  /** A band label that owns a whole 28px row (see StackedField). */
+  stackedLabel: css`
     display: flex;
     align-items: center;
-    gap: 4px;
-    cursor: pointer;
+    height: ${FIELD_HEIGHT}px;
+    font-family: ${FONT_FAMILY};
+    font-size: ${LABEL_FONT_SIZE}px;
+    line-height: 13px;
+    color: ${LT.textSecondary};
     white-space: nowrap;
-    font-size: 11px;
-    color: #444;
-    input {
-      cursor: pointer;
-    }
-  `,
-  columnSelect: css`
-    padding: 3px 6px;
-    border: 1px solid #d0d0d0;
-    border-radius: 3px;
-    font-size: 11px;
-    background: #fff;
-    color: #1a1a1a;
-    width: 50px;
-    transition: border-color 0.15s;
-    &:focus {
-      border-color: #4472c4;
-      outline: none;
-      box-shadow: 0 0 0 1px rgba(68, 114, 196, 0.2);
-    }
-  `,
-  computedOverlay: css`
-    opacity: 0.4;
-    pointer-events: none;
-    position: relative;
-  `,
-  deleteButton: css`
-    color: #c42b1c;
-    &:hover:not(:disabled) {
-      background: #fde7e7;
-      border-color: #e8c4c4;
-    }
-    &:active:not(:disabled) {
-      background: #fbd0d0;
-    }
   `,
 };
 
-/** Dims + inert-locks a control whose attribute is computed-property driven. */
-function ComputedGate({
-  computed,
+/** Width of the Name / Header inputs in the band (panel: full width). */
+const TEXT_INPUT_BAND_WIDTH = 120;
+/** Width of the Columns dropdown: one digit, or the mixed dash. */
+const COLUMNS_DROPDOWN_WIDTH = 64;
+
+/** True when the section is rendering into the ribbon band. */
+function useIsBand(): boolean {
+  return useSurfaceLayout().container === "band";
+}
+
+/**
+ * A single labelled control that must still fill the band's content box.
+ * Inline (label beside control) it would be ONE short row floating in a
+ * 61px card, which the fill rule forbids; so in the band the label takes the
+ * first 28px row and the control the second (28 + 5 + 28). Elsewhere it is
+ * the ordinary label-above Field.
+ */
+function StackedField({
+  label,
+  title,
   children,
 }: {
-  computed: boolean;
+  label: string;
+  title?: string;
   children: React.ReactNode;
 }): React.ReactElement {
+  const band = useIsBand();
+  if (!band) {
+    return (
+      <div title={title}>
+        <Field label={label}>{children}</Field>
+      </div>
+    );
+  }
   return (
     <div
-      className={computed ? styles.computedOverlay : undefined}
-      title={computed ? computedTitle : undefined}
+      title={title}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "center",
+        gap: ROW_GAP,
+        height: "100%",
+      }}
     >
-      {children}
+      <span className={styles.stackedLabel}>{label}</span>
+      <div style={{ display: "flex", alignItems: "center", height: FIELD_HEIGHT }}>{children}</div>
     </div>
   );
 }
@@ -293,6 +294,7 @@ function ComputedGate({
 
 export function SlicerPropertiesSection(_props: PanelSectionProps): React.ReactElement {
   const { slicers, computedAttrs } = useSelectedSlicers();
+  const band = useIsBand();
   const [slicerName, setSlicerName] = useState("");
   const [headerText, setHeaderText] = useState("");
 
@@ -351,47 +353,76 @@ export function SlicerPropertiesSection(_props: PanelSectionProps): React.ReactE
     await updateAllSlicers(slicers, { showHeader: checked });
   };
 
+  const inputWidth = band ? TEXT_INPUT_BAND_WIDTH : undefined;
+  const headerComputed = isComputed("headerText");
+  const showHeaderComputed = isComputed("showHeader");
+
+  const nameField = (
+    <Field label="Name:">
+      <Input
+        width={inputWidth}
+        value={isMulti ? `(${slicers.length} slicers)` : slicerName}
+        onChange={(e) => setSlicerName(e.target.value)}
+        onBlur={handleNameBlur}
+        onKeyDown={handleEnterBlur}
+        disabled={isMulti}
+        title={isMulti ? "Name editing not available for multiple slicers" : undefined}
+      />
+    </Field>
+  );
+
+  const headerField = (
+    <Field label="Header:">
+      <Input
+        width={inputWidth}
+        value={isMulti ? "" : headerText}
+        onChange={(e) => setHeaderText(e.target.value)}
+        onBlur={handleHeaderTextBlur}
+        onKeyDown={handleEnterBlur}
+        disabled={isMulti || headerComputed}
+        title={
+          headerComputed
+            ? computedTitle
+            : isMulti
+              ? "Header editing not available for multiple slicers"
+              : "Header display text (shown in the header bar)"
+        }
+        placeholder={isMulti ? "(multiple)" : undefined}
+      />
+    </Field>
+  );
+
+  const showHeaderToggle = (
+    <Checkbox
+      label="Show Header"
+      checked={commonShowHeader === MIXED ? false : commonShowHeader}
+      indeterminate={commonShowHeader === MIXED}
+      onChange={(checked) => handleShowHeaderChange(checked)}
+      disabled={showHeaderComputed}
+      // On the whole row (the label is not disabled, so it still hovers) and
+      // given to assistive tech as the input's description.
+      tooltip={showHeaderComputed ? computedTitle : undefined}
+    />
+  );
+
+  // Band: two rows — the name, then the header text beside its show/hide
+  // toggle. Panel: one labelled field per line.
+  if (band) {
+    return (
+      <ControlGrid gap={GAP_XS * 2}>
+        {nameField}
+        <ControlGridBreak />
+        {headerField}
+        {showHeaderToggle}
+      </ControlGrid>
+    );
+  }
+
   return (
-    <Stack>
-      <Field label="Name:">
-        <Input
-          width={120}
-          value={isMulti ? `(${slicers.length} slicers)` : slicerName}
-          onChange={(e) => setSlicerName(e.target.value)}
-          onBlur={handleNameBlur}
-          onKeyDown={handleEnterBlur}
-          disabled={isMulti}
-          title={isMulti ? "Name editing not available for multiple slicers" : undefined}
-        />
-      </Field>
-      <ComputedGate computed={isComputed("headerText")}>
-        <Field label="Header:">
-          <Input
-            width={120}
-            value={isMulti ? "" : headerText}
-            onChange={(e) => setHeaderText(e.target.value)}
-            onBlur={handleHeaderTextBlur}
-            onKeyDown={handleEnterBlur}
-            disabled={isMulti || isComputed("headerText")}
-            title={isComputed("headerText") ? computedTitle : isMulti ? "Header editing not available for multiple slicers" : "Header display text (shown in the header bar)"}
-            placeholder={isMulti ? "(multiple)" : undefined}
-          />
-        </Field>
-      </ComputedGate>
-      <ComputedGate computed={isComputed("showHeader")}>
-        <label className={styles.checkboxLabel}>
-          <input
-            type="checkbox"
-            checked={commonShowHeader === MIXED ? false : commonShowHeader}
-            ref={(el) => {
-              if (el) el.indeterminate = commonShowHeader === MIXED;
-            }}
-            onChange={(e) => handleShowHeaderChange(e.target.checked)}
-            disabled={isComputed("showHeader")}
-          />
-          Show Header
-        </label>
-      </ComputedGate>
+    <Stack gap={ROW_GAP}>
+      {nameField}
+      {headerField}
+      {showHeaderToggle}
     </Stack>
   );
 }
@@ -400,40 +431,38 @@ export function SlicerPropertiesSection(_props: PanelSectionProps): React.ReactE
 // Buttons section — column count
 // ============================================================================
 
+/** The column counts a slicer's button grid offers. */
+const COLUMN_OPTIONS: ReadonlyArray<DropdownOption<number | null>> = [1, 2, 3, 4, 5].map((n) => ({
+  value: n,
+  label: String(n),
+}));
+
 export function SlicerButtonsSection(_props: PanelSectionProps): React.ReactElement {
   const { slicers, computedAttrs } = useSelectedSlicers();
 
   if (slicers.length === 0) return <></>;
 
-  const isComputed = (attr: string) => computedAttrs.has(attr);
+  const columnsComputed = computedAttrs.has("columns");
   const commonColumns = commonValue(slicers, (s) => s.columns);
 
-  const handleColumnsChange = async (value: number) => {
+  const handleColumnsChange = async (value: number | null) => {
+    if (value === null) return;
     await updateAllSlicers(slicers, { columns: value });
   };
 
   return (
-    <Stack>
-      <ComputedGate computed={isComputed("columns")}>
-        <Field label="Columns:">
-          <select
-            className={styles.columnSelect}
-            value={commonColumns === MIXED ? "" : commonColumns}
-            onChange={(e) => handleColumnsChange(Number(e.target.value))}
-            disabled={isComputed("columns")}
-          >
-            {commonColumns === MIXED && (
-              <option value="" disabled>-</option>
-            )}
-            {[1, 2, 3, 4, 5].map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </ComputedGate>
-    </Stack>
+    <StackedField label="Columns:" title={columnsComputed ? computedTitle : undefined}>
+      <Dropdown<number | null>
+        ariaLabel="Columns"
+        value={commonColumns === MIXED ? null : commonColumns}
+        options={COLUMN_OPTIONS}
+        // A mixed multi-selection matches no option and shows the dash.
+        placeholder="-"
+        onChange={handleColumnsChange}
+        disabled={columnsComputed}
+        width={COLUMNS_DROPDOWN_WIDTH}
+      />
+    </StackedField>
   );
 }
 
@@ -466,6 +495,7 @@ export function SlicerStylesSection(_props: PanelSectionProps): React.ReactEleme
 
 export function SlicerSizeSection(_props: PanelSectionProps): React.ReactElement {
   const { slicers, computedAttrs } = useSelectedSlicers();
+  const band = useIsBand();
   const [widthStr, setWidthStr] = useState("");
   const [heightStr, setHeightStr] = useState("");
 
@@ -513,36 +543,55 @@ export function SlicerSizeSection(_props: PanelSectionProps): React.ReactElement
     }
   };
 
+  const widthField = (
+    <Field label="Width:">
+      <Input
+        value={widthStr}
+        onChange={(e) => setWidthStr(e.target.value)}
+        onBlur={handleWidthBlur}
+        onKeyDown={handleEnterBlur}
+        type="number"
+        min={60}
+        placeholder={isMulti ? "-" : undefined}
+        disabled={isComputed("width")}
+        title={isComputed("width") ? computedTitle : undefined}
+      />
+    </Field>
+  );
+
+  const heightField = (
+    <Field label="Height:">
+      <Input
+        value={heightStr}
+        onChange={(e) => setHeightStr(e.target.value)}
+        onBlur={handleHeightBlur}
+        onKeyDown={handleEnterBlur}
+        type="number"
+        min={60}
+        placeholder={isMulti ? "-" : undefined}
+        disabled={isComputed("height")}
+        title={isComputed("height") ? computedTitle : undefined}
+      />
+    </Field>
+  );
+
+  // Band: two rows (28 + 5 + 28). The explicit break is needed because a
+  // two-child grid is below ControlGrid's split threshold and would otherwise
+  // stay one short row. Panel: one field per line.
+  if (band) {
+    return (
+      <ControlGrid>
+        {widthField}
+        <ControlGridBreak />
+        {heightField}
+      </ControlGrid>
+    );
+  }
+
   return (
-    <Stack>
-      <ComputedGate computed={isComputed("width")}>
-        <Field label="Width:">
-          <Input
-            value={widthStr}
-            onChange={(e) => setWidthStr(e.target.value)}
-            onBlur={handleWidthBlur}
-            onKeyDown={handleEnterBlur}
-            type="number"
-            min={60}
-            placeholder={isMulti ? "-" : undefined}
-            disabled={isComputed("width")}
-          />
-        </Field>
-      </ComputedGate>
-      <ComputedGate computed={isComputed("height")}>
-        <Field label="Height:">
-          <Input
-            value={heightStr}
-            onChange={(e) => setHeightStr(e.target.value)}
-            onBlur={handleHeightBlur}
-            onKeyDown={handleEnterBlur}
-            type="number"
-            min={60}
-            placeholder={isMulti ? "-" : undefined}
-            disabled={isComputed("height")}
-          />
-        </Field>
-      </ComputedGate>
+    <Stack gap={ROW_GAP}>
+      {widthField}
+      {heightField}
     </Stack>
   );
 }
@@ -564,40 +613,52 @@ export function SlicerActionsSection(_props: PanelSectionProps): React.ReactElem
     clearSnapshot();
   };
 
+  // Four heroes: one tall row. The dialog commands act on ONE slicer, so they
+  // are disabled while several are selected; Delete acts on all of them.
   return (
-    <ActionRow>
-      <Button
+    <ActionRow gap={GAP_XS}>
+      <CommandButton
+        icon={<RibbonIcon.Settings size={HERO_ICON_SIZE} />}
+        label="Settings"
         onClick={() => showDialog(SLICER_SETTINGS_DIALOG_ID, { slicerId: primary.id })}
-        title={isMulti ? "Open settings for the last selected slicer" : "Open slicer settings (layout, selection behavior, data display)"}
+        tooltip={
+          isMulti
+            ? "Open settings for the last selected slicer"
+            : "Open slicer settings (layout, selection behavior, data display)"
+        }
         disabled={isMulti}
-      >
-        <SettingsIcon />
-        Settings
-      </Button>
-      <Button
+      />
+      <CommandButton
+        icon={<RibbonIcon.Connection size={HERO_ICON_SIZE} />}
+        // "Report Connections" overflows a hero's 92px label; the full name
+        // stays the accessible name (and contains the visible text).
+        label="Connections"
+        aria-label="Report Connections"
         onClick={() => showDialog(SLICER_CONNECTIONS_DIALOG_ID, { slicerId: primary.id })}
-        title={isMulti ? "Manage report connections for the last selected slicer" : "Choose which PivotTables this slicer filters"}
+        tooltip={
+          isMulti
+            ? "Manage report connections for the last selected slicer"
+            : "Report Connections: choose which PivotTables this slicer filters"
+        }
         disabled={isMulti}
-      >
-        <ConnectionsIcon />
-        Report Connections
-      </Button>
-      <Button
+      />
+      <CommandButton
+        icon={<RibbonIcon.Fx size={HERO_ICON_SIZE} />}
+        label="Computed"
         onClick={() => showDialog(SLICER_COMPUTED_PROPS_DIALOG_ID, { slicerId: primary.id })}
-        title={isMulti ? "Open computed properties for the last selected slicer" : "Formula-driven attributes for this slicer"}
+        tooltip={
+          isMulti
+            ? "Open computed properties for the last selected slicer"
+            : "Formula-driven attributes for this slicer"
+        }
         disabled={isMulti}
-      >
-        <ComputedIcon />
-        Computed
-      </Button>
-      <Button
-        className={styles.deleteButton}
+      />
+      <CommandButton
+        icon={<RibbonIcon.Delete size={HERO_ICON_SIZE} />}
+        label={`Delete${isMulti ? ` (${slicers.length})` : ""}`}
         onClick={handleDelete}
-        title={isMulti ? `Delete ${slicers.length} selected slicers` : "Delete this slicer"}
-      >
-        <DeleteIcon />
-        Delete{isMulti ? ` (${slicers.length})` : ""}
-      </Button>
+        tooltip={isMulti ? `Delete ${slicers.length} selected slicers` : "Delete this slicer"}
+      />
     </ActionRow>
   );
 }

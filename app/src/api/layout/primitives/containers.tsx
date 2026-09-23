@@ -1,21 +1,33 @@
 //! FILENAME: app/src/api/layout/primitives/containers.tsx
 // PURPOSE: Orientation-aware container primitives: Group, Stack, ControlRow,
-//          Grow, ActionRow.
+//          ControlGrid, Grow, ActionRow, StatusText.
 // CONTEXT: Composition building blocks that read SurfaceLayoutContext, so one
 //          JSX tree renders as a horizontal ribbon group or a vertical sidebar
-//          block. See @api/layout/context.ts for the geometry contract.
+//          block. See @api/layout/context.ts for the geometry contract and
+//          ../tokens.ts for THE FILL RULE these containers lay out against:
+//          a cluster's content box is 61px, filled either by one tall row or
+//          by two 28px rows with a 5px gap (28 + 5 + 28 = 61). ControlGrid's
+//          defaults ARE that second form, which is why its row gap is ROW_GAP
+//          and not the in-row gap: with 4px between rows the pair is 60px and
+//          sits a pixel off-centre in every cluster that uses it.
+//
+//          Colours come only from LT (../theme).
 
 import React from "react";
 import { useSurfaceLayout } from "../context";
+import { LT } from "../theme";
 import {
+  BAND_MAX_CONTENT_HEIGHT,
+  FONT_FAMILY,
   GAP_MD,
   GAP_SM,
   GAP_XS,
   GROUP_LABEL_FONT_SIZE,
-  FONT_FAMILY,
+  HEADER_FONT_SIZE,
   LABEL_FONT_SIZE,
-  RIBBON_CONTENT_HEIGHT,
+  ROW_GAP,
 } from "../tokens";
+import { Segmented } from "./Segmented";
 
 // ============================================================================
 // Group — sub-grouping inside a section
@@ -27,9 +39,11 @@ export interface GroupProps {
 }
 
 /**
- * A labeled sub-group. Band: mini column with a 10px uppercase label below
- * (the classic ribbon-group look). Panel/popover: bold sub-header above a
- * vertical block.
+ * A labeled sub-group. Band: a mini column with the caption below it, in the
+ * same 11px/500 recipe as a cluster caption. Panel/popover: the ONE header
+ * recipe (12px/600, sentence case) above a vertical block — the same header
+ * a sidebar section and a side-panel title use, so a pane does not mix three
+ * header styles.
  */
 export function Group({ label, children }: GroupProps): React.ReactElement {
   const layout = useSurfaceLayout();
@@ -59,11 +73,15 @@ export function Group({ label, children }: GroupProps): React.ReactElement {
         <div
           style={{
             fontSize: GROUP_LABEL_FONT_SIZE,
-            color: "var(--text-tertiary)",
+            fontWeight: 500,
+            lineHeight: "13px",
+            color: LT.groupLabel,
             textAlign: "center",
             marginTop: 2,
             fontFamily: FONT_FAMILY,
             whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
           }}
         >
           {label}
@@ -76,11 +94,10 @@ export function Group({ label, children }: GroupProps): React.ReactElement {
     <div style={{ display: "flex", flexDirection: "column", gap: GAP_XS }}>
       <div
         style={{
-          fontSize: LABEL_FONT_SIZE,
+          fontSize: HEADER_FONT_SIZE,
           fontWeight: 600,
-          opacity: 0.7,
-          textTransform: "uppercase",
-          letterSpacing: "0.5px",
+          lineHeight: 1.3,
+          color: LT.text,
           fontFamily: FONT_FAMILY,
         }}
       >
@@ -101,9 +118,9 @@ export interface StackProps {
 }
 
 /**
- * Vertical stack everywhere. In the band it caps at the usable content height
+ * Vertical stack everywhere. In the band it caps at the cluster's content box
  * and column-wraps, so rows pack into side-by-side columns Excel-style instead
- * of overflowing the 92px strip.
+ * of overflowing the card.
  */
 export function Stack({ gap = GAP_XS, children }: StackProps): React.ReactElement {
   const layout = useSurfaceLayout();
@@ -118,7 +135,7 @@ export function Stack({ gap = GAP_XS, children }: StackProps): React.ReactElemen
         ...(band
           ? {
               flexWrap: "wrap" as const,
-              maxHeight: layout.maxContentHeight ?? RIBBON_CONTENT_HEIGHT,
+              maxHeight: layout.maxContentHeight ?? BAND_MAX_CONTENT_HEIGHT,
               alignContent: "flex-start",
               columnGap: GAP_SM * 2,
             }
@@ -182,14 +199,64 @@ export function ControlGridBreak(): null {
 }
 
 export interface ControlGridProps {
+  /** Gap between controls within a row (default GAP_XS, 4). */
   gap?: number;
+  /** Gap between band rows, and between wrapped lines in a panel
+   *  (default ROW_GAP, 5: two 28px rows then fill the 61px content box). */
+  rowGap?: number;
   /** Rows to pack into in the band (default 2). Ignored when the children
    *  contain explicit ControlGridBreak markers. */
   bandRows?: number;
   /** Minimum child count before band splitting kicks in (default 5) —
    *  splitting a tiny group saves no width and just looks ragged. */
   splitAt?: number;
+  /**
+   * Names the Segmented pill a child belongs to, or undefined for a
+   * free-standing control. Rows are chunked FIRST, exactly as without it;
+   * then, within each row, consecutive children with the same segment are
+   * wrapped in one `<Segmented ariaLabel={segment}>`. Segmenting therefore
+   * never moves a control to another row — a run that straddles a row break
+   * becomes two pills — and a grid gains pills without re-curating its rows.
+   */
+  segmentOf?: (child: React.ReactElement) => string | undefined;
   children: React.ReactNode;
+}
+
+/** Wrap each run of consecutive same-segment children in a Segmented. */
+function segmentRow(
+  row: readonly React.ReactNode[],
+  segmentOf: ControlGridProps["segmentOf"],
+): React.ReactNode[] {
+  if (!segmentOf) return [...row];
+  const out: React.ReactNode[] = [];
+  let run: React.ReactElement[] = [];
+  let runSegment: string | undefined;
+
+  const flush = () => {
+    if (run.length > 0 && runSegment !== undefined) {
+      out.push(
+        <Segmented key={`segment:${runSegment}:${String(run[0].key)}`} ariaLabel={runSegment}>
+          {run}
+        </Segmented>,
+      );
+    }
+    run = [];
+    runSegment = undefined;
+  };
+
+  for (const node of row) {
+    const segment = React.isValidElement(node) ? segmentOf(node) : undefined;
+    if (segment === undefined) {
+      flush();
+      out.push(node);
+      continue;
+    }
+    if (segment !== runSegment) flush();
+    runSegment = segment;
+    run.push(node as React.ReactElement);
+  }
+  flush();
+  return out;
 }
 
 /**
@@ -198,12 +265,15 @@ export interface ControlGridProps {
  * stacked rows (halving the group's footprint, Excel-style); in the
  * panel/popover they flow as one wrapping toolbar row. Reading order is
  * preserved (left-to-right, then next row). Place ControlGridBreak children
- * to curate exactly where band rows split.
+ * to curate exactly where band rows split, and pass `segmentOf` to join
+ * related controls into pills.
  */
 export function ControlGrid({
   gap = GAP_XS,
+  rowGap = ROW_GAP,
   bandRows = 2,
   splitAt = 5,
+  segmentOf,
   children,
 }: ControlGridProps): React.ReactElement {
   const layout = useSurfaceLayout();
@@ -242,7 +312,7 @@ export function ControlGrid({
           display: "flex",
           flexDirection: "column",
           justifyContent: "center",
-          gap,
+          gap: rowGap,
           height: "100%",
           minWidth: 0,
         }}
@@ -258,7 +328,7 @@ export function ControlGrid({
               flexWrap: "nowrap",
             }}
           >
-            {row}
+            {segmentRow(row, segmentOf)}
           </div>
         ))}
       </div>
@@ -271,12 +341,13 @@ export function ControlGrid({
         display: "flex",
         flexDirection: "row",
         alignItems: "center",
-        gap,
+        columnGap: gap,
+        rowGap,
         flexWrap: "wrap",
         minWidth: 0,
       }}
     >
-      {children}
+      {segmentOf ? segmentRow(items, segmentOf) : children}
     </div>
   );
 }
@@ -329,7 +400,7 @@ export function StatusText({ children, title }: { children: React.ReactNode; tit
     <span
       style={{
         fontSize: LABEL_FONT_SIZE,
-        opacity: 0.8,
+        color: LT.textSecondary,
         overflow: "hidden",
         textOverflow: "ellipsis",
         whiteSpace: "nowrap",

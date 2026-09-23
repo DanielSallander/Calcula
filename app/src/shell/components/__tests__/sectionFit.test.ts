@@ -7,7 +7,14 @@ import {
   computeWidthDemotions,
   type WidthDemotionInput,
 } from "../useSectionFit";
-import { DEMOTE_HEIGHT, LAUNCHER_BAND_WIDTH } from "../../../api/layout";
+import {
+  BAND_MAX_CONTENT_HEIGHT,
+  CLUSTER_GAP,
+  CLUSTER_PAD,
+  DEMOTE_HEIGHT,
+  LAUNCHER_BAND_WIDTH,
+} from "../../../api/layout";
+import { cellChromeWidth } from "../SectionChrome";
 
 function s(
   id: string,
@@ -21,13 +28,45 @@ function s(
 describe("shouldDemoteForHeight", () => {
   it("keeps content at or under the threshold inline", () => {
     expect(shouldDemoteForHeight(0)).toBe(false);
-    expect(shouldDemoteForHeight(80)).toBe(false);
+    expect(shouldDemoteForHeight(DEMOTE_HEIGHT - 10)).toBe(false);
     expect(shouldDemoteForHeight(DEMOTE_HEIGHT)).toBe(false);
   });
 
+  it("never demotes content that fills the 61px box, even measured fractionally", () => {
+    // A probe reads a fractional contentRect; demotion is sticky for the
+    // session, so a section that FITS must not be demoted by a 0.5px reading.
+    expect(shouldDemoteForHeight(BAND_MAX_CONTENT_HEIGHT)).toBe(false);
+    expect(shouldDemoteForHeight(BAND_MAX_CONTENT_HEIGHT + 0.5)).toBe(false);
+    expect(shouldDemoteForHeight(DEMOTE_HEIGHT + 0.4)).toBe(false);
+  });
+
   it("demotes content above the threshold", () => {
+    expect(shouldDemoteForHeight(DEMOTE_HEIGHT + 0.6)).toBe(true);
     expect(shouldDemoteForHeight(DEMOTE_HEIGHT + 1)).toBe(true);
+    // Three 28px rows (the pre-fill-rule three-row layout) no longer fit.
+    expect(shouldDemoteForHeight(3 * 28 + 2 * 5)).toBe(true);
     expect(shouldDemoteForHeight(500)).toBe(true);
+  });
+});
+
+describe("cellChromeWidth", () => {
+  it("is the card padding on both sides plus the gap to the next cluster", () => {
+    expect(cellChromeWidth(true, false)).toBe(2 * CLUSTER_PAD + CLUSTER_GAP);
+    expect(cellChromeWidth(false, false)).toBe(2 * CLUSTER_PAD + CLUSTER_GAP);
+  });
+
+  it("drops the gap on the last cell", () => {
+    expect(cellChromeWidth(false, true)).toBe(2 * CLUSTER_PAD);
+    expect(cellChromeWidth(true, true)).toBe(2 * CLUSTER_PAD);
+  });
+
+  it("is 22 / 16 at today's tokens", () => {
+    expect(cellChromeWidth(false, false)).toBe(22);
+    expect(cellChromeWidth(false, true)).toBe(16);
+  });
+
+  it("agrees with the launcher-band token (a 58px launcher plus the same chrome)", () => {
+    expect(LAUNCHER_BAND_WIDTH).toBe(58 + cellChromeWidth(false, false));
   });
 });
 
@@ -76,8 +115,8 @@ describe("computeWidthDemotions", () => {
     expect(result.size).toBe(2);
   });
 
-  it("counts measured launcher widths instead of the 64px token (root-cause regression)", () => {
-    // At the token, demoting b "fits": 300 + 64 = 364 <= 400. With b's REAL
+  it("counts measured launcher widths instead of the 80px token (root-cause regression)", () => {
+    // At the token, demoting b "fits": 300 + 80 = 380 <= 400. With b's REAL
     // launcher measuring 220, 300 + 220 = 520 > 400 — a must demote too.
     const inputs: WidthDemotionInput[] = [
       { id: "a", width: 300, collapsePriority: 2, alreadyLauncher: false },
@@ -89,7 +128,7 @@ describe("computeWidthDemotions", () => {
   });
 
   it("counts a measured launcher width for already-launcher sections", () => {
-    // b is a real launcher measuring 200 (not the 64 token): 250 + 200 = 450
+    // b is a real launcher measuring 200 (not the 80 token): 250 + 200 = 450
     // overflows 400, so a must demote even though the token math said it fit.
     const inputs: WidthDemotionInput[] = [
       { id: "a", width: 250, collapsePriority: 1, alreadyLauncher: false },
@@ -101,7 +140,7 @@ describe("computeWidthDemotions", () => {
   });
 
   it("never demotes a section narrower than its launcher (no savings)", () => {
-    // Demoting the 40px section would GROW the strip to a 64px launcher.
+    // Demoting the 40px section would GROW the strip to an 80px launcher.
     const result = computeWidthDemotions([s("tiny", 40, 1), s("big", 300, 2)], 100);
     expect(result.has("big")).toBe(true);
     expect(result.has("tiny")).toBe(false);

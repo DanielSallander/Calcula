@@ -18,7 +18,8 @@ import {
   TableDialogDefinition,
   TABLE_DIALOG_ID,
   RemoveDuplicatesDialogDefinition,
-  REMOVE_DUPLICATES_DIALOG_ID,
+  TableJsonPaneDefinition,
+  TABLE_JSON_PANE_ID,
 } from "./manifest";
 
 import {
@@ -65,6 +66,18 @@ function activate(context: ExtensionContext): void {
   // Register dialogs
   context.ui.dialogs.register(TableDialogDefinition);
   context.ui.dialogs.register(RemoveDuplicatesDialogDefinition);
+
+  // The "Table JSON" task pane, opened by the Table Design panel's JSON hero.
+  // It replaced a `position: fixed` overlay the ribbon section drew itself.
+  context.ui.taskPanes.register(TableJsonPaneDefinition);
+  cleanupFunctions.push(() => {
+    context.ui.taskPanes.close(TABLE_JSON_PANE_ID);
+    context.ui.taskPanes.unregister(TABLE_JSON_PANE_ID);
+    // The selection handler adds "table" while the cursor is in a table, and
+    // deactivation resets it WITHOUT a deselect — so, now that a pane declares
+    // the key, it must not outlive the extension that owns it.
+    context.ui.taskPanes.removeContextKey("table");
+  });
 
   // Register style interceptor for table formatting (header, banded rows, etc.)
   cleanupFunctions.push(registerTableStyleInterceptor());
@@ -209,7 +222,7 @@ function activate(context: ExtensionContext): void {
   refreshCache().catch(console.error);
 
   // Expose lifecycle functions for E2E invariant testing
-  (window as any).__CALCULA_TABLE__ = {
+  (window as unknown as Record<string, unknown>).__CALCULA_TABLE__ = {
     getTableAtCell,
     getTableById,
     handleSelectionChange,

@@ -3,10 +3,27 @@
 //          Includes search, select all/none, OK/Cancel, and actions.
 // CONTEXT: Report Connections only ever offer the BI pivots backed by the
 //          filter's own model connection.
+//
+//          Hosted in an @api card Popover (Calcula Clusters): the Popover owns
+//          positioning, the card chrome, and dismissal on Escape or a press
+//          outside both the popover and its anchor (the filter card). It used
+//          to be its own position:fixed body portal with a hardcoded white box and
+//          its own document listeners; every colour is now a token, so the
+//          checklist follows the skin in Dark. The filtering logic is
+//          unchanged.
 
-import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
-import { createPortal } from "react-dom";
+import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { getSheets, emitAppEvent, AppEvents } from "@api";
+import {
+  Button,
+  Input,
+  LT,
+  Popover,
+  Select,
+  SurfaceLayoutProvider,
+  popoverLayout,
+} from "@api/layout";
+import { focusWhenVisible, primaryButtonClass } from "./paneChrome";
 import type { SlicerItem, ConnectionMode, UpdateRibbonFilterParams, AdvancedFilter, AdvancedFilterOperator, AdvancedFilterLogic, FieldDataType } from "../lib/filterPaneTypes";
 import { filterPaneBackend } from "../lib/filterPaneBackend";
 import { updateFilterAsync, updateFilterSelectionAsync, getAllFilters, getConnectionName } from "../lib/filterPaneStore";
@@ -43,7 +60,8 @@ export interface FilterDropdownProps {
   fieldName: string;
   items: SlicerItem[];
   selectedItems: string[] | null;
-  anchorRect: DOMRect;
+  /** The filter card the popover hangs below (and never dismisses on). */
+  anchorEl: HTMLElement;
   onApply: (selectedItems: string[] | null) => void;
   onClose: () => void;
   onDelete: () => void;
@@ -70,7 +88,7 @@ export function FilterDropdown({
   fieldName,
   items,
   selectedItems,
-  anchorRect,
+  anchorEl,
   onApply,
   onClose,
   onDelete,
@@ -101,7 +119,6 @@ export function FilterDropdown({
   const [filterMode, setFilterMode] = useState<"basic" | "advanced">(
     advancedFilter ? "advanced" : "basic",
   );
-  const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Sub-panel state
   type PanelView = "none" | "connections" | "crossTargets" | "settings";
@@ -217,31 +234,18 @@ export function FilterDropdown({
     setShowConnections(false);
   }, [filterId, fieldName, connectionMode, connectedSheets, availablePivots, localMode, localSheets, localConnections, localCrossTargets, localCrossSlicerTargets, connectedPivots]);
 
-  // Close on outside click
-  useEffect(() => {
-    const handleClick = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    // Delay to avoid closing immediately from the toggle click
-    const timer = setTimeout(() => {
-      document.addEventListener("mousedown", handleClick);
-    }, 0);
-    return () => {
-      clearTimeout(timer);
-      document.removeEventListener("mousedown", handleClick);
-    };
-  }, [onClose]);
+  // Escape and a press outside the popover and the card close it: the
+  // Popover below owns both, so this component binds no document listeners.
 
-  // Close on Escape
+  // The search box takes focus on open, as it always did. The autoFocus
+  // attribute alone is lost: the Popover's first, measuring pass is hidden,
+  // and a hidden input refuses focus (see focusWhenVisible).
+  const searchRef = useRef<HTMLInputElement>(null);
+  const showSearch = filterMode === "basic" && items.length > 8;
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+    if (!showSearch) return;
+    return focusWhenVisible(() => searchRef.current);
+  }, [showSearch]);
 
   const handleToggle = useCallback((value: string) => {
     if (singleSelect) {
@@ -295,344 +299,336 @@ export function FilterDropdown({
     return result;
   }, [items, searchText, hideNoData, sortNoDataLast]);
 
-  // Position: below the card, aligned left
-  const top = anchorRect.bottom + 2;
-  const left = Math.min(anchorRect.left, window.innerWidth - 260);
-
-  return createPortal(
-    <div
-      ref={dropdownRef}
-      style={{
-        position: "fixed",
-        left,
-        top,
-        width: 250,
-        maxHeight: 420,
-        backgroundColor: "#fff",
-        border: "1px solid #d1d5db",
-        borderRadius: 4,
-        boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-        zIndex: 10000,
-        display: "flex",
-        flexDirection: "column",
-        fontSize: 13,
-        color: "#333",
-      }}
+  return (
+    <Popover
+      anchorEl={anchorEl}
+      open
+      onClose={onClose}
+      card
+      width={POPOVER_WIDTH}
+      ariaLabel={`Filter ${fieldName}`}
     >
-      {/* Header + Mode selector */}
-      <div style={styles.header}>
-        <span style={{ flex: 1 }}>{fieldName}</span>
-        <select
-          value={filterMode}
-          onChange={(e) => setFilterMode(e.target.value as "basic" | "advanced")}
-          style={styles.modeSelect}
-        >
-          <option value="basic">Basic filtering</option>
-          <option value="advanced">Advanced filtering</option>
-        </select>
-      </div>
-
-      {/* Basic filtering mode */}
-      {filterMode === "basic" && (
-        <>
-          {/* Search */}
-          {items.length > 8 && (
-            <div style={styles.searchRow}>
-              <input
-                type="text"
-                placeholder="Search..."
-                value={searchText}
-                onChange={(e) => setSearchText(e.target.value)}
-                style={styles.searchInput}
-                autoFocus
-              />
-            </div>
-          )}
-
-          {/* Select All / None */}
-          {!singleSelect && (showSelectAll || true) && (
-            <div style={styles.bulkRow}>
-              <button onClick={handleSelectAll} style={styles.bulkButton}>
-                Select All
-              </button>
-              <button onClick={handleSelectNone} style={styles.bulkButton}>
-                Select None
-              </button>
-            </div>
-          )}
-
-          {/* Items */}
-          <div style={styles.itemList}>
-            {filtered.map((item) => (
-              <label
-                key={item.value}
-                style={{
-                  ...styles.itemRow,
-                  opacity: indicateNoData && !item.hasData ? 0.45 : 1,
-                }}
-              >
-                <input
-                  type={singleSelect ? "radio" : "checkbox"}
-                  checked={localSelected.has(item.value)}
-                  onChange={() => handleToggle(item.value)}
-                  name={singleSelect ? `filter-${filterId}` : undefined}
-                  style={{ marginRight: 8 }}
-                />
-                <span style={styles.itemLabel}>{item.value || "(Blank)"}</span>
-              </label>
-            ))}
-            {filtered.length === 0 && (
-              <div style={styles.noResults}>No matching values</div>
-            )}
-          </div>
-
-          {/* OK / Cancel */}
-          <div style={styles.footer}>
-            <button onClick={handleOk} style={styles.okButton}>
-              OK
-            </button>
-            <button onClick={onClose} style={styles.cancelButton}>
-              Cancel
-            </button>
-          </div>
-        </>
-      )}
-
-      {/* Advanced filtering mode */}
-      {filterMode === "advanced" && (
-        <AdvancedFilterPanel
-          filterId={filterId}
-          currentFilter={advancedFilter}
-          fieldDataType={fieldDataType}
-          items={items}
-          onApply={(selected) => {
-            onApply(selected);
-          }}
-          onClose={onClose}
-        />
-      )}
-
-      {/* Actions separator */}
-      <div style={styles.actionsDivider} />
-
-      {/* Actions / Sub-panels */}
-      {panelView === "none" ? (
-        <div style={styles.actionsRow}>
-          <button onClick={() => setPanelView("connections")} style={styles.actionLink}>
-            Connections
-          </button>
-          <button onClick={() => setPanelView("crossTargets")} style={styles.actionLink}>
-            Cross-filter
-          </button>
-          <button onClick={() => setPanelView("settings")} style={styles.actionLink}>
-            Settings
-          </button>
-          <button onClick={onDelete} style={{ ...styles.actionLink, color: "#c00" }}>
-            Remove
-          </button>
-        </div>
-      ) : panelView === "settings" ? (
-        <FilterSettingsPanel
-          filterId={filterId}
-          hideNoData={hideNoData}
-          indicateNoData={indicateNoData}
-          sortNoDataLast={sortNoDataLast}
-          showSelectAll={showSelectAll}
-          singleSelect={singleSelect}
-          filterLevel={filterLevel}
-          onClose={() => setPanelView("none")}
-        />
-      ) : panelView === "crossTargets" ? (
-        <div style={styles.connectionsPanel}>
-          <div style={styles.connectionsHeader}>Cross-filter Targets</div>
-          <div style={styles.modeHint}>
-            Select which filters and slicers this filter should cross-filter.
-            Target items will be dimmed when they have no matching data.
-          </div>
-          <div style={styles.sheetList}>
-            {/* Other ribbon filters on the SAME model connection — item
-                availability can only be evaluated within one model */}
-            {cachedFilters
-              .filter((f) => f.id !== filterId && f.connectionId === connectionId)
-              .map((f) => {
-                const shortName = f.fieldName.includes(".")
-                  ? f.fieldName.split(".").pop()!
-                  : f.fieldName;
-                return (
-                  <label key={`f-${f.id}`} style={styles.itemRow}>
-                    <input
-                      type="checkbox"
-                      checked={localCrossTargets.has(f.id)}
-                      onChange={() => {
-                        setLocalCrossTargets((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(f.id)) next.delete(f.id);
-                          else next.add(f.id);
-                          return next;
-                        });
-                      }}
-                      style={{ marginRight: 8 }}
-                    />
-                    <span style={{ fontSize: 10, color: "#888", marginRight: 4 }}>[F]</span>
-                    <span>{shortName}</span>
-                  </label>
-                );
-              })}
-            {/* Canvas slicers */}
-            {availableSlicers.map((s) => {
-              const shortName = s.fieldName.includes(".")
-                ? s.fieldName.split(".").pop()!
-                : s.fieldName;
-              return (
-                <label key={`s-${s.id}`} style={styles.itemRow}>
-                  <input
-                    type="checkbox"
-                    checked={localCrossSlicerTargets.has(s.id)}
-                    onChange={() => {
-                      setLocalCrossSlicerTargets((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(s.id)) next.delete(s.id);
-                        else next.add(s.id);
-                        return next;
-                      });
-                    }}
-                    style={{ marginRight: 8 }}
-                  />
-                  <span style={{ fontSize: 10, color: "#888", marginRight: 4 }}>[S]</span>
-                  <span>{shortName}</span>
-                </label>
-              );
-            })}
-            {cachedFilters.filter((f) => f.id !== filterId && f.connectionId === connectionId).length === 0 &&
-              availableSlicers.length === 0 && (
-              <div style={styles.modeHint}>
-                No other filters on this model connection or slicers to cross-filter.
-              </div>
-            )}
-          </div>
-          <div style={styles.connectionsFooter}>
-            <button onClick={handleSaveConnections} style={styles.okButton}>Save</button>
-            <button
-              onClick={() => {
-                setLocalCrossTargets(new Set(crossFilterTargets));
-                setLocalCrossSlicerTargets(new Set(crossFilterSlicerTargets));
-                setPanelView("none");
-              }}
-              style={styles.cancelButton}
+      {/* Rendered from a card in the ribbon band, but it is a popover: the
+          @api fields inside must take popover geometry (full width), not the
+          band's compact defaults the portal would otherwise inherit. */}
+      <SurfaceLayoutProvider value={popoverLayout()}>
+        <div style={styles.root} data-testid="controls-pane-filter-dropdown">
+          {/* Header + Mode selector */}
+          <div style={styles.header}>
+            <span style={styles.headerTitle}>{fieldName}</span>
+            <Select
+              width={MODE_SELECT_WIDTH}
+              aria-label="Filtering mode"
+              value={filterMode}
+              onChange={(e) => setFilterMode(e.target.value as "basic" | "advanced")}
             >
-              Cancel
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div style={styles.connectionsPanel}>
-          <div style={styles.connectionsHeader}>Report Connections</div>
-          <div style={styles.modeHint}>
-            Model: {connectionName ?? "(connection missing)"}
-          </div>
-          {/* Mode selector */}
-          <div style={styles.modeRow}>
-            {(["manual", "bySheet", "workbook"] as const).map((mode) => (
-              <label key={mode} style={styles.modeLabel}>
-                <input
-                  type="radio"
-                  name="connMode"
-                  checked={localMode === mode}
-                  onChange={() => setLocalMode(mode)}
-                />
-                {mode === "manual"
-                  ? "Manual"
-                  : mode === "bySheet"
-                    ? "By Sheet"
-                    : "Workbook"}
-              </label>
-            ))}
+              <option value="basic">Basic filtering</option>
+              <option value="advanced">Advanced filtering</option>
+            </Select>
           </div>
 
-          {/* Sheet list (only for bySheet mode) */}
-          {localMode === "bySheet" && (
-            <div style={styles.sheetList}>
-              {sheetNames.map((name, idx) => (
-                <label key={idx} style={styles.itemRow}>
-                  <input
-                    type="checkbox"
-                    checked={localSheets.has(idx)}
-                    onChange={() => {
-                      setLocalSheets((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(idx)) next.delete(idx);
-                        else next.add(idx);
-                        return next;
-                      });
-                    }}
-                    style={{ marginRight: 8 }}
+          {/* Basic filtering mode */}
+          {filterMode === "basic" && (
+            <>
+              {/* Search */}
+              {items.length > 8 && (
+                <div style={styles.searchRow}>
+                  <Input
+                    ref={searchRef}
+                    type="text"
+                    placeholder="Search..."
+                    aria-label="Search values"
+                    value={searchText}
+                    onChange={(e) => setSearchText(e.target.value)}
                   />
-                  <span>{name}</span>
-                </label>
-              ))}
-            </div>
-          )}
-
-          {localMode === "workbook" && (
-            <div style={styles.modeHint}>
-              Automatically connects to all pivot tables using this model
-              connection, including newly created ones.
-            </div>
-          )}
-
-          {localMode === "manual" && (
-            <div style={styles.sheetList}>
-              {availablePivots.length === 0 ? (
-                <div style={styles.modeHint}>
-                  No pivot tables use this model connection yet.
                 </div>
-              ) : (
-                availablePivots.map((pv) => (
-                  <label key={pv.id} style={styles.itemRow}>
-                    <input
-                      type="checkbox"
-                      checked={localConnections.has(pv.id)}
-                      onChange={() => {
-                        setLocalConnections((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(pv.id)) next.delete(pv.id);
-                          else next.add(pv.id);
-                          return next;
-                        });
-                      }}
-                      style={{ marginRight: 8 }}
-                    />
-                    <span style={{ fontSize: 10, color: "#888", marginRight: 4 }}>
-                      [P]
-                    </span>
-                    <span>{pv.name}</span>
-                  </label>
-                ))
               )}
-            </div>
+
+              {/* Select All / None */}
+              {!singleSelect && (showSelectAll || true) && (
+                <div style={styles.bulkRow}>
+                  <Button size="sm" variant="outlined" onClick={handleSelectAll}>
+                    Select All
+                  </Button>
+                  <Button size="sm" variant="outlined" onClick={handleSelectNone}>
+                    Select None
+                  </Button>
+                </div>
+              )}
+
+              {/* Items */}
+              <div style={styles.itemList}>
+                {filtered.map((item) => (
+                  <label
+                    key={item.value}
+                    style={{
+                      ...styles.itemRow,
+                      opacity: indicateNoData && !item.hasData ? 0.45 : 1,
+                    }}
+                  >
+                    <input
+                      type={singleSelect ? "radio" : "checkbox"}
+                      checked={localSelected.has(item.value)}
+                      onChange={() => handleToggle(item.value)}
+                      name={singleSelect ? `filter-${filterId}` : undefined}
+                      style={styles.rowInput}
+                    />
+                    <span style={styles.itemLabel}>{item.value || "(Blank)"}</span>
+                  </label>
+                ))}
+                {filtered.length === 0 && (
+                  <div style={styles.noResults}>No matching values</div>
+                )}
+              </div>
+
+              {/* OK / Cancel */}
+              <div style={styles.footer}>
+                <Button variant="outlined" className={primaryButtonClass} onClick={handleOk}>
+                  OK
+                </Button>
+                <Button variant="outlined" onClick={onClose}>
+                  Cancel
+                </Button>
+              </div>
+            </>
           )}
 
-          <div style={styles.connectionsFooter}>
-            <button onClick={handleSaveConnections} style={styles.okButton}>
-              Save
-            </button>
-            <button
-              onClick={() => {
-                setLocalMode(connectionMode);
-                setLocalSheets(new Set(connectedSheets ?? []));
-                setLocalConnections(new Set(connectedPivots ?? []));
-                setLocalCrossTargets(new Set(crossFilterTargets));
-                setPanelView("none");
+          {/* Advanced filtering mode */}
+          {filterMode === "advanced" && (
+            <AdvancedFilterPanel
+              filterId={filterId}
+              currentFilter={advancedFilter}
+              fieldDataType={fieldDataType}
+              items={items}
+              onApply={(selected) => {
+                onApply(selected);
               }}
-              style={styles.cancelButton}
-            >
-              Cancel
-            </button>
-          </div>
+              onClose={onClose}
+            />
+          )}
+
+          {/* Actions separator */}
+          <div style={styles.actionsDivider} />
+
+          {/* Actions / Sub-panels */}
+          {panelView === "none" ? (
+            <div style={styles.actionsRow}>
+              <Button size="sm" onClick={() => setPanelView("connections")}>
+                Connections
+              </Button>
+              <Button size="sm" onClick={() => setPanelView("crossTargets")}>
+                Cross-filter
+              </Button>
+              <Button size="sm" onClick={() => setPanelView("settings")}>
+                Settings
+              </Button>
+              <Button size="sm" tone="danger" onClick={onDelete}>
+                Remove
+              </Button>
+            </div>
+          ) : panelView === "settings" ? (
+            <FilterSettingsPanel
+              filterId={filterId}
+              hideNoData={hideNoData}
+              indicateNoData={indicateNoData}
+              sortNoDataLast={sortNoDataLast}
+              showSelectAll={showSelectAll}
+              singleSelect={singleSelect}
+              filterLevel={filterLevel}
+              onClose={() => setPanelView("none")}
+            />
+          ) : panelView === "crossTargets" ? (
+            <div style={styles.connectionsPanel}>
+              <div style={styles.connectionsHeader}>Cross-filter targets</div>
+              <div style={styles.modeHint}>
+                Select which filters and slicers this filter should cross-filter.
+                Target items will be dimmed when they have no matching data.
+              </div>
+              <div style={styles.sheetList}>
+                {/* Other ribbon filters on the SAME model connection — item
+                    availability can only be evaluated within one model */}
+                {cachedFilters
+                  .filter((f) => f.id !== filterId && f.connectionId === connectionId)
+                  .map((f) => {
+                    const shortName = f.fieldName.includes(".")
+                      ? f.fieldName.split(".").pop()!
+                      : f.fieldName;
+                    return (
+                      <label key={`f-${f.id}`} style={styles.itemRow}>
+                        <input
+                          type="checkbox"
+                          checked={localCrossTargets.has(f.id)}
+                          onChange={() => {
+                            setLocalCrossTargets((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(f.id)) next.delete(f.id);
+                              else next.add(f.id);
+                              return next;
+                            });
+                          }}
+                          style={styles.rowInput}
+                        />
+                        <span style={styles.kindTag}>[F]</span>
+                        <span>{shortName}</span>
+                      </label>
+                    );
+                  })}
+                {/* Canvas slicers */}
+                {availableSlicers.map((s) => {
+                  const shortName = s.fieldName.includes(".")
+                    ? s.fieldName.split(".").pop()!
+                    : s.fieldName;
+                  return (
+                    <label key={`s-${s.id}`} style={styles.itemRow}>
+                      <input
+                        type="checkbox"
+                        checked={localCrossSlicerTargets.has(s.id)}
+                        onChange={() => {
+                          setLocalCrossSlicerTargets((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(s.id)) next.delete(s.id);
+                            else next.add(s.id);
+                            return next;
+                          });
+                        }}
+                        style={styles.rowInput}
+                      />
+                      <span style={styles.kindTag}>[S]</span>
+                      <span>{shortName}</span>
+                    </label>
+                  );
+                })}
+                {cachedFilters.filter((f) => f.id !== filterId && f.connectionId === connectionId).length === 0 &&
+                  availableSlicers.length === 0 && (
+                  <div style={styles.modeHint}>
+                    No other filters on this model connection or slicers to cross-filter.
+                  </div>
+                )}
+              </div>
+              <div style={styles.connectionsFooter}>
+                <Button variant="outlined" className={primaryButtonClass} onClick={handleSaveConnections}>
+                  Save
+                </Button>
+                <Button
+                  variant="outlined"
+                  onClick={() => {
+                    setLocalCrossTargets(new Set(crossFilterTargets));
+                    setLocalCrossSlicerTargets(new Set(crossFilterSlicerTargets));
+                    setPanelView("none");
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div style={styles.connectionsPanel}>
+              <div style={styles.connectionsHeader}>Report connections</div>
+              <div style={styles.modeHint}>
+                Model: {connectionName ?? "(connection missing)"}
+              </div>
+              {/* Mode selector */}
+              <div style={styles.modeRow}>
+                {(["manual", "bySheet", "workbook"] as const).map((mode) => (
+                  <label key={mode} style={styles.modeLabel}>
+                    <input
+                      type="radio"
+                      name="connMode"
+                      checked={localMode === mode}
+                      onChange={() => setLocalMode(mode)}
+                    />
+                    {mode === "manual"
+                      ? "Manual"
+                      : mode === "bySheet"
+                        ? "By Sheet"
+                        : "Workbook"}
+                  </label>
+                ))}
+              </div>
+
+              {/* Sheet list (only for bySheet mode) */}
+              {localMode === "bySheet" && (
+                <div style={styles.sheetList}>
+                  {sheetNames.map((name, idx) => (
+                    <label key={idx} style={styles.itemRow}>
+                      <input
+                        type="checkbox"
+                        checked={localSheets.has(idx)}
+                        onChange={() => {
+                          setLocalSheets((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(idx)) next.delete(idx);
+                            else next.add(idx);
+                            return next;
+                          });
+                        }}
+                        style={styles.rowInput}
+                      />
+                      <span>{name}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+
+              {localMode === "workbook" && (
+                <div style={styles.modeHint}>
+                  Automatically connects to all pivot tables using this model
+                  connection, including newly created ones.
+                </div>
+              )}
+
+              {localMode === "manual" && (
+                <div style={styles.sheetList}>
+                  {availablePivots.length === 0 ? (
+                    <div style={styles.modeHint}>
+                      No pivot tables use this model connection yet.
+                    </div>
+                  ) : (
+                    availablePivots.map((pv) => (
+                      <label key={pv.id} style={styles.itemRow}>
+                        <input
+                          type="checkbox"
+                          checked={localConnections.has(pv.id)}
+                          onChange={() => {
+                            setLocalConnections((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(pv.id)) next.delete(pv.id);
+                              else next.add(pv.id);
+                              return next;
+                            });
+                          }}
+                          style={styles.rowInput}
+                        />
+                        <span style={styles.kindTag}>[P]</span>
+                        <span>{pv.name}</span>
+                      </label>
+                    ))
+                  )}
+                </div>
+              )}
+
+              <div style={styles.connectionsFooter}>
+                <Button variant="outlined" className={primaryButtonClass} onClick={handleSaveConnections}>
+                  Save
+                </Button>
+                <Button
+                  variant="outlined"
+                  onClick={() => {
+                    setLocalMode(connectionMode);
+                    setLocalSheets(new Set(connectedSheets ?? []));
+                    setLocalConnections(new Set(connectedPivots ?? []));
+                    setLocalCrossTargets(new Set(crossFilterTargets));
+                    setPanelView("none");
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
-      )}
-    </div>,
-    document.body,
+      </SurfaceLayoutProvider>
+    </Popover>
   );
 }
 
@@ -690,17 +686,17 @@ function FilterSettingsPanel({
 
   return (
     <div style={styles.connectionsPanel}>
-      <div style={styles.connectionsHeader}>Filter Settings</div>
+      <div style={styles.connectionsHeader}>Filter settings</div>
 
       {/* Selection */}
-      <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginBottom: 4 }}>
+      <div style={styles.settingsGroup}>
         Selection
       </div>
       <SettingsToggle label="Single select" checked={localSingleSelect} onChange={setLocalSingleSelect} />
       <SettingsToggle label={'Show "Select all" option'} checked={localShowSelectAll} onChange={setLocalShowSelectAll} />
 
       {/* Filtering */}
-      <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginTop: 8, marginBottom: 4 }}>
+      <div style={{ ...styles.settingsGroup, marginTop: 8 }}>
         Filtering
       </div>
       <label
@@ -708,10 +704,11 @@ function FilterSettingsPanel({
         title="A pinned filter (level 2+) keeps filtering even when a measure uses CLEAR or RESET — only CLEAR(…, LEVEL n) at or above its level removes it."
       >
         <span style={{ fontSize: 11 }}>Filter level</span>
-        <select
+        <Select
+          width={LEVEL_SELECT_WIDTH}
+          aria-label="Filter level"
           value={String(localFilterLevel)}
           onChange={(e) => setLocalFilterLevel(Number(e.target.value))}
-          style={{ fontSize: 11 }}
         >
           <option value="1">1 — ordinary</option>
           {[2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
@@ -719,11 +716,11 @@ function FilterSettingsPanel({
               {n} — pinned
             </option>
           ))}
-        </select>
+        </Select>
       </label>
 
       {/* Data display */}
-      <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginTop: 8, marginBottom: 4 }}>
+      <div style={{ ...styles.settingsGroup, marginTop: 8 }}>
         Data display
       </div>
       <SettingsToggle label="Hide items with no data" checked={localHideNoData} onChange={setLocalHideNoData} />
@@ -741,8 +738,12 @@ function FilterSettingsPanel({
       />
 
       <div style={styles.connectionsFooter}>
-        <button onClick={handleSave} style={styles.okButton}>Save</button>
-        <button onClick={onClose} style={styles.cancelButton}>Cancel</button>
+        <Button variant="outlined" className={primaryButtonClass} onClick={handleSave}>
+          Save
+        </Button>
+        <Button variant="outlined" onClick={onClose}>
+          Cancel
+        </Button>
       </div>
     </div>
   );
@@ -932,135 +933,133 @@ function AdvancedFilterPanel({
 
   return (
     <div style={styles.connectionsPanel}>
-      <div style={{ fontSize: 11, color: "#666", marginBottom: 6 }}>
+      <div style={styles.advIntro}>
         Show items when the value
       </div>
 
-      {/* Condition 1 */}
-      <select
-        value={op1}
-        onChange={(e) => setOp1(e.target.value as AdvancedFilterOperator)}
-        style={styles.advSelect}
-      >
-        {operators.map((o) => (
-          <option key={o.value} value={o.value}>{o.label}</option>
-        ))}
-      </select>
-      {needsValue(op1) && (
-        <input
-          type="text"
-          value={val1}
-          onChange={(e) => setVal1(e.target.value)}
-          placeholder="Value..."
-          style={styles.advInput}
-        />
-      )}
+      <div style={styles.advStack}>
+        {/* Condition 1 */}
+        <Select
+          aria-label="First condition"
+          value={op1}
+          onChange={(e) => setOp1(e.target.value as AdvancedFilterOperator)}
+        >
+          {operators.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </Select>
+        {needsValue(op1) && (
+          <Input
+            type="text"
+            aria-label="First value"
+            value={val1}
+            onChange={(e) => setVal1(e.target.value)}
+            placeholder="Value..."
+          />
+        )}
 
-      {/* Logic toggle */}
-      <div style={styles.advLogicRow}>
-        <label style={styles.modeLabel}>
-          <input
-            type="radio"
-            name="advLogic"
-            checked={logic === "and"}
-            onChange={() => setLogic("and")}
+        {/* Logic toggle */}
+        <div style={styles.advLogicRow}>
+          <label style={styles.modeLabel}>
+            <input
+              type="radio"
+              name="advLogic"
+              checked={logic === "and"}
+              onChange={() => setLogic("and")}
+            />
+            And
+          </label>
+          <label style={styles.modeLabel}>
+            <input
+              type="radio"
+              name="advLogic"
+              checked={logic === "or"}
+              onChange={() => setLogic("or")}
+            />
+            Or
+          </label>
+        </div>
+
+        {/* Condition 2 */}
+        <Select
+          aria-label="Second condition"
+          value={op2}
+          onChange={(e) => {
+            setOp2(e.target.value as AdvancedFilterOperator);
+            setHasCond2(true);
+          }}
+        >
+          {operators.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </Select>
+        {needsValue(op2) && (
+          <Input
+            type="text"
+            aria-label="Second value"
+            value={val2}
+            onChange={(e) => { setVal2(e.target.value); setHasCond2(true); }}
+            placeholder="Value..."
           />
-          And
-        </label>
-        <label style={styles.modeLabel}>
-          <input
-            type="radio"
-            name="advLogic"
-            checked={logic === "or"}
-            onChange={() => setLogic("or")}
-          />
-          Or
-        </label>
+        )}
       </div>
 
-      {/* Condition 2 */}
-      <select
-        value={op2}
-        onChange={(e) => {
-          setOp2(e.target.value as AdvancedFilterOperator);
-          setHasCond2(true);
-        }}
-        style={styles.advSelect}
-      >
-        {operators.map((o) => (
-          <option key={o.value} value={o.value}>{o.label}</option>
-        ))}
-      </select>
-      {needsValue(op2) && (
-        <input
-          type="text"
-          value={val2}
-          onChange={(e) => { setVal2(e.target.value); setHasCond2(true); }}
-          placeholder="Value..."
-          style={styles.advInput}
-        />
-      )}
-
       <div style={styles.connectionsFooter}>
-        <button onClick={handleApply} style={styles.okButton}>
+        <Button variant="outlined" className={primaryButtonClass} onClick={handleApply}>
           Apply filter
-        </button>
-        <button onClick={handleClear} style={styles.cancelButton}>
+        </Button>
+        <Button variant="outlined" onClick={handleClear}>
           Clear
-        </button>
+        </Button>
       </div>
     </div>
   );
 }
 
+/** Popover width: the checklist's historical 250px. */
+const POPOVER_WIDTH = 250;
+/** The header's mode picker ("Advanced filtering" fits). */
+const MODE_SELECT_WIDTH = 138;
+/** The settings panel's filter-level picker ("9 — pinned" fits). */
+const LEVEL_SELECT_WIDTH = 116;
+
+/** A hairline between the checklist's bands. */
+const DIVIDER = `1px solid ${LT.controlDivider}`;
+
+// Horizontal insets are small: the card Popover already pads 8px all round.
 const styles: Record<string, React.CSSProperties> = {
+  root: {
+    display: "flex",
+    flexDirection: "column",
+    fontSize: 13,
+    color: LT.text,
+  },
   header: {
-    padding: "8px 12px",
-    borderBottom: "1px solid #e5e7eb",
+    padding: "0 2px 8px",
+    borderBottom: DIVIDER,
     fontWeight: 600,
     fontSize: "12px",
-    color: "#333",
+    color: LT.text,
     display: "flex",
     alignItems: "center",
     gap: "6px",
   },
-  modeSelect: {
-    fontSize: 10,
-    padding: "2px 4px",
-    border: "1px solid #d1d5db",
-    borderRadius: 3,
-    background: "#f9fafb",
-    color: "#555",
-    cursor: "pointer",
-    flexShrink: 0,
+  headerTitle: {
+    flex: 1,
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   searchRow: {
-    padding: "6px 12px",
-    borderBottom: "1px solid #e5e7eb",
-  },
-  searchInput: {
-    width: "100%",
-    padding: "5px 8px",
-    border: "1px solid #d1d5db",
-    borderRadius: 3,
-    fontSize: 12,
-    outline: "none",
-    boxSizing: "border-box" as const,
+    padding: "6px 2px",
+    borderBottom: DIVIDER,
   },
   bulkRow: {
-    padding: "4px 12px",
-    borderBottom: "1px solid #e5e7eb",
+    padding: "6px 2px",
+    borderBottom: DIVIDER,
     display: "flex",
     gap: "6px",
-  },
-  bulkButton: {
-    padding: "3px 8px",
-    border: "1px solid #d1d5db",
-    borderRadius: 3,
-    background: "#f9fafb",
-    cursor: "pointer",
-    fontSize: 11,
-    color: "#333",
   },
   itemList: {
     flex: 1,
@@ -1071,72 +1070,61 @@ const styles: Record<string, React.CSSProperties> = {
   itemRow: {
     display: "flex",
     alignItems: "center",
-    padding: "3px 12px",
+    padding: "3px 4px",
     cursor: "pointer",
     fontSize: 12,
+    color: LT.text,
+  },
+  rowInput: {
+    marginRight: 8,
   },
   itemLabel: {
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap" as const,
   },
+  kindTag: {
+    fontSize: 10,
+    color: LT.textSecondary,
+    marginRight: 4,
+  },
   noResults: {
-    padding: "8px 12px",
-    color: "#999",
+    padding: "8px 4px",
+    color: LT.textSecondary,
     fontStyle: "italic",
     fontSize: 12,
   },
   footer: {
-    padding: "6px 12px",
-    borderTop: "1px solid #e5e7eb",
+    padding: "8px 2px 6px",
+    borderTop: DIVIDER,
     display: "flex",
     justifyContent: "flex-end",
     gap: "6px",
   },
-  okButton: {
-    padding: "4px 16px",
-    border: "none",
-    borderRadius: 3,
-    background: "#0078d4",
-    color: "#fff",
-    cursor: "pointer",
-    fontSize: 12,
-  },
-  cancelButton: {
-    padding: "4px 12px",
-    border: "1px solid #d1d5db",
-    borderRadius: 3,
-    background: "#fff",
-    cursor: "pointer",
-    fontSize: 12,
-    color: "#333",
-  },
   actionsDivider: {
     height: "1px",
-    background: "#e5e7eb",
+    background: LT.controlDivider,
   },
   actionsRow: {
-    padding: "4px 12px 6px",
+    padding: "6px 0 0",
     display: "flex",
-    gap: "8px",
-  },
-  actionLink: {
-    border: "none",
-    background: "none",
-    cursor: "pointer",
-    fontSize: 11,
-    color: "#0078d4",
-    padding: "2px 0",
-    textDecoration: "underline",
+    flexWrap: "wrap",
+    gap: "2px",
   },
   connectionsPanel: {
-    padding: "8px 12px",
+    padding: "8px 2px 2px",
   },
   connectionsHeader: {
     fontSize: 12,
     fontWeight: 600,
     marginBottom: 6,
-    color: "#333",
+    color: LT.text,
+  },
+  settingsGroup: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: LT.textSecondary,
+    marginBottom: 4,
   },
   modeRow: {
     display: "flex",
@@ -1148,19 +1136,20 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     gap: "3px",
     fontSize: 11,
+    color: LT.text,
     cursor: "pointer",
   },
   sheetList: {
     maxHeight: 120,
     overflowY: "auto" as const,
-    border: "1px solid #e5e7eb",
-    borderRadius: 3,
+    border: DIVIDER,
+    borderRadius: LT.radiusControl,
     padding: "4px 0",
     marginBottom: 6,
   },
   modeHint: {
     fontSize: 10,
-    color: "#888",
+    color: LT.textSecondary,
     fontStyle: "italic",
     marginBottom: 6,
     lineHeight: "1.4",
@@ -1169,28 +1158,21 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     justifyContent: "flex-end",
     gap: 6,
+    marginTop: 6,
   },
-  advSelect: {
-    width: "100%",
-    padding: "4px 6px",
+  advIntro: {
     fontSize: 11,
-    border: "1px solid #d1d5db",
-    borderRadius: 3,
-    marginBottom: 4,
-    boxSizing: "border-box" as const,
+    color: LT.textSecondary,
+    marginBottom: 6,
   },
-  advInput: {
-    width: "100%",
-    padding: "4px 6px",
-    fontSize: 11,
-    border: "1px solid #d1d5db",
-    borderRadius: 3,
-    marginBottom: 4,
-    boxSizing: "border-box" as const,
+  advStack: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
   },
   advLogicRow: {
     display: "flex",
     gap: 12,
-    margin: "4px 0",
+    margin: "2px 0",
   },
 };

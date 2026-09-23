@@ -1153,7 +1153,7 @@ export {
 // Ribbon button icons (two-tone SVG set for ribbon tabs; namespaced so the
 // individual icon names never collide with the menu icon exports above).
 export { RibbonIcon } from "./ribbonIcons";
-export type { RibbonIconProps } from "./ribbonIcons";
+export type { RibbonIconProps, RibbonIconKey } from "./ribbonIcons";
 
 // ============================================================================
 // File Format API (Custom Importers/Exporters)
@@ -1689,7 +1689,13 @@ export {
   getActiveGridTheme,
   LIGHT_SKIN_ID,
   DARK_SKIN_ID,
+  SOFT_SKIN_ID,
+  CONTRAST_SKIN_ID,
   BUILTIN_DEFAULT_SKIN_ID,
+  getRibbonLabelMode,
+  setRibbonLabelMode,
+  getUserTokenOverrides,
+  setUserTokenOverrides,
 } from "./appearance";
 
 export type {
@@ -1700,6 +1706,7 @@ export type {
   ThemeTokenName,
   AccessibilityOverride,
   AppearanceChangedPayload,
+  RibbonLabelMode,
 } from "./appearance";
 
 // Enterprise appearance policy (advisory default) + accessibility resolution.

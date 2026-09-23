@@ -106,6 +106,61 @@ describe("DEFAULT_LAYOUT is the shipped Home tab", () => {
 });
 
 // ============================================================================
+// Segments: catalog-only pill membership
+// ============================================================================
+
+describe("segment (which Segmented pill a command joins)", () => {
+  it("joins exactly the approved runs", () => {
+    const segments = Object.fromEntries(
+      ALL_ITEMS.filter((i) => i.segment !== undefined).map((i) => [i.id, i.segment])
+    );
+    expect(segments).toEqual({
+      bold: "emphasis",
+      italic: "emphasis",
+      underline: "emphasis",
+      strikethrough: "emphasis",
+      alignTop: "valign",
+      alignMiddle: "valign",
+      alignBottom: "valign",
+      alignLeft: "halign",
+      alignCenter: "halign",
+      alignRight: "halign",
+      decreaseIndent: "indent",
+      increaseIndent: "indent",
+      increaseDecimal: "decimals",
+      decreaseDecimal: "decimals",
+    });
+  });
+
+  it("is never persisted: a saved layout is only group ids, labels and item ids", () => {
+    saveLayout(DEFAULT_LAYOUT);
+    const raw = localStorage.getItem(STORAGE_KEY) as string;
+    expect(raw).not.toContain("segment");
+    // Byte-compatible with a layout written before segments existed.
+    expect(raw).toBe(JSON.stringify({ ...DEFAULT_LAYOUT, version: LAYOUT_VERSION }));
+  });
+
+  it("each default run is contiguous, so every pill in the shipped tab is whole", () => {
+    for (const group of DEFAULT_LAYOUT.groups) {
+      const seen = new Set<string>();
+      let previous: string | undefined;
+      for (const id of group.items) {
+        const segment = ITEMS_BY_ID.get(id)?.segment;
+        if (segment !== undefined && segment !== previous) {
+          expect(seen.has(segment), `${group.id}: "${segment}" is split`).toBe(false);
+          seen.add(segment);
+        }
+        previous = segment;
+      }
+    }
+  });
+
+  it("LAYOUT_VERSION did not move", () => {
+    expect(LAYOUT_VERSION).toBe(1);
+  });
+});
+
+// ============================================================================
 // resetLayout is pure
 // ============================================================================
 

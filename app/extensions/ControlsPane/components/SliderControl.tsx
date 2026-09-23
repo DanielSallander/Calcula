@@ -10,9 +10,19 @@
 // CONTEXT: Rendered inside ControlCard; adapts to the ribbon band (compact,
 //          fixed-width track) vs sidebar (full-width track) via
 //          useSurfaceLayout, like the other Controls-pane cards.
+//
+//          Drawn by the @api Slider (token track, accent fill, monospace
+//          readout), which replaced a bare OS-painted <input type="range">
+//          that stayed light in Dark. The COMMIT logic stays here, not in the
+//          primitive's onCommit: this control freezes its prop resync for the
+//          whole interaction and advances its baseline when a commit is
+//          issued, so a slow backend round-trip can never make a second drag
+//          commit against a stale start value. The primitive chains the
+//          pointer/key/blur handlers below through to its <input>, so they run
+//          exactly as they did on the bare input.
 
 import React, { useState, useCallback, useEffect, useRef } from "react";
-import { useSurfaceLayout } from "@api/layout";
+import { Slider, useSurfaceLayout } from "@api/layout";
 import { setChartParamValue } from "@api/chartParams";
 import type { ControlValue } from "@api/controlValues";
 import type { PaneControl } from "../lib/controlsPaneTypes";
@@ -110,8 +120,7 @@ export function SliderControl({ control }: Props): React.ReactElement {
   // Drag frames: local state + transient store event only — no backend, no
   // undo, no recalc, and the store cache stays on the committed value.
   const handleInput = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const v = Number(e.target.value);
+    (v: number) => {
       if (Number.isNaN(v)) return;
       // Safety net: a change without a seen pointerdown/keydown still counts
       // as an interaction (the baseline was prop-synced while idle).
@@ -177,28 +186,29 @@ export function SliderControl({ control }: Props): React.ReactElement {
   );
 
   return (
-    <div style={{ ...styles.row, ...(band ? styles.rowBand : styles.rowSidebar) }}>
-      <input
-        type="range"
-        min={config.min}
-        max={config.max}
-        step={config.step}
-        value={localValue}
-        onChange={handleInput}
-        onPointerDown={beginInteraction}
-        onPointerUp={handlePointerUp}
-        onKeyDown={handleKeyDown}
-        onKeyUp={handleKeyUp}
-        onBlur={handleBlur}
-        style={styles.slider}
-        title={`${control.name}: ${formatValue(localValue, config.step)}`}
-      />
-      {config.showValue && (
-        <span style={styles.valueText}>{formatValue(localValue, config.step)}</span>
-      )}
-    </div>
+    <Slider
+      min={config.min}
+      max={config.max}
+      step={config.step}
+      value={localValue}
+      onChange={handleInput}
+      onPointerDown={beginInteraction}
+      onPointerUp={handlePointerUp}
+      onKeyDown={handleKeyDown}
+      onKeyUp={handleKeyUp}
+      onBlur={handleBlur}
+      readout={config.showValue}
+      // The card is the width: the track takes what the readout leaves.
+      width={band ? BAND_TRACK_WIDTH : undefined}
+      ariaLabel={control.name}
+      title={`${control.name}: ${formatValue(localValue, config.step)}`}
+      style={styles.row}
+    />
   );
 }
+
+/** Band track width: fills a card at its minimum width beside the readout. */
+const BAND_TRACK_WIDTH = 96;
 
 /** Format the readout to the step's precision (avoids float noise). */
 function formatValue(value: number, step: number): string {
@@ -211,30 +221,6 @@ function formatValue(value: number, step: number): string {
 
 const styles: Record<string, React.CSSProperties> = {
   row: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
     minWidth: 0,
-  },
-  rowBand: {
-    width: "100%",
-  },
-  rowSidebar: {
-    width: "100%",
-  },
-  slider: {
-    flex: 1,
-    minWidth: "60px",
-    height: "16px",
-    margin: 0,
-    cursor: "pointer",
-  },
-  valueText: {
-    fontSize: "11px",
-    color: "#666",
-    whiteSpace: "nowrap",
-    flexShrink: 0,
-    minWidth: "24px",
-    textAlign: "right",
   },
 };

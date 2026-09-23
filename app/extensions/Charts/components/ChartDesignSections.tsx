@@ -1,24 +1,122 @@
 //! FILENAME: app/extensions/Charts/components/ChartDesignSections.tsx
-// PURPOSE: Panel sections for the contextual "Chart Design" panel.
-// CONTEXT: Appears (in the ribbon by default) when a chart is selected. One
-//          PanelSection per former ribbon group: chart type selector with
-//          icons, chart-elements checkboxes, stacking/axes, trendline, color
-//          palette swatches, legend controls, filter dropdown, actions and the
-//          JSON toggle. The shell owns group chrome and collapse now; internal
-//          layout uses @api/layout primitives while the band-designed widgets
-//          (type icon gallery, palette swatches, filter dropdown) are kept
-//          as-is. Replaces the monolithic ChartDesignTab (useRibbonCollapse).
+// PURPOSE: The contextual "Chart Design" panel — six clusters built from the
+//          @api/layout control grammar: Type, Elements, Layout, Style, Data,
+//          Actions.
+// CONTEXT: This was fourteen sections of hand-rolled chrome: 42px buttons with
+//          20x16 icons painted in Office colours, seven native <select>s, a
+//          checkbox grid, unicode glyph icons and a `position: fixed` JSON
+//          overlay. It is now the Calcula Clusters layout from the approved
+//          plan ("The Chart Design tab — 14 sections -> 6 clusters"):
+//
+//            Type      one tall row: six 44x61 type tiles + a More tile that
+//                      opens every type as a gallery
+//            Elements  one tall pill of icon-only toggles; Title / Legend /
+//                      Data labels are split, their chevron half opening the
+//                      options (title text, legend position, label position
+//                      and size) that used to be three more sections
+//            Layout    (axis charts only) the stacking pill + a "Bars" /
+//                      "Line" / "Area" hero whose card holds the mark sliders;
+//                      a combo chart gets the "2nd axis" switch
+//            Style     two rows: the palette strip, then "Series" (per-series
+//                      colour, the preserved SeriesColorsSection)
+//            Data      two rows (Filter + its "N of M" chip, Trendline + its
+//                      chip) beside the "Switch" row/column hero
+//            Actions   heroes: Edit Chart, Save Image, Format Point (when a
+//                      data point is selected), JSON (opens the chart-json
+//                      task pane)
+//
+//          THE FILL RULE. Every cluster's band content is either one tall row
+//          of 61px or two 28px rows with a 5px gap — never one short row
+//          alone. That is why a control that does not apply to the current
+//          mark is sometimes DISABLED rather than removed (the stacking pill on
+//          a scatter chart, the Series button on a pie): removing it would
+//          leave a cluster that is one short row floating in a tall card.
+//
+//          ONLY LAYOUT IS CONDITIONAL. The section list changes only on an
+//          axis-chart <-> radial-chart flip, so handlers/selectionHandler.ts
+//          re-registers the panel only then; every other type switch re-renders
+//          the same six components in place (no remount flash).
+//
+//          AUTHORITY: the band configures the WHOLE chart. Axis titles and
+//          bounds left it for the Format pane (ChartFormatPane's AxisSections
+//          edits the title on the Text tab and min/max on the Axis tab), which
+//          formats the current selection.
+//
+//          Imports from "@api" are limited to the event/dialog helpers; the
+//          icon set, task-pane calls and layout primitives come from their
+//          @api/* modules.
 
-import React, { useState, useEffect, useCallback, useReducer } from "react";
+import React, { useState, useEffect, useCallback, useReducer, useRef } from "react";
 import { css } from "@emotion/css";
 import { emitAppEvent, onAppEvent, AppEvents, showDialog } from "@api";
+import { openTaskPane, closeTaskPane, useTaskPaneOpenPaneIds, useIsTaskPaneOpen } from "@api/ui";
+import { RibbonIcon, type RibbonIconKey } from "@api/ribbonIcons";
 import type { PanelSection, PanelSectionProps } from "@api/uiTypes";
-import { ControlRow, ActionRow, Input } from "@api/layout";
+import {
+  useSurfaceLayout,
+  SurfaceLayoutProvider,
+  popoverLayout,
+  Button,
+  IconButton,
+  CommandButton,
+  DropdownChevron,
+  Segmented,
+  SegmentedChoice,
+  Popover,
+  Menu,
+  MenuButton,
+  MenuItem,
+  MenuSeparator,
+  Dropdown,
+  Checkbox,
+  Switch,
+  Chip,
+  Slider,
+  Input,
+  ColorSwatch,
+  Tile,
+  TileGallery,
+  PaletteStrip,
+  StatusText,
+  normalizeHex,
+  LT,
+  FONT_FAMILY,
+  GAP_XS,
+  GAP_SM,
+  ROW_GAP,
+  CONTROL_HEIGHT_MD,
+  TALL_CONTROL_HEIGHT,
+  ICON_SIZE_SM,
+  ICON_SIZE_MD,
+  HERO_ICON_SIZE,
+} from "@api/layout";
+import { alertAsync } from "@api/dialogs";
 
-import type { ChartType, ChartSpec, ChartFilters, StackMode, BarMarkOptions, LineMarkOptions, AreaMarkOptions, TrendlineSpec, TrendlineType, ComboMarkOptions, DataLabelSpec, DataLabelPosition, LineInterpolation, SeriesOrientation } from "../types";
+import type {
+  ChartType,
+  ChartSpec,
+  ChartFilters,
+  StackMode,
+  BarMarkOptions,
+  LineMarkOptions,
+  AreaMarkOptions,
+  TrendlineSpec,
+  TrendlineType,
+  ComboMarkOptions,
+  DataLabelSpec,
+  DataLabelPosition,
+  LineInterpolation,
+  SeriesOrientation,
+} from "../types";
 import { isPivotDataSource, isCartesianChart } from "../types";
-import { ChartFilterDropdown } from "./ChartFilterDropdown";
-import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
+import { ChartFilterDropdown, summarizeChartFilters } from "./ChartFilterDropdown";
+import { CHART_JSON_PANE_ID } from "./ChartJsonPane";
+import {
+  CHART_TYPES,
+  QUICK_CHART_TYPES,
+  chartTypeEntry,
+  chartTypeName,
+} from "./chartTypeCatalog";
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
 import { invalidateChartCache, getCachedChartData } from "../rendering/chartRenderer";
 import { getCurrentChartId, getSubSelection } from "../handlers/selectionHandler";
@@ -33,321 +131,161 @@ import {
   seriesColorPatch,
 } from "../lib/chartDataReader";
 import { resolveDataSource } from "../lib/dataSourceResolver";
-import { alertAsync } from "@api/dialogs";
+import { getStackModeFromSpec, setStackModeInOptions, supportsStacking } from "../lib/stackMode";
 
 // ============================================================================
-// Styles (band-designed widgets kept from the former ChartDesignTab)
+// Layout (tokens only — the band's geometry is the fill rule)
 // ============================================================================
 
-const s = {
-  // -- Type group: icon-over-text toggle buttons --
-  typeButtonGroup: css`
-    display: flex;
-    gap: 2px;
-  `,
-  typeBtn: css`
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 1px;
-    padding: 3px 6px;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    cursor: pointer;
-    font-size: 10px;
-    color: var(--text-primary, #444);
-    min-width: 42px;
+/** One tall row: fills the 61px content box. */
+const bandRow = css`
+  display: inline-flex;
+  align-items: center;
+  gap: ${GAP_XS}px;
+  box-sizing: border-box;
+  height: ${TALL_CONTROL_HEIGHT}px;
+`;
 
-    &:hover {
-      background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
-    }
-  `,
-  typeBtnActive: css`
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 1px;
-    padding: 3px 6px;
-    background: var(--button-pressed-bg, rgba(16, 185, 129, 0.14));
-    border: 1px solid var(--button-pressed-border, rgba(16, 185, 129, 0.45));
-    border-radius: 3px;
-    cursor: pointer;
-    font-size: 10px;
-    color: var(--text-primary, #1a1a1a);
-    min-width: 42px;
-    font-weight: 500;
+/** Two rows, 28 + 5 + 28 = 61. */
+const bandColumn = css`
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: ${ROW_GAP}px;
+  box-sizing: border-box;
+  height: ${TALL_CONTROL_HEIGHT}px;
+`;
 
-    &:hover {
-      background: var(--button-pressed-bg, rgba(16, 185, 129, 0.14));
-    }
-  `,
-  typeIcon: css`
-    width: 24px;
-    height: 20px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  `,
+/** One 28px row inside a two-row column. */
+const bandLine = css`
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: ${GAP_XS}px;
+  height: ${CONTROL_HEIGHT_MD}px;
+`;
 
-  // -- Chart Elements group --
-  checkGrid: css`
-    display: grid;
-    grid-template-columns: auto auto;
-    gap: 1px 12px;
-  `,
-  checkLabel: css`
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    cursor: pointer;
-    white-space: nowrap;
-    font-size: 11px;
-    color: var(--text-primary, #333);
+/** Data: the two-row column beside its hero. */
+const bandPair = css`
+  display: inline-flex;
+  align-items: center;
+  gap: ${GAP_SM}px;
+  height: ${TALL_CONTROL_HEIGHT}px;
+`;
 
-    input {
-      cursor: pointer;
-      margin: 0;
-    }
-  `,
+/** Sidebar / flyout: rows stack and wrap. */
+const panelStack = css`
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: ${GAP_SM}px;
+  min-width: 0;
+`;
 
-  // -- Small numeric option inputs (Bars/Line/Axis sections) --
-  numInput: css`
-    font-size: 11px;
-    padding: 1px 3px;
-    border: 1px solid var(--border-default, #ccc);
-    border-radius: 3px;
-    background: var(--bg-surface, #fff);
-    color: var(--text-primary, #333);
-  `,
+const panelLine = css`
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: ${GAP_XS}px;
+  min-width: 0;
+`;
 
-  // -- Compact vertical stack for option sections (ribbon-style: use the
-  //    band's height instead of spreading one wide row) --
-  optionColumn: css`
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
+/** The inside of every card popover this panel opens. */
+const cardBody = css`
+  display: flex;
+  flex-direction: column;
+  gap: ${GAP_SM}px;
+  min-width: 220px;
+  font-family: ${FONT_FAMILY};
+  color: ${LT.text};
+`;
 
-    > label {
-      justify-content: space-between;
-      width: 100%;
-    }
-  `,
+/** Slider rows in a card share a label column so the tracks line up. */
+const sliderAligned = css`
+  & > label {
+    min-width: 52px;
+  }
+`;
 
-  // -- Colors group: palette swatches --
-  paletteGallery: css`
-    display: flex;
-    gap: 3px;
-    align-items: center;
-    padding: 3px;
-    border: 1px solid var(--border-default, #e0e0e0);
-    border-radius: 3px;
-    background: var(--bg-surface, #fff);
-  `,
-  paletteSwatch: css`
-    width: 28px;
-    height: 22px;
-    border: 1px solid transparent;
-    border-radius: 2px;
-    cursor: pointer;
-    padding: 2px;
-    background: var(--bg-surface, #fff);
-    display: flex;
-    gap: 1px;
-    align-items: center;
-    justify-content: center;
+const chevronSlot = css`
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  color: ${LT.textSecondary};
+`;
 
-    &:hover {
-      background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
-    }
-  `,
-  paletteSwatchActive: css`
-    width: 28px;
-    height: 22px;
-    border: 2px solid var(--accent-primary, #005fb8);
-    border-radius: 2px;
-    cursor: pointer;
-    padding: 1px;
-    background: var(--button-pressed-bg, rgba(16, 185, 129, 0.14));
-    display: flex;
-    gap: 1px;
-    align-items: center;
-    justify-content: center;
-  `,
-  colorDot: css`
-    width: 5px;
-    height: 16px;
-    border-radius: 1px;
-  `,
+const seriesColumn = css`
+  display: flex;
+  flex-direction: column;
+  gap: ${ROW_GAP}px;
+  min-width: 200px;
+`;
 
-  // -- Select dropdowns --
-  select: css`
-    padding: 3px 6px;
-    border: 1px solid var(--border-default, #d0d0d0);
-    border-radius: 3px;
-    font-size: 11px;
-    font-family: inherit;
-    background: var(--bg-surface, #fff);
-    color: var(--text-primary, #1a1a1a);
-    cursor: pointer;
-
-    &:hover { border-color: var(--text-tertiary, #999); }
-    &:focus { outline: none; border-color: var(--accent-primary, #0078d4); }
-  `,
-
-  // -- Action buttons --
-  actionBtn: css`
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 2px;
-    padding: 4px 10px;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    cursor: pointer;
-    font-size: 10px;
-    color: var(--text-primary, #333);
-    white-space: nowrap;
-    font-family: inherit;
-
-    &:hover {
-      background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
-    }
-    &:active {
-      background: var(--button-active-bg, rgba(0, 0, 0, 0.1));
-    }
-  `,
-  actionIcon: css`
-    font-size: 20px;
-    line-height: 1;
-    height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  `,
-};
+const swatchRow = css`
+  display: flex;
+  align-items: center;
+  gap: ${GAP_XS}px;
+`;
 
 // ============================================================================
-// Chart Type Definitions with SVG Icons
+// Small shared pieces
 // ============================================================================
 
-/** Compact chart type entries for the main button row. */
-const MAIN_TYPES: Array<{ value: ChartType; label: string; icon: React.ReactNode }> = [
-  { value: "bar", label: "Bar", icon: <BarIcon /> },
-  { value: "horizontalBar", label: "H-Bar", icon: <HBarIcon /> },
-  { value: "line", label: "Line", icon: <LineIcon /> },
-  { value: "area", label: "Area", icon: <AreaIcon /> },
-  { value: "pie", label: "Pie", icon: <PieIcon /> },
-  { value: "scatter", label: "Scatter", icon: <ScatterIcon /> },
-];
-
-/** Additional chart types accessible via dropdown. */
-const MORE_TYPES: Array<{ value: ChartType; label: string }> = [
-  { value: "donut", label: "Donut" },
-  { value: "waterfall", label: "Waterfall" },
-  { value: "combo", label: "Combo" },
-  { value: "radar", label: "Radar" },
-  { value: "bubble", label: "Bubble" },
-  { value: "histogram", label: "Histogram" },
-  { value: "funnel", label: "Funnel" },
-  { value: "treemap", label: "Treemap" },
-  { value: "stock", label: "Stock" },
-  { value: "boxPlot", label: "Box & Whisker" },
-  { value: "sunburst", label: "Sunburst" },
-  { value: "pareto", label: "Pareto" },
-];
-
-// ============================================================================
-// Mini SVG Icons for Chart Types
-// ============================================================================
-
-function BarIcon() {
+/** The secondary-coloured dropdown affordance after a button label. */
+function Chevron(): React.ReactElement {
   return (
-    <svg width="20" height="16" viewBox="0 0 20 16">
-      <rect x="2" y="8" width="4" height="8" fill="#4472C4" rx="0.5" />
-      <rect x="8" y="3" width="4" height="13" fill="#ED7D31" rx="0.5" />
-      <rect x="14" y="6" width="4" height="10" fill="#A5A5A5" rx="0.5" />
-    </svg>
+    <span className={chevronSlot} aria-hidden>
+      <DropdownChevron size={9} />
+    </span>
   );
 }
 
-function HBarIcon() {
-  return (
-    <svg width="20" height="16" viewBox="0 0 20 16">
-      <rect x="0" y="1" width="12" height="4" fill="#4472C4" rx="0.5" />
-      <rect x="0" y="6" width="18" height="4" fill="#ED7D31" rx="0.5" />
-      <rect x="0" y="11" width="8" height="4" fill="#A5A5A5" rx="0.5" />
-    </svg>
-  );
+/** A RibbonIcon drawing looked up by key (the catalog stores keys, not elements). */
+function ChartIcon({ name, size }: { name: RibbonIconKey; size: number }): React.ReactElement {
+  const Glyph = RibbonIcon[name] as React.ComponentType<{ size?: number }>;
+  return <Glyph size={size} />;
 }
 
-function LineIcon() {
-  return (
-    <svg width="20" height="16" viewBox="0 0 20 16">
-      <polyline points="1,12 5,6 10,9 15,3 19,7" fill="none" stroke="#4472C4" strokeWidth="1.8" strokeLinejoin="round" />
-      <polyline points="1,14 5,10 10,11 15,8 19,10" fill="none" stroke="#ED7D31" strokeWidth="1.4" strokeLinejoin="round" />
-    </svg>
-  );
+/** What a just-opened card should focus: the checked radio / selected option /
+ *  first field, else the first enabled button. */
+const FIRST_FOCUSABLE =
+  'input:not([disabled]):not([type="hidden"]), [role="combobox"]:not([disabled]), [tabindex="0"], button:not([disabled]):not([tabindex="-1"])';
+
+/**
+ * Move focus into a card popover once it is visible. Deferred one task on
+ * purpose: Popover renders hidden for the layout pass that measures it, and a
+ * hidden element cannot take focus. Skipped when focus is already inside.
+ */
+function useFocusOnOpen(open: boolean, ref: React.RefObject<HTMLElement>): void {
+  useEffect(() => {
+    if (!open) return;
+    const timer = setTimeout(() => {
+      const box = ref.current;
+      if (!box || box.contains(document.activeElement)) return;
+      box.querySelector<HTMLElement>(FIRST_FOCUSABLE)?.focus();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [open, ref]);
 }
 
-function AreaIcon() {
-  return (
-    <svg width="20" height="16" viewBox="0 0 20 16">
-      <polygon points="1,14 5,8 10,10 15,5 19,8 19,16 1,16" fill="#4472C4" opacity="0.5" />
-      <polyline points="1,14 5,8 10,10 15,5 19,8" fill="none" stroke="#4472C4" strokeWidth="1.5" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function PieIcon() {
-  return (
-    <svg width="20" height="16" viewBox="0 0 20 16">
-      <circle cx="10" cy="8" r="7" fill="#ED7D31" />
-      <path d="M10,8 L10,1 A7,7 0 0,1 16.5,4.5 Z" fill="#4472C4" />
-      <path d="M10,8 L16.5,4.5 A7,7 0 0,1 17,8 L10,8 Z" fill="#A5A5A5" />
-    </svg>
-  );
-}
-
-function ScatterIcon() {
-  return (
-    <svg width="20" height="16" viewBox="0 0 20 16">
-      <circle cx="4" cy="11" r="2" fill="#4472C4" />
-      <circle cx="8" cy="6" r="2" fill="#4472C4" />
-      <circle cx="13" cy="9" r="2" fill="#ED7D31" />
-      <circle cx="16" cy="4" r="2" fill="#ED7D31" />
-    </svg>
-  );
-}
-
-function SaveImageIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-      {/* Image frame */}
-      <rect x="2" y="3" width="16" height="14" rx="1.5" stroke="#4472C4" strokeWidth="1.5" fill="#EAF0F9" />
-      {/* Mountain/landscape */}
-      <path d="M2 14 L7 9 L10 12 L13 8 L18 14 L18 16 L2 16 Z" fill="#4472C4" opacity="0.5" />
-      {/* Sun */}
-      <circle cx="14" cy="7" r="2" fill="#ED7D31" />
-      {/* Download arrow overlay */}
-      <path d="M10 11 L10 16" stroke="#333" strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M7.5 14 L10 16.5 L12.5 14" stroke="#333" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function SwitchRowColIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-      {/* Horizontal arrow (row) */}
-      <path d="M3 7 L11 7" stroke="#4472C4" strokeWidth="1.8" strokeLinecap="round" />
-      <path d="M9 5 L11.5 7 L9 9" stroke="#4472C4" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      {/* Vertical arrow (column) */}
-      <path d="M13 17 L13 9" stroke="#ED7D31" strokeWidth="1.8" strokeLinecap="round" />
-      <path d="M11 11 L13 8.5 L15 11" stroke="#ED7D31" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
+/**
+ * Open/close state for one anchored card popover. The card's body ref is the
+ * caller's own `useRef` (paired with {@link useFocusOnOpen}), never part of
+ * this result: a ref travelling inside a render-time object is a ref read
+ * during render as far as the hooks linter can tell.
+ */
+function useCardPopover<T extends HTMLElement>(): {
+  anchor: T | null;
+  setAnchor: (el: T | null) => void;
+  open: boolean;
+  toggle: () => void;
+  close: () => void;
+} {
+  const [anchor, setAnchor] = useState<T | null>(null);
+  const [open, setOpen] = useState(false);
+  const toggle = useCallback(() => setOpen((o) => !o), []);
+  const close = useCallback(() => setOpen(false), []);
+  return { anchor, setAnchor, open, toggle, close };
 }
 
 // ============================================================================
@@ -390,7 +328,9 @@ function useChartDesignState(): ChartDesignState {
   }, []);
 
   useEffect(() => {
-    refreshFromStore();
+    // Re-read on mount: the store is external state that may have moved
+    // between the initial-state read and this subscription.
+    refreshFromStore(); // eslint-disable-line react-hooks/set-state-in-effect -- syncing from an external store at subscribe time
     const handleRefresh = () => refreshFromStore();
     window.addEventListener(ChartEvents.CHART_UPDATED, handleRefresh);
     const unsubSelection = onAppEvent(AppEvents.CHART_SELECTION_CHANGED, () => {
@@ -421,573 +361,595 @@ function useChartDesignState(): ChartDesignState {
 }
 
 // ============================================================================
-// Type Section: icon-over-text buttons for common types + dropdown
+// 1. Type — six quick tiles + More (all 18 types)
 // ============================================================================
 
+/**
+ * Chart type. Band: a tall radio pill of the six common types (44x61, 30px
+ * duotone icons, named "Column chart"...) plus a More tile whose card holds
+ * every type as a captioned gallery. Sidebar/flyout: that gallery inline.
+ */
 export function ChartTypeSection(_props: PanelSectionProps): React.ReactElement | null {
   const { chartId, spec, updateSpec } = useChartDesignState();
+  const layout = useSurfaceLayout();
+  const {
+    anchor: moreAnchor,
+    setAnchor: setMoreAnchor,
+    open: moreOpen,
+    toggle: toggleMore,
+    close: closeMore,
+  } = useCardPopover<HTMLButtonElement>();
+  const moreBodyRef = useRef<HTMLDivElement>(null);
+  useFocusOnOpen(moreOpen, moreBodyRef);
+
   if (!chartId || !spec) return null;
 
-  const isMainType = MAIN_TYPES.some((t) => t.value === spec.mark);
+  const setMark = (mark: ChartType): void => {
+    if (mark !== spec.mark) updateSpec({ mark });
+  };
+  const current = chartTypeEntry(spec.mark);
+  const galleryItems = CHART_TYPES.map((t) => ({
+    value: t.value,
+    label: t.label,
+    icon: <ChartIcon name={t.icon} size={ICON_SIZE_MD} />,
+  }));
+
+  if (layout.container !== "band") {
+    return (
+      <TileGallery<ChartType>
+        items={galleryItems}
+        value={current?.value ?? null}
+        onChange={setMark}
+        columns={4}
+        testIdPrefix="chart-type"
+        ariaLabel="Chart type"
+      />
+    );
+  }
+
+  const underMore = current !== undefined && !current.quick;
 
   return (
-    <ControlRow gap={6}>
-      <div className={s.typeButtonGroup}>
-        {MAIN_TYPES.map(({ value, label, icon }) => (
-          <button
-            key={value}
-            className={spec.mark === value ? s.typeBtnActive : s.typeBtn}
-            onClick={() => updateSpec({ mark: value })}
-            title={label}
-          >
-            <span className={s.typeIcon}>{icon}</span>
-            {label}
-          </button>
-        ))}
-      </div>
-      {/* More types dropdown */}
-      <select
-        className={s.select}
-        value={isMainType ? "" : spec.mark}
-        onChange={(e) => {
-          if (e.target.value) updateSpec({ mark: e.target.value as ChartType });
-        }}
-        style={{ minWidth: 60 }}
-      >
-        <option value="" disabled>More...</option>
-        {MORE_TYPES.map(({ value, label }) => (
-          <option key={value} value={value}>{label}</option>
-        ))}
-      </select>
-    </ControlRow>
+    <div className={bandRow}>
+      <SegmentedChoice<ChartType>
+        value={spec.mark as ChartType}
+        onChange={setMark}
+        size="tall"
+        iconOnly
+        ariaLabel="Chart type"
+        testId="chart-type-quick"
+        options={QUICK_CHART_TYPES.map((t) => ({
+          value: t.value,
+          label: chartTypeName(t),
+          icon: <ChartIcon name={t.icon} size={HERO_ICON_SIZE} />,
+          testId: `chart-type-${t.value}`,
+        }))}
+      />
+      <Tile
+        ref={setMoreAnchor}
+        icon={<RibbonIcon.More size={HERO_ICON_SIZE} />}
+        label="More chart types"
+        selected={underMore}
+        tooltip={underMore && current ? `More chart types (current: ${current.label})` : "More chart types"}
+        testId="chart-type-more"
+        aria-haspopup="dialog"
+        aria-expanded={moreOpen}
+        onClick={toggleMore}
+      />
+      <Popover card anchorEl={moreAnchor} open={moreOpen} onClose={closeMore} heading="Chart types">
+        <SurfaceLayoutProvider value={popoverLayout()}>
+          <div ref={moreBodyRef}>
+            <TileGallery<ChartType>
+              items={galleryItems}
+              value={current?.value ?? null}
+              onChange={(mark) => {
+                closeMore();
+                moreAnchor?.focus();
+                setMark(mark);
+              }}
+              columns={4}
+              testIdPrefix="chart-type-gallery"
+              ariaLabel="All chart types"
+            />
+          </div>
+        </SurfaceLayoutProvider>
+      </Popover>
+    </div>
   );
 }
 
 // ============================================================================
-// Chart Elements Section: title, gridlines, legend, axis labels, data labels
+// 2. Elements — one tall pill of toggles, three of them split
 // ============================================================================
 
+type ElementOptionsKey = "title" | "legend" | "dataLabels";
+
+const LEGEND_POSITIONS: ReadonlyArray<{ value: "bottom" | "top" | "left" | "right"; label: string }> = [
+  { value: "bottom", label: "Bottom" },
+  { value: "top", label: "Top" },
+  { value: "left", label: "Left" },
+  { value: "right", label: "Right" },
+];
+
+const DATA_LABEL_POSITIONS: ReadonlyArray<{ value: DataLabelPosition; label: string }> = [
+  { value: "auto", label: "Auto" },
+  { value: "above", label: "Above" },
+  { value: "below", label: "Below" },
+  { value: "center", label: "Center" },
+  { value: "inside", label: "Inside" },
+  { value: "outside", label: "Outside" },
+];
+
+/**
+ * Chart elements. One click on an icon turns that element on or off (its
+ * pressed state IS the element's visibility); the chevron half of Title,
+ * Legend and Data labels opens their options. Gridlines and Axis labels
+ * exist only on axis charts.
+ */
 export function ChartElementsSection(_props: PanelSectionProps): React.ReactElement | null {
   const { chartId, spec, updateSpec } = useChartDesignState();
+  const layout = useSurfaceLayout();
+  const [openKey, setOpenKey] = useState<ElementOptionsKey | null>(null);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => setOpenKey(null), []);
+  useFocusOnOpen(openKey !== null, bodyRef);
+
   if (!chartId || !spec) return null;
 
+  const band = layout.container === "band";
+  const size = band ? "tall" : "md";
+  const iconSize = band ? 28 : ICON_SIZE_SM;
   const cartesian = isCartesianChart(spec.mark);
 
+  const titleOn = Boolean(spec.title);
+  const gridOn = Boolean(spec.yAxis?.gridLines);
+  const legendOn = Boolean(spec.legend?.visible);
+  const axisLabelsOn = Boolean(spec.xAxis?.showLabels);
+  const dl = spec.dataLabels;
+  const labelsOn = dl?.enabled ?? false;
+
+  const openOptions =
+    (key: ElementOptionsKey) =>
+    (e: React.MouseEvent<HTMLButtonElement>): void => {
+      setAnchor(e.currentTarget);
+      setOpenKey((k) => (k === key ? null : key));
+    };
+
+  const chevronProps = (key: ElementOptionsKey): React.ButtonHTMLAttributes<HTMLButtonElement> =>
+    ({
+      // eslint-disable-next-line @typescript-eslint/naming-convention -- a DOM attribute name
+      "data-testid": `chart-elem-${key}-options`,
+      // eslint-disable-next-line @typescript-eslint/naming-convention -- a DOM attribute name
+      "aria-haspopup": key === "legend" ? "menu" : "dialog",
+      // eslint-disable-next-line @typescript-eslint/naming-convention -- a DOM attribute name
+      "aria-expanded": openKey === key,
+    }) as React.ButtonHTMLAttributes<HTMLButtonElement>;
+
+  /** Close a card and put focus back on the chevron that opened it. */
+  const closeToAnchor = (): void => {
+    setOpenKey(null);
+    anchor?.focus();
+  };
+
+  // Choosing a legend position or a label option while the element is off
+  // turns it on: the reader asked to SEE it there.
+  const setDataLabels = (patch: Partial<DataLabelSpec>): void => {
+    updateSpec({ dataLabels: { ...(dl ?? { enabled: false }), ...patch, enabled: true } });
+  };
+
   return (
-    <div className={s.checkGrid}>
-      <label className={s.checkLabel}>
-        <input
-          type="checkbox"
-          checked={!!spec.title}
-          onChange={(e) => updateSpec({ title: e.target.checked ? (spec.title || "Chart") : null })}
+    <>
+      <Segmented ariaLabel="Chart elements" size={band ? "tall" : "md"}>
+        <IconButton
+          split
+          size={size}
+          icon={<RibbonIcon.ChartTitle size={iconSize} />}
+          label="Title"
+          pressed={titleOn}
+          data-testid="chart-elem-title"
+          onClick={() => updateSpec({ title: titleOn ? null : spec.title || "Chart" })}
+          onChevronClick={openOptions("title")}
+          chevronLabel="Title options"
+          chevronProps={chevronProps("title")}
         />
-        Title
-      </label>
-      {cartesian && (
-        <label className={s.checkLabel}>
-          <input
-            type="checkbox"
-            checked={spec.yAxis.gridLines}
-            onChange={(e) => updateSpec({ yAxis: { ...spec.yAxis, gridLines: e.target.checked } })}
+        {cartesian && (
+          <IconButton
+            size={size}
+            icon={<RibbonIcon.Gridlines size={iconSize} />}
+            label="Gridlines"
+            pressed={gridOn}
+            data-testid="chart-elem-gridlines"
+            onClick={() => updateSpec({ yAxis: { ...spec.yAxis, gridLines: !gridOn } })}
           />
-          Gridlines
-        </label>
-      )}
-      <label className={s.checkLabel}>
-        <input
-          type="checkbox"
-          checked={spec.legend.visible}
-          onChange={(e) => updateSpec({ legend: { ...spec.legend, visible: e.target.checked } })}
+        )}
+        <IconButton
+          split
+          size={size}
+          icon={<RibbonIcon.Legend size={iconSize} />}
+          label="Legend"
+          pressed={legendOn}
+          data-testid="chart-elem-legend"
+          onClick={() => updateSpec({ legend: { ...spec.legend, visible: !legendOn } })}
+          onChevronClick={openOptions("legend")}
+          chevronLabel="Legend options"
+          chevronProps={chevronProps("legend")}
         />
-        Legend
-      </label>
-      {cartesian && (
-        <label className={s.checkLabel}>
-          <input
-            type="checkbox"
-            checked={spec.xAxis.showLabels}
-            onChange={(e) => updateSpec({ xAxis: { ...spec.xAxis, showLabels: e.target.checked } })}
+        {cartesian && (
+          <IconButton
+            size={size}
+            icon={<RibbonIcon.AxisLabels size={iconSize} />}
+            label="Axis labels"
+            pressed={axisLabelsOn}
+            data-testid="chart-elem-axisLabels"
+            onClick={() => updateSpec({ xAxis: { ...spec.xAxis, showLabels: !axisLabelsOn } })}
           />
-          Axis Labels
-        </label>
-      )}
-      <label className={s.checkLabel}>
-        <input
-          type="checkbox"
-          checked={spec.dataLabels?.enabled ?? false}
-          onChange={(e) => {
-            const dl: DataLabelSpec = { ...(spec.dataLabels ?? { enabled: false }), enabled: e.target.checked };
-            updateSpec({ dataLabels: dl });
-          }}
+        )}
+        <IconButton
+          split
+          size={size}
+          icon={<RibbonIcon.DataLabels size={iconSize} />}
+          label="Data labels"
+          pressed={labelsOn}
+          data-testid="chart-elem-dataLabels"
+          onClick={() =>
+            updateSpec({ dataLabels: { ...(dl ?? { enabled: false }), enabled: !labelsOn } })
+          }
+          onChevronClick={openOptions("dataLabels")}
+          chevronLabel="Data label options"
+          chevronProps={chevronProps("dataLabels")}
         />
-        Data Labels
-      </label>
-    </div>
+      </Segmented>
+
+      <Popover card anchorEl={anchor} open={openKey === "title"} onClose={close} heading="Chart title" width={240}>
+        <SurfaceLayoutProvider value={popoverLayout()}>
+          <div ref={bodyRef} className={cardBody}>
+            <Input
+              type="text"
+              value={spec.title ?? ""}
+              placeholder="Chart title"
+              aria-label="Chart title"
+              data-testid="chart-title-input"
+              onChange={(e) => updateSpec({ title: e.target.value || null })}
+            />
+          </div>
+        </SurfaceLayoutProvider>
+      </Popover>
+
+      <Popover card anchorEl={anchor} open={openKey === "legend"} onClose={close} heading="Legend position">
+        <div ref={bodyRef}>
+          <Menu ariaLabel="Legend position">
+            {LEGEND_POSITIONS.map((p) => (
+              <MenuItem
+                key={p.value}
+                role="menuitemradio"
+                checked={legendOn && spec.legend?.position === p.value}
+                testId={`chart-legend-${p.value}`}
+                onSelect={() => {
+                  closeToAnchor();
+                  updateSpec({ legend: { ...spec.legend, visible: true, position: p.value } });
+                }}
+              >
+                {p.label}
+              </MenuItem>
+            ))}
+          </Menu>
+        </div>
+      </Popover>
+
+      <Popover
+        card
+        anchorEl={anchor}
+        open={openKey === "dataLabels"}
+        onClose={close}
+        heading="Data labels"
+        width={344}
+      >
+        <SurfaceLayoutProvider value={popoverLayout()}>
+          <div ref={bodyRef} className={cardBody}>
+            <SegmentedChoice<DataLabelPosition>
+              value={dl?.position ?? "auto"}
+              onChange={(position) => setDataLabels({ position })}
+              ariaLabel="Label position"
+              testId="chart-datalabel-position"
+              options={DATA_LABEL_POSITIONS.map((p) => ({
+                value: p.value,
+                label: p.label,
+                testId: `chart-datalabel-position-${p.value}`,
+              }))}
+            />
+            <Slider
+              className={sliderAligned}
+              label="Size"
+              value={dl?.fontSize ?? 10}
+              min={7}
+              max={20}
+              step={1}
+              suffix="px"
+              title="Label font size (px)"
+              testId="chart-datalabel-size"
+              onChange={(fontSize) => setDataLabels({ fontSize })}
+            />
+          </div>
+        </SurfaceLayoutProvider>
+      </Popover>
+    </>
   );
 }
 
 // ============================================================================
-// Stacking Section: none / stacked / 100% stacked (bar/hbar/line/area only)
+// 3. Layout — stacking + mark options (axis charts only)
 // ============================================================================
 
-export function StackingSection(_props: PanelSectionProps): React.ReactElement | null {
-  const { chartId, spec, updateSpec } = useChartDesignState();
-  if (!chartId || !spec) return null;
+const STACK_OPTIONS: ReadonlyArray<{ value: StackMode; label: string; icon: RibbonIconKey }> = [
+  { value: "none", label: "Grouped", icon: "Grouped" },
+  { value: "stacked", label: "Stacked", icon: "Stacked" },
+  { value: "percentStacked", label: "100% stacked", icon: "Stacked100" },
+];
 
-  const supportsStacking =
-    spec.mark === "bar" || spec.mark === "horizontalBar" || spec.mark === "line" || spec.mark === "area";
+const LINE_SHAPES: ReadonlyArray<{ value: LineInterpolation; label: string; icon: RibbonIconKey }> = [
+  { value: "linear", label: "Straight", icon: "LineStraight" },
+  { value: "smooth", label: "Smooth", icon: "LineSmooth" },
+  { value: "step", label: "Stepped", icon: "LineStep" },
+];
+
+type MarksKind = "bar" | "line" | "area";
+
+const MARKS_LABEL: Record<MarksKind, string> = { bar: "Bars", line: "Line", area: "Area" };
+
+function marksKindOf(mark: string): MarksKind | null {
+  return mark === "bar" || mark === "line" || mark === "area" ? mark : null;
+}
+
+/** Gap / overlap / corner radius — the column chart's mark options. */
+function BarMarkControls({
+  opts,
+  setOpt,
+}: {
+  opts: BarMarkOptions;
+  setOpt: (patch: Partial<BarMarkOptions>) => void;
+}): React.ReactElement {
+  return (
+    <>
+      <Slider
+        className={sliderAligned}
+        label="Gap"
+        value={opts.gapWidth ?? 150}
+        min={0}
+        max={500}
+        step={10}
+        suffix="%"
+        title="Gap between category groups, as % of bar width (Excel: Gap Width)"
+        testId="chart-bars-gap"
+        onChange={(gapWidth) => setOpt({ gapWidth })}
+      />
+      <Slider
+        className={sliderAligned}
+        label="Overlap"
+        value={opts.seriesOverlap ?? 0}
+        min={-100}
+        max={100}
+        step={5}
+        suffix="%"
+        title="Overlap between series bars; negative adds a gap (Excel: Series Overlap)"
+        testId="chart-bars-overlap"
+        onChange={(seriesOverlap) => setOpt({ seriesOverlap })}
+      />
+      <Slider
+        className={sliderAligned}
+        label="Radius"
+        value={opts.borderRadius ?? 2}
+        min={0}
+        max={20}
+        step={1}
+        suffix="px"
+        title="Bar corner radius (px)"
+        testId="chart-bars-radius"
+        onChange={(borderRadius) => setOpt({ borderRadius })}
+      />
+    </>
+  );
+}
+
+/** Width / shape / markers (+ fill for an area) — the line and area options. */
+function LineMarkControls({
+  isArea,
+  opts,
+  setOpt,
+}: {
+  isArea: boolean;
+  opts: LineMarkOptions & AreaMarkOptions;
+  setOpt: (patch: Partial<LineMarkOptions & AreaMarkOptions>) => void;
+}): React.ReactElement {
+  const showMarkers = opts.showMarkers ?? !isArea;
+  return (
+    <>
+      <Slider
+        className={sliderAligned}
+        label="Width"
+        value={opts.lineWidth ?? 2}
+        min={1}
+        max={10}
+        step={0.5}
+        suffix="px"
+        title="Line width (px)"
+        testId="chart-line-width"
+        onChange={(lineWidth) => setOpt({ lineWidth })}
+      />
+      <SegmentedChoice<LineInterpolation>
+        value={opts.interpolation ?? "linear"}
+        onChange={(interpolation) => setOpt({ interpolation })}
+        ariaLabel="Line shape"
+        testId="chart-line-shape"
+        options={LINE_SHAPES.map((s) => ({
+          value: s.value,
+          label: s.label,
+          icon: <ChartIcon name={s.icon} size={ICON_SIZE_SM} />,
+          testId: `chart-line-shape-${s.value}`,
+        }))}
+      />
+      <Checkbox
+        label="Markers"
+        checked={showMarkers}
+        testId="chart-line-markers"
+        onChange={(on) => setOpt({ showMarkers: on })}
+      />
+      {showMarkers && (
+        <Slider
+          className={sliderAligned}
+          label="Size"
+          value={opts.markerRadius ?? 4}
+          min={1}
+          max={12}
+          step={1}
+          suffix="px"
+          title="Marker radius (px)"
+          testId="chart-line-marker-size"
+          onChange={(markerRadius) => setOpt({ markerRadius })}
+        />
+      )}
+      {isArea && (
+        <Slider
+          className={sliderAligned}
+          label="Fill"
+          value={Math.round((opts.fillOpacity ?? 0.3) * 100)}
+          min={0}
+          max={100}
+          step={5}
+          suffix="%"
+          title="Area fill opacity"
+          testId="chart-area-fill"
+          onChange={(pct) => setOpt({ fillOpacity: pct / 100 })}
+        />
+      )}
+    </>
+  );
+}
+
+/**
+ * Layout (axis charts only). The stacking pill applies to column, bar, line
+ * and area; on other axis charts it stays in place disabled so the cluster
+ * keeps its shape. Column/line/area add a hero whose card holds their mark
+ * options; a combo chart adds the "2nd axis" switch.
+ */
+export function ChartLayoutSection(_props: PanelSectionProps): React.ReactElement | null {
+  const { chartId, spec, updateSpec } = useChartDesignState();
+  const layout = useSurfaceLayout();
+  const {
+    anchor: marksAnchor,
+    setAnchor: setMarksAnchor,
+    open: marksOpen,
+    toggle: toggleMarks,
+    close: closeMarks,
+  } = useCardPopover<HTMLButtonElement>();
+  const marksBodyRef = useRef<HTMLDivElement>(null);
+  useFocusOnOpen(marksOpen, marksBodyRef);
+
+  if (!chartId || !spec) return null;
+  // Registered only for axis charts; a type switch re-renders this once
+  // before the panel re-registers without it.
+  if (!isCartesianChart(spec.mark)) return null;
+
+  const band = layout.container === "band";
+  const stackable = supportsStacking(spec.mark);
+  const stackMode = getStackModeFromSpec(spec);
   const isCombo = spec.mark === "combo";
   const comboOpts = (isCombo ? spec.markOptions ?? {} : {}) as ComboMarkOptions;
-  const hasSecondaryAxis = comboOpts.secondaryYAxis ?? false;
-  if (!supportsStacking) return null;
+  const marks = marksKindOf(spec.mark);
 
-  const currentStackMode = getStackModeFromSpec(spec);
-
-  return (
-    <ControlRow gap={6}>
-      <select
-        className={s.select}
-        value={currentStackMode}
-        onChange={(e) => {
-          const mode = e.target.value as StackMode;
-          updateSpec({ markOptions: setStackModeInOptions(spec, mode) });
-        }}
-      >
-        <option value="none">Grouped</option>
-        <option value="stacked">Stacked</option>
-        <option value="percentStacked">100% Stacked</option>
-      </select>
-      {isCombo && (
-        <label className={s.checkLabel}>
-          <input
-            type="checkbox"
-            checked={hasSecondaryAxis}
-            onChange={(e) => {
-              const opts = { ...comboOpts, secondaryYAxis: e.target.checked };
-              updateSpec({ markOptions: opts });
-            }}
-          />
-          2nd Axis
-        </label>
-      )}
-    </ControlRow>
+  const stacking = (
+    <SegmentedChoice<StackMode>
+      value={stackMode}
+      onChange={(mode) => updateSpec({ markOptions: setStackModeInOptions(spec, mode) })}
+      ariaLabel="Stacking"
+      size={band ? "tall" : "md"}
+      iconOnly={band}
+      testId="chart-stacking"
+      options={STACK_OPTIONS.map((o) => ({
+        value: o.value,
+        label: o.label,
+        icon: <ChartIcon name={o.icon} size={band ? 28 : ICON_SIZE_SM} />,
+        tooltip: stackable ? o.label : `${o.label} (column, bar, line and area charts)`,
+        testId: `chart-stacking-${o.value}`,
+        disabled: !stackable,
+      }))}
+    />
   );
-}
 
-// ============================================================================
-// Axes Section: secondary axis toggle for combo charts (no stacking support)
-// ============================================================================
+  const secondaryAxis = isCombo ? (
+    <Switch
+      label="2nd axis"
+      checked={comboOpts.secondaryYAxis ?? false}
+      tooltip="Plot series against a secondary (right) value axis"
+      testId="chart-secondary-axis"
+      onChange={(on) => updateSpec({ markOptions: { ...comboOpts, secondaryYAxis: on } })}
+    />
+  ) : null;
 
-export function AxesSection(_props: PanelSectionProps): React.ReactElement | null {
-  const { chartId, spec, updateSpec } = useChartDesignState();
-  if (!chartId || !spec) return null;
-
-  const supportsStacking =
-    spec.mark === "bar" || spec.mark === "horizontalBar" || spec.mark === "line" || spec.mark === "area";
-  const isCombo = spec.mark === "combo";
-  if (supportsStacking || !isCombo) return null;
-
-  const comboOpts = (spec.markOptions ?? {}) as ComboMarkOptions;
-  const hasSecondaryAxis = comboOpts.secondaryYAxis ?? false;
-
-  return (
-    <ControlRow gap={6}>
-      <label className={s.checkLabel}>
-        <input
-          type="checkbox"
-          checked={hasSecondaryAxis}
-          onChange={(e) => {
-            const opts = { ...comboOpts, secondaryYAxis: e.target.checked };
-            updateSpec({ markOptions: opts });
-          }}
+  let marksControl: React.ReactNode = null;
+  if (marks !== null) {
+    const opts = (spec.markOptions ?? {}) as BarMarkOptions & LineMarkOptions & AreaMarkOptions;
+    const setOpt = (patch: Partial<BarMarkOptions & LineMarkOptions & AreaMarkOptions>): void =>
+      updateSpec({ markOptions: { ...opts, ...patch } });
+    marksControl = (
+      <>
+        <CommandButton
+          ref={setMarksAnchor}
+          icon={<RibbonIcon.MarkOptions size={HERO_ICON_SIZE} />}
+          label={MARKS_LABEL[marks]}
+          chevron
+          tooltip={marks === "bar" ? "Gap, overlap and corner radius" : "Width, shape and markers"}
+          data-testid="chart-marks"
+          aria-haspopup="dialog"
+          aria-expanded={marksOpen}
+          onClick={toggleMarks}
         />
-        Secondary Axis
-      </label>
-    </ControlRow>
-  );
-}
-
-// ============================================================================
-// Trendline Section: type selector + equation / R-squared toggles
-// ============================================================================
-
-export function TrendlineSection(_props: PanelSectionProps): React.ReactElement | null {
-  const { chartId, spec, updateSpec } = useChartDesignState();
-  if (!chartId || !spec) return null;
-
-  const cartesian = isCartesianChart(spec.mark);
-  const supportsTrendline = cartesian && spec.mark !== "waterfall" && spec.mark !== "histogram";
-  if (!supportsTrendline) return null;
-
-  const currentTrendline: TrendlineSpec | null = spec.trendlines?.[0] ?? null;
-
-  return (
-    <ControlRow gap={6}>
-      <select
-        className={s.select}
-        value={currentTrendline?.type ?? "none"}
-        onChange={(e) => {
-          const type = e.target.value;
-          if (type === "none") {
-            updateSpec({ trendlines: [] });
-          } else {
-            const tl: TrendlineSpec = {
-              type: type as TrendlineType,
-              seriesIndex: currentTrendline?.seriesIndex ?? 0,
-              ...(type === "polynomial" ? { polynomialDegree: currentTrendline?.polynomialDegree ?? 2 } : {}),
-              ...(type === "movingAverage" ? { movingAveragePeriod: currentTrendline?.movingAveragePeriod ?? 3 } : {}),
-            };
-            updateSpec({ trendlines: [tl] });
-          }
-        }}
-      >
-        <option value="none">None</option>
-        <option value="linear">Linear</option>
-        <option value="exponential">Exponential</option>
-        <option value="polynomial">Polynomial</option>
-        <option value="logarithmic">Logarithmic</option>
-        <option value="power">Power</option>
-        <option value="movingAverage">Moving Avg</option>
-      </select>
-      {currentTrendline && (
-        <label className={s.checkLabel}>
-          <input
-            type="checkbox"
-            checked={currentTrendline.showEquation ?? false}
-            onChange={(e) => {
-              updateSpec({
-                trendlines: [{ ...currentTrendline, showEquation: e.target.checked }],
-              });
-            }}
-          />
-          Equation
-        </label>
-      )}
-      {currentTrendline && (
-        <label className={s.checkLabel}>
-          <input
-            type="checkbox"
-            checked={currentTrendline.showRSquared ?? false}
-            onChange={(e) => {
-              updateSpec({
-                trendlines: [{ ...currentTrendline, showRSquared: e.target.checked }],
-              });
-            }}
-          />
-          R<sup>2</sup>
-        </label>
-      )}
-    </ControlRow>
-  );
-}
-
-// ============================================================================
-// Colors Section: palette swatches
-// ============================================================================
-
-export function ColorsSection(_props: PanelSectionProps): React.ReactElement | null {
-  const { chartId, spec, updateSpec } = useChartDesignState();
-  if (!chartId || !spec) return null;
+        <Popover
+          card
+          anchorEl={marksAnchor}
+          open={marksOpen}
+          onClose={closeMarks}
+          heading={MARKS_LABEL[marks]}
+          width={300}
+        >
+          <SurfaceLayoutProvider value={popoverLayout()}>
+            <div ref={marksBodyRef} className={cardBody} data-testid="chart-marks-card">
+              {marks === "bar" ? (
+                <BarMarkControls opts={opts} setOpt={setOpt} />
+              ) : (
+                <LineMarkControls isArea={marks === "area"} opts={opts} setOpt={setOpt} />
+              )}
+            </div>
+          </SurfaceLayoutProvider>
+        </Popover>
+      </>
+    );
+  }
 
   return (
-    <div className={s.paletteGallery}>
-      {PALETTE_NAMES.map((name) => {
-        const colors = PALETTES[name];
-        const isActive = spec.palette === name;
-        return (
-          <button
-            key={name}
-            className={isActive ? s.paletteSwatchActive : s.paletteSwatch}
-            onClick={() => updateSpec({ palette: name })}
-            title={name}
-          >
-            {colors.slice(0, 4).map((c, i) => (
-              <span key={i} className={s.colorDot} style={{ backgroundColor: c }} />
-            ))}
-          </button>
-        );
-      })}
+    <div className={band ? bandRow : panelStack}>
+      {stacking}
+      {marksControl}
+      {secondaryAxis}
     </div>
   );
 }
 
 // ============================================================================
-// Legend Section: position selector + chart title input
+// 4. Style — palette strip over the Series colour card
 // ============================================================================
 
-export function LegendSection(_props: PanelSectionProps): React.ReactElement | null {
-  const { chartId, spec, updateSpec } = useChartDesignState();
-  if (!chartId || !spec) return null;
-
-  return (
-    <ControlRow gap={6}>
-      {spec.legend.visible && (
-        <select
-          className={s.select}
-          value={spec.legend.position}
-          onChange={(e) =>
-            updateSpec({ legend: { ...spec.legend, position: e.target.value as "top" | "bottom" | "left" | "right" } })
-          }
-        >
-          <option value="bottom">Bottom</option>
-          <option value="top">Top</option>
-          <option value="left">Left</option>
-          <option value="right">Right</option>
-        </select>
-      )}
-      {spec.title != null && (
-        <Input
-          type="text"
-          width={130}
-          value={spec.title}
-          onChange={(e) => updateSpec({ title: e.target.value || null })}
-          placeholder="Chart title"
-        />
-      )}
-    </ControlRow>
-  );
+/** "default" -> "Default". */
+function paletteDisplayName(id: string): string {
+  return id.length === 0 ? id : id.charAt(0).toUpperCase() + id.slice(1);
 }
 
-// ============================================================================
-// Filter Section: series/category visibility dropdown
-// ============================================================================
-
-export function FilterSection(_props: PanelSectionProps): React.ReactElement | null {
-  const { chartId, spec, updateSpec } = useChartDesignState();
-  if (!chartId || !spec) return null;
-
-  return (
-    <ControlRow gap={6}>
-      <ChartFilterDropdown
-        spec={spec}
-        unfilteredData={chartId != null ? getCachedChartData(chartId)?.unfilteredData : undefined}
-        onFiltersChange={(newFilters: ChartFilters) => {
-          updateSpec({ filters: newFilters });
-        }}
-      />
-    </ControlRow>
-  );
-}
-
-// ============================================================================
-// Actions Section: Switch Row/Col, Edit Chart, Save Image, Format Point
-// ============================================================================
-
-export function ActionsSection(_props: PanelSectionProps): React.ReactElement | null {
-  const { chartId, spec, updateSpec } = useChartDesignState();
-  if (!chartId || !spec) return null;
-
-  const isPivot = isPivotDataSource(spec.data);
-
-  return (
-    <ActionRow gap={6}>
-      {!isPivot && (
-        <button
-          className={s.actionBtn}
-          onClick={async () => {
-            if (chartId == null || !spec) return;
-            try {
-              const dataRef = await resolveDataSource(spec.data);
-              const newOrientation: SeriesOrientation =
-                spec.seriesOrientation === "columns" ? "rows" : "columns";
-              const detected = await autoDetectSeriesForOrientation(
-                dataRef, spec.hasHeaders, newOrientation,
-              );
-              updateSpec({
-                seriesOrientation: newOrientation,
-                categoryIndex: detected.categoryIndex,
-                series: detected.series,
-                seriesRefs: undefined,
-              });
-            } catch (err) {
-              console.error("[Charts] Switch Row/Column failed:", err);
-            }
-          }}
-          title="Switch between rows and columns as data series"
-        >
-          <span className={s.actionIcon}><SwitchRowColIcon /></span>
-          Switch Row/Col
-        </button>
-      )}
-      <button
-        className={s.actionBtn}
-        onClick={() => {
-          if (isPivot) {
-            const pivotId = (spec.data as { pivotId: string }).pivotId;
-            showDialog(CHART_DIALOG_ID, { pivotId, editChartId: chartId });
-          } else {
-            showDialog(CHART_DIALOG_ID, { editChartId: chartId });
-          }
-        }}
-        title="Open full chart editor dialog"
-      >
-        <span className={s.actionIcon}>&#9998;</span>
-        Edit Chart
-      </button>
-      <button
-        className={s.actionBtn}
-        onClick={async () => {
-          if (chartId == null) return;
-          try {
-            await exportChartAsImage(chartId);
-          } catch (err) {
-            console.error("[Charts] Export failed:", err);
-            void alertAsync("Failed to export chart: " + String(err));
-          }
-        }}
-        title="Save chart as PNG image"
-      >
-        <span className={s.actionIcon}><SaveImageIcon /></span>
-        Save Image
-      </button>
-      {(() => {
-        const subSel = getSubSelection();
-        if (subSel.level === "dataPoint" && chartId != null) {
-          const isPieOrDonut = spec.mark === "pie" || spec.mark === "donut";
-          const cachedData = getCachedChartData(chartId);
-          // subSel indices are PAINTER (post-filter) space; the painted point's
-          // label is in the same space (the filtered data's categories).
-          const categoryName = cachedData?.data?.categories?.[subSel.categoryIndex ?? 0] ?? "";
-          // dataPointOverrides are keyed in AUTHORING (unfiltered) space — translate
-          // the painter sub-selection so the override anchors to the right datum
-          // even with a series/category filter active.
-          const authoring = cachedData
-            ? toAuthoringIndices(cachedData.data, subSel.seriesIndex ?? 0, subSel.categoryIndex ?? 0)
-            : { seriesIndex: subSel.seriesIndex ?? 0, categoryIndex: subSel.categoryIndex ?? 0 };
-          return (
-            <button
-              className={s.actionBtn}
-              onClick={() => {
-                showDialog("chart:dataPointFormat", {
-                  chartId,
-                  seriesIndex: authoring.seriesIndex,
-                  categoryIndex: authoring.categoryIndex,
-                  categoryName,
-                  isPieOrDonut,
-                });
-              }}
-              title="Format the selected data point"
-            >
-              <span className={s.actionIcon}>&#127912;</span>
-              Format Point
-            </button>
-          );
-        }
-        return null;
-      })()}
-    </ActionRow>
-  );
-}
-
-// ============================================================================
-// JSON Section: GUI/JSON toggle (Phase C)
-// ============================================================================
-
-export function JsonSection(_props: PanelSectionProps): React.ReactElement | null {
-  const { chartId, refreshFromStore } = useChartDesignState();
-
-  const jsonToggle = useJsonToggle(
-    "chart",
-    chartId != null ? String(chartId) : "",
-    refreshFromStore,
-  );
-
-  if (!chartId) return null;
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "2px 6px" }}>
-      <JsonToggleButton isActive={jsonToggle.isJsonMode} onClick={jsonToggle.toggle} />
-      {jsonToggle.isJsonMode && (
-        <div style={{ position: "fixed", right: 8, top: 140, width: 420, height: 400, zIndex: 500, border: "1px solid var(--border-default, #555)", borderRadius: 6, overflow: "hidden", boxShadow: "0 4px 16px rgba(0,0,0,0.4)" }}>
-          <JsonToggleEditor
-            json={jsonToggle.json}
-            onChange={jsonToggle.setJson}
-            onApply={jsonToggle.apply}
-            onRevert={jsonToggle.revert}
-            dirty={jsonToggle.dirty}
-            error={jsonToggle.error}
-            loading={jsonToggle.loading}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ============================================================================
-// Small labeled numeric inputs (shared by the option sections below)
-// ============================================================================
-
-function NumField(props: {
-  label: string;
-  value: number;
-  onChange: (v: number) => void;
-  min?: number;
-  max?: number;
-  step?: number;
-  width?: number;
-  title?: string;
-}): React.ReactElement {
-  return (
-    <label className={s.checkLabel} title={props.title}>
-      {props.label}
-      <input
-        type="number"
-        className={s.numInput}
-        value={props.value}
-        min={props.min}
-        max={props.max}
-        step={props.step}
-        style={{ width: props.width ?? 52 }}
-        onChange={(e) => {
-          const v = Number(e.target.value);
-          if (!Number.isNaN(v)) props.onChange(v);
-        }}
-      />
-    </label>
-  );
-}
-
-/** Number input that treats blank as "auto" (null). */
-function NumBlankField(props: {
-  label: string;
-  value: number | null;
-  onChange: (v: number | null) => void;
-  width?: number;
-  title?: string;
-}): React.ReactElement {
-  return (
-    <label className={s.checkLabel} title={props.title}>
-      {props.label}
-      <input
-        type="number"
-        className={s.numInput}
-        value={props.value ?? ""}
-        placeholder="auto"
-        style={{ width: props.width ?? 56 }}
-        onChange={(e) => {
-          const t = e.target.value;
-          if (t === "") {
-            props.onChange(null);
-          } else {
-            const v = Number(t);
-            if (!Number.isNaN(v)) props.onChange(v);
-          }
-        }}
-      />
-    </label>
-  );
-}
-
-/** input[type=color] only accepts #rrggbb — fall back for anything else. */
-function toHex6(color: string): string {
-  return /^#[0-9A-Fa-f]{6}$/.test(color) ? color : "#4E79A7";
-}
-
-// ============================================================================
-// Series Colors Section: per-series color override (name-keyed, all sources)
-// ============================================================================
-
+/**
+ * Per-series colour override (name-keyed, all sources) — the ONE writer is
+ * `seriesColorPatch`, read back through `readSeriesColor`. Hosted in the Style
+ * cluster's "Series" card; kept as a named export because the OB-1 tests
+ * render it directly.
+ */
 export function SeriesColorsSection(_props: PanelSectionProps): React.ReactElement | null {
   const { chartId, spec, updateSpec } = useChartDesignState();
   const [seriesIdx, setSeriesIdx] = useState(0);
@@ -1008,227 +970,458 @@ export function SeriesColorsSection(_props: PanelSectionProps): React.ReactEleme
   };
 
   return (
-    <div className={s.optionColumn} style={{ width: 150 }}>
-      <select
-        className={s.select}
+    <div className={seriesColumn}>
+      <Dropdown<number>
         value={idx}
-        onChange={(e) => setSeriesIdx(Number(e.target.value))}
-        title="Series"
-        style={{ width: "100%" }}
-      >
-        {seriesList.map((sr, i) => (
-          <option key={i} value={i}>{sr.name}</option>
-        ))}
-      </select>
-      <ControlRow gap={6}>
-        <input
-          type="color"
-          value={toHex6(effective)}
-          onChange={(e) => write(e.target.value)}
-          title="Series color"
-          style={{ width: 26, height: 20, padding: 0, border: "1px solid var(--border-default, #ccc)", borderRadius: 3, cursor: "pointer" }}
+        options={seriesList.map((sr, i) => ({ value: i, label: sr.name }))}
+        onChange={setSeriesIdx}
+        ariaLabel="Series"
+        testId="chart-series-picker"
+        optionTestIdPrefix="chart-series-option-"
+      />
+      <div className={swatchRow}>
+        <ColorSwatch
+          native
+          // <input type=color> only speaks #rrggbb; anything else shows the
+          // default palette's first colour rather than black.
+          color={normalizeHex(effective) ?? PALETTES.default[0]}
+          onChange={(hex) => write(hex)}
+          label="Series colour"
+          testId="chart-series-colour"
         />
-        <button
-          className={s.actionBtn}
+        <Button
           disabled={!override}
           onClick={() => write(null)}
-          title="Reset this series to its palette color"
+          tooltip="Reset this series to its palette colour"
+          data-testid="chart-series-auto"
         >
           Auto
-        </button>
-      </ControlRow>
+        </Button>
+      </div>
     </div>
   );
 }
 
-// ============================================================================
-// Bar Options Section: gap width / series overlap / corner radius (bar only)
-// ============================================================================
-
-export function BarOptionsSection(_props: PanelSectionProps): React.ReactElement | null {
+/**
+ * Style: the palette strip (row 1) and the Series colour card (row 2). The
+ * Series button stays in place, disabled, on charts without per-series fills
+ * (a pie colours by slice), so the cluster keeps its two rows.
+ */
+export function ChartStyleSection(_props: PanelSectionProps): React.ReactElement | null {
   const { chartId, spec, updateSpec } = useChartDesignState();
-  if (!chartId || !spec) return null;
-  if (spec.mark !== "bar") return null;
+  const layout = useSurfaceLayout();
+  const {
+    anchor: seriesAnchor,
+    setAnchor: setSeriesAnchor,
+    open: seriesOpen,
+    toggle: toggleSeries,
+    close: closeSeries,
+  } = useCardPopover<HTMLButtonElement>();
+  const seriesBodyRef = useRef<HTMLDivElement>(null);
+  useFocusOnOpen(seriesOpen, seriesBodyRef);
 
-  const opts = (spec.markOptions ?? {}) as BarMarkOptions;
-  const setOpt = (patch: Partial<BarMarkOptions>) =>
-    updateSpec({ markOptions: { ...opts, ...patch } });
+  if (!chartId || !spec) return null;
+
+  const band = layout.container === "band";
+  const cartesian = isCartesianChart(spec.mark);
+  const hasSeries = (getCachedChartData(chartId)?.data?.series?.length ?? 0) > 0;
+  const palettes = PALETTE_NAMES.map((id) => ({
+    id,
+    name: paletteDisplayName(id),
+    colors: PALETTES[id],
+  }));
 
   return (
-    <div className={s.optionColumn} style={{ width: 150 }}>
-      <NumField
-        label="Gap %"
-        value={opts.gapWidth ?? 150}
-        min={0} max={500} step={10}
-        onChange={(v) => setOpt({ gapWidth: v })}
-        title="Gap between category groups, as % of bar width (Excel: Gap Width)"
-      />
-      <NumField
-        label="Overlap %"
-        value={opts.seriesOverlap ?? 0}
-        min={-100} max={100} step={5}
-        onChange={(v) => setOpt({ seriesOverlap: v })}
-        title="Overlap between series bars; negative adds a gap (Excel: Series Overlap)"
-      />
-      <NumField
-        label="Radius"
-        value={opts.borderRadius ?? 2}
-        min={0} max={20} step={1}
-        onChange={(v) => setOpt({ borderRadius: v })}
-        title="Bar corner radius (px)"
-      />
-    </div>
-  );
-}
-
-// ============================================================================
-// Line/Area Options Section: width, interpolation, markers, area opacity
-// ============================================================================
-
-export function LineOptionsSection(_props: PanelSectionProps): React.ReactElement | null {
-  const { chartId, spec, updateSpec } = useChartDesignState();
-  if (!chartId || !spec) return null;
-  if (spec.mark !== "line" && spec.mark !== "area") return null;
-
-  const isArea = spec.mark === "area";
-  const opts = (spec.markOptions ?? {}) as LineMarkOptions & AreaMarkOptions;
-  const setOpt = (patch: Partial<LineMarkOptions & AreaMarkOptions>) =>
-    updateSpec({ markOptions: { ...opts, ...patch } });
-  const showMarkers = opts.showMarkers ?? !isArea;
-
-  return (
-    <div className={s.optionColumn} style={{ width: 170 }}>
-      <ControlRow gap={6}>
-        <NumField
-          label="Width"
-          value={opts.lineWidth ?? 2}
-          min={1} max={10} step={0.5}
-          onChange={(v) => setOpt({ lineWidth: v })}
-          title="Line width (px)"
+    <div className={band ? bandColumn : panelStack}>
+      <div className={band ? bandLine : panelLine}>
+        <PaletteStrip
+          palettes={palettes}
+          value={spec.palette}
+          onChange={(palette) => updateSpec({ palette })}
+          testIdPrefix="chart-palette"
+          ariaLabel="Colour palette"
         />
-        <select
-          className={s.select}
-          value={opts.interpolation ?? "linear"}
-          onChange={(e) => setOpt({ interpolation: e.target.value as LineInterpolation })}
-          title="Line interpolation"
+      </div>
+      <div className={band ? bandLine : panelLine}>
+        <Button
+          ref={setSeriesAnchor}
+          icon={<RibbonIcon.Series size={ICON_SIZE_SM} />}
+          disabled={!cartesian}
+          tooltip={
+            cartesian
+              ? "Colour one series"
+              : "Series colours apply to charts with axes; format a slice from the Format pane"
+          }
+          data-testid="chart-series"
+          aria-haspopup="dialog"
+          aria-expanded={seriesOpen}
+          onClick={toggleSeries}
         >
-          <option value="linear">Straight</option>
-          <option value="smooth">Smooth</option>
-          <option value="step">Stepped</option>
-        </select>
-      </ControlRow>
-      <ControlRow gap={6}>
-        <label className={s.checkLabel}>
-          <input
-            type="checkbox"
-            checked={showMarkers}
-            onChange={(e) => setOpt({ showMarkers: e.target.checked })}
-          />
-          Markers
-        </label>
-        {showMarkers && (
-          <NumField
-            label="Size"
-            value={opts.markerRadius ?? 4}
-            min={1} max={12} step={1}
-            onChange={(v) => setOpt({ markerRadius: v })}
-            title="Marker radius (px)"
-          />
-        )}
-      </ControlRow>
-      {isArea && (
-        <NumField
-          label="Fill %"
-          value={Math.round((opts.fillOpacity ?? 0.3) * 100)}
-          min={0} max={100} step={5}
-          onChange={(v) => setOpt({ fillOpacity: v / 100 })}
-          title="Area fill opacity"
-        />
+          Series
+          <Chevron />
+        </Button>
+      </div>
+      <Popover
+        card
+        anchorEl={seriesAnchor}
+        open={seriesOpen && cartesian}
+        onClose={closeSeries}
+        heading="Series colour"
+      >
+        <SurfaceLayoutProvider value={popoverLayout()}>
+          <div ref={seriesBodyRef} className={cardBody}>
+            {hasSeries ? (
+              <SeriesColorsSection placement="sidebar" />
+            ) : (
+              <StatusText>This chart has no series to colour yet.</StatusText>
+            )}
+          </div>
+        </SurfaceLayoutProvider>
+      </Popover>
+    </div>
+  );
+}
+
+// ============================================================================
+// 5. Data — Filter + Trendline rows beside the Switch hero
+// ============================================================================
+
+const TRENDLINE_TYPES: ReadonlyArray<{ value: TrendlineType | "none"; label: string }> = [
+  { value: "none", label: "None" },
+  { value: "linear", label: "Linear" },
+  { value: "exponential", label: "Exponential" },
+  { value: "polynomial", label: "Polynomial" },
+  { value: "logarithmic", label: "Logarithmic" },
+  { value: "power", label: "Power" },
+  { value: "movingAverage", label: "Moving average" },
+];
+
+function trendlineLabel(type: TrendlineType): string {
+  return TRENDLINE_TYPES.find((t) => t.value === type)?.label ?? type;
+}
+
+/**
+ * Data: Filter (series/category visibility, with an "N of M" chip while
+ * anything is hidden) and Trendline (a menu of types plus the equation and
+ * R-squared toggles, with a chip naming the type), beside the "Switch"
+ * row/column hero for range-sourced charts.
+ */
+export function ChartDataSection(_props: PanelSectionProps): React.ReactElement | null {
+  const { chartId, spec, updateSpec } = useChartDesignState();
+  const layout = useSurfaceLayout();
+  const {
+    anchor: filterAnchor,
+    setAnchor: setFilterAnchor,
+    open: filterOpen,
+    toggle: toggleFilter,
+    close: closeFilter,
+  } = useCardPopover<HTMLButtonElement>();
+  const filterBodyRef = useRef<HTMLDivElement>(null);
+  useFocusOnOpen(filterOpen, filterBodyRef);
+
+  if (!chartId || !spec) return null;
+
+  const band = layout.container === "band";
+  const isPivot = isPivotDataSource(spec.data);
+  const cartesian = isCartesianChart(spec.mark);
+  const supportsTrendline = cartesian && spec.mark !== "waterfall" && spec.mark !== "histogram";
+  // A pivot chart has no Switch hero; keeping its Trendline row (disabled when
+  // it does not apply) is what keeps the cluster two rows rather than one.
+  const showTrendlineRow = supportsTrendline || isPivot;
+  const unfilteredData = getCachedChartData(chartId)?.unfilteredData;
+  const summary = summarizeChartFilters(spec.filters, unfilteredData);
+  const currentTrendline: TrendlineSpec | null = spec.trendlines?.[0] ?? null;
+
+  const setTrendlineType = (type: TrendlineType | "none"): void => {
+    if (type === "none") {
+      updateSpec({ trendlines: [] });
+      return;
+    }
+    const tl: TrendlineSpec = {
+      type,
+      seriesIndex: currentTrendline?.seriesIndex ?? 0,
+      ...(type === "polynomial" ? { polynomialDegree: currentTrendline?.polynomialDegree ?? 2 } : {}),
+      ...(type === "movingAverage" ? { movingAveragePeriod: currentTrendline?.movingAveragePeriod ?? 3 } : {}),
+    };
+    updateSpec({ trendlines: [tl] });
+  };
+
+  const switchRowCol = async (): Promise<void> => {
+    if (chartId == null || !spec) return;
+    try {
+      const dataRef = await resolveDataSource(spec.data);
+      const newOrientation: SeriesOrientation =
+        spec.seriesOrientation === "columns" ? "rows" : "columns";
+      const detected = await autoDetectSeriesForOrientation(
+        dataRef, spec.hasHeaders, newOrientation,
+      );
+      updateSpec({
+        seriesOrientation: newOrientation,
+        categoryIndex: detected.categoryIndex,
+        series: detected.series,
+        seriesRefs: undefined,
+      });
+    } catch (err) {
+      console.error("[Charts] Switch Row/Column failed:", err);
+    }
+  };
+
+  const chipTitle =
+    summary === null
+      ? undefined
+      : summary.shown !== null
+        ? `${summary.shown} of ${summary.total} ${summary.noun} shown`
+        : `${summary.hidden} hidden`;
+
+  const filterRow = (
+    <div className={band ? bandLine : panelLine}>
+      <Button
+        ref={setFilterAnchor}
+        icon={<RibbonIcon.Filter size={ICON_SIZE_SM} />}
+        tooltip="Show or hide series and categories"
+        data-testid="chart-filter"
+        aria-haspopup="dialog"
+        aria-expanded={filterOpen}
+        onClick={toggleFilter}
+      >
+        Filter
+        <Chevron />
+      </Button>
+      {summary !== null && (
+        <Chip tone="info" testId="chart-filter-chip" title={chipTitle}>
+          {summary.shown !== null ? (
+            <>
+              <b>{summary.shown}</b> of {summary.total}
+            </>
+          ) : (
+            <>
+              <b>{summary.hidden}</b> hidden
+            </>
+          )}
+        </Chip>
       )}
     </div>
   );
-}
 
-// ============================================================================
-// Axis Options Section: axis titles + Y min/max (cartesian)
-// ============================================================================
+  const trendlineRow = showTrendlineRow ? (
+    <div className={band ? bandLine : panelLine}>
+      <MenuButton
+        ariaLabel="Trendline"
+        trigger={
+          <Button
+            icon={<RibbonIcon.Trendline size={ICON_SIZE_SM} />}
+            disabled={!supportsTrendline}
+            tooltip={
+              supportsTrendline
+                ? "Add a trendline to the first series"
+                : "Trendlines apply to charts with a value axis"
+            }
+            data-testid="chart-trendline"
+          >
+            Trendline
+            <Chevron />
+          </Button>
+        }
+      >
+        {TRENDLINE_TYPES.map((t) => (
+          <MenuItem
+            key={t.value}
+            role="menuitemradio"
+            checked={(currentTrendline?.type ?? "none") === t.value}
+            testId={`chart-trendline-${t.value}`}
+            onSelect={() => setTrendlineType(t.value)}
+          >
+            {t.label}
+          </MenuItem>
+        ))}
+        <MenuSeparator />
+        <MenuItem
+          role="menuitemcheckbox"
+          checked={currentTrendline?.showEquation ?? false}
+          disabled={currentTrendline === null}
+          testId="chart-trendline-equation"
+          onSelect={() => {
+            if (currentTrendline === null) return;
+            updateSpec({
+              trendlines: [{ ...currentTrendline, showEquation: !(currentTrendline.showEquation ?? false) }],
+            });
+          }}
+        >
+          Show equation
+        </MenuItem>
+        <MenuItem
+          role="menuitemcheckbox"
+          checked={currentTrendline?.showRSquared ?? false}
+          disabled={currentTrendline === null}
+          testId="chart-trendline-rsquared"
+          onSelect={() => {
+            if (currentTrendline === null) return;
+            updateSpec({
+              trendlines: [{ ...currentTrendline, showRSquared: !(currentTrendline.showRSquared ?? false) }],
+            });
+          }}
+        >
+          Show R<sup>2</sup>
+        </MenuItem>
+      </MenuButton>
+      {supportsTrendline && currentTrendline !== null && (
+        <Chip testId="chart-trendline-chip" title={`Trendline: ${trendlineLabel(currentTrendline.type)}`}>
+          <b>{trendlineLabel(currentTrendline.type)}</b>
+        </Chip>
+      )}
+    </div>
+  ) : null;
 
-export function AxisOptionsSection(_props: PanelSectionProps): React.ReactElement | null {
-  const { chartId, spec, updateSpec } = useChartDesignState();
-  if (!chartId || !spec) return null;
-  if (!isCartesianChart(spec.mark)) return null;
+  const switchHero = isPivot ? null : (
+    <CommandButton
+      icon={<RibbonIcon.SwitchRowCol size={HERO_ICON_SIZE} />}
+      label="Switch"
+      aria-label="Switch row/column"
+      tooltip="Switch between rows and columns as data series"
+      data-testid="chart-switch-rowcol"
+      onClick={() => void switchRowCol()}
+    />
+  );
+
+  const filterCardPopover = (
+    <Popover
+      card
+      anchorEl={filterAnchor}
+      open={filterOpen}
+      onClose={closeFilter}
+      heading="Filter chart"
+    >
+      <SurfaceLayoutProvider value={popoverLayout()}>
+        <div ref={filterBodyRef}>
+          <ChartFilterDropdown
+            spec={spec}
+            unfilteredData={unfilteredData}
+            onFiltersChange={(newFilters: ChartFilters) => updateSpec({ filters: newFilters })}
+          />
+        </div>
+      </SurfaceLayoutProvider>
+    </Popover>
+  );
+
+  if (!band) {
+    return (
+      <div className={panelStack}>
+        {filterRow}
+        {trendlineRow}
+        {switchHero}
+        {filterCardPopover}
+      </div>
+    );
+  }
 
   return (
-    <div className={s.optionColumn} style={{ width: 180 }}>
-      <ControlRow gap={4}>
-        <Input
-          type="text"
-          width={86}
-          value={spec.xAxis.title ?? ""}
-          placeholder="X title"
-          onChange={(e) => updateSpec({ xAxis: { ...spec.xAxis, title: e.target.value || null } })}
-        />
-        <Input
-          type="text"
-          width={86}
-          value={spec.yAxis.title ?? ""}
-          placeholder="Y title"
-          onChange={(e) => updateSpec({ yAxis: { ...spec.yAxis, title: e.target.value || null } })}
-        />
-      </ControlRow>
-      <ControlRow gap={4}>
-        <NumBlankField
-          label="Min"
-          value={spec.yAxis.min}
-          onChange={(v) => updateSpec({ yAxis: { ...spec.yAxis, min: v } })}
-          title="Y axis minimum (blank = auto)"
-        />
-        <NumBlankField
-          label="Max"
-          value={spec.yAxis.max}
-          onChange={(v) => updateSpec({ yAxis: { ...spec.yAxis, max: v } })}
-          title="Y axis maximum (blank = auto)"
-        />
-      </ControlRow>
+    <div className={bandPair}>
+      <div className={bandColumn}>
+        {filterRow}
+        {trendlineRow}
+      </div>
+      {switchHero}
+      {filterCardPopover}
     </div>
   );
 }
 
 // ============================================================================
-// Data Label Options Section: position + font size (when labels are on)
+// 6. Actions — Edit Chart, Save Image, Format Point, JSON
 // ============================================================================
 
-export function DataLabelOptionsSection(_props: PanelSectionProps): React.ReactElement | null {
-  const { chartId, spec, updateSpec } = useChartDesignState();
-  if (!chartId || !spec) return null;
-  const dl = spec.dataLabels;
-  if (!dl?.enabled) return null;
+/**
+ * Actions. Format Point appears only while a single data point is selected;
+ * JSON is pressed while the chart-json task pane is open and toggles it.
+ */
+export function ChartActionsSection(_props: PanelSectionProps): React.ReactElement | null {
+  const { chartId, spec } = useChartDesignState();
+  const layout = useSurfaceLayout();
+  const openPaneIds = useTaskPaneOpenPaneIds();
+  const paneContainerOpen = useIsTaskPaneOpen();
 
-  const setDl = (patch: Partial<DataLabelSpec>) => updateSpec({ dataLabels: { ...dl, ...patch } });
+  if (!chartId || !spec) return null;
+
+  const band = layout.container === "band";
+  const isPivot = isPivotDataSource(spec.data);
+  const jsonOpen = paneContainerOpen && openPaneIds.includes(CHART_JSON_PANE_ID);
+
+  let formatPoint: React.ReactNode = null;
+  const subSel = getSubSelection();
+  if (subSel.level === "dataPoint") {
+    const isPieOrDonut = spec.mark === "pie" || spec.mark === "donut";
+    const cachedData = getCachedChartData(chartId);
+    // subSel indices are PAINTER (post-filter) space; the painted point's
+    // label is in the same space (the filtered data's categories).
+    const categoryName = cachedData?.data?.categories?.[subSel.categoryIndex ?? 0] ?? "";
+    // dataPointOverrides are keyed in AUTHORING (unfiltered) space — translate
+    // the painter sub-selection so the override anchors to the right datum
+    // even with a series/category filter active.
+    const authoring = cachedData
+      ? toAuthoringIndices(cachedData.data, subSel.seriesIndex ?? 0, subSel.categoryIndex ?? 0)
+      : { seriesIndex: subSel.seriesIndex ?? 0, categoryIndex: subSel.categoryIndex ?? 0 };
+    formatPoint = (
+      <CommandButton
+        icon={<RibbonIcon.FormatPoint size={HERO_ICON_SIZE} />}
+        label="Format Point"
+        tooltip="Format the selected data point"
+        data-testid="chart-format-point"
+        onClick={() => {
+          showDialog("chart:dataPointFormat", {
+            chartId,
+            seriesIndex: authoring.seriesIndex,
+            categoryIndex: authoring.categoryIndex,
+            categoryName,
+            isPieOrDonut,
+          });
+        }}
+      />
+    );
+  }
 
   return (
-    <ControlRow gap={6}>
-      <select
-        className={s.select}
-        value={dl.position ?? "auto"}
-        onChange={(e) => setDl({ position: e.target.value as DataLabelPosition })}
-        title="Label position"
-      >
-        <option value="auto">Auto</option>
-        <option value="above">Above</option>
-        <option value="below">Below</option>
-        <option value="center">Center</option>
-        <option value="inside">Inside</option>
-        <option value="outside">Outside</option>
-      </select>
-      <NumField
-        label="Size"
-        value={dl.fontSize ?? 10}
-        min={7} max={20} step={1}
-        onChange={(v) => setDl({ fontSize: v })}
-        title="Label font size (px)"
+    <div className={band ? bandRow : panelLine}>
+      <CommandButton
+        icon={<RibbonIcon.EditChart size={HERO_ICON_SIZE} />}
+        label="Edit Chart"
+        tooltip="Open the full chart editor"
+        data-testid="chart-edit"
+        onClick={() => {
+          if (isPivot) {
+            const pivotId = (spec.data as { pivotId: string }).pivotId;
+            showDialog(CHART_DIALOG_ID, { pivotId, editChartId: chartId });
+          } else {
+            showDialog(CHART_DIALOG_ID, { editChartId: chartId });
+          }
+        }}
       />
-    </ControlRow>
+      <CommandButton
+        icon={<RibbonIcon.SaveImage size={HERO_ICON_SIZE} />}
+        label="Save Image"
+        tooltip="Save the chart as a PNG image"
+        data-testid="chart-save-image"
+        onClick={async () => {
+          try {
+            await exportChartAsImage(chartId);
+          } catch (err) {
+            console.error("[Charts] Export failed:", err);
+            void alertAsync("Failed to export chart: " + String(err));
+          }
+        }}
+      />
+      {formatPoint}
+      <CommandButton
+        icon={<RibbonIcon.Code size={HERO_ICON_SIZE} />}
+        label="JSON"
+        active={jsonOpen}
+        tooltip={jsonOpen ? "Close the chart JSON pane" : "Edit the chart as JSON in a task pane"}
+        data-testid="chart-json-toggle"
+        onClick={() => {
+          if (jsonOpen) closeTaskPane(CHART_JSON_PANE_ID);
+          else openTaskPane(CHART_JSON_PANE_ID);
+        }}
+      />
+    </div>
   );
 }
 
@@ -1236,198 +1429,91 @@ export function DataLabelOptionsSection(_props: PanelSectionProps): React.ReactE
 // Section list builder
 // ============================================================================
 
+/** Launcher flyout width for every Chart Design cluster. */
+const CHART_FLYOUT_WIDTH = 320;
+
+/** Section icon (launcher slot, sidebar header) — the duotone set at 24. */
+function sectionIcon(name: RibbonIconKey): React.ReactNode {
+  return <ChartIcon name={name} size={ICON_SIZE_MD} />;
+}
+
 /**
- * Build the section list for the currently selected chart. The former tab
- * rendered the Stacking/Axes/Trendline groups conditionally on the chart type;
- * with shell-owned sections that conditionality moves here — the selection
- * handler re-registers the panel when the applicable set changes (see
- * handlers/selectionHandler.ts). collapsePriority values carry over the old
- * GROUP_DEFS collapseOrder semantics (lower collapses to a launcher first).
+ * Build the section list for the currently selected chart: Type, Elements,
+ * [Layout — axis charts only], Style, Data, Actions.
+ *
+ * Layout is the ONLY conditional section, so the selection handler (which
+ * re-registers the panel when the id list changes) remounts the band only on
+ * an axis <-> radial flip. collapsePriority: lower demotes to a launcher
+ * first — Layout (3), then Actions (5), Data (6), Style (8), Elements (9),
+ * and Type (10) last.
  */
 export function buildChartDesignSections(): PanelSection[] {
   const chartId = getCurrentChartId();
   const spec = chartId != null ? getChartById(chartId)?.spec ?? null : null;
-
-  const supportsStacking =
-    spec != null &&
-    (spec.mark === "bar" || spec.mark === "horizontalBar" || spec.mark === "line" || spec.mark === "area");
-  const isCombo = spec?.mark === "combo";
   const cartesian = spec != null && isCartesianChart(spec.mark);
-  const supportsTrendline =
-    spec != null && cartesian && spec.mark !== "waterfall" && spec.mark !== "histogram";
 
   const sections: PanelSection[] = [
     {
       id: `${CHART_DESIGN_TAB_ID}.type`,
-      label: "Chart Type",
+      label: "Type",
+      icon: sectionIcon("ChartColumn"),
       component: ChartTypeSection,
       ribbonPresentation: "inline",
-      collapsePriority: 6,
+      collapsePriority: 10,
+      flyoutWidth: CHART_FLYOUT_WIDTH,
     },
     {
       id: `${CHART_DESIGN_TAB_ID}.elements`,
-      label: "Chart Elements",
+      label: "Elements",
+      icon: sectionIcon("ChartTitle"),
       component: ChartElementsSection,
-      ribbonPresentation: "auto",
-      collapsePriority: 5,
+      ribbonPresentation: "inline",
+      collapsePriority: 9,
+      flyoutWidth: CHART_FLYOUT_WIDTH,
     },
   ];
 
-  if (supportsStacking) {
-    sections.push({
-      id: `${CHART_DESIGN_TAB_ID}.stacking`,
-      label: "Stacking",
-      component: StackingSection,
-      ribbonPresentation: "auto",
-      collapsePriority: 2,
-    });
-  } else if (isCombo) {
-    sections.push({
-      id: `${CHART_DESIGN_TAB_ID}.axes`,
-      label: "Axes",
-      component: AxesSection,
-      ribbonPresentation: "auto",
-      collapsePriority: 2,
-    });
-  }
-
-  if (spec?.mark === "bar") {
-    sections.push({
-      id: `${CHART_DESIGN_TAB_ID}.barOptions`,
-      label: "Bars",
-      component: BarOptionsSection,
-      ribbonPresentation: "auto",
-      collapsePriority: 2,
-    });
-  }
-  if (spec?.mark === "line" || spec?.mark === "area") {
-    sections.push({
-      id: `${CHART_DESIGN_TAB_ID}.lineOptions`,
-      label: spec.mark === "area" ? "Area" : "Line",
-      component: LineOptionsSection,
-      ribbonPresentation: "auto",
-      collapsePriority: 2,
-    });
-  }
-  if (spec?.dataLabels?.enabled) {
-    sections.push({
-      id: `${CHART_DESIGN_TAB_ID}.dataLabelOptions`,
-      label: "Data Labels",
-      component: DataLabelOptionsSection,
-      ribbonPresentation: "auto",
-      collapsePriority: 1,
-    });
-  }
-
-  if (supportsTrendline) {
-    sections.push({
-      id: `${CHART_DESIGN_TAB_ID}.trendline`,
-      label: "Trendline",
-      component: TrendlineSection,
-      ribbonPresentation: "auto",
-      collapsePriority: 1,
-    });
-  }
-
-  sections.push(
-    {
-      id: `${CHART_DESIGN_TAB_ID}.colors`,
-      label: "Colors",
-      component: ColorsSection,
-      ribbonPresentation: "inline",
-      collapsePriority: 4,
-    },
-  );
-
   if (cartesian) {
-    sections.push(
-      {
-        id: `${CHART_DESIGN_TAB_ID}.seriesColors`,
-        label: "Series",
-        component: SeriesColorsSection,
-        ribbonPresentation: "auto",
-        collapsePriority: 3,
-      },
-      {
-        id: `${CHART_DESIGN_TAB_ID}.axisOptions`,
-        label: "Axis",
-        component: AxisOptionsSection,
-        ribbonPresentation: "auto",
-        collapsePriority: 2,
-      },
-    );
-  }
-
-  sections.push(
-    {
-      id: `${CHART_DESIGN_TAB_ID}.legend`,
-      label: "Legend",
-      component: LegendSection,
+    sections.push({
+      id: `${CHART_DESIGN_TAB_ID}.layout`,
+      label: "Layout",
+      icon: sectionIcon("Stacked"),
+      component: ChartLayoutSection,
       ribbonPresentation: "auto",
       collapsePriority: 3,
-    },
+      flyoutWidth: CHART_FLYOUT_WIDTH,
+    });
+  }
+
+  sections.push(
     {
-      id: `${CHART_DESIGN_TAB_ID}.filter`,
-      label: "Filter",
-      component: FilterSection,
+      id: `${CHART_DESIGN_TAB_ID}.style`,
+      label: "Style",
+      icon: sectionIcon("Palette"),
+      component: ChartStyleSection,
       ribbonPresentation: "inline",
       collapsePriority: 8,
+      flyoutWidth: CHART_FLYOUT_WIDTH,
+    },
+    {
+      id: `${CHART_DESIGN_TAB_ID}.data`,
+      label: "Data",
+      icon: sectionIcon("Filter"),
+      component: ChartDataSection,
+      ribbonPresentation: "inline",
+      collapsePriority: 6,
+      flyoutWidth: CHART_FLYOUT_WIDTH,
     },
     {
       id: `${CHART_DESIGN_TAB_ID}.actions`,
       label: "Actions",
-      component: ActionsSection,
+      icon: sectionIcon("EditChart"),
+      component: ChartActionsSection,
       ribbonPresentation: "auto",
-      collapsePriority: 7,
-    },
-    // The old tab hardcoded the JSON group as never-collapsing; a very high
-    // collapsePriority keeps it inline until every other section is a launcher.
-    {
-      id: `${CHART_DESIGN_TAB_ID}.json`,
-      label: "JSON",
-      component: JsonSection,
-      ribbonPresentation: "inline",
-      collapsePriority: 100,
+      collapsePriority: 5,
+      flyoutWidth: CHART_FLYOUT_WIDTH,
     },
   );
 
   return sections;
-}
-
-// ============================================================================
-// Stack Mode Helpers
-// ============================================================================
-
-/** Read the current stack mode from spec.markOptions based on chart type. */
-function getStackModeFromSpec(spec: ChartSpec): StackMode {
-  const opts = spec.markOptions ?? {};
-  switch (spec.mark) {
-    case "bar":
-    case "horizontalBar":
-      return (opts as BarMarkOptions).stackMode ?? "none";
-    case "line":
-      return (opts as LineMarkOptions).stackMode ?? "none";
-    case "area": {
-      const areaOpts = opts as AreaMarkOptions;
-      return areaOpts.stackMode ?? (areaOpts.stacked ? "stacked" : "none");
-    }
-    default:
-      return "none";
-  }
-}
-
-/** Create updated markOptions with a new stack mode, preserving other fields. */
-function setStackModeInOptions(spec: ChartSpec, mode: StackMode): BarMarkOptions | LineMarkOptions | AreaMarkOptions {
-  const opts = spec.markOptions ?? {};
-  switch (spec.mark) {
-    case "bar":
-    case "horizontalBar":
-      return { ...(opts as BarMarkOptions), stackMode: mode };
-    case "line":
-      return { ...(opts as LineMarkOptions), stackMode: mode };
-    case "area":
-      return { ...(opts as AreaMarkOptions), stackMode: mode, stacked: mode !== "none" };
-    default:
-      return opts as BarMarkOptions;
-  }
 }

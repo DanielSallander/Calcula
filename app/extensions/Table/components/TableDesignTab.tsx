@@ -1,18 +1,59 @@
 //! FILENAME: app/extensions/Table/components/TableDesignTab.tsx
 // PURPOSE: "Table Design" panel sections: Properties, Tools, Table Style Options,
-//          JSON toggle, and the Table Styles gallery.
+//          JSON, and the Table Styles gallery.
 // CONTEXT: Registered as a contextual, ribbon-placed panel while the selection is
 //          inside a table (see handlers/selectionHandler.ts). The shell owns all
-//          group chrome (label below content, dividers) and width-collapse
-//          behavior, so each section renders only its controls. Sections
-//          communicate with the Table extension via custom events
-//          (TABLE_STATE / TABLE_REQUEST_STATE).
+//          cluster chrome (card, caption, launcher demotion), so each section
+//          renders only its controls. Sections communicate with the Table
+//          extension via custom events (TABLE_STATE / TABLE_REQUEST_STATE).
+//
+//          Built from the @api/layout control grammar (the Calcula Clusters
+//          redesign, docs/design/ribbon-design-system.md), and every section
+//          obeys THE FILL RULE of the band's 61px content box:
+//
+//            Properties     TWO ROWS   name field / Resize Table
+//            Tools          TWO ROWS   three columns of icon buttons
+//            Style Options  TWO ROWS   four columns of checkboxes
+//            JSON           ONE TALL   the JSON hero (opens the "table-json" pane)
+//            Table Styles   ONE TALL   the StyleGallery strip
+//
+//          Colours come only from tokens (LT); this file is under the chrome
+//          hex-ban in app/eslint.boundaries.js. The style thumbnails' colours
+//          are DATA in ../lib/tableStyles.ts.
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
 import { css } from "@emotion/css";
-import { onAppEvent, emitAppEvent, showDialog, useGridState } from "@api";
+import {
+  onAppEvent,
+  emitAppEvent,
+  showDialog,
+  useGridState,
+  RibbonIcon,
+  openTaskPane,
+  closeTaskPane,
+  useIsTaskPaneOpen,
+  useTaskPaneOpenPaneIds,
+} from "@api";
 import type { PanelSection, PanelSectionProps } from "@api/uiTypes";
-import { Stack, ControlRow, Field, Input, Button } from "@api/layout";
+import {
+  Stack,
+  ControlRow,
+  Field,
+  Input,
+  Button,
+  Checkbox,
+  CommandButton,
+  LT,
+  useSurfaceLayout,
+  CONTROL_HEIGHT_MD,
+  FONT_FAMILY,
+  GAP_SM,
+  GAP_XS,
+  HERO_ICON_SIZE,
+  ICON_SIZE_MD,
+  ICON_SIZE_SM,
+  ROW_GAP,
+} from "@api/layout";
 import { TableEvents } from "../lib/tableEvents";
 import {
   updateTableStyleAsync,
@@ -24,12 +65,17 @@ import {
   type Table,
   type TableStyleOptions,
 } from "../lib/tableStore";
-import { TableStylesGallery, DEFAULT_TABLE_STYLE_ID } from "./TableStylesGallery";
-import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
+import {
+  applyTableStyleAsync,
+  tableStyleIdForName,
+  TABLE_STYLE_NONE_ID,
+} from "../lib/tableStyles";
+import { TableStylesGallery } from "./TableStylesGallery";
+import { TABLE_JSON_PANE_ID } from "./TableJsonPane";
 import { confirmAsync } from "@api/dialogs";
 
 // ============================================================================
-// Styles
+// Styles (tokens only)
 // ============================================================================
 
 const sectionStyles = {
@@ -38,47 +84,78 @@ const sectionStyles = {
     align-items: center;
     justify-content: center;
     height: 100%;
-    color: #999;
+    color: ${LT.textSecondary};
+    font-family: ${FONT_FAMILY};
     font-style: italic;
     font-size: 12px;
     white-space: nowrap;
   `,
   inlineError: css`
+    font-family: ${FONT_FAMILY};
     font-size: 11px;
-    color: #c42b1c;
+    color: ${LT.dangerFg};
     max-width: 180px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   `,
-  checkboxLabel: css`
-    display: flex;
+  /** Band: two 28px rows filled column by column (28 + 5 + 28 = 61), so the
+   *  controls line up in columns the way Excel's small-button groups do. */
+  bandColumns: css`
+    display: grid;
+    grid-auto-flow: column;
+    grid-template-rows: repeat(2, ${CONTROL_HEIGHT_MD}px);
+    row-gap: ${ROW_GAP}px;
+    align-content: center;
     align-items: center;
-    gap: 4px;
-    cursor: pointer;
-    white-space: nowrap;
-    font-size: 11px;
-    color: #333;
-
-    input {
-      cursor: pointer;
-    }
+    justify-items: start;
+    height: 100%;
+    min-width: 0;
   `,
-  // Danger variant layered on top of the standard layout Button
-  // (&& doubles specificity so it wins over the Button base class).
-  dangerButton: css`
-    && {
-      color: #c42b1c;
-    }
-    &&:hover:not(:disabled) {
-      background: #fde7e7;
-      border-color: #c42b1c;
-    }
-    &&:active:not(:disabled) {
-      background: #fbd0d0;
-    }
+  panelList: css`
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    min-width: 0;
+  `,
+  panelWrap: css`
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: ${GAP_XS}px;
+    min-width: 0;
   `,
 };
+
+/**
+ * The two-row column grid of the band. Outside the band the same children
+ * render as a vertical list (`panel="list"`) or a wrapping toolbar row
+ * (`panel="wrap"`).
+ */
+function TwoRowColumns({
+  columnGap,
+  panel,
+  children,
+}: {
+  columnGap: number;
+  panel: "list" | "wrap";
+  children: React.ReactNode;
+}): React.ReactElement {
+  const layout = useSurfaceLayout();
+  if (layout.container === "band") {
+    return (
+      <div className={sectionStyles.bandColumns} style={{ columnGap }}>
+        {children}
+      </div>
+    );
+  }
+  return (
+    <div className={panel === "list" ? sectionStyles.panelList : sectionStyles.panelWrap}>
+      {children}
+    </div>
+  );
+}
 
 // ============================================================================
 // Shared table-state hook
@@ -129,6 +206,7 @@ export function PropertiesSection(_props: PanelSectionProps): React.ReactElement
   const [savedName, setSavedName] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const nameInputId = useId();
 
   // Sync the editable name whenever a table-state broadcast arrives. Also
   // clears any stale error so switching tables doesn't carry the last one over.
@@ -192,14 +270,18 @@ export function PropertiesSection(_props: PanelSectionProps): React.ReactElement
   // end < start. Normalize before comparing or the button stays disabled for
   // exactly the drags that grow a table upward.
   const selection = gridState.selection;
-  const selRange = selection
-    ? {
-        startRow: Math.min(selection.startRow, selection.endRow),
-        endRow: Math.max(selection.startRow, selection.endRow),
-        startCol: Math.min(selection.startCol, selection.endCol),
-        endCol: Math.max(selection.startCol, selection.endCol),
-      }
-    : null;
+  const selRange = useMemo(
+    () =>
+      selection
+        ? {
+            startRow: Math.min(selection.startRow, selection.endRow),
+            endRow: Math.max(selection.startRow, selection.endRow),
+            startCol: Math.min(selection.startCol, selection.endCol),
+            endCol: Math.max(selection.startCol, selection.endCol),
+          }
+        : null,
+    [selection],
+  );
 
   const canResize =
     !!table &&
@@ -238,14 +320,18 @@ export function PropertiesSection(_props: PanelSectionProps): React.ReactElement
     );
   }
 
+  // TWO ROWS: the name field, then Resize Table (and the last error, which
+  // shares the second row rather than adding a third that would not fit).
   return (
-    <Stack gap={4}>
-      <Field label="Table Name:">
+    <Stack gap={ROW_GAP}>
+      <Field label="Table Name:" htmlFor={nameInputId}>
         <Input
           ref={nameInputRef}
+          id={nameInputId}
           type="text"
           width={120}
           value={tableName}
+          data-testid="table-design-name"
           onChange={(e) => setTableName(e.target.value)}
           onBlur={() => { void saveTableName(); }}
           onKeyDown={(e) => {
@@ -256,22 +342,29 @@ export function PropertiesSection(_props: PanelSectionProps): React.ReactElement
           }}
         />
       </Field>
-      {renameError && (
-        <div className={sectionStyles.inlineError} title={renameError}>
-          {renameError}
-        </div>
-      )}
-      <Button
-        disabled={!canResize}
-        onClick={() => { void handleResize(); }}
-        title={
-          canResize
-            ? "Resize this table to the selected range"
-            : "Select the new range on the grid first"
-        }
-      >
-        Resize Table
-      </Button>
+      <ControlRow gap={GAP_SM}>
+        <Button
+          icon={<RibbonIcon.Resize size={ICON_SIZE_SM} />}
+          disabled={!canResize}
+          onClick={() => { void handleResize(); }}
+          data-testid="table-design-resize"
+          // A native title, not a Tooltip: the hint matters most while the
+          // button is DISABLED, and a disabled button receives no pointer
+          // events for a Tooltip to open on.
+          title={
+            canResize
+              ? "Resize this table to the selected range"
+              : "Select the new range on the grid first"
+          }
+        >
+          Resize Table
+        </Button>
+        {renameError && (
+          <span className={sectionStyles.inlineError} title={renameError} role="alert">
+            {renameError}
+          </span>
+        )}
+      </ControlRow>
     </Stack>
   );
 }
@@ -360,21 +453,53 @@ export function ToolsSection(_props: PanelSectionProps): React.ReactElement | nu
 
   if (!tableState) return null;
 
+  // TWO ROWS, filled column by column: analyse | slice | change the table.
   return (
-    <Stack gap={4}>
-      <ControlRow gap={4}>
-        <Button onClick={handleSummarizeWithPivot}>Summarize with PivotTable</Button>
-        <Button onClick={handleInsertSlicer}>Insert Slicer</Button>
-        <Button onClick={handleRemoveDuplicates}>Remove Duplicates</Button>
-      </ControlRow>
-      <ControlRow gap={4}>
-        <Button onClick={handleEditScript}>Edit Script...</Button>
-        <Button onClick={() => void handleConvertToRange()}>Convert to Range</Button>
-        <Button className={sectionStyles.dangerButton} onClick={handleDeleteTable}>
-          Delete Table
-        </Button>
-      </ControlRow>
-    </Stack>
+    <TwoRowColumns columnGap={GAP_XS} panel="wrap">
+      <Button
+        icon={<RibbonIcon.Pivot size={ICON_SIZE_SM} />}
+        onClick={handleSummarizeWithPivot}
+        data-testid="table-design-summarize-pivot"
+      >
+        Summarize with PivotTable
+      </Button>
+      <Button
+        icon={<RibbonIcon.DeleteRow size={ICON_SIZE_SM} />}
+        onClick={handleRemoveDuplicates}
+        data-testid="table-design-remove-duplicates"
+      >
+        Remove Duplicates
+      </Button>
+      <Button
+        icon={<RibbonIcon.Slicer size={ICON_SIZE_SM} />}
+        onClick={handleInsertSlicer}
+        data-testid="table-design-insert-slicer"
+      >
+        Insert Slicer
+      </Button>
+      <Button
+        icon={<RibbonIcon.Table size={ICON_SIZE_SM} />}
+        onClick={() => void handleConvertToRange()}
+        data-testid="table-design-convert-to-range"
+      >
+        Convert to Range
+      </Button>
+      <Button
+        icon={<RibbonIcon.Script size={ICON_SIZE_SM} />}
+        onClick={handleEditScript}
+        data-testid="table-design-edit-script"
+      >
+        Edit Script...
+      </Button>
+      <Button
+        icon={<RibbonIcon.Delete size={ICON_SIZE_SM} />}
+        tone="danger"
+        onClick={handleDeleteTable}
+        data-testid="table-design-delete"
+      >
+        Delete Table
+      </Button>
+    </TwoRowColumns>
   );
 }
 
@@ -382,23 +507,40 @@ export function ToolsSection(_props: PanelSectionProps): React.ReactElement | nu
 // Table Style Options section
 // ============================================================================
 
+/** The seven flags, paired so each band column reads as one idea: the
+ *  header/total rows, the banding, the emphasised columns, the filter. */
+const STYLE_OPTIONS: ReadonlyArray<{ key: keyof TableStyleOptions; label: string }> = [
+  { key: "headerRow", label: "Header Row" },
+  { key: "totalRow", label: "Total Row" },
+  { key: "bandedRows", label: "Banded Rows" },
+  { key: "bandedColumns", label: "Banded Columns" },
+  { key: "firstColumn", label: "First Column" },
+  { key: "lastColumn", label: "Last Column" },
+  { key: "showFilterButton", label: "Filter Button" },
+];
+
+/** What an absent flag shows: the filter button is on unless turned off. */
+function optionChecked(opts: TableStyleOptions | undefined, key: keyof TableStyleOptions): boolean {
+  return opts?.[key] ?? key === "showFilterButton";
+}
+
 export function StyleOptionsSection(_props: PanelSectionProps): React.ReactElement | null {
   const { tableState, setTableState } = useDesignTableState();
   const table = tableState?.table ?? null;
   const opts = table?.styleOptions;
 
-  const toggleOption = useCallback(
-    (key: keyof TableStyleOptions) => {
+  const setOption = useCallback(
+    (key: keyof TableStyleOptions, value: boolean) => {
       if (!table || !opts) return;
       if (key === "totalRow") {
-        toggleTotalsRowAsync(table.id, !opts.totalRow).then((updated) => {
+        toggleTotalsRowAsync(table.id, value).then((updated) => {
           if (updated) {
             setTableState({ table: updated });
             emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
           }
         });
       } else {
-        updateTableStyleAsync(table.id, { [key]: !opts[key] }).then((updated) => {
+        updateTableStyleAsync(table.id, { [key]: value }).then((updated) => {
           if (updated) {
             setTableState({ table: updated });
             emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
@@ -411,78 +553,47 @@ export function StyleOptionsSection(_props: PanelSectionProps): React.ReactEleme
 
   if (!tableState) return null;
 
-  // A single Stack: the band caps at the ribbon content height and
-  // column-wraps (Excel-style checkbox columns); the sidebar shows one list.
+  // TWO ROWS in the band (four columns of checkboxes); one list elsewhere.
   return (
-    <Stack gap={4}>
-      <label className={sectionStyles.checkboxLabel}>
-        <input type="checkbox" checked={opts?.headerRow ?? false} onChange={() => toggleOption("headerRow")} />
-        Header Row
-      </label>
-      <label className={sectionStyles.checkboxLabel}>
-        <input type="checkbox" checked={opts?.totalRow ?? false} onChange={() => toggleOption("totalRow")} />
-        Total Row
-      </label>
-      <label className={sectionStyles.checkboxLabel}>
-        <input type="checkbox" checked={opts?.bandedRows ?? false} onChange={() => toggleOption("bandedRows")} />
-        Banded Rows
-      </label>
-      <label className={sectionStyles.checkboxLabel}>
-        <input type="checkbox" checked={opts?.firstColumn ?? false} onChange={() => toggleOption("firstColumn")} />
-        First Column
-      </label>
-      <label className={sectionStyles.checkboxLabel}>
-        <input type="checkbox" checked={opts?.lastColumn ?? false} onChange={() => toggleOption("lastColumn")} />
-        Last Column
-      </label>
-      <label className={sectionStyles.checkboxLabel}>
-        <input type="checkbox" checked={opts?.bandedColumns ?? false} onChange={() => toggleOption("bandedColumns")} />
-        Banded Columns
-      </label>
-      <label className={sectionStyles.checkboxLabel}>
-        <input type="checkbox" checked={opts?.showFilterButton ?? true} onChange={() => toggleOption("showFilterButton")} />
-        Filter Button
-      </label>
-    </Stack>
+    <TwoRowColumns columnGap={12} panel="list">
+      {STYLE_OPTIONS.map(({ key, label }) => (
+        <Checkbox
+          key={key}
+          label={label}
+          checked={optionChecked(opts, key)}
+          onChange={(checked) => setOption(key, checked)}
+          testId={`table-style-option-${key}`}
+        />
+      ))}
+    </TwoRowColumns>
   );
 }
 
 // ============================================================================
-// JSON section (Phase C toggle)
+// JSON section — opens the "table-json" task pane
 // ============================================================================
 
 export function JsonSection(_props: PanelSectionProps): React.ReactElement | null {
   const { tableState } = useDesignTableState();
-
-  const jsonToggle = useJsonToggle(
-    "table",
-    tableState?.table?.id != null ? String(tableState.table.id) : "",
-    () => emitAppEvent(TableEvents.TABLE_REQUEST_STATE),
-  );
+  const taskPaneOpen = useIsTaskPaneOpen();
+  const openPaneIds = useTaskPaneOpenPaneIds();
+  const showing = taskPaneOpen && openPaneIds.includes(TABLE_JSON_PANE_ID);
 
   if (!tableState) return null;
+  const { table } = tableState;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "2px 6px" }}>
-      <JsonToggleButton
-        isActive={jsonToggle.isJsonMode}
-        onClick={jsonToggle.toggle}
-        disabled={!tableState}
-      />
-      {jsonToggle.isJsonMode && (
-        <div style={{ position: "fixed", right: 8, top: 140, width: 420, height: 400, zIndex: 500, border: "1px solid #555", borderRadius: 6, overflow: "hidden", boxShadow: "0 4px 16px rgba(0,0,0,0.4)" }}>
-          <JsonToggleEditor
-            json={jsonToggle.json}
-            onChange={jsonToggle.setJson}
-            onApply={jsonToggle.apply}
-            onRevert={jsonToggle.revert}
-            dirty={jsonToggle.dirty}
-            error={jsonToggle.error}
-            loading={jsonToggle.loading}
-          />
-        </div>
-      )}
-    </div>
+    <CommandButton
+      icon={<RibbonIcon.Code size={HERO_ICON_SIZE} />}
+      label="JSON"
+      active={showing}
+      tooltip="Edit this table as JSON"
+      data-testid="table-json-toggle"
+      onClick={() => {
+        if (showing) closeTaskPane(TABLE_JSON_PANE_ID);
+        else openTaskPane(TABLE_JSON_PANE_ID, { tableId: table.id, tableName: table.name });
+      }}
+    />
   );
 }
 
@@ -491,24 +602,31 @@ export function JsonSection(_props: PanelSectionProps): React.ReactElement | nul
 // ============================================================================
 
 export function StylesSection(_props: PanelSectionProps): React.ReactElement | null {
-  const { tableState } = useDesignTableState();
-  const [selectedStyleId, setSelectedStyleId] = useState(DEFAULT_TABLE_STYLE_ID);
+  const { tableState, setTableState } = useDesignTableState();
+  const table = tableState?.table ?? null;
 
-  const handleStyleSelect = useCallback((_styleId: string) => {
-    setSelectedStyleId(_styleId);
-  }, []);
+  // The gallery WRITES the table's style name. Its highlight is derived from
+  // what the table stores (`styleName`), never kept locally: the old gallery
+  // held the choice in React state, wrote nothing, and forgot it on remount.
+  const applyStyle = useCallback(
+    async (styleId: string) => {
+      if (!table) return;
+      const updated = await applyTableStyleAsync(table.id, styleId);
+      if (updated) {
+        setTableState({ table: updated });
+        emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
+      }
+    },
+    [table, setTableState],
+  );
 
-  const handleStyleClear = useCallback(() => {
-    setSelectedStyleId("");
-  }, []);
-
-  if (!tableState) return null;
+  if (!table) return null;
 
   return (
     <TableStylesGallery
-      selectedStyleId={selectedStyleId}
-      onStyleSelect={handleStyleSelect}
-      onStyleClear={handleStyleClear}
+      selectedStyleId={tableStyleIdForName(table.styleName)}
+      onStyleSelect={(styleId) => void applyStyle(styleId)}
+      onStyleClear={() => void applyStyle(TABLE_STYLE_NONE_ID)}
     />
   );
 }
@@ -517,37 +635,37 @@ export function StylesSection(_props: PanelSectionProps): React.ReactElement | n
 // Section list
 // ============================================================================
 
-// One PanelSection per former ribbon group. collapsePriority preserves the old
+// One PanelSection per ribbon cluster. collapsePriority preserves the old
 // collapse order (Properties first, then Tools, then Style Options — lower
-// collapses to a launcher first). The JSON toggle and the styles gallery never
-// collapsed under the old system: they get high priorities, and both are
-// band-designed widgets so they are trusted "inline" (never height-probed);
-// the gallery keeps its own ResizeObserver-driven Quick Styles fallback.
+// collapses to a launcher first). The JSON hero and the styles gallery are
+// band-designed (each is exactly one 61px row), so they are trusted "inline"
+// (never height-probed) and collapse last.
 export const TABLE_DESIGN_SECTIONS: PanelSection[] = [
   {
     id: "table-design.properties",
     label: "Properties",
-    icon: "⚙",
+    icon: <RibbonIcon.Settings size={ICON_SIZE_MD} />,
     component: PropertiesSection,
     collapsePriority: 1,
   },
   {
     id: "table-design.tools",
     label: "Tools",
-    icon: "⚒",
+    icon: <RibbonIcon.Lightning size={ICON_SIZE_MD} />,
     component: ToolsSection,
     collapsePriority: 2,
   },
   {
     id: "table-design.styleOptions",
     label: "Table Style Options",
-    icon: "☑",
+    icon: <RibbonIcon.BandedRows size={ICON_SIZE_MD} />,
     component: StyleOptionsSection,
     collapsePriority: 3,
   },
   {
     id: "table-design.json",
     label: "JSON",
+    icon: <RibbonIcon.Code size={ICON_SIZE_MD} />,
     component: JsonSection,
     ribbonPresentation: "inline",
     collapsePriority: 100,
@@ -555,6 +673,7 @@ export const TABLE_DESIGN_SECTIONS: PanelSection[] = [
   {
     id: "table-design.styles",
     label: "Table Styles",
+    icon: <RibbonIcon.TableStyle size={ICON_SIZE_MD} />,
     component: StylesSection,
     ribbonPresentation: "inline",
     collapsePriority: 200,

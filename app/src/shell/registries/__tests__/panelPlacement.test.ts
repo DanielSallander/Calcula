@@ -123,3 +123,25 @@ describe("hidden panels", () => {
     expect(registeredTabs).toHaveLength(0);
   });
 });
+
+describe("resetPlacement", () => {
+  it("moves a panel back to its default AND forgets the override (no explicit default left behind)", () => {
+    panelRegistry.registerPanel(makePanel());
+    panelRegistry.setPlacement("test.panel", "ribbon");
+    // Moving back with setPlacement records the default explicitly...
+    panelRegistry.setPlacement("test.panel", "sidebar");
+    expect(usePanelPlacementStore.getState().placements).toEqual({ ["test.panel"]: "sidebar" });
+
+    // ...resetPlacement does not: the map is empty, which is the clean state.
+    panelRegistry.setPlacement("test.panel", "ribbon");
+    panelRegistry.resetPlacement("test.panel");
+    expect(panelRegistry.getPlacement("test.panel")).toBe("sidebar");
+    expect(usePanelPlacementStore.getState().placements).toEqual({});
+    expect(registeredViews.map((v) => v.id)).toContain("test.panel");
+  });
+
+  it("is a no-op for an unknown panel", () => {
+    panelRegistry.resetPlacement("nope");
+    expect(usePanelPlacementStore.getState().placements).toEqual({});
+  });
+});

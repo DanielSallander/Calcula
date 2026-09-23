@@ -12,6 +12,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { findHardcodedColours } from "@api/layout";
 import { Badge, Modal, quantiseModalWidth, isSectionId } from "../components/editorShared";
 import { NAV_ICONS } from "../components/navIcons";
 import { formatRouteHash, parseRouteHash, useSectionRoute } from "../lib/useSectionRoute";
@@ -394,6 +395,24 @@ describe("Badge", () => {
     const err = container.querySelector('[data-testid="e"] span') as HTMLElement;
     expect(err.style.background).not.toBe(warn.style.background);
     expect(err.style.color).not.toBe(warn.style.color);
+  });
+
+  it("is the one @api Badge, painted with tokens only in every tone", async () => {
+    await act(async () =>
+      root.render(
+        <div>
+          <Badge>neutral</Badge>
+          <Badge tone="warn">warn</Badge>
+          <Badge tone="ok">ok</Badge>
+          <Badge tone="error">error</Badge>
+        </div>,
+      ),
+    );
+    const pills = Array.from(container.querySelectorAll<HTMLElement>("span[data-tone]"));
+    expect(pills.map((p) => p.textContent)).toEqual(["neutral", "warn", "ok", "error"]);
+    // The error tone maps onto the shared pill's danger tone.
+    expect(pills[3].getAttribute("data-tone")).toBe("danger");
+    expect(findHardcodedColours(container)).toEqual([]);
   });
 });
 

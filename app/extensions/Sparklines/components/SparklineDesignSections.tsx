@@ -4,25 +4,58 @@
 //          Style / Axis / Group). Composed from @api/layout primitives so the
 //          same JSX renders horizontally in the ribbon band and vertically in
 //          the sidebar; the shell owns group chrome, labels and collapse.
-//          Replaces the monolithic SparklineDesignTab (useRibbonCollapse +
-//          RibbonGroup). Registered via SparklineDesignPanelDefinition in
-//          manifest.ts and shown/hidden by handlers/selectionHandler.ts.
+//          Registered via SparklineDesignPanelDefinition in manifest.ts and
+//          shown/hidden by handlers/selectionHandler.ts.
+//
+//          THE FILL RULE (@api/layout tokens): in the band every section fills
+//          the cluster's 61px content box one of two ways —
+//            Sparkline  one tall row: the "Edit Data" hero
+//            Type       one tall row: a 61px Line | Column | Win/Loss pill
+//            Show       two rows: three columns of two checkboxes
+//            Style      two rows: the preset strip over the two colour pickers
+//            Axis       two rows: columns of two (axis + scale, min + max,
+//                       empty cells + plot order)
+//            Group      two rows: Group + Ungroup over Clear
+//          Two-row sections that pair controls into COLUMNS use BandColumns
+//          below rather than Stack's column-wrap: the columns are explicit, so
+//          the section's max-content width (what the shell measures) is the
+//          sum of the columns on every engine.
+//
+//          The eight Style presets and the picker colours are categorical DATA
+//          and live in ../lib/sparklineColors.ts; everything here paints with
+//          LT tokens.
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useId, useState } from "react";
 import { css } from "@emotion/css";
 import type { PanelSectionProps } from "@api/uiTypes";
 import type { Selection } from "@api";
+import { RibbonIcon } from "@api/ribbonIcons";
 import { useGridState } from "@api/state";
 import { showDialog } from "@api/ui";
 import { AppEvents, emitAppEvent, onAppEvent } from "@api/events";
 import {
-  ActionRow,
   Button,
+  Checkbox,
+  CommandButton,
+  ControlGrid,
+  ControlGridBreak,
   ControlRow,
+  Dropdown,
   Field,
-  Input,
+  FONT_FAMILY,
+  GAP_SM,
+  HERO_ICON_SIZE,
+  ICON_SIZE_SM,
+  LT,
+  NumberField,
+  PaletteStrip,
+  ROW_GAP,
+  SegmentedChoice,
   Stack,
-  ToggleButton,
+  useSurfaceLayout,
+  type DropdownOption,
+  type PaletteOption,
+  type SegmentedChoiceOption,
 } from "@api/layout";
 import {
   getSparklineForCell,
@@ -31,122 +64,92 @@ import {
   groupSparklines as groupSparklinesFn,
   ungroupSparkline as ungroupSparklineFn,
 } from "../store";
-import type { SparklineGroup, AxisScaleType, EmptyCellHandling, PlotOrder } from "../types";
+import type {
+  SparklineGroup,
+  SparklineType,
+  AxisScaleType,
+  EmptyCellHandling,
+  PlotOrder,
+} from "../types";
+import { SPARKLINE_STYLE_PRESETS, presetColors } from "../lib/sparklineColors";
 import { SparklineColorPicker } from "./SparklineColorPicker";
 import { SPARKLINE_DIALOG_ID } from "../index";
 
 // ============================================================================
-// Style presets (predefined color combos for the Style gallery)
+// Option data
 // ============================================================================
 
-const STYLE_PRESETS: Array<{ color: string; negativeColor: string; markerColor: string }> = [
-  { color: "#4472C4", negativeColor: "#D94735", markerColor: "#4472C4" },
-  { color: "#ED7D31", negativeColor: "#D94735", markerColor: "#ED7D31" },
-  { color: "#A5A5A5", negativeColor: "#D94735", markerColor: "#A5A5A5" },
-  { color: "#FFC000", negativeColor: "#D94735", markerColor: "#FFC000" },
-  { color: "#5B9BD5", negativeColor: "#D94735", markerColor: "#5B9BD5" },
-  { color: "#70AD47", negativeColor: "#D94735", markerColor: "#70AD47" },
-  { color: "#264478", negativeColor: "#D94735", markerColor: "#264478" },
-  { color: "#636363", negativeColor: "#D94735", markerColor: "#636363" },
+/** The Style strip's palettes: each preset shown as its own colours. */
+const STYLE_PALETTES: readonly PaletteOption[] = SPARKLINE_STYLE_PRESETS.map((preset) => ({
+  id: preset.id,
+  name: preset.name,
+  colors: presetColors(preset),
+}));
+
+const SCALE_OPTIONS: ReadonlyArray<DropdownOption<AxisScaleType>> = [
+  { value: "auto", label: "Auto" },
+  { value: "sameForAll", label: "Same for All" },
+  { value: "custom", label: "Custom" },
+];
+
+const EMPTY_CELL_OPTIONS: ReadonlyArray<DropdownOption<EmptyCellHandling>> = [
+  { value: "zero", label: "Zero" },
+  { value: "gaps", label: "Gaps" },
+  { value: "connect", label: "Connect" },
+];
+
+const PLOT_ORDER_OPTIONS: ReadonlyArray<DropdownOption<PlotOrder>> = [
+  { value: "default", label: "Left to Right" },
+  { value: "rightToLeft", label: "Right to Left" },
 ];
 
 // ============================================================================
-// Styles (only for content the layout primitives do not cover: checkbox
-// labels, compact selects, and the style-preset swatch strip)
+// Styles (only what no layout primitive covers: the empty-state message)
 // ============================================================================
 
-const styles = {
-  disabledMessage: css`
-    display: flex;
-    align-items: center;
-    height: 100%;
-    color: var(--text-tertiary, #999);
-    font-style: italic;
-    font-size: 12px;
-    white-space: nowrap;
-  `,
-  checkboxLabel: css`
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    cursor: pointer;
-    white-space: nowrap;
-    font-size: 11px;
-    color: var(--text-primary, #333);
-
-    input {
-      cursor: pointer;
-      margin: 0;
-    }
-  `,
-  styleGallery: css`
-    display: flex;
-    gap: 2px;
-    align-items: center;
-    padding: 2px;
-    border: 1px solid var(--border-default, #e0e0e0);
-    border-radius: 3px;
-  `,
-  stylePreset: css`
-    width: 28px;
-    height: 22px;
-    border: 1px solid transparent;
-    border-radius: 2px;
-    cursor: pointer;
-    padding: 2px;
-    background: transparent;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-
-    &:hover {
-      background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
-    }
-  `,
-  stylePresetActive: css`
-    width: 28px;
-    height: 22px;
-    border: 2px solid var(--button-pressed-border, rgba(16, 185, 129, 0.45));
-    border-radius: 2px;
-    cursor: pointer;
-    padding: 1px;
-    background: var(--button-pressed-bg, rgba(16, 185, 129, 0.14));
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  `,
-  selectSmall: css`
-    font-size: 11px;
-    padding: 1px 4px;
-    border: 1px solid var(--border-default, #ccc);
-    border-radius: 3px;
-    background: var(--bg-surface, #fff);
-    cursor: pointer;
-    min-width: 70px;
-  `,
-};
+const emptyState = css`
+  display: flex;
+  align-items: center;
+  height: 100%;
+  color: ${LT.textTertiary};
+  font-family: ${FONT_FAMILY};
+  font-style: italic;
+  font-size: 12px;
+  white-space: nowrap;
+`;
 
 // ============================================================================
-// Mini sparkline preview for style gallery
+// BandColumns — controls paired into columns in the band, a list in a panel
 // ============================================================================
 
-function MiniSparklinePreview({ color }: { color: string }): React.ReactElement {
-  // Draw a simple 5-point line preview
-  const points = [3, 8, 2, 10, 5];
-  const w = 24;
-  const h = 16;
-  const maxVal = 10;
-  const coords = points.map((v, i) => {
-    const x = (i / (points.length - 1)) * w;
-    const y = h - (v / maxVal) * h;
-    return `${x},${y}`;
-  });
-  const pathD = coords.map((c, i) => (i === 0 ? `M${c}` : `L${c}`)).join(" ");
+/**
+ * In the ribbon band: one column per entry, each a ROW_GAP stack of (at most)
+ * two 28px controls — the fill rule's 28 + 5 + 28. In a panel or flyout: the
+ * same controls in reading order as one vertical list.
+ */
+function BandColumns({ columns }: { columns: React.ReactNode[][] }): React.ReactElement {
+  const layout = useSurfaceLayout();
+
+  if (layout.container === "band") {
+    return (
+      <ControlRow gap={GAP_SM * 2}>
+        {columns.map((column, c) => (
+          <Stack key={c} gap={ROW_GAP}>
+            {column.map((control, r) => (
+              <React.Fragment key={r}>{control}</React.Fragment>
+            ))}
+          </Stack>
+        ))}
+      </ControlRow>
+    );
+  }
 
   return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
-      <path d={pathD} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
-    </svg>
+    <Stack gap={GAP_SM}>
+      {columns.flatMap((column, c) =>
+        column.map((control, r) => <React.Fragment key={`${c}-${r}`}>{control}</React.Fragment>),
+      )}
+    </Stack>
   );
 }
 
@@ -164,18 +167,16 @@ interface SparklineDesignContext {
 }
 
 function useSparklineDesign(): SparklineDesignContext {
+  // A context read: a selection change re-renders the section, and the group
+  // below is looked up during render, so it always follows the selection.
   const gridState = useGridState();
   const sel = gridState.selection;
 
-  // Force re-render when sparkline properties change
+  // Force re-render when sparkline properties change (the store is not React
+  // state, so a write re-renders nothing by itself).
   const [, forceUpdate] = useState(0);
 
-  // Re-read group on selection change
-  useEffect(() => {
-    forceUpdate((c) => c + 1);
-  }, [sel?.endRow, sel?.endCol]);
-
-  // Sections render independently now: a mutation made in a sibling section
+  // Sections render independently: a mutation made in a sibling section
   // (type change, clear, ungroup, style preset) must re-render this one too.
   // Every mutation path emits GRID_REFRESH, so subscribe once per section —
   // this reproduces the former tab-level forceUpdate.
@@ -205,6 +206,11 @@ function useSparklineDesign(): SparklineDesignContext {
   return { sel, group, update, refresh };
 }
 
+/** Icon size for a control that is 61px tall in the band and 28px elsewhere. */
+function useTallIconSize(): number {
+  return useSurfaceLayout().container === "band" ? 28 : ICON_SIZE_SM;
+}
+
 // ============================================================================
 // Section: Sparkline — Edit Data
 // ============================================================================
@@ -216,27 +222,25 @@ export function SparklineEditSection(_props: PanelSectionProps): React.ReactElem
     // Only the first section carries the empty-state message; siblings render
     // nothing so it is not repeated across the band.
     return (
-      <div className={styles.disabledMessage}>
+      <div className={emptyState} data-testid="sparkline-design-empty">
         Select a sparkline cell to see design options
       </div>
     );
   }
 
   return (
-    <ActionRow>
-      <Button
-        onClick={() => {
-          showDialog(SPARKLINE_DIALOG_ID, {
-            editGroupId: group.id,
-            sparklineType: group.type,
-          });
-        }}
-        title="Edit sparkline data and location ranges"
-      >
-        <span>&#x270E;</span>
-        Edit Data
-      </Button>
-    </ActionRow>
+    <CommandButton
+      icon={<RibbonIcon.Pencil size={HERO_ICON_SIZE} />}
+      label="Edit Data"
+      tooltip="Edit sparkline data and location ranges"
+      data-testid="sparkline-edit-data"
+      onClick={() => {
+        showDialog(SPARKLINE_DIALOG_ID, {
+          editGroupId: group.id,
+          sparklineType: group.type,
+        });
+      }}
+    />
   );
 }
 
@@ -246,35 +250,43 @@ export function SparklineEditSection(_props: PanelSectionProps): React.ReactElem
 
 export function SparklineTypeSection(_props: PanelSectionProps): React.ReactElement | null {
   const { group, update } = useSparklineDesign();
+  const band = useSurfaceLayout().container === "band";
+  const iconSize = useTallIconSize();
   if (!group) return null;
 
+  const options: ReadonlyArray<SegmentedChoiceOption<SparklineType>> = [
+    {
+      value: "line",
+      label: "Line",
+      icon: <RibbonIcon.SparkLine size={iconSize} />,
+      tooltip: "Line sparkline",
+      testId: "sparkline-type-line",
+    },
+    {
+      value: "column",
+      label: "Column",
+      icon: <RibbonIcon.SparkColumn size={iconSize} />,
+      tooltip: "Column sparkline",
+      testId: "sparkline-type-column",
+    },
+    {
+      value: "winloss",
+      label: "Win/Loss",
+      icon: <RibbonIcon.SparkWinLoss size={iconSize} />,
+      tooltip: "Win/Loss sparkline",
+      testId: "sparkline-type-winloss",
+    },
+  ];
+
   return (
-    <ControlRow gap={2}>
-      <ToggleButton
-        active={group.type === "line"}
-        onClick={() => update({ type: "line" })}
-        title="Line sparkline"
-      >
-        <span>&#x1F4C8;</span>
-        Line
-      </ToggleButton>
-      <ToggleButton
-        active={group.type === "column"}
-        onClick={() => update({ type: "column" })}
-        title="Column sparkline"
-      >
-        <span>&#x1F4CA;</span>
-        Column
-      </ToggleButton>
-      <ToggleButton
-        active={group.type === "winloss"}
-        onClick={() => update({ type: "winloss" })}
-        title="Win/Loss sparkline"
-      >
-        <span>&#x1F4CA;</span>
-        Win/Loss
-      </ToggleButton>
-    </ControlRow>
+    <SegmentedChoice<SparklineType>
+      ariaLabel="Sparkline type"
+      size={band ? "tall" : "md"}
+      value={group.type}
+      options={options}
+      onChange={(type) => update({ type })}
+      testId="sparkline-type"
+    />
   );
 }
 
@@ -286,110 +298,104 @@ export function SparklineShowSection(_props: PanelSectionProps): React.ReactElem
   const { group, update } = useSparklineDesign();
   if (!group) return null;
 
+  // Excel's pairing: the extremes, the ends, then negatives and markers.
   return (
-    <Stack gap={1}>
-      <label className={styles.checkboxLabel}>
-        <input
-          type="checkbox"
-          checked={group.showHighPoint}
-          onChange={(e) => update({ showHighPoint: e.target.checked })}
-        />
-        High Point
-      </label>
-      <label className={styles.checkboxLabel}>
-        <input
-          type="checkbox"
-          checked={group.showFirstPoint}
-          onChange={(e) => update({ showFirstPoint: e.target.checked })}
-        />
-        First Point
-      </label>
-      <label className={styles.checkboxLabel}>
-        <input
-          type="checkbox"
-          checked={group.showLowPoint}
-          onChange={(e) => update({ showLowPoint: e.target.checked })}
-        />
-        Low Point
-      </label>
-      <label className={styles.checkboxLabel}>
-        <input
-          type="checkbox"
-          checked={group.showLastPoint}
-          onChange={(e) => update({ showLastPoint: e.target.checked })}
-        />
-        Last Point
-      </label>
-      <label className={styles.checkboxLabel}>
-        <input
-          type="checkbox"
-          checked={group.showNegativePoints}
-          onChange={(e) => update({ showNegativePoints: e.target.checked })}
-        />
-        Negative Points
-      </label>
-      <label className={styles.checkboxLabel}>
-        <input
-          type="checkbox"
-          checked={group.showMarkers}
-          onChange={(e) => update({ showMarkers: e.target.checked })}
-        />
-        Markers
-      </label>
-    </Stack>
+    <BandColumns
+      columns={[
+        [
+          <Checkbox
+            label="High Point"
+            checked={group.showHighPoint}
+            onChange={(showHighPoint) => update({ showHighPoint })}
+            testId="sparkline-show-high"
+          />,
+          <Checkbox
+            label="Low Point"
+            checked={group.showLowPoint}
+            onChange={(showLowPoint) => update({ showLowPoint })}
+            testId="sparkline-show-low"
+          />,
+        ],
+        [
+          <Checkbox
+            label="First Point"
+            checked={group.showFirstPoint}
+            onChange={(showFirstPoint) => update({ showFirstPoint })}
+            testId="sparkline-show-first"
+          />,
+          <Checkbox
+            label="Last Point"
+            checked={group.showLastPoint}
+            onChange={(showLastPoint) => update({ showLastPoint })}
+            testId="sparkline-show-last"
+          />,
+        ],
+        [
+          <Checkbox
+            label="Negative Points"
+            checked={group.showNegativePoints}
+            onChange={(showNegativePoints) => update({ showNegativePoints })}
+            testId="sparkline-show-negative"
+          />,
+          <Checkbox
+            label="Markers"
+            checked={group.showMarkers}
+            onChange={(showMarkers) => update({ showMarkers })}
+            testId="sparkline-show-markers"
+          />,
+        ],
+      ]}
+    />
   );
 }
 
 // ============================================================================
-// Section: Style — preset gallery + color pickers (band-designed widgets,
-// hosted as-is; the section is declared "inline" in the manifest)
+// Section: Style — preset strip + colour pickers (two rows)
 // ============================================================================
 
 export function SparklineStyleSection(_props: PanelSectionProps): React.ReactElement | null {
   const { group, update } = useSparklineDesign();
   if (!group) return null;
 
-  return (
-    <ControlRow gap={8}>
-      {/* Style presets gallery */}
-      <div className={styles.styleGallery}>
-        {STYLE_PRESETS.map((preset, idx) => {
-          const isActive =
-            group.color === preset.color &&
-            group.negativeColor === preset.negativeColor;
-          return (
-            <button
-              key={idx}
-              className={isActive ? styles.stylePresetActive : styles.stylePreset}
-              onClick={() =>
-                update({
-                  color: preset.color,
-                  negativeColor: preset.negativeColor,
-                  markerColor: preset.markerColor,
-                })
-              }
-              title={`Style ${idx + 1}`}
-            >
-              <MiniSparklinePreview color={preset.color} />
-            </button>
-          );
-        })}
-      </div>
+  // Exact match on the two colours a preset sets, as the old strip did.
+  const active = SPARKLINE_STYLE_PRESETS.find(
+    (preset) => group.color === preset.color && group.negativeColor === preset.negativeColor,
+  );
 
-      {/* Color pickers */}
-      <Stack gap={3}>
+  return (
+    <Stack gap={ROW_GAP}>
+      <PaletteStrip
+        palettes={STYLE_PALETTES}
+        value={active?.id ?? ""}
+        ariaLabel="Sparkline style"
+        moreLabel="More styles"
+        popoverHeading="Sparkline styles"
+        testIdPrefix="sparkline-style"
+        onChange={(id) => {
+          const preset = SPARKLINE_STYLE_PRESETS.find((p) => p.id === id);
+          if (!preset) return;
+          update({
+            color: preset.color,
+            negativeColor: preset.negativeColor,
+            markerColor: preset.markerColor,
+          });
+        }}
+      />
+      <ControlRow gap={GAP_SM * 2}>
         <SparklineColorPicker
           label="Sparkline Color"
           value={group.color}
           onChange={(color) => update({ color })}
+          testId="sparkline-color"
         />
         <SparklineColorPicker
           label="Marker Color"
           value={group.markerColor || group.color}
           onChange={(markerColor) => update({ markerColor })}
+          testId="sparkline-marker-color"
         />
-      </Stack>
-    </ControlRow>
+      </ControlRow>
+    </Stack>
   );
 }
 
@@ -399,78 +405,80 @@ export function SparklineStyleSection(_props: PanelSectionProps): React.ReactEle
 
 export function SparklineAxisSection(_props: PanelSectionProps): React.ReactElement | null {
   const { group, update } = useSparklineDesign();
+  const minId = useId();
+  const maxId = useId();
   if (!group) return null;
 
-  return (
-    <Stack gap={2}>
-      <label className={styles.checkboxLabel}>
-        <input
-          type="checkbox"
-          checked={group.showAxis}
-          onChange={(e) => update({ showAxis: e.target.checked })}
-        />
-        Show Axis
-      </label>
-
-      <Field label="Scale:">
-        <select
-          className={styles.selectSmall}
+  const columns: React.ReactNode[][] = [
+    [
+      <Checkbox
+        label="Show Axis"
+        checked={group.showAxis}
+        onChange={(showAxis) => update({ showAxis })}
+        testId="sparkline-axis-show"
+      />,
+      <Field label="Scale">
+        <Dropdown<AxisScaleType>
+          ariaLabel="Axis scale"
           value={group.axisScaleType}
-          onChange={(e) => update({ axisScaleType: e.target.value as AxisScaleType })}
-        >
-          <option value="auto">Auto</option>
-          <option value="sameForAll">Same for All</option>
-          <option value="custom">Custom</option>
-        </select>
-      </Field>
+          options={SCALE_OPTIONS}
+          onChange={(axisScaleType) => update({ axisScaleType })}
+          testId="sparkline-axis-scale"
+          optionTestIdPrefix="sparkline-axis-scale-"
+        />
+      </Field>,
+    ],
+  ];
 
-      {group.axisScaleType === "custom" && (
-        <ControlRow gap={6}>
-          <Field label="Min:">
-            <Input
-              type="number"
-              width={56}
-              value={group.axisMinValue ?? ""}
-              onChange={(e) => update({ axisMinValue: e.target.value === "" ? null : parseFloat(e.target.value) })}
-              placeholder="Auto"
-            />
-          </Field>
-          <Field label="Max:">
-            <Input
-              type="number"
-              width={56}
-              value={group.axisMaxValue ?? ""}
-              onChange={(e) => update({ axisMaxValue: e.target.value === "" ? null : parseFloat(e.target.value) })}
-              placeholder="Auto"
-            />
-          </Field>
-        </ControlRow>
-      )}
+  if (group.axisScaleType === "custom") {
+    columns.push([
+      <Field label="Min" htmlFor={minId}>
+        <NumberField
+          id={minId}
+          width={56}
+          blankMeans="auto"
+          value={group.axisMinValue ?? null}
+          onChange={(axisMinValue) => update({ axisMinValue })}
+          testId="sparkline-axis-min"
+        />
+      </Field>,
+      <Field label="Max" htmlFor={maxId}>
+        <NumberField
+          id={maxId}
+          width={56}
+          blankMeans="auto"
+          value={group.axisMaxValue ?? null}
+          onChange={(axisMaxValue) => update({ axisMaxValue })}
+          testId="sparkline-axis-max"
+        />
+      </Field>,
+    ]);
+  }
 
-      <Field label="Empty Cells:">
-        <select
-          className={styles.selectSmall}
-          value={group.emptyCellHandling}
-          onChange={(e) => update({ emptyCellHandling: e.target.value as EmptyCellHandling })}
-        >
-          <option value="zero">Zero</option>
-          <option value="gaps">Gaps</option>
-          <option value="connect">Connect</option>
-        </select>
-      </Field>
+  columns.push([
+    <Field label="Empty Cells">
+      <Dropdown<EmptyCellHandling>
+        ariaLabel="Empty cells"
+        value={group.emptyCellHandling}
+        options={EMPTY_CELL_OPTIONS}
+        onChange={(emptyCellHandling) => update({ emptyCellHandling })}
+        testId="sparkline-axis-empty-cells"
+        optionTestIdPrefix="sparkline-axis-empty-cells-"
+      />
+    </Field>,
+    <Field label="Plot Order">
+      <Dropdown<PlotOrder>
+        ariaLabel="Plot order"
+        value={group.plotOrder}
+        options={PLOT_ORDER_OPTIONS}
+        onChange={(plotOrder) => update({ plotOrder })}
+        testId="sparkline-axis-plot-order"
+        optionTestIdPrefix="sparkline-axis-plot-order-"
+      />
+    </Field>,
+  ]);
 
-      <Field label="Plot Order:">
-        <select
-          className={styles.selectSmall}
-          value={group.plotOrder}
-          onChange={(e) => update({ plotOrder: e.target.value as PlotOrder })}
-        >
-          <option value="default">Left to Right</option>
-          <option value="rightToLeft">Right to Left</option>
-        </select>
-      </Field>
-    </Stack>
-  );
+  return <BandColumns columns={columns} />;
 }
 
 // ============================================================================
@@ -482,50 +490,47 @@ export function SparklineGroupSection(_props: PanelSectionProps): React.ReactEle
   if (!group) return null;
 
   return (
-    <Stack gap={2}>
-      <ActionRow gap={4}>
-        <Button
-          size="sm"
-          onClick={() => {
-            if (!sel) return;
-            const result = groupSparklinesFn(sel.startRow, sel.startCol, sel.endRow, sel.endCol);
-            if (result) {
-              refresh();
-            }
-          }}
-          title="Group selected sparklines into one group"
-        >
-          <span>&#x229E;</span>
-          Group
-        </Button>
-        <Button
-          size="sm"
-          onClick={() => {
-            const count = ungroupSparklineFn(group.id);
-            if (count > 0) {
-              refresh();
-            }
-          }}
-          title="Split sparkline group into individual sparklines"
-        >
-          <span>&#x229F;</span>
-          Ungroup
-        </Button>
-      </ActionRow>
-      <ActionRow gap={4}>
-        <Button
-          size="sm"
-          style={{ color: "#c42b1c" }}
-          onClick={() => {
-            removeSparklineGroup(group.id);
+    <ControlGrid>
+      <Button
+        icon={<RibbonIcon.Group size={ICON_SIZE_SM} />}
+        tooltip="Group selected sparklines into one group"
+        data-testid="sparkline-group"
+        onClick={() => {
+          if (!sel) return;
+          const result = groupSparklinesFn(sel.startRow, sel.startCol, sel.endRow, sel.endCol);
+          if (result) {
             refresh();
-          }}
-          title="Clear selected sparklines"
-        >
-          <span>&#x2716;</span>
-          Clear
-        </Button>
-      </ActionRow>
-    </Stack>
+          }
+        }}
+      >
+        Group
+      </Button>
+      <Button
+        icon={<RibbonIcon.Layout size={ICON_SIZE_SM} />}
+        tooltip="Split sparkline group into individual sparklines"
+        data-testid="sparkline-ungroup"
+        onClick={() => {
+          const count = ungroupSparklineFn(group.id);
+          if (count > 0) {
+            refresh();
+          }
+        }}
+      >
+        Ungroup
+      </Button>
+      <ControlGridBreak />
+      <Button
+        tone="danger"
+        icon={<RibbonIcon.Delete size={ICON_SIZE_SM} />}
+        tooltip="Clear selected sparklines"
+        data-testid="sparkline-clear"
+        onClick={() => {
+          removeSparklineGroup(group.id);
+          refresh();
+        }}
+      >
+        Clear
+      </Button>
+    </ControlGrid>
   );
 }

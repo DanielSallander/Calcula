@@ -5,12 +5,37 @@
 //          One section per former ribbon group; the shell owns group chrome,
 //          labels and width-collapse. Sections share pivot state through
 //          lib/pivotPanelStore (replaces the monolithic PivotAnalyzeTab).
+//
+//          Built from the @api/layout control grammar: the big buttons are
+//          CommandButton heroes (61px in the band, 28px inline buttons in a
+//          sidebar or flyout) carrying duotone RibbonIcons, so they follow the
+//          skin — the old hand-drawn SVGs painted a fixed Excel green and a
+//          white page fill that glared in Dark. Every section follows THE FILL
+//          RULE: one tall 61px row of heroes, or two 28px rows with a 5px gap
+//          (the data-source readout; the Filter Pages / Delete pair).
+//
+//          This file is chrome: colours come only from LT tokens.
 
 import React, { useState, useCallback } from 'react';
-import { css } from '@emotion/css';
+import { css, cx } from '@emotion/css';
 import { showDialog, openTaskPane } from '@api';
 import type { PanelSectionProps } from '@api/uiTypes';
-import { ActionRow } from '@api/layout';
+import {
+  ActionRow,
+  Button,
+  CommandButton,
+  LT,
+  CONTROL_HEIGHT_MD,
+  FIELD_HEIGHT,
+  FONT_FAMILY,
+  GAP_XS,
+  HERO_ICON_SIZE,
+  ICON_SIZE_SM,
+  LABEL_FONT_SIZE,
+  ROW_GAP,
+  useSurfaceLayout,
+} from '@api/layout';
+import { RibbonIcon } from '@api/ribbonIcons';
 import {
   refreshPivotCache,
   getPivotTableInfo,
@@ -26,80 +51,66 @@ import { PIVOT_OPTIONS_DIALOG_ID } from '../manifest';
 import { confirmAsync } from "@api/dialogs";
 
 // ============================================================================
-// Styles
+// Styles (tokens only)
 // ============================================================================
 
 const sectionStyles = {
+  /** "Select a PivotTable..." — fills the content box, centred. */
   disabledMessage: css`
     display: flex;
     align-items: center;
     height: 100%;
-    color: var(--text-tertiary, #999);
+    color: ${LT.textTertiary};
     font-style: italic;
     font-size: 12px;
     white-space: nowrap;
-    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+    font-family: ${FONT_FAMILY};
   `,
-  button: css`
+  /** Two stacked rows (28 + 5 + 28 in the band). */
+  twoRows: css`
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 2px;
-    padding: 4px 10px;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    background: transparent;
-    cursor: pointer;
-    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
-    font-size: 11px;
-    color: var(--text-primary, #333);
-    white-space: nowrap;
-
-    &:hover {
-      background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
-      border-color: transparent;
-    }
-
-    &:active {
-      background: var(--button-active-bg, rgba(0, 0, 0, 0.1));
-    }
-  `,
-  buttonIcon: css`
-    font-size: 22px;
-    line-height: 1;
-    height: 26px;
-    display: flex;
-    align-items: center;
     justify-content: center;
+    align-items: flex-start;
+    gap: ${ROW_GAP}px;
+    min-width: 0;
   `,
-  buttonLabel: css`
-    font-size: 10px;
-    line-height: 1.2;
+  caption: css`
+    font-family: ${FONT_FAMILY};
+    font-size: ${LABEL_FONT_SIZE}px;
+    line-height: 13px;
+    color: ${LT.textSecondary};
+    white-space: nowrap;
   `,
-  sourceInfo: css`
+  /** In the band the caption is a full 28px row. */
+  captionBand: css`
     display: flex;
-    flex-direction: column;
-    gap: 2px;
-    font-size: 11px;
-    color: var(--text-primary, #333);
-    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+    align-items: center;
+    height: ${CONTROL_HEIGHT_MD}px;
   `,
-  sourceLabel: css`
-    font-size: 10px;
-    color: var(--text-secondary, #666);
-  `,
+  /** The read-only source range: a field-shaped box, not an editable one. */
   sourceValue: css`
-    font-size: 11px;
-    color: var(--text-primary, #1a1a1a);
-    font-weight: 500;
-    padding: 2px 6px;
-    background: var(--bg-surface-disabled, #f5f5f5);
-    border: 1px solid var(--border-default, #e0e0e0);
-    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    box-sizing: border-box;
+    height: ${FIELD_HEIGHT}px;
     max-width: 200px;
+    padding: 0 8px;
+    font-family: ${FONT_FAMILY};
+    font-size: 12px;
+    font-weight: 500;
+    color: ${LT.text};
+    background: ${LT.panel};
+    border: 1px solid ${LT.controlBorder};
+    border-radius: ${LT.radiusControl};
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  `,
+  sourceValueText: css`
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   `,
 };
 
@@ -109,6 +120,8 @@ const sectionStyles = {
 
 export function AnalyzePivotTableSection(_props: PanelSectionProps): React.ReactElement {
   const { pivotId, sourceRange } = usePivotPanelState();
+  const layout = useSurfaceLayout();
+  const band = layout.container === 'band';
 
   if (!pivotId) {
     return (
@@ -119,10 +132,16 @@ export function AnalyzePivotTableSection(_props: PanelSectionProps): React.React
   }
 
   return (
-    <div className={sectionStyles.sourceInfo}>
-      <span className={sectionStyles.sourceLabel}>Data Source:</span>
-      <span className={sectionStyles.sourceValue} title={sourceRange}>
-        {sourceRange || '...'}
+    <div className={sectionStyles.twoRows}>
+      <span className={cx(sectionStyles.caption, band && sectionStyles.captionBand)}>
+        Data Source:
+      </span>
+      <span
+        className={sectionStyles.sourceValue}
+        title={sourceRange}
+        data-testid="pivot-analyze-source-range"
+      >
+        <span className={sectionStyles.sourceValueText}>{sourceRange || '...'}</span>
       </span>
     </div>
   );
@@ -174,37 +193,23 @@ export function AnalyzeDataSection(_props: PanelSectionProps): React.ReactElemen
 
   return (
     <>
-      <ActionRow gap={8}>
-        <button
-          className={sectionStyles.button}
+      <ActionRow gap={GAP_XS}>
+        <CommandButton
+          icon={<RibbonIcon.ChangeSource size={HERO_ICON_SIZE} />}
+          label="Change Source"
+          tooltip="Change Data Source: change the source data range for this PivotTable"
           onClick={() => setShowChangeSource(true)}
-          title="Change the source data range for this PivotTable"
-        >
-          <span className={sectionStyles.buttonIcon}>
-            <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-              {/* Table grid */}
-              <rect x="1" y="2" width="13" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
-              <line x1="1" y1="6" x2="14" y2="6" stroke="currentColor" strokeWidth="1.2" />
-              <line x1="1" y1="10" x2="14" y2="10" stroke="currentColor" strokeWidth="1.2" />
-              <line x1="6" y1="2" x2="6" y2="14" stroke="currentColor" strokeWidth="1.2" />
-              {/* Curved arrow */}
-              <path d="M13 16 C16 16, 19 14, 19 10" stroke="#217346" strokeWidth="1.6" strokeLinecap="round" fill="none" />
-              <path d="M17.5 8.5 L19 10 L20.5 8.5" stroke="#217346" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-            </svg>
-          </span>
-          <span className={sectionStyles.buttonLabel}>Change Data Source</span>
-        </button>
-        <button
-          className={sectionStyles.button}
+          data-testid="pivot-analyze-change-source"
+        />
+        <CommandButton
+          icon={<RibbonIcon.Refresh size={HERO_ICON_SIZE} />}
+          label={isRefreshing ? 'Refreshing...' : 'Refresh'}
+          tooltip="Refresh the PivotTable data"
           onClick={handleRefresh}
           disabled={isRefreshing}
-          title="Refresh the PivotTable data"
-        >
-          <span className={sectionStyles.buttonIcon}>&#x21BB;</span>
-          <span className={sectionStyles.buttonLabel}>
-            {isRefreshing ? 'Refreshing...' : 'Refresh'}
-          </span>
-        </button>
+          aria-busy={isRefreshing || undefined}
+          data-testid="pivot-analyze-refresh"
+        />
       </ActionRow>
 
       {/* Change Data Source Dialog */}
@@ -224,6 +229,8 @@ export function AnalyzeDataSection(_props: PanelSectionProps): React.ReactElemen
 
 export function AnalyzeActionsSection(_props: PanelSectionProps): React.ReactElement | null {
   const { pivotId } = usePivotPanelState();
+  const layout = useSurfaceLayout();
+  const band = layout.container === 'band';
 
   const handleOptions = useCallback(() => {
     if (!pivotId) return;
@@ -257,79 +264,55 @@ export function AnalyzeActionsSection(_props: PanelSectionProps): React.ReactEle
     return null;
   }
 
-  return (
-    <ActionRow gap={8}>
-      <button
-        className={sectionStyles.button}
-        onClick={handleOptions}
-        title="PivotTable Options"
-      >
-        <span className={sectionStyles.buttonIcon}>
-          <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M11 14a3 3 0 100-6 3 3 0 000 6z" stroke="currentColor" strokeWidth="1.4"/>
-            <path d="M9.5 2.5l-.4 1.7a7 7 0 00-1.8 1l-1.6-.6L4.2 6.8l1.2 1.2a7 7 0 000 2l-1.2 1.2 1.5 2.2 1.6-.6a7 7 0 001.8 1l.4 1.7h3l.4-1.7a7 7 0 001.8-1l1.6.6 1.5-2.2-1.2-1.2a7 7 0 000-2l1.2-1.2-1.5-2.2-1.6.6a7 7 0 00-1.8-1l-.4-1.7z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
-          </svg>
-        </span>
-        <span className={sectionStyles.buttonLabel}>Options</span>
-      </button>
-      <button
-        className={sectionStyles.button}
-        onClick={() => showDialog("slicer:insertDialog", { sourceType: "pivot", sourceId: pivotId })}
-        title="Insert a Slicer for this PivotTable"
-      >
-        <span className={sectionStyles.buttonIcon}>
-          <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="2" y="2" width="18" height="18" rx="2" stroke="currentColor" strokeWidth="1.4"/>
-            <line x1="2" y1="7" x2="20" y2="7" stroke="currentColor" strokeWidth="1.2"/>
-            <line x1="2" y1="12" x2="20" y2="12" stroke="currentColor" strokeWidth="1.2"/>
-            <line x1="2" y1="17" x2="20" y2="17" stroke="currentColor" strokeWidth="1.2"/>
-          </svg>
-        </span>
-        <span className={sectionStyles.buttonLabel}>Insert Slicer</span>
-      </button>
-      <button
-        className={sectionStyles.button}
-        onClick={() => showDialog("timelineSlicer:insertDialog", { sourceId: pivotId })}
-        title="Insert a Timeline for this PivotTable"
-      >
-        <span className={sectionStyles.buttonIcon}>
-          <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="2" y="5" width="18" height="12" rx="2" stroke="currentColor" strokeWidth="1.4"/>
-            <line x1="2" y1="10" x2="20" y2="10" stroke="currentColor" strokeWidth="1"/>
-            <line x1="7" y1="10" x2="7" y2="17" stroke="currentColor" strokeWidth="0.8" strokeDasharray="1.5 1"/>
-            <line x1="12" y1="10" x2="12" y2="17" stroke="currentColor" strokeWidth="0.8" strokeDasharray="1.5 1"/>
-            <line x1="17" y1="10" x2="17" y2="17" stroke="currentColor" strokeWidth="0.8" strokeDasharray="1.5 1"/>
-            <rect x="8" y="12" width="3" height="3" rx="0.5" fill="currentColor" opacity="0.4"/>
-          </svg>
-        </span>
-        <span className={sectionStyles.buttonLabel}>Insert Timeline</span>
-      </button>
-      <button
-        className={sectionStyles.button}
+  // The two lighter commands stack as 28 + 5 + 28 beside the heroes in the
+  // band (Excel's own Actions group is a stacked column); elsewhere they
+  // simply continue the row of buttons.
+  const stacked = (
+    <>
+      <Button
+        icon={<RibbonIcon.FilterPages size={ICON_SIZE_SM} />}
+        tooltip="Show Report Filter Pages - generate one sheet per filter value"
         onClick={handleReportFilterPages}
-        title="Show Report Filter Pages - generate one sheet per filter value"
+        data-testid="pivot-analyze-filter-pages"
       >
-        <span className={sectionStyles.buttonIcon}>
-          <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="2" y="4" width="14" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.2"/>
-            <rect x="4" y="2" width="14" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.2" fill="#fff"/>
-            <rect x="6" y="0" width="14" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.2" fill="#fff"/>
-            <line x1="6" y1="4" x2="20" y2="4" stroke="currentColor" strokeWidth="1"/>
-            <line x1="6" y1="8" x2="20" y2="8" stroke="currentColor" strokeWidth="1"/>
-            <line x1="12" y1="0" x2="12" y2="12" stroke="currentColor" strokeWidth="1"/>
-          </svg>
-        </span>
-        <span className={sectionStyles.buttonLabel}>Filter Pages</span>
-      </button>
-      <button
-        className={sectionStyles.button}
+        Filter Pages
+      </Button>
+      <Button
+        tone="danger"
+        icon={<RibbonIcon.Delete size={ICON_SIZE_SM} />}
+        tooltip="Delete this PivotTable"
         onClick={handleDelete}
-        title="Delete this PivotTable"
-        style={{ color: "#c42b1c" }}
+        data-testid="pivot-analyze-delete"
       >
-        <span className={sectionStyles.buttonIcon}>&#x2716;</span>
-        <span className={sectionStyles.buttonLabel}>Delete</span>
-      </button>
+        Delete
+      </Button>
+    </>
+  );
+
+  return (
+    <ActionRow gap={GAP_XS}>
+      <CommandButton
+        icon={<RibbonIcon.Settings size={HERO_ICON_SIZE} />}
+        label="Options"
+        tooltip="PivotTable Options"
+        onClick={handleOptions}
+        data-testid="pivot-analyze-options"
+      />
+      <CommandButton
+        icon={<RibbonIcon.Slicer size={HERO_ICON_SIZE} />}
+        label="Insert Slicer"
+        tooltip="Insert a Slicer for this PivotTable"
+        onClick={() => showDialog("slicer:insertDialog", { sourceType: "pivot", sourceId: pivotId })}
+        data-testid="pivot-analyze-insert-slicer"
+      />
+      <CommandButton
+        icon={<RibbonIcon.Timeline size={HERO_ICON_SIZE} />}
+        label="Insert Timeline"
+        tooltip="Insert a Timeline for this PivotTable"
+        onClick={() => showDialog("timelineSlicer:insertDialog", { sourceId: pivotId })}
+        data-testid="pivot-analyze-insert-timeline"
+      />
+      {band ? <div className={sectionStyles.twoRows}>{stacked}</div> : stacked}
     </ActionRow>
   );
 }
@@ -399,39 +382,21 @@ export function AnalyzeCalculationsSection(_props: PanelSectionProps): React.Rea
 
   return (
     <>
-      <ActionRow gap={8}>
-        <button
-          className={sectionStyles.button}
+      <ActionRow gap={GAP_XS}>
+        <CommandButton
+          icon={<RibbonIcon.CalcField size={HERO_ICON_SIZE} />}
+          label="Calculated Field"
+          tooltip="Insert a Calculated Field"
           onClick={handleOpenCalcField}
-          title="Insert a Calculated Field"
-        >
-          <span className={sectionStyles.buttonIcon}>
-            <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <text x="3" y="16" fontSize="14" fontWeight="bold" fontFamily="serif" fill="currentColor">fx</text>
-              <circle cx="16" cy="6" r="5" stroke="#217346" strokeWidth="1.4" fill="none"/>
-              <line x1="16" y1="3.5" x2="16" y2="8.5" stroke="#217346" strokeWidth="1.4" strokeLinecap="round"/>
-              <line x1="13.5" y1="6" x2="18.5" y2="6" stroke="#217346" strokeWidth="1.4" strokeLinecap="round"/>
-            </svg>
-          </span>
-          <span className={sectionStyles.buttonLabel}>Calculated Field</span>
-        </button>
-        <button
-          className={sectionStyles.button}
+          data-testid="pivot-analyze-calculated-field"
+        />
+        <CommandButton
+          icon={<RibbonIcon.Fx size={HERO_ICON_SIZE} />}
+          label="Calculated Item"
+          tooltip="Insert a Calculated Item"
           onClick={handleOpenCalcItem}
-          title="Insert a Calculated Item"
-        >
-          <span className={sectionStyles.buttonIcon}>
-            <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect x="2" y="4" width="12" height="14" rx="1.5" stroke="currentColor" strokeWidth="1.4"/>
-              <line x1="2" y1="8" x2="14" y2="8" stroke="currentColor" strokeWidth="1.2"/>
-              <line x1="2" y1="12" x2="14" y2="12" stroke="currentColor" strokeWidth="1.2"/>
-              <circle cx="16" cy="6" r="5" stroke="#217346" strokeWidth="1.4" fill="none"/>
-              <line x1="16" y1="3.5" x2="16" y2="8.5" stroke="#217346" strokeWidth="1.4" strokeLinecap="round"/>
-              <line x1="13.5" y1="6" x2="18.5" y2="6" stroke="#217346" strokeWidth="1.4" strokeLinecap="round"/>
-            </svg>
-          </span>
-          <span className={sectionStyles.buttonLabel}>Calculated Item</span>
-        </button>
+          data-testid="pivot-analyze-calculated-item"
+        />
       </ActionRow>
 
       {/* Calculated Field Dialog */}

@@ -361,6 +361,24 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         page.off("pageerror", onPageError);
       }
 
+      // TOOLTIPS ARE OFF FOR THE WHOLE RUN. The ribbon redesign gave every
+      // icon-only control a delayed, body-portalled tooltip. A pointer that a
+      // test parks over a button would otherwise paint one into a golden 400ms
+      // later, and a tooltip sitting over the tab strip would be the thing
+      // `elementFromPoint` finds in the ui-not-blocked probe. The @api Tooltip
+      // renders nothing while this dataset flag is "off".
+      //
+      // BOTH halves, because either alone leaks: addInitScript survives a
+      // reload or navigation (appearance-skins.spec clears storage and reloads)
+      // but never runs on the document that is ALREADY loaded, which is the one
+      // every other test uses; the immediate evaluate covers that document.
+      await page.addInitScript(() => {
+        document.documentElement.dataset.tooltips = "off";
+      });
+      await page.evaluate(() => {
+        document.documentElement.dataset.tooltips = "off";
+      });
+
       await use(page);
     },
     // Worker-scoped: this setup does a cold-WebView2 waitForSelector of up to 60s
@@ -435,9 +453,16 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     // subsequent screenshot down by ~92px AND hide the ribbon's formatting
     // buttons (fmt-copy, fmt-bold, ...), breaking unrelated functional tests.
     // If the ribbon content is hidden, dispatch the toggle event to re-expand.
+    // The band animates its height for ~200ms before it reaches display:none,
+    // so a ribbon left MID-collapse still computes display:flex; the
+    // `data-ribbon-minimized` attribute is set from the first frame instead.
     await sharedPage.evaluate(() => {
       const content = document.querySelector("[data-ribbon-content]");
-      if (content && window.getComputedStyle(content).display === "none") {
+      if (
+        content &&
+        (content.hasAttribute("data-ribbon-minimized") ||
+          window.getComputedStyle(content).display === "none")
+      ) {
         window.dispatchEvent(new CustomEvent("app:ribbon-toggle-minimize"));
       }
     });

@@ -8,13 +8,14 @@
 
 import React, { createContext, useContext } from "react";
 import type { PanelPlacement } from "../uiTypes";
+import { BAND_MAX_CONTENT_HEIGHT } from "./tokens";
 
 /** Main-axis direction the surface flows content in. */
 export type SurfaceOrientation = "horizontal" | "vertical";
 
 /**
  * The concrete container hosting the content:
- * - "band": the ribbon's fixed-height horizontal strip (~80px usable)
+ * - "band": the ribbon's fixed-height horizontal strip (BAND_MAX_CONTENT_HEIGHT usable)
  * - "panel": the sidebar's full-height vertical column
  * - "popover": a launcher flyout (vertical, sidebar-like, scrollable)
  */
@@ -74,7 +75,10 @@ export function bandLayout(width = 0): SurfaceLayout {
     surface: "ribbon",
     orientation: "horizontal",
     container: "band",
-    maxContentHeight: 80,
+    // The cluster's content box, derived in tokens.ts. This literal used to be
+    // 80 while demotion fired at 92, so content between 81 and 92px clipped
+    // instead of demoting. One number now drives both.
+    maxContentHeight: BAND_MAX_CONTENT_HEIGHT,
     width,
     density: "compact",
   };

@@ -1,5 +1,7 @@
 //! FILENAME: app/extensions/Animation/components/icons.tsx
-// PURPOSE: Small inline SVG icons for the Animation transport + panel.
+// PURPOSE: The small play/pause glyphs of the status-bar transport item and
+//          the on-grid play pill (11-12px, below the RibbonIcon ladder), and the
+//          View-menu film glyph. The panel's transport uses RibbonIcon.
 import React from "react";
 
 type IconProps = { size?: number; color?: string };
@@ -18,23 +20,6 @@ export function PlayIcon({ size = 14 }: IconProps): React.ReactElement {
 
 export function PauseIcon({ size = 14 }: IconProps): React.ReactElement {
   return svg(size, <path d="M4.5 3h2.5v10H4.5V3zm4.5 0h2.5v10H9V3z" />);
-}
-
-export function StopIcon({ size = 14 }: IconProps): React.ReactElement {
-  return svg(size, <rect x="4" y="4" width="8" height="8" rx="1" />);
-}
-
-export function StepBackIcon({ size = 14 }: IconProps): React.ReactElement {
-  return svg(size, <path d="M5 3v10H3.7V3H5zm7 0v10l-6-5 6-5z" />);
-}
-
-export function StepFwdIcon({ size = 14 }: IconProps): React.ReactElement {
-  return svg(size, <path d="M11 3v10h1.3V3H11zM4 3v10l6-5L4 3z" />);
-}
-
-/** Eject — "unload the driver" (media convention for giving the medium back). */
-export function EjectIcon({ size = 14 }: IconProps): React.ReactElement {
-  return svg(size, <path d="M8 3l5 6H3l5-6zm-5 8h10v2H3v-2z" />);
 }
 
 export function FilmIcon({ size = 16 }: IconProps): React.ReactElement {

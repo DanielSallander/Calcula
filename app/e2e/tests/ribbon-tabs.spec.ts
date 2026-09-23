@@ -250,3 +250,183 @@ test.describe("Ribbon tab navigation", () => {
     await softly(takeRibbonScreenshot(appPage, "ribbon-format-state"));
   });
 });
+
+/**
+ * The Calcula Clusters goldens for tabs other than Home.
+ *
+ * Page Layout is a standing tab. Table Design is CONTEXTUAL: it exists only
+ * while the cursor is inside a table, so the test makes one inside this spec's
+ * own W-X block (W4:X7), captures, and deletes it through the store — the
+ * route the product's own Delete Table takes. The table NAME is masked: names
+ * count up across the whole suite ("Table7" after seven tables anywhere), so it
+ * is session residue, not chrome.
+ */
+/** Captions of the band's cells, in order (the caption is each cell's last
+ *  child, for an inline cluster AND for one folded into a launcher). */
+async function bandCaptions(page: import("@playwright/test").Page): Promise<string[]> {
+  return page.evaluate(() =>
+    Array.from(document.querySelectorAll("[data-ribbon-content] [data-section-cell]")).map(
+      (cell) => (cell.lastElementChild?.textContent ?? "").trim(),
+    ),
+  );
+}
+
+/* eslint-disable @typescript-eslint/naming-convention -- the dev-server import hook the app installs */
+type ImportWindow = Window & { __calcImport: (url: string) => Promise<unknown> };
+/* eslint-enable @typescript-eslint/naming-convention */
+
+test.describe("Ribbon tabs beyond Home (Calcula Clusters)", () => {
+  test.beforeEach(async ({ grid }) => {
+    await pinUndoState(grid);
+  });
+
+  test("Page Layout band", async ({ appPage }) => {
+    const tab = appPage
+      .locator("[data-ribbon-content]")
+      .locator("xpath=..")
+      .locator("div")
+      .first()
+      .locator("button")
+      .filter({ hasText: /^Page Layout$/ });
+    test.skip((await tab.count()) === 0, "no Page Layout tab is registered in this build");
+    await tab.click();
+    await appPage.waitForTimeout(300);
+    await softly(takeRibbonScreenshot(appPage, "page-layout"));
+    await appPage
+      .locator("[data-ribbon-content]")
+      .locator("xpath=..")
+      .locator("div")
+      .first()
+      .locator("button")
+      .filter({ hasText: /^Home$/ })
+      .click();
+  });
+
+  test("Table Design band (contextual)", async ({ appPage, grid }) => {
+    const rows: Array<[string, string]> = [
+      ["Region", "Sales"],
+      ["North", "120"],
+      ["South", "80"],
+      ["West", "95"],
+    ];
+    for (let i = 0; i < rows.length; i++) {
+      await grid.setCellValueDirect(`W${4 + i}`, rows[i][0]);
+      await grid.setCellValueDirect(`X${4 + i}`, rows[i][1]);
+    }
+    const tableId = await appPage.evaluate(async () => {
+      const store = (await (window as unknown as ImportWindow).__calcImport(
+        new URL("/extensions/Table/lib/tableStore.ts", document.baseURI).href,
+      )) as {
+        createTableAsync: (o: Record<string, unknown>) => Promise<{ id: number | string } | null>;
+      };
+      const t = await store.createTableAsync({
+        sheetIndex: 0,
+        startRow: 3,
+        startCol: 22,
+        endRow: 6,
+        endCol: 23,
+        hasHeaders: true,
+      });
+      if (t) window.dispatchEvent(new CustomEvent("app:table-created", { detail: { tableId: t.id } }));
+      return t ? String(t.id) : null;
+    });
+    expect(tableId, "the table must have been created").not.toBeNull();
+    try {
+      await appPage.waitForTimeout(800);
+      await grid.clickCell("W5");
+      const tab = appPage
+        .locator("[data-ribbon-content]")
+        .locator("xpath=..")
+        .locator("div")
+        .first()
+        .locator("button")
+        .filter({ hasText: /^Table Design$/ });
+      await expect(tab, "a cursor inside a table registers Table Design").toHaveCount(1, { timeout: 8000 });
+      await tab.click();
+      // Wait for the band by its captions, not by one control: at the 1280
+      // harness width the low-priority clusters (Properties first) fold into
+      // launchers, and their controls are then not in the band at all.
+      await expect
+        .poll(() => bandCaptions(appPage), { timeout: 8000 })
+        .toEqual(expect.arrayContaining(["Properties", "Table Style Options", "Table Styles"]));
+      // No native <select> survived in the band.
+      expect(await appPage.locator("[data-ribbon-content] select").count()).toBe(0);
+      await softly(
+        takeRibbonScreenshot(appPage, "table-design", {
+          mask: [appPage.getByTestId("table-design-name")],
+        }),
+      );
+    } finally {
+      await appPage.evaluate(async (id) => {
+        const store = (await (window as unknown as ImportWindow).__calcImport(
+          new URL("/extensions/Table/lib/tableStore.ts", document.baseURI).href,
+        )) as { deleteTableAsync: (id: unknown) => Promise<boolean> };
+        // The same call, with the same string id, BUG-0051's journey makes.
+        if (id !== null) await store.deleteTableAsync(id);
+      }, tableId);
+      for (let i = 0; i < rows.length; i++) {
+        await grid.setCellValueDirect(`W${4 + i}`, "");
+        await grid.setCellValueDirect(`X${4 + i}`, "");
+      }
+      await appPage.waitForTimeout(500);
+    }
+  });
+
+  // The Sparkline tab gained its accent colour and was rebuilt on the
+  // primitives (type pill, marker checkboxes, style strip, colour swatches)
+  // without ever being looked at live. Its data lives in BG1:BJ1 with the
+  // sparkline in BK1 (cols 58-62), a block nothing else in the tree writes.
+  test("Sparkline band (contextual)", async ({ appPage, grid }) => {
+    const values = ["10", "25", "15", "30"];
+    const dataCols = ["BG", "BH", "BI", "BJ"];
+    for (let i = 0; i < values.length; i++) {
+      await grid.setCellValueDirect(`${dataCols[i]}1`, values[i]);
+    }
+    const groupId = await appPage.evaluate(() => {
+      const api = (window as unknown as Record<string, {
+        createSparklineGroup: (
+          location: Record<string, number>,
+          source: Record<string, number>,
+          kind: string,
+        ) => { valid: boolean; group?: { id: number } };
+      } | undefined>)["__CALCULA_SPARKLINES__"];
+      if (!api) return null;
+      const result = api.createSparklineGroup(
+        { startRow: 0, startCol: 62, endRow: 0, endCol: 62 },
+        { startRow: 0, startCol: 58, endRow: 0, endCol: 61 },
+        "line",
+      );
+      return result.group?.id ?? null;
+    });
+    expect(groupId, "the Sparklines extension must expose its create API").not.toBeNull();
+    try {
+      await grid.navigateTo("BK1");
+      const tab = appPage
+        .locator("[data-ribbon-content]")
+        .locator("xpath=..")
+        .locator("div")
+        .first()
+        .locator("button")
+        .filter({ hasText: /^Sparkline$/ });
+      await expect(tab, "a cursor on a sparkline cell registers the Sparkline tab").toHaveCount(1, {
+        timeout: 8000,
+      });
+      await tab.click();
+      await expect
+        .poll(() => bandCaptions(appPage), { timeout: 8000 })
+        .toEqual(expect.arrayContaining(["Sparkline", "Type", "Show", "Style", "Axis", "Group"]));
+      expect(await appPage.locator("[data-ribbon-content] select").count()).toBe(0);
+      await softly(takeRibbonScreenshot(appPage, "sparkline-design"));
+    } finally {
+      await appPage.evaluate((id) => {
+        const api = (window as unknown as Record<string, {
+          removeSparklineGroup: (id: number) => boolean;
+        } | undefined>)["__CALCULA_SPARKLINES__"];
+        if (api && id !== null) api.removeSparklineGroup(id);
+      }, groupId);
+      for (const col of dataCols) await grid.setCellValueDirect(`${col}1`, "");
+      await grid.navigateTo("A1");
+      await appPage.waitForTimeout(500);
+    }
+  });
+});

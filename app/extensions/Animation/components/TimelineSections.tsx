@@ -3,11 +3,23 @@
 //          driver config, playback transport, export. Pure views over the
 //          playbackEngine and animationStore.
 // CONTEXT: Composed from @api/layout primitives, so the same components render
-//          vertically in the sidebar and horizontally in the 92px ribbon band;
-//          the unbounded saved-animations list and the Monte Carlo histogram
-//          demote to launcher flyouts in the band (ItemList/Tall). Replaces
-//          the former monolithic TimelinePanel, which had no ribbon form and
-//          forced the panel to be sidebar-locked.
+//          vertically in the sidebar and horizontally in the ribbon band; the
+//          unbounded saved-animations list and the Monte Carlo histogram
+//          demote to launcher flyouts in the band (ItemList/Tall). This is the
+//          reference DUAL-SURFACE panel (sidebar by default, freely movable).
+//
+//          Every section's band content obeys the fill rule (@api/layout
+//          tokens.ts): ONE TALL ROW of 61px (the saved-list launcher, the two
+//          export heroes) or TWO ROWS of 28 + 5 + 28 (driver fields over
+//          driver actions; transport over scrubber). The transport is the one
+//          section whose two surfaces differ in shape: the sidebar gives the
+//          scrubber a row of its own, which would be a forbidden third row in
+//          the band, so there the scrubber shares a row with the readouts.
+//
+//          E2E contract: the transport buttons keep their `title` attributes
+//          exactly ("Play"/"Pause", "Step back", "Stop (reset)", "Step
+//          forward") because the journeys select them by title; they pass
+//          tooltip={false} so the native title is the only hover text.
 
 import React, { useCallback, useEffect, useState } from "react";
 import type { PanelSectionProps } from "@api/uiTypes";
@@ -18,16 +30,30 @@ import type { Selection } from "@api";
 import {
   ActionRow,
   Button,
+  Chip,
+  CommandButton,
   ControlRow,
   Field,
   FieldGrid,
-  Grow,
+  GAP_SM,
+  GAP_XS,
+  HERO_ICON_SIZE,
+  ICON_SIZE_MD,
+  ICON_SIZE_SM,
+  IconButton,
   Input,
   ItemList,
+  LT,
+  NumberField,
+  ROW_GAP,
+  Segmented,
+  Slider,
   Stack,
   StatusText,
   Tall,
+  useSurfaceLayout,
 } from "@api/layout";
+import { RibbonIcon } from "@api/ribbonIcons";
 import { playbackEngine, type EngineState } from "../lib/animationEngine";
 import { listAnimations, subscribeAnimations, deleteAnimation } from "../lib/animationStore";
 import { exportAnimationGif } from "../lib/gifExporter";
@@ -37,7 +63,6 @@ import { MonteCarloView } from "./MonteCarloView";
 import type { AnimationSpec } from "../types";
 import { parseA1 } from "../lib/a1";
 import { ANIMATION_DIALOG_ID } from "./AnimationDialog";
-import { PlayIcon, PauseIcon, StopIcon, StepBackIcon, StepFwdIcon, FilmIcon, EjectIcon } from "./icons";
 
 function useEngineState(): EngineState {
   const [state, setState] = useState<EngineState>(() => playbackEngine.getState());
@@ -61,21 +86,29 @@ export function SavedAnimationsSection(_props: PanelSectionProps): React.ReactEl
     <ItemList
       label="Animations"
       count={specs.length}
-      icon={<FilmIcon />}
+      icon={<RibbonIcon.Folder size={ICON_SIZE_MD} />}
       testId="anim-saved-list"
     >
       <ActionRow>
-        <Button size="sm" data-testid="anim-new" onClick={() => showDialog(ANIMATION_DIALOG_ID, {})}>
-          + New
+        <Button
+          size="sm"
+          icon={<RibbonIcon.Plus size={16} />}
+          data-testid="anim-new"
+          onClick={() => showDialog(ANIMATION_DIALOG_ID, {})}
+        >
+          New
         </Button>
       </ActionRow>
       {specs.length === 0 ? (
-        <div style={{ opacity: 0.6, fontSize: 11 }}>
+        <div style={{ color: LT.textSecondary, fontSize: 11, lineHeight: "16px" }}>
           None yet — configure a driver and Save, or click New.
         </div>
       ) : (
         specs.map((s) => (
-          <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+          <div
+            key={s.id}
+            style={{ display: "flex", alignItems: "center", gap: GAP_SM, fontSize: 12, color: LT.text }}
+          >
             <span
               style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
               title={s.name}
@@ -88,9 +121,13 @@ export function SavedAnimationsSection(_props: PanelSectionProps): React.ReactEl
             <Button size="sm" title="Edit" onClick={() => showDialog(ANIMATION_DIALOG_ID, { editingId: s.id })}>
               Edit
             </Button>
-            <Button size="sm" title="Delete" onClick={() => void deleteAnimation(s.id)}>
-              ✕
-            </Button>
+            <IconButton
+              size="sm"
+              icon={<RibbonIcon.Close size={16} />}
+              label="Delete"
+              data-testid={`anim-delete-${s.id}`}
+              onClick={() => void deleteAnimation(s.id)}
+            />
           </div>
         ))
       )}
@@ -134,8 +171,10 @@ export function DriverSection(_props: PanelSectionProps): React.ReactElement {
     });
   }, [cellRef, fromStr, toStr, stepStr]);
 
+  // Band: fields over actions = 28 + 5 + 28. A validation message is a third
+  // child, which the band Stack wraps into a column beside them.
   return (
-    <Stack gap={6}>
+    <Stack gap={ROW_GAP}>
       <FieldGrid>
         <Field label="Driver cell">
           <Input
@@ -145,7 +184,7 @@ export function DriverSection(_props: PanelSectionProps): React.ReactElement {
             placeholder="B1"
           />
         </Field>
-        <div style={{ display: "flex", gap: 6, minWidth: 0 }}>
+        <div style={{ display: "flex", gap: GAP_SM, minWidth: 0 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <Field label="From">
               <Input data-testid="anim-from" value={fromStr} onChange={(e) => setFromStr(e.target.value)} />
@@ -173,7 +212,9 @@ export function DriverSection(_props: PanelSectionProps): React.ReactElement {
       </ActionRow>
       {formError && (
         <StatusText title={formError}>
-          <span style={{ color: "var(--error-color, #c0392b)" }}>{formError}</span>
+          <span style={{ color: LT.dangerFg }} data-testid="anim-driver-error">
+            {formError}
+          </span>
         </StatusText>
       )}
     </Stack>
@@ -186,93 +227,171 @@ export function DriverSection(_props: PanelSectionProps): React.ReactElement {
 
 export function TransportSection(_props: PanelSectionProps): React.ReactElement {
   const state = useEngineState();
+  const layout = useSurfaceLayout();
+  const band = layout.container === "band";
   const hasDriver = state.frameCount > 0;
   const isPlaying = state.status === "playing";
 
+  const transport = (
+    <Segmented ariaLabel="Playback">
+      <IconButton
+        icon={<RibbonIcon.StepBack size={ICON_SIZE_SM} />}
+        label="Step back"
+        title="Step back"
+        tooltip={false}
+        disabled={!hasDriver}
+        onClick={() => void playbackEngine.step(-1)}
+      />
+      <IconButton
+        icon={isPlaying ? <RibbonIcon.Pause size={ICON_SIZE_SM} /> : <RibbonIcon.Play size={ICON_SIZE_SM} />}
+        label={isPlaying ? "Pause" : "Play"}
+        title={isPlaying ? "Pause" : "Play"}
+        tooltip={false}
+        disabled={!hasDriver}
+        onClick={() => (isPlaying ? playbackEngine.pause() : playbackEngine.play())}
+      />
+      <IconButton
+        icon={<RibbonIcon.Stop size={ICON_SIZE_SM} />}
+        label="Stop (reset)"
+        title="Stop (reset)"
+        tooltip={false}
+        disabled={!hasDriver}
+        onClick={() => void playbackEngine.stop()}
+      />
+      <IconButton
+        icon={<RibbonIcon.StepForward size={ICON_SIZE_SM} />}
+        label="Step forward"
+        title="Step forward"
+        tooltip={false}
+        disabled={!hasDriver}
+        onClick={() => void playbackEngine.step(1)}
+      />
+    </Segmented>
+  );
+
+  /*
+    UNLOAD — the product's route out of owning a driver, and the second half of
+    D4. "Stop" restores the model but keeps the driver loaded (correct: a user
+    mid-iteration wants to press Play again), so before this button there was
+    no way to give the driver back at all and the play pill stayed until the
+    page reloaded. Deliberately separate from Stop rather than folded into it,
+    for that same reason — and outside the transport pill, for the same reason.
+  */
+  const unload = (
+    <IconButton
+      icon={<RibbonIcon.Upload size={ICON_SIZE_SM} />}
+      label="Unload driver"
+      title="Unload driver (restores the model and hides the play pill)"
+      tooltip={false}
+      data-testid="anim-clear-driver"
+      disabled={!hasDriver}
+      onClick={() => void playbackEngine.clearDriver()}
+    />
+  );
+
+  const frameReadout = (
+    <div
+      style={{
+        marginLeft: band ? undefined : "auto",
+        fontVariantNumeric: "tabular-nums",
+        color: LT.text,
+        fontSize: 12,
+        whiteSpace: "nowrap",
+      }}
+      data-testid="anim-frame"
+    >
+      {hasDriver ? `${state.frame + 1} / ${state.frameCount}` : "no driver"}
+    </div>
+  );
+
+  const scrubber = (
+    <Slider
+      value={state.frame}
+      min={state.rangeStart}
+      max={state.rangeEnd}
+      step={1}
+      readout={false}
+      ariaLabel="Frame"
+      testId="anim-scrubber"
+      disabled={!hasDriver}
+      onChange={(frame) => void playbackEngine.seek(frame)}
+    />
+  );
+
+  const valueReadout = (
+    <span
+      style={{ fontVariantNumeric: "tabular-nums", fontSize: 12, whiteSpace: "nowrap", color: LT.textSecondary }}
+    >
+      value: <strong style={{ color: LT.text }}>{state.frameLabel ?? "—"}</strong>
+    </span>
+  );
+
+  const fps = (
+    <NumberField
+      label="fps"
+      value={state.fps}
+      min={1}
+      max={120}
+      width={56}
+      testId="anim-fps"
+      onChange={(v) => {
+        if (v !== null) playbackEngine.setFps(v);
+      }}
+    />
+  );
+
+  const loop = (
+    <Chip
+      value={state.loop ? "On" : "Off"}
+      active={state.loop}
+      testId="anim-loop"
+      onClick={() => playbackEngine.setLoop(!state.loop)}
+    >
+      Loop
+    </Chip>
+  );
+
+  const monteCarlo = mcActive() && (
+    <Tall label="Distribution" icon={<RibbonIcon.ChartHistogram size={ICON_SIZE_MD} />} testId="anim-mc-block">
+      <MonteCarloView />
+    </Tall>
+  );
+
+  if (band) {
+    // Two rows (28 + 5 + 28); the Monte Carlo launcher, when present, is a
+    // 61px control the band Stack wraps into a column of its own.
+    return (
+      <Stack gap={ROW_GAP}>
+        <ControlRow gap={GAP_XS}>
+          {transport}
+          {unload}
+          {frameReadout}
+        </ControlRow>
+        <ControlRow gap={GAP_SM}>
+          {scrubber}
+          {valueReadout}
+          {fps}
+          {loop}
+        </ControlRow>
+        {monteCarlo}
+      </Stack>
+    );
+  }
+
   return (
-    <Stack gap={4}>
-      <ControlRow gap={6}>
-        <Button title="Step back" disabled={!hasDriver} onClick={() => void playbackEngine.step(-1)}>
-          <StepBackIcon />
-        </Button>
-        <Button
-          title={isPlaying ? "Pause" : "Play"}
-          disabled={!hasDriver}
-          onClick={() => (isPlaying ? playbackEngine.pause() : playbackEngine.play())}
-        >
-          {isPlaying ? <PauseIcon /> : <PlayIcon />}
-        </Button>
-        <Button title="Stop (reset)" disabled={!hasDriver} onClick={() => void playbackEngine.stop()}>
-          <StopIcon />
-        </Button>
-        <Button title="Step forward" disabled={!hasDriver} onClick={() => void playbackEngine.step(1)}>
-          <StepFwdIcon />
-        </Button>
-        {/*
-          UNLOAD — the product's route out of owning a driver, and the second
-          half of D4. "Stop" restores the model but keeps the driver loaded
-          (correct: a user mid-iteration wants to press Play again), so before
-          this button there was no way to give the driver back at all and the
-          play pill stayed until the page reloaded. Deliberately separate from
-          Stop rather than folded into it, for that same reason.
-        */}
-        <Button
-          title="Unload driver (restores the model and hides the play pill)"
-          data-testid="anim-clear-driver"
-          disabled={!hasDriver}
-          onClick={() => void playbackEngine.clearDriver()}
-        >
-          <EjectIcon />
-        </Button>
-        <div
-          style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", opacity: 0.85, fontSize: 12, whiteSpace: "nowrap" }}
-          data-testid="anim-frame"
-        >
-          {hasDriver ? `${state.frame + 1} / ${state.frameCount}` : "no driver"}
-        </div>
+    <Stack gap={GAP_SM}>
+      <ControlRow gap={GAP_XS}>
+        {transport}
+        {unload}
+        {frameReadout}
       </ControlRow>
-
-      <ControlRow>
-        <Grow>
-          <input
-            type="range"
-            min={state.rangeStart}
-            max={state.rangeEnd}
-            value={state.frame}
-            step={1}
-            disabled={!hasDriver}
-            onChange={(e) => void playbackEngine.seek(Number(e.target.value))}
-            style={{ width: "100%" }}
-          />
-        </Grow>
+      {scrubber}
+      <ControlRow gap={GAP_SM}>
+        {valueReadout}
+        {fps}
+        {loop}
       </ControlRow>
-
-      <ControlRow gap={10}>
-        <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 12, whiteSpace: "nowrap" }}>
-          value: <strong>{state.frameLabel ?? "—"}</strong>
-        </span>
-        <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
-          fps
-          <Input
-            type="number"
-            min={1}
-            max={120}
-            width={56}
-            value={state.fps}
-            onChange={(e) => playbackEngine.setFps(Number(e.target.value))}
-          />
-        </label>
-        <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
-          <input type="checkbox" checked={state.loop} onChange={(e) => playbackEngine.setLoop(e.target.checked)} />
-          loop
-        </label>
-      </ControlRow>
-
-      {mcActive() && (
-        <Tall label="Distribution" icon={<FilmIcon />} testId="anim-mc-block">
-          <MonteCarloView />
-        </Tall>
-      )}
+      {monteCarlo}
     </Stack>
   );
 }
@@ -340,22 +459,32 @@ export function ExportSection(_props: PanelSectionProps): React.ReactElement {
 
   const webmSupported = isWebmRecordingSupported();
 
+  // Two 61px heroes: one tall row in the band, two 28px buttons in the panel.
   return (
-    <ActionRow>
-      <Button disabled={!hasDriver || exporting} onClick={() => void handleExport()}>
-        {exporting ? "Exporting…" : "Export GIF"}
-      </Button>
-      <Button
-        disabled={!hasDriver || exporting || !webmSupported}
+    <ActionRow gap={GAP_XS}>
+      <CommandButton
+        icon={<RibbonIcon.SaveImage size={HERO_ICON_SIZE} />}
+        label={exporting ? "Exporting…" : "Export GIF"}
+        data-testid="anim-export-gif"
+        disabled={!hasDriver || exporting}
+        onClick={() => void handleExport()}
+      />
+      {/* A native title, not the Tooltip primitive: its main job is to say
+          WHY the button is disabled, and a disabled button never receives the
+          pointer events the Tooltip opens on. */}
+      <CommandButton
+        icon={<RibbonIcon.Download size={HERO_ICON_SIZE} />}
+        label="Export WebM"
         title={
           webmSupported
             ? "Record live playback to WebM video"
             : "Video recording is not available in this runtime"
         }
+        tooltip={false}
+        data-testid="anim-export-webm"
+        disabled={!hasDriver || exporting || !webmSupported}
         onClick={() => void handleExportWebm()}
-      >
-        Export WebM
-      </Button>
+      />
       {exportMsg && <StatusText title={exportMsg}>{exportMsg}</StatusText>}
     </ActionRow>
   );

@@ -1,353 +1,289 @@
 //! FILENAME: app/extensions/Charts/components/ChartFilterDropdown.tsx
-// PURPOSE: Dropdown for toggling series and category visibility on a chart.
-// CONTEXT: Rendered inline in the Chart Design panel's Filter section. Shows checkboxes for
-//          each series and category, with Select All / Deselect All controls.
+// PURPOSE: The body of the Chart Design "Filter" popover — show or hide each
+//          series and each category of the selected chart.
+// CONTEXT: This used to be a whole dropdown: its own trigger (a unicode triangle glyph in a
+//          hand-rolled button), its own `position: fixed; z-index: 10000`
+//          layer, its own document-level Escape and outside-click listeners,
+//          and a dozen hardcoded Office colours. In the Clusters grammar the
+//          trigger is the band's "Filter" Button and the layer is an @api
+//          `Popover card` owned by the Data cluster, which already handles
+//          positioning, Escape, outside presses and focus return. What is left
+//          here is the part only Charts knows: the list.
+//
+//          THE FILTER MODEL IS UNCHANGED. `spec.filters` holds the indices that
+//          are HIDDEN (`hiddenSeries`, `hiddenCategories`), in authoring
+//          space, and every change goes out through `onFiltersChange` with both
+//          arrays — the Data cluster writes it with one `updateSpec`.
+//
+//          The series colour dot is categorical colour DATA (the painted
+//          series colour) and carries `data-colour-data`; everything else
+//          paints with @api/layout tokens.
 
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useCallback } from "react";
 import { css } from "@emotion/css";
+import {
+  Button,
+  Checkbox,
+  Chip,
+  MenuHeading,
+  MenuSeparator,
+  StatusText,
+  LT,
+  FONT_FAMILY,
+  GAP_XS,
+} from "@api/layout";
 import type { ChartFilters, ParsedChartData, ChartSpec } from "../types";
 
 // ============================================================================
-// Styles
+// Styles (tokens only)
 // ============================================================================
 
-const styles = {
-  container: css`
-    position: relative;
-    display: inline-block;
-  `,
-  trigger: css`
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 2px;
-    padding: 4px 8px;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    cursor: pointer;
-    font-size: 11px;
-    color: #333;
-    white-space: nowrap;
-    min-width: 50px;
+const body = css`
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  max-width: 320px;
+  font-family: ${FONT_FAMILY};
+  color: ${LT.text};
+`;
 
-    &:hover {
-      background: #e8e8e8;
-      border-color: #d0d0d0;
-    }
-  `,
-  triggerActive: css`
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 2px;
-    padding: 4px 8px;
-    background: #d6e4f0;
-    border: 1px solid #a0c0e0;
-    border-radius: 3px;
-    cursor: pointer;
-    font-size: 11px;
-    color: #1a1a1a;
-    white-space: nowrap;
-    min-width: 50px;
+const headingRow = css`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: ${GAP_XS}px;
+  padding-right: 2px;
+`;
 
-    &:hover {
-      background: #c0d8ec;
-    }
-  `,
-  triggerIcon: css`
-    font-size: 16px;
-    line-height: 1;
-  `,
-  badge: css`
-    display: inline-block;
-    background: #005fb8;
-    color: #fff;
-    font-size: 9px;
-    border-radius: 6px;
-    padding: 0 4px;
-    min-width: 14px;
-    text-align: center;
-    margin-left: 2px;
-  `,
-  dropdown: css`
-    position: fixed;
-    z-index: 10000;
-    background: #fff;
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    min-width: 200px;
-    max-height: 320px;
-    overflow-y: auto;
-    padding: 4px 0;
-    font-size: 12px;
-    font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-  `,
-  section: css`
-    padding: 4px 12px;
-  `,
-  sectionTitle: css`
-    font-weight: 600;
-    font-size: 11px;
-    color: #555;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
-    margin-bottom: 2px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  `,
-  selectAll: css`
-    font-size: 10px;
-    color: #005fb8;
-    cursor: pointer;
-    font-weight: normal;
-    text-transform: none;
-    letter-spacing: normal;
+const list = css`
+  display: flex;
+  flex-direction: column;
+  padding: 0 6px;
+`;
 
-    &:hover {
-      text-decoration: underline;
-    }
-  `,
-  divider: css`
-    border-top: 1px solid #e8e8e8;
-    margin: 4px 0;
-  `,
-  item: css`
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 3px 12px;
-    cursor: pointer;
-    white-space: nowrap;
+const nameRow = css`
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+`;
 
-    &:hover {
-      background: #f0f0f0;
-    }
+const nameText = css`
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
 
-    input {
-      cursor: pointer;
-      margin: 0;
-    }
+const swatch = css`
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+`;
 
-    label {
-      cursor: pointer;
-      flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-  `,
-  colorSwatch: css`
-    width: 10px;
-    height: 10px;
-    border-radius: 2px;
-    flex-shrink: 0;
-  `,
-};
+const footer = css`
+  display: flex;
+  padding: 2px 2px 0;
+`;
 
 // ============================================================================
-// Props
+// Model helpers
 // ============================================================================
 
-interface ChartFilterDropdownProps {
-  spec: ChartSpec;
-  unfilteredData: ParsedChartData | undefined;
-  onFiltersChange: (filters: ChartFilters) => void;
+/** More categories than this are not listed (the list would be unusable). */
+const MAX_LISTED_CATEGORIES = 50;
+
+/** What the Data cluster's "N of M" chip says about the active filter. */
+export interface ChartFilterSummary {
+  /** Hidden series + hidden categories. */
+  hidden: number;
+  /** Visible items across the filtered dimension(s), or null when unknown. */
+  shown: number | null;
+  /** All items across the filtered dimension(s), or null when unknown. */
+  total: number | null;
+  /** "series", "categories" or "items" (both dimensions are filtered). */
+  noun: string;
+}
+
+/**
+ * Summarise a chart's filter for the band chip, or null when nothing is
+ * hidden. Counts only the dimension(s) that are actually filtered, so hiding
+ * 9 of 12 months reads "3 of 12" rather than a sum that mixes in the series.
+ * `shown`/`total` are null when the chart's data has not been read yet.
+ */
+export function summarizeChartFilters(
+  filters: ChartFilters | undefined,
+  unfilteredData: ParsedChartData | undefined,
+): ChartFilterSummary | null {
+  const hiddenSeries = new Set(filters?.hiddenSeries ?? []).size;
+  const hiddenCategories = new Set(filters?.hiddenCategories ?? []).size;
+  const hidden = hiddenSeries + hiddenCategories;
+  if (hidden === 0) return null;
+
+  const noun =
+    hiddenSeries > 0 && hiddenCategories > 0 ? "items" : hiddenSeries > 0 ? "series" : "categories";
+  if (!unfilteredData) return { hidden, shown: null, total: null, noun };
+
+  let total = 0;
+  if (hiddenSeries > 0) total += unfilteredData.series.length;
+  if (hiddenCategories > 0) total += unfilteredData.categories.length;
+  return { hidden, shown: Math.max(0, total - hidden), total, noun };
 }
 
 // ============================================================================
 // Component
 // ============================================================================
 
+export interface ChartFilterDropdownProps {
+  spec: ChartSpec;
+  unfilteredData: ParsedChartData | undefined;
+  onFiltersChange: (filters: ChartFilters) => void;
+}
+
+/**
+ * The filter list: a "Series" group and a "Categories" group of checkboxes
+ * (checked = shown), each with a "Select all" chip while something in it is
+ * hidden, and "Clear filters" while anything is. Rendered inside the Data
+ * cluster's card Popover.
+ */
 export function ChartFilterDropdown({
   spec,
   unfilteredData,
   onFiltersChange,
 }: ChartFilterDropdownProps): React.ReactElement {
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const [dropdownPos, setDropdownPos] = useState<{ top: number; left: number } | null>(null);
-
   const filters = spec.filters ?? { hiddenSeries: [], hiddenCategories: [] };
   const hiddenSeriesSet = new Set(filters.hiddenSeries ?? []);
   const hiddenCategoriesSet = new Set(filters.hiddenCategories ?? []);
-
-  const totalHidden = hiddenSeriesSet.size + hiddenCategoriesSet.size;
-  const isFiltered = totalHidden > 0;
+  const isFiltered = hiddenSeriesSet.size + hiddenCategoriesSet.size > 0;
 
   const allSeries = unfilteredData?.series ?? [];
   const allCategories = unfilteredData?.categories ?? [];
+  const listCategories = allCategories.length > 0 && allCategories.length <= MAX_LISTED_CATEGORIES;
 
-  // Close on outside click
-  useEffect(() => {
-    if (!open) return;
-    const handleClick = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClick, true);
-    return () => document.removeEventListener("mousedown", handleClick, true);
-  }, [open]);
-
-  // Close on Escape
-  useEffect(() => {
-    if (!open) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("keydown", handleKey, true);
-    return () => document.removeEventListener("keydown", handleKey, true);
-  }, [open]);
+  const hiddenSeriesList = filters.hiddenSeries;
+  const hiddenCategoriesList = filters.hiddenCategories;
 
   const toggleSeries = useCallback(
     (index: number) => {
-      const newHidden = new Set(hiddenSeriesSet);
-      if (newHidden.has(index)) {
-        newHidden.delete(index);
-      } else {
-        newHidden.add(index);
-      }
+      const next = new Set(hiddenSeriesList ?? []);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
       onFiltersChange({
-        hiddenSeries: Array.from(newHidden),
-        hiddenCategories: filters.hiddenCategories ?? [],
+        hiddenSeries: Array.from(next),
+        hiddenCategories: hiddenCategoriesList ?? [],
       });
     },
-    [hiddenSeriesSet, filters.hiddenCategories, onFiltersChange],
+    [hiddenSeriesList, hiddenCategoriesList, onFiltersChange],
   );
 
   const toggleCategory = useCallback(
     (index: number) => {
-      const newHidden = new Set(hiddenCategoriesSet);
-      if (newHidden.has(index)) {
-        newHidden.delete(index);
-      } else {
-        newHidden.add(index);
-      }
+      const next = new Set(hiddenCategoriesList ?? []);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
       onFiltersChange({
-        hiddenSeries: filters.hiddenSeries ?? [],
-        hiddenCategories: Array.from(newHidden),
+        hiddenSeries: hiddenSeriesList ?? [],
+        hiddenCategories: Array.from(next),
       });
     },
-    [hiddenCategoriesSet, filters.hiddenSeries, onFiltersChange],
+    [hiddenSeriesList, hiddenCategoriesList, onFiltersChange],
   );
 
   const selectAllSeries = useCallback(() => {
-    onFiltersChange({
-      hiddenSeries: [],
-      hiddenCategories: filters.hiddenCategories ?? [],
-    });
-  }, [filters.hiddenCategories, onFiltersChange]);
+    onFiltersChange({ hiddenSeries: [], hiddenCategories: hiddenCategoriesList ?? [] });
+  }, [hiddenCategoriesList, onFiltersChange]);
 
   const selectAllCategories = useCallback(() => {
-    onFiltersChange({
-      hiddenSeries: filters.hiddenSeries ?? [],
-      hiddenCategories: [],
-    });
-  }, [filters.hiddenSeries, onFiltersChange]);
+    onFiltersChange({ hiddenSeries: hiddenSeriesList ?? [], hiddenCategories: [] });
+  }, [hiddenSeriesList, onFiltersChange]);
 
   const clearAllFilters = useCallback(() => {
     onFiltersChange({ hiddenSeries: [], hiddenCategories: [] });
   }, [onFiltersChange]);
 
+  if (allSeries.length === 0 && !listCategories) {
+    return (
+      <div className={body} data-testid="chart-filter-body">
+        <StatusText>No series or categories to filter yet.</StatusText>
+      </div>
+    );
+  }
+
   return (
-    <div ref={containerRef} className={styles.container}>
-      <button
-        ref={triggerRef}
-        className={isFiltered ? styles.triggerActive : styles.trigger}
-        onClick={() => {
-          if (!open && triggerRef.current) {
-            const rect = triggerRef.current.getBoundingClientRect();
-            setDropdownPos({ top: rect.bottom + 2, left: rect.left });
-          }
-          setOpen(!open);
-        }}
-        title="Filter chart series and categories"
-      >
-        <span className={styles.triggerIcon}>&#9661;</span>
-        Filter
-        {isFiltered && <span className={styles.badge}>{totalHidden}</span>}
-      </button>
-
-      {open && dropdownPos && (
-        <div className={styles.dropdown} style={{ top: dropdownPos.top, left: dropdownPos.left }}>
-          {/* Series Section */}
-          {allSeries.length > 0 && (
-            <div className={styles.section}>
-              <div className={styles.sectionTitle}>
-                <span>Series</span>
-                {hiddenSeriesSet.size > 0 && (
-                  <span className={styles.selectAll} onClick={selectAllSeries}>
-                    Show All
+    <div className={body} data-testid="chart-filter-body">
+      {allSeries.length > 0 && (
+        <>
+          <div className={headingRow}>
+            <MenuHeading>Series</MenuHeading>
+            {hiddenSeriesSet.size > 0 && (
+              <Chip onClick={selectAllSeries} testId="chart-filter-series-all">
+                Select all
+              </Chip>
+            )}
+          </div>
+          <div className={list} role="group" aria-label="Series">
+            {allSeries.map((series, i) => (
+              <Checkbox
+                key={`s-${i}`}
+                checked={!hiddenSeriesSet.has(i)}
+                onChange={() => toggleSeries(i)}
+                testId={`chart-filter-series-${i}`}
+                label={
+                  <span className={nameRow}>
+                    {series.color && (
+                      <span
+                        className={swatch}
+                        style={{ background: series.color }}
+                        data-colour-data=""
+                        aria-hidden
+                      />
+                    )}
+                    <span className={nameText}>{series.name || `Series ${i + 1}`}</span>
                   </span>
-                )}
-              </div>
-              {allSeries.map((series, i) => (
-                <div key={`s-${i}`} className={styles.item} onClick={() => toggleSeries(i)}>
-                  <input
-                    type="checkbox"
-                    checked={!hiddenSeriesSet.has(i)}
-                    onChange={() => toggleSeries(i)}
-                  />
-                  {series.color && (
-                    <span
-                      className={styles.colorSwatch}
-                      style={{ backgroundColor: series.color }}
-                    />
-                  )}
-                  <label>{series.name || `Series ${i + 1}`}</label>
-                </div>
-              ))}
-            </div>
-          )}
+                }
+              />
+            ))}
+          </div>
+        </>
+      )}
 
-          {/* Divider */}
-          {allSeries.length > 0 && allCategories.length > 0 && (
-            <div className={styles.divider} />
-          )}
+      {allSeries.length > 0 && listCategories && <MenuSeparator />}
 
-          {/* Categories Section */}
-          {allCategories.length > 0 && allCategories.length <= 50 && (
-            <div className={styles.section}>
-              <div className={styles.sectionTitle}>
-                <span>Categories</span>
-                {hiddenCategoriesSet.size > 0 && (
-                  <span className={styles.selectAll} onClick={selectAllCategories}>
-                    Show All
-                  </span>
-                )}
-              </div>
-              {allCategories.map((cat, i) => (
-                <div key={`c-${i}`} className={styles.item} onClick={() => toggleCategory(i)}>
-                  <input
-                    type="checkbox"
-                    checked={!hiddenCategoriesSet.has(i)}
-                    onChange={() => toggleCategory(i)}
-                  />
-                  <label>{cat || `(empty)`}</label>
-                </div>
-              ))}
-            </div>
-          )}
+      {listCategories && (
+        <>
+          <div className={headingRow}>
+            <MenuHeading>Categories</MenuHeading>
+            {hiddenCategoriesSet.size > 0 && (
+              <Chip onClick={selectAllCategories} testId="chart-filter-categories-all">
+                Select all
+              </Chip>
+            )}
+          </div>
+          <div className={list} role="group" aria-label="Categories">
+            {allCategories.map((cat, i) => (
+              <Checkbox
+                key={`c-${i}`}
+                checked={!hiddenCategoriesSet.has(i)}
+                onChange={() => toggleCategory(i)}
+                testId={`chart-filter-category-${i}`}
+                label={<span className={nameText}>{cat || "(empty)"}</span>}
+              />
+            ))}
+          </div>
+        </>
+      )}
 
-          {/* Clear All */}
-          {isFiltered && (
-            <>
-              <div className={styles.divider} />
-              <div className={styles.section}>
-                <span
-                  className={styles.selectAll}
-                  onClick={clearAllFilters}
-                  style={{ fontSize: 11, fontWeight: 600 }}
-                >
-                  Clear All Filters
-                </span>
-              </div>
-            </>
-          )}
-        </div>
+      {isFiltered && (
+        <>
+          <MenuSeparator />
+          <div className={footer}>
+            <Button onClick={clearAllFilters} data-testid="chart-filter-clear">
+              Clear filters
+            </Button>
+          </div>
+        </>
       )}
     </div>
   );

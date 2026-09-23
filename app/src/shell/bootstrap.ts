@@ -14,11 +14,19 @@ import {
   registerPanelService,
   registerTaskPaneHooks,
   registerActivityBarHooks,
+  registerMenuItem,
+  updateMenuItem,
   type TaskPaneService,
   type DialogService,
   type OverlayService,
   type ActivityBarService,
 } from "../api/ui";
+import {
+  getRibbonLabelMode,
+  setRibbonLabelMode,
+  subscribeToAppearance,
+} from "../api/appearance";
+import { RibbonIcon } from "../api/ribbonIcons";
 
 import { initKeybindings } from "../api/keybindings";
 import { getLocaleSettings } from "../api/locale";
@@ -43,6 +51,9 @@ import {
   type CommandGuard,
   type GridMenuContext,
   type GridContextMenuItem,
+  type AddInManifest,
+  type RibbonTabDefinition,
+  type RibbonGroupDefinition,
 } from "../api/extensions";
 
 import { useShallow } from "zustand/react/shallow";
@@ -67,10 +78,15 @@ import {
 import { ActivityBarExtensions as ActivityBarExtensionsImpl } from "./registries/activityBarExtensions";
 import { useActivityBarStore } from "./ActivityBar/useActivityBarStore";
 import { panelRegistry, initPanelRegistry } from "./registries/panelRegistry";
-import type { PanelSectionProps } from "../api/uiTypes";
-import type { ShellPanelSection } from "./components/SectionRenderers";
-import type { RibbonGroupDefinition } from "./registries/types";
+import type { PanelDefinition, PanelSectionProps } from "../api/uiTypes";
+import { clearSectionWidthCaches, type ShellPanelSection } from "./components/SectionRenderers";
+import { clearSectionFitCache } from "./components/useSectionFit";
 import { useGridState } from "../api/state";
+
+/** Section icon of a synthesized legacy section (the launcher slot size). */
+const LEGACY_SECTION_ICON_SIZE = 24;
+/** Panel icon of a synthesized legacy tab (the rail / panel-icon size). */
+const LEGACY_PANEL_ICON_SIZE = 20;
 
 /**
  * Wraps a RibbonGroupDefinition component (expects RibbonContext) into a
@@ -82,7 +98,8 @@ import { useGridState } from "../api/state";
  * width-overflow collapse still measures them and may fold them to launchers
  * when the window is too narrow) and flagged legacyRibbonDom so the sidebar
  * renderer scopes its transposition CSS to exactly these until each tab
- * migrates to @api/layout primitives.
+ * migrates to @api/layout primitives. They render inside the same cluster
+ * chrome as every other section.
  */
 function wrapRibbonGroupAsSection(group: RibbonGroupDefinition): ShellPanelSection {
   const GroupComponent = group.component;
@@ -100,6 +117,7 @@ function wrapRibbonGroupAsSection(group: RibbonGroupDefinition): ShellPanelSecti
   return {
     id: group.id,
     label: group.label,
+    icon: React.createElement(RibbonIcon.Group, { size: LEGACY_SECTION_ICON_SIZE }),
     component: SectionAdapter,
     ribbonPresentation: "inline",
     collapsePriority: group.order,
@@ -127,10 +145,180 @@ function wrapRibbonTabAsSection(tab: { id: string; label: string; component: Rea
   return {
     id: tab.id + ".main",
     label: tab.label,
+    icon: React.createElement(RibbonIcon.Group, { size: LEGACY_SECTION_ICON_SIZE }),
     component: SectionAdapter,
     ribbonPresentation: "inline",
     legacyRibbonDom: true,
   };
+}
+
+/** True when a panel's only section is a whole wrapped legacy tab. */
+function isWholeTabPanel(panel: PanelDefinition): boolean {
+  return panel.sections.length === 1 && panel.sections[0].id.endsWith(".main");
+}
+
+/** Add one legacy group to an already-registered panel as a section. */
+function addRibbonGroupToPanel(panel: PanelDefinition, group: RibbonGroupDefinition): void {
+  const newSection = wrapRibbonGroupAsSection(group);
+  // If the panel currently has a single "main" section (a wrapped tab),
+  // replace it: individual groups are being registered and take precedence.
+  const sections = isWholeTabPanel(panel)
+    ? [newSection]
+    : [...panel.sections.filter((s) => s.id !== newSection.id), newSection];
+  panelRegistry.registerPanel({ ...panel, sections });
+}
+
+/**
+ * Register a legacy ribbon tab as a panel. Any groups already PARKED in
+ * ExtensionRegistryImpl for this tab (registered before it, or by a manifest)
+ * are drained out of the Impl in the same step and become the panel's
+ * sections, in their declared order; with none, the whole tab component is
+ * one section. Draining is what lets RibbonContainer drop its direct group
+ * path: a group left in the Impl used to render there, beside the section
+ * renderer, with no measurement and no demotion.
+ */
+function registerLegacyTabPanel(tab: RibbonTabDefinition): void {
+  const adopted = ExtensionRegistryImpl.drainRibbonGroupsForTab(tab.id).map(wrapRibbonGroupAsSection);
+  panelRegistry.registerPanel({
+    id: tab.id,
+    title: tab.label,
+    icon: React.createElement(RibbonIcon.Group, { size: LEGACY_PANEL_ICON_SIZE }),
+    sections: adopted.length > 0 ? adopted : [wrapRibbonTabAsSection(tab)],
+    defaultPlacement: "ribbon",
+    ribbonOrder: tab.order,
+    ribbonColor: tab.color,
+    priority: 1000 - tab.order,
+  });
+}
+
+/**
+ * The legacy ribbon API (`registerRibbonTab`, `registerRibbonGroup`,
+ * `AddInManifest.ribbonTabs` / `ribbonGroups`) routed onto panels, so legacy
+ * content renders in cluster chrome through the measured section renderer on
+ * either surface. Exported for the registry tests; production reaches it only
+ * through the ExtensionRegistryService that bootstrapShell registers.
+ */
+export const legacyRibbonRouting = {
+  /** A legacy tab: one panel, adopting any groups parked before it. */
+  registerRibbonTab(tab: RibbonTabDefinition): void {
+    registerLegacyTabPanel(tab);
+  },
+
+  /**
+   * A legacy group. After its tab: added to the tab's panel as a section
+   * (unchanged behaviour). Before its tab: parked in the Impl, and adopted
+   * when the tab registers.
+   */
+  registerRibbonGroup(group: RibbonGroupDefinition): void {
+    const panel = panelRegistry.getPanel(group.tabId);
+    if (panel) {
+      addRibbonGroupToPanel(panel, group);
+    } else {
+      ExtensionRegistryImpl.registerRibbonGroup(group);
+    }
+  },
+
+  /**
+   * An add-in manifest. The Impl keeps the manifest for bookkeeping
+   * (dependency checks, getRegisteredAddIns) and registers its commands; it
+   * also parks the manifest's tabs and groups, which are adopted here:
+   * - each tab becomes a panel whose sections are its groups (the manifest's
+   *   own plus any parked earlier), drained from the Impl;
+   * - the raw tab the Impl registered under the same id is overwritten by the
+   *   panel's ribbon projection — and removed when the panel lives in the
+   *   sidebar, where nothing overwrites it, or the tab would show twice;
+   * - a group aimed at another add-in's tab that is already registered joins
+   *   that panel as a section; one whose tab is not there yet stays parked.
+   */
+  registerAddIn(manifest: AddInManifest): void {
+    ExtensionRegistryImpl.registerAddIn(manifest);
+
+    const ownTabIds = new Set((manifest.ribbonTabs ?? []).map((t) => t.id));
+    for (const tab of manifest.ribbonTabs ?? []) {
+      registerLegacyTabPanel(tab);
+      if (panelRegistry.getPlacement(tab.id) !== "ribbon") {
+        ExtensionRegistryImpl.unregisterRibbonTab(tab.id);
+      }
+    }
+
+    for (const group of manifest.ribbonGroups ?? []) {
+      if (ownTabIds.has(group.tabId)) continue;
+      const panel = panelRegistry.getPanel(group.tabId);
+      if (!panel || !ExtensionRegistryImpl.hasRibbonGroup(group.id)) continue;
+      ExtensionRegistryImpl.unregisterRibbonGroup(group.id);
+      addRibbonGroupToPanel(panel, group);
+    }
+  },
+
+  /** Undo registerAddIn: its panels, the sections it added to other add-ins'
+   *  panels, and the Impl's bookkeeping. */
+  unregisterAddIn(addinId: string): void {
+    const manifest = ExtensionRegistryImpl.getRegisteredAddIns().find((m) => m.id === addinId);
+    if (manifest) {
+      const ownTabIds = new Set((manifest.ribbonTabs ?? []).map((t) => t.id));
+      manifest.ribbonTabs?.forEach((tab) => panelRegistry.unregisterPanel(tab.id));
+      for (const group of manifest.ribbonGroups ?? []) {
+        if (ownTabIds.has(group.tabId)) continue;
+        const panel = panelRegistry.getPanel(group.tabId);
+        if (!panel || !panel.sections.some((s) => s.id === group.id)) continue;
+        panelRegistry.registerPanel({
+          ...panel,
+          sections: panel.sections.filter((s) => s.id !== group.id),
+        });
+      }
+    }
+    ExtensionRegistryImpl.unregisterAddIn(addinId);
+  },
+};
+
+// ============================================================================
+// Ribbon appearance wiring
+// ============================================================================
+
+/** View-menu item id of the group-label preference. */
+const RIBBON_LABELS_MENU_ITEM_ID = "view.ribbonGroupLabels";
+/** Menu icon size (the menu bar's icon column). */
+const MENU_ICON_SIZE = 16;
+
+/**
+ * Ties the ribbon to the appearance preferences:
+ * - a skin, token or label-mode change clears the ribbon's measurement caches
+ *   (their first production callers): a demotion or a width measured under
+ *   one skin's radii and one label mode is not evidence under another, and
+ *   the next mount must re-measure instead of replaying it;
+ * - the View menu gets "Show Ribbon Group Labels", a checked item that
+ *   follows the preference however it was changed (this menu, the ribbon's
+ *   context menu, the Appearance page).
+ */
+function wireRibbonAppearance(): void {
+  const clearRibbonMeasurements = (): void => {
+    clearSectionFitCache();
+    clearSectionWidthCaches();
+  };
+  onAppEvent(AppEvents.APPEARANCE_CHANGED, clearRibbonMeasurements);
+
+  let labelsChecked = getRibbonLabelMode() === "show";
+  registerMenuItem("view", {
+    id: RIBBON_LABELS_MENU_ITEM_ID,
+    label: "Show Ribbon Group Labels",
+    icon: React.createElement(RibbonIcon.Text, { size: MENU_ICON_SIZE }),
+    checked: labelsChecked,
+    action: () => {
+      setRibbonLabelMode(getRibbonLabelMode() === "show" ? "hide" : "show");
+    },
+  });
+
+  // The loader's own subscription fires for EVERY re-apply, including ones
+  // that never emit APPEARANCE_CHANGED (a late registerSkin of the active
+  // skin, an accessibility override).
+  subscribeToAppearance(() => {
+    clearRibbonMeasurements();
+    const next = getRibbonLabelMode() === "show";
+    if (next !== labelsChecked) {
+      labelsChecked = next;
+      updateMenuItem("view", RIBBON_LABELS_MENU_ITEM_ID, { checked: next });
+    }
+  });
 }
 
 let isBootstrapped = false;
@@ -232,6 +420,7 @@ export function bootstrapShell(): void {
         sections: [{
           id: definition.id + ".main",
           label: definition.title,
+          icon: definition.icon,
           ribbonPresentation: "launcher",
           component: ({ placement, onClose, data }) =>
             React.createElement(ViewComponent, { onClose, data, placement }),
@@ -286,80 +475,17 @@ export function bootstrapShell(): void {
   // Register Extension Services
   // =========================================================================
 
-  // Extension Registry Service - ribbon tab/group registration routes through PanelRegistry
+  // Extension Registry Service - ribbon tab/group registration routes through
+  // PanelRegistry as measured sections (legacyRibbonRouting above).
   const extensionRegistryService: ExtensionRegistryService = {
-    registerAddIn: (manifest) => {
-      // Store manifest for bookkeeping (dependency checks, getRegisteredAddIns)
-      // and register commands. We bypass its ribbon tab/group registration since
-      // we route those through PanelRegistry as sections.
-      ExtensionRegistryImpl.registerAddIn(manifest);
-
-      // Route ribbon tabs through PanelRegistry with sections
-      if (manifest.ribbonTabs) {
-        for (const tab of manifest.ribbonTabs) {
-          const tabGroups = (manifest.ribbonGroups ?? [])
-            .filter((g) => g.tabId === tab.id)
-            .sort((a, b) => a.order - b.order);
-
-          // Convert each group to a section, or wrap entire tab as single section
-          const sections: ShellPanelSection[] = tabGroups.length > 0
-            ? tabGroups.map(wrapRibbonGroupAsSection)
-            : [wrapRibbonTabAsSection(tab)];
-
-          panelRegistry.registerPanel({
-            id: tab.id,
-            title: tab.label,
-            icon: null as any,
-            sections,
-            defaultPlacement: "ribbon",
-            ribbonOrder: tab.order,
-            ribbonColor: tab.color,
-            priority: 1000 - tab.order,
-          });
-        }
-      }
-    },
-    unregisterAddIn: (addinId) => {
-      const manifest = ExtensionRegistryImpl.getRegisteredAddIns().find((m) => m.id === addinId);
-      if (manifest) {
-        manifest.ribbonTabs?.forEach((tab) => panelRegistry.unregisterPanel(tab.id));
-      }
-      ExtensionRegistryImpl.unregisterAddIn(addinId);
-    },
+    registerAddIn: (manifest) => legacyRibbonRouting.registerAddIn(manifest),
+    unregisterAddIn: (addinId) => legacyRibbonRouting.unregisterAddIn(addinId),
     registerCommand: (command) => ExtensionRegistryImpl.registerCommand(command),
     getCommand: (commandId) => ExtensionRegistryImpl.getCommand(commandId),
     getAllCommands: () => ExtensionRegistryImpl.getAllCommands(),
-    registerRibbonTab: (tab) => {
-      // Wrap entire tab component as a single section
-      panelRegistry.registerPanel({
-        id: tab.id,
-        title: tab.label,
-        icon: null as any,
-        sections: [wrapRibbonTabAsSection(tab)],
-        defaultPlacement: "ribbon",
-        ribbonOrder: tab.order,
-        ribbonColor: tab.color,
-        priority: 1000 - tab.order,
-      });
-    },
+    registerRibbonTab: (tab) => legacyRibbonRouting.registerRibbonTab(tab),
     unregisterRibbonTab: (tabId) => panelRegistry.unregisterPanel(tabId),
-    registerRibbonGroup: (group) => {
-      // Groups registered after their tab — add as a new section to the existing panel
-      const panel = panelRegistry.getPanel(group.tabId);
-      if (panel) {
-        const newSection = wrapRibbonGroupAsSection(group);
-        // If panel currently has a single "main" section (wrapped tab), replace it
-        // since individual groups are being registered and should take precedence
-        const sections = panel.sections.length === 1 && panel.sections[0].id.endsWith(".main")
-          ? [newSection]
-          : [...panel.sections.filter((s) => s.id !== newSection.id), newSection];
-        panelRegistry.registerPanel({ ...panel, sections });
-      } else {
-        // Tab not registered yet — register directly into ExtensionRegistryImpl
-        // (it will be picked up when the tab is registered)
-        ExtensionRegistryImpl.registerRibbonGroup(group);
-      }
-    },
+    registerRibbonGroup: (group) => legacyRibbonRouting.registerRibbonGroup(group),
     getRibbonTabs: () => ExtensionRegistryImpl.getRibbonTabs(),
     getRibbonGroupsForTab: (tabId) => ExtensionRegistryImpl.getRibbonGroupsForTab(tabId),
     notifySelectionChange: (selection) => ExtensionRegistryImpl.notifySelectionChange(selection),
@@ -439,6 +565,10 @@ export function bootstrapShell(): void {
 
   registerCoreGridContextMenu();
   registerCoreSheetContextMenu();
+
+  // Ribbon <-> appearance: measurement-cache clears on skin/label changes and
+  // the View menu's "Show Ribbon Group Labels" item.
+  wireRibbonAppearance();
 
   // Initialize centralized keybinding system
   initKeybindings();

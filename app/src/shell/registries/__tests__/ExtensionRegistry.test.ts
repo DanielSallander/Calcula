@@ -127,6 +127,31 @@ describe("ExtensionRegistry", () => {
       registry.unregisterRibbonGroup("g1");
       expect(registry.getRibbonGroupsForTab("tab1")).toHaveLength(0);
     });
+
+    it("drainRibbonGroupsForTab returns a tab's groups in order and removes only those", () => {
+      registry.registerRibbonGroup(makeGroup("g2", "tab1", 20));
+      registry.registerRibbonGroup(makeGroup("g1", "tab1", 10));
+      registry.registerRibbonGroup(makeGroup("g3", "tab2", 5));
+      const listener = vi.fn();
+      const off = registry.onRegistryChange(listener);
+
+      const drained = registry.drainRibbonGroupsForTab("tab1");
+      off();
+
+      expect(drained.map((g) => g.id)).toEqual(["g1", "g2"]);
+      expect(registry.getRibbonGroupsForTab("tab1")).toHaveLength(0);
+      expect(registry.hasRibbonGroup("g1")).toBe(false);
+      expect(registry.getRibbonGroupsForTab("tab2").map((g) => g.id)).toEqual(["g3"]);
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it("drainRibbonGroupsForTab with nothing parked is a silent no-op", () => {
+      const listener = vi.fn();
+      const off = registry.onRegistryChange(listener);
+      expect(registry.drainRibbonGroupsForTab("empty")).toEqual([]);
+      off();
+      expect(listener).not.toHaveBeenCalled();
+    });
   });
 
   // =========================================================================

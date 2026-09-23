@@ -9,6 +9,8 @@
 //          with no probe flash. A demoted section stays demoted for the app
 //          session (the inline content is unmounted, so it cannot be
 //          re-measured); growth WHILE inline demotes live via ResizeObserver.
+//          The shell clears the cache (clearSectionFitCache) when the skin or
+//          the label preference changes, so the next mount re-measures.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SectionRibbonPresentation } from "../../api/uiTypes";
@@ -29,9 +31,17 @@ export function clearSectionFitCache(): void {
 // Pure decision helpers (unit-testable without a DOM)
 // ============================================================================
 
-/** Whether a measured natural height demotes an "auto" section. */
+/**
+ * Whether a measured natural height demotes an "auto" section.
+ *
+ * The height is ROUNDED before the comparison. The probe reads a fractional
+ * contentRect (61.4 at some zoom levels for content that is 61 CSS px), and a
+ * demotion is sticky for the session: comparing the raw value would demote a
+ * section that fits, forever. DEMOTE_HEIGHT (63) is the 61px content box plus
+ * 2px of slack; the same number applies whether captions are shown or hidden.
+ */
 export function shouldDemoteForHeight(naturalHeight: number): boolean {
-  return naturalHeight > DEMOTE_HEIGHT;
+  return Math.round(naturalHeight) > DEMOTE_HEIGHT;
 }
 
 export interface WidthDemotionInput {
@@ -40,11 +50,12 @@ export interface WidthDemotionInput {
   width: number;
   /**
    * Measured rendered width of this section's LAUNCHER cell (chrome included).
-   * Real launchers are usually much wider than the 64px token (min-width 56 +
-   * padding + a label up to 110px + cell chrome) — modeling them at 64 made
-   * the collapse stop several hundred px too early on section-heavy tabs
-   * (Chart Design), leaving a permanently overflowing strip. Unmeasured
-   * launchers fall back to LAUNCHER_BAND_WIDTH until their probe reports.
+   * Real launchers are often wider than the LAUNCHER_BAND_WIDTH token (80:
+   * min-width 58 + card padding + cluster gap) because a label runs up to
+   * 110px — modeling them at the token made the collapse stop several hundred
+   * px too early on section-heavy tabs (Chart Design), leaving a permanently
+   * overflowing strip. Unmeasured launchers fall back to the token until their
+   * probe reports.
    */
   launcherWidth?: number;
   /** Lower collapses first. */
@@ -180,12 +191,10 @@ export function useSectionFit(
     [cacheKey, declared],
   );
 
-  useEffect(() => {
-    return () => {
-      observerRef.current?.disconnect();
-      observerRef.current = null;
-    };
-  }, []);
+  // The probe is disconnected by probeRef(null) on unmount, never by an
+  // unmount-only effect: React 18 StrictMode runs effect cleanups in a
+  // SIMULATED unmount without re-running callback refs, and that cleanup left
+  // the sizer unobserved for the rest of the session in every dev build.
 
   return { demoted: declared ?? measuredDemoted, probeRef };
 }

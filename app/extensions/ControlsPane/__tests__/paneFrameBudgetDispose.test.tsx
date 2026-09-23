@@ -30,13 +30,22 @@ Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
 vi.mock("@api", () => ({
   getShapeBitmap: () => null,
   hasShapeBitmapRenderer: () => false,
+  RibbonIcon: new Proxy({}, { get: () => () => null }),
 }));
 vi.mock("@api/layout", () => ({
   Button: () => null,
+  IconButton: () => null,
+  Popover: () => null,
   Stack: ({ children }: { children?: React.ReactNode }) =>
     React.createElement("div", null, children),
   StatusText: () => null,
+  SurfaceLayoutProvider: ({ children }: { children?: React.ReactNode }) =>
+    React.createElement(React.Fragment, null, children),
+  popoverLayout: () => ({ container: "popover" }),
   useSurfaceLayout: () => ({ container: "sidebar" }),
+  DEFAULT_PICKER_COLOR: "#000000",
+  // The card's styles read tokens at module load; any name resolves.
+  LT: new Proxy({}, { get: (_t, key) => `var(--${String(key)})` }),
 }));
 vi.mock("@api/scriptableObjects", () => ({
   ObjectScriptManager: {

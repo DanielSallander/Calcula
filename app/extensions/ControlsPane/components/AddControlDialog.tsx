@@ -8,9 +8,11 @@
 //          generic inline error). "Custom..." can scaffold + open a starter
 //          object script right away.
 // CONTEXT: Visual idiom mirrors AddFilterDialog (overlay, header, footer).
+//          Painted with dialog/LT tokens only, so it follows the skin in Dark.
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import type { DialogProps } from "@api";
+import { RibbonIcon, type DialogProps } from "@api";
+import { Button, IconButton, LT } from "@api/layout";
 import {
   listAnimatableCharts,
   listChartParams,
@@ -26,6 +28,7 @@ import type {
 import { createControlAsync, getAllControls } from "../lib/controlsPaneStore";
 import { getAllFilters } from "../lib/filterPaneStore";
 import { openControlScriptEditor } from "./CustomControlHost";
+import { primaryButtonClass } from "./paneChrome";
 
 // ============================================================================
 // Types & helpers
@@ -295,9 +298,12 @@ export function AddControlDialog({
         {/* Header */}
         <div style={styles.header}>
           <span style={styles.title}>Add {TYPE_LABELS[controlType]}</span>
-          <button style={styles.closeButton} onClick={onClose}>
-            x
-          </button>
+          <IconButton
+            size="sm"
+            icon={<RibbonIcon.Close size={16} />}
+            label="Close"
+            onClick={onClose}
+          />
         </div>
 
         {/* Body */}
@@ -520,19 +526,18 @@ export function AddControlDialog({
 
         {/* Footer */}
         <div style={styles.footer}>
-          <button style={styles.cancelButton} onClick={onClose}>
+          <Button variant="outlined" style={FOOTER_BUTTON_STYLE} onClick={onClose}>
             Cancel
-          </button>
-          <button
-            style={{
-              ...styles.createButton,
-              opacity: name.trim().length === 0 || isCreating ? 0.5 : 1,
-            }}
+          </Button>
+          <Button
+            variant="outlined"
+            className={primaryButtonClass}
+            style={FOOTER_BUTTON_STYLE}
             disabled={name.trim().length === 0 || isCreating}
             onClick={handleCreate}
           >
             {isCreating ? "Adding..." : "Add Control"}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -540,47 +545,56 @@ export function AddControlDialog({
 }
 
 // ============================================================================
-// Styles — mirrors AddFilterDialog
+// Styles — mirrors AddFilterDialog; tokens only (dialog tokens for the frame,
+// LT for the controls), so the dialog follows the skin in Dark
 // ============================================================================
+
+const FOOTER_BUTTON_STYLE: React.CSSProperties = { minWidth: 80 };
+
+/** Text-entry chrome shared by the inputs, selects and the textarea. */
+const FIELD_CHROME: React.CSSProperties = {
+  width: "100%",
+  boxSizing: "border-box" as const,
+  padding: "6px 8px",
+  fontSize: "12px",
+  border: `1px solid ${LT.controlBorder}`,
+  borderRadius: LT.radiusControl,
+  background: LT.inputBg,
+  color: LT.text,
+};
 
 const styles: Record<string, React.CSSProperties> = {
   overlay: {
     position: "fixed",
     inset: 0,
-    background: "rgba(0,0,0,0.3)",
+    background: "var(--dialog-overlay-bg, rgba(0, 0, 0, 0.3))",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     zIndex: 10000,
   },
   dialog: {
-    background: "#fff",
-    borderRadius: "6px",
+    background: "var(--dialog-bg, #ffffff)",
+    border: "1px solid var(--dialog-border, #d1d5db)",
+    borderRadius: LT.radiusPopover,
+    color: LT.text,
     width: "420px",
     maxHeight: "90vh",
     display: "flex",
     flexDirection: "column",
-    boxShadow: "0 8px 32px rgba(0,0,0,0.2)",
+    boxShadow: LT.shadowRaised,
   },
   header: {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
     padding: "12px 16px",
-    borderBottom: "1px solid #e0e0e0",
+    borderBottom: `1px solid ${LT.border}`,
   },
   title: {
     fontSize: "14px",
     fontWeight: 600,
-    color: "#333",
-  },
-  closeButton: {
-    border: "none",
-    background: "none",
-    fontSize: "16px",
-    cursor: "pointer",
-    color: "#888",
-    padding: "0 4px",
+    color: "var(--dialog-title-text, #111827)",
   },
   body: {
     padding: "12px 16px",
@@ -594,31 +608,13 @@ const styles: Record<string, React.CSSProperties> = {
     display: "block",
     fontSize: "12px",
     fontWeight: 600,
-    color: "#555",
+    color: LT.textSecondary,
     marginBottom: "4px",
   },
-  input: {
-    width: "100%",
-    boxSizing: "border-box" as const,
-    padding: "6px 8px",
-    fontSize: "12px",
-    border: "1px solid #d0d0d0",
-    borderRadius: "3px",
-  },
-  select: {
-    width: "100%",
-    padding: "6px 8px",
-    fontSize: "12px",
-    border: "1px solid #d0d0d0",
-    borderRadius: "3px",
-  },
+  input: FIELD_CHROME,
+  select: FIELD_CHROME,
   textarea: {
-    width: "100%",
-    boxSizing: "border-box" as const,
-    padding: "6px 8px",
-    fontSize: "12px",
-    border: "1px solid #d0d0d0",
-    borderRadius: "3px",
+    ...FIELD_CHROME,
     fontFamily: "inherit",
     resize: "vertical" as const,
   },
@@ -640,17 +636,17 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     gap: "6px",
     fontSize: "12px",
-    color: "#333",
+    color: LT.text,
     cursor: "pointer",
   },
   hint: {
     fontSize: "11px",
-    color: "#888",
+    color: LT.textSecondary,
     marginTop: "4px",
   },
   error: {
     fontSize: "11px",
-    color: "#c00",
+    color: LT.dangerFg,
     marginBottom: "8px",
     whiteSpace: "pre-wrap" as const,
   },
@@ -659,23 +655,6 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "flex-end",
     gap: "8px",
     padding: "12px 16px",
-    borderTop: "1px solid #e0e0e0",
-  },
-  cancelButton: {
-    padding: "6px 16px",
-    fontSize: "12px",
-    border: "1px solid #d0d0d0",
-    borderRadius: "3px",
-    background: "#fff",
-    cursor: "pointer",
-  },
-  createButton: {
-    padding: "6px 16px",
-    fontSize: "12px",
-    border: "none",
-    borderRadius: "3px",
-    background: "#0078d4",
-    color: "#fff",
-    cursor: "pointer",
+    borderTop: `1px solid ${LT.border}`,
   },
 };

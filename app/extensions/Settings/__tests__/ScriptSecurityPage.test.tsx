@@ -25,6 +25,7 @@ vi.mock("@core/lib/file-api", () => ({ getCurrentFilePath: async () => null }));
 
 import { ScriptSecurityPage } from "../components/ScriptSecurityPage";
 import { listWorkbookTrust } from "@api/scriptSecurity";
+import { findHardcodedColours } from "@api/layout";
 
 const KEY = "c:/books/q4.cala";
 const STORE_KEY = "calcula.scriptTrust.v1";
@@ -164,6 +165,31 @@ describe("Script Security settings page", () => {
     seedTrust();
     await render();
     expect(container.textContent).toContain(".calp package is separate");
+  });
+
+  it("uses the one panel header recipe, @api buttons and token colours", async () => {
+    seedTrust();
+    await render();
+    const headings = Array.from(container.querySelectorAll("h3"));
+    expect(headings.map((h) => h.textContent)).toEqual([
+      "Script Security",
+      "Scheduled jobs",
+      "Trusted workbooks",
+      "Script capability grants",
+      "Notebook capability grants",
+    ]);
+    for (const h of headings) {
+      const cs = getComputedStyle(h);
+      expect(cs.fontSize, h.textContent ?? "").toBe("12px");
+      expect(cs.fontWeight, h.textContent ?? "").toBe("600");
+      expect(cs.textTransform, h.textContent ?? "").not.toBe("uppercase");
+      // Each heading names the section it heads.
+      expect(h.closest("section")?.getAttribute("aria-labelledby")).toBe(h.id);
+    }
+    // The compact @api Button (24px), not a hand-rolled one.
+    expect(buttonWithText("Revoke trust").style.height).toBe("24px");
+    expect(buttonWithText("Clear all trust decisions").style.height).toBe("24px");
+    expect(findHardcodedColours(container)).toEqual([]);
   });
 
   it("shows an empty state when nothing has ever been trusted", async () => {

@@ -85,6 +85,8 @@ import {
   CHART_DIALOG_ID,
   ChartFormatPaneDefinition,
   CHART_FORMAT_PANE_ID,
+  ChartJsonPaneDefinition,
+  CHART_JSON_PANE_ID,
 } from "./manifest";
 
 import {
@@ -663,8 +665,12 @@ function activate(context: ExtensionContext): void {
   // AxisContextMenu still name those ids. They are doorways; the pane is the
   // room. Nothing is registered twice for the same job.
   registerTaskPane(ChartFormatPaneDefinition);
+  // The Chart JSON pane: what the Chart Design band's JSON hero opens (it
+  // replaced a fixed-position overlay). Same context key, same subject.
+  registerTaskPane(ChartJsonPaneDefinition);
   cleanupFunctions.push(() => {
     unregisterTaskPane(CHART_FORMAT_PANE_ID);
+    unregisterTaskPane(CHART_JSON_PANE_ID);
     // `selectChart` adds the "chart" context key and `deselectChart` removes
     // it, but deactivation goes through `resetSelectionHandlerState`, which
     // resets the ladder WITHOUT deselecting — so the key would outlive the

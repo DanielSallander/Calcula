@@ -1,10 +1,20 @@
 //! FILENAME: app/extensions/ControlsPane/components/RibbonFilterCard.tsx
-// PURPOSE: Compact filter card in the ribbon — field name, summary, dropdown
-//          arrow, plus the model connection the filter is sourced from
+// PURPOSE: Compact filter chip-card in the Controls pane — field name, the
+//          selection summary as a Chip ("3 of 12", "(All)"), a dropdown
+//          chevron, plus the model connection the filter is sourced from
 //          (visible so multi-model workbooks stay unambiguous).
-//          Clicking the arrow opens a checklist dropdown anchored below the card.
+//          The chevron opens the filter checklist in a card Popover anchored
+//          below the card.
+// CONTEXT: Chrome is the pane's shared chip-card (paneChrome.ts): the 56px
+//          band height the section's "inline" presentation relies on, tokens
+//          only, the pressed wash while a selection is active. The checklist's
+//          dismissal belongs to the Popover — a press on the card (its anchor)
+//          never dismisses it, so the chevron toggles without the old 200ms
+//          reopen guard.
 
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect } from "react";
+import { RibbonIcon } from "@api";
+import { Chip, DropdownChevron, IconButton, LT, useSurfaceLayout } from "@api/layout";
 import type { RibbonFilter, SlicerItem } from "../lib/filterPaneTypes";
 import {
   getCachedItems,
@@ -14,14 +24,18 @@ import {
   getFilterById,
   getConnectionName,
 } from "../lib/filterPaneStore";
-import { FilterPaneEvents } from "../lib/filterPaneEvents";
 import { FilterDropdown } from "./FilterDropdown";
+import { FilterPaneEvents } from "../lib/filterPaneEvents";
+import { cardTitleStyle, paneCardStyle } from "./paneChrome";
 
 interface Props {
   filter: RibbonFilter;
 }
 
 export function RibbonFilterCard({ filter }: Props): React.ReactElement {
+  const layout = useSurfaceLayout();
+  const band = layout.container === "band";
+
   const [items, setItems] = useState<SlicerItem[]>(
     getCachedItems(filter.id) ?? [],
   );
@@ -29,9 +43,9 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
     filter.selectedItems,
   );
   const [dropdownOpen, setDropdownOpen] = useState(false);
-  const [dropdownAnchor, setDropdownAnchor] = useState<DOMRect | null>(null);
-  const cardRef = useRef<HTMLDivElement>(null);
-  const closedAtRef = useRef(0);
+  // The card is the popover's anchor: the checklist hangs below the whole
+  // card, and a press anywhere on it is never an "outside" press.
+  const [cardEl, setCardEl] = useState<HTMLDivElement | null>(null);
 
   // Sync local selection when filter prop changes
   useEffect(() => {
@@ -71,11 +85,7 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
   }, [filter.id, itemsLoaded]);
 
   const toggleDropdown = useCallback(async () => {
-    // If the dropdown was just closed by an outside click (<100ms ago),
-    // don't reopen it — the user intended to close, not toggle.
-    if (Date.now() - closedAtRef.current < 200) return;
-    if (!dropdownOpen && cardRef.current) {
-      setDropdownAnchor(cardRef.current.getBoundingClientRect());
+    if (!dropdownOpen) {
       // Load items on first open (lazy loading)
       if (!itemsLoaded) {
         await refreshFilterItems(filter.id);
@@ -88,7 +98,6 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
   }, [dropdownOpen, itemsLoaded, filter.id]);
 
   const handleDropdownClose = useCallback(() => {
-    closedAtRef.current = Date.now();
     setDropdownOpen(false);
   }, []);
 
@@ -106,19 +115,27 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
     await deleteFilterAsync(filter.id);
   }, [filter.id]);
 
-
   // Build summary text
   const hasFilter = localSelectedItems !== null;
   const totalCount = items.length;
+  let summary: React.ReactNode;
   let summaryText: string;
   if (!hasFilter) {
     summaryText = "(All)";
+    summary = summaryText;
   } else if (localSelectedItems.length === 0) {
     summaryText = "(None)";
+    summary = summaryText;
   } else if (localSelectedItems.length === 1) {
     summaryText = localSelectedItems[0];
+    summary = summaryText;
   } else {
     summaryText = `${localSelectedItems.length} of ${totalCount}`;
+    summary = (
+      <>
+        <b>{localSelectedItems.length}</b> of {totalCount}
+      </>
+    );
   }
 
   // Shorten field name: "dim_customer.city" -> "city"
@@ -130,38 +147,47 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
   // which model each filter comes from when several connections exist.
   const connectionName = getConnectionName(filter.connectionId);
   const connectionMissing = connectionName === undefined;
+  const pinned = (filter.filterLevel ?? 1) >= 2;
 
   return (
     <>
       <div
-        ref={cardRef}
-        style={{
-          ...styles.card,
-          borderColor: hasFilter ? "#0078d4" : "#c0c0c0",
-          background: hasFilter ? "#edf4fc" : "#fff",
-        }}
+        ref={setCardEl}
+        style={paneCardStyle(band, hasFilter)}
+        data-pane-card="filter"
+        data-filtered={hasFilter ? "true" : "false"}
         title={
           `${filter.fieldName}\nModel: ${connectionName ?? "(connection missing)"}\n` +
           (hasFilter
             ? `Filtered: ${localSelectedItems?.length ?? 0} of ${totalCount}`
             : "No filter applied") +
-          ((filter.filterLevel ?? 1) >= 2
+          (pinned
             ? `\nPinned (level ${filter.filterLevel}) — survives CLEAR in measures`
             : "")
         }
       >
+        {/* Title row (24, the chip's height) + gap (2) + connection line (12)
+            sits centred in the card's 46px content box. */}
         <div style={styles.cardBody}>
           <div style={styles.topRow}>
-            {(filter.filterLevel ?? 1) >= 2 && (
+            {pinned && (
               <span
+                role="img"
                 aria-label={`Pinned filter (level ${filter.filterLevel})`}
-                style={{ fontSize: 10, lineHeight: 1, marginRight: 2 }}
+                style={styles.pin}
               >
-                📌
+                <RibbonIcon.Lock size={14} />
               </span>
             )}
-            <div style={styles.fieldName}>{shortName}:</div>
-            <div style={styles.summary}>{summaryText}</div>
+            <span style={cardTitleStyle}>{shortName}</span>
+            <Chip
+              tone={hasFilter ? "info" : "neutral"}
+              title={summaryText}
+              testId="controls-pane-filter-summary"
+              style={styles.summaryChip}
+            >
+              {summary}
+            </Chip>
           </div>
           <div
             style={{
@@ -172,23 +198,32 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
             {connectionName ?? "(connection missing)"}
           </div>
         </div>
-        <button
-          style={styles.arrow}
-          onClick={toggleDropdown}
-        >
-          {dropdownOpen ? "▲" : "▼"}
-        </button>
+        <IconButton
+          size="sm"
+          label={`Filter ${shortName}`}
+          icon={
+            <span style={{ ...styles.chevron, transform: dropdownOpen ? "rotate(180deg)" : undefined }}>
+              <DropdownChevron size={9} />
+            </span>
+          }
+          aria-haspopup="dialog"
+          aria-expanded={dropdownOpen}
+          data-testid="controls-pane-filter-open"
+          onClick={() => void toggleDropdown()}
+        />
       </div>
 
-      {/* Dropdown — read fresh filter from store to avoid stale props */}
-      {dropdownOpen && dropdownAnchor && (() => {
+      {/* Checklist — read fresh filter from store to avoid stale props.
+          Mounted only while open, so its local selection state starts fresh
+          from the filter on every open. */}
+      {dropdownOpen && cardEl && (() => {
         const f = getFilterById(filter.id) ?? filter;
         return (
           <FilterDropdown
             fieldName={f.fieldName}
             items={items}
             selectedItems={localSelectedItems}
-            anchorRect={dropdownAnchor}
+            anchorEl={cardEl}
             onApply={handleSelectionApply}
             onClose={handleDropdownClose}
             filterId={f.id}
@@ -215,68 +250,45 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  card: {
-    display: "flex",
-    alignItems: "center",
-    gap: "4px",
-    padding: "4px 6px 4px 10px",
-    borderWidth: "1px",
-    borderStyle: "solid",
-    borderRadius: "3px",
-    cursor: "default",
-    height: "56px",
-    flexShrink: 0,
-    maxWidth: "220px",
-    minWidth: "120px",
-  },
   cardBody: {
     display: "flex",
     flexDirection: "column",
     justifyContent: "center",
-    gap: "2px",
+    gap: 2,
     flex: 1,
     minWidth: 0,
   },
   topRow: {
     display: "flex",
     alignItems: "center",
-    gap: "4px",
+    gap: 6,
     minWidth: 0,
   },
-  fieldName: {
-    fontSize: "11px",
-    fontWeight: 600,
-    color: "#333",
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
+  pin: {
+    display: "inline-flex",
+    flex: "none",
+    color: LT.textSecondary,
   },
-  summary: {
-    fontSize: "11px",
-    color: "#666",
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    flex: 1,
+  // The chip may shrink (its text ellipsises) so a long single-value summary
+  // never pushes the chevron out of the card.
+  summaryChip: {
+    flex: "0 1 auto",
+    minWidth: 0,
   },
   connectionRow: {
-    fontSize: "9px",
-    color: "#8a8a8a",
+    fontSize: 10,
+    lineHeight: "12px",
+    color: LT.textSecondary,
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis",
   },
   connectionMissing: {
-    color: "#c00",
+    color: LT.dangerFg,
     fontStyle: "italic",
   },
-  arrow: {
-    border: "none",
-    background: "none",
-    cursor: "pointer",
-    fontSize: "10px",
-    color: "#555",
-    padding: "4px",
-    flexShrink: 0,
+  chevron: {
+    display: "inline-flex",
+    transition: `transform ${LT.motionHover}`,
   },
 };

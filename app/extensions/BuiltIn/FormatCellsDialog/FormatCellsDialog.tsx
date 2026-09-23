@@ -272,9 +272,30 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
     onClose();
   }, [onClose, reset]);
 
-  // Keyboard handling
+  // Keyboard handling.
+  //
+  // React bubbles key events through the COMPONENT tree, not the DOM, so a key
+  // pressed in a surface this dialog portals to <body> (a colour palette, its
+  // hex field, any future dropdown) arrives here too. That key is not the
+  // dialog's: Escape there means "close the palette" and Enter "pick this
+  // swatch / commit this hex". Treating them as Cancel / OK discarded or
+  // applied the whole dialog from inside a popover. So only keys that start in
+  // the dialog's own DOM carry the dialog's meaning. The handler sits on the
+  // dialog container, so `currentTarget` IS that container's element (the
+  // node `win.ref` holds) — no ref read needed.
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      const box = e.currentTarget;
+      const ownKey = e.target instanceof Node && box.contains(e.target);
+
+      if (!ownKey) {
+        // Escape from a portalled surface keeps travelling, so that surface's
+        // own document-level Escape handling (the popover closing itself)
+        // still hears it; every other key stays contained, as before.
+        if (e.key !== "Escape") e.stopPropagation();
+        return;
+      }
+
       e.stopPropagation();
 
       if (e.key === "Escape") {

@@ -4,39 +4,42 @@ import { css } from '@emotion/css';
 import { styles } from './EditorStyles';
 import { FieldItem } from './FieldItem';
 import type { SourceField, DragField } from './types';
+import { TOKENS } from '../lib/themeTokens';
 
-// Search input styles
+// Search input styles. Tokens only (see EditorStyles.ts for the Primer
+// literal -> token mapping); the light look is essentially unchanged.
 const searchStyles = {
   container: css`
     padding: 6px 8px;
-    border-bottom: 1px solid #eaeef2;
-    background: #f6f8fa;
+    border-bottom: 1px solid ${TOKENS.controlDivider};
+    background: ${TOKENS.panelBg};
   `,
   input: css`
     width: 100%;
     padding: 5px 8px;
-    border: 1px solid #d0d7de;
+    border: 1px solid ${TOKENS.controlBorder};
     border-radius: 6px;
     font-size: 12px;
     font-family: inherit;
     outline: none;
-    background: #fff;
+    background: ${TOKENS.surfaceBg};
+    color: ${TOKENS.textPrimary};
     transition: border-color 0.15s, box-shadow 0.15s;
     box-sizing: border-box;
 
     &:focus {
-      border-color: #0969da;
-      box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.15);
+      border-color: ${TOKENS.accent};
+      box-shadow: 0 0 0 2px color-mix(in srgb, ${TOKENS.accent} 15%, transparent);
     }
 
     &::placeholder {
-      color: #8b949e;
+      color: ${TOKENS.textTertiary};
     }
   `,
   noResults: css`
     padding: 12px;
     text-align: center;
-    color: #656d76;
+    color: ${TOKENS.textSecondary};
     font-size: 11px;
     font-style: italic;
   `,

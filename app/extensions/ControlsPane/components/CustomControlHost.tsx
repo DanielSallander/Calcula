@@ -56,11 +56,17 @@ import React, {
   useState,
 } from "react";
 import { emitAppEvent, onAppEvent } from "@api/events";
-import { getShapeBitmap, hasShapeBitmapRenderer } from "@api";
+import { getShapeBitmap, hasShapeBitmapRenderer, RibbonIcon } from "@api";
 import {
   Button,
+  DEFAULT_PICKER_COLOR,
+  IconButton,
+  LT,
+  Popover,
   Stack,
   StatusText,
+  SurfaceLayoutProvider,
+  popoverLayout,
   useSurfaceLayout,
 } from "@api/layout";
 import {
@@ -636,13 +642,13 @@ function setup(shape) {
   function render() {
     var label = shape.getProperty("label") || "${name}";
     shape.render.setHtmlContent(
-      '<div style="min-height:44px;height:100%;display:flex;align-items:center;justify-content:center;gap:10px;background:#fff;">' +
-        '<button onclick="calcula.sendMessage(' + "'decrement'" + ')" style="width:24px;height:24px;border:none;border-radius:50%;background:#e5e7eb;font-weight:700;cursor:pointer;">-</button>' +
+      '<div style="min-height:44px;height:100%;display:flex;align-items:center;justify-content:center;gap:10px;background:var(--calcula-bg, #ffffff);">' +
+        '<button onclick="calcula.sendMessage(' + "'decrement'" + ')" style="width:24px;height:24px;border:none;border-radius:50%;background:var(--calcula-button-hover-bg, #e5e7eb);color:var(--calcula-text, #1a1a1a);font-weight:700;cursor:pointer;">-</button>' +
         '<div style="text-align:center;">' +
-          '<div style="font-size:16px;font-weight:700;color:#1a1a1a;">' + count + '</div>' +
-          '<div style="font-size:9px;color:#888;">' + label + '</div>' +
+          '<div style="font-size:16px;font-weight:700;color:var(--calcula-text, #1a1a1a);">' + count + '</div>' +
+          '<div style="font-size:9px;color:var(--calcula-text-secondary, #888888);">' + label + '</div>' +
         '</div>' +
-        '<button onclick="calcula.sendMessage(' + "'increment'" + ')" style="width:24px;height:24px;border:none;border-radius:50%;background:#e5e7eb;font-weight:700;cursor:pointer;">+</button>' +
+        '<button onclick="calcula.sendMessage(' + "'increment'" + ')" style="width:24px;height:24px;border:none;border-radius:50%;background:var(--calcula-button-hover-bg, #e5e7eb);color:var(--calcula-text, #1a1a1a);font-weight:700;cursor:pointer;">+</button>' +
       '</div>'
     );
   }
@@ -778,7 +784,7 @@ function PropertyEditorRow({
   }
   const inputType = row.type === "color" ? "color" : row.type === "number" ? "number" : "text";
   const defaultValue =
-    row.type === "color" && !/^#[0-9a-fA-F]{6}$/.test(row.value) ? "#000000" : row.value;
+    row.type === "color" && !/^#[0-9a-fA-F]{6}$/.test(row.value) ? DEFAULT_PICKER_COLOR : row.value;
   return (
     <label style={styles.propRow} title={row.key}>
       <span style={styles.propLabel}>{row.label}</span>
@@ -787,6 +793,8 @@ function PropertyEditorRow({
         key={`${row.key}:${row.value}`}
         type={inputType}
         defaultValue={defaultValue}
+        // A colour property's swatch is the user's colour DATA, not chrome.
+        data-colour-data={row.type === "color" ? "" : undefined}
         style={row.type === "color" ? styles.propColorInput : styles.propInput}
         onBlur={(e) => {
           if (e.currentTarget.value !== row.value) {
@@ -803,11 +811,12 @@ function PropertyEditorRow({
 
 function PropertiesPopover({
   control,
-  anchorRect,
+  anchorEl,
   onClose,
 }: {
   control: PaneControl;
-  anchorRect: DOMRect;
+  /** The button that opened it; a press on it toggles rather than dismisses. */
+  anchorEl: HTMLElement;
   onClose: () => void;
 }): React.ReactElement {
   const rt = getOrCreateRuntime(control.id);
@@ -823,27 +832,35 @@ function PropertiesPopover({
     [control.id],
   );
 
-  const width = 240;
-  const left = Math.max(4, Math.min(anchorRect.left, window.innerWidth - width - 8));
-  const top = Math.min(anchorRect.bottom + 4, window.innerHeight - 60);
-
+  // An @api card Popover: it positions itself against the button, clamps to
+  // the viewport, and closes on Escape or a press outside. It replaced a
+  // position:fixed layer over a full-window transparent overlay that swallowed
+  // the first click anywhere else in the app.
   return (
-    <>
-      <div style={styles.popoverOverlay} onMouseDown={onClose} />
-      <div style={{ ...styles.popover, left, top, width }}>
-        <div style={styles.popoverTitle}>Properties — {control.name}</div>
-        {rows.length === 0 ? (
-          <div style={styles.popoverEmpty}>
-            No properties declared. The control script declares them with
-            shape.render.declareProperties().
-          </div>
-        ) : (
-          rows.map((row) => (
-            <PropertyEditorRow key={row.key} row={row} onCommit={handleCommit} />
-          ))
-        )}
-      </div>
-    </>
+    <Popover
+      anchorEl={anchorEl}
+      open
+      onClose={onClose}
+      card
+      width={POPOVER_WIDTH}
+      ariaLabel={`Properties — ${control.name}`}
+    >
+      <SurfaceLayoutProvider value={popoverLayout()}>
+        <div style={styles.popoverBody}>
+          <div style={styles.popoverTitle}>Properties — {control.name}</div>
+          {rows.length === 0 ? (
+            <div style={styles.popoverEmpty}>
+              No properties declared. The control script declares them with
+              shape.render.declareProperties().
+            </div>
+          ) : (
+            rows.map((row) => (
+              <PropertyEditorRow key={row.key} row={row} onCommit={handleCommit} />
+            ))
+          )}
+        </div>
+      </SurfaceLayoutProvider>
+    </Popover>
   );
 }
 
@@ -892,7 +909,7 @@ export function CustomControlHost({
   const scriptExists = ObjectScriptManager.getScript("shape", instanceId) !== null;
 
   const [propsOpen, setPropsOpen] = useState(false);
-  const [propsAnchor, setPropsAnchor] = useState<DOMRect | null>(null);
+  const [propsAnchor, setPropsAnchor] = useState<HTMLElement | null>(null);
 
   // ---- iframe registration (sendMessage forwarding + integrity check) ----
   const frameElementRef = useRef<HTMLIFrameElement | null>(null);
@@ -971,7 +988,7 @@ export function CustomControlHost({
   );
 
   const togglePropsPopover = useCallback((e: React.MouseEvent<HTMLElement>) => {
-    setPropsAnchor(e.currentTarget.getBoundingClientRect());
+    setPropsAnchor(e.currentTarget);
     setPropsOpen((open) => !open);
   }, []);
 
@@ -1102,18 +1119,19 @@ export function CustomControlHost({
             <div style={styles.bandBody} onClick={handleBodyClick}>
               {body}
             </div>
-            <button
-              style={styles.iconButton}
-              title="Properties"
+            <IconButton
+              size="sm"
+              icon={<RibbonIcon.Settings size={16} />}
+              label="Properties"
+              aria-expanded={propsOpen}
+              style={styles.bandIconButton}
               onClick={togglePropsPopover}
-            >
-              {"⋯"}
-            </button>
+            />
           </div>
           {propsOpen && propsAnchor && (
             <PropertiesPopover
               control={control}
-              anchorRect={propsAnchor}
+              anchorEl={propsAnchor}
               onClose={() => setPropsOpen(false)}
             />
           )}
@@ -1138,7 +1156,7 @@ export function CustomControlHost({
         {propsOpen && propsAnchor && (
           <PropertiesPopover
             control={control}
-            anchorRect={propsAnchor}
+            anchorEl={propsAnchor}
             onClose={() => setPropsOpen(false)}
           />
         )}
@@ -1158,18 +1176,25 @@ export function CustomControlHost({
             {body}
           </div>
           <div style={styles.bandButtons}>
-            <button style={styles.iconButton} title="Properties" onClick={togglePropsPopover}>
-              {"⋯"}
-            </button>
-            <button style={styles.iconButton} title="Edit code…" onClick={handleEditCode}>
-              {"</>"}
-            </button>
+            <IconButton
+              size="sm"
+              icon={<RibbonIcon.Settings size={16} />}
+              label="Properties"
+              aria-expanded={propsOpen}
+              onClick={togglePropsPopover}
+            />
+            <IconButton
+              size="sm"
+              icon={<RibbonIcon.Code size={16} />}
+              label="Edit code…"
+              onClick={handleEditCode}
+            />
           </div>
         </div>
         {propsOpen && propsAnchor && (
           <PropertiesPopover
             control={control}
-            anchorRect={propsAnchor}
+            anchorEl={propsAnchor}
             onClose={() => setPropsOpen(false)}
           />
         )}
@@ -1188,8 +1213,13 @@ export function CustomControlHost({
           <Button size="sm" title="Properties" onClick={togglePropsPopover}>
             Properties
           </Button>
-          <Button size="sm" title="Edit the control's script" onClick={handleEditCode}>
-            {"</>"} Code
+          <Button
+            size="sm"
+            icon={<RibbonIcon.Code size={16} />}
+            title="Edit the control's script"
+            onClick={handleEditCode}
+          >
+            Code
           </Button>
         </div>
         <div style={styles.sidebarBody} onClick={handleBodyClick}>
@@ -1202,7 +1232,7 @@ export function CustomControlHost({
       {propsOpen && propsAnchor && (
         <PropertiesPopover
           control={control}
-          anchorRect={propsAnchor}
+          anchorEl={propsAnchor}
           onClose={() => setPropsOpen(false)}
         />
       )}
@@ -1211,8 +1241,12 @@ export function CustomControlHost({
 }
 
 // ============================================================================
-// Styles (band card matches RibbonFilterCard's 56px idiom)
+// Styles (band card matches the pane's 56px chip-card; tokens only, so the
+// card and its Properties popover follow the skin in Dark)
 // ============================================================================
+
+/** Properties popover width. */
+const POPOVER_WIDTH = 240;
 
 const styles: Record<string, React.CSSProperties> = {
   bandCard: {
@@ -1220,23 +1254,23 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "stretch",
     gap: "2px",
     padding: "2px",
-    borderWidth: "1px",
-    borderStyle: "solid",
-    borderColor: "#c0c0c0",
-    borderRadius: "3px",
-    background: "#fff",
+    border: `1px solid ${LT.controlBorder}`,
+    borderRadius: LT.radiusCluster,
+    background: LT.surface,
+    color: LT.text,
     cursor: "default",
     height: "56px",
     flexShrink: 0,
     maxWidth: "220px",
     minWidth: "120px",
     boxSizing: "border-box",
+    overflow: "hidden",
   },
   bandBody: {
     flex: 1,
     minWidth: 0,
     overflow: "hidden",
-    borderRadius: "2px",
+    borderRadius: LT.radiusControl,
     display: "flex",
   },
   bandButtons: {
@@ -1245,22 +1279,18 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "center",
     flexShrink: 0,
   },
-  iconButton: {
-    border: "none",
-    background: "none",
-    cursor: "pointer",
-    fontSize: "10px",
-    color: "#555",
-    padding: "2px 4px",
-    lineHeight: 1.2,
+  bandIconButton: {
+    alignSelf: "center",
+    flexShrink: 0,
   },
   sidebarCard: {
-    border: "1px solid #c0c0c0",
-    borderRadius: "3px",
-    background: "#fff",
+    border: `1px solid ${LT.controlBorder}`,
+    borderRadius: LT.radiusCluster,
+    background: LT.surface,
+    color: LT.text,
     padding: "6px",
   },
-  // Embedded (inside ControlCard's chrome): no border/fixed card frame —
+  // Embedded (inside ControlCard's chip-card): no border/fixed card frame —
   // fill the host card's content row.
   embeddedBand: {
     display: "flex",
@@ -1291,7 +1321,7 @@ const styles: Record<string, React.CSSProperties> = {
     minWidth: 0,
     fontSize: "11px",
     fontWeight: 600,
-    color: "#333",
+    color: LT.text,
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis",
@@ -1301,17 +1331,17 @@ const styles: Record<string, React.CSSProperties> = {
     // layout over the 56px band.
     minHeight: "120px",
     display: "flex",
-    borderRadius: "2px",
+    borderRadius: LT.radiusControl,
     overflow: "hidden",
-    border: "1px solid #e4e4e4",
-    background: "#fff",
+    border: `1px solid ${LT.controlDivider}`,
+    background: LT.surface,
   },
   iframe: {
     border: "none",
     width: "100%",
     height: "100%",
     minHeight: "48px",
-    background: "#fff",
+    background: LT.surface,
     // PAINT-ONLY BY DEFAULT. This used to read `pointerEvents: "auto"`, with a
     // comment explaining that pane cards are interactive hosts "unlike the
     // on-grid overlay" — which made `ui.html` alone worth clicks, focus and
@@ -1342,7 +1372,7 @@ const styles: Record<string, React.CSSProperties> = {
   placeholderName: {
     fontSize: "11px",
     fontWeight: 600,
-    color: "#333",
+    color: LT.text,
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis",
@@ -1350,41 +1380,30 @@ const styles: Record<string, React.CSSProperties> = {
   },
   placeholderHint: {
     fontSize: "10px",
-    color: "#888",
+    color: LT.textSecondary,
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis",
     maxWidth: "100%",
   },
-  popoverOverlay: {
-    position: "fixed",
-    inset: 0,
-    zIndex: 9998,
-    background: "transparent",
-  },
-  popover: {
-    position: "fixed",
-    zIndex: 9999,
-    background: "#fff",
-    border: "1px solid #c0c0c0",
-    borderRadius: "4px",
-    boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
-    padding: "8px",
-    maxHeight: "320px",
+  // The card Popover owns chrome and position; this only bounds the list.
+  popoverBody: {
+    maxHeight: "304px",
     overflowY: "auto",
+    color: LT.text,
   },
   popoverTitle: {
-    fontSize: "11px",
+    fontSize: "12px",
     fontWeight: 600,
-    color: "#333",
+    color: LT.text,
     marginBottom: "6px",
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis",
   },
   popoverEmpty: {
-    fontSize: "10px",
-    color: "#888",
+    fontSize: "11px",
+    color: LT.textSecondary,
   },
   propRow: {
     display: "flex",
@@ -1396,23 +1415,28 @@ const styles: Record<string, React.CSSProperties> = {
     flex: 1,
     minWidth: 0,
     fontSize: "11px",
-    color: "#444",
+    color: LT.textSecondary,
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis",
   },
   propInput: {
     width: "110px",
+    height: "24px",
+    boxSizing: "border-box",
     fontSize: "11px",
-    padding: "2px 4px",
-    border: "1px solid #c0c0c0",
-    borderRadius: "2px",
+    padding: "2px 6px",
+    border: `1px solid ${LT.controlBorder}`,
+    borderRadius: LT.radiusControl,
+    background: LT.inputBg,
+    color: LT.text,
   },
   propColorInput: {
     width: "40px",
-    height: "20px",
+    height: "22px",
     padding: 0,
-    border: "1px solid #c0c0c0",
-    borderRadius: "2px",
+    border: `1px solid ${LT.controlBorder}`,
+    borderRadius: "4px",
+    background: LT.inputBg,
   },
 };

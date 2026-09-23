@@ -1,10 +1,31 @@
 //! FILENAME: app/extensions/Settings/components/AppearancePage.tsx
 // PURPOSE: Appearance (App Skin) picker for the Settings panel — gallery of skins
-//          with live-preview swatches, an advisory "managed by org" banner, and
-//          accessibility toggles. Distinct from the Office-style Document Theme.
+//          with live-preview swatches, an advisory "managed by org" banner, the
+//          user's own ribbon/accent preferences, and accessibility toggles.
+//          Distinct from the Office-style Document Theme.
 // CONTEXT: Extension UI — imports ONLY from @api (facade rule).
+//
+//          Calcula Clusters: every control here is an @api/layout primitive
+//          (Checkbox, Dropdown, SegmentedChoice, ColorSwatch, Chip, Button), so
+//          the page follows the skin it is choosing. Chrome paints only with
+//          LT tokens; this file is under the chrome hex ban.
+//
+//          SKIN CARDS SHOW THE SKIN. Each card's preview is drawn from that
+//          skin's own merged tokens (getSkinTokens), not the active one's: a
+//          10px activity rail, the ribbon frame with its tab indicator, the band
+//          with two cluster cards (radius, tint, hairline and the state accent
+//          all from the skin), and a sliver of grid from its GridTheme. Those
+//          colours are the skin's DATA, so the preview carries data-colour-data.
+//          A token whose value points at another (`var(--state-accent)`,
+//          `color-mix(..., var(--state-accent) 14%, ...)`) is resolved against
+//          the SAME skin's map — left as-is it would resolve against whatever
+//          skin is active and every card would wear the current accent.
+//
+//          E2E CONTRACT: skin cards stay `<button title={skin.name}>`
+//          (appearance-skins.spec clicks `button[title="Dark"]`).
 
 import React, { useEffect, useState } from "react";
+import { css } from "@emotion/css";
 import {
   listAvailableSkins,
   getActiveSkinId,
@@ -12,15 +33,39 @@ import {
   subscribeToAppearance,
   getSkinTokens,
   getSkinGridTheme,
+  getRibbonLabelMode,
+  setRibbonLabelMode,
+  getUserTokenOverrides,
+  setUserTokenOverrides,
+  type AccessibilityOverride,
+  type RibbonLabelMode,
+  type Skin,
+} from "@api/appearance";
+import {
   getManagedAppearanceInfo,
   refreshManagedAppearance,
   getUserAccessibility,
   setUserAccessibility,
-  type Skin,
-  type AccessibilityOverride,
   type EffectiveAppearancePolicy,
   type SkinTrust,
-} from "@api";
+} from "@api/appearancePolicy";
+import {
+  Button,
+  Checkbox,
+  Chip,
+  ColorSwatch,
+  Dropdown,
+  Field,
+  FONT_FAMILY,
+  FONT_MONO,
+  HEADER_FONT_SIZE,
+  LT,
+  SegmentedChoice,
+  normalizeHex,
+  type ChipTone,
+  type DropdownOption,
+} from "@api/layout";
+import { RibbonIcon } from "@api/ribbonIcons";
 
 /**
  * How each org-skin trust state is shown. EVERY member of `SkinTrust` has a row
@@ -29,22 +74,24 @@ import {
  *
  * The rule this enforces: a state that is not "the key I expected" must never
  * read as reassuring. `notPinned` is a valid signature by an unrecognised
- * signer — authentic, not trusted — and it says so.
+ * signer — authentic, not trusted — and it says so. The tone is the Chip's
+ * semantic colour (ok / warn / danger), so it follows the skin and high
+ * contrast instead of being a fixed green or red.
  */
-const SKIN_TRUST_PRESENTATION: Record<SkinTrust, { label: string; color: string; title: string }> = {
+const SKIN_TRUST_PRESENTATION: Record<SkinTrust, { label: string; tone: ChipTone; title: string }> = {
   verified: {
     label: "verified",
-    color: "#137333",
+    tone: "ok",
     title: "Signed by the publisher key your administrator pinned in policy.json.",
   },
   firstUse: {
     label: "trusted just now",
-    color: "#a05a00",
+    tone: "warn",
     title: "This publisher key was pinned by this operation (trust-on-first-use).",
   },
   firstUseKnownPublisher: {
     label: "trusted just now — publisher already known",
-    color: "#a05a00",
+    tone: "warn",
     title:
       "This registry was not trusted for this skin package before, but the same publisher key " +
       "is already trusted for it from another registry — a move, a mirror, or the same location " +
@@ -52,14 +99,14 @@ const SKIN_TRUST_PRESENTATION: Record<SkinTrust, { label: string; color: string;
   },
   firstUseAcceptedNameConflict: {
     label: "trusted DESPITE a name conflict",
-    color: "#c5221f",
+    tone: "danger",
     title:
       "Another registry holds this skin package name under a DIFFERENT publisher key, and this " +
       "key was recorded anyway. Two registries claiming one name is what a hijack looks like.",
   },
   notPinned: {
     label: "NOT trusted — unrecognised signer",
-    color: "#c5221f",
+    tone: "danger",
     title:
       "The skin pack's signature is valid, but this computer has never agreed to trust that " +
       "publisher for this registry. A valid signature only proves the file was not altered after " +
@@ -68,66 +115,497 @@ const SKIN_TRUST_PRESENTATION: Record<SkinTrust, { label: string; color: string;
   },
   notPinnedNameConflict: {
     label: "NOT trusted — NAME CONFLICT with another registry",
-    color: "#c5221f",
+    tone: "danger",
     title:
       "Another registry is already trusted for this skin package name under a DIFFERENT " +
       "publisher key, and this one is not trusted here. The skin is not applied.",
   },
   unsigned: {
     label: "unsigned",
-    color: "#a05a00",
+    tone: "warn",
     title: "No publisher key was expected, so the pack was applied as advisory unsigned data.",
   },
   unknown: {
     label: "rejected — signature missing or invalid",
-    color: "#c5221f",
+    tone: "danger",
     title: "A signature was required but was missing or did not verify. The skin was not applied.",
   },
 };
 
-/** A small live-preview of a skin built from its resolved (non-applied) values. */
-function SkinSwatch({ skin }: { skin: Skin }): React.ReactElement {
-  const t = getSkinTokens(skin);
+/** A trust state this build does not know reads as the worst case. */
+function trustPresentation(trust: string): { label: string; tone: ChipTone; title: string } {
+  return (
+    (SKIN_TRUST_PRESENTATION as Record<string, { label: string; tone: ChipTone; title: string }>)[
+      trust
+    ] ?? {
+      label: `unrecognised (${trust})`,
+      tone: "danger",
+      title: `Unrecognised trust state '${trust}'.`,
+    }
+  );
+}
+
+// ============================================================================
+// Token helpers
+// ============================================================================
+
+const VAR_REFERENCE = /var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,\s*([^()]*))?\)/;
+
+/**
+ * A token's value with every `var(--x)` inside it replaced by the SAME map's
+ * `--x`, recursively (bounded, so a cyclic skin cannot hang the page). An
+ * unknown reference falls back to its own fallback, else `transparent`.
+ */
+function resolveSkinToken(tokens: Record<string, string>, name: string): string {
+  let value = tokens[name] ?? "transparent";
+  for (let i = 0; i < 8; i++) {
+    const m = VAR_REFERENCE.exec(value);
+    if (!m) break;
+    const replacement = tokens[m[1]] ?? m[2]?.trim() ?? "transparent";
+    value = value.slice(0, m.index) + replacement + value.slice(m.index + m[0].length);
+  }
+  return value;
+}
+
+/** WCAG 2 contrast ratio of a hex colour against white, or null for non-hex. */
+function contrastOnWhite(color: string | null | undefined): number | null {
+  const hex = normalizeHex(color);
+  if (hex === null) return null;
+  const linear = [1, 3, 5].map((i) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  const luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+  return 1.05 / (luminance + 0.05);
+}
+
+/** Below this an accent reads as a thin mark on white controls (WCAG 1.4.11). */
+const MIN_ACCENT_CONTRAST = 3;
+
+/** The tokens an accent pick writes: the pressed tint and the state colour. */
+const ACCENT_TOKENS = ["--accent-primary", "--state-accent"] as const;
+
+// ============================================================================
+// Styles
+// ============================================================================
+
+const s = {
+  content: css`
+    flex: 1;
+    overflow: auto;
+    padding: 14px 16px;
+    color: ${LT.text};
+    font-family: ${FONT_FAMILY};
+  `,
+  section: css`
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 22px;
+  `,
+  /** The one panel header recipe: 12px/600, sentence case. */
+  sectionTitle: css`
+    margin: 0;
+    font-family: ${FONT_FAMILY};
+    font-size: ${HEADER_FONT_SIZE}px;
+    font-weight: 600;
+    line-height: 16px;
+    color: ${LT.text};
+  `,
+  hint: css`
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.5;
+    color: ${LT.textSecondary};
+  `,
+
+  // ---- managed banner --------------------------------------------------------
+  banner: css`
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    margin-bottom: 20px;
+    padding: 10px 12px;
+    border-radius: ${LT.radiusCluster};
+    background: ${LT.clusterBg};
+    box-shadow: inset 0 0 0 1px ${LT.clusterBorder};
+  `,
+  bannerTitle: css`
+    font-size: ${HEADER_FONT_SIZE}px;
+    font-weight: 600;
+    color: ${LT.text};
+  `,
+  bannerDetail: css`
+    font-family: ${FONT_MONO};
+    font-size: 11px;
+    line-height: 1.45;
+    color: ${LT.textSecondary};
+    overflow-wrap: anywhere;
+  `,
+  bannerTrust: css`
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: ${LT.textSecondary};
+  `,
+  bannerError: css`
+    align-self: stretch;
+    padding: 6px 8px;
+    border-radius: ${LT.radiusControl};
+    background: ${LT.dangerBg};
+    color: ${LT.dangerFg};
+    font-size: 11px;
+    line-height: 1.45;
+  `,
+
+  // ---- skin gallery ----------------------------------------------------------
+  gallery: css`
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
+    gap: 10px;
+  `,
+  card: css`
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    box-sizing: border-box;
+    min-width: 0;
+    padding: 7px;
+    border: none;
+    border-radius: ${LT.radiusCluster};
+    background: ${LT.surface};
+    box-shadow: inset 0 0 0 1px ${LT.controlBorder};
+    color: ${LT.text};
+    cursor: pointer;
+    font-family: ${FONT_FAMILY};
+    text-align: left;
+    transition: box-shadow ${LT.motionHover};
+
+    &:hover {
+      box-shadow: inset 0 0 0 1px ${LT.clusterBorderHover}, ${LT.shadowClusterHover};
+    }
+
+    &[aria-pressed="true"],
+    &[aria-pressed="true"]:hover {
+      box-shadow: inset 0 0 0 2px ${LT.stateAccent};
+    }
+
+    &:focus-visible {
+      outline: none;
+      box-shadow: ${LT.focusRing};
+    }
+  `,
+  cardLabelRow: css`
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    min-width: 0;
+  `,
+  cardName: css`
+    min-width: 0;
+    overflow: hidden;
+    font-size: 12px;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  `,
+  cardMeta: css`
+    display: inline-flex;
+    align-items: center;
+    flex: none;
+    font-size: 11px;
+    color: ${LT.textSecondary};
+  `,
+  cardCheck: css`
+    display: inline-flex;
+    flex: none;
+    color: ${LT.stateAccent};
+  `,
+
+  // ---- preview (every colour inside is the skin's DATA) ----------------------
+  preview: css`
+    display: flex;
+    height: 60px;
+    overflow: hidden;
+    border-radius: 6px;
+  `,
+  previewMain: css`
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+  `,
+
+  // ---- customise -------------------------------------------------------------
+  accentRow: css`
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  `,
+  accentValue: css`
+    font-family: ${FONT_MONO};
+    font-size: 11px;
+    color: ${LT.textSecondary};
+  `,
+};
+
+// ============================================================================
+// Skin preview
+// ============================================================================
+
+/** A radius token scaled into the preview (a 12px cluster reads as ~5px). */
+function scaledRadius(value: string, scale: number, max: number): number {
+  const px = parseFloat(value);
+  return Number.isFinite(px) ? Math.max(0, Math.min(px * scale, max)) : 2;
+}
+
+/** A small live-preview of a skin built from its resolved (non-applied) values:
+ *  the rail, the ribbon frame and band with two cluster cards, and the grid. */
+function SkinPreview({ skin }: { skin: Skin }): React.ReactElement {
+  const tokens = getSkinTokens(skin);
   const grid = getSkinGridTheme(skin);
-  const v = (name: string, fallback: string) => t[name] ?? fallback;
+  const t = (name: string) => resolveSkinToken(tokens, name);
+
+  const clusterRadius = scaledRadius(t("--radius-cluster"), 0.4, 6);
+  const controlRadius = scaledRadius(t("--radius-control"), 0.35, 4);
+  const cluster: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 3,
+    minWidth: 0,
+    padding: "0 4px",
+    borderRadius: clusterRadius,
+    background: t("--ribbon-cluster-bg"),
+    boxShadow: `inset 0 0 0 1px ${t("--ribbon-cluster-border")}`,
+  };
+  const textLine: React.CSSProperties = {
+    flex: 1,
+    height: 3,
+    borderRadius: 2,
+    background: t("--text-secondary"),
+    opacity: 0.55,
+  };
+
   return (
     <div
-      style={{
-        width: "100%",
-        height: 64,
-        borderRadius: 4,
-        overflow: "hidden",
-        border: `1px solid ${v("--border-default", "#d1d5db")}`,
-        background: v("--grid-bg", "#ffffff"),
-        position: "relative",
-      }}
+      className={s.preview}
+      data-colour-data=""
+      data-testid={`appearance-skin-preview-${skin.id}`}
+      aria-hidden
+      style={{ boxShadow: `inset 0 0 0 1px ${t("--border-default")}`, background: grid.cellBackground }}
     >
-      {/* menu/title strip */}
-      <div style={{ height: 12, background: v("--menu-bar-bg", "#3c3c3c") }} />
-      {/* header row */}
-      <div style={{ height: 12, background: v("--grid-header-bg", "#f8f9fa"), borderBottom: `1px solid ${grid.headerBorder}` }} />
-      {/* grid body with a selection rectangle + accent dot */}
-      <div style={{ position: "relative", height: 40, background: grid.cellBackground }}>
-        <div style={{ position: "absolute", top: 6, left: 8, width: 28, height: 16, border: `1.5px solid ${grid.selectionBorder}`, background: grid.selectionBackground }} />
-        <div style={{ position: "absolute", top: 8, right: 10, width: 18, height: 6, borderRadius: 3, background: v("--accent-primary", "#10b981") }} />
-        <div style={{ position: "absolute", bottom: 6, left: 8, fontSize: 8, color: grid.cellText, fontFamily: grid.cellFontFamily }}>Aa 123</div>
+      {/* Activity rail: 10px, active item + indicator, two idle items. */}
+      <div
+        data-preview-part="rail"
+        style={{ position: "relative", width: 10, flex: "none", background: t("--activity-bar-bg") }}
+      >
+        <span
+          style={{
+            position: "absolute",
+            left: 2,
+            top: 13,
+            width: 6,
+            height: 8,
+            borderRadius: 2,
+            background: t("--activity-bar-item-active-bg"),
+          }}
+        />
+        <span
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 14,
+            width: 2,
+            height: 6,
+            borderRadius: 1,
+            background: t("--activity-bar-indicator"),
+          }}
+        />
+        {[28, 38].map((top) => (
+          <span
+            key={top}
+            style={{
+              position: "absolute",
+              left: 3,
+              top,
+              width: 4,
+              height: 4,
+              borderRadius: 2,
+              background: t("--activity-bar-fg"),
+              opacity: 0.6,
+            }}
+          />
+        ))}
+      </div>
+
+      <div className={s.previewMain}>
+        {/* Ribbon frame: the tab strip with the active tab's indicator. */}
+        <div
+          data-preview-part="frame"
+          style={{
+            display: "flex",
+            alignItems: "flex-end",
+            gap: 4,
+            height: 10,
+            padding: "0 6px",
+            flex: "none",
+            background: t("--ribbon-frame-bg"),
+          }}
+        >
+          <span style={{ width: 14, height: 2, borderRadius: 1, background: t("--ribbon-tab-indicator") }} />
+          <span style={{ width: 10, height: 2, borderRadius: 1, background: t("--text-tertiary"), opacity: 0.4 }} />
+        </div>
+
+        {/* Band with two cluster cards. */}
+        <div
+          data-preview-part="band"
+          style={{
+            display: "flex",
+            gap: 3,
+            height: 24,
+            flex: "none",
+            boxSizing: "border-box",
+            padding: 3,
+            background: t("--ribbon-band-bg"),
+            borderBottom: `1px solid ${t("--border-default")}`,
+          }}
+        >
+          <div data-preview-part="cluster" style={{ ...cluster, flex: 3 }}>
+            <span
+              style={{
+                width: 10,
+                height: 10,
+                flex: "none",
+                borderRadius: controlRadius,
+                background: t("--state-accent"),
+              }}
+            />
+            <span style={textLine} />
+          </div>
+          <div data-preview-part="cluster" style={{ ...cluster, flex: 2 }}>
+            <span
+              style={{
+                width: 10,
+                height: 10,
+                flex: "none",
+                borderRadius: controlRadius,
+                background: t("--button-pressed-bg"),
+                boxShadow: `inset 0 0 0 1px ${t("--button-pressed-border")}`,
+              }}
+            />
+            <span style={textLine} />
+          </div>
+        </div>
+
+        {/* A sliver of grid: header row, a selection, some text. */}
+        <div style={{ position: "relative", flex: 1, background: grid.cellBackground }}>
+          <div
+            style={{
+              height: 5,
+              background: t("--grid-header-bg"),
+              borderBottom: `1px solid ${grid.headerBorder}`,
+            }}
+          />
+          <div
+            style={{
+              position: "absolute",
+              top: 8,
+              left: 6,
+              width: 24,
+              height: 8,
+              border: `1.5px solid ${grid.selectionBorder}`,
+              background: grid.selectionBackground,
+            }}
+          />
+          <div
+            style={{
+              position: "absolute",
+              top: 8,
+              right: 6,
+              fontSize: 8,
+              lineHeight: "10px",
+              color: grid.cellText,
+              fontFamily: grid.cellFontFamily,
+            }}
+          >
+            Aa 123
+          </div>
+        </div>
       </div>
     </div>
   );
 }
+
+function SkinCard({ skin, active }: { skin: Skin; active: boolean }): React.ReactElement {
+  return (
+    <button
+      type="button"
+      className={s.card}
+      title={skin.name}
+      aria-pressed={active}
+      data-testid={`appearance-skin-${skin.id}`}
+      onClick={() => setActiveSkin(skin.id)}
+    >
+      <SkinPreview skin={skin} />
+      <span className={s.cardLabelRow}>
+        <span className={s.cardName}>{skin.name}</span>
+        {active ? (
+          <span className={s.cardCheck} aria-hidden>
+            <RibbonIcon.Check size={16} />
+          </span>
+        ) : (
+          <span className={s.cardMeta}>{skin.base === "dark" ? "Dark" : "Light"}</span>
+        )}
+      </span>
+    </button>
+  );
+}
+
+// ============================================================================
+// Page
+// ============================================================================
+
+const LABEL_MODE_OPTIONS: ReadonlyArray<{ value: RibbonLabelMode; label: string; testId: string }> = [
+  { value: "show", label: "Show", testId: "appearance-ribbon-labels-show" },
+  { value: "hide", label: "Hide", testId: "appearance-ribbon-labels-hide" },
+];
+
+type ForcedBaseChoice = "auto" | "light" | "dark";
+
+const FORCED_BASE_OPTIONS: ReadonlyArray<DropdownOption<ForcedBaseChoice>> = [
+  { value: "auto", label: "Auto (use the skin's base)" },
+  { value: "light", label: "Always light" },
+  { value: "dark", label: "Always dark" },
+];
+
+const FONT_SCALE_OPTIONS: ReadonlyArray<DropdownOption<number>> = [
+  { value: 1, label: "Default" },
+  { value: 1.25, label: "Large (125%)" },
+  { value: 1.5, label: "Larger (150%)" },
+];
 
 export function AppearancePage(): React.ReactElement {
   const [skins, setSkins] = useState<Skin[]>(() => listAvailableSkins());
   const [activeId, setActiveId] = useState<string>(() => getActiveSkinId());
   const [managed, setManaged] = useState<EffectiveAppearancePolicy | null>(() => getManagedAppearanceInfo());
   const [a11y, setA11y] = useState<AccessibilityOverride>(() => getUserAccessibility());
+  const [labelMode, setLabelMode] = useState<RibbonLabelMode>(() => getRibbonLabelMode());
+  const [userTokens, setUserTokens] = useState<Record<string, string>>(() => getUserTokenOverrides());
 
-  // Keep the highlighted card + list in sync with any appearance change.
+  // Keep the highlighted card + list + preferences in sync with any
+  // appearance change (a skin switch, a label-mode flip from the View menu, an
+  // accent set elsewhere).
   useEffect(() => {
     const refresh = () => {
       setSkins(listAvailableSkins());
       setActiveId(getActiveSkinId());
       setManaged(getManagedAppearanceInfo());
+      setLabelMode(getRibbonLabelMode());
+      setUserTokens(getUserTokenOverrides());
     };
     const unsub = subscribeToAppearance(refresh);
     // The managed policy resolves asynchronously just after boot; re-check shortly.
@@ -158,202 +636,191 @@ export function AppearancePage(): React.ReactElement {
     }
   };
 
+  const changeLabelMode = (mode: RibbonLabelMode) => {
+    setLabelMode(mode);
+    setRibbonLabelMode(mode);
+  };
+
+  // ---- accent -------------------------------------------------------------
+  // The override is the user's; the skin's own accent is what shows without
+  // one. setUserTokenOverrides REPLACES the whole set, so an accent change
+  // keeps any other override the user has.
+  const activeSkin = skins.find((sk) => sk.id === activeId) ?? null;
+  const accentOverride = normalizeHex(userTokens["--state-accent"]);
+  const skinAccent = activeSkin
+    ? normalizeHex(resolveSkinToken(getSkinTokens(activeSkin), "--state-accent"))
+    : null;
+  const accentShown = accentOverride ?? skinAccent;
+  const accentContrast = accentOverride ? contrastOnWhite(accentOverride) : null;
+  const lowContrast = accentContrast !== null && accentContrast < MIN_ACCENT_CONTRAST;
+
+  const chooseAccent = (hex: string) => {
+    const next: Record<string, string> = { ...getUserTokenOverrides() };
+    for (const name of ACCENT_TOKENS) next[name] = hex;
+    setUserTokenOverrides(next);
+    setUserTokens(getUserTokenOverrides());
+  };
+
+  const resetAccent = () => {
+    const rest: Record<string, string> = { ...getUserTokenOverrides() };
+    for (const name of ACCENT_TOKENS) delete rest[name];
+    setUserTokenOverrides(Object.keys(rest).length > 0 ? rest : null);
+    setUserTokens(getUserTokenOverrides());
+  };
+
+  const trust = managed ? trustPresentation(managed.trust) : null;
+
   return (
-    <div style={styles.content}>
-      {managed?.managed && (
-        <div style={styles.managedBanner}>
-          <div style={styles.managedTitle}>
+    <div className={s.content} data-testid="appearance-page">
+      {managed?.managed && trust && (
+        <div className={s.banner} data-testid="appearance-managed">
+          <div className={s.bannerTitle}>
             Default appearance suggested by {managed.managedBy || "your organization"}
           </div>
-          <div style={styles.managedDetail}>
-            Source: {managed.registryUrl || "(local)"} · Signed: {managed.publisherFingerprint || "—"} · Trust:{" "}
-            <span
-              style={{ color: SKIN_TRUST_PRESENTATION[managed.trust]?.color ?? "#c5221f", fontWeight: 600 }}
-              title={SKIN_TRUST_PRESENTATION[managed.trust]?.title ?? `Unrecognised trust state '${managed.trust}'.`}
-            >
-              {SKIN_TRUST_PRESENTATION[managed.trust]?.label ?? `unrecognised (${managed.trust})`}
-            </span>
+          <div className={s.bannerDetail}>
+            Source: {managed.registryUrl || "(local)"} · Signed: {managed.publisherFingerprint || "—"}
             {managed.version ? ` · v${managed.version}` : ""}
           </div>
-          {managed.policyError && <div style={styles.managedError}>{managed.policyError}</div>}
-          <div style={styles.managedNote}>You can change the appearance freely below — this is only the starting default.</div>
+          <div className={s.bannerTrust}>
+            Trust
+            <Chip tone={trust.tone} title={trust.title} testId="appearance-managed-trust">
+              {trust.label}
+            </Chip>
+          </div>
+          {managed.policyError && (
+            <div className={s.bannerError} role="alert">
+              {managed.policyError}
+            </div>
+          )}
+          <p className={s.hint}>You can change the appearance freely below — this is only the starting default.</p>
           {managed.registryUrl && (
-            <button style={styles.checkButton} onClick={checkForUpdates} disabled={checking}>
+            <Button
+              variant="outlined"
+              size="sm"
+              icon={<RibbonIcon.Refresh size={16} />}
+              onClick={checkForUpdates}
+              disabled={checking}
+            >
               {checking ? "Checking…" : "Check for updates"}
-            </button>
+            </Button>
           )}
         </div>
       )}
 
-      <div style={styles.section}>
-        <div style={styles.sectionTitle}>Skin</div>
-        <div style={styles.gallery}>
-          {skins.map((skin) => {
-            const isActive = skin.id === activeId;
-            return (
-              <button
-                key={skin.id}
-                style={isActive ? { ...styles.card, ...styles.cardActive } : styles.card}
-                onClick={() => setActiveSkin(skin.id)}
-                title={skin.name}
-              >
-                <SkinSwatch skin={skin} />
-                <div style={styles.cardLabelRow}>
-                  <span style={styles.cardName}>{skin.name}</span>
-                  <span style={styles.baseBadge}>{skin.base}</span>
-                </div>
-              </button>
-            );
-          })}
+      <section className={s.section} aria-labelledby="appearance-skin-heading">
+        <h3 id="appearance-skin-heading" className={s.sectionTitle}>
+          Skin
+        </h3>
+        <div className={s.gallery}>
+          {skins.map((skin) => (
+            <SkinCard key={skin.id} skin={skin} active={skin.id === activeId} />
+          ))}
         </div>
-      </div>
+      </section>
 
-      <div style={styles.section}>
-        <div style={styles.sectionTitle}>Accessibility</div>
-        <div style={styles.settingHint}>These always apply on top of the chosen skin and are never overridden.</div>
+      <section className={s.section} aria-labelledby="appearance-customize-heading">
+        <h3 id="appearance-customize-heading" className={s.sectionTitle}>
+          Customize
+        </h3>
 
-        <label style={styles.checkRow}>
-          <input
-            type="checkbox"
+        <Field label="Ribbon group labels">
+          <SegmentedChoice<RibbonLabelMode>
+            ariaLabel="Ribbon group labels"
+            value={labelMode}
+            onChange={changeLabelMode}
+            options={LABEL_MODE_OPTIONS}
+            testId="appearance-ribbon-labels"
+          />
+        </Field>
+
+        <Field label="Accent colour">
+          <div className={s.accentRow}>
+            <ColorSwatch
+              color={accentShown}
+              onChange={chooseAccent}
+              label="Accent colour"
+              showTheme={false}
+              testId="appearance-accent"
+            />
+            <span className={s.accentValue} data-testid="appearance-accent-value">
+              {accentShown === null
+                ? "Skin default"
+                : `${accentShown.toUpperCase()}${accentOverride ? "" : " (skin)"}`}
+            </span>
+            <Button
+              variant="outlined"
+              size="sm"
+              onClick={resetAccent}
+              disabled={accentOverride === null}
+              data-testid="appearance-accent-reset"
+            >
+              Reset
+            </Button>
+          </div>
+        </Field>
+        {lowContrast && accentContrast !== null && (
+          <div>
+            <Chip
+              tone="warn"
+              icon={<RibbonIcon.Warn size={14} />}
+              title="Focus rings, ticks and selected states in this colour may be hard to see on white."
+              testId="appearance-accent-contrast"
+            >
+              Low contrast: {accentContrast.toFixed(1)}:1 on white
+            </Chip>
+          </div>
+        )}
+        <p className={s.hint}>
+          The accent marks selection, focus and checked controls. It is layered over the skin, so
+          switching skins keeps it until you reset it.
+        </p>
+      </section>
+
+      <section className={s.section} aria-labelledby="appearance-a11y-heading">
+        <h3 id="appearance-a11y-heading" className={s.sectionTitle}>
+          Accessibility
+        </h3>
+        <p className={s.hint}>These always apply on top of the chosen skin and are never overridden.</p>
+
+        <div>
+          <Checkbox
             checked={!!a11y.highContrast}
-            onChange={(e) => updateA11y({ highContrast: e.target.checked })}
-            style={styles.checkInput}
+            onChange={(checked) => updateA11y({ highContrast: checked })}
+            label="High contrast"
+            testId="appearance-high-contrast"
           />
-          <span>High contrast</span>
-        </label>
-
-        <label style={styles.checkRow}>
-          <input
-            type="checkbox"
+        </div>
+        <div>
+          <Checkbox
             checked={!!a11y.reducedMotion}
-            onChange={(e) => updateA11y({ reducedMotion: e.target.checked })}
-            style={styles.checkInput}
+            onChange={(checked) => updateA11y({ reducedMotion: checked })}
+            label="Reduce motion"
+            testId="appearance-reduced-motion"
           />
-          <span>Reduce motion</span>
-        </label>
+        </div>
 
-        <div style={styles.setting}>
-          <div style={styles.settingLabel}>Force base</div>
-          <select
-            style={styles.select}
+        <Field label="Force base">
+          <Dropdown<ForcedBaseChoice>
+            ariaLabel="Force base"
             value={a11y.forcedBase ?? "auto"}
-            onChange={(e) => {
-              const val = e.target.value;
-              updateA11y({ forcedBase: val === "auto" ? null : (val as "light" | "dark") });
-            }}
-          >
-            <option value="auto">Auto (use the skin's base)</option>
-            <option value="light">Always light</option>
-            <option value="dark">Always dark</option>
-          </select>
-        </div>
+            options={FORCED_BASE_OPTIONS}
+            onChange={(val) => updateA11y({ forcedBase: val === "auto" ? null : val })}
+            testId="appearance-forced-base"
+            optionTestIdPrefix="appearance-forced-base-"
+          />
+        </Field>
 
-        <div style={styles.setting}>
-          <div style={styles.settingLabel}>Minimum text size</div>
-          <select
-            style={styles.select}
-            value={String(a11y.minFontScale ?? 1)}
-            onChange={(e) => updateA11y({ minFontScale: parseFloat(e.target.value) })}
-          >
-            <option value="1">Default</option>
-            <option value="1.25">Large (125%)</option>
-            <option value="1.5">Larger (150%)</option>
-          </select>
-        </div>
-      </div>
+        <Field label="Minimum text size">
+          <Dropdown<number>
+            ariaLabel="Minimum text size"
+            value={a11y.minFontScale ?? 1}
+            options={FONT_SCALE_OPTIONS}
+            onChange={(val) => updateA11y({ minFontScale: val })}
+            testId="appearance-min-font-scale"
+            optionTestIdPrefix="appearance-min-font-scale-"
+          />
+        </Field>
+      </section>
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  content: {
-    flex: 1,
-    overflow: "auto",
-    padding: "14px 16px",
-    color: "var(--text-primary)",
-  },
-  managedBanner: {
-    marginBottom: 20,
-    padding: "10px 12px",
-    borderRadius: 4,
-    border: "1px solid var(--border-default)",
-    background: "var(--panel-bg)",
-  },
-  managedTitle: { fontSize: 12, fontWeight: 600, color: "var(--text-primary)" },
-  managedDetail: { fontSize: 10.5, color: "var(--text-secondary)", marginTop: 4, fontFamily: "'Cascadia Code', 'Consolas', monospace" },
-  managedNote: { fontSize: 11, color: "var(--text-tertiary)", marginTop: 6 },
-  managedError: {
-    fontSize: 11,
-    color: "#c5221f",
-    marginTop: 6,
-    lineHeight: 1.45,
-    padding: "6px 8px",
-    border: "1px solid #f3c4c2",
-    borderRadius: 4,
-    background: "#fdeceb",
-  },
-  checkButton: {
-    marginTop: 8,
-    padding: "4px 10px",
-    fontSize: 11,
-    borderRadius: 4,
-    border: "1px solid var(--border-default)",
-    background: "var(--bg-surface)",
-    color: "var(--text-primary)",
-    cursor: "pointer",
-  },
-  section: { marginBottom: 24 },
-  sectionTitle: {
-    fontSize: 11,
-    fontWeight: 600,
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.04em",
-    color: "var(--text-secondary)",
-    marginBottom: 14,
-    paddingBottom: 6,
-    borderBottom: "1px solid var(--border-default)",
-  },
-  gallery: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))",
-    gap: 10,
-  },
-  card: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 6,
-    padding: 6,
-    borderRadius: 6,
-    border: "2px solid transparent",
-    background: "var(--bg-surface)",
-    cursor: "pointer",
-    textAlign: "left" as const,
-  },
-  cardActive: { borderColor: "var(--accent-primary)" },
-  cardLabelRow: { display: "flex", alignItems: "center", justifyContent: "space-between" },
-  cardName: { fontSize: 12, fontWeight: 500, color: "var(--text-primary)" },
-  baseBadge: {
-    fontSize: 9,
-    textTransform: "uppercase" as const,
-    color: "var(--text-tertiary)",
-    border: "1px solid var(--border-default)",
-    borderRadius: 3,
-    padding: "1px 4px",
-  },
-  setting: { marginTop: 12 },
-  settingLabel: { fontSize: 12, fontWeight: 500, color: "var(--text-primary)", marginBottom: 6 },
-  settingHint: { fontSize: 11, color: "var(--text-tertiary)", marginBottom: 12, lineHeight: "1.5" },
-  checkRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text-primary)", cursor: "pointer", marginBottom: 8 },
-  checkInput: { margin: 0, cursor: "pointer", accentColor: "var(--accent-primary)" },
-  select: {
-    width: "100%",
-    padding: "6px 8px",
-    fontSize: 12,
-    borderRadius: 4,
-    border: "1px solid var(--border-default)",
-    background: "var(--bg-surface)",
-    color: "var(--text-primary)",
-    cursor: "pointer",
-    outline: "none",
-  },
-};

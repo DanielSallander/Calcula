@@ -219,6 +219,17 @@ async function clickEl(el: HTMLElement): Promise<void> {
   });
 }
 
+/** Pick a series in the Design panel's series Dropdown: open the combobox,
+ *  then click the option (the listbox is portalled to document.body). */
+async function chooseSeries(name: string): Promise<void> {
+  await clickEl(container.querySelector('[role="combobox"]') as HTMLElement);
+  const option = Array.from(document.querySelectorAll('[role="option"]')).find(
+    (o) => o.textContent === name,
+  );
+  if (option === undefined) throw new Error(`no series option "${name}"`);
+  await clickEl(option as HTMLElement);
+}
+
 async function setColour(el: HTMLInputElement, hex: string): Promise<void> {
   await act(async () => {
     const setter = Object.getOwnPropertyDescriptor(
@@ -350,11 +361,7 @@ describe("OB-1(a) the Format pane and the Design panel agree", () => {
 
     await unmount();
     await render(React.createElement(SeriesColorsSection, {} as never));
-    const select = container.querySelector("select") as HTMLSelectElement;
-    await act(async () => {
-      select.value = "1";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    await chooseSeries("Cost");
     expect((container.querySelector('input[type="color"]') as HTMLInputElement).value).toBe(
       PICKED,
     );
@@ -542,11 +549,7 @@ describe("OB-1 the Design panel Auto button", () => {
     await seed(fixtureSpec({ seriesColors: { Revenue: "#111111", Cost: PICKED } }));
     await render(React.createElement(SeriesColorsSection, {} as never));
 
-    const select = container.querySelector("select") as HTMLSelectElement;
-    await act(async () => {
-      select.value = "1";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    await chooseSeries("Cost");
 
     const auto = Array.from(container.querySelectorAll("button")).find(
       (b) => b.textContent === "Auto",
@@ -563,11 +566,7 @@ describe("OB-1 the Design panel Auto button", () => {
     await seed(fixtureSpec());
     await render(React.createElement(SeriesColorsSection, {} as never));
 
-    const select = container.querySelector("select") as HTMLSelectElement;
-    await act(async () => {
-      select.value = "1";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    await chooseSeries("Cost");
     await setColour(container.querySelector('input[type="color"]') as HTMLInputElement, PICKED);
 
     expect(readSeriesColor(liveSpec(), "Cost")).toBe(PICKED);

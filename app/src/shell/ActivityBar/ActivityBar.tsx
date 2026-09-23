@@ -1,6 +1,9 @@
 //! FILENAME: app/src/shell/ActivityBar/ActivityBar.tsx
 // PURPOSE: Thin vertical icon strip on the left edge (VS Code-style Activity Bar)
-// CONTEXT: Shell component that renders registered activity view icons
+// CONTEXT: Shell component that renders registered activity view icons.
+//          Chrome lives in ActivityBar.styles.ts on the --activity-bar-* tokens
+//          (Calcula Clusters: 48px cells, 40px chips, a 3px accent indicator);
+//          the count and the design-mode "JS" pill are the shared @api Badge.
 
 import React, { useCallback, useEffect, useState } from "react";
 import { useActivityBarStore } from "./useActivityBarStore";
@@ -12,8 +15,17 @@ import { PanelContextMenu } from "../Ribbon/PanelContextMenu";
 import { emitAppEvent } from "../../api/events";
 import { hasObjectScript, onObjectScriptPresenceChange } from "../../api/objectScriptBadge";
 import { getDesignMode, onDesignModeChange } from "../../api/designMode";
-
-const ACTIVITY_BAR_WIDTH = 48;
+import { Badge } from "../../api/layout";
+import {
+  ACTIVITY_BAR_WIDTH,
+  railBadge,
+  railBottom,
+  railButton,
+  railChip,
+  railContainer,
+  railScriptBadge,
+  railTop,
+} from "./ActivityBar.styles";
 
 /**
  * Activity Bar - the thin vertical icon strip on the left.
@@ -103,37 +115,25 @@ export function ActivityBar(): React.ReactElement {
     }
   }, [contextMenu]);
 
+  const renderIcon = (view: ActivityViewDefinition) => (
+    <ActivityBarIcon
+      key={view.id}
+      view={view}
+      isActive={isOpen && activeViewId === view.id}
+      badge={panelRegistry.getBadge(view.id)}
+      hasScript={viewHasScript(view.id)}
+      onClick={handleIconClick}
+      onContextMenu={handleIconContextMenu}
+    />
+  );
+
   return (
-    <div style={styles.container}>
+    <div className={railContainer} data-activity-bar="">
       {/* Top section */}
-      <div style={styles.topSection}>
-        {views.top.map((view) => (
-          <ActivityBarIcon
-            key={view.id}
-            view={view}
-            isActive={isOpen && activeViewId === view.id}
-            badge={panelRegistry.getBadge(view.id)}
-            hasScript={viewHasScript(view.id)}
-            onClick={handleIconClick}
-            onContextMenu={handleIconContextMenu}
-          />
-        ))}
-      </div>
+      <div className={railTop}>{views.top.map(renderIcon)}</div>
 
       {/* Bottom section */}
-      <div style={styles.bottomSection}>
-        {views.bottom.map((view) => (
-          <ActivityBarIcon
-            key={view.id}
-            view={view}
-            isActive={isOpen && activeViewId === view.id}
-            badge={panelRegistry.getBadge(view.id)}
-            hasScript={viewHasScript(view.id)}
-            onClick={handleIconClick}
-            onContextMenu={handleIconContextMenu}
-          />
-        ))}
-      </div>
+      <div className={railBottom}>{views.bottom.map(renderIcon)}</div>
 
       {/* Panel context menu */}
       {contextMenu && (
@@ -153,7 +153,10 @@ export function ActivityBar(): React.ReactElement {
 }
 
 /**
- * Single icon button in the Activity Bar.
+ * Single icon button in the Activity Bar: a 48px hit target hosting a 40px
+ * chip. Hover, active and focus are pure CSS (see ActivityBar.styles.ts); the
+ * active item is announced with `aria-current="true"`, which is also what
+ * paints it, so the two cannot drift apart.
  */
 function ActivityBarIcon({
   view,
@@ -170,147 +173,43 @@ function ActivityBarIcon({
   onClick: (viewId: string) => void;
   onContextMenu?: (e: React.MouseEvent, viewId: string) => void;
 }): React.ReactElement {
-  const [isHovered, setIsHovered] = useState(false);
-
   return (
     <button
-      style={{
-        ...styles.iconButton,
-        ...(isActive ? styles.iconButtonActive : {}),
-        ...(isHovered && !isActive ? styles.iconButtonHover : {}),
-      }}
+      type="button"
+      className={railButton}
       onClick={() => onClick(view.id)}
       onContextMenu={(e) => onContextMenu?.(e, view.id)}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
       title={view.title}
       aria-label={view.title}
+      aria-current={isActive ? "true" : undefined}
+      data-activity-view={view.id}
     >
-      {/* Active indicator bar */}
-      {isActive && <div style={styles.activeIndicator} />}
-
-      {/* Icon */}
-      <div style={{
-        ...styles.iconWrapper,
-        opacity: isActive ? 1 : isHovered ? 0.8 : 0.6,
-      }}>
+      {/* Chip: carries the hover/active wash and the focus ring; the icon
+          inherits the button's colour through currentColor. */}
+      <span className={railChip} data-rail-chip="" aria-hidden>
         {view.icon}
-      </div>
+      </span>
 
-      {/* Badge */}
+      {/* Notification badge (panelRegistry.setBadge) */}
       {badge && (
-        <div style={styles.badge}>
+        <Badge className={railBadge} aria-hidden data-rail-badge="">
           {badge}
-        </div>
+        </Badge>
       )}
 
       {/* T4: script-presence badge (design mode) — this panel has a script. */}
       {hasScript && (
-        <div style={styles.scriptBadge} title="This panel has a script">
+        <Badge
+          className={railScriptBadge}
+          tone="accent"
+          title="This panel has a script"
+          data-rail-script-badge=""
+        >
           JS
-        </div>
+        </Badge>
       )}
     </button>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    display: "flex",
-    flexDirection: "column",
-    width: ACTIVITY_BAR_WIDTH,
-    minWidth: ACTIVITY_BAR_WIDTH,
-    height: "100%",
-    backgroundColor: "#333333",
-    flexShrink: 0,
-  },
-  topSection: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    paddingTop: 4,
-    flex: 1,
-  },
-  bottomSection: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    paddingBottom: 4,
-  },
-  iconButton: {
-    position: "relative" as const,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    width: ACTIVITY_BAR_WIDTH,
-    height: ACTIVITY_BAR_WIDTH,
-    padding: 0,
-    border: "none",
-    background: "transparent",
-    cursor: "pointer",
-    color: "#ffffff",
-  },
-  iconButtonActive: {
-    // Active state is indicated by the left bar, not background
-  },
-  iconButtonHover: {
-    // Hover opacity is handled inline
-  },
-  activeIndicator: {
-    position: "absolute" as const,
-    left: 0,
-    top: 8,
-    bottom: 8,
-    width: 2,
-    backgroundColor: "#ffffff",
-    borderRadius: "0 1px 1px 0",
-  },
-  iconWrapper: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    width: 24,
-    height: 24,
-    transition: "opacity 0.1s",
-  },
-  badge: {
-    position: "absolute" as const,
-    bottom: 6,
-    right: 6,
-    minWidth: 16,
-    height: 16,
-    padding: "0 4px",
-    borderRadius: 8,
-    backgroundColor: "var(--accent-color)",
-    color: "#fff",
-    fontSize: 9,
-    fontWeight: 600,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    lineHeight: 1,
-    fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
-  },
-  // Script-presence pill (top-right, distinct from the bottom-right notification badge).
-  scriptBadge: {
-    position: "absolute" as const,
-    top: 5,
-    right: 5,
-    minWidth: 13,
-    height: 13,
-    padding: "0 3px",
-    borderRadius: 3,
-    backgroundColor: "rgba(0, 120, 212, 0.9)",
-    color: "#fff",
-    fontSize: 8,
-    fontWeight: 700,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    lineHeight: 1,
-    letterSpacing: "0.03em",
-    pointerEvents: "none" as const,
-  },
-};
 
 export { ACTIVITY_BAR_WIDTH };

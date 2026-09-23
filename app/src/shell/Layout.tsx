@@ -420,12 +420,22 @@ function LayoutInner(): React.ReactElement {
       {/* Formula Bar (hidden when displayFormulaBar is false) */}
       {state.displayFormulaBar !== false && <FormulaBar />}
 
-      {/* Main Content Area - Activity Bar + Side Panel + Spreadsheet + Task Pane */}
+      {/* Main Content Area - Activity Bar + Side Panel + Spreadsheet + Task Pane
+
+          overflow: CLIP, not hidden. A closed task pane stays mounted, parked
+          at right: -width, so once a pane has been opened this row holds
+          320px more content than it shows. `overflow: hidden` still makes the
+          row a SCROLL CONTAINER: anything that scrolled an off-screen element
+          into view (navigating to a cell past the right edge, focus landing in
+          the parked pane) scrolled the whole row sideways, sliding the
+          activity rail out on the left and the empty parked pane into view on
+          the right, and nothing ever scrolled it back. `clip` paints the same
+          and cannot be scrolled at all. */}
       <div
         style={{
           flex: 1,
           display: "flex",
-          overflow: "hidden",
+          overflow: "clip",
           position: "relative",
         }}
       >

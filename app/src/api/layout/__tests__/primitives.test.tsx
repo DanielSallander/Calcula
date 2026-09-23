@@ -19,6 +19,7 @@ import {
   Tall,
   type SurfaceLayout,
 } from "../index";
+import { BAND_MAX_CONTENT_HEIGHT } from "../tokens";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -75,11 +76,11 @@ describe("Field", () => {
 });
 
 describe("Stack", () => {
-  it("column-wraps within the band height", () => {
+  it("column-wraps within the cluster's content box", () => {
     renderIn(bandLayout(), <Stack><div>a</div><div>b</div></Stack>);
     const rootDiv = container.firstElementChild as HTMLElement;
     expect(rootDiv.style.flexWrap).toBe("wrap");
-    expect(rootDiv.style.maxHeight).toBe("80px");
+    expect(rootDiv.style.maxHeight).toBe(`${BAND_MAX_CONTENT_HEIGHT}px`);
   });
 
   it("stacks without a height cap in the panel", () => {

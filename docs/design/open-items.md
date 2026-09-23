@@ -2513,6 +2513,57 @@ FIXED (2026-09-17, BUG-0119; the GVAR half on `query_auto_refresh` is BUG-0120; 
 "(blank)". D-IO-10 (a comment follows the FACT, not the label) is
 built as proposed and confirmed by the owner in passing ("proceed").
 
+### 2.ae The "Calcula Clusters" ribbon + sidebar redesign — shipped 2026-09-23; what it left open
+
+**Shipped** (record: `docs/design/ribbon-design-system.md`, `docs/design/ICONS.md`,
+`docs/design/third-party-addin-authoring.md` §8; approved mockup
+https://claude.ai/artifact/W2RwKUxBA79azM4Qznargi). One control grammar in `@api/layout`
+(`app/src/api/layout/index.ts`: Button/IconButton/CommandButton, Tooltip, Badge, card Popover,
+Segmented/SegmentedChoice/SegmentedTabs, Menu, Dropdown, Checkbox/Switch, Chip, Slider,
+NumberField, ColorSwatch/ColorPopover, Tile/TileGallery, PaletteStrip, StyleGallery); one duotone
+`RibbonIcon` set on a 24 grid, 170 keys, the 34 historical ones frozen (`app/src/api/ribbonIcons.tsx`);
+the fill rule as TS geometry (`app/src/api/layout/tokens.ts:12-63` — card 77, content 61, one tall
+row or 28 + 5 + 28); the cluster chrome (`app/src/shell/components/SectionChrome.tsx`); the Clusters
+tokens in both baselines plus High-contrast rows; Calcula Soft and Calcula Contrast as pure token
+deltas (`app/src/core/theme/builtInSkins.ts`); the hide-group-labels preference and user accent
+overrides (`app/src/core/theme/skinLoader.ts:41,48`); Chart Design rebuilt from 14 sections to 6
+clusters; every contextual tab on a `var(--tab-accent-*)` accent; the rail, side panel, task pane,
+mini toolbar and Add-ins tab on the primitives; a `PanelDefinition` example in
+`app/extensions/_template/`. The chrome hex ban (`app/eslint.boundaries.js` `chromeColorConfigs`)
+covers every migrated file.
+
+**Deferred, deliberately:**
+
+| item | verified at |
+|---|---|
+| **The Format pane and Settings INTERIORS.** Only the page switchers moved: Settings has the `SegmentedTabs` strip (`app/extensions/Settings/SettingsView.tsx:277`), but its pages' own controls and the whole of `ChartFormatPane.tsx` (2,691 lines; its own `role="tablist"` strip at `:2666`, 44 hex literals, not under the hex ban) still hand-roll their chrome. Each is a large pane with no layout defect — a restyle, not a fix — so each is its own pass. | `app/extensions/Charts/components/ChartFormatPane.tsx:2666`, `app/extensions/Settings/SettingsView.tsx:277` |
+| **No webfont.** Owner decision 2026-09-22: not planned. The chrome renders in the Segoe UI Variable stack, so on a machine without it the fallback is Segoe UI / system-ui and the mockup's metrics are approximate there. Recorded so nobody bundles one "to match the mockup". | `app/src/api/layout/tokens.ts:91` |
+| **No PROMOTE after a HEIGHT demotion.** Width demotion is live both ways (every band resize recomputes it from cached widths). A section that once measured taller than `DEMOTE_HEIGHT` stays a launcher for the session — its inline content is unmounted, so nothing re-measures it — until an appearance change or a reload clears the fit cache. `PROMOTE_HEIGHT` was deleted (zero consumers). A window-resize cache clear was suggested and REFUSED (2026-09-23): the band height is fixed and a section's natural height does not depend on the window width, so a resize never changes the answer. The real (rare) case is content that SHRINKS after demoting — a conditional row going away — and the fix for it is a re-probe when the section's props change, not a resize hook. | `app/src/shell/components/useSectionFit.ts:9-13,26`, `app/src/shell/bootstrap.ts` (`wireRibbonAppearance`) |
+
+**Smaller gaps found while documenting it:** there is no user-facing switch for tooltips, only
+`html[data-tooltips="off"]`, which the E2E fixture sets (`app/src/api/layout/primitives/Tooltip.tsx:87`);
+the menu bar's own 16-grid set (`app/src/api/menuIcons.tsx`) is untouched, as scoped. CLOSED the same
+day: `Dropdown` now takes `tooltip` / `shortcut` / `commandId` itself (it renders a fragment, so a
+wrapping `Tooltip` could only reach an extra span); ClearAll was redrawn as a stack of cells so it
+differs from ClearContents by shape, not only by the X's colour; Popover / Tooltip / ColorSwatch gained
+a `zIndex` layer, so the mini toolbar's global z-index override is gone.
+
+**Found and fixed while proving it live (2026-09-23), each with a failing-first test:** BUG-0130
+(the width backstop folded EVERY cluster on a cold mount), BUG-0131 (a chosen table style never
+reached the grid), BUG-0132 (Escape in a dialog's colour popover closed the dialog), BUG-0133 (React
+StrictMode killed the ribbon's width probes after mount, in every dev build). Also: the main content
+row became `overflow: clip` (`app/src/shell/Layout.tsx`) because a closed task pane stays parked at
+`right: -width`, which made the `overflow: hidden` row scrollable, and a later scroll-into-view shifted
+the whole row 320px left (rail gone, empty pane showing); enter animations fill `backwards` so no
+layer lingers with grayscale text.
+
+| item | verified at |
+|---|---|
+| **Two visual goldens were re-recorded with non-chrome content and must be restored from git:** `e2e/visual/__screenshots__/core-visual.spec.ts/grid-fmt-alignment.png` and `grid-core-editing-mode.png`. `--update-snapshots=changed` rewrote them with the sv-SE locale residue (`#VALUE!`, `#######`, `0.75` as text) because they already failed for that reason; git was unavailable in the session, so they could not be put back. `git checkout -- <both paths>` restores them. `sheets-default-tabs.png` is a full-window capture that HAD to change for the chrome, and its grid area carries the same residue from the preceding test. | `app/e2e/visual/core-visual.spec.ts` |
+| **The sv-SE regional-format failures are unchanged and not the redesign's:** number-formatting x3, regression-scenarios, stress-tests, core-visual "number format rendering", and tables "create a table with headers" (the `tables-before-create` golden photographs `1,5` where this machine now stores the typed `1.50` as text). See memory `project_e2e_formula_separator_locale`. | `app/e2e/tests/number-formatting.spec.ts`, `tables.spec.ts:98` |
+| **Not re-investigated:** journey `model-transform.spec.ts:585` ("Not connected to the database" from `bi_model_transform` after the file's own import test) and two `paste-special` grid goldens (a different B6 value left by an earlier spec changes the text overflow). Neither touches chrome. One more, a timing flake: `sheet-tab-state-undo.spec.ts:233` saw ONE canvas frame without ink during undo's sheet switch in the final 813-test run (17 ms), then passed 3/3 when repeated alone on the same build. | `app/e2e/journeys/model-transform.spec.ts:585`, `app/e2e/tests/paste-special.spec.ts:16,70`, `app/e2e/journeys/sheet-tab-state-undo.spec.ts:233` |
+| **CLOSED the same day: the placement residue.** `panel-placement.spec` restored the Animation panel with `setPlacement("sidebar")`, which leaves an explicit `{animation.timeline: "sidebar"}` that the journey residue guard reads as a reconfigured app (seen only when journeys follow the functional specs). `panelRegistry.resetPlacement` now drops the override (unit-tested), and both placement specs clean up through it; the guard passes after them. | `app/src/shell/registries/panelRegistry.ts` (`resetPlacement`) |
+
 ## 3. How to keep this file honest
 
 1. **Close items here, in place**, when they are fixed — do not rely on a later section of the

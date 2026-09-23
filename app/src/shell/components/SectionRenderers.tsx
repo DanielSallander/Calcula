@@ -16,14 +16,19 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { css } from "@emotion/css";
 import type { PanelSection, PanelSectionProps } from "../../api/uiTypes";
 import {
   SurfaceLayoutProvider,
   panelLayout,
   LAUNCHER_BAND_WIDTH,
   DropdownChevron,
+  LT,
+  FONT_FAMILY,
+  HEADER_FONT_SIZE,
 } from "../../api/layout";
 import { SectionCell, type SectionCellForm } from "./SectionCell";
+import { cellChromeWidth } from "./SectionChrome";
 import { computeWidthDemotions, type WidthDemotionInput } from "./useSectionFit";
 
 /**
@@ -35,11 +40,6 @@ import { computeWidthDemotions, type WidthDemotionInput } from "./useSectionFit"
 export interface ShellPanelSection extends PanelSection {
   legacyRibbonDom?: boolean;
 }
-
-/** Approximate SectionChrome horizontal padding + divider per cell. Only a
- *  pre-measurement fallback: the real rendered cell width (onCellWidth)
- *  replaces the approximation as soon as the cell probe reports. */
-const CELL_CHROME_WIDTH = 21;
 
 // ============================================================================
 // Module-level width knowledge (survives unregister/re-register churn)
@@ -54,13 +54,40 @@ const CELL_CHROME_WIDTH = 21;
 
 const inlineWidthCache = new Map<string, Record<string, number>>();
 const launcherWidthCache = new Map<string, Record<string, number>>();
+/** Sizer-reported natural widths (content only, no chrome), per panel. */
+const naturalWidthCache = new Map<string, Record<string, number>>();
 let lastKnownBandWidth = 0;
 
 /** Test/skin-change hook: forget all measured cell widths and the band width. */
 export function clearSectionWidthCaches(): void {
   inlineWidthCache.clear();
   launcherWidthCache.clear();
+  naturalWidthCache.clear();
   lastKnownBandWidth = 0;
+}
+
+/**
+ * Read-only copy of what the width collapse has MEASURED for one panel: each
+ * section's rendered inline and launcher cell widths (chrome included), its
+ * sizer's natural content width (chrome NOT included — add cellChromeWidth,
+ * as the renderer does) and the last band width. For live proofs only (e2e/tests/chart-design-ribbon.spec.ts):
+ * the harness cannot resize its window, so "all six Chart Design clusters fit
+ * at 1366" is proved by feeding these real widths to computeWidthDemotions at
+ * other band widths, the D6 way. A section measured only as a launcher has no
+ * inline entry.
+ */
+export function peekSectionWidths(panelId: string): {
+  inline: Record<string, number>;
+  launcher: Record<string, number>;
+  natural: Record<string, number>;
+  bandWidth: number;
+} {
+  return {
+    inline: { ...(inlineWidthCache.get(panelId) ?? {}) },
+    launcher: { ...(launcherWidthCache.get(panelId) ?? {}) },
+    natural: { ...(naturalWidthCache.get(panelId) ?? {}) },
+    bandWidth: lastKnownBandWidth,
+  };
 }
 
 // ============================================================================
@@ -119,13 +146,17 @@ export function SectionRibbonRenderer({
     return () => observer.disconnect();
   }, []);
 
-  const handleNaturalWidth = useCallback((sectionId: string, width: number) => {
-    setNaturalWidths((prev) =>
-      Math.abs((prev[sectionId] ?? 0) - width) < 1
-        ? prev
-        : { ...prev, [sectionId]: width },
-    );
-  }, []);
+  const handleNaturalWidth = useCallback(
+    (sectionId: string, width: number) => {
+      setNaturalWidths((prev) => {
+        if (Math.abs((prev[sectionId] ?? 0) - width) < 1) return prev;
+        const next = { ...prev, [sectionId]: width };
+        naturalWidthCache.set(panelId, next);
+        return next;
+      });
+    },
+    [panelId],
+  );
 
   const handleCellWidth = useCallback(
     (sectionId: string, form: SectionCellForm, width: number) => {
@@ -147,14 +178,16 @@ export function SectionRibbonRenderer({
       const measuredInline = inlineCellWidths[s.id];
       const natural = naturalWidths[s.id];
       // Inline demand: the real rendered cell width when measured (exact,
-      // chrome included); else sizer natural width + chrome approximation;
+      // chrome included); else sizer natural width + the cluster chrome
+      // (cellChromeWidth: card padding both sides + the gap unless last);
       // else an optimistic launcher-band width so a truly fresh mount doesn't
       // demote everything before any probe has reported.
+      const chrome = cellChromeWidth(i === 0, i === sections.length - 1);
       const width =
         measuredInline !== undefined || natural !== undefined
           ? Math.max(
               measuredInline ?? 0,
-              natural !== undefined ? natural + CELL_CHROME_WIDTH : 0,
+              natural !== undefined ? natural + chrome : 0,
             )
           : LAUNCHER_BAND_WIDTH;
       return {
@@ -176,26 +209,61 @@ export function SectionRibbonRenderer({
     forcedDemotions,
   ]);
 
-  // Forced demotions are relative to one band width and one section set; when
-  // either changes the model re-derives from scratch (and re-escalates within
-  // the same paint if the DOM still overflows).
-  const prevResetKeyRef = useRef<{ width: number; sections: PanelSection[] } | null>(null);
-  useLayoutEffect(() => {
-    const prev = prevResetKeyRef.current;
-    if (prev && (prev.width !== containerWidth || prev.sections !== sections)) {
-      setForcedDemotions((n) => (n === 0 ? n : 0));
-    }
-    prevResetKeyRef.current = { width: containerWidth, sections };
-  }, [containerWidth, sections]);
-
   // DOM-truth backstop, runs after every commit: if the strip's content is
   // still wider than its box after the modeled demotions (constant drift,
   // lost probe report, exotic fonts), demote one more candidate per pass —
   // synchronously before paint — until reality fits or nothing demotable
   // remains (then the strip's own overflow clip contains the residue).
+  //
+  // Forced demotions are evidence about ONE model: one band width, one section
+  // set, one set of measurements. When any of those changes while a forced
+  // count stands, the count is dropped and the check waits for the next
+  // commit, which is laid out from the new model. And nothing is forced until
+  // every section has reported SOME width: before that the model is still
+  // using the optimistic launcher-band width for each section, no section is
+  // even a candidate, and an overflow says nothing the widths will not say a
+  // frame later. Both halves were missing, and together they made a contextual
+  // tab's first appearance in a session fold EVERY cluster: the count ran up
+  // to the section total on the unmeasured strip and stayed there after the
+  // real widths arrived (sectionWidthProbe.test.tsx, "cold mount").
+  const prevModelRef = useRef<{
+    width: number;
+    sections: PanelSection[];
+    natural: Record<string, number>;
+    inline: Record<string, number>;
+    launcher: Record<string, number>;
+  } | null>(null);
   useLayoutEffect(() => {
+    const prev = prevModelRef.current;
+    prevModelRef.current = {
+      width: containerWidth,
+      sections,
+      natural: naturalWidths,
+      inline: inlineCellWidths,
+      launcher: launcherCellWidths,
+    };
+    const modelChanged =
+      prev !== null &&
+      (prev.width !== containerWidth ||
+        prev.sections !== sections ||
+        prev.natural !== naturalWidths ||
+        prev.inline !== inlineCellWidths ||
+        prev.launcher !== launcherCellWidths);
+    if (modelChanged && forcedDemotions > 0) {
+      setForcedDemotions(0);
+      return;
+    }
+
     const el = containerRef.current;
     if (!el || containerWidth <= 0) return;
+    const everyWidthKnown = sections.every(
+      (s) =>
+        s.ribbonPresentation === "launcher" ||
+        naturalWidths[s.id] !== undefined ||
+        inlineCellWidths[s.id] !== undefined ||
+        launcherCellWidths[s.id] !== undefined,
+    );
+    if (!everyWidthKnown) return;
     if (el.scrollWidth > el.clientWidth + 1) {
       setForcedDemotions((n) => (n >= sections.length ? n : n + 1));
     }
@@ -246,10 +314,90 @@ interface SectionSidebarRendererProps {
   data?: Record<string, unknown>;
 }
 
+/** Disclosure chevron in a sidebar section header. */
+const SIDEBAR_CHEVRON_SIZE = 11;
+/** Section icon in a sidebar section header: between the 20px control icon
+ *  and the 24px launcher icon, so the header reads as a heading, not a button. */
+const SIDEBAR_SECTION_ICON_SIZE = 22;
+
+/**
+ * The sidebar transposition of the ribbon clusters: no cards — a 36px header
+ * row (chevron, section icon, 12px/600 sentence-case label; the one header
+ * recipe the side panel title and the panel Group header share) over the
+ * section content. Tokens only.
+ */
+const sidebarStyles = {
+  header: css`
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    box-sizing: border-box;
+    width: calc(100% - 12px);
+    height: 36px;
+    margin: 2px 6px;
+    padding: 0 8px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    cursor: pointer;
+    font-family: ${FONT_FAMILY};
+    font-size: ${HEADER_FONT_SIZE}px;
+    font-weight: 600;
+    line-height: 1;
+    color: ${LT.text};
+    text-align: left;
+    transition: background-color ${LT.motionHover};
+
+    &:hover {
+      background: ${LT.hover};
+    }
+
+    &:focus-visible {
+      outline: none;
+      box-shadow: ${LT.focusRing};
+    }
+  `,
+  chevron: css`
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    color: ${LT.textSecondary};
+    transition: transform ${LT.motionHover};
+  `,
+  /** Fits whatever size the section icon was drawn at (sections declare it at
+   *  24 for their launcher) to the header's 22px. */
+  icon: css`
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: ${SIDEBAR_SECTION_ICON_SIZE}px;
+    height: ${SIDEBAR_SECTION_ICON_SIZE}px;
+
+    & > svg {
+      width: ${SIDEBAR_SECTION_ICON_SIZE}px;
+      height: ${SIDEBAR_SECTION_ICON_SIZE}px;
+    }
+  `,
+  label: css`
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  `,
+  content: css`
+    padding: 6px 14px 12px;
+    min-width: 0;
+    overflow-x: auto;
+  `,
+};
+
 /**
  * Renders panel sections vertically in the sidebar: a single section fills the
- * panel directly; multiple sections stack as collapsible groups. All content
- * gets vertical SurfaceLayout geometry with the live panel width.
+ * panel directly (no header chrome); multiple sections stack as collapsible
+ * groups. All content gets vertical SurfaceLayout geometry with the live panel
+ * width.
  */
 export function SectionSidebarRenderer({
   sections,
@@ -312,53 +460,53 @@ export function SectionSidebarRenderer({
           const isCollapsed = collapsed.has(section.id);
           const legacy = (section as ShellPanelSection).legacyRibbonDom === true;
           const Section = section.component as React.ComponentType<PanelSectionProps>;
+          const hasIcon =
+            section.icon !== undefined &&
+            section.icon !== null &&
+            section.icon !== false &&
+            section.icon !== "";
           return (
             <div
               key={section.id}
-              style={isSingleSection ? { height: "100%" } : { borderBottom: "1px solid var(--border-default)" }}
+              data-sidebar-section={section.id}
+              style={isSingleSection ? { height: "100%" } : undefined}
             >
               {/* Section header — hidden for single-section panels */}
               {!isSingleSection && (
                 <button
+                  type="button"
+                  className={sidebarStyles.header}
+                  aria-expanded={!isCollapsed}
                   onClick={() => toggleSection(section.id)}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "6px",
-                    width: "100%",
-                    padding: "8px 12px",
-                    border: "none",
-                    backgroundColor: "transparent",
-                    cursor: "pointer",
-                    fontSize: "11px",
-                    fontWeight: 600,
-                    color: "var(--text-secondary)",
-                    textTransform: "uppercase",
-                    letterSpacing: "0.5px",
-                    fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
-                  }}
                 >
                   <span
-                    style={{
-                      transition: "transform 0.15s",
-                      transform: isCollapsed ? "rotate(-90deg)" : "rotate(0deg)",
-                      display: "inline-flex",
-                    }}
+                    className={sidebarStyles.chevron}
+                    style={{ transform: isCollapsed ? "rotate(-90deg)" : "rotate(0deg)" }}
+                    aria-hidden
                   >
-                    <DropdownChevron size={8} />
+                    <DropdownChevron size={SIDEBAR_CHEVRON_SIZE} />
                   </span>
-                  {section.label}
+                  {hasIcon && (
+                    <span className={sidebarStyles.icon} aria-hidden>
+                      {section.icon}
+                    </span>
+                  )}
+                  <span className={sidebarStyles.label}>{section.label}</span>
                 </button>
               )}
               {/* Section content */}
               {(isSingleSection || !isCollapsed) && (
                 <div
-                  className={legacy ? "legacy-ribbon-transpose" : undefined}
-                  style={
+                  className={
                     isSingleSection
-                      ? { height: "100%", minWidth: 0 }
-                      : { padding: "4px 12px 8px", minWidth: 0, overflowX: "auto" }
+                      ? legacy
+                        ? "legacy-ribbon-transpose"
+                        : undefined
+                      : [sidebarStyles.content, legacy ? "legacy-ribbon-transpose" : ""]
+                          .filter(Boolean)
+                          .join(" ")
                   }
+                  style={isSingleSection ? { height: "100%", minWidth: 0 } : undefined}
                 >
                   <Section placement="sidebar" onClose={onClose} data={data} />
                 </div>

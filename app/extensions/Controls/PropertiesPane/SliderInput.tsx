@@ -1,51 +1,20 @@
 //! FILENAME: app/extensions/Controls/PropertiesPane/SliderInput.tsx
-// PURPOSE: Combined slider + number input component for bounded numeric properties.
+// PURPOSE: Combined slider + number box for bounded numeric properties.
 // CONTEXT: Used for opacity, rotation, font size, etc. in the Properties Pane.
+//          A thin adapter over the @api/layout Slider and NumberField (Calcula
+//          Clusters), kept under its old name and props because PropertyRow
+//          imports it. The primitives paint the track, fill, thumb and box with
+//          tokens; the range it replaced was OS-drawn and ignored the skin.
+//
+//          Behaviour is the old component's, on purpose:
+//          - dragging reports every step through BOTH onChange and onCommit,
+//            as the bare range did (React's onChange on a range IS the input
+//            event), so the object keeps previewing live while it is dragged;
+//          - the number box commits only on Enter or when it loses focus,
+//            clamped to [min, max]; text that is not a number reverts.
 
-import React, { useState, useCallback, useEffect } from "react";
-
-// ============================================================================
-// Styles (theme-aware via CSS variables)
-// ============================================================================
-
-const v = (token: string) => `var(${token})`;
-
-const containerStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-};
-
-const rangeStyle: React.CSSProperties = {
-  flex: 1,
-  height: 4,
-  appearance: "none",
-  WebkitAppearance: "none",
-  borderRadius: 2,
-  outline: "none",
-  cursor: "pointer",
-  accentColor: v("--accent-color"),
-};
-
-const numberInputStyle: React.CSSProperties = {
-  width: 52,
-  padding: "3px 6px",
-  border: `1px solid ${v("--border-default")}`,
-  borderRadius: 3,
-  fontSize: 12,
-  fontFamily: v("--font-family-sans"),
-  outline: "none",
-  textAlign: "right",
-  backgroundColor: v("--bg-surface"),
-  color: v("--text-primary"),
-  transition: "border-color 0.15s",
-  boxSizing: "border-box",
-};
-
-const numberInputFocusStyle: React.CSSProperties = {
-  borderColor: v("--accent-color"),
-  boxShadow: `0 0 0 1px ${v("--accent-color")}`,
-};
+import React, { useCallback } from "react";
+import { NumberField, Slider } from "@api/layout";
 
 // ============================================================================
 // Props
@@ -64,6 +33,20 @@ interface SliderInputProps {
 // Component
 // ============================================================================
 
+/** Room for "-360" or "0.25" at 12px. */
+const NUMBER_BOX_WIDTH = 58;
+
+const containerStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+};
+
+const sliderStyle: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+};
+
 export const SliderInput: React.FC<SliderInputProps> = ({
   value,
   min,
@@ -72,95 +55,60 @@ export const SliderInput: React.FC<SliderInputProps> = ({
   onChange,
   onCommit,
 }) => {
-  const [localNum, setLocalNum] = useState(String(value));
-  const [focused, setFocused] = useState(false);
-
-  // Sync when external value changes
-  useEffect(() => {
-    setLocalNum(String(value));
-  }, [value]);
-
   const clamp = useCallback(
     (v: number) => Math.min(max, Math.max(min, v)),
     [min, max],
   );
 
-  const fillPct = ((clamp(value) - min) / (max - min)) * 100;
-
-  const handleRangeInput = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const v = parseFloat(e.target.value);
-      if (!isNaN(v)) {
-        onChange(v);
-        setLocalNum(String(v));
-      }
+  const handleRange = useCallback(
+    (v: number) => {
+      if (Number.isNaN(v)) return;
+      onChange(v);
+      onCommit(clamp(v));
     },
-    [onChange],
+    [onChange, onCommit, clamp],
   );
 
-  const handleRangeCommit = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const v = parseFloat(e.target.value);
-      if (!isNaN(v)) {
-        onCommit(clamp(v));
-      }
+  /** Commit what the box holds (clamped); anything that is not a number is
+   *  dropped and the box shows the current value again on blur. */
+  const commitBox = useCallback(
+    (raw: string) => {
+      if (raw.trim() === "") return;
+      const v = Number(raw);
+      if (!Number.isFinite(v)) return;
+      onCommit(clamp(v));
     },
     [onCommit, clamp],
   );
 
-  const handleNumberChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      setLocalNum(e.target.value);
-    },
-    [],
-  );
-
-  const commitNumber = useCallback(() => {
-    const v = parseFloat(localNum);
-    if (!isNaN(v)) {
-      const clamped = clamp(v);
-      setLocalNum(String(clamped));
-      onCommit(clamped);
-    } else {
-      setLocalNum(String(value));
-    }
-  }, [localNum, value, clamp, onCommit]);
-
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === "Enter") {
-        commitNumber();
-      }
-    },
-    [commitNumber],
-  );
-
   return (
     <div style={containerStyle}>
-      <input
-        type="range"
-        style={{
-          ...rangeStyle,
-          "--fill-pct": `${fillPct}%`,
-        } as React.CSSProperties}
+      <Slider
+        value={clamp(value)}
         min={min}
         max={max}
         step={step}
-        value={clamp(value)}
-        onInput={handleRangeInput}
-        onChange={handleRangeCommit}
+        onChange={handleRange}
+        readout={false}
+        ariaLabel="Value"
+        style={sliderStyle}
       />
-      <input
-        type="text"
-        style={{
-          ...numberInputStyle,
-          ...(focused ? numberInputFocusStyle : {}),
+      <NumberField
+        value={value}
+        // The box keeps its own draft while focused; the value is committed on
+        // Enter or blur, never per keystroke.
+        onChange={() => undefined}
+        min={min}
+        max={max}
+        step={step}
+        width={NUMBER_BOX_WIDTH}
+        ariaLabel="Value"
+        onBlur={(e) => commitBox(e.currentTarget.value)}
+        onKeyDown={(e) => {
+          // Enter ends the edit the way leaving the box does, so the commit
+          // runs once, in onBlur.
+          if (e.key === "Enter") e.currentTarget.blur();
         }}
-        value={localNum}
-        onChange={handleNumberChange}
-        onBlur={() => { setFocused(false); commitNumber(); }}
-        onFocus={() => setFocused(true)}
-        onKeyDown={handleKeyDown}
       />
     </div>
   );

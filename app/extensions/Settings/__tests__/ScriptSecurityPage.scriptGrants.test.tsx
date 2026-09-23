@@ -118,10 +118,16 @@ describe("Script Security page — script capability grants", () => {
   it("lists the script, its capabilities and the exact origins it may reach", async () => {
     seedScriptGrants();
     await render();
-    expect(container.textContent).toContain("Script Capability Grants");
+    expect(container.querySelector("#script-security-script-grants-heading")?.textContent).toBe(
+      "Script capability grants",
+    );
     expect(container.textContent).toContain("Refresh Button");
-    expect(container.textContent).toContain("Network");
-    expect(container.textContent).toContain("Scheduled jobs");
+    // Each granted capability is its own revocable chip. Asserted on the chip,
+    // not the page text: "Scheduled jobs" is also a section heading.
+    expect(buttonWithTitle("Revoke Network for Refresh Button").textContent).toContain("Network");
+    expect(buttonWithTitle("Revoke Scheduled jobs for Refresh Button").textContent).toContain(
+      "Scheduled jobs",
+    );
     expect(container.textContent).toContain("https://api.example.com");
   });
 

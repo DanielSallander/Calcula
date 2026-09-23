@@ -1,19 +1,37 @@
 //! FILENAME: app/extensions/BuiltIn/FormatCellsDialog/components/ColorPicker.tsx
-// PURPOSE: Theme-aware color picker component for the Format Cells dialog.
-// CONTEXT: Shows theme colors (10x6 grid), standard colors row, and custom color input.
+// PURPOSE: The labelled colour picker of the Format Cells dialog (Font colour,
+//          Border colour, the Fill tab's solid / gradient / pattern colours).
+// CONTEXT: A thin adapter over the ONE @api colour picker: a ColorSwatch whose
+//          click opens ColorPopover — the document theme grid with its tint
+//          rows, the standard colours, "More colours..." with the OS picker and
+//          a hex field. It used to draw all of that itself (a styled-components
+//          10x6 grid, its own standard row, a position:absolute dropdown, its
+//          own document mousedown listener for click-outside and hardcoded
+//          shadow colours); ColorPopover was written to replace it without a
+//          behaviour change, so the props below are the old props, unchanged:
+//
+//          - a theme pick calls onThemeColorChange(slot, tint, hex) when given,
+//            else onChange(hex) with the resolved colour — exactly as before;
+//          - a theme swatch is marked selected from themeSlot/themeTint, a
+//            standard swatch from the hex when no slot is set;
+//          - the OS picker reports live; a typed hex is committed only when it
+//            is a whole colour (it used to hand every keystroke of "#4" to the
+//            dialog state).
+//
+//          ONE KEYBOARD RULE THE ADAPTER ADDS. The popover portals to <body>,
+//          but React bubbles its key events through the COMPONENT tree — into
+//          the dialog's onKeyDown, which maps Escape to Cancel and Enter to OK.
+//          The old dropdown never took focus, so that never came up; the popover
+//          does (it opens on the selected swatch). Unguarded, Escape to close
+//          the palette would discard the whole dialog and Enter on a swatch
+//          would press OK instead of picking it. So Escape and Enter that start
+//          INSIDE the popover stop here: Enter still reaches the swatch/hex
+//          field (they act on it themselves), and Escape closes the popover and
+//          returns focus to the swatch button. Keys on the button itself keep
+//          the dialog's meaning, as they always had.
 
-import React, { useState, useRef, useEffect, useCallback } from "react";
-import styled from "styled-components";
-import type { ThemeColorInfo } from "@api";
-import { getThemeColorPalette } from "@api/theme";
-
-const v = (name: string) => `var(${name})`;
-
-// Standard colors row (10 fixed colors, not theme-dependent)
-const STANDARD_COLORS = [
-  "#c00000", "#ff0000", "#ffc000", "#ffff00", "#92d050",
-  "#00b050", "#00b0f0", "#0070c0", "#002060", "#7030a0",
-];
+import React, { useCallback, useId, useRef } from "react";
+import { ColorSwatch, LT, GAP_SM, FONT_FAMILY } from "@api/layout";
 
 interface ColorPickerProps {
   value: string;
@@ -28,6 +46,25 @@ interface ColorPickerProps {
   label?: string;
 }
 
+/** "Color 1:" -> "Color 1"; the visible label keeps its colon, the accessible
+ *  name and tooltip do not. */
+function accessibleName(label: string | undefined): string {
+  const trimmed = (label ?? "").replace(/:\s*$/, "").trim();
+  return trimmed || "Colour";
+}
+
+const rowStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: GAP_SM,
+};
+
+const labelStyle: React.CSSProperties = {
+  fontFamily: FONT_FAMILY,
+  fontSize: 12,
+  color: LT.textSecondary,
+};
+
 export function ColorPicker({
   value,
   themeSlot,
@@ -36,267 +73,46 @@ export function ColorPicker({
   onThemeColorChange,
   label,
 }: ColorPickerProps): React.ReactElement {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [palette, setPalette] = useState<ThemeColorInfo[]>([]);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const id = useId();
+  const wrapRef = useRef<HTMLSpanElement>(null);
+  const name = accessibleName(label);
 
-  const handleClickOutside = useCallback((e: MouseEvent) => {
-    if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-      setIsExpanded(false);
+  const guardPopoverKeys = useCallback((e: React.KeyboardEvent<HTMLSpanElement>) => {
+    const wrap = wrapRef.current;
+    // Keys on the swatch button keep the host dialog's meaning.
+    if (!wrap || wrap.contains(e.target as Node)) return;
+    if (e.key !== "Escape" && e.key !== "Enter") return;
+    // Stopping the synthetic event also stops the native one at React's root,
+    // so the popover's own document-level Escape listener never hears it:
+    // close it the way a pointer user would, through its trigger.
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      const trigger = wrap.querySelector<HTMLButtonElement>('button[aria-expanded="true"]');
+      if (trigger) {
+        trigger.click();
+        trigger.focus();
+      }
     }
   }, []);
 
-  useEffect(() => {
-    if (isExpanded) {
-      document.addEventListener("mousedown", handleClickOutside);
-      // Load theme palette
-      getThemeColorPalette().then(setPalette).catch(console.error);
-    }
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [isExpanded, handleClickOutside]);
-
-  const handleThemeColorClick = (info: ThemeColorInfo) => {
-    if (onThemeColorChange) {
-      onThemeColorChange(info.slot, info.tint, info.resolvedColor);
-    } else {
-      onChange(info.resolvedColor);
-    }
-    setIsExpanded(false);
-  };
-
-  const isThemeColorSelected = (info: ThemeColorInfo): boolean => {
-    if (themeSlot && themeSlot === info.slot && (themeTint ?? 0) === info.tint) {
-      return true;
-    }
-    return false;
-  };
-
-  // Split palette into rows: first 10 = base, then 5 rows of 10 tints
-  const baseColors = palette.slice(0, 10);
-  const tintRows = [];
-  for (let i = 10; i < palette.length; i += 10) {
-    tintRows.push(palette.slice(i, i + 10));
-  }
-
   return (
-    <Container ref={containerRef}>
-      {label && <Label>{label}</Label>}
-      <SwatchButton
-        onClick={() => setIsExpanded(!isExpanded)}
-        title={value}
-      >
-        <Swatch style={{ backgroundColor: value }} />
-        <Arrow>{isExpanded ? "\u25B2" : "\u25BC"}</Arrow>
-      </SwatchButton>
-
-      {isExpanded && (
-        <Dropdown onClick={(e) => e.stopPropagation()}>
-          {/* Theme Colors Section */}
-          {baseColors.length > 0 && (
-            <>
-              <SectionLabel>Theme Colors</SectionLabel>
-              <PaletteGrid>
-                {baseColors.map((info) => (
-                  <PaletteCell
-                    key={`${info.slot}-${info.tint}`}
-                    $color={info.resolvedColor}
-                    $selected={isThemeColorSelected(info)}
-                    onClick={() => handleThemeColorClick(info)}
-                    title={info.label}
-                  />
-                ))}
-              </PaletteGrid>
-              {tintRows.map((row, rowIdx) => (
-                <PaletteGrid key={rowIdx}>
-                  {row.map((info) => (
-                    <PaletteCell
-                      key={`${info.slot}-${info.tint}`}
-                      $color={info.resolvedColor}
-                      $selected={isThemeColorSelected(info)}
-                      onClick={() => handleThemeColorClick(info)}
-                      title={info.label}
-                    />
-                  ))}
-                </PaletteGrid>
-              ))}
-            </>
-          )}
-
-          {/* Standard Colors */}
-          <SectionLabel>Standard Colors</SectionLabel>
-          <PaletteGrid>
-            {STANDARD_COLORS.map((color) => (
-              <PaletteCell
-                key={color}
-                $color={color}
-                $selected={!themeSlot && value.toLowerCase() === color.toLowerCase()}
-                onClick={() => {
-                  onChange(color);
-                  setIsExpanded(false);
-                }}
-                title={color}
-              />
-            ))}
-          </PaletteGrid>
-
-          {/* Custom Color */}
-          <CustomColorRow>
-            <CustomLabel>Custom:</CustomLabel>
-            <CustomInput
-              type="color"
-              value={value}
-              onChange={(e) => onChange(e.target.value)}
-            />
-            <HexInput
-              type="text"
-              value={value}
-              onChange={(e) => {
-                const val = e.target.value;
-                if (/^#[0-9a-fA-F]{0,6}$/.test(val)) {
-                  onChange(val);
-                }
-              }}
-              onBlur={(e) => {
-                const val = e.target.value;
-                if (/^#[0-9a-fA-F]{6}$/.test(val)) {
-                  onChange(val);
-                  setIsExpanded(false);
-                }
-              }}
-              maxLength={7}
-            />
-          </CustomColorRow>
-        </Dropdown>
+    <span ref={wrapRef} style={rowStyle} onKeyDown={guardPopoverKeys}>
+      {label && (
+        <label htmlFor={id} style={labelStyle}>
+          {label}
+        </label>
       )}
-    </Container>
+      <ColorSwatch
+        id={id}
+        color={value || null}
+        onChange={onChange}
+        onThemeColorChange={onThemeColorChange}
+        themeSlot={themeSlot || undefined}
+        themeTint={themeTint}
+        label={name}
+        chevron
+        tooltip={value ? `${name}: ${value}` : name}
+      />
+    </span>
   );
 }
-
-// Styled Components
-const Container = styled.div`
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-`;
-
-const Label = styled.span`
-  font-size: 12px;
-  color: ${v("--text-secondary")};
-`;
-
-const SwatchButton = styled.button`
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 6px;
-  background: ${v("--grid-bg")};
-  border: 1px solid ${v("--border-default")};
-  border-radius: 3px;
-  cursor: pointer;
-
-  &:hover {
-    border-color: ${v("--accent-primary")};
-  }
-`;
-
-const Swatch = styled.div`
-  width: 20px;
-  height: 14px;
-  border: 1px solid ${v("--border-default")};
-  border-radius: 2px;
-`;
-
-const Arrow = styled.span`
-  font-size: 8px;
-  color: ${v("--text-secondary")};
-`;
-
-const Dropdown = styled.div`
-  position: absolute;
-  top: 100%;
-  left: 0;
-  z-index: 1100;
-  margin-top: 4px;
-  padding: 8px;
-  background: ${v("--panel-bg")};
-  border: 1px solid ${v("--border-default")};
-  border-radius: 6px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  min-width: 220px;
-`;
-
-const SectionLabel = styled.div`
-  font-size: 10px;
-  color: ${v("--text-secondary")};
-  margin-bottom: 3px;
-  margin-top: 6px;
-
-  &:first-child {
-    margin-top: 0;
-  }
-`;
-
-const PaletteGrid = styled.div`
-  display: grid;
-  grid-template-columns: repeat(10, 1fr);
-  gap: 2px;
-  margin-bottom: 1px;
-`;
-
-const PaletteCell = styled.button<{ $color: string; $selected: boolean }>`
-  width: 18px;
-  height: 18px;
-  border: ${(p) =>
-    p.$selected
-      ? `2px solid ${v("--accent-primary")}`
-      : `1px solid ${v("--border-default")}`};
-  border-radius: 2px;
-  background-color: ${(p) => p.$color};
-  cursor: pointer;
-  padding: 0;
-
-  &:hover {
-    border: 2px solid ${v("--text-primary")};
-    transform: scale(1.2);
-  }
-`;
-
-const CustomColorRow = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding-top: 6px;
-  margin-top: 6px;
-  border-top: 1px solid ${v("--border-default")};
-`;
-
-const CustomLabel = styled.span`
-  font-size: 11px;
-  color: ${v("--text-secondary")};
-`;
-
-const CustomInput = styled.input`
-  width: 24px;
-  height: 20px;
-  padding: 0;
-  border: 1px solid ${v("--border-default")};
-  border-radius: 3px;
-  cursor: pointer;
-`;
-
-const HexInput = styled.input`
-  flex: 1;
-  padding: 2px 4px;
-  font-size: 11px;
-  font-family: "Consolas", monospace;
-  background: ${v("--grid-bg")};
-  border: 1px solid ${v("--border-default")};
-  border-radius: 3px;
-  color: ${v("--text-primary")};
-  outline: none;
-
-  &:focus {
-    border-color: ${v("--accent-primary")};
-  }
-`;

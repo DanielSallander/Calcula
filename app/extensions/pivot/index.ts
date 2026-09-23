@@ -123,7 +123,12 @@ import {
   DEFAULT_PIVOT_CELL_HEIGHT,
 } from "./rendering/pivot";
 import type { PivotCellDrawResult, PivotTheme, PivotColumnMeasureSource } from "./rendering/pivot";
-import { getThemeOverridesForStyle, DEFAULT_PIVOT_STYLE_ID } from "./components/PivotTableStylesGallery";
+import {
+  getThemeOverridesForStyle,
+  DEFAULT_PIVOT_STYLE_ID,
+  getPivotStylePreview,
+  setPivotStylePreview,
+} from "./lib/pivotStyles";
 
 // Re-export cache accessors so existing consumers (e.g., context menu) keep working
 export { cachePivotView, getCachedPivotView };
@@ -138,9 +143,11 @@ const pivotStyleMap = new Map<string, string>();
 /** Maps styleId -> resolved PivotTheme (cached to avoid recomputing each frame). */
 const resolvedThemeCache = new Map<string, PivotTheme>();
 
-/** Get the PivotTheme for a given pivot, based on its selected style. */
+/** Get the PivotTheme for a given pivot: the style the gallery is HOVERING
+ *  (a transient preview that never reaches the backend, the undo stack or the
+ *  dirty flag) wins over the pivot's own selected style. */
 function getThemeForPivot(pivotId: string): PivotTheme {
-  const styleId = pivotStyleMap.get(pivotId) || DEFAULT_PIVOT_STYLE_ID;
+  const styleId = getPivotStylePreview(pivotId) ?? (pivotStyleMap.get(pivotId) || DEFAULT_PIVOT_STYLE_ID);
   if (!styleId) return DEFAULT_PIVOT_THEME;
 
   let theme = resolvedThemeCache.get(styleId);
@@ -2239,6 +2246,7 @@ function deactivate(): void {
   // Clear style tracking
   pivotStyleMap.clear();
   resolvedThemeCache.clear();
+  setPivotStylePreview(null, null);
 
   // Clear overlay regions
   removeGridRegionsByType("pivot");

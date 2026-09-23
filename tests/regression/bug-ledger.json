@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 130,
+  "nextId": 134,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4779,6 +4779,143 @@
         ]
       },
       "notes": "Verified by state change on one binary, not by a diff (git was denied in the session): shapes-hometab test 5 failed alone on a fresh app before the change and the whole 8-test file passed after it, same app.exe. The negative half was proved separately -- Delete with NO control selected must still clear cells -- by re-running spill-delete, undo-across-open, remaining-correctness and report-store (26/26 green), which includes the dedicated 'Delete on the origin' spill tests. Two further instances of the same class were NOT fixed and remain open: extensions/Controls/index.ts handleControlKeyboard and extensions/Controls/components/ControlContextMenu.tsx are document-level listeners on the same door, and anything that relied on 'the grid is not focused, so the grid-scoped binding is skipped' silently changed meaning when the grid started taking focus on press."
+    },
+    {
+      "id": "BUG-0130",
+      "status": "fixed",
+      "discovered": "2026-09-23",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Found by e2e/tests/chart-design-ribbon.spec.ts on its first targeted run (the Chart Design tab's first appearance in a fresh app); the same run logged the measured widths that prove the fold was wrong."
+      },
+      "violation": {
+        "oracleId": "ribbon-cold-mount-folds-every-cluster",
+        "message": "The first time a wide contextual tab (Chart Design) appeared in a session, EVERY cluster rendered as a launcher at 1264px although the widths the renderer itself measured in the same run fit four of six (Type 334, Elements 290, Layout 216, Style 210, Data 193, Actions 233; computeWidthDemotions folds only Layout and Actions). SectionRibbonRenderer's DOM-truth backstop (app/src/shell/components/SectionRenderers.tsx) saw the strip overflow BEFORE any section had reported a width -- the model still used the optimistic 80px per section, so no section was a demotion candidate -- and escalated its forced count to the section total; nothing reset that count when the real widths arrived, so the model then folded all six.",
+        "severity": "medium"
+      },
+      "whyNobodyNoticed": "Timing-dependent: whether the strip is laid out overflowing before the sizers' ResizeObserver reports depends on the frame, so the full functional run passed the same assertion and the targeted run (a colder app) failed it. jsdom has no layout, so scrollWidth is 0 there and no unit test ever reached the backstop's escalation from a cold mount. A second mount of the same panel was always right (the width caches seed it), which made it look like a one-off.",
+      "repro": {
+        "kind": "unit",
+        "description": "app: npx vitest run src/shell/components/__tests__/sectionWidthProbe.test.tsx -t \"cold mount\" -- fakes the strip's scrollWidth from which cells are inline; before the fix cold-b folds too."
+      },
+      "triage": {
+        "verdict": "app",
+        "confidence": "high",
+        "rootCauseHypothesis": "Forced demotions are evidence about ONE model (band width, section set, measurements) but were only reset on the first two, and the backstop ran before the model had any real widths to be evidence about."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "The backstop now (1) forces nothing until every section has reported some width, and (2) drops a standing forced count whenever the measurements change, re-checking on the next commit, which is laid out from the new model. A positive test keeps the backstop's real job (the model under-measures, the strip really overflows -> fold exactly one) and both tests fail when the escalation line is removed.",
+        "filesChanged": [
+          "app/src/shell/components/SectionRenderers.tsx",
+          "app/src/shell/components/__tests__/sectionWidthProbe.test.tsx"
+        ]
+      },
+      "notes": "The same run also proved the redesign's width budget from live measurements (total 1476px; all six inline from ~1500)."
+    },
+    {
+      "id": "BUG-0131",
+      "status": "fixed",
+      "discovered": "2026-09-23",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Found while moving the Table Design style gallery onto the @api StyleGallery (Calcula Clusters redesign, table lane)."
+      },
+      "violation": {
+        "oracleId": "table-style-choice-never-reaches-the-grid",
+        "message": "Choosing a table style changed nothing on the grid. The old gallery kept the choice in local component state; once it was made to write Table.styleName to the store, the grid STILL painted Medium 2, because app/extensions/Table/lib/tableStyleInterceptor.ts hardcoded the Medium 2 colours (#4472C4 header, #D9E2F3 bands) for every table regardless of its stored style.",
+        "severity": "medium"
+      },
+      "whyNobodyNoticed": "Every table is created with the default Medium 2, which is exactly what the hardcoded interceptor painted, so every golden and every journey that makes a table looked right. Only choosing a DIFFERENT style exposes it, and the gallery's own state hid that the choice went nowhere.",
+      "repro": {
+        "kind": "unit",
+        "description": "app: npx vitest run extensions/Table/lib/tableStyleInterceptor.test.ts -- a table whose styleName is not Medium 2 must paint that style's header colour; None paints nothing."
+      },
+      "triage": {
+        "verdict": "app",
+        "confidence": "high",
+        "rootCauseHypothesis": "The painter named colours instead of reading the style catalogue the gallery shows."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "The interceptor resolves the table's stored style from the catalogue (cached per style id), derives header / band / total fills from it, paints nothing for None, and falls back to Medium 2 for names it cannot draw. The default still paints exactly #4472C4 / #D9E2F3, so the table goldens hold.",
+        "filesChanged": [
+          "app/extensions/Table/lib/tableStyleInterceptor.ts",
+          "app/extensions/Table/lib/tableStyles.ts",
+          "app/extensions/Table/lib/tableStyleInterceptor.test.ts"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0132",
+      "status": "fixed",
+      "discovered": "2026-09-23",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Found while moving the Format Cells colour picker onto the @api ColorPopover (Calcula Clusters redesign, shared-pickers follow-up)."
+      },
+      "violation": {
+        "oracleId": "escape-in-a-dialog-popover-closes-the-dialog",
+        "message": "Pressing Escape to dismiss the Format Cells colour palette closed the WHOLE dialog, without its reset(). app/src/shell/DialogContainer.tsx closes the topmost Escape-dismissible dialog from a WINDOW CAPTURE keydown listener and stops the event, which runs before any listener the popover or the dialog owns.",
+        "severity": "medium"
+      },
+      "whyNobodyNoticed": "The dialog's own key handler and the picker's own guard both looked correct in isolation, and unit tests render a dialog without the shell's DialogContainer, so the capture listener that pre-empts them both is never in the test.",
+      "repro": {
+        "kind": "unit",
+        "description": "app: npx vitest run src/shell/__tests__/dialogContainerEscape.test.tsx -- Escape whose target is inside a [data-section-flyout] must not close the dialog; Escape from the dialog itself still does. The flyout case fails with the guard removed."
+      },
+      "triage": {
+        "verdict": "app",
+        "confidence": "high",
+        "rootCauseHypothesis": "A global capture listener arbitrating a key that a nested surface owns."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "DialogContainer leaves Escape alone when its target is inside a [data-section-flyout] (every @api/layout popover, menu and dropdown list is portalled into one), so the popover closes itself and returns focus to its trigger. FormatCellsDialog also ignores Enter/Escape whose target is outside its own DOM (portalled popovers bubble through the React tree).",
+        "filesChanged": [
+          "app/src/shell/DialogContainer.tsx",
+          "app/src/shell/__tests__/dialogContainerEscape.test.tsx",
+          "app/extensions/BuiltIn/FormatCellsDialog/FormatCellsDialog.tsx"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0133",
+      "status": "fixed",
+      "discovered": "2026-09-23",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Found by a --repeat-each=2 stability run of e2e/tests/ribbon-tabs.spec.ts (Table Design golden differed on the repeat), then measured with a temporary diagnostic spec that mounted Table Design three times and traced every width report."
+      },
+      "violation": {
+        "oracleId": "ribbon-width-probes-die-under-strictmode",
+        "message": "In every dev build (React 18 StrictMode, i.e. every E2E run and `tauri dev`) the ribbon's width probes went dead after mount. SectionCell and useSectionFit create their ResizeObserver in a callback ref and ALSO disconnected it from an unmount-only useEffect cleanup; StrictMode's simulated unmount runs effect cleanups but does not re-run callback refs, so both observers were disconnected for the rest of the session. Each cell reported its width once, at mount, before its content had rendered (Table Design's Tools cluster at 32px against a real 464px), the width collapse cached and trusted that, and the Table Design band came up with every cluster inline and overflowing (scrollWidth 1395 in a 1264px band), Table Styles cut off at the edge.",
+        "severity": "medium"
+      },
+      "whyNobodyNoticed": "Production builds do not double-invoke effects, so the shipped app was unaffected; in dev the first mount was usually rescued by the DOM-truth backstop and by sections whose launcher<->inline flips remounted a fresh (live) probe, so it showed only on some mounts and looked like flake. jsdom tests rendered without StrictMode.",
+      "repro": {
+        "kind": "unit",
+        "description": "app: npx vitest run src/shell/components/__tests__/sectionWidthProbe.test.tsx -t StrictMode -- renders a SectionCell inside React.StrictMode and requires both probes to still be observing; fails with 'the natural-width sizer is no longer observed' before the fix."
+      },
+      "triage": {
+        "verdict": "app",
+        "confidence": "high",
+        "rootCauseHypothesis": "Two owners for one observer's lifetime: the callback ref (attach/null) and an unmount-only effect. Under StrictMode only one of them is replayed."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "Removed the unmount-only disconnect effects from SectionCell and useSectionFit; the callback refs' own null call is the unmount path (React calls it). Verified live: the diagnostic's three Table Design mounts all fit the band and every cluster reported its real natural width.",
+        "filesChanged": [
+          "app/src/shell/components/SectionCell.tsx",
+          "app/src/shell/components/useSectionFit.ts",
+          "app/src/shell/components/__tests__/sectionWidthProbe.test.tsx"
+        ]
+      },
+      "notes": "Found while chasing BUG-0130; the two compound (dead probes leave the model with stale widths, and a backstop that waits for measurements then has nothing fresh to wait for)."
     }
   ]
 }

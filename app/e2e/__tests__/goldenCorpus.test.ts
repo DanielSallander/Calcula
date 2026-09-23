@@ -915,15 +915,17 @@ describe("the pressed-accent reader", () => {
     // default from VerticalAlign::Middle to Bottom -- and there is no "unlit
     // empty workbook" in the corpus at all any more.
     //
-    // The permanent pair is geometric, not behavioural: `menu-data-open`
-    // photographs the SAME empty workbook with the Data menu covering the
-    // alignment cluster (the lit box is simply not in frame), while
-    // `core-empty-grid` shows it plainly. Same window, same product state —
-    // the gap between the two readings IS the toggle, which is exactly what
-    // the reader must be able to see.
+    // The pair is geometric, not behavioural. Until the Calcula Clusters
+    // ribbon (2026-09-23) the COVERED side was `menu-data-open` (the Data menu
+    // hid the alignment cluster); the narrower Clusters menu no longer reaches
+    // the toggle, so that golden is lit now. The covered side is
+    // `ribbon-minimized`: the same 1280x800 window with the band collapsed,
+    // so the lit box is simply not in frame (measured: 0 px), while
+    // `core-empty-grid` shows it plainly. The gap between the two readings IS
+    // the toggle, which is exactly what the reader must be able to see.
     const read = (p: string) =>
       readPressedAccentFill(decodePng(readFileSync(join(E2E_ROOT, ...p.split("/")))));
-    const covered = read("visual/__screenshots__/core-visual.spec.ts/menu-data-open.png");
+    const covered = read("tests/__screenshots__/ribbon-tabs.spec.ts/ribbon-minimized.png");
     const visible = read("visual/__screenshots__/core-visual.spec.ts/core-empty-grid.png");
     expect(covered).toBeLessThan(PRESSED_ACCENT_FLOOR);
     expect(visible).toBeGreaterThan(PRESSED_ACCENT_FLOOR);

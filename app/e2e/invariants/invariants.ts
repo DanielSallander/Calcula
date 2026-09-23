@@ -81,7 +81,10 @@ const CONTEXTUAL_TAB_RULES: Record<string, ContextualTabRule> = {
     expectation: "at least one pivot table must exist",
   },
 
-  // --- Sparklines (no color, but still a contextual tab) ---
+  // --- Sparklines ---
+  // Since the Clusters redesign the tab carries var(--tab-accent-sparkline), so
+  // it reports a non-null accentColor and this rule now actually RUNS (it was
+  // skipped while the tab had no colour).
   Sparkline: {
     validate: (s) => s.logical.sparklineGroups.length > 0,
     expectation: "at least one sparkline group must exist",

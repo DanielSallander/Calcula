@@ -1096,6 +1096,9 @@ export async function takeRibbonScreenshot(
   options?: {
     maxDiffPixelRatio?: number;
     threshold?: number;
+    /** Parts of the band whose content is session residue rather than
+     *  chrome (a table NAME counts up across the whole suite). */
+    mask?: Locator[];
   }
 ): Promise<void> {
   await assertCaptureEnvironment(page);
@@ -1143,5 +1146,60 @@ export async function takeStatusBarScreenshot(
   await expect(statusBar).toHaveScreenshot(`statusbar-${name}.png`, {
     ...DEFAULT_SCREENSHOT_OPTIONS,
     ...options,
+  });
+}
+
+/**
+ * Take screenshots of the left sidebar chrome: the activity rail, and — when a
+ * side panel is open — the panel too.
+ *
+ * The rail is the one piece of chrome the Calcula Clusters redesign turned
+ * LIGHT in the Light skin (--activity-bar-bg), so it gets a golden of its own
+ * rather than being checked only as a strip of every full-window capture.
+ *
+ * TWO ELEMENT CAPTURES, NEVER A CLIP. A union rectangle over rail + panel
+ * would need `toHaveScreenshot({ clip })`, which e2e/__tests__/noClippedCapture
+ * bans (a clipped capture moves the viewport under a parked pointer). So the
+ * rail is `sidebar-<name>-rail.png` and the panel is `sidebar-<name>.png`;
+ * with no panel open, the rail alone is `sidebar-<name>.png`.
+ *
+ * THE PANEL'S CONTENT IS MASKED. A side panel hosts whichever extension view
+ * is open, and that view's state (a saved animation, a driver cell a previous
+ * spec set) is suite residue, not chrome. The golden is about the header
+ * recipe (icon, 12px/600 sentence-case title, More / Close) and the panel
+ * edge; the mask keeps the content box's GEOMETRY in frame and its contents
+ * out of it — the same trade `ribbon-minimized` makes for the grid.
+ */
+export async function takeSidebarScreenshot(
+  page: Page,
+  name: string,
+  options?: {
+    maxDiffPixelRatio?: number;
+    threshold?: number;
+  }
+): Promise<void> {
+  await assertCaptureEnvironment(page);
+  await parkPointerAwayFromChrome(page);
+  await page.waitForTimeout(300);
+  const rail = await resolveOne(page, "the activity rail", ["[data-activity-bar]"]);
+  const panel = page.locator("[data-side-panel]");
+  const panelOpen = (await panel.count()) > 0 && (await panel.first().isVisible());
+  if (!panelOpen) {
+    await expect(rail).toHaveScreenshot(`sidebar-${name}.png`, {
+      ...DEFAULT_SCREENSHOT_OPTIONS,
+      ...options,
+    });
+    return;
+  }
+  await expect(rail).toHaveScreenshot(`sidebar-${name}-rail.png`, {
+    ...DEFAULT_SCREENSHOT_OPTIONS,
+    ...options,
+  });
+  const sidePanel = await resolveOne(page, "the side panel", ["[data-side-panel]"]);
+  await expect(sidePanel).toHaveScreenshot(`sidebar-${name}.png`, {
+    ...DEFAULT_SCREENSHOT_OPTIONS,
+    ...options,
+    // The panel's second child is its content box (header, content, handle).
+    mask: [sidePanel.locator(":scope > div").nth(1)],
   });
 }
