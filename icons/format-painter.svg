@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <!-- Frame (drawn first so the roller and handle cover its ends) -->
+  <path d="M51 21 L53.6 22.5 Q54.6 23.1 54 24.1 L50.9 29.3 Q50.3 30.3 49.1 30.3 L30.8 30.3 Q29.6 30.3 28.9 31.3 L26.1 35.3"
+        stroke="#9B9EA5" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Roller -->
+  <rect x="21.2" y="8.34" width="31.9" height="11.6" rx="3.3" fill="#3C4150"
+        transform="rotate(31 37.16 14.14)"/>
+
+  <!-- Handle -->
+  <path d="M21.4 36.6
+           Q22.4 33.2 24.6 33.6
+           L28.6 35.6
+           Q30.2 36.6 29.6 38.4
+           C28.8 40.2 26.4 41.8 25.6 44.8
+           C25 47 24.3 48.8 23.1 50.2
+           L14 50.2
+           C14.5 48 15.8 45.3 17.7 42.8
+           C19.8 40 20.8 38.5 21.4 36.6 Z"
+        fill="#3C4150"/>
+
+  <!-- Paint swatch -->
+  <rect x="8.45" y="51.1" width="23.2" height="10.5" rx="2.9" fill="#2D8C5A"/>
+</svg>

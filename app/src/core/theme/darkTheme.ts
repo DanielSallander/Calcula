@@ -227,9 +227,12 @@ export const darkTheme: Record<string, string> = {
   [THEME_TOKENS.BADGE_FG]: "#ffffff",
 
   // --- Calcula Clusters: duotone icon ground ---
-  // A little more ink than light (34% vs 30%): a light tint on a dark ground
-  // loses more separation than a dark tint on a light one.
-  [THEME_TOKENS.ICON_FILL_SOFT]: "color-mix(in srgb, currentColor 34%, transparent)",
+  // LESS ink than light (45% vs 50%), because the contrast budget is smaller:
+  // soft-vs-cluster times strong-vs-soft equals strong-vs-cluster, 10.7:1
+  // here against 16.1:1 in light. 45% renders #7c7c7e (3.4:1 on the cluster,
+  // 3.0:1 under hover) and keeps STRONG 3.2:1 above it; 50% flattens the
+  // small strong details that sit on a soft ground.
+  [THEME_TOKENS.ICON_FILL_SOFT]: "color-mix(in srgb, currentColor 45%, transparent)",
 
   // --- Calcula Clusters: contextual tab accents (each >= 4.5:1 on the frame) ---
   [THEME_TOKENS.TAB_ACCENT_CHART]: "#7aa7ff",

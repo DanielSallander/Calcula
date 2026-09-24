@@ -15,7 +15,7 @@ import { defaultTheme } from "./defaultTheme";
 import { darkTheme } from "./darkTheme";
 // WCAG relative luminance / contrast. Shared with skinLoader.test.ts, which
 // holds every built-in SKIN to the same bars after merging.
-import { contrast } from "./__tests__/wcag";
+import { contrast, compositeOver, mixWithBlackOklab } from "./__tests__/wcag";
 
 const ALL_TOKENS = Object.values(THEME_TOKENS) as string[];
 
@@ -159,12 +159,41 @@ describe("Calcula Clusters tokens are legible in both baselines", () => {
     // They are references, not copies, so a skin that changes --state-accent
     // (Calcula Soft does) recolours every one of them without restating it.
     // A literal here would be a second source of truth that drifts on the
-    // first skin that retunes the accent.
+    // first skin that retunes the accent. The light icon accent is DERIVED
+    // (the state colour one step darker) but still names --state-accent.
     for (const [, theme] of BASELINES) {
-      expect(theme[THEME_TOKENS.ICON_ACCENT]).toBe("var(--state-accent)");
       expect(theme[THEME_TOKENS.FOCUS_RING_COLOR]).toBe("var(--state-accent)");
       expect(theme[THEME_TOKENS.RIBBON_TAB_INDICATOR]).toBe("var(--state-accent)");
       expect(theme[THEME_TOKENS.ACTIVITY_BAR_INDICATOR]).toBe("var(--state-accent)");
     }
+    expect(defaultTheme[THEME_TOKENS.ICON_ACCENT]).toBe(
+      "color-mix(in oklab, var(--state-accent) 88%, black)",
+    );
+    expect(darkTheme[THEME_TOKENS.ICON_ACCENT]).toBe("var(--state-accent)");
+  });
+
+  it("light: the icon green sits BETWEEN the 50% grey and near-black", () => {
+    // No single green clears 3:1 from both the SOFT grey and STRONG (the best
+    // any luminance can do is 2.2:1 each), so the icon green is placed
+    // between them and the drawings give it a pixel of background instead
+    // (docs/design/ICONS.md 2.2). This pins BOTH sides of that trade:
+    // today's undarkened #047857 (a 100% mix) is 1.50 on the grey and fails
+    // the first floor; an 80% mix is 2.06 under STRONG and fails the second.
+    const t = defaultTheme;
+    const m = /^color-mix\(in oklab, var\(--state-accent\) (\d+)%, black\)$/.exec(
+      t[THEME_TOKENS.ICON_ACCENT],
+    );
+    expect(m, "ICON_ACCENT must stay a derived reference").not.toBeNull();
+    const green = mixWithBlackOklab(t[THEME_TOKENS.STATE_ACCENT], Number(m![1]) / 100);
+    const soft = /currentColor (\d+)%/.exec(t[THEME_TOKENS.ICON_FILL_SOFT]);
+    expect(soft, "ICON_FILL_SOFT must stay a tint of currentColor").not.toBeNull();
+    const cluster = t[THEME_TOKENS.RIBBON_CLUSTER_BG];
+    const strong = t[THEME_TOKENS.TEXT_PRIMARY];
+    const grey = compositeOver(strong, Number(soft![1]) / 100, cluster);
+    // #036448 today: 6.53 / 7.19 / 1.97 / 2.47.
+    expect(contrast(green, cluster)).toBeGreaterThanOrEqual(3);
+    expect(contrast(green, t[THEME_TOKENS.RIBBON_BAND_BG])).toBeGreaterThanOrEqual(3);
+    expect(contrast(green, grey)).toBeGreaterThanOrEqual(1.9);
+    expect(contrast(green, strong)).toBeGreaterThanOrEqual(2.4);
   });
 });

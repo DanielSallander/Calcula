@@ -5,9 +5,11 @@
 //
 //          SOFT   the ground the subject sits on (an axis, a panel, a body).
 //                 `--icon-fill-soft` is a TINT OF THE FOREGROUND
-//                 (color-mix(currentColor 30%, transparent)), not a fixed grey,
-//                 so it keeps the same separation on the band, on a tinted
-//                 cluster, on a pressed button and in high contrast.
+//                 (color-mix(currentColor 50%, transparent) in light, 45% in
+//                 dark), not a fixed grey, so it keeps the same separation on
+//                 the band, on a tinted cluster, on a pressed button and in
+//                 high contrast. It must clear 3:1 against the cluster AND
+//                 leave STRONG 3:1 above it; the reasoning is in the themes.
 //          STRONG the subject itself: `currentColor`, so it follows the
 //                 button's text colour and inverts with the skin.
 //          ACCENT exactly one thing per icon: the series a chart icon is about,
@@ -21,15 +23,41 @@
 //
 //          The drawing rules the set is held to (the approved mockup, rev 2):
 //          filled shapes; rect corners rx >= 1.4; NOTHING THINNER THAN 3 UNITS
-//          (a stroke is at least 2.6 with round caps and joins); no <text> and
+//          (a stroke is at least 2.6 with round caps and joins, or exactly 2.4
+//          on a straight horizontal/vertical run centred on the pixel grid:
+//          PIXEL_STROKE, two whole pixels at 20px); no <text> and
 //          no emoji, because a glyph renders in whatever font the machine has
 //          and at 20px a font hint is a smudge. A 3-unit feature at the 20px
 //          control size is 2.5 device pixels; the 2-unit features of the old
 //          16-grid stroke set were 1.3, which is what made them blotchy.
 //
+//          How much of the box a drawing fills (the fill audit, 2026-09-24).
+//          The 28px button with a 20px icon stays; an icon that looks lost in
+//          it is a drawing to fix, not a size to raise:
+//          - long side 19-20 units (margin 2.0-2.5; prefer 2.4, which lands on
+//            whole pixels at 20px and at 20px x 150%);
+//          - short side at least 16 units, unless the subject is inherently a
+//            strip, and then centred;
+//          - visually centred within 0.6 units, except where position IS the
+//            meaning (Align, Indent);
+//          - no ink closer than 1.2 units to the frame edge, except a
+//            deliberate tip or drop (an arrow that reaches the edge touches the
+//            divider of the segmented pill it sits in);
+//          - parts at least 3.6 units (3 px); a free-standing dot at least 4.3.
+//
 //          SOFT is translucent. Two soft shapes that overlap therefore paint
 //          the overlap darker, so drawings keep soft shapes apart and lay
 //          STRONG / ACCENT (opaque) on top of soft, never soft on top of them.
+//
+//          ACCENT (and DANGER) borders the BACKGROUND, not the greys
+//          (2026-09-24). No single green clears 3:1 from both SOFT and STRONG
+//          (the best any one lightness can do is 2.2:1 each), so a new or
+//          redrawn icon keeps at least 1.2 units (one clean pixel at 20px, on
+//          the 1.2 grid) between its accent and every SOFT or STRONG shape: move
+//          it, shrink it, or cut a notch or a HOLE (a reverse-wound subpath)
+//          into the ground. Never a <mask>. A strong-or-soft part left beside
+//          the cut stays at least 2.4 wide. Checked by
+//          `npm run check:icon-contact` against a shrink-only allowlist.
 
 import React from "react";
 
@@ -90,10 +118,26 @@ export function IconFrame({
 /** Minimum stroke width for a line or arrow: below it the 3-unit rule fails. */
 export const MIN_STROKE = 2.6;
 
+/** One device pixel at the 20px control size, in grid units (24 / 20). An
+ *  edge on a multiple of it paints crisp at 100%; an edge between two
+ *  multiples paints a half-covered pixel, which reads as a soft edge. On a
+ *  multiple of 2 x PIXEL_GRID it is also crisp at 150%. */
+export const PIXEL_GRID = 1.2;
+
+/**
+ * The one exception to MIN_STROKE: exactly two whole pixels at 20px
+ * (2 x PIXEL_GRID). A 2.6 line is 2.17 px and can NEVER be crisp at 100%, so
+ * a straight horizontal or vertical line may be 2.4 instead, but only when
+ * its centre lies on the pixel grid, so both edges land on pixel boundaries.
+ * Diagonals and curves keep MIN_STROKE (they antialias whatever their width).
+ * ribbonIcons.test.tsx enforces both conditions.
+ */
+export const PIXEL_STROKE = 2.4;
+
 /**
  * Props for a stroked (not filled) path in one channel: round caps and joins,
  * no fill. Width defaults to 3, the grid's standard line; never pass less than
- * MIN_STROKE.
+ * MIN_STROKE, except PIXEL_STROKE on a pixel-aligned horizontal/vertical path.
  *
  * ```tsx
  * <path d="M4 12h16" {...line(ACCENT)} />
@@ -112,7 +156,7 @@ export function line(
   return {
     fill: "none",
     stroke: channel,
-    strokeWidth: Math.max(width, MIN_STROKE),
+    strokeWidth: width === PIXEL_STROKE ? PIXEL_STROKE : Math.max(width, MIN_STROKE),
     strokeLinecap: "round",
     strokeLinejoin: "round",
   };

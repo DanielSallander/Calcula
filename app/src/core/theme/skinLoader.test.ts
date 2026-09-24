@@ -36,7 +36,7 @@ import {
   softSkin,
   contrastSkin,
 } from "./builtInSkins";
-import { contrast } from "./__tests__/wcag";
+import { contrast, mixWithBlackOklab } from "./__tests__/wcag";
 
 /** The value a token was actually INJECTED with — what the page will paint. */
 function injected(token: string): string | undefined {
@@ -177,9 +177,14 @@ describe("accessibility transforms", () => {
     expect(injected(THEME_TOKENS.RIBBON_GROUP_LABEL_FG)).toBe("#1a1a1a");
     expect(injected(THEME_TOKENS.ICON_FILL_SOFT)).toBe("#767676");
     expect(injected(THEME_TOKENS.RIBBON_TAB_INDICATOR)).toBe("#000000");
+    // High contrast INHERITS the icon accent on purpose: light gets the
+    // darkened state green (#036448: 1.58 on #767676, 2.92 under #000,
+    // 6.53 on the cluster; the undarkened #047857 was 1.21 on that grey).
+    expect(injected(THEME_TOKENS.ICON_ACCENT)).toBe(defaultTheme[THEME_TOKENS.ICON_ACCENT]);
     setActiveSkin(DARK_SKIN_ID);
     expect(injected(THEME_TOKENS.CONTROL_BORDER)).toBe("#ffffff");
     expect(injected(THEME_TOKENS.ICON_FILL_SOFT)).toBe("#9d9d9d");
+    expect(injected(THEME_TOKENS.ICON_ACCENT)).toBe("var(--state-accent)");
   });
 });
 
@@ -200,7 +205,9 @@ describe("the four built-in skins", () => {
     // Untouched tokens are the light baseline's, including the ones that
     // REFERENCE the state accent — they recolour through the reference.
     expect(tokens[THEME_TOKENS.RIBBON_BAND_BG]).toBe(defaultTheme[THEME_TOKENS.RIBBON_BAND_BG]);
-    expect(tokens[THEME_TOKENS.ICON_ACCENT]).toBe("var(--state-accent)");
+    // The light baseline's derived icon accent (state colour one step darker):
+    // Soft's indigo #4f46e5 paints #413ac1 in its icons.
+    expect(tokens[THEME_TOKENS.ICON_ACCENT]).toBe(defaultTheme[THEME_TOKENS.ICON_ACCENT]);
     expect(getMergedGridTheme(softSkin)).toEqual(DEFAULT_THEME);
   });
 
@@ -213,6 +220,9 @@ describe("the four built-in skins", () => {
     expect(tokens[THEME_TOKENS.RIBBON_CLUSTER_BORDER]).toBe("#000000");
     expect(tokens[THEME_TOKENS.STATE_ACCENT]).toBe("#00543a");
     expect(tokens[THEME_TOKENS.TEXT_PRIMARY]).toBe(defaultTheme[THEME_TOKENS.TEXT_PRIMARY]);
+    // Its green is already darker than the light icon green; darkening it
+    // again would take it under STRONG to 1.62:1. It opts out.
+    expect(tokens[THEME_TOKENS.ICON_ACCENT]).toBe("var(--state-accent)");
   });
 
   it("switching to a delta skin injects its values into the page", () => {
@@ -250,9 +260,23 @@ describe("the four built-in skins", () => {
       expect(
         contrast(t[THEME_TOKENS.ACTIVITY_BAR_FG], t[THEME_TOKENS.ACTIVITY_BAR_BG]),
       ).toBeGreaterThanOrEqual(4.5);
+      // The icon green borders the card wherever a drawing gives it air, so
+      // it must clear 3:1 there in every skin, derived form included.
+      expect(contrast(iconAccentHex(t), card)).toBeGreaterThanOrEqual(3);
+      expect(contrast(iconAccentHex(t), t[THEME_TOKENS.RIBBON_BAND_BG])).toBeGreaterThanOrEqual(3);
     });
   }
 });
+
+/** The hex an ICON_ACCENT value paints: the state accent itself, or the
+ *  light baseline's `color-mix(in oklab, var(--state-accent) N%, black)`. */
+function iconAccentHex(t: Record<string, string>): string {
+  const v = t[THEME_TOKENS.ICON_ACCENT];
+  if (v === "var(--state-accent)") return t[THEME_TOKENS.STATE_ACCENT];
+  const m = /^color-mix\(in oklab, var\(--state-accent\) (\d+)%, black\)$/.exec(v);
+  if (!m) throw new Error(`unrecognised ICON_ACCENT: ${v}`);
+  return mixWithBlackOklab(t[THEME_TOKENS.STATE_ACCENT], Number(m[1]) / 100);
+}
 
 describe("ribbon group-label preference", () => {
   it("absent storage reads as show", () => {

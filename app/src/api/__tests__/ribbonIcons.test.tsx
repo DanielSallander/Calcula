@@ -30,6 +30,8 @@ import {
   ACCENT,
   DANGER,
   MIN_STROKE,
+  PIXEL_STROKE,
+  PIXEL_GRID,
 } from "../icons";
 import { findHardcodedColours } from "../layout/testing";
 
@@ -257,9 +259,81 @@ describe("every RibbonIcon drawing", () => {
       // corners; it is not a line, so the minimum does not apply to it.
       if (el.getAttribute("fill") === stroke) continue;
       const width = Number(el.getAttribute("stroke-width"));
-      if (!(width >= MIN_STROKE)) thin.push(`<${el.tagName}> stroke-width=${width}`);
+      if (width >= MIN_STROKE) continue;
+      // The one exception: two whole pixels on a pixel-aligned straight run.
+      if (width === PIXEL_STROKE && isPixelAlignedAxisPath(el)) continue;
+      thin.push(`<${el.tagName}> stroke-width=${width} d=${el.getAttribute("d") ?? ""}`);
     }
     expect(thin).toEqual([]);
+  });
+});
+
+/** True when `v` is a whole number of device pixels at 20px (a multiple of
+ *  PIXEL_GRID), within float noise. */
+function onPixelGrid(v: number): boolean {
+  const q = v / PIXEL_GRID;
+  return Math.abs(q - Math.round(q)) < 1e-6;
+}
+
+/**
+ * A PIXEL_STROKE path is legal only when EVERY segment is horizontal or
+ * vertical and runs along a pixel-grid line, so both edges of the 2.4 stroke
+ * (centre +/- 1.2) land on pixel boundaries. Only M/L/H/V/Z (absolute or
+ * relative) can guarantee that; any curve or arc fails.
+ */
+function isPixelAlignedAxisPath(el: Element): boolean {
+  if (el.tagName.toLowerCase() !== "path") return false;
+  const tokens = (el.getAttribute("d") ?? "").match(/[A-Za-z]|-?(?:\d+\.?\d*|\.\d+)(?:e-?\d+)?/g) ?? [];
+  let i = 0;
+  let cmd = "";
+  let x = 0;
+  let y = 0;
+  let startX = 0;
+  let startY = 0;
+  const num = (): number => Number(tokens[i++]);
+  const segment = (nx: number, ny: number): boolean => {
+    const horizontal = Math.abs(ny - y) < 1e-9;
+    const vertical = Math.abs(nx - x) < 1e-9;
+    const ok = (horizontal && onPixelGrid(y)) || (vertical && onPixelGrid(x));
+    x = nx;
+    y = ny;
+    return ok;
+  };
+  while (i < tokens.length) {
+    if (/[A-Za-z]/.test(tokens[i])) cmd = tokens[i++];
+    switch (cmd) {
+      case "M": x = startX = num(); y = startY = num(); cmd = "L"; break;
+      case "m": x = startX = x + num(); y = startY = y + num(); cmd = "l"; break;
+      case "L": { const nx = num(); if (!segment(nx, num())) return false; break; }
+      case "l": { const nx = x + num(); if (!segment(nx, y + num())) return false; break; }
+      case "H": if (!segment(num(), y)) return false; break;
+      case "h": if (!segment(x + num(), y)) return false; break;
+      case "V": if (!segment(x, num())) return false; break;
+      case "v": if (!segment(x, y + num())) return false; break;
+      case "Z": case "z": if (!segment(startX, startY)) return false; cmd = ""; break;
+      default: return false;
+    }
+  }
+  return true;
+}
+
+describe("the PIXEL_STROKE exception has teeth", () => {
+  const path = (d: string): Element => {
+    const el = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    el.setAttribute("d", d);
+    return el;
+  };
+  it("accepts straight runs on the pixel grid, absolute and relative", () => {
+    expect(isPixelAlignedAxisPath(path("M4.8 6H19.2"))).toBe(true);
+    expect(isPixelAlignedAxisPath(path("M12 3.6v16.8M4.8 12h14.4"))).toBe(true);
+    expect(isPixelAlignedAxisPath(path("M3.6 3.6L3.6 20.4L20.4 20.4"))).toBe(true);
+  });
+  it("refuses a run between pixels, a diagonal and a curve", () => {
+    expect(isPixelAlignedAxisPath(path("M4.8 6.6H19.2"))).toBe(false);
+    expect(isPixelAlignedAxisPath(path("M4.8 4.8L19.2 19.2"))).toBe(false);
+    expect(isPixelAlignedAxisPath(path("M4.8 6a2 2 0 0 1 4 0"))).toBe(false);
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    expect(isPixelAlignedAxisPath(circle)).toBe(false);
   });
 });
 

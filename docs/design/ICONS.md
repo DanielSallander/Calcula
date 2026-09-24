@@ -47,20 +47,52 @@ by default because the control that hosts them already carries the name.
 | **ACCENT** | `ACCENT` | `var(--icon-accent)` | exactly ONE thing: the series a chart icon is about, the element a furniture icon names, or the verb |
 | DANGER | `DANGER` | `var(--icon-danger)` | the destructive verb (Delete's lid, ClearAll's X), in place of ACCENT |
 
-- **SOFT is a tint of the foreground**, `color-mix(in srgb, currentColor 30%, transparent)` (34% in
+- **SOFT is a tint of the foreground**, `color-mix(in srgb, currentColor 50%, transparent)` (45% in
   Dark), not a fixed grey. It therefore keeps the same separation on the band, on a tinted cluster,
   on a pressed button and in the Dark skin, instead of washing out on one of them. High contrast
   replaces it with a SOLID mid-grey (#767676 light, #9d9d9d dark), the one ground that must not stay
   translucent there.
+- **Why 50 / 45 (2026-09-24; it was 30 / 34).** The owner found the grey too faint: 30% renders
+  #afb2b8 on the cluster, 1.9:1, so soft-only drawings (Undo, Find, the Indent rows) looked disabled
+  and Format Painter's frame vanished. Two floors hold at once: soft against the cluster at least
+  3:1 (WCAG 1.4.11 for a graphic), and STRONG against soft at least 3:1, because about 40 icons lay a
+  strong detail on a soft ground. The two ratios MULTIPLY to strong-against-cluster, so every point
+  gained on one is taken from the other — a 16.1:1 budget in Light but 10.7:1 in Dark, which is why
+  Dark gets the smaller number. Light 50% = #82868f (3.3:1 on the cluster, strong 4.9:1 above it);
+  55% turns the tile icons into dark blocks. Dark 45% = #7c7c7e (3.4:1, 3.0:1 under hover, strong
+  3.2:1 above it); 50% flattens the small strong details. The one known residual is a pressed
+  toggle in Dark (2.6:1).
+- **Soft never overlaps soft.** A double layer of the 50% tint is only 2.2:1 from STRONG — a dark
+  knot. Draw a soft shape that crosses itself as ONE path (the chart Axes L) or one stroked path
+  (Cut's blades: a stroke paints its own crossing once).
 - **STRONG is `currentColor`**, so an icon follows the text colour of whatever hosts it — muted at
   rest, full strength when active, inverted in Dark — with no rule per state. This is the Model
   Editor's reasoning, promoted: *an icon that inherits is correct in states nobody thought about,
   and it keeps the whole set outside the hex ban by construction rather than by exemption.*
-- **ACCENT is `--icon-accent` = `var(--state-accent)`** (repointed from `--accent-primary`, which is
-  2.5:1 on the cluster card and made the accent collapse to a thin mark).
+- **ACCENT is `--icon-accent`**: `color-mix(in oklab, var(--state-accent) 88%, black)` in
+  Light (#047857 paints #036448), `var(--state-accent)` in Dark (#34d399). Repointed from
+  `--accent-primary` (2.5:1 on the cluster card, the accent collapsed to a thin mark). Light is one
+  step darker since 2026-09-24 because the green has to sit between the 50% grey and near-black:
+  1.97:1 on the grey (was 1.50), 2.47:1 under STRONG (was 3.23), 6.5:1 on the cluster. It is still
+  a reference, so Calcula Soft and a user accent recolour the icons in their own hue. Calcula
+  Contrast opts out: its #00543a is already darker. The tab underline, focus ring and checkboxes
+  keep `var(--state-accent)`.
 - **Exactly one accent per icon**, and never ACCENT and DANGER together. Chart-type icons are
   monochrome duotone (owner decision 2026-09-22): the accent is one series, not a categorical
   palette. A categorical variant would be a one-file swap in `icons/chart.tsx`.
+- **The accent borders the background, not the greys (2026-09-24).** No single green reaches 3:1
+  from both SOFT and STRONG (the best one lightness can do is 2.2:1 each in Light, 1.8:1 in Dark),
+  so separation cannot come from colour. It came up when the owner saw Paste's green clip vanish
+  into its board after the grey went to 50%. A new or redrawn icon keeps at least 1.2 units (one
+  clean pixel at 20px, on the 1.2 grid) of background between ACCENT/DANGER and every SOFT/STRONG
+  shape: move it, shrink it, or cut a notch (Paste) or a HOLE — a reverse-wound subpath, like
+  Search's lens and the Lock keyhole — into the ground. No `<mask>`. Parts left beside a cut stay
+  at least 2.4 wide. A gap centred on the box cannot be 1.2 AND on whole pixels, so centred gaps
+  are 2.4 (Cell Styles). `npm run check:icon-contact` (`app/scripts/icon-accent-contact.mjs`)
+  measures this in Chromium from the source against
+  `app/scripts/icon-accent-contact.allowlist.json`, where the icons that still break it are pinned
+  and may only shrink. Do not cut a gap round a pressed-toggle icon without re-measuring: on the
+  Dark pressed tint the grey itself is only 2.66:1.
 - **SOFT is translucent, so soft shapes never overlap** (the overlap paints darker) and STRONG /
   ACCENT are laid on top of SOFT, never under it.
 - **No colour literal anywhere under `app/src/api/icons/`** — no hex, `rgb()`, `hsl()` or named
@@ -69,10 +101,24 @@ by default because the control that hosts them already carries the name.
 
 ### 2.3 Shape
 
-- **Filled shapes**, not outlines. Rect corners `rx >= 1.4`.
-- **Nothing thinner than 3 grid units.** A line or arrow is a stroke of at least `MIN_STROKE` (2.6)
-  with round caps and joins — use the `line(channel, width = 3)` helper, which clamps. At the 20px
-  control size a 3-unit feature is 2.5 device pixels; that is what cured the blotchiness.
+- **Filled shapes**, not outlines. Rect corners `rx >= 1.4`, with two exceptions: a 3px pixel-grid
+  cell takes rx 0.75-1.0, because at 1.4 it paints as a plus sign (Merge Cells, Waterfall, Keyboard);
+  a 2.4-thick bar takes rx 1.2, a full pill.
+- **Nothing thinner than 3 grid units, with one exception.** A line or arrow is a stroke of at least
+  `MIN_STROKE` (2.6) with round caps and joins — use the `line(channel, width = 3)` helper, which
+  clamps. At the 20px control size a 3-unit feature is 2.5 device pixels; that is what cured the
+  blotchiness. The exception is `PIXEL_STROKE` (2.4, exactly two pixels), allowed only on a path made
+  of horizontal and vertical segments (M/L/H/V/Z) whose centre line is on the 1.2 grid; `line()`
+  passes it through and the unit test enforces the rule. A 2.6 line is 2.17 px and can never be crisp.
+  A filled bar may likewise be 2.4 thick when its edges are on the grid (the chart Baseline).
+- **Straight edges on whole pixels.** At 20px one pixel is 1.2 units (`PIXEL_GRID`). Every
+  horizontal and vertical edge (a rect side, or a stroke's centre plus or minus half its width) sits
+  on a multiple of 1.2, or it paints a half-covered grey row that reads as soft beside the crisp
+  ones. A multiple of 2.4 is also whole pixels at 150% and at the 30px tiles; prefer it when it costs
+  nothing at 20px, but 20px wins (the 2026-09-24 sharpening pass). A 3.6 stroke is crisp when its
+  centre is on an odd multiple of 0.6. Diagonals, curves and round caps always antialias. 24px and
+  28px (rail, launchers, band segments) cannot share this grid: a multiple of 1.2 is a whole pixel
+  there only at multiples of 6, so those sizes are not tuned.
 - **Lose shapes, don't gain them.** The rev-2 redraw took Chart Title from five shapes to two and
   Gridlines from five to three. Where a concept has an obvious detailed picture and an obvious simple
   one, the simple one wins (navIcons: *a "hierarchy" is three boxes and two lines, not an org chart*).
@@ -199,7 +245,8 @@ must be current). **Home** (`icons/home.tsx`, 38):
 5. **Run** `cd app && npx vitest run src/api/__tests__/ribbonIcons.test.tsx`. It checks, per key: a
    24-unit svg whose size follows the prop; no `<text>`; `findHardcodedColours` is `[]`; every
    fill/stroke is one of the four channels, with at least one SOFT or STRONG; not ACCENT and DANGER
-   together; no stand-alone stroke under `MIN_STROKE`; and it scans the folder's SOURCE for hex /
+   together; no stand-alone stroke under `MIN_STROKE` except `PIXEL_STROKE` on a pixel-aligned
+   horizontal/vertical path; and it scans the folder's SOURCE for hex /
    rgb / hsl and `<text>`. The chrome hex ban in `app/eslint.boundaries.js` covers
    `src/api/icons/**` with no exemptions.
 6. **Look at it** at 20 and 30, in Light and Dark, beside its neighbours. The test cannot see
@@ -213,6 +260,28 @@ Draw it in the same language through the facade — `import { IconFrame, SOFT, S
 from "@api/icons"` — rather than inventing a fifth style. `AddInGlyph` in `AddInsRibbonSection.tsx`
 is the worked example (a soft body under a strong outline, tokens only). If more than one extension
 would use it, it is a key: propose it for the shared set instead.
+
+### Replacing a drawing with the owner's own SVG
+
+The owner designs replacements in an SVG editor and drops them in `icons/` at the repo root (one
+file per button, icon only, no text). FormatPainter, MergeCells and ClearFormatting were converted
+this way on 2026-09-24; their doc comments list every departure from the owner's file and why. The
+conversion rules, learned on those three:
+
+- **Scale 64 -> 24 is x0.375, then fit the set's 1.5-2.5 margins.** Owner drawings tend to fill the
+  whole box.
+- **Colours map to channels by role, never literally:** the owner's dark greys -> STRONG, light
+  grey -> SOFT, green -> ACCENT. The owner's own colour choice wins over the set's habits (Clear
+  Formatting's green eraser tip is ACCENT, not DANGER).
+- **Every line under 2.6 units must change:** an owner's 1.7-2.5 stroke at 64 is 0.6-0.9 units.
+  Thicken it to 2.6 and move it clear of its neighbours (Format Painter's wire), or redraw it as a
+  filled shape (Merge Cells' arrows became wedges, Clear Formatting's % rings became dots).
+- **Gaps of at least 1.2 units, edges on multiples of 1.2** (whole pixels at 20px). A 0.75-unit gap
+  smears into a grey line, and the Dark skin's STRONG vs ACCENT is only 1.46:1, so the gap is often
+  the only thing separating two channels.
+- **Render before and after.** `icons/tools/render.mjs` (sheet at 20/24/30/120px, Light and Dark,
+  beside the owner's file) and `icons/tools/pixels.mjs` (the real 20px pixels magnified) run from
+  `app/` with Node and the installed Playwright Chromium; the owner judges from the sheets.
 
 ---
 

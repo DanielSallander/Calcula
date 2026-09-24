@@ -16,6 +16,8 @@ export {
   DANGER,
   DEFAULT_ICON_SIZE,
   MIN_STROKE,
+  PIXEL_STROKE,
+  PIXEL_GRID,
   line,
 } from "./frame";
 export type { RibbonIconProps, RibbonIconComponent, IconFrameProps } from "./frame";

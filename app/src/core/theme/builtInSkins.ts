@@ -96,6 +96,10 @@ export const contrastSkin: Skin = {
     [THEME_TOKENS.RIBBON_GROUP_LABEL_FG]: "#1f2937",
     [THEME_TOKENS.ICON_FILL_SOFT]: "#7a7a7a",
     [THEME_TOKENS.STATE_ACCENT]: "#00543a",
+    // Icons use this green as-is: it is already darker than the light
+    // baseline's derived icon green, and darkening it again would leave it
+    // 1.62:1 under STRONG.
+    [THEME_TOKENS.ICON_ACCENT]: "var(--state-accent)",
     [THEME_TOKENS.RIBBON_FRAME_BG]: "#ffffff",
   },
 };

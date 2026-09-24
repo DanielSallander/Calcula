@@ -32,6 +32,36 @@ export function luminance(rgb: [number, number, number]): number {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
+const toHex = (rgb: number[]): string =>
+  "#" + rgb.map((v) => Math.round(Math.min(255, Math.max(0, v))).toString(16).padStart(2, "0")).join("");
+const toLinear = (v: number): number => {
+  const s = v / 255;
+  return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+};
+const fromLinear = (v: number): number =>
+  255 * (v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055);
+
+/**
+ * What the browser paints for `color-mix(in oklab, <hex> <p>%, black)`.
+ * Black is the OKLab origin, so the mix scales L, a and b by p; the cube
+ * in the OKLab -> LMS step makes that p^3 in LMS, and linear sRGB is linear
+ * in LMS, so the result is simply linear sRGB x p^3 (always in gamut, hue
+ * kept). Chromium paints exactly this: #047857 at 88% -> #036448.
+ */
+export function mixWithBlackOklab(hex: string, fraction: number): string {
+  const rgb = parseHex(hex);
+  if (!rgb) throw new Error(`not plain hex: ${hex}`);
+  return toHex(rgb.map((v) => fromLinear(toLinear(v) * fraction ** 3)));
+}
+
+/** `fg` at `alpha` over an opaque `bg`, in sRGB (what color-mix(in srgb, fg a%, transparent) paints on bg). */
+export function compositeOver(fg: string, alpha: number, bg: string): string {
+  const f = parseHex(fg);
+  const b = parseHex(bg);
+  if (!f || !b) throw new Error(`not a plain hex pair: ${fg} / ${bg}`);
+  return toHex(f.map((v, i) => v * alpha + b[i] * (1 - alpha)));
+}
+
 /** WCAG contrast ratio of two plain-hex colours (order does not matter). */
 export function contrast(a: string, b: string): number {
   const ca = parseHex(a);

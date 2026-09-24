@@ -222,8 +222,8 @@ fallback equals the light value), `layoutThemeParity.test.ts` (reads `theme.ts`)
 | `--kbd-bg` | rgba(255,255,255,.16) | rgba(17,24,39,.10) | shortcut chip |
 | `--badge-bg` / `--badge-fg` | var(--accent-color) / #ffffff | same | |
 | **Icons** (see ICONS.md) ||||
-| `--icon-fill-soft` | color-mix(in srgb, currentColor 30%, transparent) | 34% | a tint of the foreground, not a grey |
-| `--icon-accent` | var(--state-accent) | same | **repointed** from var(--accent-primary) |
+| `--icon-fill-soft` | color-mix(in srgb, currentColor 50%, transparent) | 45% | a tint of the foreground, not a grey; 30/34 until 2026-09-24 (too faint, see ICONS.md) |
+| `--icon-accent` | color-mix(in oklab, var(--state-accent) 88%, black) = #036448 | var(--state-accent) | **repointed** from var(--accent-primary); light one step darker 2026-09-24 (see ICONS.md 2.2) |
 | `--icon-danger` | #c42b1c | #f87171 | |
 | **Contextual tab accents** (>= 4.5:1 on the frame) ||||
 | `--tab-accent-chart` | #1d5fd0 | #7aa7ff | Chart Design |
@@ -256,7 +256,9 @@ Three values that are decisions, not transcriptions:
   asserts `--state-accent` >= 3:1 against `--bg-surface` and `--ribbon-cluster-bg`, and every tab
   accent >= 4.5:1 against `--ribbon-frame-bg`, in both baselines.
 - **`--icon-accent` follows `--state-accent`**, for the same reason: at #10b981 the duotone's accent
-  channel read 2.5:1 on the cluster and collapsed to a thin mark.
+  channel read 2.5:1 on the cluster and collapsed to a thin mark. In Light it is the state colour
+  one step darker (a color-mix, still a reference), so it sits between the 50% grey and near-black;
+  see ICONS.md 2.2.
 
 **High contrast** (`HIGH_CONTRAST` in `skinLoader.ts`) gains the rows the redesign needed, because
 chrome moved OFF tokens that table already strengthened: a control edge used to be

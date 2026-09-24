@@ -167,8 +167,14 @@ export const defaultTheme: Record<string, string> = {
   // --- Ribbon icon accents (@api ribbonIcons) ---
   // The accent channel of the duotone icon set follows the STATE colour, not
   // the brand green: an icon's accent is a small filled shape on the band, and
-  // #10b981 is only ~2.5:1 there.
-  [THEME_TOKENS.ICON_ACCENT]: 'var(--state-accent)',
+  // #10b981 is only ~2.5:1 there. In light it is the state colour one step
+  // DARKER (#047857 -> #036448): the green has to sit between the 50% grey
+  // and near-black, and no single green clears 3:1 from both (the best is
+  // 2.2 each). #036448 is 1.97:1 on the grey (was 1.50), 2.47 under STRONG
+  // (was 3.23) and 6.5 on the cluster; the redrawn icons give the green a
+  // pixel of background instead (docs/design/ICONS.md 2.2). Still a
+  // reference, so a skin or user accent recolours the icons in its own hue.
+  [THEME_TOKENS.ICON_ACCENT]: 'color-mix(in oklab, var(--state-accent) 88%, black)',
   [THEME_TOKENS.ICON_DANGER]: '#c42b1c',
 
   // --- Calcula Clusters: shape + motion ---
@@ -221,7 +227,10 @@ export const defaultTheme: Record<string, string> = {
   [THEME_TOKENS.BADGE_FG]: '#ffffff',
 
   // --- Calcula Clusters: duotone icon ground ---
-  [THEME_TOKENS.ICON_FILL_SOFT]: 'color-mix(in srgb, currentColor 30%, transparent)',
+  // 50% renders #82868f on the cluster (3.3:1, the WCAG 1.4.11 floor for a
+  // graphic) and keeps STRONG 4.9:1 above it. 30% rendered #afb2b8 at 1.9:1,
+  // which read as disabled. 55% turns the tile icons into dark blocks.
+  [THEME_TOKENS.ICON_FILL_SOFT]: 'color-mix(in srgb, currentColor 50%, transparent)',
 
   // --- Calcula Clusters: contextual tab accents (each >= 4.5:1 on the frame) ---
   [THEME_TOKENS.TAB_ACCENT_CHART]: '#1d5fd0',

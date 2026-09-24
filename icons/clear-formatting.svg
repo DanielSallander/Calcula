@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <!-- Percent sign -->
+  <circle cx="9" cy="10" r="3.5" stroke="#4A5068" stroke-width="2.5"/>
+  <circle cx="21" cy="24" r="3.5" stroke="#4A5068" stroke-width="2.5"/>
+  <path d="M23 6 L7 28" stroke="#4A5068" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Eraser, tilted 45 degrees -->
+  <g transform="rotate(-45 40 38)">
+    <!-- Tip -->
+    <path d="M35 30 H26 A3 3 0 0 0 23 33 V43 A3 3 0 0 0 26 46 H35 Z" fill="#4E9A5F"/>
+    <!-- Body -->
+    <path d="M37 30 H54 A3 3 0 0 1 57 33 V43 A3 3 0 0 1 54 46 H37 Z" fill="#4A5068"/>
+  </g>
+</svg>

@@ -24,6 +24,7 @@
     "gen:model-fixture": "node ../tests/fixtures/model/gen-sales-star.mjs",
     "check:intents": "node ../tests/eval/gen-intents.mjs --check",
     "check:model-fixture": "node ../tests/fixtures/model/gen-sales-star.mjs --check",
+    "check:icon-contact": "node scripts/icon-accent-contact.mjs",
     "fetch:llama-server": "node scripts/fetch-llama-server.mjs",
     "check:llama-server": "node scripts/fetch-llama-server.mjs --check",
     "fetch:builtin-model": "node scripts/fetch-builtin-model.mjs",
