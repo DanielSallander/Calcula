@@ -45,34 +45,50 @@ function hasUnboundedDeps(spec: ChartSpec): boolean {
  * (coordinates only) or a bound param's cell. Unbounded-dependency charts return
  * true (conservative).
  *
- * Sheet-aware via the ACTIVE sheet, NOT spec.data.sheetIndex: a coordinate chart
- * reads its cells through getViewportCells, which is active-sheet-only (a
- * coordinate range and a same-sheet param ref can't read cross-sheet), so ONLY an
- * active-sheet change can affect it. A change with no `sheetIndex` is assumed
- * active (the historical implicit contract); a change tagged with another sheet is
- * ignored (it can't be in the chart's read-set). Gating on spec.data.sheetIndex
- * would be wrong — the fetch ignores it, so when chart placement and data sheet
- * diverge a real active-sheet edit would be missed (under-invalidation). Pure.
+ * TWO SHEETS, TWO RULES.
+ *
+ *   - The DATA range is read from the chart's SOURCE sheet
+ *     (`sourceSheetIndex`: the data ref's sheet id mapped to the live index, or
+ *     its `sheetIndex` when it has no id — see
+ *     `dataSourceResolver.peekRangeRefSheetIndex`). The reader reads exactly
+ *     that sheet (`getRangeCellsTyped(..., sheetIndex)`), so exactly a change ON
+ *     that sheet can affect it: a change tagged `sheetIndex: s` intersects when
+ *     `s === sourceSheetIndex` and the cell is in the bbox, and an UNTAGGED
+ *     change means the active sheet (the historical implicit contract), so it
+ *     intersects only while the source sheet is the active one. This is what
+ *     lets a chart on a CANVAS repaint when its data sheet is edited — and why
+ *     keying on the active sheet, as this used to, left it frozen.
+ *     `sourceSheetIndex === null` means "not known right now" (a cold id cache,
+ *     or a source sheet that has just been deleted): the answer is then true,
+ *     because a skipped invalidation is the one mistake this function must
+ *     never make.
+ *   - A PARAM cell is read from the ACTIVE sheet (`resolveParamCell` — a param
+ *     ref is same-sheet only, and the sheet it is written back to is the active
+ *     one), so a param change still counts only when it is on the active sheet.
+ *
+ * Pure.
  */
 export function chartIntersectsChanges(
   spec: ChartSpec,
   changes: ReadonlyArray<ChangedCell>,
   activeSheetIndex: number,
+  sourceSheetIndex: number | null,
 ): boolean {
   if (changes.length === 0) return false;
   if (hasUnboundedDeps(spec)) return true;
+  if (sourceSheetIndex === null) return true;
 
   const d = spec.data as DataRangeRef;
-  const onActiveSheet = (c: ChangedCell): boolean => (c.sheetIndex ?? activeSheetIndex) === activeSheetIndex;
+  const sheetOf = (c: ChangedCell): number => c.sheetIndex ?? activeSheetIndex;
   for (const c of changes) {
-    if (!onActiveSheet(c)) continue;
+    if (sheetOf(c) !== sourceSheetIndex) continue;
     if (c.row >= d.startRow && c.row <= d.endRow && c.col >= d.startCol && c.col <= d.endCol) return true;
   }
   // A change to a bound param's cell affects the chart even outside the data bbox.
   for (const p of spec.params ?? []) {
     if (!p.cellRef) continue;
     const t = parseParamCellTarget(p.cellRef);
-    if (t && changes.some((c) => onActiveSheet(c) && c.row === t.row && c.col === t.col)) return true;
+    if (t && changes.some((c) => sheetOf(c) === activeSheetIndex && c.row === t.row && c.col === t.col)) return true;
   }
   return false;
 }

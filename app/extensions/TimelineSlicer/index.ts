@@ -67,6 +67,12 @@ import { applyTimelineFilter } from "./lib/timelineSlicerFilterBridge";
 import { timelineBackend } from "./lib/timelineBackend";
 import { TimelineSlicerEvents } from "./lib/timelineSlicerEvents";
 import type { TimelineLevel } from "./lib/timelineSlicerTypes";
+import {
+  armPendingTimelineClick,
+  clearPendingTimelineClick,
+  takePendingTimelineClick,
+} from "./lib/timelinePendingClick";
+import { registerTimelineObjectSelection } from "./lib/timelineObjectSelection";
 
 // ============================================================================
 // Module State
@@ -74,7 +80,9 @@ import type { TimelineLevel } from "./lib/timelineSlicerTypes";
 
 let cleanupFunctions: Array<() => void> = [];
 let gridContainer: HTMLElement | null = null;
-let pendingClick: { timelineId: string; deferNarrow?: boolean } | null = null;
+// The pending click (armed on floatingObject:selected, consumed on mouseup)
+// lives in lib/timelinePendingClick.ts, so the rule that only a real mouse
+// press may arm it is testable.
 let lastMousedownCtrl = false;
 let dragStartPositions: Map<string, { x: number; y: number }> | null = null;
 
@@ -141,6 +149,11 @@ function activate(context: ExtensionContext): void {
     }),
   );
 
+  // Keyboard / programmatic selection (@api/objectSelection): a canvas sheet's
+  // Tab cycling selects timelines through this, never through the mouse route
+  // below, which arms a pending click the next mouseup anywhere would complete.
+  cleanupFunctions.push(registerTimelineObjectSelection());
+
   // -----------------------------------------------------------------------
   // Floating object events (selection, move, resize)
   // -----------------------------------------------------------------------
@@ -177,10 +190,10 @@ function activate(context: ExtensionContext): void {
       if (t) dragStartPositions.set(id, { x: t.x, y: t.y });
     }
 
-    pendingClick = {
+    armPendingTimelineClick({
       timelineId,
       deferNarrow: alreadySelected && wasMultiSelected && !lastMousedownCtrl,
-    };
+    });
   };
   window.addEventListener("floatingObject:selected", handleFloatingSelected);
   cleanupFunctions.push(() => {
@@ -192,7 +205,7 @@ function activate(context: ExtensionContext): void {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "timeline-slicer") return;
 
-    pendingClick = null;
+    clearPendingTimelineClick();
 
     const primaryId = detail.data?.timelineId as string;
     if (primaryId == null) return;
@@ -293,10 +306,10 @@ function activate(context: ExtensionContext): void {
       return;
     }
 
+    const pendingClick = takePendingTimelineClick();
     if (!pendingClick) return;
 
     const { timelineId, deferNarrow } = pendingClick;
-    pendingClick = null;
     dragStartPositions = null;
 
     if (deferNarrow) {
@@ -581,7 +594,7 @@ function deactivate(): void {
   resetStore();
   resetScrollOffsets();
   gridContainer = null;
-  pendingClick = null;
+  clearPendingTimelineClick();
   dragStartPositions = null;
   periodDragState = null;
 

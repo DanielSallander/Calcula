@@ -8884,6 +8884,12 @@ mod floating_range_lifecycle_tests;
 #[path = "floating_range_recalc_tests.rs"]
 mod floating_range_recalc_tests;
 
+/// Canvas sheets (M1): the kind authority and the write-refusal doors. A CHILD
+/// module of `data` for the same reason as above: it drives `update_cell_impl`.
+#[cfg(test)]
+#[path = "canvas_sheet_tests.rs"]
+mod canvas_sheet_tests;
+
 /// §2c follow-on — bulk range commands that rewrite cells must seed the ONE
 /// shared cascade, and cycles must be detected across sheet boundaries. Also a
 /// CHILD module of `data` for the same reason as above.

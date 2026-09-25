@@ -191,7 +191,7 @@ fn edges_survive_a_user_sheet_added_after_the_floating_range() {
     assert_eq!(number(&wb, info.backing_sheet_index, 0, 0), 10.0);
 
     // add_sheet rotates the object sheet to the tail and re-keys its edges.
-    crate::sheets::add_sheet_inner(&wb.state, &wb.file, None).expect("add sheet");
+    crate::sheets::add_sheet_inner(&wb.state, &wb.file, None, ::persistence::SheetKind::Worksheet).expect("add sheet");
     let new_backing =
         crate::floating_range::list_floating_ranges_inner(&wb.state)[0].backing_sheet_index;
     assert_eq!(new_backing, 2, "the object sheet rode to the tail");

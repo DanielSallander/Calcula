@@ -339,7 +339,8 @@ fn renaming_a_subscribed_sheet_is_allowed_and_keeps_the_mapping() {
         subs.subscriptions[0].sheets[0].local_sheet_id
     };
 
-    crate::sheets::rename_sheet_inner(&state, &file_state, 1, "Vendor KPIs".to_string(), false)
+    let pivot_state = crate::pivot::types::PivotState::new();
+    crate::sheets::rename_sheet_inner(&state, &file_state, &pivot_state, 1, "Vendor KPIs".to_string(), false)
         .expect("renaming a subscribed sheet is the subscriber's business");
 
     assert_eq!(state.sheet_names.read().unwrap()[1], "Vendor KPIs");

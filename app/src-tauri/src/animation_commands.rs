@@ -31,6 +31,23 @@ use engine::{Cell, CellValue, Grid, StyleRegistry};
 // Helpers
 // ============================================================================
 
+/// One run's restore buffer, filed by `anim_snapshot` and played back (and
+/// dropped) by `anim_restore`.
+///
+/// It names its sheet by STABLE ID, not by index. The index is only where the
+/// sheet was when playback started: drag its tab past another sheet mid-run and
+/// the index now names a different sheet -- a canvas included -- and a restore
+/// that trusted the caller's index wrote the snapshot's cells into that sheet's
+/// grid, where they were saved.
+#[derive(Debug, Clone, Default)]
+pub struct AnimSnapshot {
+    /// The sheet the cells were read from. `None` only for a sheet with no
+    /// stable id on file, which then falls back to the caller's index.
+    pub sheet_id: Option<identity::SheetId>,
+    /// The saved (cell coord, prior Cell) pairs; `None` = the cell was absent.
+    pub cells: Vec<((u32, u32), Option<Cell>)>,
+}
+
 /// Build a CellData snapshot from the grid (copy of scenario_manager's helper —
 /// kept local so the two modules stay independent).
 fn build_cell_data(
@@ -240,7 +257,19 @@ pub(crate) fn frame_effect(state: &AppState, token: &str) -> Result<DocumentEffe
 /// `anim_restore` can put the model back exactly. One token per driver run.
 #[tauri::command]
 pub fn anim_snapshot(state: State<AppState>, params: AnimSnapshotParams) -> AnimSnapshotResult {
+    anim_snapshot_inner(&state, params)
+}
+
+/// `anim_snapshot` over a plain reference, so the restore's sheet binding can be
+/// driven from a unit test (a `tauri::State` cannot be built in one).
+pub(crate) fn anim_snapshot_inner(state: &AppState, params: AnimSnapshotParams) -> AnimSnapshotResult {
     let sheet_idx = params.sheet_index;
+    // A CANVAS has no cells to drive: refusing the snapshot also refuses every
+    // frame of the run (a frame needs its snapshot on file), so no transient
+    // value ever sits in a canvas's hidden grid between frames.
+    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(state, sheet_idx, "animate cells") {
+        return AnimSnapshotResult { success: false, error: Some(e) };
+    }
     let grids = state.grids.read().unwrap();
     if sheet_idx >= grids.len() {
         return AnimSnapshotResult {
@@ -253,13 +282,17 @@ pub fn anim_snapshot(state: State<AppState>, params: AnimSnapshotParams) -> Anim
         .iter()
         .map(|&(r, c)| ((r, c), grids[sheet_idx].get_cell(r, c).cloned()))
         .collect();
+    // The sheet's stable id, read under the same `grids` guard as the cells
+    // (`grids` -> `sheet_ids` is the canonical order), so the pair describes one
+    // moment: a move cannot slip between reading the cells and naming the sheet.
+    let sheet_id = state.sheet_ids.read().unwrap().get(sheet_idx).copied();
     drop(grids);
 
     state
         .animation_snapshots
         .lock()
         .unwrap()
-        .insert(params.token, saved);
+        .insert(params.token, AnimSnapshot { sheet_id, cells: saved });
 
     AnimSnapshotResult {
         success: true,
@@ -283,6 +316,12 @@ pub fn anim_apply_frame(
         &state.calc_cancel,
     );
     let sheet_idx = params.sheet_index;
+
+    // The frame names its sheet independently of the snapshot, so it is gated
+    // on its own: a frame aimed at a CANVAS writes nothing. Before any lock.
+    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(&state, sheet_idx, "animate cells") {
+        return AnimationFrameResult { updated_cells: Vec::new(), error: Some(e) };
+    }
 
     // A frame may only be applied while the matching anim_snapshot is on file. This is
     // what makes "transient" checkable rather than remembered: no snapshot, no restore,
@@ -359,6 +398,27 @@ pub fn anim_apply_frame(
 /// idempotent.
 #[tauri::command]
 pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> AnimationFrameResult {
+    anim_restore_inner(&state, params)
+}
+
+/// Where a snapshot's sheet is NOW: the index its stable id resolves to, or the
+/// caller's index for a snapshot that carries no id. `None` = the sheet is gone.
+fn snapshot_sheet_index(state: &AppState, sheet_id: Option<identity::SheetId>, fallback: usize) -> Option<usize> {
+    match sheet_id {
+        Some(id) => state.sheet_ids.read().unwrap().iter().position(|s| *s == id),
+        None => Some(fallback),
+    }
+}
+
+/// `anim_restore` over a plain reference (see `anim_snapshot_inner`).
+///
+/// The target sheet comes from the SNAPSHOT, not from `params.sheet_index`,
+/// which is only where the sheet was when the caller last looked. Refused --
+/// with the snapshot left on file -- when that sheet is a canvas; refused and
+/// dropped when the sheet no longer exists (there is nothing left to restore
+/// into, and keeping it would keep a transient-write licence alive for a run
+/// that can never be put back).
+pub(crate) fn anim_restore_inner(state: &AppState, params: AnimRestoreParams) -> AnimationFrameResult {
     let _pass = crate::eval_budget::begin_pass(
         crate::eval_budget::EvalSurface::Background,
         &state.calc_cancel,
@@ -369,12 +429,47 @@ pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> Animat
     // and it also has nothing to restore -- the `None` arm below returns before any
     // write. So the token is REQUIRED here rather than optional: an absent one is a
     // refusal, not a licence to write undecided.
-    let Ok(effect) = frame_effect(&state, &params.token) else {
+    let Ok(effect) = frame_effect(state, &params.token) else {
         return AnimationFrameResult {
             updated_cells: Vec::new(),
             error: Some("No animation snapshot is registered for this token".to_string()),
         };
     };
+
+    // WHICH SHEET, decided BEFORE the snapshot leaves the registry. The id is
+    // copied out under the registry lock and the lock released; the index is
+    // then resolved and the kind checked, each store alone.
+    let snapshot_sheet_id = match state.animation_snapshots.lock().unwrap().get(&params.token) {
+        Some(snapshot) => snapshot.sheet_id,
+        None => {
+            return AnimationFrameResult {
+                updated_cells: Vec::new(),
+                error: None,
+            }
+        }
+    };
+    let Some(gate_idx) = snapshot_sheet_index(state, snapshot_sheet_id, params.sheet_index) else {
+        state.animation_snapshots.lock().unwrap().remove(&params.token);
+        return AnimationFrameResult {
+            updated_cells: Vec::new(),
+            error: Some(
+                "The sheet this animation snapshot was taken on no longer exists; nothing was restored"
+                    .to_string(),
+            ),
+        };
+    };
+    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(state, gate_idx, "animate cells") {
+        return AnimationFrameResult { updated_cells: Vec::new(), error: Some(e) };
+    }
+    if gate_idx != params.sheet_index {
+        crate::log_info!(
+            "ANIM",
+            "anim_restore: the snapshot's sheet moved from index {} to {} during playback; restoring it there",
+            params.sheet_index,
+            gate_idx
+        );
+    }
+
     let saved = state
         .animation_snapshots
         .lock()
@@ -390,10 +485,21 @@ pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> Animat
         }
     };
 
-    let sheet_idx = params.sheet_index;
-
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    // RE-RESOLVED under the grid locks (`grid` -> `grids` -> `sheet_ids`, the
+    // canonical order): a sheet moved between the gate and here is still
+    // found. Its kind cannot have changed -- a sheet's kind is fixed for its
+    // life and moves with it -- so the gate above still holds for it.
+    let Some(sheet_idx) = snapshot_sheet_index(state, saved.sheet_id, params.sheet_index) else {
+        return AnimationFrameResult {
+            updated_cells: Vec::new(),
+            error: Some(
+                "The sheet this animation snapshot was taken on no longer exists; nothing was restored"
+                    .to_string(),
+            ),
+        };
+    };
     let active_sheet = *state.active_sheet.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
     let styles = state.style_registry.read().unwrap();
@@ -415,6 +521,7 @@ pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> Animat
     // Option to unwrap here.
 
     let ops: Vec<((u32, u32), SetOp)> = saved
+        .cells
         .into_iter()
         .map(|((r, c), prior)| {
             let op = match prior {

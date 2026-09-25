@@ -254,6 +254,7 @@ describe("the four built-in skins", () => {
         THEME_TOKENS.TAB_ACCENT_SLICER,
         THEME_TOKENS.TAB_ACCENT_SPARKLINE,
         THEME_TOKENS.TAB_ACCENT_REPORT,
+        THEME_TOKENS.TAB_ACCENT_CANVAS,
       ]) {
         expect(contrast(t[tab], t[THEME_TOKENS.RIBBON_FRAME_BG]), tab).toBeGreaterThanOrEqual(4.5);
       }

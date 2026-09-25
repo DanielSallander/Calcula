@@ -11,6 +11,7 @@ import {
   getSheets,
 } from "@api";
 import type { DialogProps, ConnectionInfo } from "@api";
+import type { SheetInfo } from "@api/lib";
 import { emitAppEvent, AppEvents } from "@api/events";
 import { useDialogWindow } from "@api/dialogWindow";
 import {
@@ -48,6 +49,13 @@ import {
   onChartSpecEditorClosed,
 } from "../lib/crossWindowEvents";
 import { isSpecEditorWindowOpen, closeSpecEditorWindow } from "../lib/openSpecEditorWindow";
+import {
+  bindRangeText,
+  formatSheetQualifiedRange,
+  rangeRefDisplayText,
+  RANGE_FORMAT_MESSAGE,
+  type RangeBinding,
+} from "../lib/chartRangeBinding";
 
 import { DataTab } from "./tabs/DataTab";
 import { DesignTab } from "./tabs/DesignTab";
@@ -89,53 +97,38 @@ function selectionToRange(
   return `${toA1Notation(minRow, minCol)}:${toA1Notation(maxRow, maxCol)}`;
 }
 
+/** A qualified range for the auto-detected selection on the current sheet. */
 function buildSheetRange(sheetName: string, range: string): string {
-  if (/[^a-zA-Z0-9_]/.test(sheetName)) {
-    return `'${sheetName}'!${range}`;
-  }
-  return `${sheetName}!${range}`;
+  return formatSheetQualifiedRange(sheetName, range);
 }
 
-function parseRangeReference(
-  rangeRef: string,
-): { startRow: number; startCol: number; endRow: number; endCol: number } | null {
-  let ref = rangeRef;
-  const bangIndex = ref.lastIndexOf("!");
-  if (bangIndex !== -1) {
-    ref = ref.substring(bangIndex + 1);
+/** The placement rectangle an opener may hand the dialog (e.g. a canvas drop). */
+interface DialogPlacement {
+  sheetIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Read `dialogData.placement`, accepting it only when every field is a finite
+ * number (a partial rectangle is ignored rather than half-applied).
+ */
+export function readDialogPlacement(raw: unknown): DialogPlacement | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  const fields = ["sheetIndex", "x", "y", "width", "height"] as const;
+  for (const f of fields) {
+    if (typeof p[f] !== "number" || !Number.isFinite(p[f] as number)) return null;
   }
-
-  ref = ref.replace(/'/g, "").trim().toUpperCase();
-
-  const match = ref.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
-  if (!match) return null;
-
-  const startColLetters = match[1];
-  const startRowNum = parseInt(match[2], 10);
-  const endColLetters = match[3];
-  const endRowNum = parseInt(match[4], 10);
-
-  if (isNaN(startRowNum) || isNaN(endRowNum) || startRowNum < 1 || endRowNum < 1) {
-    return null;
-  }
-
-  let startCol = 0;
-  for (let i = 0; i < startColLetters.length; i++) {
-    startCol = startCol * 26 + (startColLetters.charCodeAt(i) - 64);
-  }
-  startCol -= 1;
-
-  let endCol = 0;
-  for (let i = 0; i < endColLetters.length; i++) {
-    endCol = endCol * 26 + (endColLetters.charCodeAt(i) - 64);
-  }
-  endCol -= 1;
-
+  if ((p.width as number) <= 0 || (p.height as number) <= 0) return null;
   return {
-    startRow: startRowNum - 1,
-    startCol,
-    endRow: endRowNum - 1,
-    endCol,
+    sheetIndex: p.sheetIndex as number,
+    x: p.x as number,
+    y: p.y as number,
+    width: p.width as number,
+    height: p.height as number,
   };
 }
 
@@ -239,6 +232,15 @@ export function CreateChartDialog({
   // `dialogData`'s object identity re-running the whole reset on every render.
   const requestedTab = (dialogData?.initialTab as string) ?? null;
 
+  // Canvas sheets (M4). An opener that knows where the chart goes (a canvas
+  // insert) hands the rectangle as `placement`; the source cells cannot say,
+  // because on a canvas they are on another sheet. `suppressAutoRange` asks
+  // the dialog not to turn the grid selection into a range -- and on a canvas
+  // it never does: a canvas has no cells, so its "selection" is not data.
+  const placement = readDialogPlacement(dialogData?.placement);
+  const suppressAutoRange = dialogData?.suppressAutoRange === true;
+  const isCanvasSurface = gridState.surface === "canvas";
+
   // Active tab
   const [activeTab, setActiveTab] = useState<TabId>("data");
 
@@ -329,6 +331,46 @@ export function CreateChartDialog({
   // Derive available axes from the parsed range
   const [availableAxes, setAvailableAxes] = useState<Array<{ index: number; label: string }>>([]);
 
+  // The workbook's sheets, read once per open. The range text is BOUND against
+  // this list: a typed "Sheet2!A1:B5" means Sheet2 (its index AND its stable
+  // id are stored), not whatever sheet the dialog was opened on.
+  const [sheetList, setSheetList] = useState<SheetInfo[]>([]);
+  const sheetListRef = useRef<SheetInfo[]>([]);
+  // Edit mode seeds the range field from the stored reference; the text last
+  // seeded, so a re-seed (once the sheet list arrives) never overwrites typing.
+  const editSeedRef = useRef<string>("");
+  const sourceRangeRef = useRef(sourceRange);
+  sourceRangeRef.current = sourceRange;
+
+  // The ACTIVE sheet, from Core's live grid state when it is there (it moves in
+  // the same reducer step as the sheet switch) and from this dialog's own
+  // sheet read otherwise. The auto-detected range is qualified by this name,
+  // so it must never be a previous open's.
+  const activeSheetName = gridState.sheetContext?.activeSheetName || currentSheetName;
+  const activeSheetIndex = gridState.sheetContext?.activeSheetIndex ?? currentSheetIndex;
+
+  const rangeBinding = useMemo<RangeBinding>(
+    () =>
+      bindRangeText(sourceRange, {
+        sheets: sheetList,
+        currentSheetIndex: activeSheetIndex,
+        currentSheetName: activeSheetName,
+        currentIsCanvas: isCanvasSurface,
+      }),
+    [sourceRange, sheetList, activeSheetIndex, activeSheetName, isCanvasSurface],
+  );
+  const boundRef: DataRangeRef | null = rangeBinding.ok ? rangeBinding.ref : null;
+  // Primitive identity for effects: which cells, on which sheet. The id is left
+  // out on purpose -- it names the same sheet the index does, and a key that
+  // changed when the sheet list merely ARRIVED would re-run series detection.
+  const boundRefKey = boundRef
+    ? `${boundRef.sheetIndex}|${boundRef.startRow}|${boundRef.startCol}|${boundRef.endRow}|${boundRef.endCol}`
+    : "";
+  // Why the typed range cannot be charted, in the reader's terms (null: fine,
+  // or nothing to say yet). Only meaningful for a range source.
+  const rangeError =
+    !isPivotMode && sourceMode === "range" && !rangeBinding.ok ? rangeBinding.message : null;
+
   // Compose the current spec from all state
   const currentSpec = useMemo((): ChartSpec | null => {
     let dataSource: ChartSpec["data"];
@@ -339,15 +381,8 @@ export function CreateChartDialog({
       if (!connectionId || !dslText.trim()) return null;
       dataSource = { type: "designQuery" as const, dslText, connectionId };
     } else {
-      const parsed = parseRangeReference(sourceRange);
-      if (!parsed) return null;
-      dataSource = {
-        sheetIndex: currentSheetIndex,
-        startRow: parsed.startRow,
-        startCol: parsed.startCol,
-        endRow: parsed.endRow,
-        endCol: parsed.endCol,
-      };
+      if (!rangeBinding.ok) return null;
+      dataSource = { ...rangeBinding.ref };
     }
 
     const spec: ChartSpec = {
@@ -369,7 +404,7 @@ export function CreateChartDialog({
       spec.markOptions = markOptions;
     }
     return spec;
-  }, [sourceRange, sourceMode, dslText, connectionId, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, specOverlay, currentSheetIndex, isPivotMode, pivotId]);
+  }, [rangeBinding, sourceMode, dslText, connectionId, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, specOverlay, isPivotMode, pivotId]);
 
   // Switch source mode; seed a starter design query the first time (Monaco has
   // no placeholder text).
@@ -435,6 +470,13 @@ export function CreateChartDialog({
       split.reset(); // Reset the settings/preview divider
       loadSheets();
 
+      // A new chart on a canvas (or one whose opener said so) starts with an
+      // EMPTY range: nothing is auto-detected, so a range left over from the
+      // previous open must not be offered as if it had been.
+      if (!isEditMode && (suppressAutoRange || isCanvasSurface)) {
+        setSourceRange("");
+      }
+
       // Load BI connections for the design-query source picker (non-fatal).
       chartsBackend
         .invoke<ConnectionInfo[]>("bi_get_connections", {})
@@ -450,10 +492,16 @@ export function CreateChartDialog({
           if (typeof spec.data === "string") {
             setSourceRange(spec.data);
           } else if (spec.data && "startRow" in spec.data) {
-            // DataRangeRef: convert to A1 string
-            const d = spec.data as { startRow: number; startCol: number; endRow: number; endCol: number };
-            const range = selectionToRange(d.startRow, d.startCol, d.endRow, d.endCol);
-            setSourceRange(currentSheetName ? buildSheetRange(currentSheetName, range) : range);
+            // DataRangeRef: show it qualified by its OWN sheet (found by id),
+            // never by the sheet the dialog is opened on -- on a canvas that
+            // would name the canvas. Until the sheet list is to hand the field
+            // stays empty; the effect below seeds it when the list arrives.
+            const d = spec.data as DataRangeRef;
+            const text = sheetListRef.current.length > 0
+              ? rangeRefDisplayText(d, sheetListRef.current, null)
+              : "";
+            editSeedRef.current = text;
+            setSourceRange(text);
           } else if (spec.data && (spec.data as { type?: string }).type === "designQuery") {
             const dq = spec.data as DesignQueryDataSource;
             setSourceMode("designQuery");
@@ -497,13 +545,30 @@ export function CreateChartDialog({
         }).catch(() => {});
       }
     }
-  }, [isOpen, isPivotMode, pivotId, isEditMode, editChartId, currentSheetName, requestedTab]);
+  }, [isOpen, isPivotMode, pivotId, isEditMode, editChartId, currentSheetName, requestedTab, suppressAutoRange, isCanvasSurface]);
+
+  // Edit mode, once the sheet list has arrived: show the stored reference
+  // qualified by its own sheet's CURRENT name (found by id, so a rename or a
+  // move since the chart was made is reflected). Only while the field still
+  // holds what was seeded -- the reader's own typing is never overwritten.
+  useEffect(() => {
+    if (!isOpen || !isEditMode || editChartId == null || sheetList.length === 0) return;
+    const d = getChartById(editChartId)?.spec.data;
+    if (!d || typeof d !== "object" || !("startRow" in d)) return;
+    const text = rangeRefDisplayText(d as DataRangeRef, sheetList, null);
+    if (sourceRangeRef.current !== editSeedRef.current || text === editSeedRef.current) return;
+    editSeedRef.current = text;
+    setSourceRange(text);
+  }, [isOpen, isEditMode, editChartId, sheetList]);
 
   // Use the user's selection as the data range. If the selection is a single
   // cell, auto-detect the surrounding data region; otherwise use the selection as-is.
-  // Skipped in pivot mode and design-query mode (data doesn't come from a range).
+  // Skipped in pivot mode and design-query mode (data doesn't come from a range),
+  // and on a canvas or when the opener asked (`suppressAutoRange`): a canvas
+  // has no cells, so its "selection" is not a data range.
   useEffect(() => {
-    if (!isOpen || hasAutoDetected || !currentSheetName || isPivotMode || sourceMode === "designQuery") return;
+    if (!isOpen || hasAutoDetected || !activeSheetName || isPivotMode || sourceMode === "designQuery") return;
+    if (suppressAutoRange || isCanvasSurface) return;
 
     const sel = gridState.selection;
     if (!sel) return;
@@ -521,7 +586,7 @@ export function CreateChartDialog({
         sel.endRow,
         sel.endCol,
       );
-      setSourceRange(buildSheetRange(currentSheetName, range));
+      setSourceRange(buildSheetRange(activeSheetName, range));
       return;
     }
 
@@ -531,7 +596,7 @@ export function CreateChartDialog({
         if (region) {
           const [startRow, startCol, endRow, endCol] = region;
           const range = selectionToRange(startRow, startCol, endRow, endCol);
-          setSourceRange(buildSheetRange(currentSheetName, range));
+          setSourceRange(buildSheetRange(activeSheetName, range));
         } else {
           const range = selectionToRange(
             sel.startRow,
@@ -539,7 +604,7 @@ export function CreateChartDialog({
             sel.endRow,
             sel.endCol,
           );
-          setSourceRange(buildSheetRange(currentSheetName, range));
+          setSourceRange(buildSheetRange(activeSheetName, range));
         }
       })
       .catch((err) => {
@@ -550,34 +615,22 @@ export function CreateChartDialog({
           sel.endRow,
           sel.endCol,
         );
-        setSourceRange(buildSheetRange(currentSheetName, range));
+        setSourceRange(buildSheetRange(activeSheetName, range));
       });
-  }, [isOpen, hasAutoDetected, currentSheetName, gridState.selection, sourceMode]);
+  }, [isOpen, hasAutoDetected, activeSheetName, gridState.selection, sourceMode, suppressAutoRange, isCanvasSurface]);
 
-  // Auto-detect series when source range changes
+  // Auto-detect series when the BOUND range changes (its cells or its sheet).
   useEffect(() => {
-    if (!sourceRange) {
+    if (!boundRef) {
       setAvailableAxes([]);
       setSeries([]);
       setPreviewData(null);
       return;
     }
 
-    const parsed = parseRangeReference(sourceRange);
-    if (!parsed) {
-      setAvailableAxes([]);
-      setSeries([]);
-      setPreviewData(null);
-      return;
-    }
-
-    const dataRange: DataRangeRef = {
-      sheetIndex: currentSheetIndex,
-      startRow: parsed.startRow,
-      startCol: parsed.startCol,
-      endRow: parsed.endRow,
-      endCol: parsed.endCol,
-    };
+    // Read from the sheet the text names (index + id), not the active sheet.
+    const dataRange: DataRangeRef = { ...boundRef };
+    const parsed = dataRange;
 
     // Build available axes
     if (orientation === "columns") {
@@ -605,7 +658,9 @@ export function CreateChartDialog({
       .catch((err) => {
         console.error("[CreateChartDialog] Series detection failed:", err);
       });
-  }, [sourceRange, hasHeaders, orientation, currentSheetIndex]);
+    // boundRefKey stands for boundRef (see its declaration).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boundRefKey, hasHeaders, orientation]);
 
   // Update preview when spec changes (also resolves cell references).
   // Composition containers (concat/facet/repeat) read their data via children /
@@ -686,6 +741,10 @@ export function CreateChartDialog({
   const loadSheets = async () => {
     try {
       const result = await getSheets();
+      // The list the range text binds against (by name -> index + id), and the
+      // edit-mode display resolves the stored ref's sheet from (by id).
+      sheetListRef.current = result.sheets;
+      setSheetList(result.sheets);
       const activeSheet = result.sheets.find((s) => s.index === result.activeIndex);
       if (activeSheet) {
         setCurrentSheetName(activeSheet.name);
@@ -707,6 +766,23 @@ export function CreateChartDialog({
     setIsLoading(true);
 
     try {
+      // A range source that does not bind says WHY before anything generic
+      // does (a canvas range without its sheet, a canvas named as the source,
+      // an unknown sheet, a malformed range).
+      if (!isPivotMode && sourceMode === "range") {
+        if (!sourceRange.trim()) {
+          throw new Error("Please enter a data range for the chart.");
+        }
+        if (!rangeBinding.ok) {
+          throw new Error(
+            rangeBinding.message ??
+              (sheetList.length === 0
+                ? "Still reading the workbook's sheets. Try again in a moment."
+                : RANGE_FORMAT_MESSAGE),
+          );
+        }
+      }
+
       if (!currentSpec) {
         throw new Error("Invalid chart configuration.");
       }
@@ -719,15 +795,6 @@ export function CreateChartDialog({
           throw new Error("Please enter a design query.");
         }
       } else if (!isPivotMode) {
-        if (!sourceRange.trim()) {
-          throw new Error("Please enter a data range for the chart.");
-        }
-
-        const parsed = parseRangeReference(sourceRange);
-        if (!parsed) {
-          throw new Error("Invalid range format. Use a range like Sheet1!A1:D10.");
-        }
-
         // Composition containers (concat/facet/repeat) get their series from
         // children / partitions, so an empty top-level series is valid for them.
         const isComposition = !!(currentSpec.concat || currentSpec.facet || currentSpec.repeat);
@@ -736,20 +803,28 @@ export function CreateChartDialog({
         }
       }
 
-      // Calculate pixel placement
+      // Pixel placement. An opener-supplied rectangle wins (a canvas insert
+      // knows where the chart goes). Otherwise, on a worksheet, the chart goes
+      // below its source cells as it always has; on a canvas the source cells
+      // are on another sheet, so their coordinates mean nothing here.
       const defaultCellWidth = 64;
       const defaultCellHeight = 20;
+      let placementSheetIndex = activeSheetIndex;
       let chartX = 50;
       let chartY = 50;
+      let chartWidth = 600;
+      let chartHeight = 400;
 
-      if (!isPivotMode && sourceMode === "range") {
-        const parsed = parseRangeReference(sourceRange)!;
-        chartX = parsed.startCol * defaultCellWidth;
-        chartY = (parsed.endRow + 2) * defaultCellHeight;
+      if (placement) {
+        placementSheetIndex = placement.sheetIndex;
+        chartX = placement.x;
+        chartY = placement.y;
+        chartWidth = placement.width;
+        chartHeight = placement.height;
+      } else if (!isPivotMode && sourceMode === "range" && boundRef && !isCanvasSurface) {
+        chartX = boundRef.startCol * defaultCellWidth;
+        chartY = (boundRef.endRow + 2) * defaultCellHeight;
       }
-
-      const chartWidth = 600;
-      const chartHeight = 400;
 
       if (isEditMode && editChartId != null) {
         // Replace the existing chart's spec wholesale — the dialog holds the
@@ -763,7 +838,7 @@ export function CreateChartDialog({
         emitAppEvent(AppEvents.GRID_REFRESH);
       } else {
         const chart = createChart(currentSpec, {
-          sheetIndex: currentSheetIndex,
+          sheetIndex: placementSheetIndex,
           x: chartX,
           y: chartY,
           width: chartWidth,
@@ -905,6 +980,7 @@ export function CreateChartDialog({
             <DataTab
               sourceRange={sourceRange}
               onSourceRangeChange={setSourceRange}
+              sourceRangeError={rangeError}
               sourceMode={isPivotMode ? "range" : sourceMode}
               onSourceModeChange={handleSourceModeChange}
               designQueryAvailable={!isPivotMode}
@@ -986,7 +1062,10 @@ export function CreateChartDialog({
 
         {/* Errors — full width, next to the button that refused. */}
         {error && <ErrorBar role="alert">{error}</ErrorBar>}
-        {!error && previewError && <ErrorBar role="alert">{previewError}</ErrorBar>}
+        {/* The range refusal is shown inline under the field on the Data tab;
+            from any other tab it has to be visible here instead. */}
+        {!error && rangeError && activeTab !== "data" && <ErrorBar role="alert">{rangeError}</ErrorBar>}
+        {!error && !rangeError && previewError && <ErrorBar role="alert">{previewError}</ErrorBar>}
 
         {/* Footer */}
         <Footer>

@@ -39,6 +39,7 @@ import type {
   NamedRange,
   NamedRangeCoords,
   NamedRangeResult,
+  SheetKindName,
   SheetsResult,
   TypedCellData,
   UndoResult,
@@ -59,7 +60,8 @@ import type { PivotTableInfo } from "@api/pivotTypes";
 export interface AppCliGateway {
   // --- Sheets --------------------------------------------------------------
   getSheets(): Promise<SheetsResult>;
-  addSheet(name?: string): Promise<SheetsResult>;
+  /** `kind` omitted = a worksheet; "canvas" adds a canvas page. */
+  addSheet(name?: string, kind?: SheetKindName): Promise<SheetsResult>;
   deleteSheet(index: number): Promise<SheetsResult>;
   renameSheet(index: number, newName: string): Promise<SheetsResult>;
   hideSheet(index: number, level?: "hidden" | "veryHidden"): Promise<SheetsResult>;
@@ -187,7 +189,7 @@ async function throughCommand(
 export function createLiveAppGateway(): AppCliGateway {
   return {
     getSheets: () => getSheets(),
-    addSheet: (name?: string) => addSheet(name),
+    addSheet: (name?: string, kind?: SheetKindName) => addSheet(name, kind),
     deleteSheet: (index: number) => deleteSheet(index),
     renameSheet: (index: number, newName: string) => renameSheet(index, newName),
     hideSheet: (index: number, level?: "hidden" | "veryHidden") => hideSheet(index, level),

@@ -29,6 +29,12 @@ type SourceMode = "range" | "designQuery";
 interface DataTabProps {
   sourceRange: string;
   onSourceRangeChange: (value: string) => void;
+  /**
+   * Why the typed range cannot be charted (a canvas range without its sheet, a
+   * canvas named as the source, an unknown sheet, a malformed range), shown
+   * right under the field. Null/absent: nothing to say.
+   */
+  sourceRangeError?: string | null;
   /** Which kind of data source this chart uses. */
   sourceMode: SourceMode;
   onSourceModeChange: (value: SourceMode) => void;
@@ -71,6 +77,7 @@ interface DataTabProps {
 export function DataTab({
   sourceRange,
   onSourceRangeChange,
+  sourceRangeError,
   sourceMode,
   onSourceModeChange,
   designQueryAvailable,
@@ -235,7 +242,17 @@ export function DataTab({
                 value={sourceRange}
                 onChange={(e) => onSourceRangeChange(e.target.value)}
                 placeholder="e.g., Sheet1!A1:D10"
+                aria-invalid={sourceRangeError ? true : undefined}
               />
+              {sourceRangeError && (
+                <span
+                  data-testid="chart-range-error"
+                  aria-live="polite"
+                  style={{ fontSize: "11px", color: "var(--text-error, #c42b1c)", marginTop: "4px", display: "block" }}
+                >
+                  {sourceRangeError}
+                </span>
+              )}
             </FieldGroup>
 
             <FieldGroup>

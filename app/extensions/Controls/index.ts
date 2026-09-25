@@ -171,6 +171,8 @@ import {
   macroRunnerUnavailableDiagnosis,
 } from "./lib/buttonClickDiagnosis";
 import { setControlMetadata, getControlMetadata, getAllControls, setControlProperty } from "./lib/controlApi";
+import { withControlAnchor, requestedSize } from "./lib/controlAnchors";
+import { registerControlObjectSelection } from "./lib/controlObjectSelection";
 import { controlsBackend } from "./lib/controlsBackend";
 import { PropertiesPane } from "./PropertiesPane/PropertiesPane";
 import { registerControlContextMenu } from "./lib/controlContextMenu";
@@ -483,6 +485,14 @@ function activate(context: ExtensionContext): void {
       removePicture: removePictureControlAt,
     }),
   );
+
+  // 0d. Keyboard / programmatic SELECTION (@api/objectSelection). A canvas
+  //     sheet cycles its objects with Tab, and `floatingObject:selected` cannot
+  //     be the route: that event means "a left press landed here", and its
+  //     handler below RUNS a button's script in run mode, emits shape:clicked
+  //     and opens the Properties pane. The provider selects and does nothing
+  //     else.
+  cleanupFns.push(registerControlObjectSelection());
 
   // 1. Register button cell decoration for rendering (embedded buttons)
   const unregDecoration = context.grid.decorations.register("button", drawButton, 10);
@@ -1502,107 +1512,140 @@ function cellOriginPixels(row: number, col: number): { x: number; y: number } {
   return { x, y };
 }
 
+/** The smallest button the anchored path makes, and the size of a positioned
+ *  button nobody gave a size to. */
+const BUTTON_MIN_WIDTH = 80;
+const BUTTON_MIN_HEIGHT = 28;
+
 /**
- * Create a floating button control at an anchor cell — THE one place a button
- * is made, for the ribbon's "Insert Button" and for every @api caller that comes
- * through the ButtonControlProvider seam.
+ * Create a floating button control — THE one place a button is made, for the
+ * ribbon's "Insert Button" and for every @api caller that comes through the
+ * ButtonControlProvider seam.
  *
  * It is one function on purpose. The recorded-macro "save as button" path used
  * to write its own control metadata and produced nothing visible, because a
  * button is three writes (backend metadata with the RIGHT property names,
  * floating-store registration, overlay region sync) and it only did the first.
  * Anything that duplicates this list drifts the next time a default changes.
+ *
+ * WHERE IT GOES. At the anchor cell's walked origin and at least the cell's
+ * size — the historical path, unchanged — or, when the request gives `x`/`y`,
+ * at exactly that point (a canvas sheet has no cells to walk). A request with a
+ * position and no anchor gets one ALLOCATED inside the same serialised step as
+ * the metadata write (`withControlAnchor`): a button REPLACES whatever an
+ * occupied anchor holds, so an anchor chosen outside that step could wipe a
+ * control another insert had just made.
  */
-async function createButtonControlAt(
+export async function createButtonControlAt(
   request: CreateButtonControlRequest,
 ): Promise<ButtonControlHandle> {
   const { getColumnWidth, getRowHeight } = await import("../../src/api/dimensions");
   const { getGridStateSnapshot } = await import("../../src/api/grid");
 
-  const { sheetIndex, row, col } = request;
-  const gridState = getGridStateSnapshot();
-  const defaultCellWidth = gridState?.config?.defaultCellWidth ?? 100;
-  const defaultCellHeight = gridState?.config?.defaultCellHeight ?? 24;
-  const columnWidths = gridState?.dimensions?.columnWidths ?? new Map();
-  const rowHeights = gridState?.dimensions?.rowHeights ?? new Map();
+  const { sheetIndex } = request;
+  const askedWidth = requestedSize("A button's width", request.width);
+  const askedHeight = requestedSize("A button's height", request.height);
 
-  // Calculate pixel position from cell bounds (sheet coordinates, no scroll)
-  let cellX = 0;
-  for (let c = 0; c < col; c++) {
-    cellX += getColumnWidth(c, defaultCellWidth, columnWidths);
-  }
-  let cellY = 0;
-  for (let r = 0; r < row; r++) {
-    cellY += getRowHeight(r, defaultCellHeight, rowHeights);
-  }
-  const cellWidth = getColumnWidth(col, defaultCellWidth, columnWidths);
-  const cellHeight = getRowHeight(row, defaultCellHeight, rowHeights);
+  return withControlAnchor(request, async ({ row, col }, position) => {
+    let btnX: number;
+    let btnY: number;
+    let btnWidth: number;
+    let btnHeight: number;
+    if (position) {
+      // Exactly where the caller asked. The anchor is identity only here, so
+      // its cell's size says nothing about this button's.
+      btnX = position.x;
+      btnY = position.y;
+      btnWidth = askedWidth ?? BUTTON_MIN_WIDTH;
+      btnHeight = askedHeight ?? BUTTON_MIN_HEIGHT;
+    } else {
+      const gridState = getGridStateSnapshot();
+      const defaultCellWidth = gridState?.config?.defaultCellWidth ?? 100;
+      const defaultCellHeight = gridState?.config?.defaultCellHeight ?? 24;
+      const columnWidths = gridState?.dimensions?.columnWidths ?? new Map();
+      const rowHeights = gridState?.dimensions?.rowHeights ?? new Map();
 
-  // Button size: at least the cell size, with a reasonable minimum
-  const btnWidth = Math.max(cellWidth, 80);
-  const btnHeight = Math.max(cellHeight, 28);
+      // Calculate pixel position from cell bounds (sheet coordinates, no scroll)
+      let cellX = 0;
+      for (let c = 0; c < col; c++) {
+        cellX += getColumnWidth(c, defaultCellWidth, columnWidths);
+      }
+      let cellY = 0;
+      for (let r = 0; r < row; r++) {
+        cellY += getRowHeight(r, defaultCellHeight, rowHeights);
+      }
+      const cellWidth = getColumnWidth(col, defaultCellWidth, columnWidths);
+      const cellHeight = getRowHeight(row, defaultCellHeight, rowHeights);
 
-  // Create control metadata with floating defaults
-  await setControlMetadata(sheetIndex, row, col, {
-    controlType: "button",
-    properties: {
-      text: { valueType: "static", value: request.label },
-      fill: { valueType: "static", value: "#e0e0e0" },
-      color: { valueType: "static", value: "#000000" },
-      borderColor: { valueType: "static", value: "#999999" },
-      fontSize: { valueType: "static", value: "11" },
-      embedded: { valueType: "static", value: "false" },
-      // Explicit: floating controls default UNPINNED, and the backend's
-      // moves_with_cells defaults an ABSENT property to "moves" (the right
-      // default for in-cell controls). Without writing it, the backend
-      // shifted this control's anchor on row inserts while the frontend held
-      // its pixels — divergence on the very first structural edit.
-      pinToGrid: { valueType: "static", value: "false" },
-      x: { valueType: "static", value: String(cellX) },
-      y: { valueType: "static", value: String(cellY) },
-      width: { valueType: "static", value: String(btnWidth) },
-      height: { valueType: "static", value: String(btnHeight) },
-      onSelect: { valueType: "static", value: request.onSelect ?? "" },
-      tooltip: { valueType: "static", value: request.tooltip ?? "" },
-      // LINK to a recorded macro by id, when asked. A macro-linked button holds
-      // only this 12-byte reference — no copied body — and the run-mode click
-      // path resolves+runs the CURRENT macro through @api/macroRunService. Only
-      // written when present, so ordinary buttons stay free of the property.
-      ...(request.macroRef
-        ? { [MACRO_REF_PROPERTY]: { valueType: "static", value: request.macroRef } }
-        : {}),
-    },
+      btnX = cellX;
+      btnY = cellY;
+      // Button size: at least the cell size, with a reasonable minimum
+      btnWidth = askedWidth ?? Math.max(cellWidth, BUTTON_MIN_WIDTH);
+      btnHeight = askedHeight ?? Math.max(cellHeight, BUTTON_MIN_HEIGHT);
+    }
+
+    // Create control metadata with floating defaults
+    await setControlMetadata(sheetIndex, row, col, {
+      controlType: "button",
+      properties: {
+        text: { valueType: "static", value: request.label },
+        fill: { valueType: "static", value: "#e0e0e0" },
+        color: { valueType: "static", value: "#000000" },
+        borderColor: { valueType: "static", value: "#999999" },
+        fontSize: { valueType: "static", value: "11" },
+        embedded: { valueType: "static", value: "false" },
+        // Explicit: floating controls default UNPINNED, and the backend's
+        // moves_with_cells defaults an ABSENT property to "moves" (the right
+        // default for in-cell controls). Without writing it, the backend
+        // shifted this control's anchor on row inserts while the frontend held
+        // its pixels — divergence on the very first structural edit.
+        pinToGrid: { valueType: "static", value: "false" },
+        x: { valueType: "static", value: String(btnX) },
+        y: { valueType: "static", value: String(btnY) },
+        width: { valueType: "static", value: String(btnWidth) },
+        height: { valueType: "static", value: String(btnHeight) },
+        onSelect: { valueType: "static", value: request.onSelect ?? "" },
+        tooltip: { valueType: "static", value: request.tooltip ?? "" },
+        // LINK to a recorded macro by id, when asked. A macro-linked button holds
+        // only this 12-byte reference — no copied body — and the run-mode click
+        // path resolves+runs the CURRENT macro through @api/macroRunService. Only
+        // written when present, so ordinary buttons stay free of the property.
+        ...(request.macroRef
+          ? { [MACRO_REF_PROPERTY]: { valueType: "static", value: request.macroRef } }
+          : {}),
+      },
+    });
+
+    // Add to floating store
+    const controlId = makeFloatingControlId(sheetIndex, row, col);
+    addFloatingControl({
+      id: controlId,
+      sheetIndex,
+      row,
+      col,
+      x: btnX,
+      y: btnY,
+      width: btnWidth,
+      height: btnHeight,
+      controlType: "button",
+    });
+
+    // Sync overlay regions and refresh
+    invalidateFloatingButtonCache(controlId);
+    syncFloatingControlRegions();
+    emitAppEvent(AppEvents.GRID_REFRESH);
+
+    return {
+      instanceId: controlId,
+      sheetIndex,
+      row,
+      col,
+      x: btnX,
+      y: btnY,
+      width: btnWidth,
+      height: btnHeight,
+    };
   });
-
-  // Add to floating store
-  const controlId = makeFloatingControlId(sheetIndex, row, col);
-  addFloatingControl({
-    id: controlId,
-    sheetIndex,
-    row,
-    col,
-    x: cellX,
-    y: cellY,
-    width: btnWidth,
-    height: btnHeight,
-    controlType: "button",
-  });
-
-  // Sync overlay regions and refresh
-  invalidateFloatingButtonCache(controlId);
-  syncFloatingControlRegions();
-  emitAppEvent(AppEvents.GRID_REFRESH);
-
-  return {
-    instanceId: controlId,
-    sheetIndex,
-    row,
-    col,
-    x: cellX,
-    y: cellY,
-    width: btnWidth,
-    height: btnHeight,
-  };
 }
 
 /** Delete the control at an anchor cell. Mirrors createButtonControlAt so a
@@ -1625,7 +1668,8 @@ async function removeButtonControlAt(anchor: ButtonControlAnchor): Promise<void>
 
 /**
  * Place a picture the document ALREADY HOLDS, for any caller that asks through
- * the feature-neutral seam (today: `api.createPicture` from the script broker).
+ * the feature-neutral seam (today: `api.createPicture` from the script broker,
+ * and a canvas sheet's Insert Picture at a snapped rectangle).
  *
  * The one image argument is a `media:` handle, and this is a PLACEMENT path, not
  * an ingress: there is no parameter here that could carry bytes, a path or a
@@ -1641,11 +1685,16 @@ async function removeButtonControlAt(anchor: ButtonControlAnchor): Promise<void>
  *     can never paint is worse than an error: it is a permanent broken-image box
  *     the user has to hunt down and delete, created by an operation that
  *     reported success.
+ *
+ * WHERE IT GOES: the anchor cell's walked origin, or exactly `x`/`y` when the
+ * request gives a position — with an anchor ALLOCATED, in the same serialised
+ * step as the write, when it names none (`withControlAnchor`). Both refusals
+ * run first, so a bad request never waits behind other inserts.
  */
-async function createPictureControlAt(
+export async function createPictureControlAt(
   request: CreatePictureControlRequest,
 ): Promise<PictureControlHandle> {
-  const { sheetIndex, row, col, mediaRef } = request;
+  const { sheetIndex, mediaRef } = request;
 
   if (!isMediaRef(mediaRef)) {
     throw new Error(
@@ -1663,62 +1712,74 @@ async function createPictureControlAt(
   }
 
   const { getColumnWidth, getRowHeight } = await import("../../src/api/dimensions");
-  const gridState = getGridStateSnapshot();
-  const defaultCellWidth = gridState?.config?.defaultCellWidth ?? 100;
-  const defaultCellHeight = gridState?.config?.defaultCellHeight ?? 24;
-  const columnWidths = gridState?.dimensions?.columnWidths ?? new Map();
-  const rowHeights = gridState?.dimensions?.rowHeights ?? new Map();
 
-  let cellX = 0;
-  for (let c = 0; c < col; c++) {
-    cellX += getColumnWidth(c, defaultCellWidth, columnWidths);
-  }
-  let cellY = 0;
-  for (let r = 0; r < row; r++) {
-    cellY += getRowHeight(r, defaultCellHeight, rowHeights);
-  }
+  return withControlAnchor(request, async ({ row, col }, position) => {
+    let picX: number;
+    let picY: number;
+    if (position) {
+      picX = position.x;
+      picY = position.y;
+    } else {
+      const gridState = getGridStateSnapshot();
+      const defaultCellWidth = gridState?.config?.defaultCellWidth ?? 100;
+      const defaultCellHeight = gridState?.config?.defaultCellHeight ?? 24;
+      const columnWidths = gridState?.dimensions?.columnWidths ?? new Map();
+      const rowHeights = gridState?.dimensions?.rowHeights ?? new Map();
 
-  // A decode failure (natural size 0) after the bytes RESOLVED is not a reason
-  // to refuse: the host already proved the header, so the picture exists and
-  // will paint. `pictureLayoutSize` lays it out at the standard box instead.
-  const { width, height } = pictureLayoutSize(request, natural);
+      let cellX = 0;
+      for (let c = 0; c < col; c++) {
+        cellX += getColumnWidth(c, defaultCellWidth, columnWidths);
+      }
+      let cellY = 0;
+      for (let r = 0; r < row; r++) {
+        cellY += getRowHeight(r, defaultCellHeight, rowHeights);
+      }
+      picX = cellX;
+      picY = cellY;
+    }
 
-  await setControlMetadata(sheetIndex, row, col, {
-    controlType: "image",
-    properties: {
-      src: { valueType: "static", value: mediaRef },
-      opacity: { valueType: "static", value: "1" },
-      rotation: { valueType: "static", value: "0" },
-      // Explicit unpinned — see the floating-button creation above.
-      pinToGrid: { valueType: "static", value: "false" },
-      x: { valueType: "static", value: String(cellX) },
-      y: { valueType: "static", value: String(cellY) },
-      width: { valueType: "static", value: String(width) },
-      height: { valueType: "static", value: String(height) },
-      // Only written when asked for: `listControls` reads this property for the
-      // object list, and an empty one would name every picture "".
-      ...(request.name ? { name: { valueType: "static", value: request.name } } : {}),
-    },
+    // A decode failure (natural size 0) after the bytes RESOLVED is not a reason
+    // to refuse: the host already proved the header, so the picture exists and
+    // will paint. `pictureLayoutSize` lays it out at the standard box instead.
+    const { width, height } = pictureLayoutSize(request, natural);
+
+    await setControlMetadata(sheetIndex, row, col, {
+      controlType: "image",
+      properties: {
+        src: { valueType: "static", value: mediaRef },
+        opacity: { valueType: "static", value: "1" },
+        rotation: { valueType: "static", value: "0" },
+        // Explicit unpinned — see the floating-button creation above.
+        pinToGrid: { valueType: "static", value: "false" },
+        x: { valueType: "static", value: String(picX) },
+        y: { valueType: "static", value: String(picY) },
+        width: { valueType: "static", value: String(width) },
+        height: { valueType: "static", value: String(height) },
+        // Only written when asked for: `listControls` reads this property for the
+        // object list, and an empty one would name every picture "".
+        ...(request.name ? { name: { valueType: "static", value: request.name } } : {}),
+      },
+    });
+
+    const controlId = makeFloatingControlId(sheetIndex, row, col);
+    addFloatingControl({
+      id: controlId,
+      sheetIndex,
+      row,
+      col,
+      x: picX,
+      y: picY,
+      width,
+      height,
+      controlType: "image",
+    });
+
+    invalidateImageCache(controlId);
+    syncFloatingControlRegions();
+    emitAppEvent(AppEvents.GRID_REFRESH);
+
+    return { instanceId: controlId, sheetIndex, row, col, x: picX, y: picY, width, height };
   });
-
-  const controlId = makeFloatingControlId(sheetIndex, row, col);
-  addFloatingControl({
-    id: controlId,
-    sheetIndex,
-    row,
-    col,
-    x: cellX,
-    y: cellY,
-    width,
-    height,
-    controlType: "image",
-  });
-
-  invalidateImageCache(controlId);
-  syncFloatingControlRegions();
-  emitAppEvent(AppEvents.GRID_REFRESH);
-
-  return { instanceId: controlId, sheetIndex, row, col, x: cellX, y: cellY, width, height };
 }
 
 /** Delete the control at an anchor (no-op when there is none). */
@@ -1794,9 +1855,9 @@ function listShapeCatalogEntries(): ShapeCatalogEntry[] {
 }
 
 /**
- * Create a floating SHAPE at an anchor cell — THE one place a shape is made,
- * for the ribbon's shape gallery and for every @api caller that comes through
- * the ControlsProvider seam.
+ * Create a floating SHAPE — THE one place a shape is made, for the ribbon's
+ * shape gallery and for every @api caller that comes through the
+ * ControlsProvider seam.
  *
  * One recipe, two callers, for `createButtonControlAt`'s hard-won reason: a
  * shape is SEVENTEEN property keys, plus a pixel walk, plus three registrations,
@@ -1813,6 +1874,12 @@ function listShapeCatalogEntries(): ShapeCatalogEntry[] {
  *     and draws an empty shape; that exact bug shipped once, for buttons.
  *   * `x`/`y` are a per-column/per-row WALK, not `col * defaultWidth`. Column
  *     widths and row heights are irregular the moment a user resizes anything.
+ *     The one exception is a request that gives its own `x`/`y` (a canvas
+ *     sheet's snapped rectangle): then the shape goes exactly there.
+ *
+ * A request with a position and no anchor gets one ALLOCATED inside the same
+ * serialised step as the metadata write (`withControlAnchor`), so two inserts
+ * in flight can never be handed the same cell.
  *
  * TWO REFUSALS, both loud on purpose:
  *
@@ -1825,10 +1892,10 @@ function listShapeCatalogEntries(): ShapeCatalogEntry[] {
  *     derived from its ANCHOR, the wiped control's object script stays bound to
  *     that id and the new control silently inherits someone else's code.
  */
-async function createShapeControlAt(
+export async function createShapeControlAt(
   request: CreateShapeControlRequest,
 ): Promise<ShapeControlHandle> {
-  const { sheetIndex, row, col, shapeType } = request;
+  const { sheetIndex, shapeType } = request;
 
   const shapeDef = getShapeDefinition(shapeType);
   if (!shapeDef) {
@@ -1839,83 +1906,87 @@ async function createShapeControlAt(
     );
   }
 
-  const { getControlMetadata } = await import("./lib/controlApi");
-  const occupant = await getControlMetadata(sheetIndex, row, col);
-  if (occupant) {
-    throw new Error(
-      `The cell at row ${row}, column ${col} on sheet ${sheetIndex} already holds a ` +
-        `${occupant.controlType} control. One cell anchors at most one control, and a ` +
-        `control's script binding is derived from its anchor — creating here would ` +
-        `delete that control and hand its script to the new one. Delete it first, or ` +
-        `choose an empty cell.`,
-    );
-  }
+  return withControlAnchor(request, async ({ row, col }, position) => {
+    // Inside the serialised step, so no other insert can claim this anchor
+    // between the check and the write below.
+    const { getControlMetadata } = await import("./lib/controlApi");
+    const occupant = await getControlMetadata(sheetIndex, row, col);
+    if (occupant) {
+      throw new Error(
+        `The cell at row ${row}, column ${col} on sheet ${sheetIndex} already holds a ` +
+          `${occupant.controlType} control. One cell anchors at most one control, and a ` +
+          `control's script binding is derived from its anchor — creating here would ` +
+          `delete that control and hand its script to the new one. Delete it first, or ` +
+          `choose an empty cell.`,
+      );
+    }
 
-  const { x: cellX, y: cellY } = cellOriginPixels(row, col);
-  const shapeWidth = request.width ?? shapeDef.defaultWidth;
-  const shapeHeight = request.height ?? shapeDef.defaultHeight;
+    const { x: shapeX, y: shapeY } = position ?? cellOriginPixels(row, col);
+    const shapeWidth = request.width ?? shapeDef.defaultWidth;
+    const shapeHeight = request.height ?? shapeDef.defaultHeight;
 
-  // Create control metadata for the shape
-  await setControlMetadata(sheetIndex, row, col, {
-    controlType: "shape",
-    properties: {
-      shapeType: { valueType: "static", value: shapeType },
-      fill: { valueType: "static", value: "#4472C4" },
-      stroke: { valueType: "static", value: "#2F528F" },
-      strokeWidth: { valueType: "static", value: "1" },
-      // `text`, never `label` — see the header.
-      text: { valueType: "static", value: request.text ?? "" },
-      textColor: { valueType: "static", value: "#FFFFFF" },
-      fontSize: { valueType: "static", value: "11" },
-      fontBold: { valueType: "static", value: "false" },
-      fontItalic: { valueType: "static", value: "false" },
-      textAlign: { valueType: "static", value: "center" },
-      opacity: { valueType: "static", value: "1" },
-      rotation: { valueType: "static", value: "0" },
-      // Explicit unpinned — see the floating-button creation above.
-      pinToGrid: { valueType: "static", value: "false" },
-      x: { valueType: "static", value: String(cellX) },
-      y: { valueType: "static", value: String(cellY) },
-      width: { valueType: "static", value: String(shapeWidth) },
-      height: { valueType: "static", value: String(shapeHeight) },
-      // Only written when asked for: `listControls` reads this property for the
-      // object list, and an empty one would name every shape "".
-      ...(request.name ? { name: { valueType: "static", value: request.name } } : {}),
-    },
+    // Create control metadata for the shape
+    await setControlMetadata(sheetIndex, row, col, {
+      controlType: "shape",
+      properties: {
+        shapeType: { valueType: "static", value: shapeType },
+        fill: { valueType: "static", value: "#4472C4" },
+        stroke: { valueType: "static", value: "#2F528F" },
+        strokeWidth: { valueType: "static", value: "1" },
+        // `text`, never `label` — see the header.
+        text: { valueType: "static", value: request.text ?? "" },
+        textColor: { valueType: "static", value: "#FFFFFF" },
+        fontSize: { valueType: "static", value: "11" },
+        fontBold: { valueType: "static", value: "false" },
+        fontItalic: { valueType: "static", value: "false" },
+        textAlign: { valueType: "static", value: "center" },
+        opacity: { valueType: "static", value: "1" },
+        rotation: { valueType: "static", value: "0" },
+        // Explicit unpinned — see the floating-button creation above.
+        pinToGrid: { valueType: "static", value: "false" },
+        x: { valueType: "static", value: String(shapeX) },
+        y: { valueType: "static", value: String(shapeY) },
+        width: { valueType: "static", value: String(shapeWidth) },
+        height: { valueType: "static", value: String(shapeHeight) },
+        // Only written when asked for: `listControls` reads this property for the
+        // object list, and an empty one would name every shape "".
+        ...(request.name ? { name: { valueType: "static", value: request.name } } : {}),
+      },
+    });
+
+    // Add to floating store
+    const controlId = makeFloatingControlId(sheetIndex, row, col);
+    addFloatingControl({
+      id: controlId,
+      sheetIndex,
+      row,
+      col,
+      x: shapeX,
+      y: shapeY,
+      width: shapeWidth,
+      height: shapeHeight,
+      controlType: "shape",
+    });
+
+    // Sync overlay regions and refresh. The cache invalidate was MISSING from the
+    // ribbon path: the shape renderer keys its bitmap cache by control id, and a
+    // fresh control at an id a deleted one used to hold repainted the OLD shape.
+    invalidateShapeCache(controlId);
+    syncFloatingControlRegions();
+    emitAppEvent(AppEvents.GRID_REFRESH);
+
+    return {
+      instanceId: controlId,
+      shapeType,
+      sheetIndex,
+      row,
+      col,
+      x: shapeX,
+      y: shapeY,
+      width: shapeWidth,
+      height: shapeHeight,
+    };
   });
-
-  // Add to floating store
-  const controlId = makeFloatingControlId(sheetIndex, row, col);
-  addFloatingControl({
-    id: controlId,
-    sheetIndex,
-    row,
-    col,
-    x: cellX,
-    y: cellY,
-    width: shapeWidth,
-    height: shapeHeight,
-    controlType: "shape",
-  });
-
-  // Sync overlay regions and refresh. The cache invalidate was MISSING from the
-  // ribbon path: the shape renderer keys its bitmap cache by control id, and a
-  // fresh control at an id a deleted one used to hold repainted the OLD shape.
-  invalidateShapeCache(controlId);
-  syncFloatingControlRegions();
-  emitAppEvent(AppEvents.GRID_REFRESH);
-
-  return {
-    instanceId: controlId,
-    shapeType,
-    sheetIndex,
-    row,
-    col,
-    x: cellX,
-    y: cellY,
-    width: shapeWidth,
-    height: shapeHeight,
-  };
 }
 
 /**

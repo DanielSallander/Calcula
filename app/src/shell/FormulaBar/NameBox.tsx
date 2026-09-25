@@ -215,7 +215,11 @@ export function NameBox(): React.ReactElement {
         state.selection.endRow,
         state.selection.endCol
       )
-    : "A1";
+    : // A CANVAS has no cell cursor: an "A1" here would name a cell nobody
+      // can see. The box stays empty until an object publishes its label.
+      state.surface === "canvas"
+      ? ""
+      : "A1";
 
   // Check if the current selection matches a named range
   useEffect(() => {
@@ -547,9 +551,18 @@ export function NameBox(): React.ReactElement {
 
       const result = await setActiveSheetApi(index);
       await primeSheetSwitch(result.activeIndex);
-      const activeName = result.sheets[result.activeIndex]?.name ?? "";
+      // By the index FIELD, never list position: object-backed sheets are
+      // absent from the list while indices stay true (see SheetTabs.sheetAt).
+      const activeSheet = result.sheets.find((s) => s.index === result.activeIndex);
+      const activeName = activeSheet?.name ?? "";
 
-      dispatch(setActiveSheet(result.activeIndex, activeName));
+      dispatch(
+        setActiveSheet(
+          result.activeIndex,
+          activeName,
+          activeSheet?.kind === "canvas" ? "canvas" : "grid",
+        ),
+      );
       window.dispatchEvent(
         new CustomEvent("sheet:normalSwitch", {
           detail: { newSheetIndex: result.activeIndex, newSheetName: activeName },
@@ -570,17 +583,22 @@ export function NameBox(): React.ReactElement {
    */
   const goToAddress = useCallback(
     async (address: ParsedNameBoxAddress): Promise<string | null> => {
-      if (address.sheetName) {
-        const { sheets } = await getSheets();
-        const index = sheets.findIndex(
-          (s) => s.name.toLowerCase() === address.sheetName!.toLowerCase()
-        );
-        if (index === -1) {
-          return `There is no sheet named "${address.sheetName}" in this workbook.`;
-        }
-        if (index !== state.sheetContext.activeSheetIndex) {
-          await switchToSheet(index);
-        }
+      // The sheet is found by NAME and addressed by its TRUE index (the list
+      // omits object-backed sheets, so a list position is not an index), and a
+      // CANVAS is refused before anything moves: selecting on it is a no-op
+      // and scrolling to a cell would scroll the page out of view.
+      const { sheets } = await getSheets();
+      const target = address.sheetName
+        ? sheets.find((s) => s.name.toLowerCase() === address.sheetName!.toLowerCase())
+        : sheets.find((s) => s.index === state.sheetContext.activeSheetIndex);
+      if (address.sheetName && !target) {
+        return `There is no sheet named "${address.sheetName}" in this workbook.`;
+      }
+      if (target?.kind === "canvas") {
+        return `"${target.name}" is a canvas: a canvas sheet holds objects, not cells, so there is no cell to go to.`;
+      }
+      if (target && target.index !== state.sheetContext.activeSheetIndex) {
+        await switchToSheet(target.index);
       }
 
       // Merge expansion is a SINGLE-CELL behaviour. Expanding a typed range to
@@ -614,12 +632,18 @@ export function NameBox(): React.ReactElement {
         return `"${nr.name}" does not refer to a range that can be selected (${nr.refersTo}).`;
       }
 
-      if (coords.sheetIndex !== state.sheetContext.activeSheetIndex) {
+      {
         const { sheets } = await getSheets();
-        if (!sheets[coords.sheetIndex]) {
+        const target = sheets.find((s) => s.index === coords.sheetIndex);
+        if (!target) {
           return `"${nr.name}" refers to a sheet that is no longer in this workbook.`;
         }
-        await switchToSheet(coords.sheetIndex);
+        if (target.kind === "canvas") {
+          return `"${nr.name}" refers to "${target.name}", which is a canvas: a canvas sheet holds objects, not cells, so there is no cell to go to.`;
+        }
+        if (coords.sheetIndex !== state.sheetContext.activeSheetIndex) {
+          await switchToSheet(coords.sheetIndex);
+        }
       }
 
       selectRange(coords);
@@ -653,12 +677,18 @@ export function NameBox(): React.ReactElement {
       }
 
       const coords = result.resolved;
-      if (coords.sheetIndex !== state.sheetContext.activeSheetIndex) {
+      {
         const { sheets } = await getSheets();
-        if (!sheets[coords.sheetIndex]) {
+        const target = sheets.find((s) => s.index === coords.sheetIndex);
+        if (!target) {
           return `"${reference}" refers to a sheet that is no longer in this workbook.`;
         }
-        await switchToSheet(coords.sheetIndex);
+        if (target.kind === "canvas") {
+          return `"${reference}" refers to "${target.name}", which is a canvas: a canvas sheet holds objects, not cells, so there is no cell to go to.`;
+        }
+        if (coords.sheetIndex !== state.sheetContext.activeSheetIndex) {
+          await switchToSheet(coords.sheetIndex);
+        }
       }
 
       selectRange(coords);

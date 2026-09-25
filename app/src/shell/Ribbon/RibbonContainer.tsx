@@ -9,7 +9,7 @@
 //          The DOM contracts E2E tooling relies on are listed in
 //          RibbonContainer.styles.ts.
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { ExtensionRegistry } from "../../api/extensions";
 import type { RibbonTabDefinition, RibbonContext } from "../../api/extensions";
 import { useGridState } from "../../api/state";
@@ -41,6 +41,17 @@ export function RibbonContainer(): React.ReactElement {
   const state = useGridState();
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [tabs, setTabs] = useState<RibbonTabDefinition[]>([]);
+  // Mirrors of the selection for the registry listener below. The next tab is
+  // decided OUTSIDE the state updater: React StrictMode runs updaters twice, so
+  // an updater that consumed "the tab to return to" would consume it on the
+  // first run and fall back to Home on the second.
+  const activeTabIdRef = useRef<string | null>(null);
+  activeTabIdRef.current = activeTabId;
+  // Tab ids present at the previous registry change: an activate-on-register
+  // tab is selected only when it FIRST appears, never on every re-registration.
+  const knownTabIdsRef = useRef<Set<string>>(new Set());
+  // Where to go back to when an activate-on-register tab goes away.
+  const returnTabRef = useRef<{ from: string; to: string | null } | null>(null);
   const [isMinimized, setIsMinimized] = useState(false);
   // When minimized, clicking a tab temporarily shows the content, then re-hides on blur
   const [tempExpanded, setTempExpanded] = useState(false);
@@ -139,16 +150,42 @@ export function RibbonContainer(): React.ReactElement {
       const registeredTabs = ExtensionRegistry.getRibbonTabs();
       setTabs(registeredTabs);
 
-      setActiveTabId((current) => {
+      const known = knownTabIdsRef.current;
+      knownTabIdsRef.current = new Set(registeredTabs.map((t) => t.id));
+      const current = activeTabIdRef.current;
+      const has = (id: string | null) => id !== null && registeredTabs.some((t) => t.id === id);
+
+      let next: string | null;
+      const appeared = registeredTabs.find((t) => t.activateOnRegister && !known.has(t.id));
+      if (registeredTabs.length === 0) {
         // If no tabs, clear active
-        if (registeredTabs.length === 0) return null;
-        // If current tab still exists, keep it (don't auto-switch on new contextual tabs)
-        if (current && registeredTabs.some((t) => t.id === current)) return current;
-        // Current tab was removed (e.g. contextual tab hidden) — fall back to
-        // the first non-contextual tab, or the first tab if all are contextual
-        const fallback = registeredTabs.find((t) => !t.color) ?? registeredTabs[0];
-        return fallback.id;
-      });
+        next = null;
+      } else if (appeared) {
+        // A tab that owns a whole surface (the Canvas tab) is selected when it
+        // appears; remember where the user was so leaving can go back there.
+        if (current !== appeared.id) returnTabRef.current = { from: appeared.id, to: current };
+        next = appeared.id;
+      } else if (has(current)) {
+        // Current tab still exists: keep it (don't auto-switch on new contextual tabs)
+        next = current;
+      } else {
+        const back = returnTabRef.current;
+        if (back && back.from === current && has(back.to)) {
+          // The activate-on-register tab that took the selection went away:
+          // return to the tab the user had before it, not to Home.
+          next = back.to;
+        } else {
+          // Current tab was removed (e.g. contextual tab hidden) — fall back to
+          // the first non-contextual tab, or the first tab if all are contextual
+          const fallback = registeredTabs.find((t) => !t.color) ?? registeredTabs[0];
+          next = fallback.id;
+        }
+      }
+      if (returnTabRef.current && !has(returnTabRef.current.from)) {
+        returnTabRef.current = null;
+      }
+      activeTabIdRef.current = next;
+      setActiveTabId(next);
     };
 
     updateTabs();

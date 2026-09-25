@@ -1,8 +1,11 @@
 //! FILENAME: app/extensions/TimelineSlicer/components/InsertTimelineDialog.tsx
 // PURPOSE: Dialog for inserting timeline slicers. Lists available PivotTables
 //          and their date fields, and creates one timeline per checked field.
+// CONTEXT: The timelines go on the ACTIVE sheet — at `data.placement` when the
+//          caller passed one (a canvas sheet's snapped rectangle), else at the
+//          historical (20, 20) stack. The layout is ../lib/insertTimelinePlan.ts.
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { css } from "@emotion/css";
 import type { DialogProps } from "@api";
 import { useDialogWindow } from "@api/dialogWindow";
@@ -10,6 +13,7 @@ import { getSheets } from "@api";
 import { getAllPivotTables } from "@api/backend";
 import { getPivotDateFields } from "../lib/timeline-slicer-api";
 import { createTimelineAsync } from "../lib/timelineSlicerStore";
+import { readTimelinePlacement, timelineRects } from "../lib/insertTimelinePlan";
 
 // ============================================================================
 // Types
@@ -162,6 +166,8 @@ export function InsertTimelineDialog({
   const [activeSheetIndex, setActiveSheetIndex] = useState(0);
 
   const preselectedSourceId = data?.sourceId as string | undefined;
+  // Where the caller wants the timelines (sheet pixels, active sheet), if it said.
+  const placement = useMemo(() => readTimelinePlacement(data), [data]);
 
   useEffect(() => {
     if (isOpen) {
@@ -243,17 +249,17 @@ export function InsertTimelineDialog({
     setError(null);
 
     try {
-      let offsetY = 0;
-      for (const fieldName of checkedFields) {
+      const fieldNames = Array.from(checkedFields);
+      const rects = timelineRects(fieldNames.length, placement);
+      for (let i = 0; i < fieldNames.length; i++) {
+        const fieldName = fieldNames[i];
         await createTimelineAsync({
           name: fieldName,
           sheetIndex: activeSheetIndex,
-          x: 20,
-          y: 20 + offsetY,
+          ...rects[i],
           sourceId: source.id,
           fieldName,
         });
-        offsetY += 120;
       }
       onClose();
     } catch (err) {

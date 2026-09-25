@@ -306,7 +306,13 @@ export type RecordedGridEvent =
       hasHeaders: boolean;
     }
   | { kind: "activateSheet"; index: number }
-  | { kind: "addSheet"; index: number; name: string }
+  | {
+      kind: "addSheet";
+      index: number;
+      name: string;
+      /** Present only for a canvas: a replayed macro must add the same KIND. */
+      sheetKind?: "canvas";
+    }
   | { kind: "deleteSheet"; index: number }
   | { kind: "renameSheet"; index: number; newName: string };
 
@@ -1440,6 +1446,43 @@ export async function setCalculateBeforeSave(enabled: boolean): Promise<boolean>
 
 export type SheetVisibility = "visible" | "hidden" | "veryHidden";
 
+/**
+ * What kind of surface a sheet is: an ordinary cell "worksheet", or a "canvas"
+ * that shows only floating objects on a fixed page (Rust `SheetKind`,
+ * core/persistence). Fixed when the sheet is created.
+ */
+export type SheetKindName = "worksheet" | "canvas";
+
+/** A floating object hosted on a canvas, by its family's kind and stable id. */
+export interface CanvasObjectRef {
+  kind: string;
+  id: string;
+}
+
+/**
+ * A canvas sheet's layout (Rust `CanvasLayout`). Every size is LOGICAL px -- the
+ * same units as a floating object's x/y/width/height, so the snap grid and the
+ * objects it positions never disagree about scale.
+ */
+export interface CanvasLayout {
+  snapToGrid: boolean;
+  gridSizePx: number;
+  showGrid: boolean;
+  /** "16:9" | "4:3" | "letter" | "custom". */
+  pagePreset: string;
+  pageWidth: number;
+  pageHeight: number;
+  /** CSS hex colour; "" means the theme's default page colour. */
+  background: string;
+  /** Paint order, bottom first (absent when empty). */
+  zOrder?: CanvasObjectRef[];
+  /** Objects locked against move/resize (absent when empty). */
+  locked?: CanvasObjectRef[];
+}
+
+/** Partial update for a canvas layout (Rust `CanvasLayoutPatch`). */
+export type CanvasLayoutPatch = Partial<CanvasLayout>;
+
 export interface SheetInfo {
   index: number;
   name: string;
@@ -1455,6 +1498,15 @@ export interface SheetInfo {
    * `name` (shifts on rename).
    */
   sheetId?: string;
+  /**
+   * "worksheet" or "canvas". Rides in the same payload as `sheetId` so the tab
+   * strip, the Core surface switch and the Canvas ribbon tab learn it together
+   * with the list. Optional for the same reason `sheetId` is; absent means a
+   * worksheet.
+   */
+  kind?: SheetKindName;
+  /** The canvas's layout; absent for a worksheet. */
+  canvasLayout?: CanvasLayout;
 }
 
 export interface SheetsResult {
@@ -1514,9 +1566,16 @@ function announceSheetAdded(
   });
 }
 
-export async function addSheet(name?: string): Promise<SheetsResult> {
+/**
+ * Add a sheet at the end of the workbook and switch to it. `kind` defaults to
+ * a worksheet; "canvas" adds a canvas sheet with the default layout.
+ */
+export async function addSheet(name?: string, kind?: SheetKindName): Promise<SheetsResult> {
   const before = await sheetNamesBefore();
-  const result = await invoke<SheetsResult>("add_sheet", { name: name ?? null });
+  const result = await invoke<SheetsResult>("add_sheet", {
+    name: name ?? null,
+    kind: kind ?? null,
+  });
   announceSheetAdded(before, result, "new");
   // The sheet COLLECTION changed (§3cd). SheetTabs reloads its list from the
   // `sheets` domain; SHEET_ADDED above is a lifecycle notification that the tab
@@ -1529,9 +1588,30 @@ export async function addSheet(name?: string): Promise<SheetsResult> {
   const known = new Set(before.map((s) => s.name));
   const added = result.sheets.find((s) => !known.has(s.name));
   if (added) {
-    recordGridEvent({ kind: "addSheet", index: added.index, name: added.name });
+    recordGridEvent({
+      kind: "addSheet",
+      index: added.index,
+      name: added.name,
+      ...(added.kind === "canvas" ? { sheetKind: "canvas" as const } : {}),
+    });
   }
   return result;
+}
+
+/**
+ * Change a canvas sheet's layout (partial patch). `sheetIndex` defaults to the
+ * active sheet. Refused by the backend for a worksheet or an out-of-range value.
+ * The backend announces the change on `sheet:canvas-layout-changed`, which the
+ * Shell bridges to `AppEvents.CANVAS_LAYOUT_CHANGED`.
+ */
+export async function setCanvasLayout(
+  patch: CanvasLayoutPatch,
+  sheetIndex?: number,
+): Promise<CanvasLayout> {
+  return invoke<CanvasLayout>("set_canvas_layout", {
+    sheetIndex: sheetIndex ?? null,
+    patch,
+  });
 }
 
 export async function deleteSheet(index: number): Promise<SheetsResult> {

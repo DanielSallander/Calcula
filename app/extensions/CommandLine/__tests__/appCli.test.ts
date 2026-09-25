@@ -254,6 +254,26 @@ describe("sheet operations", () => {
     expect(allText(lines)).toContain("Report");
   });
 
+  it("adds a CANVAS sheet with kind=canvas, and labels it as one", async () => {
+    const { calls, lines, plan, ok } = await runApp("add sheet Dashboard kind=canvas");
+    expect(ok).toBe(true);
+    expect(calls.addSheet).toEqual([["Dashboard", "canvas"]]);
+    expect(plan.writeLabels).toEqual(["add canvas Dashboard"]);
+    expect(allText(lines)).toContain("Added canvas 'Dashboard'");
+  });
+
+  it("kind=worksheet is passed explicitly and keeps the sheet label", async () => {
+    const { calls, plan } = await runApp("add sheet Data kind=worksheet");
+    expect(calls.addSheet).toEqual([["Data", "worksheet"]]);
+    expect(plan.writeLabels).toEqual(["add sheet Data"]);
+  });
+
+  it("refuses an unknown kind= at PLAN time, before anything is added", () => {
+    expect(() => planApp("add sheet Report kind=sheet3")).toThrow(
+      /kind= expects worksheet or canvas \(got 'sheet3'\)/,
+    );
+  });
+
   it("renames via ->, bare pair, and 'to' — resolving the index live", async () => {
     for (const text of [
       "rename sheet Sheet2 -> Budget",

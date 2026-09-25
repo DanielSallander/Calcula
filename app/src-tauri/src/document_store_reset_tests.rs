@@ -1022,7 +1022,10 @@ fn animation_snapshots_do_not_survive_the_document() {
     let s = Stores::new();
     s.state.animation_snapshots.lock().unwrap().insert(
         "leak-probe-token".to_string(),
-        vec![((0, 0), Some(probe_cell("A-ORIGINAL")))],
+        crate::animation_commands::AnimSnapshot {
+            sheet_id: None,
+            cells: vec![((0, 0), Some(probe_cell("A-ORIGINAL")))],
+        },
     );
     assert_eq!(
         s.state.animation_snapshots.lock().unwrap().len(),

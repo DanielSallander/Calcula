@@ -247,6 +247,14 @@ pub fn scenario_show(
         params.sheet_index
     );
 
+    // A CANVAS has no cells for a scenario's changing cells to land in. The
+    // store cannot hold one there any more (add and merge both refuse a
+    // canvas), but a scenario that reached one before would otherwise write
+    // straight into the hidden grid. Refused before the effect.
+    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(&state, params.sheet_index, "show a scenario") {
+        return ScenarioShowResult { updated_cells: Vec::new(), error: Some(e) };
+    }
+
     // Find the scenario
     let scenarios = state.scenarios.read().unwrap();
     let sheet_scenarios = scenarios.get(&params.sheet_index);
@@ -417,6 +425,12 @@ pub fn scenario_summary(
         &state.calc_cancel,
     );
     crate::log_info!("SCENARIO", "Generating summary for sheet {}", params.sheet_index);
+
+    // The summary applies each scenario into the sheet's grid and restores it,
+    // leaving materialized cells behind: never on a canvas. Before the effect.
+    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(&state, params.sheet_index, "summarize scenarios") {
+        return ScenarioSummaryResult { scenario_names: Vec::new(), rows: Vec::new(), error: Some(e) };
+    }
 
     let scenarios_store = state.scenarios.read().unwrap();
     let sheet_scenarios = match scenarios_store.get(&params.sheet_index) {
@@ -660,6 +674,17 @@ pub fn scenario_merge(
         source_sheet_index,
         target_sheet_index
     );
+
+    // The same allowEditScenarios gate scenario_add passes -- merge was the one
+    // way in without it, and so the one way a scenario could reach a CANVAS
+    // (check_sheet_action refuses every cell-scope action there), after which
+    // Show would write its cells into the canvas's hidden grid. Before the
+    // effect, so a refusal leaves the document clean.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, target_sheet_index, "editScenarios", "merge scenarios",
+    ) {
+        return ScenarioResult { success: false, error: Some(e) };
+    }
 
     let effect = DocumentEffect::mutates(&file_state);
     let mut scenarios = state.scenarios.write(&effect).unwrap();

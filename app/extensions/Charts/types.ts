@@ -530,10 +530,27 @@ export interface SeriesRef {
 // Data Source
 // ============================================================================
 
-/** A cell range reference (0-indexed, inclusive). */
+/**
+ * A cell range reference (0-indexed, inclusive).
+ *
+ * WHICH SHEET: `sheetId` when present, `sheetIndex` only when it is absent.
+ * An index shifts on every sheet insert / delete / move and a name shifts on
+ * every rename, so a chart that follows its data must key on the workbook's
+ * stable sheet uuid. The resolver (lib/dataSourceResolver.ts) maps the id to
+ * the live index at read time and REFUSES a ref whose id no longer names a
+ * sheet -- it never falls back to the index or to a name, because that would
+ * silently chart some other sheet's cells.
+ *
+ * `sheetIndex` stays required: it is what a script or an MCP client can write,
+ * and it is the fallback for a ref authored before ids existed. Every authoring
+ * path (the Insert Chart dialog, the store's create, the load-time migration)
+ * stamps `sheetId` from it.
+ */
 export interface DataRangeRef {
-  /** Sheet index (0-based). */
+  /** Sheet index (0-based). Read only when `sheetId` is absent. */
   sheetIndex: number;
+  /** The source sheet's stable uuid (`SheetInfo.sheetId`); wins over `sheetIndex`. */
+  sheetId?: string;
   startRow: number;
   startCol: number;
   endRow: number;

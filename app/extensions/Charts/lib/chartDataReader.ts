@@ -1,9 +1,26 @@
 //! FILENAME: app/extensions/Charts/lib/chartDataReader.ts
 // PURPOSE: Read cell data from the grid and parse it into chart-ready series.
-// CONTEXT: Uses getViewportCells from the API to fetch data for a chart spec's
-//          data range, then organizes it into categories and numeric series.
+// CONTEXT: Reads a chart spec's data range FROM ITS OWN SHEET (the resolved
+//          `sheetIndex`, id-first -- see dataSourceResolver) through
+//          `getRangeCellsTyped`, then organizes it into categories and numeric
+//          series.
+//
+//          IT USED TO READ THE ACTIVE SHEET. Every read went through
+//          `getViewportCells`, which has no sheet parameter, so a range's
+//          `sheetIndex` was decoration: a worksheet chart only worked because
+//          it is only ever painted while its own sheet is active. A chart on a
+//          CANVAS sheet broke that -- its data is always on another sheet and
+//          the canvas under it has no cells -- so it read an empty grid.
+//
+//          SAME STRINGS AS BEFORE. The typed read's `display` is produced by the
+//          very formatter `get_viewport_cells` uses (`format_cell_value` is
+//          `format_cell_value_with_color(..).text`), so a worksheet chart parses
+//          the identical strings. Two shape differences are handled here: the
+//          result is SPARSE (absent cells stay ""), and the backend refuses more
+//          than 100,000 cells per call, so a larger range is read in bands (see
+//          `readRangeDisplayGrid`) instead of failing where the old read did not.
 
-import { getViewportCells } from "@api/lib";
+import { getRangeCellsTyped } from "@api/lib";
 import { indexToCol, isSandboxTransformMounted, runSandboxTransform } from "@api";
 
 import type {
@@ -19,7 +36,7 @@ import type {
   TidyField,
 } from "../types";
 import { isPivotDataSource, isDesignQueryDataSource } from "../types";
-import { resolveDataSource, resolveSpecReferences } from "./dataSourceResolver";
+import { resolveDataSource, resolveRangeRefSheet, resolveSpecReferences } from "./dataSourceResolver";
 import { applyTransformsAsync, type SandboxTransformRunner } from "./chartTransforms";
 import { resolveParams, selectionFilterCategories, applyAxisParamBindings } from "./chartParams";
 import { getPointSelection } from "../handlers/chartPointSelection";
@@ -47,6 +64,56 @@ const sandboxTransformRunner: SandboxTransformRunner = (type, data, transform, p
   if (params) for (const [k, v] of params) paramsObj[k] = v;
   return runSandboxTransform(type, data, transform, paramsObj) as Promise<ParsedChartData>;
 };
+
+// ============================================================================
+// Reading a range from its own sheet
+// ============================================================================
+
+/**
+ * The most cells one `getRangeCellsTyped` call may cover -- the backend's
+ * `MAX_TYPED_RANGE_CELLS` (app/src-tauri/src/commands/data.rs). A larger range
+ * is refused outright, so the reader bands it.
+ */
+export const TYPED_RANGE_READ_CAP = 100_000;
+
+/**
+ * Read a RESOLVED range's display strings into a dense `rows x cols` grid, from
+ * the range's own sheet (`ref.sheetIndex` -- the caller has already resolved
+ * the sheet id to the live index).
+ *
+ * The typed read is sparse: a cell the sheet does not hold is simply absent and
+ * stays "" here, exactly as a cell `getViewportCells` omitted did. A range
+ * larger than {@link TYPED_RANGE_READ_CAP} cells is read in row bands (and, for
+ * an absurdly wide range, column bands) of at most that many cells, one call
+ * after another, so a big source range still charts instead of failing.
+ */
+export async function readRangeDisplayGrid(ref: DataRangeRef): Promise<string[][]> {
+  const numRows = ref.endRow - ref.startRow + 1;
+  const numCols = ref.endCol - ref.startCol + 1;
+  const grid: string[][] = Array.from({ length: numRows }, () =>
+    Array(numCols).fill(""),
+  );
+  if (numRows <= 0 || numCols <= 0) return grid;
+
+  const colsPerBand = Math.min(numCols, TYPED_RANGE_READ_CAP);
+  const rowsPerBand = Math.max(1, Math.floor(TYPED_RANGE_READ_CAP / colsPerBand));
+
+  for (let r0 = ref.startRow; r0 <= ref.endRow; r0 += rowsPerBand) {
+    const r1 = Math.min(ref.endRow, r0 + rowsPerBand - 1);
+    for (let c0 = ref.startCol; c0 <= ref.endCol; c0 += colsPerBand) {
+      const c1 = Math.min(ref.endCol, c0 + colsPerBand - 1);
+      const cells = await getRangeCellsTyped(r0, c0, r1, c1, ref.sheetIndex);
+      for (const cell of cells) {
+        const r = cell.row - ref.startRow;
+        const c = cell.col - ref.startCol;
+        if (r >= 0 && r < numRows && c >= 0 && c < numCols) {
+          grid[r][c] = cell.display ?? "";
+        }
+      }
+    }
+  }
+  return grid;
+}
 
 // ============================================================================
 // Public API
@@ -152,31 +219,14 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   // Standard cell range data source
   const { hasHeaders, seriesOrientation } = resolvedSpec;
 
-  // Resolve the data source to concrete coordinates
+  // Resolve the data source to concrete coordinates AND its live sheet (a
+  // deleted source sheet throws here, and the renderer shows that message).
   const dataRef = await resolveDataSource(resolvedSpec.data);
 
-  // Fetch all cells in the data range
-  const cells = await getViewportCells(
-    dataRef.startRow,
-    dataRef.startCol,
-    dataRef.endRow,
-    dataRef.endCol,
-  );
-
-  // Build a 2D grid of display values
+  // A 2D grid of display values, read from the data's OWN sheet.
   const numRows = dataRef.endRow - dataRef.startRow + 1;
   const numCols = dataRef.endCol - dataRef.startCol + 1;
-  const grid: string[][] = Array.from({ length: numRows }, () =>
-    Array(numCols).fill(""),
-  );
-
-  for (const cell of cells) {
-    const r = cell.row - dataRef.startRow;
-    const c = cell.col - dataRef.startCol;
-    if (r >= 0 && r < numRows && c >= 0 && c < numCols) {
-      grid[r][c] = cell.display;
-    }
-  }
+  const grid = await readRangeDisplayGrid(dataRef);
 
   // Compile an encoding spec to the series model now that we know the headers.
   const headers = seriesOrientation === "columns"
@@ -441,19 +491,12 @@ async function resolveLookupSources(
  */
 async function readLookupRange(from: DataSource): Promise<ParsedChartData> {
   const ref = await resolveDataSource(from);
-  const detected = await autoDetectSeries(ref, true);
-
-  const cells = await getViewportCells(ref.startRow, ref.startCol, ref.endRow, ref.endCol);
+  // ONE read of the lookup's own sheet serves both the series detection and the
+  // parse (it used to read the range twice, both times from the active sheet).
+  const grid = await readRangeDisplayGrid(ref);
   const numRows = ref.endRow - ref.startRow + 1;
   const numCols = ref.endCol - ref.startCol + 1;
-  const grid: string[][] = Array.from({ length: numRows }, () => Array(numCols).fill(""));
-  for (const cell of cells) {
-    const r = cell.row - ref.startRow;
-    const c = cell.col - ref.startCol;
-    if (r >= 0 && r < numRows && c >= 0 && c < numCols) {
-      grid[r][c] = cell.display;
-    }
-  }
+  const detected = detectColumnSeries(grid, numRows, numCols, true, ref.startCol);
 
   return parseColumnOriented(grid, numRows, numCols, true, detected.categoryIndex, detected.series);
 }
@@ -618,42 +661,19 @@ function buildTidyData(
 }
 
 /**
- * Auto-detect series from a data range.
- * Called when creating a new chart to suggest default series mapping.
+ * Columns-orientation series detection over an already-read grid: the first
+ * column is the category, and every other column holding at least one number
+ * below the header becomes a series named by its header (or its column letter).
+ * Pure.
  */
-export async function autoDetectSeries(
-  dataRange: DataRangeRef,
+function detectColumnSeries(
+  grid: string[][],
+  numRows: number,
+  numCols: number,
   hasHeaders: boolean,
-): Promise<{
-  categoryIndex: number;
-  series: ChartSeries[];
-  orientation: SeriesOrientation;
-}> {
-  const cells = await getViewportCells(
-    dataRange.startRow,
-    dataRange.startCol,
-    dataRange.endRow,
-    dataRange.endCol,
-  );
-
-  const numRows = dataRange.endRow - dataRange.startRow + 1;
-  const numCols = dataRange.endCol - dataRange.startCol + 1;
-  const grid: string[][] = Array.from({ length: numRows }, () =>
-    Array(numCols).fill(""),
-  );
-
-  for (const cell of cells) {
-    const r = cell.row - dataRange.startRow;
-    const c = cell.col - dataRange.startCol;
-    if (r >= 0 && r < numRows && c >= 0 && c < numCols) {
-      grid[r][c] = cell.display;
-    }
-  }
-
-  // Default: columns orientation, first column as category
-  const orientation: SeriesOrientation = "columns";
+  startCol: number,
+): { categoryIndex: number; series: ChartSeries[] } {
   const categoryIndex = 0;
-
   const dataStartRow = hasHeaders ? 1 : 0;
   const series: ChartSeries[] = [];
 
@@ -673,7 +693,7 @@ export async function autoDetectSeries(
 
     const name = hasHeaders && grid[0][col]
       ? grid[0][col]
-      : indexToCol(dataRange.startCol + col);
+      : indexToCol(startCol + col);
 
     series.push({
       name,
@@ -682,12 +702,38 @@ export async function autoDetectSeries(
     });
   }
 
+  return { categoryIndex, series };
+}
+
+/**
+ * Auto-detect series from a data range.
+ * Called when creating a new chart to suggest default series mapping.
+ * Reads the range's own sheet (id-first).
+ */
+export async function autoDetectSeries(
+  dataRange: DataRangeRef,
+  hasHeaders: boolean,
+): Promise<{
+  categoryIndex: number;
+  series: ChartSeries[];
+  orientation: SeriesOrientation;
+}> {
+  const ref = await resolveRangeRefSheet(dataRange);
+  const grid = await readRangeDisplayGrid(ref);
+  const numRows = ref.endRow - ref.startRow + 1;
+  const numCols = ref.endCol - ref.startCol + 1;
+
+  // Default: columns orientation, first column as category
+  const orientation: SeriesOrientation = "columns";
+  const { categoryIndex, series } = detectColumnSeries(grid, numRows, numCols, hasHeaders, ref.startCol);
+
   return { categoryIndex, series, orientation };
 }
 
 /**
  * Re-derive series definitions for a specific orientation.
  * Used when switching between rows and columns orientation on an existing chart.
+ * Reads the range's own sheet (id-first).
  */
 export async function autoDetectSeriesForOrientation(
   dataRange: DataRangeRef,
@@ -697,42 +743,16 @@ export async function autoDetectSeriesForOrientation(
   categoryIndex: number;
   series: ChartSeries[];
 }> {
-  const cells = await getViewportCells(
-    dataRange.startRow,
-    dataRange.startCol,
-    dataRange.endRow,
-    dataRange.endCol,
-  );
-
-  const numRows = dataRange.endRow - dataRange.startRow + 1;
-  const numCols = dataRange.endCol - dataRange.startCol + 1;
-  const grid: string[][] = Array.from({ length: numRows }, () =>
-    Array(numCols).fill(""),
-  );
-
-  for (const cell of cells) {
-    const r = cell.row - dataRange.startRow;
-    const c = cell.col - dataRange.startCol;
-    if (r >= 0 && r < numRows && c >= 0 && c < numCols) {
-      grid[r][c] = cell.display;
-    }
-  }
+  const ref = await resolveRangeRefSheet(dataRange);
+  const grid = await readRangeDisplayGrid(ref);
+  const numRows = ref.endRow - ref.startRow + 1;
+  const numCols = ref.endCol - ref.startCol + 1;
 
   const categoryIndex = 0;
   const series: ChartSeries[] = [];
 
   if (orientation === "columns") {
-    const dataStartRow = hasHeaders ? 1 : 0;
-    for (let col = 0; col < numCols; col++) {
-      if (col === categoryIndex) continue;
-      let hasNumeric = false;
-      for (let row = dataStartRow; row < numRows; row++) {
-        if (!isNaN(parseDisplayNumber(grid[row][col]))) { hasNumeric = true; break; }
-      }
-      if (!hasNumeric) continue;
-      const name = hasHeaders && grid[0][col] ? grid[0][col] : indexToCol(dataRange.startCol + col);
-      series.push({ name, sourceIndex: col, color: null });
-    }
+    return detectColumnSeries(grid, numRows, numCols, hasHeaders, ref.startCol);
   } else {
     const dataStartCol = hasHeaders ? 1 : 0;
     for (let row = 0; row < numRows; row++) {
@@ -742,7 +762,7 @@ export async function autoDetectSeriesForOrientation(
         if (!isNaN(parseDisplayNumber(grid[row][col]))) { hasNumeric = true; break; }
       }
       if (!hasNumeric) continue;
-      const name = hasHeaders && grid[row][0] ? grid[row][0] : `Row ${dataRange.startRow + row + 1}`;
+      const name = hasHeaders && grid[row][0] ? grid[row][0] : `Row ${ref.startRow + row + 1}`;
       series.push({ name, sourceIndex: row, color: null });
     }
   }

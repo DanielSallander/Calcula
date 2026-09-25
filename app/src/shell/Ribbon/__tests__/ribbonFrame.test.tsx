@@ -361,3 +361,56 @@ describe("PanelContextMenu", () => {
     expect(findHardcodedColours(document.body)).toEqual([]);
   });
 });
+
+describe("a tab registered with activateOnRegister (the Canvas tab)", () => {
+  function isActive(label: string): boolean {
+    const b = tabButton(label);
+    return !!b && getComputedStyle(b).fontWeight === "600";
+  }
+
+  function canvasTab(): RibbonTabDefinition {
+    return {
+      ...tab("canvas", "Canvas", 50, "var(--tab-accent-canvas, #b0245f)"),
+      activateOnRegister: true,
+    };
+  }
+
+  it("is selected when it appears, and removing it returns to the tab the user HAD", () => {
+    renderRibbon();
+    act(() => tabButton("Animation")!.click());
+    expect(isActive("Animation")).toBe(true);
+
+    act(() => ExtensionRegistryImpl.registerRibbonTab(canvasTab()));
+    expect(isActive("Canvas")).toBe(true);
+
+    act(() => ExtensionRegistryImpl.unregisterRibbonTab("canvas"));
+    // Not Home (the old fallback): the tab that was selected before the canvas.
+    expect(isActive("Animation")).toBe(true);
+  });
+
+  it("a choice the user made while it was up is kept when it goes away", () => {
+    renderRibbon();
+    act(() => ExtensionRegistryImpl.registerRibbonTab(canvasTab()));
+    expect(isActive("Canvas")).toBe(true);
+    act(() => tabButton("Chart Design")!.click());
+    act(() => ExtensionRegistryImpl.unregisterRibbonTab("canvas"));
+    expect(isActive("Chart Design")).toBe(true);
+  });
+
+  it("an unrelated registry change does not re-select it", () => {
+    renderRibbon();
+    act(() => ExtensionRegistryImpl.registerRibbonTab(canvasTab()));
+    act(() => tabButton("Home")!.click());
+    act(() => ExtensionRegistryImpl.registerRibbonTab(tab("extra", "Extra", 60)));
+    expect(isActive("Home")).toBe(true);
+  });
+
+  it("POSITIVE CONTROL: an ordinary contextual tab still never steals the selection", () => {
+    renderRibbon();
+    act(() => tabButton("Animation")!.click());
+    act(() =>
+      ExtensionRegistryImpl.registerRibbonTab(tab("pivot", "Pivot Table", 80, "var(--tab-accent-pivot, #1a7a43)")),
+    );
+    expect(isActive("Animation")).toBe(true);
+  });
+});

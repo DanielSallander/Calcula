@@ -789,6 +789,18 @@ pub fn add_computed_property(
         &state, &pane_control_state, &ribbon_filter_state,
     );
     let active_sheet = *state.active_sheet.read().unwrap();
+    // A CANVAS has no rows, columns or cells for a property to style: refused
+    // before any lock and before the effect, so nothing is written and the
+    // document stays clean. The index was copied out above, so only
+    // `sheet_kinds` is held here.
+    if crate::sheets::is_canvas_sheet(&state.sheet_kinds.read().unwrap(), active_sheet) {
+        return ComputedPropertyResult {
+            success: false,
+            properties: Vec::new(),
+            dimension_changes: Vec::new(),
+            needs_style_refresh: false,
+        };
+    }
     let grid = state.grid.read().unwrap();
     let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
@@ -931,6 +943,18 @@ pub fn update_computed_property(
         &state, &pane_control_state, &ribbon_filter_state,
     );
     let active_sheet = *state.active_sheet.read().unwrap();
+    // A CANVAS has no rows, columns or cells for a property to style: refused
+    // before any lock and before the effect, so nothing is written and the
+    // document stays clean. The index was copied out above, so only
+    // `sheet_kinds` is held here.
+    if crate::sheets::is_canvas_sheet(&state.sheet_kinds.read().unwrap(), active_sheet) {
+        return ComputedPropertyResult {
+            success: false,
+            properties: Vec::new(),
+            dimension_changes: Vec::new(),
+            needs_style_refresh: false,
+        };
+    }
     let grid = state.grid.read().unwrap();
     let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
@@ -1067,6 +1091,16 @@ pub fn remove_computed_property(
     file_state: State<FileState>,
     prop_id: u64,
 ) -> ComputedPropertyResult {
+    remove_computed_property_inner(&state, &file_state, prop_id)
+}
+
+/// The command body over plain references, so its lock order can be driven
+/// from a test thread (a `tauri::State` cannot be built in a unit test).
+pub(crate) fn remove_computed_property_inner(
+    state: &AppState,
+    file_state: &FileState,
+    prop_id: u64,
+) -> ComputedPropertyResult {
     let active_sheet = *state.active_sheet.read().unwrap();
 
     // Resolve under a READ guard first (see `update_computed_property`).
@@ -1085,27 +1119,37 @@ pub fn remove_computed_property(
 
     // The property resolved, so this call will remove it.
     let effect = DocumentEffect::mutates(&file_state);
-    let mut props_storage = state.computed_properties.write(&effect).unwrap();
 
-    // Remove the property
-    if let Some(sheet_props) = props_storage.get_mut(&active_sheet) {
-        let list = match target_type.as_str() {
-            "column" => sheet_props.column_props.get_mut(&index),
-            "row" => sheet_props.row_props.get_mut(&index),
-            "cell" => sheet_props.cell_props.get_mut(&(index, index2.unwrap_or(0))),
-            _ => None,
-        };
-        if let Some(list) = list {
-            list.retain(|p| p.id != prop_id);
+    // THE STORE WORK FINISHES IN ITS OWN BLOCK, and every guard it took is
+    // released before a dimension store is touched below. The structural sheet
+    // commands (move / copy / delete / the add rotation) hold `column_widths`
+    // and `row_heights` while `remap_sheet_keyed_stores` takes
+    // `computed_properties` and the two dependency maps; holding those here
+    // while waiting for a dimension guard was the other half of that cycle
+    // (ABBA), and it hung both commands for good.
+    let properties = {
+        let mut props_storage = state.computed_properties.write(&effect).unwrap();
+
+        // Remove the property
+        if let Some(sheet_props) = props_storage.get_mut(&active_sheet) {
+            let list = match target_type.as_str() {
+                "column" => sheet_props.column_props.get_mut(&index),
+                "row" => sheet_props.row_props.get_mut(&index),
+                "cell" => sheet_props.cell_props.get_mut(&(index, index2.unwrap_or(0))),
+                _ => None,
+            };
+            if let Some(list) = list {
+                list.retain(|p| p.id != prop_id);
+            }
         }
-    }
 
-    // Clear dependencies
-    let mut deps = state.computed_prop_dependencies.lock().unwrap();
-    let mut rev_deps = state.computed_prop_dependents.lock().unwrap();
-    clear_prop_dependencies(prop_id, &mut deps, &mut rev_deps);
+        // Clear dependencies
+        let mut deps = state.computed_prop_dependencies.lock().unwrap();
+        let mut rev_deps = state.computed_prop_dependents.lock().unwrap();
+        clear_prop_dependencies(prop_id, &mut deps, &mut rev_deps);
 
-    let properties = get_props_list(&props_storage, active_sheet, &target_type, index, index2);
+        get_props_list(&props_storage, active_sheet, &target_type, index, index2)
+    }; // props_storage, deps and rev_deps are released here
 
     // For dimension attributes, removing means reverting to default
     let mut dimension_changes = Vec::new();

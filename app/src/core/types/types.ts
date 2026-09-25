@@ -203,6 +203,21 @@ export const DEFAULT_SPLIT_CONFIG: SplitConfig = {
 export type ViewMode = "normal" | "pageLayout" | "pageBreakPreview";
 
 /**
+ * What the active sheet's surface IS, as far as painting and input go:
+ * - "grid": an ordinary worksheet -- cells, gridlines, headers, a cell cursor.
+ * - "canvas": a canvas sheet -- a page of floating objects only. Core paints
+ *   no cells, gridlines, headers or selection, and ignores cell selection.
+ *
+ * Resolved SYNCHRONOUSLY in the same reducer step that moves the sheet context
+ * (SET_SHEET_CONTEXT / SET_ACTIVE_SHEET), so the surface can never tear against
+ * the sheet it describes -- the BUG-0052 one-flush contract. Hydrating it like
+ * the display flags (async, on `sheet:normalSwitch` only) would be wrong on
+ * every switch path that never fires that event (script host, Collaboration
+ * checkout, bookmarks).
+ */
+export type SheetSurface = "grid" | "canvas";
+
+/**
  * Configuration for grid dimensions.
  */
 export interface GridConfig {
@@ -1057,6 +1072,14 @@ export interface GridState {
   clipboard: ClipboardState;
   /** Current sheet context */
   sheetContext: SheetContext;
+  /** The ACTIVE sheet's surface -- see `SheetSurface`. */
+  surface: SheetSurface;
+  /**
+   * Every known sheet's surface, keyed by TRUE sheet index. Refreshed from each
+   * sheet list (SET_SHEET_SURFACES) so a switch whose dispatcher did not carry
+   * the kind still resolves the right surface. Missing index = "grid".
+   */
+  sheetSurfaces: Record<number, SheetSurface>;
   /** Freeze panes configuration */
   freezeConfig: FreezeConfig;
   /** Split window configuration */
@@ -1135,6 +1158,8 @@ export function createInitialGridState(): GridState {
       activeSheetIndex: 0,
       activeSheetName: "Sheet1",
     },
+    surface: "grid",
+    sheetSurfaces: {},
     freezeConfig: { ...DEFAULT_FREEZE_CONFIG },
     splitConfig: { ...DEFAULT_SPLIT_CONFIG },
     splitViewport: { scrollX: 0, scrollY: 0, startRow: 0, startCol: 0, rowCount: 50, colCount: 20 },

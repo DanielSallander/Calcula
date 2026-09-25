@@ -130,6 +130,7 @@ import {
   setActiveSheetIndex,
   getActiveSheetIndex,
   loadChartsFromBackend,
+  reloadChartsAfterSheetListChange,
   getChartById,
   updateChartSpec,
   replaceChartSpec as storeReplaceChartSpec,
@@ -239,12 +240,15 @@ import {
   matchingSharedParams,
   brushKeysFromHits,
 } from "./handlers/chartPointSelection";
-import { parseParamCellTarget } from "./lib/dataSourceResolver";
+import { peekRangeRefSheetIndex, resolveDataSource } from "./lib/dataSourceResolver";
+import { installSheetIdCacheInvalidation } from "./lib/sheetIdMap";
 import { chartIntersectsChanges } from "./lib/chartInvalidation";
+import { writeParamValueToCell } from "./lib/chartParamWriteBack";
+import { createChartObjectSelectionProvider } from "./lib/chartObjectSelection";
+import { registerObjectSelectionProvider } from "@api/objectSelection";
 import { clearAllWidgetValues, getWidgetValue, setWidgetValue, nextWidgetValue } from "./handlers/chartWidgetValues";
 import { hitTestWidgetControls, isInWidgetArea } from "./rendering/paramWidgets";
 import { onAppEvent } from "@api/events";
-import { updateCell } from "@api/lib";
 import { ChartEvents } from "./lib/chartEvents";
 import {
   CHART_FORMAT_SELECTION_COMMAND,
@@ -369,10 +373,12 @@ async function emitChartSelectionEvent(): Promise<void> {
           sheetName = name;
         }
       } else if (typeof data === "object" && "startRow" in data) {
-        // DataRangeRef — resolve sheet index to name
+        // DataRangeRef — resolve its sheet (id-first, so a chart on a canvas
+        // names its DATA sheet, and a moved sheet is still found), then the name.
+        const resolved = await resolveDataSource(data);
         const { getSheets } = await import("@api");
         const result = await getSheets();
-        const sheet = result.sheets.find((s: { index: number }) => s.index === data.sheetIndex);
+        const sheet = result.sheets.find((s: { index: number }) => s.index === resolved.sheetIndex);
         if (sheet) sheetName = sheet.name;
       }
 
@@ -489,6 +495,28 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(onChartCuesChanged(() => requestOverlayRedraw()));
   cleanupFunctions.push(onOverlayStyleChanged(() => requestOverlayRedraw()));
   registerChartCueHost(chartOverlayHost);
+
+  // A DataRangeRef names its sheet by stable id; the resolver maps the id to
+  // the live index through a cached sheet list, and the cache is only allowed
+  // to exist while something drops it on every sheet-collection event.
+  cleanupFunctions.push(installSheetIdCacheInvalidation());
+
+  // The press-free way to select a chart (@api/objectSelection): keyboard
+  // object cycling on a canvas and a background click that deselects. Select
+  // means select -- no pending click is armed, so the next mouseup cannot walk
+  // the sub-selection ladder.
+  cleanupFunctions.push(
+    registerObjectSelectionProvider(
+      createChartObjectSelectionProvider({
+        emitSelection: () => void emitChartSelectionEvent(),
+        invalidateChart: (chartId) => invalidateChartCache(chartId),
+        refresh: () => {
+          requestOverlayRedraw();
+          context.events.emit(AppEvents.GRID_REFRESH);
+        },
+      }),
+    ),
+  );
 
   console.log("[Chart Extension] Registering...");
 
@@ -999,6 +1027,10 @@ function activate(context: ExtensionContext): void {
   // event carries the changed cells, invalidate only charts whose read-set
   // intersects them (conservative — unbounded-dependency charts always invalidate);
   // a bare signal (no payload) falls back to the prior invalidate-all behavior.
+  // The data range is matched on the chart's SOURCE sheet (its data ref's sheet
+  // id -> live index, synchronously from the resolver's cache; unknown ->
+  // invalidate), so an edit on Sheet1 repaints a chart on a canvas that charts
+  // Sheet1 (see chartInvalidation.ts).
   cleanupFunctions.push(
     context.events.on(AppEvents.CELLS_UPDATED, (detail) => {
       const charts = getAllCharts();
@@ -1014,7 +1046,8 @@ function activate(context: ExtensionContext): void {
       const selectedId = getCurrentChartId();
       let any = false;
       for (const chart of charts) {
-        if (chartIntersectsChanges(chart.spec, changes, activeSheetIndex)) {
+        const sourceSheetIndex = peekRangeRefSheetIndex(chart.spec.data);
+        if (chartIntersectsChanges(chart.spec, changes, activeSheetIndex, sourceSheetIndex)) {
           invalidateChartCache(chart.chartId);
           if (chart.chartId === selectedId) noteChartDataChanging();
           any = true;
@@ -1246,10 +1279,9 @@ function activate(context: ExtensionContext): void {
       if (keys.length > 0) {
         setPointSelection(d.chartId, { [param.name]: { on, values: keys } });
         // Mirror the click path's side effects: S7c writeback + S7b bus.
-        if (param.writeTo) {
-          const target = parseParamCellTarget(param.writeTo);
-          if (target) void updateCell(target.row, target.col, keys[0]);
-        }
+        // On a canvas (no cells) the write is refused with a message instead of
+        // being attempted and silently rejected by the backend.
+        if (param.writeTo) writeParamValueToCell(param.writeTo, keys[0], param.name);
       } else {
         clearPointSelection(d.chartId);
       }
@@ -1491,10 +1523,8 @@ function activate(context: ExtensionContext): void {
         // S7c: write the clicked label/value back to a same-sheet cell so
         // formulas / other charts can react (fire-and-forget; safe — its
         // CELLS_UPDATED only re-renders, the ephemeral selection survives).
-        if (selectParam.writeTo) {
-          const target = parseParamCellTarget(selectParam.writeTo);
-          if (target) void updateCell(target.row, target.col, key);
-        }
+        // On a canvas there is no cell to write: refused with a message.
+        if (selectParam.writeTo) writeParamValueToCell(selectParam.writeTo, key, selectParam.name);
       } else {
         clearPointSelection(click.chartId);
       }
@@ -1774,8 +1804,85 @@ function activate(context: ExtensionContext): void {
     }
   }).catch(() => {});
 
+  // Reload charts from the backend. The KIND says why, and decides whether a
+  // pending debounced save is carried across:
+  //   "document": File > Open / New -- another workbook; a reload, no flush.
+  //   "sheets":   the sheet COLLECTION changed (add / delete / move / copy, or
+  //               one undone) -- the backend has remapped each chart's placement
+  //               sheet, so pending saves are reconciled with that remap and
+  //               flushed first (reloadChartsAfterSheetListChange).
+  //   "objects":  the backend's chart state changed under us (undo/redo of a
+  //               chart edit, an AI-created chart, the charts a sheet delete
+  //               took with it) -- a plain re-pull.
+  type ChartReloadKind = "document" | "sheets" | "objects";
+  type ChartReloadRequest = Record<ChartReloadKind, boolean>;
+  let reloadsDisposed = false;
+  cleanupFunctions.push(() => {
+    reloadsDisposed = true;
+  });
+  const reloadCharts = async (req: ChartReloadRequest) => {
+    if (reloadsDisposed) return;
+    try {
+      if (req.sheets && !req.document) {
+        // Never across documents: a pending save from the OUTGOING workbook
+        // has nothing to be flushed into.
+        await reloadChartsAfterSheetListChange();
+      } else {
+        await loadChartsFromBackend();
+      }
+      if (reloadsDisposed) return;
+      const idx = await getActiveSheet();
+      setActiveSheetIndex(idx);
+      deselectChart();
+      emitChartSelectionEvent();
+      if (req.document || req.objects) {
+        // Drop ephemeral point-selections + widget values on file open/new so they
+        // don't survive into a freshly loaded workbook (kept across plain cell edits).
+        // (A bare sheet add or rename keeps them: no chart changed.)
+        clearAllPointSelections();
+        clearAllWidgetValues();
+        // Insight cues are a lens on THIS document's charts; they never survive
+        // into the next one (the document-scoped-store lesson).
+        clearAllChartCues();
+      }
+      invalidateAllChartCaches();
+      syncChartRegions();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    } catch {
+      // Ignore
+    }
+  };
+
+  // ONE RELOAD PER BURST. A sheet delete announces SHEET_DELETED and then the
+  // `sheets` and `objects` domains (a detail-less SHEET_CHANGED and
+  // charts:refresh) in the same synchronous run; three overlapping reloads
+  // would race each other's array swap and flush. Requests are coalesced on a
+  // microtask (the reasons OR-ed together) and serialized on a chain.
+  let queuedReload: ChartReloadRequest | null = null;
+  let reloadChain: Promise<void> = Promise.resolve();
+  const requestChartsReload = (kind: ChartReloadKind): void => {
+    if (queuedReload !== null) {
+      queuedReload[kind] = true;
+      return;
+    }
+    const req: ChartReloadRequest = { document: false, sheets: false, objects: false };
+    req[kind] = true;
+    queuedReload = req;
+    queueMicrotask(() => {
+      const next = queuedReload ?? req;
+      queuedReload = null;
+      reloadChain = reloadChain.then(() => reloadCharts(next)).catch(() => {});
+    });
+  };
+
   cleanupFunctions.push(
-    context.events.on(AppEvents.SHEET_CHANGED, async () => {
+    context.events.on<{ sheetIndex?: unknown } | undefined>(AppEvents.SHEET_CHANGED, async (detail) => {
+      // The Shell fans the `sheets` mutation domain (a sheet added, deleted,
+      // moved, copied or renamed -- from the tab strip, a script, an MCP
+      // client, or undo) out to SHEET_CHANGED WITHOUT a detail. The backend
+      // has then remapped every chart's placement sheet, so the store is
+      // re-read; a plain sheet SWITCH carries its index and needs no reload.
+      if (typeof detail?.sheetIndex !== "number") requestChartsReload("sheets");
       try {
         const idx = await getActiveSheet();
         setActiveSheetIndex(idx);
@@ -1789,29 +1896,6 @@ function activate(context: ExtensionContext): void {
       }
     }),
   );
-
-  // Reload charts from backend after file open or new file
-  const reloadCharts = async () => {
-    try {
-      await loadChartsFromBackend();
-      const idx = await getActiveSheet();
-      setActiveSheetIndex(idx);
-      deselectChart();
-      emitChartSelectionEvent();
-      // Drop ephemeral point-selections + widget values on file open/new so they
-      // don't survive into a freshly loaded workbook (kept across plain cell edits).
-      clearAllPointSelections();
-      clearAllWidgetValues();
-      // Insight cues are a lens on THIS document's charts; they never survive
-      // into the next one (the document-scoped-store lesson).
-      clearAllChartCues();
-      invalidateAllChartCaches();
-      syncChartRegions();
-      context.events.emit(AppEvents.GRID_REFRESH);
-    } catch {
-      // Ignore
-    }
-  };
   // ===== Distributed (.calp) consent gate for sandboxed chart libraries =====
   // A reserved chart-mark / chart-transform library that arrived inside a
   // distributed .calp must NOT auto-mount on open — the project vision requires
@@ -2056,14 +2140,16 @@ function activate(context: ExtensionContext): void {
   );
 
   cleanupFunctions.push(
-    context.events.on(AppEvents.AFTER_OPEN, reloadCharts),
+    context.events.on(AppEvents.AFTER_OPEN, () => requestChartsReload("document")),
   );
   cleanupFunctions.push(
-    context.events.on(AppEvents.AFTER_NEW, reloadCharts),
+    context.events.on(AppEvents.AFTER_NEW, () => requestChartsReload("document")),
   );
   // Undo/redo of chart operations restores backend chart state — re-pull it
-  // (dispatched by the core undo handler when UndoResult.objectsChanged).
-  const handleChartsRefresh = () => { void reloadCharts(); };
+  // (dispatched by the core undo handler when UndoResult.objectsChanged). A
+  // sheet move / delete / copy announces this too, in the same burst as the
+  // detail-less SHEET_CHANGED above, and the coalescer lets "sheets" win.
+  const handleChartsRefresh = () => requestChartsReload("objects");
   window.addEventListener("charts:refresh", handleChartsRefresh);
   cleanupFunctions.push(() => {
     window.removeEventListener("charts:refresh", handleChartsRefresh);

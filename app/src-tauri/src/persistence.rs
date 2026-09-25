@@ -568,6 +568,22 @@ pub(crate) fn apply_sheet_view_to_sheet(
 /// LOAD IS HALF THE FIX (see `restore_user_hidden_from_workbook`): the load
 /// path used to push a `SplitConfig::default()` per sheet, which is what threw
 /// away a saved split even once the save side wrote one.
+/// Hydrate `sheet_kinds` from a loaded workbook, one kind per sheet. Split out
+/// of `open_file` so the load side of a canvas round trip is testable without
+/// Tauri state (the save side is `enrich_workbook_metadata`).
+pub(crate) fn restore_sheet_kinds_from_workbook(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    workbook: &Workbook,
+) -> Result<(), String> {
+    let mut sheet_kinds = state.sheet_kinds.write(effect).map_err(|e| e.to_string())?;
+    sheet_kinds.clear();
+    for sheet in &workbook.sheets {
+        sheet_kinds.push(sheet.kind.clone());
+    }
+    Ok(())
+}
+
 pub(crate) fn restore_sheet_view_from_workbook(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
@@ -1036,6 +1052,11 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
             workbook.sheets[i].view_mode = f.view_mode.clone();
             workbook.sheets[i].display_headings = f.display_headings;
         }
+    }
+
+    // ---- Sheet kind (worksheet / canvas + layout) ----
+    if let Ok(kinds) = state.sheet_kinds.read() {
+        workbook.sheets[i].kind = kinds.get(i).cloned().unwrap_or_default();
     }
     } // end per-sheet loop
 
@@ -3335,6 +3356,9 @@ pub fn open_file(
             });
         }
 
+        // ---- Per-sheet kind (worksheet / canvas + layout) ----
+        restore_sheet_kinds_from_workbook(&state, &load_effect, &workbook)?;
+
         // ---- Page setups for all sheets ----
         let mut page_setups = state.page_setups.write(&load_effect).map_err(|e| e.to_string())?;
         page_setups.clear();
@@ -4321,6 +4345,11 @@ pub(crate) fn reset_document_scoped_stores(
         display_flags.push(crate::api_types::SheetDisplayFlags::default());
     }
     {
+        let mut sheet_kinds = state.sheet_kinds.write(effect).map_err(|e| e.to_string())?;
+        sheet_kinds.clear();
+        sheet_kinds.push(::persistence::SheetKind::Worksheet);
+    }
+    {
         let mut page_setups = state.page_setups.write(effect).map_err(|e| e.to_string())?;
         page_setups.clear();
         page_setups.push(crate::api_types::PageSetup::default());
@@ -5014,6 +5043,20 @@ pub fn rename_virtual_file(
 // AI CONTEXT SERIALIZATION
 // ============================================================================
 
+/// Whether sheet `index` becomes a sheet section of the AI context. Only USER
+/// WORKSHEETS do, exactly as get_sheet_summary decides it: a floating range's
+/// backing sheet is not a sheet the user has, and a CANVAS has no cells --
+/// serialized as a SheetInput it would read as "(empty sheet)", inviting the
+/// model to write data onto a surface that refuses every cell write.
+pub(crate) fn ai_context_includes_sheet(
+    sheet_visibility: &[String],
+    sheet_kinds: &[::persistence::SheetKind],
+    index: usize,
+) -> bool {
+    crate::sheets::is_user_sheet(sheet_visibility, index)
+        && !crate::sheets::is_canvas_sheet(sheet_kinds, index)
+}
+
 #[tauri::command]
 pub fn get_ai_context(
     state: State<AppState>,
@@ -5025,11 +5068,18 @@ pub fn get_ai_context(
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
 
+    // LOCK ORDER: `sheet_visibility` and `sheet_kinds` BEFORE `sheet_protection`,
+    // the order get_sheet_summary, search and the script pre-pass take them in.
+    let sheet_visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
+    let sheet_kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
     // Build sheet inputs — use stored grids for non-active sheets, active grid for current.
     // Hidden formulas are withheld exactly like every other read path.
     let protection_storage = state.sheet_protection.read().map_err(|e| e.to_string())?;
     let mut sheet_inputs: Vec<SheetInput> = Vec::new();
     for (i, name) in sheet_names.iter().enumerate() {
+        if !ai_context_includes_sheet(&sheet_visibility, &sheet_kinds, i) {
+            continue;
+        }
         if i == active_sheet {
             sheet_inputs.push(SheetInput {
                 name,
@@ -5479,6 +5529,14 @@ pub fn xlsx_save_loss_report(
             .any(|g| g.cells.values().any(|c| c.rich_text.is_some())),
         "In-cell rich text (mixed fonts/colors within one cell)",
     );
+    // xlsx has no canvas concept: the reader restores every sheet as a
+    // worksheet, so a canvas reopens as an editable grid with its objects
+    // floating over cells. `Sheet.kind` is a per-SHEET field, which the
+    // Workbook-field census below cannot see -- hence a line of its own here.
+    check(
+        state.sheet_kinds.read().map_err(|e| e.to_string())?.iter().any(|k| k.is_canvas()),
+        "Canvas sheets (they reopen as ordinary worksheets; page size, snap grid and object stacking are lost)",
+    );
 
     Ok(lost)
 }
@@ -5497,7 +5555,7 @@ pub fn xlsx_save_loss_report(
 /// told. `SILENT` = dropped without a line, WITH the reason it does not need one.
 #[cfg(test)]
 pub(crate) const XLSX_LOSS_COVERAGE: &[(&str, &str)] = &[
-    ("sheets", "WRITTEN: cells, formulas, styles, merges, widths, freeze"),
+    ("sheets", "WRITTEN: cells, formulas, styles, merges, widths, freeze; Sheet.kind (canvas + layout) is REPORTED as 'Canvas sheets' and the reader restores a worksheet"),
     ("tables", "WRITTEN: as xlsx tables"),
     ("charts", "WRITTEN: as xlsx charts"),
     ("sparklines", "WRITTEN"),
@@ -6816,3 +6874,128 @@ mod default_geometry_and_sheet_view_tests {
 #[cfg(test)]
 #[path = "orphaned_sheet_state_tests.rs"]
 mod orphaned_sheet_state_tests;
+
+#[cfg(test)]
+mod canvas_kind_persistence_tests {
+    //! A canvas survives the app's own save and load bridges, not just the
+    //! core archive: `enrich_workbook_metadata` (save) and
+    //! `restore_sheet_kinds_from_workbook` (load) are where the app's
+    //! `sheet_kinds` store meets `persistence::Sheet.kind`, and the core
+    //! round-trip tests start from a `Workbook`, so they never see either.
+
+    use super::*;
+    use ::persistence::{CanvasLayout, SheetKind};
+
+    fn seed() -> crate::document_effect::DocumentEffect {
+        crate::document_effect::test_seed_effect()
+    }
+
+    #[test]
+    fn a_canvas_survives_the_apps_save_and_load_bridges() {
+        let state = crate::create_app_state();
+        let layout = CanvasLayout {
+            grid_size_px: 24,
+            snap_to_grid: false,
+            ..CanvasLayout::default()
+        };
+        *state.sheet_kinds.write(&seed()).unwrap() =
+            vec![SheetKind::Worksheet, SheetKind::Canvas(layout.clone())];
+
+        // Save side: the same helper the save command uses.
+        let mut workbook = Workbook::new();
+        workbook.sheets = (0..2)
+            .map(|i| ::persistence::Sheet::new(format!("Sheet{}", i + 1)))
+            .collect();
+        let ids: Vec<SheetId> = workbook.sheets.iter().map(|s| s.id).collect();
+        enrich_workbook_metadata(&mut workbook, &state, &ids);
+        assert_eq!(workbook.sheets[1].kind, SheetKind::Canvas(layout.clone()), "the save must capture the kind");
+
+        // Through the real archive.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("canvas.cala");
+        calcula_format::save_calcula(&workbook, &path).unwrap();
+        let loaded = calcula_format::load_calcula(&path).unwrap();
+
+        // Load side: a DIFFERENT, pristine AppState.
+        let reopened = crate::create_app_state();
+        restore_sheet_kinds_from_workbook(&reopened, &seed(), &loaded).unwrap();
+        assert_eq!(
+            *reopened.sheet_kinds.read().unwrap(),
+            vec![SheetKind::Worksheet, SheetKind::Canvas(layout)],
+            "each sheet must come back as ITS OWN kind, layout included"
+        );
+    }
+
+    /// The body of the top-level fn whose signature starts with `needle`, up to
+    /// its column-0 closing brace, with `//` comments stripped line-wise so a
+    /// COMMENT naming a call cannot satisfy a census. LOUD when the body cannot
+    /// be bounded: widening to end-of-file would let a call in a LATER function
+    /// (this test module's own, for one) stand in for the missing one.
+    fn code_body_of(src: &str, needle: &str) -> String {
+        let src = src.replace("\r\n", "\n");
+        let start = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("persistence.rs no longer defines `{needle}`"));
+        let rest = &src[start..];
+        let end = rest
+            .find("\n}\n")
+            .map(|e| e + 2)
+            .unwrap_or_else(|| panic!("`{needle}`: no column-0 closing brace"));
+        rest[..end]
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// THE LOAD HALF IS PINNED AT ITS ONLY PRODUCTION CALL. The round-trip test
+    /// above calls `restore_sheet_kinds_from_workbook` ITSELF, so deleting the
+    /// one call in `open_file` left every test green while every saved canvas
+    /// reopened as a worksheet -- its hidden grid suddenly an ordinary sheet,
+    /// its objects on a page of cells. `open_file` takes `State<AppState>` and
+    /// cannot be driven in-process, so this pins it from SOURCE, in code rather
+    /// than in a comment.
+    #[test]
+    fn open_file_restores_the_sheet_kinds_in_code() {
+        const SRC: &str = include_str!("persistence.rs");
+        let body = code_body_of(SRC, "pub fn open_file(");
+        assert!(
+            body.contains("restore_sheet_kinds_from_workbook("),
+            "open_file no longer calls `restore_sheet_kinds_from_workbook(` (a \
+             commented-out call does not count): every canvas in a reopened \
+             workbook would come back as a worksheet"
+        );
+    }
+
+    /// Non-vacuity for the census above: a commented-out call is not a call,
+    /// and a call in the NEXT function cannot stand in for this one.
+    #[test]
+    fn the_open_file_census_sees_a_commented_out_or_misplaced_call() {
+        const COMMENTED: &str = "pub fn open_file() {\n    // restore_sheet_kinds_from_workbook(&state, &e, &wb)?;\n    load();\n}\npub fn later() {\n    restore_sheet_kinds_from_workbook(&state, &e, &wb)?;\n}\n";
+        assert!(!code_body_of(COMMENTED, "pub fn open_file(").contains("restore_sheet_kinds_from_workbook("));
+        const WIRED: &str = "pub fn open_file() {\n    restore_sheet_kinds_from_workbook(&state, &e, &wb)?;\n}\n";
+        assert!(code_body_of(WIRED, "pub fn open_file(").contains("restore_sheet_kinds_from_workbook("));
+    }
+
+    #[test]
+    fn the_ai_context_leaves_out_canvases_and_object_sheets_only() {
+        let visibility = vec![
+            "visible".to_string(),
+            "visible".to_string(),
+            crate::sheets::OBJECT_SHEET_VISIBILITY.to_string(),
+            "hidden".to_string(),
+        ];
+        let kinds = vec![
+            SheetKind::Worksheet,
+            SheetKind::new_canvas(),
+            SheetKind::Worksheet,
+            SheetKind::Worksheet,
+        ];
+        let included: Vec<usize> =
+            (0..4).filter(|&i| ai_context_includes_sheet(&visibility, &kinds, i)).collect();
+        assert_eq!(included, vec![0, 3], "a canvas and an object sheet are left out; a hidden worksheet is not");
+    }
+}

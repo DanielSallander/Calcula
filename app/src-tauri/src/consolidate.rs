@@ -544,9 +544,11 @@ fn consolidate_data_inner(
         // written. Pure gate form: grid/grids/styles are already held here
         // (canonical order allows sheet_protection last).
         if total_rows > 0 && total_cols > 0 {
+            let sheet_kinds = state.sheet_kinds.read().unwrap();
             let protection_storage = state.sheet_protection.read().unwrap();
             let dest_grid = if dest_sheet == active_sheet { &*grid } else { &grids[dest_sheet] };
             if let Err(e) = crate::protection::check_sheet_protection_range_in(
+                &sheet_kinds,
                 &protection_storage,
                 dest_grid,
                 &styles,
@@ -662,9 +664,11 @@ fn consolidate_data_inner(
 
         // Sheet protection on the destination block, same as category mode.
         {
+            let sheet_kinds = state.sheet_kinds.read().unwrap();
             let protection_storage = state.sheet_protection.read().unwrap();
             let dest_grid = if dest_sheet == active_sheet { &*grid } else { &grids[dest_sheet] };
             if let Err(e) = crate::protection::check_sheet_protection_range_in(
+                &sheet_kinds,
                 &protection_storage,
                 dest_grid,
                 &styles,

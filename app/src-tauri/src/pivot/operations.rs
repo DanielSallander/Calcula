@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::api_types::MergedRegion;
 use crate::commands::styles::parse_number_format;
 use crate::pivot::utils::col_index_to_letter;
-use crate::{log_debug, AppState, ProtectedRegion};
+use crate::{log_debug, log_warn, AppState, ProtectedRegion};
 use crate::pivot::types::PivotState;
 use pivot_engine::{calculate_pivot, PivotCache, PivotDefinition, PivotId, PivotView};
 use engine::{
@@ -469,19 +469,124 @@ pub(crate) fn build_cache_with_synthetic_dim(
     Ok(cache)
 }
 
-/// Resolves the destination sheet index from a pivot definition.
-/// Falls back to active sheet if destination_sheet is not set or not found.
+/// Resolves the destination sheet index from a pivot definition, in three
+/// steps, most authoritative first:
+///
+/// 1. **The destination NAME.** Exact spelling first, then ignoring ASCII case
+///    -- sheet names are unique ignoring case (`ensure_sheet_name_is_free`), so
+///    the second match is unambiguous, and a case-only drift between a stored
+///    name and its tab must not lose the pivot. A name that resolves is
+///    honoured whatever the sheet's kind: a canvas pivot names its canvas, and a
+///    GRID pivot aimed at a canvas is refused where it writes
+///    (`update_pivot_in_grid`), not re-aimed here.
+/// 2. **The pivot's own registered region.** On a name miss the protected
+///    region is where the pivot's cells ACTUALLY are, which is the only sheet
+///    its output may be rewritten on.
+/// 3. **The active sheet**, as before canvases existed, for a pivot that has
+///    neither (never rendered). If that is a canvas the write refuses.
+///
+/// THERE IS NO REDIRECT to "some other worksheet". It used to send a stale-
+/// named pivot to the first user worksheet whenever a canvas was active, and
+/// that wrote the pivot's output straight over whatever that sheet held --
+/// typically the pivot's own source data. A name misses because a rename did
+/// not carry the definition with it; `rename_sheet_inner` now rewrites
+/// `destination_sheet` / `source_sheet`, which removes the cause.
+///
+/// LOCKS -- what callers actually hold: most call this WITH `pivot_tables`
+/// held (it is `Persisted`, so even a read guard is an exclusive mutex): e.g.
+/// `toggle_pivot_group`, `refresh_pivot_cache`, `apply_pivot_definition_restore`.
+/// So every store read here is taken UNDER `pivot_tables`, each ALONE and
+/// released before the next: `sheet_names`, then `protected_regions` (a std
+/// mutex), then `active_sheet`. `pivot_tables` -> `protected_regions` is the
+/// crate's order (`delete_pivot_table`, the undo delete, and the structural
+/// row/column shifts in `commands/structure.rs`, which take `pivot_tables`
+/// FIRST for exactly this reason). `sheet_kinds` and `sheet_visibility` are
+/// deliberately NOT read here: `delete_sheet_impl` holds `sheet_visibility`
+/// while it takes `pivot_tables`, so reading it under `pivot_tables` closed a
+/// cycle. KNOWN OPEN (predates canvases): `delete_sheet_impl` also holds
+/// `sheet_names` / `active_sheet` while it takes `pivot_tables`, so the two
+/// reads this resolver has always made under `pivot_tables` are the same
+/// shape; closing that needs `delete_sheet_impl` to stop taking
+/// `pivot_tables` under its sheet guards.
 pub(crate) fn resolve_dest_sheet_index(state: &AppState, definition: &PivotDefinition) -> usize {
     if let Some(ref sheet_name) = definition.destination_sheet {
         let sheet_names = state.sheet_names.read().unwrap();
-        for (idx, name) in sheet_names.iter().enumerate() {
-            if name == sheet_name {
-                return idx;
+        if let Some(idx) = sheet_names.iter().position(|n| n == sheet_name) {
+            return idx;
+        }
+        if let Some(idx) = sheet_names.iter().position(|n| n.eq_ignore_ascii_case(sheet_name)) {
+            return idx;
+        }
+    }
+    // The name missed (or was never set): the sheet the pivot's cells are on.
+    if let Some(region) = get_pivot_region(state, definition.id) {
+        if definition.destination_sheet.is_some() {
+            log_warn!(
+                "PIVOT",
+                "pivot {} names destination sheet {:?}, which this workbook does not have; \
+                 using the sheet its output is registered on ({})",
+                definition.id,
+                definition.destination_sheet,
+                region.sheet_index
+            );
+        }
+        return region.sheet_index;
+    }
+    // Neither a name nor a region: the active sheet, exactly as before
+    // canvases. A canvas here is refused by `update_pivot_in_grid`.
+    *state.active_sheet.read().unwrap()
+}
+
+/// Carry every pivot's sheet NAMES through a sheet rename: each
+/// `destination_sheet` and `source_sheet` equal to `old_name` (ignoring ASCII
+/// case -- sheet names are unique that way, and a stored name whose case has
+/// drifted from its tab still means that tab) becomes `new_name`. Returns how
+/// many definitions changed.
+///
+/// The cancel-revert snapshots in `previous_states` carry definitions too; a
+/// revert after the rename must not put the old spelling back.
+///
+/// LOCKS: `pivot_tables`, then `previous_states`, each alone. The caller must
+/// hold no sheet guard (`rename_sheet_inner` calls this after dropping them).
+pub(crate) fn rename_pivot_sheet_references(
+    pivot_state: &PivotState,
+    effect: &crate::document_effect::DocumentEffect,
+    old_name: &str,
+    new_name: &str,
+) -> usize {
+    let rewrite = |def: &mut PivotDefinition| -> bool {
+        let mut changed = false;
+        for slot in [&mut def.destination_sheet, &mut def.source_sheet] {
+            if slot.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(old_name)) {
+                *slot = Some(new_name.to_string());
+                changed = true;
+            }
+        }
+        changed
+    };
+    let mut changed = 0;
+    if let Ok(mut tables) = pivot_state.pivot_tables.write(effect) {
+        for (def, _) in tables.values_mut() {
+            if rewrite(def) {
+                changed += 1;
             }
         }
     }
-    // Fallback to active sheet
-    *state.active_sheet.read().unwrap()
+    if let Ok(mut previous) = pivot_state.previous_states.lock() {
+        for (def, _) in previous.values_mut() {
+            rewrite(def);
+        }
+    }
+    if changed > 0 {
+        log_debug!(
+            "PIVOT",
+            "sheet rename '{}' -> '{}' re-aimed {} pivot definition(s)",
+            old_name,
+            new_name,
+            changed
+        );
+    }
+    changed
 }
 
 /// Clears cells in a pivot region from the grid.
@@ -969,8 +1074,47 @@ pub(crate) fn update_pivot_region(
     );
 }
 
+/// The refusal a GRID pivot gets when its destination is a canvas sheet. One
+/// wording for the pre-effect gates (`ensure_pivot_destination_is_grid`) and
+/// the write-site backstop (`update_pivot_in_grid`), so a caller cannot tell
+/// which of the two caught it -- and the message names the canvas.
+pub(crate) const GRID_PIVOT_CANVAS_ACTION: &str = "write a grid pivot table";
+
+/// Resolve `pivot_id`'s destination and refuse when it is a canvas -- the
+/// pre-effect half of the rule `update_pivot_in_grid` enforces at the write.
+/// A pivot command that will rewrite the grid calls this BEFORE it mints its
+/// `DocumentEffect`, so a refusal leaves the document clean.
+///
+/// LOCKS: `pivot_tables` is taken alone to clone the definition and released
+/// before the resolver runs; then `sheet_kinds` alone. The caller must hold
+/// none of them.
+pub(crate) fn ensure_pivot_destination_is_grid(
+    state: &AppState,
+    pivot_state: &PivotState,
+    pivot_id: PivotId,
+) -> Result<(), String> {
+    let definition = {
+        let tables = pivot_state
+            .pivot_tables
+            .read()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+        match tables.get(&pivot_id) {
+            Some((def, _)) => def.clone(),
+            // The caller's own existence check owns the "not found" refusal.
+            None => return Ok(()),
+        }
+    };
+    let dest = resolve_dest_sheet_index(state, &definition);
+    crate::sheets::ensure_not_canvas_in_state(state, dest, GRID_PIVOT_CANVAS_ACTION)
+}
+
 /// Clears the old pivot region and writes the new view to the grid.
 /// Also syncs to state.grid if needed.
+///
+/// `Err` -- having written NOTHING -- when `dest_sheet_idx` is a canvas.
+/// Every caller must then skip what follows a successful write:
+/// `update_pivot_region` (which would move the pivot's protection onto the
+/// canvas and orphan its real cells), `store_view`, and the undo record.
 pub(crate) fn update_pivot_in_grid(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
@@ -978,7 +1122,26 @@ pub(crate) fn update_pivot_in_grid(
     dest_sheet_idx: usize,
     destination: (u32, u32),
     view: &PivotView,
-) {
+) -> Result<(), String> {
+    // A GRID pivot never materializes into a canvas's hidden grid: its cells
+    // would be real (formulas could read them) and invisible (a canvas paints
+    // no cells). Every grid-pivot write passes here, so this is the one rule;
+    // the creation doors and `ensure_pivot_destination_is_grid` refuse a
+    // canvas destination up front, and this catches the rest (a destination
+    // that changed after that check, or a caller with no pre-check). Read
+    // ALONE, before any other lock.
+    if let Err(refusal) =
+        crate::sheets::ensure_not_canvas_in_state(state, dest_sheet_idx, GRID_PIVOT_CANVAS_ACTION)
+    {
+        log_warn!(
+            "PIVOT",
+            "pivot {:?} resolves to canvas sheet {}; a grid pivot never materializes into a canvas, output not written",
+            pivot_id,
+            dest_sheet_idx
+        );
+        return Err(refusal);
+    }
+
     // Get old region before writing new data
     let old_region = get_pivot_region(state, pivot_id);
 
@@ -1052,6 +1215,7 @@ pub(crate) fn update_pivot_in_grid(
             merged.insert(mr);
         }
     }
+    Ok(())
 }
 
 /// Auto-fit column widths for a pivot table based on cell content.
@@ -1521,6 +1685,10 @@ pub(crate) fn save_overwritten_cells(
 ///
 /// Every pivot command that modifies cell values should call this instead of
 /// calling `update_pivot_in_grid` + `update_pivot_region` separately.
+///
+/// `Err` when the write was refused (a canvas destination): nothing was
+/// written, the region was NOT moved, and nothing was recalculated. Commands
+/// propagate it with `?`, which also skips their `store_view` / undo record.
 pub(crate) fn finalize_pivot_update(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
@@ -1530,10 +1698,11 @@ pub(crate) fn finalize_pivot_update(
     destination: (u32, u32),
     view: &PivotView,
     control_states: Option<(&crate::pane_control::PaneControlState, &crate::ribbon_filter::RibbonFilterState)>,
-) {
-    update_pivot_in_grid(state, effect, pivot_id, dest_sheet_idx, destination, view);
+) -> Result<(), String> {
+    update_pivot_in_grid(state, effect, pivot_id, dest_sheet_idx, destination, view)?;
     update_pivot_region(state, pivot_id, dest_sheet_idx, destination, view);
     recalculate_sheet_formulas(state, pivot_state, control_states);
+    Ok(())
 }
 
 /// Re-evaluate all formula cells on the active sheet when calculation mode is

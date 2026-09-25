@@ -162,8 +162,12 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // the host), `pane.onOpen` / `onPlacementChange` (an embedded surface the
     // USER placed opens without the script asking), and `render.setHitRegions`
     // (a shape declaring which of its own pixels take pointer input).
-    expect(chains.size).toBe(714);
-    expect(entries.length).toBe(771);
+    // 2026-09-25: 714 -> 716 chains and 771 -> 773 entries — the canvas sheet
+    // kind's two layout rows on UnlockedAPI, `api.getCanvasLayout` and
+    // `api.setCanvasLayout`, one declaration each (addSheet's new `kind`
+    // parameter changes a signature, not the count).
+    expect(chains.size).toBe(716);
+    expect(entries.length).toBe(773);
     expect(entries.length).toBeGreaterThan(chains.size);
 
     const policyPairs = new Set(
@@ -180,7 +184,9 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // probed under FormContext / ScriptPaneApi / PaneControlHandle exactly once).
     // 2026-09-04 (M3): 954 -> 958, the same four members above, each probed
     // under exactly one interface.
-    expect(policyPairs.size).toBe(958);
+    // 2026-09-25: 958 -> 960, the two canvas layout members above, each
+    // probed under exactly one interface (UnlockedAPI).
+    expect(policyPairs.size).toBe(960);
     expect(entries.length).toBeLessThan(policyPairs.size);
 
     // TOTALITY, which is what makes `entryFor`'s exact match total: every

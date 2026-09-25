@@ -192,7 +192,13 @@ export const chartSpecJsonSchema: object = {
       description: "Explicit cell range reference with 0-based coordinates.",
       required: ["sheetIndex", "startRow", "startCol", "endRow", "endCol"],
       properties: {
-        sheetIndex: { type: "integer", minimum: 0, description: "Sheet index (0-based)." },
+        sheetIndex: { type: "integer", minimum: 0, description: "Sheet index (0-based). Used only when sheetId is absent." },
+        sheetId: {
+          type: "string",
+          minLength: 1,
+          description:
+            "The source sheet's stable id (from the sheet list). When present it wins over sheetIndex, so the chart keeps following its data when sheets are inserted, moved or renamed; a sheetId that no longer names a sheet is an error, never a fallback. Omit it when writing by index -- Calcula stamps it.",
+        },
         startRow: { type: "integer", minimum: 0, description: "Start row (0-based, inclusive)." },
         startCol: { type: "integer", minimum: 0, description: "Start column (0-based, inclusive)." },
         endRow: { type: "integer", minimum: 0, description: "End row (0-based, inclusive)." },
@@ -1896,6 +1902,10 @@ export function generateSpecReference(): string {
   lines.push("");
   lines.push("The `data` field accepts four formats:");
   lines.push("1. **DataRangeRef object**: { sheetIndex: 0, startRow: 0, startCol: 0, endRow: 9, endCol: 3 }");
+  lines.push("   Optional `sheetId` (the sheet's stable id) wins over `sheetIndex`: the chart then keeps reading the same");
+  lines.push("   sheet after sheets are inserted, moved or renamed, and reports an error if that sheet is deleted. Write");
+  lines.push("   `sheetIndex` alone and Calcula stamps the id. A chart on a canvas sheet must name its data sheet this way");
+  lines.push("   (or with a sheet-qualified A1 reference) -- a canvas has no cells of its own.");
   lines.push("2. **A1 reference**: \"Sheet1!A1:D10\" or \"A1:D10\"");
   lines.push("3. **Named range**: \"SalesData\"");
   lines.push("4. **PivotDataSource**: { type: \"pivot\", pivotId: \"<pivot uuid>\" } — reads from a pivot table's aggregated output");

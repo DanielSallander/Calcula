@@ -72,6 +72,12 @@ import {
 import { applySlicerFilter } from "./lib/slicerFilterBridge";
 import { SlicerEvents } from "./lib/slicerEvents";
 import { slicerBackend } from "./lib/slicerBackend";
+import {
+  armPendingSlicerClick,
+  clearPendingSlicerClick,
+  takePendingSlicerClick,
+} from "./lib/slicerPendingClick";
+import { registerSlicerObjectSelection } from "./lib/slicerObjectSelection";
 
 // ============================================================================
 // Module State
@@ -82,9 +88,9 @@ let cleanupFunctions: Array<() => void> = [];
 /** Cached reference to grid container for coordinate conversion. */
 let gridContainer: HTMLElement | null = null;
 
-/** Pending click: set on floatingObject:selected, consumed on mouseup.
- *  deferNarrow: when true, mouseup should narrow multi-selection to this single slicer. */
-let pendingClick: { slicerId: string; deferNarrow?: boolean } | null = null;
+// The pending click (armed on floatingObject:selected, consumed on mouseup)
+// lives in lib/slicerPendingClick.ts, so the rule that only a real mouse press
+// may arm it is testable.
 
 /** Track last mousedown modifier state (since floatingObject:selected doesn't carry it). */
 let lastMousedownCtrl = false;
@@ -171,6 +177,11 @@ function activate(context: ExtensionContext): void {
     }),
   );
 
+  // Keyboard / programmatic selection (@api/objectSelection): a canvas sheet's
+  // Tab cycling selects slicers through this, never through the mouse route
+  // below, which arms a pending click the next mouseup anywhere would complete.
+  cleanupFunctions.push(registerSlicerObjectSelection());
+
   // -----------------------------------------------------------------------
   // Floating object events (selection, move, resize)
   // -----------------------------------------------------------------------
@@ -217,7 +228,10 @@ function activate(context: ExtensionContext): void {
 
     // Set pending click — processed on mouseup if not a drag.
     // deferNarrow = true when we deferred narrowing the multi-selection.
-    pendingClick = { slicerId, deferNarrow: alreadySelected && wasMultiSelected && !lastMousedownCtrl };
+    armPendingSlicerClick({
+      slicerId,
+      deferNarrow: alreadySelected && wasMultiSelected && !lastMousedownCtrl,
+    });
   };
   window.addEventListener("floatingObject:selected", handleFloatingSelected);
   cleanupFunctions.push(() => {
@@ -230,7 +244,7 @@ function activate(context: ExtensionContext): void {
     if (detail.regionType !== "slicer") return;
 
     // Clear pending click — this was a drag, not a click
-    pendingClick = null;
+    clearPendingSlicerClick();
 
     const primaryId = detail.data?.slicerId as string;
     if (primaryId == null) return;
@@ -343,10 +357,10 @@ function activate(context: ExtensionContext): void {
   // -----------------------------------------------------------------------
 
   const handleMouseUp = (e: MouseEvent) => {
+    const pendingClick = takePendingSlicerClick();
     if (!pendingClick) return;
 
     const { slicerId, deferNarrow } = pendingClick;
-    pendingClick = null;
     dragStartPositions = null;
 
     // If we deferred narrowing a multi-selection to this single slicer
@@ -595,7 +609,7 @@ function deactivate(): void {
   resetStore();
   resetScrollOffsets();
   gridContainer = null;
-  pendingClick = null;
+  clearPendingSlicerClick();
   dragStartPositions = null;
 
   // Unregister from extension registries

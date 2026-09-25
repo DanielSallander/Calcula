@@ -7,6 +7,7 @@ import { useState, useEffect, useCallback } from "react";
 import { getGridBounds } from "../../lib/tauri-api";
 import { getColumnXPosition, getRowYPosition } from "../../lib/scrollUtils";
 import type { GridConfig, Viewport, ViewportDimensions, DimensionOverrides } from "../../types";
+import { pageScrollExtent, GRID_SCROLLBAR_GUTTER_PX } from "../../lib/layoutSurface";
 
 export interface ScrollbarMetrics {
   /** Total scrollable content width in pixels */
@@ -35,9 +36,16 @@ export interface UseScrollbarMetricsOptions {
   refreshInterval?: number;
   /** Zoom factor (1.0 = 100%) */
   zoom?: number;
+  /**
+   * A PAGE-BOUNDED surface's page (a canvas sheet), in logical px. When given,
+   * the scrollable extent is the page plus the layout margin
+   * (`pageScrollExtent`) instead of the used range: a canvas has no cells, so
+   * its used range would say nothing about where its content ends.
+   */
+  page?: { width: number; height: number } | null;
 }
 
-const SCROLLBAR_SIZE = 14;
+const SCROLLBAR_SIZE = GRID_SCROLLBAR_GUTTER_PX;
 // Buffer rows/cols beyond the used range (Excel-like behavior)
 const BUFFER_ROWS = 5;
 const BUFFER_COLS = 2;
@@ -53,6 +61,7 @@ export function useScrollbarMetrics({
   dimensions,
   refreshInterval = 2000,
   zoom = 1,
+  page = null,
 }: UseScrollbarMetricsOptions): ScrollbarMetrics {
   const [usedRange, setUsedRange] = useState<{ maxRow: number; maxCol: number }>({
     maxRow: 0,
@@ -116,6 +125,24 @@ export function useScrollbarMetrics({
     1,
     (viewportDimensions.height - SCROLLBAR_SIZE) / zoom - config.colHeaderHeight
   );
+
+  // PAGE-BOUNDED SURFACE: the extent is the page (plus its margin), full stop.
+  // The wheel and the scrollbar thumb both clamp to these numbers, so this is
+  // what keeps a canvas from scrolling off into empty sheet space.
+  if (page) {
+    const extent = pageScrollExtent(page);
+    const maxScrollX = Math.max(0, extent.width - availableWidth);
+    const maxScrollY = Math.max(0, extent.height - availableHeight);
+    return {
+      contentWidth: extent.width,
+      contentHeight: extent.height,
+      maxScrollX,
+      maxScrollY,
+      showHorizontal: maxScrollX > 0,
+      showVertical: maxScrollY > 0,
+      refresh: refreshUsedRange,
+    };
+  }
 
   // Calculate how many rows/cols fit in the viewport
   const viewportRows = Math.ceil(availableHeight / config.defaultCellHeight);

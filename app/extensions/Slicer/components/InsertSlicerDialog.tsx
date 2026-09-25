@@ -1,8 +1,13 @@
 //! FILENAME: app/extensions/Slicer/components/InsertSlicerDialog.tsx
 // PURPOSE: Dialog for inserting slicers. Lists available Tables and PivotTables,
 //          shows their fields as checkboxes, and creates one slicer per checked field.
+// CONTEXT: Offers the tables of EVERY sheet (each labelled with its sheet) and
+//          places the slicers on the ACTIVE sheet — at `data.placement` when the
+//          caller passed one (a canvas sheet's snapped rectangle), else at the
+//          historical (100, 100) cascade. The list and the layout are pure
+//          functions in ../lib/insertSlicerPlan.ts.
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import type { DialogProps } from "@api";
 import { useDialogWindow } from "@api/dialogWindow";
 import { getSheets } from "@api";
@@ -16,31 +21,22 @@ import {
 import { surfacePivotNotices } from "@api/pivotNotices";
 import { createSlicerAsync } from "../lib/slicerStore";
 import type { SlicerSourceType } from "../lib/slicerTypes";
+import {
+  type BiModelInfo,
+  type SlicerDataSource,
+  pivotSource,
+  readSlicerPlacement,
+  slicerRects,
+  sourceLabel,
+  tableSources,
+} from "../lib/insertSlicerPlan";
 
 // ============================================================================
 // Types
 // ============================================================================
 
-interface BiModelTable {
-  name: string;
-  columns: Array<{ name: string; dataType: string; isNumeric: boolean }>;
-}
-
-interface BiModelInfo {
-  tables: BiModelTable[];
-  measures: Array<{ name: string }>;
-  lookupColumns?: string[];
-}
-
-interface DataSource {
-  type: SlicerSourceType;
-  id: string;
-  name: string;
-  sheetIndex: number;
-  fields: string[];
-  /** BI model info for BI-backed pivots (fields organized by table) */
-  biModel?: BiModelInfo;
-}
+/** One entry of the "Data source" list (see insertSlicerPlan). */
+type DataSource = SlicerDataSource;
 
 // ============================================================================
 // BI Pivot Helpers
@@ -213,6 +209,8 @@ export function InsertSlicerDialog({
   // Pre-select a specific source if passed via dialog data
   const preselectedSourceType = data?.sourceType as SlicerSourceType | undefined;
   const preselectedSourceId = data?.sourceId as string | undefined;
+  // Where the caller wants the slicers (sheet pixels, active sheet), if it said.
+  const placement = useMemo(() => readSlicerPlacement(data), [data]);
 
   // Load available data sources when dialog opens
   useEffect(() => {
@@ -247,23 +245,16 @@ export function InsertSlicerDialog({
       const sheetsResult = await getSheets();
       const currentSheetIndex = sheetsResult.activeIndex;
       setActiveSheetIndex(currentSheetIndex);
+      const sheetNames = sheetsResult.sheets.map((s) => ({ index: s.index, name: s.name }));
 
       const allSources: DataSource[] = [];
 
-      // Fetch tables for the current sheet
+      // Fetch the tables of EVERY sheet. A slicer addresses its source by id,
+      // so a table on another sheet is as good a source as one here — and on a
+      // canvas sheet, which can hold no table, it is the only kind there is.
       try {
         const tables = await getAllTables();
-        for (const table of tables) {
-          if (table.sheetIndex === currentSheetIndex) {
-            allSources.push({
-              type: "table",
-              id: table.id,
-              name: table.name,
-              sheetIndex: table.sheetIndex,
-              fields: table.columns.map((c) => c.name),
-            });
-          }
-        }
+        allSources.push(...tableSources(tables, sheetNames, currentSheetIndex));
       } catch (err) {
         console.warn("[InsertSlicerDialog] Failed to load tables:", err);
       }
@@ -275,6 +266,7 @@ export function InsertSlicerDialog({
             id: string;
             name: string;
             sourceRange: string;
+            sheetIndex?: number;
           }>
         >();
         for (const pv of pivots) {
@@ -292,23 +284,12 @@ export function InsertSlicerDialog({
                   allFields.push(`${table.name}.${col.name}`);
                 }
               }
-              allSources.push({
-                type: "pivot",
-                id: pv.id,
-                name: pv.name,
-                sheetIndex: currentSheetIndex,
-                fields: allFields,
-                biModel: result.biModel,
-              });
+              allSources.push(pivotSource(pv, allFields, sheetNames, result.biModel));
             } else {
               // Range pivot: use all cache fields
-              allSources.push({
-                type: "pivot",
-                id: pv.id,
-                name: pv.name,
-                sheetIndex: currentSheetIndex,
-                fields: result.hierarchies.map((h) => h.name),
-              });
+              allSources.push(
+                pivotSource(pv, result.hierarchies.map((h) => h.name), sheetNames),
+              );
             }
           } catch (err) {
             console.warn(
@@ -384,9 +365,6 @@ export function InsertSlicerDialog({
 
     try {
       const fieldKeys = Array.from(checkedFields);
-      const slicerWidth = 180;
-      const slicerHeight = 240;
-      const gap = 10;
       const isBi = !!selectedSource.biModel;
 
       // For BI pivots, ensure selected fields are in the pivot cache
@@ -399,10 +377,13 @@ export function InsertSlicerDialog({
         );
       }
 
-      // Create one slicer per checked field, positioned side by side
-      // Start at a reasonable position (100, 100 from sheet origin)
-      let offsetX = 100;
-      for (const fieldKey of fieldKeys) {
+      // Create one slicer per checked field, positioned side by side on the
+      // ACTIVE sheet: from the caller's placement when it gave one, else from
+      // (100, 100) as always.
+      const rects = slicerRects(fieldKeys.length, placement);
+      for (let i = 0; i < fieldKeys.length; i++) {
+        const fieldKey = fieldKeys[i];
+        const rect = rects[i];
         // For BI pivots, fieldKey is "table.column" - use "table.column" as the
         // slicer fieldName so the backend can match it in the pivot cache
         const fieldName = fieldKey;
@@ -413,10 +394,10 @@ export function InsertSlicerDialog({
         const slicer = await createSlicerAsync({
           name: displayName,
           sheetIndex: activeSheetIndex,
-          x: offsetX,
-          y: 100,
-          width: slicerWidth,
-          height: slicerHeight,
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
           sourceType: selectedSource.type,
           cacheSourceId: selectedSource.id,
           fieldName,
@@ -426,8 +407,6 @@ export function InsertSlicerDialog({
         if (!slicer) {
           throw new Error(`Failed to create slicer for field "${fieldName}".`);
         }
-
-        offsetX += slicerWidth + gap;
       }
 
       handleClose();
@@ -550,7 +529,7 @@ export function InsertSlicerDialog({
             <div style={styles.loadingText}>Loading data sources...</div>
           ) : sources.length === 0 ? (
             <div style={styles.emptyText}>
-              No Tables or PivotTables found on the active sheet. Create a Table
+              No Tables or PivotTables found in this workbook. Create a Table
               or PivotTable first, then insert a Slicer.
             </div>
           ) : (
@@ -571,7 +550,7 @@ export function InsertSlicerDialog({
                   <option value={-1}>-- Select a source --</option>
                   {sources.map((source, i) => (
                     <option key={`${source.type}-${source.id}`} value={i}>
-                      {source.name} ({source.type === "table" ? "Table" : source.biModel ? "Data Model" : "PivotTable"})
+                      {sourceLabel(source)}
                     </option>
                   ))}
                 </select>

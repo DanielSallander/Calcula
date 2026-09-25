@@ -375,6 +375,9 @@ pub struct AddSheetParams {
     #[schemars(description = "Name for the new sheet. Omit for an auto-generated Sheet<N>.")]
     #[serde(default)]
     pub name: Option<String>,
+    #[schemars(description = "Sheet kind: \"worksheet\" (default, a cell grid) or \"canvas\" (a fixed page that holds only floating objects such as charts, slicers, shapes, floating grids and pivot tables; it has NO cells, and its objects read data from worksheets).")]
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -1065,7 +1068,7 @@ impl CalculaMcpServer {
 
     // ---- Sheet management (D5) ----
 
-    #[tool(description = "List the workbook's sheets with their 0-based indices, names, visibility and which one is active. The indices are what add_sheet/rename_sheet/delete_sheet/move_sheet and the sheet_index arguments elsewhere take. Read-only.")]
+    #[tool(description = "List the workbook's sheets with their 0-based indices, names, kind (worksheet or canvas; a canvas holds objects only, never cells), visibility and which one is active. The indices are what add_sheet/rename_sheet/delete_sheet/move_sheet and the sheet_index arguments elsewhere take. Read-only.")]
     async fn list_sheets(&self) -> Result<CallToolResult, ErrorData> {
         log_info!("MCP", "Tool call: list_sheets");
         match tools_objects::list_sheets(&self.app_handle) {
@@ -1077,14 +1080,14 @@ impl CalculaMcpServer {
         }
     }
 
-    #[tool(description = "Add a new empty sheet at the end of the workbook. NOTE: sheet structure changes are NOT undoable in Calcula (same as the in-app behavior) — confirm with the user before adding sheets in bulk.")]
+    #[tool(description = "Add a new empty sheet at the end of the workbook: a worksheet (default) or, with kind=canvas, a canvas sheet that holds only floating objects and has no cells. NOTE: sheet structure changes are NOT undoable in Calcula (same as the in-app behavior) — confirm with the user before adding sheets in bulk.")]
     async fn add_sheet(
         &self,
         params: Parameters<AddSheetParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        log_info!("MCP", "Tool call: add_sheet {:?}", p.name);
-        match tools_objects::add_sheet(&self.app_handle, p.name.as_deref()) {
+        log_info!("MCP", "Tool call: add_sheet {:?} kind={:?}", p.name, p.kind);
+        match tools_objects::add_sheet(&self.app_handle, p.name.as_deref(), p.kind.as_deref()) {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => {
                 log_warn!("MCP", "Tool error: add_sheet: {}", log_summary(&e, 200));

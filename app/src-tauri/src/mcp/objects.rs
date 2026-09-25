@@ -1180,9 +1180,10 @@ pub(crate) fn format_sheet_inventory(result: &crate::sheets::SheetsResult) -> St
     let mut out = String::new();
     for s in &result.sheets {
         out.push_str(&format!(
-            "- index={} name=\"{}\" visibility={}{}{}\n",
+            "- index={} name=\"{}\" kind={} visibility={}{}{}\n",
             s.index,
             s.name,
+            s.kind,
             s.visibility,
             if s.index == result.active_index { " (active)" } else { "" },
             if s.tab_color.is_empty() {
@@ -1209,18 +1210,23 @@ pub fn list_sheets(handle: &AppHandle) -> Result<String, String> {
 }
 
 /// Add a sheet at the end of the workbook.
-pub fn add_sheet(handle: &AppHandle, name: Option<&str>) -> Result<String, String> {
+pub fn add_sheet(handle: &AppHandle, name: Option<&str>, kind: Option<&str>) -> Result<String, String> {
     require_tier(handle, "add_sheet")?;
     let result = crate::sheets::add_sheet(
         handle.state::<AppState>(),
         handle.state::<crate::persistence::FileState>(),
         name.map(|s| s.to_string()),
+        kind.map(|s| s.to_string()),
     )?;
+    // The new sheet is the ACTIVE one (add_sheet switches to it). Reading it
+    // by index rather than as the list's last row stays right however the
+    // partition rotation placed it.
     let added = result
         .sheets
-        .last()
-        .map(|s| (s.index, s.name.clone()))
-        .unwrap_or((0, name.unwrap_or("Sheet").to_string()));
+        .iter()
+        .find(|s| s.index == result.active_index)
+        .map(|s| (s.index, s.name.clone(), s.kind.clone()))
+        .unwrap_or((0, name.unwrap_or("Sheet").to_string(), "worksheet".to_string()));
 
     // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
     // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
@@ -1233,17 +1239,24 @@ pub fn add_sheet(handle: &AppHandle, name: Option<&str>) -> Result<String, Strin
     audit(
         handle,
         "add_sheet",
-        &format!("An AI tool added sheet \"{}\" at index {}", added.1, added.0),
+        &format!("An AI tool added {} \"{}\" at index {}", added.2, added.1, added.0),
         vec![
             ("name", serde_json::json!(added.1)),
             ("index", serde_json::json!(added.0)),
+            ("kind", serde_json::json!(added.2)),
         ],
     );
     Ok(format!(
-        "Added sheet \"{}\" at index {} ({} sheet(s) now). Sheet structure changes are NOT undoable.",
+        "Added {} \"{}\" at index {} ({} sheet(s) now). Sheet structure changes are NOT undoable.{}",
+        added.2,
         added.1,
         added.0,
-        result.sheets.len()
+        result.sheets.len(),
+        if added.2 == "canvas" {
+            " A canvas holds objects only: it has no cells, and cell writes to it are refused."
+        } else {
+            ""
+        }
     ))
 }
 
@@ -1262,6 +1275,7 @@ pub fn rename_sheet(handle: &AppHandle, index: usize, new_name: &str) -> Result<
     crate::sheets::rename_sheet(
         handle.state::<AppState>(),
         handle.state::<crate::persistence::FileState>(),
+        handle.state::<crate::pivot::types::PivotState>(),
         index,
         new_name.to_string(),
     )?;
@@ -1813,6 +1827,8 @@ mod tests {
                     tab_color: String::new(),
                     visibility: "visible".to_string(),
                     sheet_id: String::new(),
+                    kind: "worksheet".to_string(),
+                    canvas_layout: None,
                 },
                 crate::sheets::SheetInfo {
                     index: 1,
@@ -1822,6 +1838,8 @@ mod tests {
                     tab_color: "#ff0000".to_string(),
                     visibility: "hidden".to_string(),
                     sheet_id: String::new(),
+                    kind: "canvas".to_string(),
+                    canvas_layout: Some(::persistence::CanvasLayout::default()),
                 },
             ],
             active_index: 1,
@@ -1831,6 +1849,8 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("index=0"));
         assert!(lines[0].contains("name=\"Data\""));
+        assert!(lines[0].contains("kind=worksheet"));
+        assert!(lines[1].contains("kind=canvas"), "a canvas must say so: {}", lines[1]);
         assert!(!lines[0].contains("(active)"));
         assert!(lines[1].contains("visibility=hidden"));
         assert!(lines[1].contains("(active)"));

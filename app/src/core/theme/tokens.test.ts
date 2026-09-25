@@ -107,6 +107,7 @@ const TAB_ACCENTS = [
   THEME_TOKENS.TAB_ACCENT_SLICER,
   THEME_TOKENS.TAB_ACCENT_SPARKLINE,
   THEME_TOKENS.TAB_ACCENT_REPORT,
+  THEME_TOKENS.TAB_ACCENT_CANVAS,
 ] as const;
 
 describe("Calcula Clusters tokens are legible in both baselines", () => {

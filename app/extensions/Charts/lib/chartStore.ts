@@ -19,13 +19,18 @@ import {
 import { chartsBackend } from "./chartsBackend";
 import { emitAppEvent, AppEvents } from "@api/events";
 import { alertAsync } from "@api/dialogs";
+// The sheet list's id <-> index map lives in its own small module, NOT in the
+// resolver: the store is imported almost everywhere, and the resolver pulls the
+// whole `@api` facade and the grid state with it.
+import { loadSheetIdMap, peekSheetIdForIndex } from "./sheetIdMap";
+import { specHasUnstampedRangeRef, stampSpecSheetIds, type SheetIdForIndex } from "./chartSheetRefs";
 
 // ============================================================================
 // Backend Types
 // ============================================================================
 
 /** Matches Rust ChartEntry (api_types.rs). */
-interface ChartEntry {
+export interface ChartEntry {
   id: string;
   sheetIndex: number;
   specJson: string;
@@ -82,17 +87,28 @@ function toEntry(chart: ChartDefinition): ChartEntry {
  * chartSpecNormalize.ts). Completing the record costs one shallow copy per
  * chart at load and removes the whole failure mode.
  */
-function fromEntry(entry: ChartEntry): ChartDefinition {
+export function fromEntry(entry: ChartEntry): ChartDefinition {
   let parsed: unknown;
   try {
     parsed = JSON.parse(entry.specJson);
   } catch {
     parsed = null;
   }
-  return normalizeChartDefinition(parsed, {
+  const definition = normalizeChartDefinition(parsed, {
     chartId: entry.id,
     sheetIndex: entry.sheetIndex,
   });
+  // THE ENTRY'S PLACEMENT WINS over the copy inside the JSON. `toEntry` writes
+  // the placement sheet twice -- once as the entry's `sheet_index`, once inside
+  // `specJson` -- and only the first is maintained by the backend: a sheet
+  // delete / move / copy remaps `entry.sheet_index` (object_deps
+  // `cascade_sheet_removed`, and the two .calp materializers) and never
+  // rewrites the opaque JSON. Preferring the JSON copy undid every remap at the
+  // next load, and the next `update_chart` then wrote the stale index back.
+  if (typeof entry.sheetIndex === "number" && Number.isInteger(entry.sheetIndex)) {
+    definition.sheetIndex = entry.sheetIndex;
+  }
+  return definition;
 }
 
 /** True for non-null, non-array objects (the values we recurse into when merging). */
@@ -454,6 +470,16 @@ async function reportChartPersistFailures(failures: ChartPersistFailure[]): Prom
 /** Chart IDs that have been mutated but not yet persisted. */
 const dirtyChartIds = new Set<string>();
 
+/**
+ * Dirty chart ids whose ONLY pending change is a sheet-id stamp (the load-time
+ * migration, or a create whose sheet list was not to hand). Such a write
+ * carries nothing the user authored -- the stamp names the same sheet the index
+ * already names -- so a refusal (a protected sheet refuses every chart write)
+ * is logged and NOT put in front of the user as lost work. Any real edit to the
+ * chart before the flush removes it from this set.
+ */
+const stampOnlyChartIds = new Set<string>();
+
 /** Timer handle for the debounced save. */
 let saveTimer: number | null = null;
 
@@ -461,10 +487,32 @@ let saveTimer: number | null = null;
  * Mark a chart as dirty and schedule a debounced persist.
  * Multiple calls within 300ms are batched into a single flush.
  */
-function scheduleSave(chartId: string): void {
+function scheduleSave(chartId: string, reason: "edit" | "sheetIdStamp" = "edit"): void {
+  if (reason === "sheetIdStamp") {
+    if (!dirtyChartIds.has(chartId)) stampOnlyChartIds.add(chartId);
+  } else {
+    stampOnlyChartIds.delete(chartId);
+  }
   dirtyChartIds.add(chartId);
   if (saveTimer !== null) clearTimeout(saveTimer);
   saveTimer = window.setTimeout(flushDirtyCharts, 300);
+}
+
+/** Index -> sheet id from the resolver's CACHED sheet list (synchronous; may miss). */
+const cachedSheetIdForIndex: SheetIdForIndex = (sheetIndex) => peekSheetIdForIndex(sheetIndex);
+
+/**
+ * Stamp the sheet id onto every DataRangeRef in `chart`'s spec that lacks one,
+ * from the CACHED sheet list only -- synchronous, so no persist path waits on a
+ * backend read for it. A cold cache simply leaves the ref for the load-time
+ * migration. Skipped for a chart under a transient preview: its `spec` is the
+ * preview, not the stored spec.
+ */
+function stampChartFromCache(chart: ChartDefinition): void {
+  if (activePreview !== null && activePreview.chartId === chart.chartId) return;
+  if (!specHasUnstampedRangeRef(chart.spec)) return;
+  const stamped = stampSpecSheetIds(chart.spec, cachedSheetIdForIndex);
+  if (stamped !== chart.spec) chart.spec = stamped;
 }
 
 /**
@@ -474,12 +522,17 @@ function scheduleSave(chartId: string): void {
  */
 async function flushDirtyCharts(): Promise<void> {
   const ids = Array.from(dirtyChartIds);
+  const stampOnly = new Set(ids.filter((id) => stampOnlyChartIds.has(id)));
+  for (const id of ids) stampOnlyChartIds.delete(id);
   dirtyChartIds.clear();
   saveTimer = null;
   const failures: ChartPersistFailure[] = [];
   for (const id of ids) {
     const chart = getChartById(id);
     if (!chart) continue;
+    // Every write carries the source sheet's id where the cache can supply it,
+    // so a ref a script wrote by index is pinned to that sheet from now on.
+    stampChartFromCache(chart);
     // NEVER the previewed spec: a save scheduled by an unrelated edit must not
     // carry a hover preview to disk (see `chartAsPersisted`).
     const persistable = chartAsPersisted(chart);
@@ -487,6 +540,15 @@ async function flushDirtyCharts(): Promise<void> {
       await chartsBackend.invoke("update_chart", { entry: toEntry(persistable) });
       recordPersisted(persistable);
     } catch (error) {
+      if (stampOnly.has(id)) {
+        // Nothing the user did was refused: the stored chart still resolves
+        // its data by index, and the next load tries the stamp again.
+        console.warn(
+          `[Charts] Could not record the source sheet id for chart "${chart.name}" (${id}); ` +
+            `it keeps resolving its data by sheet index: ${describeBackendError(error)}`,
+        );
+        continue;
+      }
       // Describe the loss BEFORE the rollback, while both versions still exist.
       const snapshot = persistedSnapshots.get(id);
       // Also the persistable shape: a preview is not a lost EDIT, and naming it
@@ -587,7 +649,97 @@ export async function loadChartsFromBackend(): Promise<void> {
     charts = [];
     persistedSnapshots.clear();
     nextChartNumber = 1;
+    return;
   }
+  // AFTER the snapshots are recorded: they are what the backend holds, and the
+  // stamp is a change to be persisted like any other.
+  await migrateSheetIds(charts);
+}
+
+/**
+ * Load-time migration: stamp the source sheet's id on every DataRangeRef a
+ * chart carries without one (spec.data, layers[].data, lookup `from`, concat
+ * children -- see chartSheetRefs.ts), from ONE sheet-list read, and persist the
+ * stamped charts through the ordinary debounced update path.
+ *
+ * The id comes from the ref's own `sheetIndex` at load -- the only thing a
+ * ref written before ids existed says about its sheet. A ref whose index no
+ * sheet answers to is left alone (it cannot be pinned to anything), and a
+ * failed sheet-list read leaves every chart as it was: an unstamped ref still
+ * resolves by index, exactly as before.
+ */
+async function migrateSheetIds(loaded: readonly ChartDefinition[]): Promise<void> {
+  const needing = loaded.filter((c) => specHasUnstampedRangeRef(c.spec));
+  if (needing.length === 0) return;
+  let idForIndex: SheetIdForIndex;
+  try {
+    const map = await loadSheetIdMap();
+    idForIndex = (sheetIndex) => map.idByIndex.get(sheetIndex);
+  } catch (error) {
+    console.warn("[Charts] Could not read the sheet list to stamp chart source sheet ids:", error);
+    return;
+  }
+  for (const chart of needing) {
+    // A newer load (or a delete) may have replaced the chart while we waited.
+    if (getChartById(chart.chartId) !== chart) continue;
+    if (activePreview !== null && activePreview.chartId === chart.chartId) continue;
+    const stamped = stampSpecSheetIds(chart.spec, idForIndex);
+    if (stamped === chart.spec) continue;
+    chart.spec = stamped;
+    scheduleSave(chart.chartId, "sheetIdStamp");
+  }
+}
+
+/**
+ * Reload the store after the sheet COLLECTION changed (a sheet added, deleted,
+ * moved, copied, or such an operation undone), WITHOUT losing a pending
+ * debounced save.
+ *
+ * WHY NOT JUST RELOAD. A drag schedules its write 300 ms out. Replacing the
+ * array under it lost the drag (the timer then wrote the reloaded, un-dragged
+ * chart). WHY NOT JUST FLUSH FIRST. The backend has already REMAPPED each
+ * chart's placement sheet for the operation that just happened, and a flush
+ * writes the whole entry -- so writing the in-memory, pre-operation index would
+ * undo that remap, the very staleness this reload exists to cure.
+ *
+ * So: read the entries the backend holds now, adopt ITS placement index for
+ * every pending chart whose placement the user has not changed since the last
+ * persist, drop a pending chart the backend no longer has (it went with its
+ * sheet -- `update_chart` would refuse it and show a spurious error), flush,
+ * THEN reload.
+ */
+export async function reloadChartsAfterSheetListChange(): Promise<void> {
+  if (saveTimer !== null || dirtyChartIds.size > 0) {
+    let entries: ChartEntry[] | null = null;
+    try {
+      entries = await chartsBackend.invoke<ChartEntry[]>("get_charts");
+    } catch {
+      entries = null;
+    }
+    if (entries !== null) {
+      const storedPlacement = new Map<string, number>();
+      for (const e of entries) storedPlacement.set(e.id, e.sheetIndex);
+      for (const id of Array.from(dirtyChartIds)) {
+        const chart = getChartById(id);
+        const stored = storedPlacement.get(id);
+        if (!chart || stored === undefined) {
+          dirtyChartIds.delete(id);
+          stampOnlyChartIds.delete(id);
+          continue;
+        }
+        const snapshot = persistedSnapshots.get(id);
+        // A pending placement MOVE (the user put the chart on another sheet and
+        // it has not been written yet) is the user's; anything else follows the
+        // backend's remap.
+        if (!snapshot || chart.sheetIndex === snapshot.sheetIndex) {
+          chart.sheetIndex = stored;
+          if (snapshot) snapshot.sheetIndex = stored;
+        }
+      }
+      await flushPendingChartSaves();
+    }
+  }
+  await loadChartsFromBackend();
 }
 
 // ============================================================================
@@ -626,7 +778,12 @@ export function createChart(
     // type-checked against it — the script broker and the MCP tools hand over a
     // parsed JSON object. Completing here means no path into the store can
     // produce a chart the painters cannot draw.
-    spec: normalizeChartSpec(spec),
+    //
+    // And the source sheet's id goes on every DataRangeRef the caller wrote by
+    // index (a script / MCP client can only write `sheetIndex`), from the
+    // cached sheet list so create stays synchronous. A cold cache is covered
+    // after the save (see persistNewChart).
+    spec: stampSpecSheetIds(normalizeChartSpec(spec), cachedSheetIdForIndex),
   };
   charts.push(chart);
   // Persist to backend. Still not awaited (createChart is synchronous by
@@ -653,6 +810,13 @@ async function persistNewChart(
   try {
     await chartsBackend.invoke("save_chart", { entry: toEntry(chart) });
     recordPersisted(chart);
+    // The create could not stamp every ref from the cache (the sheet list was
+    // not to hand). The save above is NOT delayed for it -- a create followed
+    // at once by a delete must reach the backend in that order -- so the stamp
+    // follows as an ordinary debounced update.
+    if (operation === "create" && specHasUnstampedRangeRef(chart.spec)) {
+      void migrateSheetIds([chart]);
+    }
   } catch (error) {
     const chartName = chart.name;
     const outcome = rollbackToPersisted(chart.chartId);
@@ -917,6 +1081,7 @@ export function resetChartStore(): void {
     saveTimer = null;
   }
   dirtyChartIds.clear();
+  stampOnlyChartIds.clear();
   // The store is going away; there is nothing left to restore a preview onto.
   activePreview = null;
   charts = [];

@@ -528,6 +528,8 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             show_formulas: false,
             view_mode: crate::DEFAULT_SHEET_VIEW_MODE.to_string(),
             display_headings: true,
+            // xlsx has no canvas concept; every imported sheet is a worksheet.
+            kind: crate::SheetKind::Worksheet,
             // <row s=".."> / <col s=".."> translated from RAW xlsx xf indices
             // through the same map the cells use, so a column that Excel styled
             // wholesale stays one entry here instead of becoming a style on

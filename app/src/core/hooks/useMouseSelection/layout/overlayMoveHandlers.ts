@@ -11,6 +11,13 @@
 import type { GridConfig, Viewport } from "../../../types";
 import { getGridRegions, getOverlayRegistration, type GridRegion } from "../../../../api/gridOverlays";
 import { isPointerClaimed } from "../../../lib/pointerClaims";
+import { getLayoutSurface, applySurfaceToMove } from "../../../lib/layoutSurface";
+import { getGridStateSnapshot } from "../../../state/GridContext";
+
+/** The layout surface of the sheet being edited (null = unconstrained). */
+function activeLayoutSurface() {
+  return getLayoutSurface(getGridStateSnapshot()?.sheetContext.activeSheetIndex ?? 0);
+}
 
 // ============================================================================
 // Overlay Move State
@@ -62,7 +69,8 @@ export interface OverlayMoveHandlers {
     event: React.MouseEvent<HTMLElement>,
   ) => boolean;
   /** Handle mousemove during overlay move drag. */
-  handleOverlayMoveMouseMove: (mouseX: number, mouseY: number) => void;
+  /** `altKey` held = move freely, bypassing the snap grid. */
+  handleOverlayMoveMouseMove: (mouseX: number, mouseY: number, altKey?: boolean) => void;
   /** Handle mouseup to complete overlay move. */
   handleOverlayMoveMouseUp: () => void;
   /**
@@ -327,9 +335,16 @@ export function createOverlayMoveHandlers(
   const handleOverlayMoveMouseMove = (
     mouseX: number,
     mouseY: number,
+    altKey: boolean = false,
   ): void => {
     const moveState = overlayMoveStateRef.current;
     if (!moveState) return;
+
+    // CONSUME MODE (a subscribed canvas, or design mode off): the object was
+    // selected by the press, but no drag may change its geometry. Returning
+    // before `hasMoved` is set means mouse-up dispatches no moveComplete.
+    const surface = activeLayoutSurface();
+    if (surface && !surface.editable) return;
 
     const deltaX = mouseX - moveState.startMouseX;
     const deltaY = mouseY - moveState.startMouseY;
@@ -339,9 +354,31 @@ export function createOverlayMoveHandlers(
       moveState.hasMoved = true;
     }
 
+    // On a laid-out surface, pointer jitter inside the click threshold moves
+    // NOTHING: snapping a 1px wobble would jump an off-grid object to the grid
+    // on a plain click (and a family that persists previews would save it).
+    // Worksheets keep their previous behaviour.
+    if (surface && !moveState.hasMoved) return;
+
     // Clamp to non-negative sheet coordinates
-    const newX = Math.max(0, moveState.startX + deltaX);
-    const newY = Math.max(0, moveState.startY + deltaY);
+    let newX = Math.max(0, moveState.startX + deltaX);
+    let newY = Math.max(0, moveState.startY + deltaY);
+
+    // SNAP + PAGE (the layout surface). Applied HERE, the one point every
+    // family's move geometry passes through: mouse-up re-dispatches exactly
+    // these values as moveComplete, so the preview and the persisted position
+    // can never disagree. Alt moves freely; a family with its own quantisation
+    // opts out with `region.data.snap === false`.
+    if (surface) {
+      const floating = moveState.region.floating;
+      const snapped = applySurfaceToMove(
+        surface,
+        { x: newX, y: newY, width: floating?.width ?? 0, height: floating?.height ?? 0 },
+        { bypassSnap: altKey, optOutSnap: moveState.region.data?.snap === false },
+      );
+      newX = snapped.x;
+      newY = snapped.y;
+    }
 
     // Track current position for mouseUp
     moveState.currentX = newX;

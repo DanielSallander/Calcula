@@ -37,7 +37,8 @@ const TOPICS: Record<string, string> = {
   sheet: `Sheets:
   ls sheets [pattern]
   show sheet <name>               (index, visibility, used range)
-  add sheet [Name]                (auto-named when no name is given)
+  add sheet [Name] [kind=canvas]  (auto-named when no name is given;
+                                  kind=canvas adds a canvas page)
   rename sheet <old> -> <new>     (also: rename sheet old new / old to new)
   delete sheet <name>
   set sheet <name> visibility=visible|hidden|veryhidden tabcolor=#rrggbb
@@ -111,7 +112,7 @@ const TOPICS: Record<string, string> = {
   set cell A1 = <value or formula>
   set sheet <name> visibility=visible|hidden|veryhidden tabcolor=#rrggbb`,
   add: `add:
-  add sheet [Name]
+  add sheet [Name] [kind=worksheet|canvas]
   add name <N> = Sheet1!A1:B9`,
   delete: `delete:
   delete sheet <name>      delete name <n>      delete range A1:B9 [what=…]`,

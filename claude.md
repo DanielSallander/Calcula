@@ -197,7 +197,7 @@ enforced by the compiler, not by review.
   `write(&effect)` requires a `DocumentEffect`. **Do not count the fields by hand, and do not
   quote a number from this file.** `the_appstate_lock_census_reconciles`
   (`app/src-tauri/src/document_effect.rs`) parses the struct body and asserts the split, so the
-  build fails the moment it moves. As pinned today: **106 fields — 64 `Persisted<T>`, 40 bare
+  build fails the moment it moves. As pinned today: **107 fields — 65 `Persisted<T>`, 40 bare
   `Mutex`/`RwLock`, 2 neither** (`undo_stack`, `calc_cancel`). Three successive hand-counts in
   this very paragraph were wrong before that test existed — 36, then 51, then 59, each from a
   different grep spelling — which is why the number now lives in a test and this paragraph no

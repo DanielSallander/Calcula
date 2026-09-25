@@ -136,8 +136,13 @@ pub(crate) fn sync_report_definitions_to_regions(
 /// Shift protected regions when rows are inserted.
 /// Coordinate shifts apply to ALL regions; pivot definition updates apply only to pivot regions.
 fn shift_pivot_regions_for_row_insert(state: &AppState, effect: &crate::document_effect::DocumentEffect, pivot_state: &PivotState, from_row: u32, count: u32, sheet_index: usize) {
-    let mut regions = state.protected_regions.lock().unwrap();
+    // LOCK ORDER: `pivot_tables` BEFORE `protected_regions`, the crate's one
+    // order for the pair (`delete_pivot_table`, the undo delete, and every pivot
+    // command that resolves its destination under `pivot_tables` -- the
+    // resolver reads the pivot's region). Taking them the other way round here
+    // closed a cycle with each of those.
     let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
+    let mut regions = state.protected_regions.lock().unwrap();
 
     for region in regions.iter_mut() {
         if region.sheet_index != sheet_index {
@@ -191,8 +196,13 @@ fn shift_pivot_regions_for_row_insert(state: &AppState, effect: &crate::document
 
 /// Shift protected regions when columns are inserted.
 fn shift_pivot_regions_for_col_insert(state: &AppState, effect: &crate::document_effect::DocumentEffect, pivot_state: &PivotState, from_col: u32, count: u32, sheet_index: usize) {
-    let mut regions = state.protected_regions.lock().unwrap();
+    // LOCK ORDER: `pivot_tables` BEFORE `protected_regions`, the crate's one
+    // order for the pair (`delete_pivot_table`, the undo delete, and every pivot
+    // command that resolves its destination under `pivot_tables` -- the
+    // resolver reads the pivot's region). Taking them the other way round here
+    // closed a cycle with each of those.
     let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
+    let mut regions = state.protected_regions.lock().unwrap();
 
     for region in regions.iter_mut() {
         if region.sheet_index != sheet_index {
@@ -238,8 +248,13 @@ fn shift_pivot_regions_for_col_insert(state: &AppState, effect: &crate::document
 
 /// Shift protected regions when rows are deleted.
 fn shift_pivot_regions_for_row_delete(state: &AppState, effect: &crate::document_effect::DocumentEffect, pivot_state: &PivotState, from_row: u32, count: u32, sheet_index: usize) {
-    let mut regions = state.protected_regions.lock().unwrap();
+    // LOCK ORDER: `pivot_tables` BEFORE `protected_regions`, the crate's one
+    // order for the pair (`delete_pivot_table`, the undo delete, and every pivot
+    // command that resolves its destination under `pivot_tables` -- the
+    // resolver reads the pivot's region). Taking them the other way round here
+    // closed a cycle with each of those.
     let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
+    let mut regions = state.protected_regions.lock().unwrap();
 
     // Collect IDs of regions fully within the deleted range
     let mut regions_to_remove: Vec<String> = Vec::new();
@@ -1223,8 +1238,13 @@ fn shift_writeback_draft_regions(
 
 /// Shift protected regions when columns are deleted.
 fn shift_pivot_regions_for_col_delete(state: &AppState, effect: &crate::document_effect::DocumentEffect, pivot_state: &PivotState, from_col: u32, count: u32, sheet_index: usize) {
-    let mut regions = state.protected_regions.lock().unwrap();
+    // LOCK ORDER: `pivot_tables` BEFORE `protected_regions`, the crate's one
+    // order for the pair (`delete_pivot_table`, the undo delete, and every pivot
+    // command that resolves its destination under `pivot_tables` -- the
+    // resolver reads the pivot's region). Taking them the other way round here
+    // closed a cycle with each of those.
     let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
+    let mut regions = state.protected_regions.lock().unwrap();
 
     let mut regions_to_remove: Vec<String> = Vec::new();
 

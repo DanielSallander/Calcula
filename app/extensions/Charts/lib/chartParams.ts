@@ -9,7 +9,6 @@
 //          build on this same carry vehicle later.
 
 import type { ChartSpec, ParamSpec, ChartSelectionMap, AxisSpec } from "../types";
-import { isDataRangeRef } from "../types";
 import type { FormulaValue } from "./chartFormula";
 import { resolveParamCell } from "./dataSourceResolver";
 import { parseDisplayNumber } from "./chartFieldTypes";
@@ -155,8 +154,6 @@ export async function resolveParams(spec: ChartSpec, chartId?: string): Promise<
   const params = spec.params;
   if (!params || params.length === 0) return out;
 
-  const sheetIndex = isDataRangeRef(spec.data) ? spec.data.sheetIndex : 0;
-
   for (const p of params) {
     const name = (p.name ?? "").trim();
     if (name === "" || RESERVED_PARAM_NAMES.has(name) || out.has(name)) continue;
@@ -168,8 +165,10 @@ export async function resolveParams(spec: ChartSpec, chartId?: string): Promise<
     if (widget !== undefined) {
       resolved = widget;
     } else if (p.cellRef) {
-      // A same-sheet cell ref is read live; cross-sheet/empty falls back to default.
-      const display = await resolveParamCell(p.cellRef, sheetIndex);
+      // A same-sheet (ACTIVE-sheet) cell ref is read live; cross-sheet/empty
+      // falls back to default. See resolveParamCell for why "same sheet" is the
+      // active one rather than the data's sheet.
+      const display = await resolveParamCell(p.cellRef);
       resolved = display !== null ? coerceCellValue(display) : coerceToFormulaValue(p.value ?? "");
     } else {
       resolved = coerceToFormulaValue(p.value ?? "");

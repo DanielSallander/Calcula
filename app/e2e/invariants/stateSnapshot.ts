@@ -143,6 +143,13 @@ export interface LogicalState {
    */
   sheetTabColors: string[];
   /**
+   * Per-sheet KIND, in index order ("worksheet" | "canvas"). Optional: a
+   * snapshot built before canvases existed, or whose query failed, has none.
+   * The "Canvas" contextual-tab rule reads it -- a Canvas tab on a worksheet
+   * is the defect that rule exists to catch.
+   */
+  sheetKinds?: string[];
+  /**
    * Floating ranges in the workbook (all sheets). Empty when the query fails
    * — a snapshot must degrade to "none visible", never manufacture state.
    */
@@ -518,6 +525,9 @@ async function captureLogicalState(page: Page): Promise<LogicalState> {
       ),
       sheetTabColors: (((sheetsResult as any)?.sheets ?? []) as any[]).map((s: any) =>
         String(s?.tabColor ?? "")
+      ),
+      sheetKinds: (((sheetsResult as any)?.sheets ?? []) as any[]).map((s: any) =>
+        String(s?.kind ?? "worksheet")
       ),
       floatingRanges: await Promise.all(
         (((floatingRanges as any[]) ?? [])).map(async (fr: any) => {

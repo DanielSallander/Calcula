@@ -239,6 +239,7 @@ export const defaultTheme: Record<string, string> = {
   [THEME_TOKENS.TAB_ACCENT_SLICER]: '#6a48c9',
   [THEME_TOKENS.TAB_ACCENT_SPARKLINE]: '#b8410a',
   [THEME_TOKENS.TAB_ACCENT_REPORT]: '#8a3d0b',
+  [THEME_TOKENS.TAB_ACCENT_CANVAS]: '#b0245f',
 
   // --- Calcula Clusters: sidebar activity bar + status bar ---
   [THEME_TOKENS.ACTIVITY_BAR_BG]: '#f3f4f6',

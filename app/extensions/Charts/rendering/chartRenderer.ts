@@ -776,9 +776,9 @@ async function renderChartAsync(
     const chart = getChartById(chartId);
     if (!chart) return;
 
-    // Skip rendering if the chart's sheet isn't the active sheet.
-    // getViewportCells only reads from the active sheet, so rendering
-    // a chart for an inactive sheet would produce wrong data.
+    // Skip rendering if the chart's PLACEMENT sheet isn't the active sheet: it
+    // is not on screen. (The data read itself goes to the data's own sheet,
+    // which on a canvas is always another one -- see chartDataReader.)
     if (chart.sheetIndex !== getActiveSheetIndex()) return;
 
     // Fetch data from the grid and resolve cell references. Pass chartId so the

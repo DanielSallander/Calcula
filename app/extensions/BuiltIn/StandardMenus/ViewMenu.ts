@@ -308,13 +308,17 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   // ---------------------------------------------------------------------------
 
   const currentViewMode = gridState.viewMode || "normal";
+  // A CANVAS sheet has no rows, columns, cells, gridlines or headings, so the
+  // commands that act on those are disabled there (the backend also refuses
+  // freeze and split for a canvas). The layout-level items stay available.
+  const onCanvas = gridState.surface === "canvas";
   const items: MenuItemDefinition[] = [];
 
   // View Mode section
   items.push(
-    { id: 'view.normalView', label: 'Normal View', icon: IconNormalView, action: handleNormalView, checked: currentViewMode === "normal" },
-    { id: 'view.pageLayoutView', label: 'Page Layout View', icon: IconPageLayoutView, action: handlePageLayoutView, checked: currentViewMode === "pageLayout" },
-    { id: 'view.pageBreakPreview', label: 'Page Break Preview', icon: IconPageBreakPreview, action: handlePageBreakPreview, checked: currentViewMode === "pageBreakPreview" },
+    { id: 'view.normalView', label: 'Normal View', icon: IconNormalView, action: handleNormalView, checked: currentViewMode === "normal", disabled: onCanvas },
+    { id: 'view.pageLayoutView', label: 'Page Layout View', icon: IconPageLayoutView, action: handlePageLayoutView, checked: currentViewMode === "pageLayout", disabled: onCanvas },
+    { id: 'view.pageBreakPreview', label: 'Page Break Preview', icon: IconPageBreakPreview, action: handlePageBreakPreview, checked: currentViewMode === "pageBreakPreview", disabled: onCanvas },
     { id: 'view.sepViews', label: '', separator: true },
   );
 
@@ -343,6 +347,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     id: 'view.freezePanes',
     label: 'Freeze Panes',
     icon: IconFreezePanes,
+    disabled: onCanvas,
     children: [
       { id: 'view.freezeRow', label: 'Freeze Top Row', icon: IconFreezeRow, action: handleFreezeTopRow, checked: freezeState.row },
       { id: 'view.freezeCol', label: 'Freeze First Column', icon: IconFreezeCol, action: handleFreezeFirstColumn, checked: freezeState.col },
@@ -359,6 +364,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     label: isSplit ? 'Remove Split' : 'Split Window',
     icon: IconSplitWindow,
     action: isSplit ? handleRemoveSplit : handleSplitWindow,
+    disabled: onCanvas,
   });
 
   items.push({ id: 'view.sep2', label: '', separator: true });
@@ -370,6 +376,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     icon: IconGoToSpecial,
     action: handleGoToSpecial,
     shortcut: 'Ctrl+G',
+    disabled: onCanvas,
   });
 
   // Show Formulas
@@ -380,6 +387,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     action: handleToggleShowFormulas,
     checked: gridState.showFormulas,
     shortcut: 'Ctrl+`',
+    disabled: onCanvas,
   });
 
   // Display Zeros
@@ -389,6 +397,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     icon: IconDisplayZeros,
     action: handleToggleDisplayZeros,
     checked: gridState.displayZeros,
+    disabled: onCanvas,
   });
 
   // Display Gridlines
@@ -397,7 +406,8 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     label: 'Gridlines',
     icon: IconGridlines,
     action: handleToggleDisplayGridlines,
-    checked: gridState.displayGridlines !== false,
+    checked: !onCanvas && gridState.displayGridlines !== false,
+    disabled: onCanvas,
   });
 
   // Display Headings
@@ -406,7 +416,8 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     label: 'Headings',
     icon: IconHeadings,
     action: handleToggleDisplayHeadings,
-    checked: gridState.displayHeadings !== false,
+    checked: !onCanvas && gridState.displayHeadings !== false,
+    disabled: onCanvas,
   });
 
   // Display Formula Bar

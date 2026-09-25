@@ -14,6 +14,7 @@ exports[`AppEvents > all event values match snapshot 1`] = `
   "BI_MODEL_CHANGED": "app:bi-model-changed",
   "BI_REFRESH_COMPLETED": "app:bi-refresh-completed",
   "CALC_PROGRESS": "app:calc-progress",
+  "CANVAS_LAYOUT_CHANGED": "app:canvas-layout-changed",
   "CELLS_UPDATED": "app:cells-updated",
   "CELL_VALUES_CHANGED": "app:cell-values-changed",
   "CHART_SELECTION_CHANGED": "app:chart-selection-changed",

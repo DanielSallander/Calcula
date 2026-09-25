@@ -21,6 +21,7 @@ import {
   IconTitleCols,
 } from "@api";
 import type { Selection } from "@api";
+import { getGridStateSnapshot } from "@api/grid";
 import {
   getPrintData,
   writeBinaryFile,
@@ -76,6 +77,24 @@ function getSelectionBounds(): {
 }
 
 // ============================================================================
+// Canvas sheets
+// ============================================================================
+
+/**
+ * The refusal shown when the active sheet is a CANVAS. Printing reads the
+ * active sheet's CELLS (get_print_data), and a canvas has none: the objects on
+ * the page are not part of the print data, so a print would come out as a
+ * blank page presented as the canvas. Refusing says what is true.
+ */
+const CANVAS_PRINT_REFUSAL =
+  "Printing and PDF export of a canvas sheet are not supported yet: a canvas holds objects only, " +
+  "and printing reads cells. Switch to a worksheet to print it.";
+
+function activeSheetIsCanvas(): boolean {
+  return getGridStateSnapshot()?.surface === "canvas";
+}
+
+// ============================================================================
 // Print handler
 // ============================================================================
 
@@ -85,6 +104,10 @@ async function handlePrint(): Promise<void> {
     // that declared onBeforePrint is asked, with the standard default-ALLOW
     // deadline. checkLifecycleGuards reports a cancellation to the user itself
     // (with the objecting script's name), so returning silently is honest.
+    if (activeSheetIsCanvas()) {
+      void alertAsync(CANVAS_PRINT_REFUSAL, { title: "Print" });
+      return;
+    }
     if (await checkLifecycleGuards("print", {})) return;
     const data = await getPrintData();
     executePrint(data);
@@ -100,6 +123,10 @@ async function handlePrint(): Promise<void> {
 
 async function handleExportPdf(): Promise<void> {
   try {
+    if (activeSheetIsCanvas()) {
+      void alertAsync(CANVAS_PRINT_REFUSAL, { title: "Export to PDF" });
+      return;
+    }
     // Same Before-Print verdict as handlePrint: a PDF export IS a print of the
     // document, and a guard that could stop one but not the other would lie.
     if (await checkLifecycleGuards("print", {})) return;
@@ -354,6 +381,9 @@ function activate(context: ExtensionContext): void {
   //     printService.ts for why that must not be offered to a script.
   cleanupFns.push(
     registerPdfRenderer(async () => {
+      // Same refusal as File > Export to PDF: a script asking for the PDF of a
+      // canvas must not get a blank page back as if it were the canvas.
+      if (activeSheetIsCanvas()) throw new Error(CANVAS_PRINT_REFUSAL);
       const data = await getPrintData();
       return new Uint8Array(generatePdf(data));
     }),

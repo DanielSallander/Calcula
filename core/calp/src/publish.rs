@@ -503,6 +503,15 @@ pub fn carries_wave_content(request: &PublishRequest) -> bool {
                 .get(idx)
                 .is_some_and(|s| s.cells.values().any(|c| c.spill.is_some()))
         })
+        // A CANVAS sheet. An older app ignores the unknown `kind` in
+        // metadata.json and materializes the canvas as an ordinary, editable
+        // worksheet with its objects floating over an empty grid -- a document
+        // that looks like something it is not, with no error anywhere.
+        // Refusing the pull is the honest failure.
+        || request
+            .sheet_indices
+            .iter()
+            .any(|&idx| wb.sheets.get(idx).is_some_and(|s| s.kind.is_canvas()))
 }
 
 /// Publish selected sheets from a workbook to a local workspace.

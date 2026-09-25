@@ -146,6 +146,15 @@ export const AppEvents = {
   // to the backend, so re-emitting one here would echo a value the backend just
   // reported straight back at it.
   SHEET_DISPLAY_FLAGS_CHANGED: "app:sheet-display-flags-changed",
+
+  // A CANVAS sheet's layout (page, snap grid, background, stacking) was
+  // replaced in the BACKEND. Re-emitted by `shell/canvasLayoutBridge.ts` from
+  // the Rust `sheet:canvas-layout-changed` announcement, which the ONE write
+  // door (`set_canvas_layout`) sends for every route: the Canvas ribbon tab, a
+  // script row, an MCP tool, a `.calp` refresh. Carries no payload on purpose,
+  // like SHEET_DISPLAY_FLAGS_CHANGED: the canvas sheet extension answers it by
+  // re-reading `get_sheets`, so no subscriber acts on a stale copy.
+  CANVAS_LAYOUT_CHANGED: "app:canvas-layout-changed",
 } as const;
 
 export type AppEventType = (typeof AppEvents)[keyof typeof AppEvents];

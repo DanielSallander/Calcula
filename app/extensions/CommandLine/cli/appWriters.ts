@@ -18,7 +18,7 @@ import { validateOptions } from "../../_shared/cli/optionSchema";
 import type { CliOptionSpec, CliOptionTable } from "../../_shared/cli/optionSchema";
 import type { CliIo, WritePreview } from "../../_shared/cli/registry";
 import type { ClearApplyTo } from "@api/backend";
-import type { SheetInfo } from "@api/lib";
+import type { SheetInfo, SheetKindName } from "@api/lib";
 import {
   colLetterToIndex,
   formatQualified,
@@ -41,7 +41,14 @@ export const APP_CELL_OPTIONS: CliOptionTable = {
 };
 
 export const APP_SHEET_OPTIONS: CliOptionTable = {
-  add: [],
+  add: [
+    {
+      key: "kind",
+      type: "enum",
+      values: ["worksheet", "canvas"],
+      help: "worksheet (default) or canvas (a fixed page of floating objects)",
+    },
+  ],
   rename: [],
   delete: [],
   set: [
@@ -157,7 +164,7 @@ type SheetVisibilityChange = "visible" | "hidden" | "veryHidden";
 
 type AppWriteAction =
   | { t: "setCell"; sheet: string | null; row: number; col: number; input: string; refLabel: string }
-  | { t: "addSheet"; name: string | null }
+  | { t: "addSheet"; name: string | null; kind: SheetKindName | null }
   | { t: "renameSheet"; oldName: string; newName: string }
   | { t: "deleteSheet"; name: string }
   | { t: "setSheet"; name: string; visibility: SheetVisibilityChange | null; tabColor: string | null }
@@ -180,7 +187,7 @@ function analyzeAppWrite(cmd: GenericCommand): AppWriteAction | null {
     case "add":
       if (cmd.kind === "sheet") return analyzeAddSheet(cmd);
       if (cmd.kind === "name") return analyzeAddName(cmd);
-      fail("add what? The command line can 'add sheet [Name]' or 'add name <N> = <ref>'", cmd.line);
+      fail("add what? The command line can 'add sheet [Name] [kind=canvas]' or 'add name <N> = <ref>'", cmd.line);
       break;
     case "rename":
       if (cmd.kind === "sheet") {
@@ -276,7 +283,18 @@ function analyzeSetSheet(cmd: GenericCommand): AppWriteAction {
 function analyzeAddSheet(cmd: GenericCommand): AppWriteAction {
   const name = cmd.pos[0]?.text ?? null;
   if (name !== null) noSheetWildcard(name, cmd.line);
-  return { t: "addSheet", name };
+  // kind= is checked HERE, at plan time: the option schema validates keys
+  // only, and a sheet's kind is fixed at creation, so a typo must never fall
+  // back to adding a worksheet the user did not ask for.
+  const kindRaw = optStr(cmd, "kind");
+  let kind: SheetKindName | null = null;
+  if (kindRaw !== undefined) {
+    const k = kindRaw.toLowerCase();
+    if (k === "worksheet") kind = "worksheet";
+    else if (k === "canvas") kind = "canvas";
+    else fail(`kind= expects worksheet or canvas (got '${kindRaw}')`, cmd.line);
+  }
+  return { t: "addSheet", name, kind };
 }
 
 function analyzeAddName(cmd: GenericCommand): AppWriteAction {
@@ -376,8 +394,10 @@ function labelOf(action: AppWriteAction): string {
   switch (action.t) {
     case "setCell":
       return `set cell ${action.refLabel}`;
-    case "addSheet":
-      return action.name ? `add sheet ${action.name}` : "add sheet";
+    case "addSheet": {
+      const noun = action.kind === "canvas" ? "canvas" : "sheet";
+      return action.name ? `add ${noun} ${action.name}` : `add ${noun}`;
+    }
     case "renameSheet":
       return `rename sheet ${action.oldName} -> ${action.newName}`;
     case "deleteSheet":
@@ -459,11 +479,16 @@ export async function runAppWrite(cmd: GenericCommand, s: AppCliSession, io: Cli
       return;
     }
     case "addSheet": {
-      const res = await s.gateway.addSheet(action.name ?? undefined);
+      // The kind is passed ONLY when the user named one, so a plain
+      // `add sheet X` reaches the gateway exactly as it always has.
+      const res =
+        action.kind === null
+          ? await s.gateway.addSheet(action.name ?? undefined)
+          : await s.gateway.addSheet(action.name ?? undefined, action.kind);
       s.sheets = res.sheets;
       s.activeSheetIndex = res.activeIndex;
       const created = action.name ?? res.sheets[res.activeIndex]?.name ?? "sheet";
-      io.print(`Added sheet '${created}'.`);
+      io.print(`Added ${action.kind === "canvas" ? "canvas" : "sheet"} '${created}'.`);
       return;
     }
     case "renameSheet": {

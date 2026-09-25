@@ -408,7 +408,10 @@ describe("the releases are WIRED into every way a script ends (source pins)", ()
   });
 
   it("the suppression sits at the ONE choke point every cell write funnels into", () => {
-    const at = hostSrc.indexOf("function scheduleGridDataRefresh(): void {");
+    // Matched up to the open paren: the scheduler takes an optional
+    // announce-only flag (off-sheet CELLS_UPDATED, canvas sheets M4).
+    const at = hostSrc.indexOf("function scheduleGridDataRefresh(");
+    expect(at).toBeGreaterThan(-1);
     const body = hostSrc.slice(at, hostSrc.indexOf("\n}", at));
     expect(body).toContain("deferredRepaintHolder !== null");
   });

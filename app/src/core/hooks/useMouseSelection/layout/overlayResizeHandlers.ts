@@ -10,6 +10,19 @@ import { createEmptyDimensionOverrides } from "../../../types";
 import { getGridRegions, type GridRegion } from "../../../../api/gridOverlays";
 import { getCellFromPixel } from "../../../lib/gridRenderer";
 import { rowHeaderGutter, colHeaderGutter } from "../../../lib/gridRenderer/layout/headerVisibility";
+import { getLayoutSurface, applySurfaceToResize, edgesOfCorner } from "../../../lib/layoutSurface";
+import { getGridStateSnapshot } from "../../../state/GridContext";
+
+/** The layout surface of the sheet being edited (null = unconstrained). */
+function activeLayoutSurface() {
+  return getLayoutSurface(getGridStateSnapshot()?.sheetContext.activeSheetIndex ?? 0);
+}
+
+/** False in consume mode: no resize handle is live on any floating object. */
+function floatingResizeAllowed(): boolean {
+  const surface = activeLayoutSurface();
+  return !surface || surface.editable;
+}
 
 /** Size of the resize handle hit area in pixels */
 const HANDLE_HIT_SIZE = 10;
@@ -71,7 +84,8 @@ export interface OverlayResizeHandlers {
     event: React.MouseEvent<HTMLElement>
   ) => boolean;
   /** Handle mousemove during overlay resize drag */
-  handleOverlayResizeMouseMove: (mouseX: number, mouseY: number) => void;
+  /** `altKey` held = resize freely, bypassing the snap grid. */
+  handleOverlayResizeMouseMove: (mouseX: number, mouseY: number, altKey?: boolean) => void;
   /** Handle mouseup to complete overlay resize */
   handleOverlayResizeMouseUp: () => void;
 }
@@ -178,11 +192,12 @@ export function createOverlayResizeHandlers(
     mouseY: number,
   ): GridRegion | null => {
     const regions = getGridRegions();
+    const floatingAllowed = floatingResizeAllowed();
     for (const region of regions) {
       // Floating overlay: check all 4 corners
       if (region.floating) {
-        // Skip if region is not resizable
-        if (region.data?.resizable === false) continue;
+        // Skip if region is not resizable (or the surface is in consume mode)
+        if (!floatingAllowed || region.data?.resizable === false) continue;
 
         const corners = getFloatingCornerPixels(region, config, viewport);
         if (!corners) continue;
@@ -222,11 +237,13 @@ export function createOverlayResizeHandlers(
   ): boolean => {
     const regions = getGridRegions();
 
-    // Check floating overlays first (all 4 corners)
+    // Check floating overlays first (all 4 corners). None is live in consume
+    // mode (a subscribed canvas, or design mode off).
+    const floatingAllowed = floatingResizeAllowed();
     for (const region of regions) {
       if (!region.floating) continue;
       // Skip if region is not resizable (extensions set this via data)
-      if (region.data?.resizable === false) continue;
+      if (!floatingAllowed || region.data?.resizable === false) continue;
 
       const corners = getFloatingCornerPixels(region, config, viewport);
       if (!corners) continue;
@@ -273,6 +290,7 @@ export function createOverlayResizeHandlers(
   const handleOverlayResizeMouseMove = (
     mouseX: number,
     mouseY: number,
+    altKey: boolean = false,
   ): void => {
     const resizeState = overlayResizeStateRef.current;
     if (!resizeState) return;
@@ -317,9 +335,45 @@ export function createOverlayResizeHandlers(
           break;
       }
 
-      // Clamp position to non-negative
-      bounds.x = Math.max(0, bounds.x);
-      bounds.y = Math.max(0, bounds.y);
+      // Clamp position to non-negative WITHOUT moving the fixed edge: a
+      // left/top drag past the sheet origin shrinks the object at 0 instead of
+      // pushing its right/bottom edge outward (the old clamp did the latter).
+      if (bounds.x < 0) {
+        bounds.width = Math.max(MIN_FLOATING_SIZE, bounds.width + bounds.x);
+        bounds.x = 0;
+      }
+      if (bounds.y < 0) {
+        bounds.height = Math.max(MIN_FLOATING_SIZE, bounds.height + bounds.y);
+        bounds.y = 0;
+      }
+
+      // SNAP + PAGE (the layout surface): only the DRAGGED edges snap, the
+      // fixed corner stays put, MIN_FLOATING_SIZE still holds, and dragged
+      // edges stop at the page border. Mouse-up re-dispatches these bounds as
+      // resizeComplete, so preview and result agree. Alt resizes freely.
+      const surface = activeLayoutSurface();
+      if (surface) {
+        const snapped = applySurfaceToResize(
+          surface,
+          { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
+          edgesOfCorner(resizeState.corner),
+          MIN_FLOATING_SIZE,
+          {
+            bypassSnap: altKey,
+            // `snap: false` opts a family out of snapping altogether;
+            // `snapResize: false` only out of RESIZE snapping, for a family that
+            // quantises its own size (a floating range resizes by whole rows
+            // and columns) but still aligns its position to the grid.
+            optOutSnap:
+              resizeState.region.data?.snap === false ||
+              resizeState.region.data?.snapResize === false,
+          },
+        );
+        bounds.x = snapped.x;
+        bounds.y = snapped.y;
+        bounds.width = snapped.width;
+        bounds.height = snapped.height;
+      }
 
       window.dispatchEvent(new CustomEvent("floatingObject:resizePreview", {
         detail: {

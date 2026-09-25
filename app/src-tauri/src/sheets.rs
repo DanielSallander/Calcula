@@ -54,10 +54,24 @@ pub struct SheetInfo {
     /// landing on the wrong tab is worse than no mark at all.
     #[serde(default)]
     pub sheet_id: String,
+    /// The sheet's KIND as a plain string: `"worksheet"` or `"canvas"`
+    /// (`SheetKind::wire_name`). It rides in the same payload as `sheet_id` for
+    /// the same reason: the tab strip, the Core surface switch and the Canvas
+    /// ribbon tab all need it together with the list, and a separate round
+    /// trip could tear against a `.calp` pull appending sheets.
+    #[serde(default = "default_sheet_kind")]
+    pub kind: String,
+    /// The canvas's page / snap-grid / stacking layout; absent for a worksheet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_layout: Option<::persistence::CanvasLayout>,
 }
 
 fn default_visibility() -> String {
     "visible".to_string()
+}
+
+fn default_sheet_kind() -> String {
+    "worksheet".to_string()
 }
 
 /// Result of get_sheets command
@@ -78,6 +92,7 @@ pub(crate) fn build_sheet_list(
     tab_colors: &[String],
     sheet_visibility: &[String],
     sheet_ids: &[identity::SheetId],
+    sheet_kinds: &[::persistence::SheetKind],
 ) -> Vec<SheetInfo> {
     sheet_names
         .iter()
@@ -108,6 +123,18 @@ pub(crate) fn build_sheet_list(
                     .get(index)
                     .map(|id| id.to_string())
                     .unwrap_or_default(),
+                // `.get(index)` for the same reason as `sheet_id`: the vector
+                // is parallel to the UNFILTERED state. A short vector reads as
+                // a worksheet, the padding default.
+                kind: sheet_kinds
+                    .get(index)
+                    .map(|k| k.wire_name())
+                    .unwrap_or("worksheet")
+                    .to_string(),
+                canvas_layout: sheet_kinds
+                    .get(index)
+                    .and_then(|k| k.canvas_layout())
+                    .cloned(),
             }
         })
         .collect()
@@ -628,6 +655,22 @@ fn remap_sheet_keyed_stores(
     // index, so its criteria hid rows on an unrelated sheet and the owning
     // table's id no longer matched anything on its own sheet.
     remap_indexed_map(&mut state.auto_filters.write(effect).unwrap(), &remap);
+    // COMPUTED PROPERTIES are sheet-index-keyed too, and their two derived
+    // indexes carry the sheet inside a cell key. Unremapped, a move or delete
+    // left one sheet's row/column/cell properties re-evaluated -- and WRITTEN,
+    // as fills, styles and dimensions -- onto whichever sheet inherited the
+    // index: a canvas included, whose hidden grid then held styled cells.
+    remap_indexed_map(&mut state.computed_properties.write(effect).unwrap(), &remap);
+    remap_cell_keyed_map(&mut state.computed_prop_dependents.lock().unwrap(), &remap);
+    {
+        let mut deps = state.computed_prop_dependencies.lock().unwrap();
+        for cells in deps.values_mut() {
+            *cells = cells
+                .drain()
+                .filter_map(|(s, r, c)| remap(s).map(|n| (n, r, c)))
+                .collect();
+        }
+    }
     // CROSS-SHEET DEPENDENCY EDGES. Neither map was ever remapped, and both
     // carry a sheet INDEX: `cross_sheet_dependencies` in its KEY, and
     // `cross_sheet_dependents` in the values of its sets. Moving or deleting a
@@ -890,7 +933,7 @@ pub fn get_sheets(state: State<AppState>) -> SheetsResult {
     let sheet_visibility = state.sheet_visibility.read().unwrap();
 
     SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
         active_index,
     }
 }
@@ -989,6 +1032,94 @@ pub fn set_sheet_display_flags(
     // `get_sheet_display_flags` would deadlock against a still-held write lock.
     use tauri::Emitter;
     let _ = app.emit(SHEET_DISPLAY_FLAGS_EVENT, announced);
+}
+
+/// The Tauri event announcing that a canvas sheet's LAYOUT changed (page, snap
+/// grid, background, stacking). Same reason `SHEET_DISPLAY_FLAGS_EVENT` exists:
+/// the authority lives here, but the canvas surface that draws it is frontend
+/// state, and a script, an MCP tool or a `.calp` refresh can move the authority
+/// without going through the ribbon. Bridged onto the `@api` bus as
+/// `AppEvents.CANVAS_LAYOUT_CHANGED` by `app/src/shell/canvasLayoutBridge.ts`
+/// (pinned by its test). The payload names the sheet and carries the RESULT of
+/// the patch; the bridge drops it and subscribers re-read `get_sheets`.
+pub const CANVAS_LAYOUT_EVENT: &str = "sheet:canvas-layout-changed";
+
+/// The payload of [`CANVAS_LAYOUT_EVENT`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasLayoutChanged {
+    pub sheet_index: usize,
+    pub sheet_id: String,
+    pub layout: ::persistence::CanvasLayout,
+}
+
+/// Change a canvas sheet's LAYOUT (page, snap grid, background, stacking).
+///
+/// ONE command for the whole layout (a partial patch), for the reason
+/// `set_sheet_display_flags` is one command: the dispatch frame's stack budget.
+/// Addresses a sheet by index so a script can lay out a canvas that is not on
+/// screen; `None` means the active sheet. Refused for a worksheet, and for a
+/// patch whose result fails `CanvasLayout::validate` -- both BEFORE the effect,
+/// in the same critical section as the write (`lock_pending`), so a refusal
+/// leaves the document clean and a concurrent patch cannot slip in between.
+///
+/// Not undoable, like zoom and the display flags: it is view/layout state.
+#[tauri::command]
+pub fn set_canvas_layout(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    file_state: State<FileState>,
+    sheet_index: Option<usize>,
+    patch: crate::api_types::CanvasLayoutPatch,
+) -> Result<::persistence::CanvasLayout, String> {
+    let changed = set_canvas_layout_inner(&state, &file_state, sheet_index, &patch)?;
+    let layout = changed.layout.clone();
+    // Announce AFTER every guard is dropped (see SHEET_DISPLAY_FLAGS_EVENT).
+    use tauri::Emitter;
+    let _ = app.emit(CANVAS_LAYOUT_EVENT, changed);
+    Ok(layout)
+}
+
+/// Command body over plain references (unit-testable without a Tauri State).
+pub(crate) fn set_canvas_layout_inner(
+    state: &AppState,
+    file_state: &FileState,
+    sheet_index: Option<usize>,
+    patch: &crate::api_types::CanvasLayoutPatch,
+) -> Result<CanvasLayoutChanged, String> {
+    let index = match sheet_index {
+        Some(i) => i,
+        None => *state.active_sheet.read().unwrap(),
+    };
+    // Layout edits are object-scope: allowed on a protected sheet only when
+    // the protection options allow editing objects.
+    crate::protection::check_sheet_action(state, index, "editObjects", "change the canvas layout")?;
+    let sheet_id = state
+        .sheet_ids
+        .read()
+        .unwrap()
+        .get(index)
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+    let kinds = state.sheet_kinds.lock_pending().unwrap();
+    let current = match kinds.get(index) {
+        Some(::persistence::SheetKind::Canvas(layout)) => layout.clone(),
+        _ => {
+            return Err(format!(
+                "Sheet {} is not a canvas sheet; only a canvas has a page layout.",
+                index
+            ))
+        }
+    };
+    let next = patch.apply(current)?;
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut kinds = kinds.authorize(&effect);
+    kinds[index] = ::persistence::SheetKind::Canvas(next.clone());
+    Ok(CanvasLayoutChanged {
+        sheet_index: index,
+        sheet_id,
+        layout: next,
+    })
 }
 
 /// Set the gridlines visibility for the active sheet.
@@ -1144,7 +1275,7 @@ pub(crate) fn activate_sheet(state: &AppState, index: usize) -> Result<SheetsRes
 
     (
         SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
             active_index: index,
         },
         switched,
@@ -1184,6 +1315,7 @@ pub(crate) fn append_sheet_stores(
     effect: &crate::document_effect::DocumentEffect,
     name: String,
     visibility: &str,
+    kind: ::persistence::SheetKind,
     sheet_names: &mut Vec<String>,
     grids: &mut Vec<engine::Grid>,
     freeze_configs: &mut Vec<FreezeConfig>,
@@ -1244,16 +1376,29 @@ pub(crate) fn append_sheet_stores(
     }
     tab_colors.push(String::new());
     sheet_visibility.push(visibility.to_string());
-    // New sheet shows gridlines by default
+    // A worksheet shows gridlines and headings by default. A CANVAS shows
+    // neither: the frontend already skips its cell passes by kind, but the
+    // flags are set too so every consumer that reads only the flags (print,
+    // the AI context, xlsx export) sees the right defaults for a canvas.
+    let is_canvas = kind.is_canvas();
     {
         let mut gridlines = state.show_gridlines.write(effect).unwrap();
         ensure_vec_len_with(&mut gridlines, existing, || true);
-        gridlines.push(true);
+        gridlines.push(!is_canvas);
     }
     {
         let mut display_flags = state.sheet_display_flags.write(effect).unwrap();
         ensure_vec_len(&mut display_flags, existing);
-        display_flags.push(crate::api_types::SheetDisplayFlags::default());
+        let mut flags = crate::api_types::SheetDisplayFlags::default();
+        if is_canvas {
+            flags.display_headings = false;
+        }
+        display_flags.push(flags);
+    }
+    {
+        let mut sheet_kinds = state.sheet_kinds.write(effect).unwrap();
+        ensure_vec_len(&mut sheet_kinds, existing);
+        sheet_kinds.push(kind);
     }
     // New sheet gets empty dimensions and merged regions
     all_column_widths.push(HashMap::new());
@@ -1267,22 +1412,83 @@ pub(crate) fn append_sheet_stores(
     (sheet_names.len() - 1, sheet_id)
 }
 
+/// Parse a sheet kind from its wire name. `None` and `"worksheet"` are a
+/// worksheet; `"canvas"` is a canvas with the default layout. Anything else is
+/// refused by name, so a typo from a script or an MCP client cannot silently
+/// create a worksheet the caller did not ask for.
+pub(crate) fn parse_sheet_kind(kind: Option<&str>) -> Result<::persistence::SheetKind, String> {
+    match kind.map(str::trim) {
+        None | Some("") | Some("worksheet") => Ok(::persistence::SheetKind::Worksheet),
+        Some("canvas") => Ok(::persistence::SheetKind::new_canvas()),
+        Some(other) => Err(format!(
+            "Unknown sheet kind '{}'. Use 'worksheet' or 'canvas'.",
+            other
+        )),
+    }
+}
+
+/// Is sheet `index` a CANVAS? A missing slot reads as a worksheet, the padding
+/// default, exactly as `build_sheet_list` reads it.
+pub(crate) fn is_canvas_sheet(sheet_kinds: &[::persistence::SheetKind], index: usize) -> bool {
+    sheet_kinds.get(index).is_some_and(|k| k.is_canvas())
+}
+
+/// The standard refusal for a CELL writer aimed at a canvas sheet: a canvas
+/// shows no cells, so a value written into its (hidden) grid would be
+/// invisible and undeletable from the UI. The sibling of `ensure_user_sheet`;
+/// the message names the canvas so the log can act on it. `action` reads as a
+/// verb phrase ("edit cells", "paste", "create a table").
+pub(crate) fn ensure_not_canvas(
+    sheet_kinds: &[::persistence::SheetKind],
+    index: usize,
+    action: &str,
+) -> Result<(), String> {
+    if is_canvas_sheet(sheet_kinds, index) {
+        Err(format!(
+            "Cannot {} on sheet {}: it is a canvas sheet, which holds objects only. \
+             Put the data on a worksheet and reference it from the canvas.",
+            action, index
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// `ensure_not_canvas` reading the kinds from state. Takes ONLY the
+/// `sheet_kinds` read lock and releases it before returning, so a caller may
+/// run it before its own locks without adding an edge to the lock order.
+pub(crate) fn ensure_not_canvas_in_state(
+    state: &AppState,
+    index: usize,
+    action: &str,
+) -> Result<(), String> {
+    let kinds = state.sheet_kinds.read().unwrap();
+    ensure_not_canvas(&kinds, index, action)
+}
+
 #[tauri::command]
 pub fn add_sheet(
     state: State<AppState>,
     file_state: State<FileState>,
     name: Option<String>,
+    kind: Option<String>,
 ) -> Result<SheetsResult, String> {
-    add_sheet_inner(&state, &file_state, name)
+    let kind = parse_sheet_kind(kind.as_deref())?;
+    add_sheet_inner(&state, &file_state, name, kind)
 }
 
 /// Command body over plain references, so the partition-keeping branch has a
 /// unit tier (`State<T>` cannot be built in a test). Same split as
 /// `hide_sheet_inner` below.
+///
+/// `kind` is fixed for the sheet's whole life: there is no worksheet <->
+/// canvas conversion, so the kind needs no undo arm (adding a sheet already
+/// ends the undo history, below).
 pub(crate) fn add_sheet_inner(
     state: &AppState,
     file_state: &FileState,
     name: Option<String>,
+    kind: ::persistence::SheetKind,
 ) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(state, "add a sheet")?;
     // Excel's rule, checked BEFORE the document is marked modified: a refused
@@ -1370,6 +1576,7 @@ pub(crate) fn add_sheet_inner(
         &effect,
         new_name,
         "visible",
+        kind,
         &mut sheet_names,
         &mut grids,
         &mut freeze_configs,
@@ -1435,6 +1642,10 @@ pub(crate) fn add_sheet_inner(
                 rotate_element(&mut *display_flags, appended_at, k);
             }
             {
+                let mut sheet_kinds = state.sheet_kinds.write(&effect).unwrap();
+                rotate_element(&mut *sheet_kinds, appended_at, k);
+            }
+            {
                 let mut all_merged = state.all_merged_regions.write(&effect).unwrap();
                 rotate_element(&mut *all_merged, appended_at, k);
             }
@@ -1473,7 +1684,7 @@ pub(crate) fn add_sheet_inner(
     *current_grid = engine::grid::Grid::new();
 
     SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
         active_index: *active_sheet,
     }
     }; // drop all locks before rebuilding dependency maps
@@ -1955,6 +2166,21 @@ pub(crate) fn delete_sheet_impl(
             display_flags.remove(index);
         }
     }
+    {
+        let mut sheet_kinds = state.sheet_kinds.write(&effect).unwrap();
+        if index < sheet_kinds.len() {
+            sheet_kinds.remove(index);
+        }
+    }
+    {
+        // page_setups is parallel to the sheet list like every vector above.
+        // It was once missed here, so every sheet after a deleted one saved
+        // its NEIGHBOUR's page setup (the lifecycle guard now pins it).
+        let mut page_setups = state.page_setups.write(&effect).unwrap();
+        if index < page_setups.len() {
+            page_setups.remove(index);
+        }
+    }
     if index < all_column_widths.len() {
         all_column_widths.remove(index);
     }
@@ -2024,7 +2250,7 @@ pub(crate) fn delete_sheet_impl(
     }
 
     SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
         active_index: *active_sheet,
     }
     }; // drop all locks before rebuilding dependency maps
@@ -2124,10 +2350,11 @@ pub(crate) fn delete_sheet_impl(
 pub fn rename_sheet(
     state: State<AppState>,
     file_state: State<crate::persistence::FileState>,
+    pivot_state: State<'_, PivotState>,
     index: usize,
     new_name: String,
 ) -> Result<SheetsResult, String> {
-    rename_sheet_inner(&state, &file_state, index, new_name, false)
+    rename_sheet_inner(&state, &file_state, &pivot_state, index, new_name, false)
 }
 
 /// Command body over plain references (the `hide_sheet_inner` split), plus the
@@ -2139,6 +2366,7 @@ pub fn rename_sheet(
 pub(crate) fn rename_sheet_inner(
     state: &AppState,
     file_state: &FileState,
+    pivot_state: &PivotState,
     index: usize,
     new_name: String,
     allow_object: bool,
@@ -2241,7 +2469,7 @@ pub(crate) fn rename_sheet_inner(
     }
 
     let result = SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
         active_index: active_sheet,
     };
 
@@ -2254,6 +2482,19 @@ pub(crate) fn rename_sheet_inner(
     drop(sheet_visibility);
     drop(tab_colors);
     drop(freeze_configs);
+
+    // PIVOTS NAME THEIR SHEETS, and nothing carried those names through a
+    // rename: `PivotDefinition.destination_sheet` / `source_sheet` kept the old
+    // spelling, the destination stopped resolving, and the resolver's fallback
+    // then aimed the next refresh at some OTHER sheet -- once, the first
+    // worksheet, over the pivot's own source data. Taken here, with every sheet
+    // guard above already released: `pivot_tables` is taken alone.
+    crate::pivot::operations::rename_pivot_sheet_references(
+        pivot_state,
+        &effect,
+        &old_name,
+        &trimmed_name,
+    );
 
     // The cross-sheet dependents map is keyed by sheet NAME, and the name just
     // changed. Without this the cascade looks up the new spelling, misses, and
@@ -2315,9 +2556,15 @@ pub(crate) fn set_freeze_panes_impl(
     // same save path -- has always dirtied and says so in its doc comment. This one did
     // not: the two contradicted each other inside one file, and a workbook whose only
     // change was a freeze closed "clean" with the layout silently discarded.
+    //
+    // A canvas has no rows or columns to freeze. Refused BEFORE the effect, so the
+    // refusal does not dirty the document. The index is copied out FIRST: a
+    // `read()` temporary inside the call would hold `active_sheet` while the gate
+    // takes `sheet_kinds`, the reverse of `get_sheet_summary` (an ABBA deadlock).
+    let active_sheet = *state.active_sheet.read().unwrap();
+    ensure_not_canvas_in_state(state, active_sheet, "freeze panes")?;
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let sheet_names = state.sheet_names.read().unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let tab_colors = state.tab_colors.read().unwrap();
     let sheet_visibility = state.sheet_visibility.read().unwrap();
@@ -2337,7 +2584,7 @@ pub(crate) fn set_freeze_panes_impl(
     };
 
     let result = SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
         active_index: active_sheet,
     };
     drop(freeze_configs);
@@ -2372,6 +2619,8 @@ pub fn set_split_window(
     split_col: Option<u32>,
 ) -> Result<(), String> {
     let active_sheet = *state.active_sheet.read().unwrap();
+    // A canvas has no rows or columns to split at. Refused before the effect.
+    ensure_not_canvas_in_state(&state, active_sheet, "split the window")?;
     // Nothing below can refuse, so the effect is minted here and the write it
     // authorises is the same statement that sets the flag.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
@@ -2495,6 +2744,28 @@ pub fn move_sheet(
     from_index: usize,
     to_index: usize,
 ) -> Result<SheetsResult, String> {
+    move_sheet_impl(
+        &state,
+        &file_state,
+        &slicer_state,
+        &timeline_state,
+        &ribbon_filter_state,
+        from_index,
+        to_index,
+    )
+}
+
+/// `move_sheet` without the Tauri `State` wrappers, so tests can drive the
+/// real rotation of every per-sheet vector.
+pub(crate) fn move_sheet_impl(
+    state: &AppState,
+    file_state: &FileState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    from_index: usize,
+    to_index: usize,
+) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(&state, "move a sheet")?;
     // Deleting/moving/copying a sheet rewrites persisted per-sheet stores.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
@@ -2530,7 +2801,7 @@ pub fn move_sheet(
     ensure_user_sheet(&sheet_visibility, to_index, "move onto")?;
     if from_index == to_index {
         return Ok(SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
             active_index: *active_sheet,
         });
     }
@@ -2598,6 +2869,11 @@ pub fn move_sheet(
             display_flags.push(crate::api_types::SheetDisplayFlags::default());
         }
         rotate_element(&mut *display_flags, from_index, to_index);
+    }
+    {
+        let mut sheet_kinds = state.sheet_kinds.write(&effect).unwrap();
+        ensure_vec_len(&mut sheet_kinds, count);
+        rotate_element(&mut *sheet_kinds, from_index, to_index);
     }
     {
         let mut all_merged = state.all_merged_regions.write(&effect).unwrap();
@@ -2696,7 +2972,7 @@ pub fn move_sheet(
     }
 
     let result = SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
         active_index: new_active,
     };
 
@@ -2738,7 +3014,40 @@ pub fn copy_sheet(
     source_index: usize,
     new_name: Option<String>,
 ) -> Result<SheetsResult, String> {
+    copy_sheet_impl(
+        &state,
+        &file_state,
+        &slicer_state,
+        &timeline_state,
+        &ribbon_filter_state,
+        source_index,
+        new_name,
+    )
+}
+
+/// `copy_sheet` without the Tauri `State` wrappers, so tests can drive the
+/// real insertion into every per-sheet vector.
+pub(crate) fn copy_sheet_impl(
+    state: &AppState,
+    file_state: &FileState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    source_index: usize,
+    new_name: Option<String>,
+) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(&state, "copy a sheet")?;
+    // A canvas cannot be copied yet: copy_sheet clones the grid and the view
+    // state but NONE of the object stores (charts, slicers, floating ranges,
+    // pivots), so the copy of a canvas would be an empty page presented as a
+    // duplicate. Refusing is the honest failure until a deep copy exists.
+    if is_canvas_sheet(&state.sheet_kinds.read().unwrap(), source_index) {
+        return Err(
+            "A canvas sheet cannot be duplicated yet: its objects would not be copied. \
+             Add a new canvas and recreate or move the objects instead."
+                .to_string(),
+        );
+    }
 
     // NAME GATES FIRST, under a read lock, so a refused name cannot leave the
     // document marked modified (`DocumentEffect::mutates` on ordering). The
@@ -2874,6 +3183,14 @@ pub fn copy_sheet(
         let cloned_flags = display_flags[source_index].clone();
         display_flags.insert(insert_at, cloned_flags);
     }
+    {
+        // copy_sheet refuses a canvas up front, so the copy is always a
+        // worksheet; cloning the slot keeps the rule in one place anyway.
+        let mut sheet_kinds = state.sheet_kinds.write(&effect).unwrap();
+        ensure_vec_len(&mut sheet_kinds, count);
+        let cloned_kind = sheet_kinds[source_index].clone();
+        sheet_kinds.insert(insert_at, cloned_kind);
+    }
     all_column_widths.insert(insert_at, cloned_widths);
     all_row_heights.insert(insert_at, cloned_heights);
     crate::commands::dimensions::stash_active_user_hidden(&state, old_active);
@@ -2953,7 +3270,7 @@ pub fn copy_sheet(
     }
 
     let result = SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
         active_index: new_index,
     };
 
@@ -3099,7 +3416,7 @@ pub(crate) fn hide_sheet_inner(
         };
 
         let result = SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
             active_index: switch_to.unwrap_or(active_sheet),
         };
         (result, switch_to, previous_visibility, active_sheet)
@@ -3183,7 +3500,7 @@ pub(crate) fn unhide_sheet_inner(
         sheet_visibility[index] = "visible".to_string();
 
         let result = SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
             active_index: active_sheet,
         };
         (result, previous_visibility)
@@ -3249,7 +3566,7 @@ pub(crate) fn set_tab_color_inner(
         tab_colors[index] = color;
 
         let result = SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
             active_index: active_sheet,
         };
         (result, previous_tab_colors)
@@ -3587,6 +3904,74 @@ mod sheet_zoom_tests {
         }
     }
 
+    /// The CODE of a body: every line whose first non-blank text is `//` is
+    /// dropped, so a comment that names a store cannot stand in for the
+    /// statement that maintains it.
+    fn code_lines(body: &str) -> String {
+        body.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The statement each lifecycle op must contain to keep a per-sheet vector
+    /// aligned. Merely NAMING the store is not enough: every op's span already
+    /// names `sheet_kinds` through its `build_sheet_list(..)` call, which is how
+    /// the first version of this census stayed green with the move rotation
+    /// deleted.
+    fn maintaining_statement(store: &str, op: &str) -> String {
+        match op {
+            "add_sheet" | "move_sheet" => format!("rotate_element(&mut *{store}"),
+            "delete_sheet" => format!("{store}.remove("),
+            "copy_sheet" => format!("{store}.insert("),
+            other => panic!("no maintaining statement known for `{other}`"),
+        }
+    }
+
+    fn assert_maintains(body: &str, store: &str, op: &str) -> Result<(), String> {
+        let needle = maintaining_statement(store, op);
+        if code_lines(body).contains(&needle) {
+            Ok(())
+        } else {
+            Err(format!(
+                "`{op}` does not maintain `{store}` (no `{needle}` outside comments) -- \
+                 every sheet after the change would read its neighbour's value"
+            ))
+        }
+    }
+
+    /// Same guard for the per-sheet KIND vector. Desynchronising it would turn a
+    /// worksheet into a canvas (its cells vanish from the screen and every
+    /// write to it is refused) or a canvas into a worksheet (its hidden pivot
+    /// cells appear under its objects) -- on the sheet NEXT to the one changed.
+    #[test]
+    fn every_sheet_lifecycle_op_maintains_the_sheet_kinds_vector() {
+        for op in ["add_sheet", "delete_sheet", "move_sheet", "copy_sheet"] {
+            assert_maintains(function_body(op), "sheet_kinds", op).unwrap();
+        }
+    }
+
+    /// Same guard for `page_setups`. `delete_sheet` once removed every per-sheet
+    /// vector EXCEPT this one, so each sheet after a deleted one saved its
+    /// neighbour's page setup, and nothing failed.
+    #[test]
+    fn every_sheet_lifecycle_op_maintains_the_page_setups_vector() {
+        for op in ["add_sheet", "delete_sheet", "move_sheet", "copy_sheet"] {
+            assert_maintains(function_body(op), "page_setups", op).unwrap();
+        }
+    }
+
+    /// The census has teeth: a body that only NAMES the store -- in a comment,
+    /// or through a `build_sheet_list(..)` read -- fails it.
+    #[test]
+    fn the_maintenance_census_rejects_a_body_that_only_names_the_store() {
+        let named_only = "\n    // sheet_kinds.remove(index) happens elsewhere\n    \
+            sheets: build_sheet_list(&names, &state.sheet_kinds.read().unwrap()),\n";
+        assert!(assert_maintains(named_only, "sheet_kinds", "delete_sheet").is_err());
+        let real = "\n    sheet_kinds.remove(index);\n";
+        assert!(assert_maintains(real, "sheet_kinds", "delete_sheet").is_ok());
+    }
+
     /// Same guard for the per-sheet DISPLAY FLAGS vector. It is the newest parallel
     /// vector and therefore the likeliest one to be missed when a fifth lifecycle site
     /// appears; desynchronising it makes a sheet show its neighbour's display mode
@@ -3873,13 +4258,14 @@ mod tables_remap_tests {
         // The census. `remap_sheet_keyed_stores` does not reach `tables`, so
         // "it is a sheet-keyed store" is not enough to keep the three commands
         // honest — each one has to be checked for it by name.
-        let move_body = body_of("pub fn move_sheet(");
+        // The commands' bodies live in the `_impl` testability split.
+        let move_body = body_of("pub(crate) fn move_sheet_impl(");
         assert!(
             move_body.contains("remap_tables_store("),
             "`move_sheet` no longer re-keys the table store, so a table stays \
              registered under the index its sheet used to occupy (BUG-0047)."
         );
-        let copy_body = body_of("pub fn copy_sheet(");
+        let copy_body = body_of("pub(crate) fn copy_sheet_impl(");
         assert!(
             copy_body.contains("remap_tables_store("),
             "`copy_sheet` no longer shifts the table store, so an insertion \

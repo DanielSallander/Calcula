@@ -18,6 +18,7 @@ import type {
   FreezeConfig,
   SplitConfig,
   ViewMode,
+  SheetSurface,
 } from "../types";
 import { ZOOM_MIN, ZOOM_MAX } from "../types";
 
@@ -51,6 +52,7 @@ export const GRID_ACTIONS = {
   CLEAR_CLIPBOARD: "CLEAR_CLIPBOARD",
   SET_SHEET_CONTEXT: "SET_SHEET_CONTEXT",
   SET_ACTIVE_SHEET: "SET_ACTIVE_SHEET",
+  SET_SHEET_SURFACES: "SET_SHEET_SURFACES",
   SET_FREEZE_CONFIG: "SET_FREEZE_CONFIG",
   SET_HIDDEN_ROWS: "SET_HIDDEN_ROWS",
   SET_HIDDEN_COLS: "SET_HIDDEN_COLS",
@@ -223,12 +225,22 @@ export interface ClearClipboardAction {
 
 export interface SetSheetContextAction {
   type: typeof GRID_ACTIONS.SET_SHEET_CONTEXT;
-  payload: { activeSheetIndex: number; activeSheetName: string };
+  /** `surface` is optional: a dispatcher holding the sheet list passes it; one
+   *  that does not falls back to the `sheetSurfaces` map. */
+  payload: { activeSheetIndex: number; activeSheetName: string; surface?: SheetSurface };
 }
 
 export interface SetActiveSheetAction {
   type: typeof GRID_ACTIONS.SET_ACTIVE_SHEET;
-  payload: { index: number; name: string };
+  payload: { index: number; name: string; surface?: SheetSurface };
+}
+
+/** Replace the known surface of every sheet (keyed by TRUE index) and
+ *  re-derive the active surface from it. `reset` drops every entry first
+ *  (a new document). */
+export interface SetSheetSurfacesAction {
+  type: typeof GRID_ACTIONS.SET_SHEET_SURFACES;
+  payload: { surfaces: Record<number, SheetSurface>; reset?: boolean };
 }
 
 // Freeze panes action interface
@@ -348,6 +360,7 @@ export type GridAction =
   | ClearClipboardAction
   | SetSheetContextAction
   | SetActiveSheetAction
+  | SetSheetSurfacesAction
   | SetFreezeConfigAction
   | SetHiddenRowsAction
   | SetHiddenColsAction
@@ -373,21 +386,45 @@ export type GridAction =
  */
 export function setSheetContext(
   activeSheetIndex: number,
-  activeSheetName: string
+  activeSheetName: string,
+  surface?: SheetSurface,
 ): SetSheetContextAction {
   return {
     type: GRID_ACTIONS.SET_SHEET_CONTEXT,
-    payload: { activeSheetIndex, activeSheetName },
+    payload: surface
+      ? { activeSheetIndex, activeSheetName, surface }
+      : { activeSheetIndex, activeSheetName },
   };
 }
 
 /**
  * Set the active sheet (for switching sheets during formula editing).
+ * Pass `surface` when the caller holds the sheet list; otherwise the reducer
+ * resolves it from the `sheetSurfaces` map.
  */
-export function setActiveSheet(index: number, name: string): SetActiveSheetAction {
+export function setActiveSheet(
+  index: number,
+  name: string,
+  surface?: SheetSurface,
+): SetActiveSheetAction {
   return {
     type: GRID_ACTIONS.SET_ACTIVE_SHEET,
-    payload: { index, name },
+    payload: surface ? { index, name, surface } : { index, name },
+  };
+}
+
+/**
+ * Record every sheet's surface (keyed by TRUE sheet index) and re-derive the
+ * active one. `reset: true` forgets every previous entry first -- used when a
+ * whole new sheet list replaces the old one.
+ */
+export function setSheetSurfaces(
+  surfaces: Record<number, SheetSurface>,
+  reset: boolean = true,
+): SetSheetSurfacesAction {
+  return {
+    type: GRID_ACTIONS.SET_SHEET_SURFACES,
+    payload: { surfaces, reset },
   };
 }
 

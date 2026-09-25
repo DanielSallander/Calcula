@@ -2973,8 +2973,12 @@ fn apply_pivot_definition_restore(
 
         drop(pivot_tables);
 
-        // Rewrite the grid
-        finalize_pivot_update(state, effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((pane_control_state, ribbon_filter_state)));
+        // Rewrite the grid. A refusal (the destination is a canvas) wrote
+        // nothing and did not move the region; the undo still restores the
+        // definition, so the log says why the grid did not follow.
+        if let Err(refusal) = finalize_pivot_update(state, effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((pane_control_state, ribbon_filter_state))) {
+            crate::log_warn!("UNDO", "pivot {} definition restored but not re-rendered: {}", pivot_id, refusal);
+        }
 
         // Restore cells that were overwritten by the previous pivot expansion
         if !snapshot.overwritten_cells.is_empty() {
@@ -3130,8 +3134,11 @@ fn apply_pivot_delete_restore(
     pivot_tables.insert(pivot_id, (definition, cache));
     drop(pivot_tables);
 
-    // Write to grid
-    finalize_pivot_update(state, effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((pane_control_state, ribbon_filter_state)));
+    // Write to grid. A refusal (the destination is a canvas) wrote nothing and
+    // registered no region; the pivot is back and can be deleted or re-aimed.
+    if let Err(refusal) = finalize_pivot_update(state, effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((pane_control_state, ribbon_filter_state))) {
+        crate::log_warn!("UNDO", "pivot {} restored but not re-rendered: {}", pivot_id, refusal);
+    }
 }
 
 // ============================================================================

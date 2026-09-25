@@ -20,7 +20,7 @@
 import { autoCompleteFormula } from "../lib/formulaCompletion";
 import { setExtendMode } from "./useGridKeyboard";
 import { useCallback, useState, useEffect, useRef } from "react";
-import { useGridContext } from "../state/GridContext";
+import { useGridContext, getGridStateSnapshot } from "../state/GridContext";
 import {
   startEditing as startEditingAction,
   updateEditing,
@@ -844,6 +844,15 @@ export function useEditing(): UseEditingReturn {
       setLastError(null);
       setPendingReference(null);
 
+      // A CANVAS surface has no cells to edit. Checked first and synchronously:
+      // a double-click reaches startEdit(row, col) directly, bypassing the
+      // null-selection bail-out that covers typing (startEditing below). The
+      // backend refuses a canvas cell write too; this keeps the inline editor
+      // from ever opening over the page.
+      if (getGridStateSnapshot()?.surface === "canvas") {
+        return;
+      }
+
       // Synchronous guard: immediately block editing in protected ranges (no async yield)
       const rangeGuard = checkRangeGuards(row, col, row, col);
       if (rangeGuard?.blocked) {
@@ -1486,7 +1495,9 @@ export function useEditing(): UseEditingReturn {
         await setActiveSheetApi(editing.sourceSheetIndex!);
 
         // Update the frontend state to match
-        dispatch(setActiveSheet(editing.sourceSheetIndex!, editing.sourceSheetName!));
+        // A formula's source sheet is always a worksheet (a canvas refuses
+        // every cell edit), so the surface is known without the list.
+        dispatch(setActiveSheet(editing.sourceSheetIndex!, editing.sourceSheetName!, "grid"));
 
         // Dispatch event to refresh grid cells for the source sheet
         window.dispatchEvent(new CustomEvent("sheet:formulaModeSwitch", {
@@ -1732,7 +1743,7 @@ export function useEditing(): UseEditingReturn {
       await setActiveSheetApi(editing.sourceSheetIndex!);
       
       // Update the frontend state to match
-      dispatch(setActiveSheet(editing.sourceSheetIndex!, editing.sourceSheetName!));
+      dispatch(setActiveSheet(editing.sourceSheetIndex!, editing.sourceSheetName!, "grid"));
       
       // Dispatch event to refresh grid cells for the source sheet
       window.dispatchEvent(new CustomEvent("sheet:formulaModeSwitch", {

@@ -727,9 +727,28 @@ async fn notebook_rewind_internal(
     // protected in between. Same reasoning as `solver_revert`; see the
     // exempt-paths block in protection.rs.
     let active_sheet = *app_state.active_sheet.read().map_err(|e| e.to_string())?;
+    // STRUCTURE GATES, before the effect. A checkpoint is a copy of every
+    // grid BY POSITION. Installed over a workbook whose sheet count changed
+    // since, it would truncate the grid list below every per-sheet store (a
+    // sheet added) or pour one sheet's cells into its neighbour (one deleted),
+    // a canvas's hidden grid included. So a count mismatch is refused, and
+    // each CANVAS slot keeps its LIVE grid whatever the checkpoint holds: a
+    // canvas never receives restored cells.
+    let canvas_indices: Vec<usize> = {
+        let kinds = app_state.sheet_kinds.read().map_err(|e| e.to_string())?;
+        (0..kinds.len()).filter(|&i| crate::sheets::is_canvas_sheet(&kinds, i)).collect()
+    };
+    let live_len = app_state.grids.read().map_err(|e| e.to_string())?.len();
+    if snapshot_grids.len() != live_len {
+        return Err(format!(
+            "This notebook's checkpoint was taken when the workbook had {} sheet(s), and it has {} now. \
+             Rewind restores whole sheets by position, so it is refused after sheets were added, \
+             deleted or copied. Run the notebook again from the top instead.",
+            snapshot_grids.len(),
+            live_len
+        ));
+    }
     {
-        let active_grid_clone = snapshot_grids.get(active_sheet).cloned();
-
         // Rewinding installs a checkpoint's cells over the live ones -- a real
         // change to what a save would write, even though it is a "revert" in
         // intent. Same call as step 4 below; `mutates` is idempotent and the
@@ -738,6 +757,18 @@ async fn notebook_rewind_internal(
         let file_state = app.state::<crate::persistence::FileState>();
         let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut app_grids = app_state.grids.write(&effect).map_err(|e| e.to_string())?;
+        let mut snapshot_grids = snapshot_grids;
+        for &i in &canvas_indices {
+            if let (Some(slot), Some(live)) = (snapshot_grids.get_mut(i), app_grids.get(i)) {
+                *slot = live.clone();
+            }
+        }
+        // A canvas that is the active sheet keeps its live active mirror too.
+        let active_grid_clone = if canvas_indices.contains(&active_sheet) {
+            None
+        } else {
+            snapshot_grids.get(active_sheet).cloned()
+        };
         *app_grids = snapshot_grids;
         drop(app_grids);
 

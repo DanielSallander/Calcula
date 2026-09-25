@@ -64,7 +64,13 @@ describe('AppEvents', () => {
     // "floatingRanges" MutationDomain fans out to it), script rows, a .calp
     // pull. The extension re-reads list_floating_ranges and re-syncs its
     // overlay regions on it.
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`75`);
+    //
+    // 76 since CANVAS_LAYOUT_CHANGED (2026-09-25): a canvas sheet's layout
+    // (page, snap grid, background, stacking) is backend state with one write
+    // door, and a script, an MCP tool or a .calp refresh can move it without
+    // the Canvas ribbon tab. Payload-free like SHEET_DISPLAY_FLAGS_CHANGED; the
+    // canvas sheet extension re-reads get_sheets on it.
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`76`);
   });
 
   it('all values use the app: prefix', () => {

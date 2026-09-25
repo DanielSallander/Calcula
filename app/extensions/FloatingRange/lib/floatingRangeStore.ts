@@ -306,6 +306,11 @@ export function syncFloatingRangeRegions(): void {
       cols: entry.cols,
       movable: designing,
       resizable: designing,
+      // On a canvas the frame's POSITION snaps to the layout grid like every
+      // object's, but its SIZE is whole rows and columns (quantised by this
+      // extension on resize): a second, pixel-grid snap on top would make most
+      // row/column counts unreachable. Core honours this for resize only.
+      snapResize: false,
     },
   }));
 

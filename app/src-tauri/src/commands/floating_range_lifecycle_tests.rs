@@ -190,6 +190,7 @@ fn rename_renames_the_backing_sheet_and_ends_the_history() {
     let renamed = crate::floating_range::rename_floating_range_inner(
         &wb.state,
         &wb.file,
+        &wb.pivots,
         info.range.id,
         "Rates".to_string(),
     )
@@ -207,6 +208,7 @@ fn rename_renames_the_backing_sheet_and_ends_the_history() {
     crate::floating_range::rename_floating_range_inner(
         &wb.state,
         &wb.file,
+        &wb.pivots,
         info.range.id,
         "Sheet1".to_string(),
     )

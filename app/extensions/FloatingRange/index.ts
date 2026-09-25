@@ -118,6 +118,7 @@ import {
   destroyFrEditor,
 } from "./editor/frEditor";
 import { buildQualifiedRef } from "./lib/frRefs";
+import { registerFloatingRangeObjectSelection } from "./lib/frObjectSelection";
 import {
   buildFrContextMenu,
   type FrContextMenuHandlers,
@@ -998,6 +999,13 @@ function activate(context: ExtensionContext): void {
       priority: 13,
     }),
   );
+
+  // 1b. Keyboard / programmatic selection (@api/objectSelection). A canvas
+  //     sheet's Tab cycling selects ranges through this, and asks `ownsKey`
+  //     first: while a range has an inner cell selection, Tab and Escape are
+  //     handleFrKeyDown's (below), and a second window-capture listener cannot
+  //     stop this one from also seeing the key.
+  cleanupFns.push(registerFloatingRangeObjectSelection());
 
   // 2. floatingObject:* wiring.
   setupFloatingObjectEvents();

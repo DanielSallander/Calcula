@@ -79,6 +79,9 @@ import type {
   ListSource,
   Hyperlink,
   AddHyperlinkParams,
+  CanvasLayout,
+  CanvasLayoutPatch,
+  SheetKindName,
 } from "../lib";
 // columnToLetter: the A1 spelling delivered on onDataChange change entries.
 // (The worker-side canonicalModel keeps a private twin, colToLetters; this is
@@ -171,7 +174,7 @@ import type {
   ScriptDialogPromptOptions,
   ScriptDialogTextOptions,
 } from "./scriptDialogSpec";
-import { AppEvents, emitAppEvent, onAppEvent, type ApplicationUpdatedPayload } from "../events";
+import { AppEvents, emitAppEvent, onAppEvent, type ApplicationUpdatedPayload, type CellValueChange } from "../events";
 import type { PullResponse } from "../collaboration";
 import {
   registerLifecycleGuard,
@@ -4494,53 +4497,15 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
 
     // ---- unlocked: sheet CRUD (B2) ----
     case "api.addSheet": {
-      // Optional POSITION (Wave 4 — VBA's Add Before:=/After:=). The backend
-      // has no position parameter (add_sheet always appends), so the position
-      // is composed as add + move under ONE undo transaction: the anchor is
-      // resolved against the PRE-ADD list (an append never renumbers it), the
-      // final index computed there, and move_sheet rotates the new sheet into
-      // place. A failed move CANCELS the transaction and rethrows — the caller
-      // is never told half the truth. (Sheet CRUD records no undo entries
-      // today, so the empty transaction commits as a no-op; the bracket is
-      // what keeps this one step if that ever changes.)
-      const [name, position] = args as [
-        string?,
-        { before?: number | string | null; after?: number | string | null }?,
+      // [name?, position?, kind?] — the work (and its reasoning) lives in
+      // executeAddSheet, exported so the kind forwarding is testable.
+      const [name, position, kind] = args as [
+        (string | null)?,
+        ({ before?: number | string | null; after?: number | string | null } | null)?,
+        (SheetKindName | null)?,
       ];
       const lib = await getLib();
-      if (name !== undefined && name !== null) {
-        await assertSheetNameFree(lib, name, null);
-      }
-      const before = await lib.getSheets();
-      const target = resolveSheetPosition(before.sheets, position, "addSheet");
-      if (target === null) {
-        const result = await lib.addSheet(name ?? undefined);
-        await announceSheetsChanged(result);
-        // add_sheet makes the new sheet active — resolve it by INDEX FIELD, not
-        // by array position (the two diverge once a sheet has been deleted).
-        const added = result.sheets.find((s) => s.index === result.activeIndex);
-        return { index: added?.index ?? result.activeIndex, name: added?.name ?? "" };
-      }
-      await lib.beginUndoTransaction("Add sheet");
-      let result;
-      try {
-        result = await lib.addSheet(name ?? undefined);
-        const appendedAt = result.activeIndex;
-        if (target !== appendedAt) {
-          result = await lib.moveSheet(appendedAt, target);
-        }
-        await lib.commitUndoTransaction();
-      } catch (e) {
-        try {
-          await lib.cancelUndoTransaction();
-        } catch {
-          /* the throw below is the primary failure */
-        }
-        throw e;
-      }
-      await announceSheetsChanged(result);
-      const added = result.sheets.find((s) => s.index === target);
-      return { index: added?.index ?? target, name: added?.name ?? "" };
+      return executeAddSheet(lib, name, position, kind);
     }
     case "api.deleteSheet": {
       const [ref] = args as [number | string];
@@ -4913,13 +4878,17 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // The rich sheet listing (Wave 2): getSheetNames discards visibility and
       // tab colour that lib.getSheets already returns — this row stops that.
       const lib = await getLib();
-      const { sheets } = await lib.getSheets();
-      return sheets.map((s) => ({
-        index: s.index,
-        name: s.name,
-        visibility: s.visibility,
-        tabColor: s.tabColor ?? null,
-      }));
+      return executeGetSheets(lib);
+    }
+    case "api.getCanvasLayout": {
+      const [sheetRef] = args as [(number | string | null)?];
+      const lib = await getLib();
+      return executeGetCanvasLayout(lib, sheetRef);
+    }
+    case "api.setCanvasLayout": {
+      const [patch, sheetRef] = args as [CanvasLayoutPatch, (number | string | null)?];
+      const lib = await getLib();
+      return executeSetCanvasLayout(lib, patch, sheetRef);
     }
     case "api.setTabColor": {
       // The one sheet attribute the CRUD rows left write-only-from-the-UI. The
@@ -8522,6 +8491,17 @@ async function writeCellsOnSheet(
   // active sheet, double pass) — without this a formula reading the written
   // block stayed stale until the next manual edit (found live).
   await lib.recalculateSheetsAfterScriptWrite([sheetIndex]);
+  // Announce the cells that landed OFF-sheet, tagged with their sheet (the
+  // skipped ones were announced by the active path above), plus the owed bare
+  // refresh for the dependents that recalculation touched — so a chart on a
+  // canvas sheet reading this one redraws. See noteOffSheetWrite.
+  const skippedAt = new Set(skipped.map((u) => `${u.row},${u.col}`));
+  noteOffSheetWrite(
+    sheetIndex,
+    updates
+      .filter((u) => !skippedAt.has(`${u.row},${u.col}`))
+      .map((u) => writtenInputChange(u.row, u.col, u.value)),
+  );
   // Another sheet: no visible cell moved, but a formula on the ACTIVE sheet may
   // depend on one, and the style caches key on the whole workbook. Refresh
   // without the per-cell event (we have no CellData for an off-sheet write).
@@ -8825,6 +8805,10 @@ export function releaseDeferredRepaint(scriptId: string): void {
   if (repaintOwedWhileDeferred) {
     repaintOwedWhileDeferred = false;
     scheduleGridDataRefresh();
+  } else if (offSheetRecalcOwed) {
+    // Only an announce-only write (the off-sheet clear) landed in the bracket:
+    // deliver its CELLS_UPDATED debt without inventing a canvas re-fetch.
+    scheduleOffSheetAnnouncement();
   }
 }
 
@@ -8833,26 +8817,136 @@ export function releaseDeferredRepaint(scriptId: string): void {
 export function resetDeferredRepaint(): void {
   deferredRepaintHolder = null;
   repaintOwedWhileDeferred = false;
+  // The off-sheet announcement debt describes the OUTGOING document: drop it.
+  pendingOffSheetChanges = [];
+  offSheetChangesOverflowed = false;
+  offSheetRecalcOwed = false;
 }
 
-function scheduleGridDataRefresh(): void {
-  if (deferredRepaintHolder !== null) {
-    // A deferRepaint batch is open: swallow the broadcast, remember the debt.
-    repaintOwedWhileDeferred = true;
+// ---- Off-sheet write announcement (canvas sheets, M4) ----------------------
+// A write to a sheet that is NOT active used to announce nothing: no
+// CELLS_UPDATED, so a chart placed on a canvas sheet (a report page with no
+// cells) whose data lives on sheet 0 kept drawing the old numbers after a
+// script wrote sheet 0. Two debts, both paid in the SAME per-frame fire of
+// scheduleGridDataRefresh (one frame loop, never a second one):
+//
+//   1. The written cells, TAGGED with their sheetIndex, ride ONE CELLS_UPDATED
+//      per frame — so Charts' scoped invalidation matches them against each
+//      chart's SOURCE sheet, not the active one. Coalesced like cellEvents'
+//      own CELLS_UPDATED: a script looping single-cell off-sheet writes must
+//      not dispatch one event per write to every CELLS_UPDATED listener (the
+//      title bar alone re-reads the dirty flag from the backend per event).
+//   2. `offSheetRecalcOwed`: the backend recalculates the formula DEPENDENTS of
+//      an off-sheet write (whole sheets, plus a cross-sheet closure the frontend
+//      cannot see) and reports none of them. A chart over `C1:C5 = A*2` must
+//      still redraw when a script writes A1, so ONE bare CELLS_UPDATED ("refresh
+//      everything") follows the tagged one in the same frame.
+//
+// Deliberately NOT cellEvents.emitBatch: that also fires CELL_VALUES_CHANGED,
+// which feeds sheet.onDataChange / cell.onEdit. Own-write suppression
+// (recordScriptWrite) has a 250 ms TTL, and a long per-cell off-sheet loop
+// outlives it — the timestamp-macro feedback loop would come back.
+
+/** Above this many pending tagged changes the list is dropped: the bare event
+ *  that always follows already invalidates everything, and a deferred batch
+ *  writing a million off-sheet cells must not buffer a million objects. */
+const MAX_PENDING_OFF_SHEET_CHANGES = 10_000;
+let pendingOffSheetChanges: CellValueChange[] = [];
+let offSheetChangesOverflowed = false;
+let offSheetRecalcOwed = false;
+
+/** A change record for a cell written from script INPUT (off-sheet there is no
+ *  display value without a read-back; consumers of the payload key on the
+ *  coordinates + sheet). */
+function writtenInputChange(
+  row: number,
+  col: number,
+  value: string,
+): Omit<CellValueChange, "sheetIndex"> {
+  return { row, col, newValue: value, formula: value.startsWith("=") ? value : null };
+}
+
+/**
+ * Record an off-sheet write for the next frame's announcement: the changes are
+ * tagged with `sheetIndex` (ALWAYS explicit — the sheet may have become active
+ * by the time the frame fires), and the bare dependents refresh is owed. The
+ * caller schedules the frame (scheduleGridDataRefresh, or
+ * scheduleOffSheetAnnouncement where the canvas must not be re-fetched).
+ */
+function noteOffSheetWrite(
+  sheetIndex: number,
+  changes: ReadonlyArray<Omit<CellValueChange, "sheetIndex">>,
+): void {
+  offSheetRecalcOwed = true;
+  if (offSheetChangesOverflowed || changes.length === 0) return;
+  if (pendingOffSheetChanges.length + changes.length > MAX_PENDING_OFF_SHEET_CHANGES) {
+    pendingOffSheetChanges = [];
+    offSheetChangesOverflowed = true;
     return;
   }
+  for (const c of changes) pendingOffSheetChanges.push({ ...c, sheetIndex });
+}
+
+/** Pay the off-sheet announcement debts (called from the frame fire only):
+ *  the tagged changes first, then the ONE bare event for the dependents. Both
+ *  flags are cleared BEFORE emitting, so a listener that writes again owes the
+ *  NEXT frame rather than being swallowed by this one. */
+function flushOffSheetAnnouncements(): void {
+  const changes = pendingOffSheetChanges;
+  const recalcOwed = offSheetRecalcOwed;
+  pendingOffSheetChanges = [];
+  offSheetChangesOverflowed = false;
+  offSheetRecalcOwed = false;
+  if (changes.length > 0) {
+    emitAppEvent(AppEvents.CELLS_UPDATED, { changes });
+  }
+  if (recalcOwed) {
+    emitAppEvent(AppEvents.CELLS_UPDATED);
+  }
+}
+
+/** True while the scheduled frame owes the canvas a re-fetch. False when the
+ *  frame was scheduled only to announce an off-sheet write whose path is
+ *  pinned NOT to re-fetch the canvas (the off-sheet clear). */
+let gridRefetchOwed = false;
+
+/**
+ * Schedule the per-frame fire. `refetch: false` asks the SAME frame only for
+ * the off-sheet CELLS_UPDATED announcement (scheduleOffSheetAnnouncement); a
+ * re-fetch requested by anyone else in that frame still happens.
+ */
+function scheduleGridDataRefresh(refetch = true): void {
+  if (deferredRepaintHolder !== null) {
+    // A deferRepaint batch is open: swallow the broadcast, remember the debt.
+    // (An announce-only request leaves its debt in offSheetRecalcOwed, which
+    // releaseDeferredRepaint pays without a re-fetch.)
+    if (refetch) repaintOwedWhileDeferred = true;
+    return;
+  }
+  if (refetch) gridRefetchOwed = true;
   if (gridRefreshScheduled) return;
   gridRefreshScheduled = true;
   const fire = (): void => {
     gridRefreshScheduled = false;
-    emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["styles"] });
-    void import("../grid").then((grid) => grid.refreshGridData());
+    if (gridRefetchOwed) {
+      gridRefetchOwed = false;
+      emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["styles"] });
+      void import("../grid").then((grid) => grid.refreshGridData());
+    }
+    // Off-sheet writes: the tagged CELLS_UPDATED + ONE bare one, coalesced to
+    // this frame (see noteOffSheetWrite).
+    flushOffSheetAnnouncements();
   };
   if (typeof requestAnimationFrame === "function") {
     requestAnimationFrame(fire);
   } else {
     setTimeout(fire, 16);
   }
+}
+
+/** Schedule the frame ONLY for the off-sheet CELLS_UPDATED announcement. */
+function scheduleOffSheetAnnouncement(): void {
+  scheduleGridDataRefresh(false);
 }
 
 /** Push a batch of changed cells to the grid + style caches (the same refresh
@@ -8899,12 +8993,15 @@ async function syncDimensionToGrid(
  *  context and fire the one event the tab bar + extensions already listen to
  *  (SheetTabs reloads its list from SHEET_CHANGED). */
 async function announceSheetsChanged(
-  result: { sheets: Array<{ index: number; name: string }>; activeIndex: number },
+  result: { sheets: Array<{ index: number; name: string; kind?: string }>; activeIndex: number },
 ): Promise<void> {
   const active = result.sheets.find((s) => s.index === result.activeIndex) ?? result.sheets[0];
   const [gridApi, dispatchMod] = await Promise.all([import("../grid"), import("../gridDispatch")]);
   if (active) {
-    dispatchMod.dispatchGridAction(gridApi.setActiveSheet(active.index, active.name));
+    // The surface rides the same dispatch as the context (a canvas never tears).
+    dispatchMod.dispatchGridAction(
+      gridApi.setActiveSheet(active.index, active.name, active.kind === "canvas" ? "canvas" : "grid"),
+    );
   }
   emitAppEvent(AppEvents.SHEET_CHANGED, {
     sheetIndex: active?.index ?? result.activeIndex,
@@ -8928,6 +9025,159 @@ async function assertSheetNameFree(
   if (clash) {
     throw new BrokerError("ValidationError", `A sheet named "${clash.name}" already exists`);
   }
+}
+
+/** One sheet as api.getSheets answers it (the worker's ScriptSheetInfo). */
+export interface ScriptSheetListing {
+  index: number;
+  name: string;
+  kind: SheetKindName;
+  visibility: "visible" | "hidden" | "veryHidden";
+  tabColor: string | null;
+}
+
+/**
+ * api.getSheets — the rich sheet listing. `kind` is reported for EVERY sheet
+ * (never absent): an absent backend kind is the serde default, a worksheet, so
+ * a script can branch on `s.kind === "canvas"` without a truthiness guess.
+ */
+export async function executeGetSheets(
+  lib: Awaited<ReturnType<typeof getLib>>,
+): Promise<ScriptSheetListing[]> {
+  const { sheets } = await lib.getSheets();
+  return sheets.map((s) => ({
+    index: s.index,
+    name: s.name,
+    kind: s.kind ?? "worksheet",
+    visibility: s.visibility,
+    tabColor: s.tabColor ?? null,
+  }));
+}
+
+/**
+ * api.addSheet — [name?, position?, kind?].
+ *
+ * Optional POSITION (Wave 4 — VBA's Add Before:=/After:=). The backend has no
+ * position parameter (add_sheet always appends), so the position is composed
+ * as add + move under ONE undo transaction: the anchor is resolved against the
+ * PRE-ADD list (an append never renumbers it), the final index computed there,
+ * and move_sheet rotates the new sheet into place. A failed move CANCELS the
+ * transaction and rethrows — the caller is never told half the truth. (Sheet
+ * CRUD records no undo entries today, so the empty transaction commits as a
+ * no-op; the bracket is what keeps this one step if that ever changes.)
+ *
+ * Optional KIND (2026-09-25): "canvas" adds a canvas page with the default
+ * layout. A kind is fixed at creation, so it is forwarded on BOTH add paths —
+ * a positioned canvas that arrived as a worksheet would be a silent lie.
+ * vAddSheet has already refused any other spelling.
+ */
+export async function executeAddSheet(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  name: string | null | undefined,
+  position: { before?: number | string | null; after?: number | string | null } | null | undefined,
+  kind: SheetKindName | null | undefined,
+): Promise<{ index: number; name: string }> {
+  if (name !== undefined && name !== null) {
+    await assertSheetNameFree(lib, name, null);
+  }
+  const before = await lib.getSheets();
+  const target = resolveSheetPosition(before.sheets, position, "addSheet");
+  if (target === null) {
+    const result = await lib.addSheet(name ?? undefined, kind ?? undefined);
+    await announceSheetsChanged(result);
+    // add_sheet makes the new sheet active — resolve it by INDEX FIELD, not
+    // by array position (the two diverge once a sheet has been deleted).
+    const added = result.sheets.find((s) => s.index === result.activeIndex);
+    return { index: added?.index ?? result.activeIndex, name: added?.name ?? "" };
+  }
+  await lib.beginUndoTransaction("Add sheet");
+  let result;
+  try {
+    result = await lib.addSheet(name ?? undefined, kind ?? undefined);
+    const appendedAt = result.activeIndex;
+    if (target !== appendedAt) {
+      result = await lib.moveSheet(appendedAt, target);
+    }
+    await lib.commitUndoTransaction();
+  } catch (e) {
+    try {
+      await lib.cancelUndoTransaction();
+    } catch {
+      /* the throw below is the primary failure */
+    }
+    throw e;
+  }
+  await announceSheetsChanged(result);
+  const added = result.sheets.find((s) => s.index === target);
+  return { index: added?.index ?? target, name: added?.name ?? "" };
+}
+
+/**
+ * Resolve the sheet a canvas-layout row addresses (undefined/null = the ACTIVE
+ * sheet; otherwise index or name under the Wave-1 rules) and refuse a
+ * worksheet BY NAME. ANY sheet may be addressed: the backend command takes a
+ * sheet index, so laying out an off-screen canvas needs no activate-dance.
+ */
+async function resolveCanvasSheet(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetRef: number | string | null | undefined,
+  method: string,
+): Promise<{ index: number; name: string; layout: CanvasLayout }> {
+  const { sheets, activeIndex } = await lib.getSheets();
+  const index =
+    sheetRef === undefined || sheetRef === null
+      ? activeIndex
+      : resolveSheetRefIn(sheets, sheetRef, method);
+  const sheet = sheets.find((s) => s.index === index);
+  if (!sheet) {
+    throw new BrokerError(
+      "ValidationError",
+      `${method}: no sheet with index ${index} (sheets: ${describeSheets(sheets)})`,
+    );
+  }
+  if ((sheet.kind ?? "worksheet") !== "canvas") {
+    throw new BrokerError(
+      "ValidationError",
+      `Sheet '${sheet.name}' is not a canvas sheet; only a canvas has a page layout ` +
+        `(add one with api.addSheet(name, undefined, "canvas"))`,
+    );
+  }
+  if (!sheet.canvasLayout) {
+    // The backend always reports a canvas's layout (SheetKind::Canvas carries
+    // it), so this is a backend/frontend skew, never a default to invent.
+    throw new BrokerError(
+      "HostError",
+      `${method}: canvas sheet '${sheet.name}' was reported without its layout`,
+    );
+  }
+  return { index, name: sheet.name, layout: sheet.canvasLayout };
+}
+
+/** api.getCanvasLayout — a canvas sheet's layout, exactly as the backend holds
+ *  it (zOrder / locked included when present: readable, not settable). */
+export async function executeGetCanvasLayout(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetRef?: number | string | null,
+): Promise<CanvasLayout> {
+  const { layout } = await resolveCanvasSheet(lib, sheetRef, "getCanvasLayout");
+  return layout;
+}
+
+/**
+ * api.setCanvasLayout — patch a canvas sheet's layout through the SAME
+ * set_canvas_layout command the Canvas ribbon tab writes, and answer the
+ * resulting layout. vCanvasLayout has already refused unknown / read-only keys
+ * and out-of-range values; the backend re-validates the MERGED layout and
+ * announces the change itself (sheet:canvas-layout-changed, bridged to
+ * AppEvents.CANVAS_LAYOUT_CHANGED), so there is nothing to emit here.
+ */
+export async function executeSetCanvasLayout(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  patch: CanvasLayoutPatch,
+  sheetRef?: number | string | null,
+): Promise<CanvasLayout> {
+  const { index } = await resolveCanvasSheet(lib, sheetRef, "setCanvasLayout");
+  return lib.setCanvasLayout(patch, index);
 }
 
 // ============================================================================
@@ -10347,7 +10597,22 @@ export async function executeClearRange(
   for (const cell of updated) {
     recordScriptWrite(scriptId, t.sheet, cell.row, cell.col);
   }
-  if (!t.offSheet) await afterCellDataChange(updated);
+  if (!t.offSheet) {
+    await afterCellDataChange(updated);
+  } else if (result.count > 0) {
+    // Off-sheet: the canvas is NOT re-fetched (pinned by
+    // crossSheetStructural.test.ts), but the clear is still announced. The
+    // backend returns no cell list here today, so whatever it does return is
+    // tagged, and the bare refresh it owes covers both the cleared cells and
+    // the dependents it recalculated (see noteOffSheetWrite).
+    noteOffSheetWrite(
+      t.sheet,
+      updated.map((c) => ({
+        row: c.row, col: c.col, newValue: c.display, formula: c.formula ?? null,
+      })),
+    );
+    scheduleOffSheetAnnouncement();
+  }
   return { count: result.count };
 }
 
@@ -12673,6 +12938,9 @@ async function writeOffSheetCellTyped(
     );
     return;
   }
+  // Tagged announcement + the owed dependents refresh (see noteOffSheetWrite):
+  // the backend recalculated this write's dependents and reported none.
+  noteOffSheetWrite(sheetIndex, [writtenInputChange(row, col, value)]);
   // Another sheet: no visible cell moved, but an active-sheet formula may
   // depend on one, and the style caches key on the whole workbook.
   scheduleGridDataRefresh();
@@ -12705,6 +12973,8 @@ async function writeCellOnSheet(
     await afterCellDataChange((await lib.updateCell(row, col, value)).cells);
     return;
   }
+  // Tagged announcement + the owed dependents refresh (see noteOffSheetWrite).
+  noteOffSheetWrite(sheetIndex, [writtenInputChange(row, col, value)]);
   scheduleGridDataRefresh();
 }
 

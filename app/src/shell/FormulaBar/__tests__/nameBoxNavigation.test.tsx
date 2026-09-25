@@ -38,7 +38,13 @@ const gridState = {
   sheetContext: { activeSheetIndex: 0, activeSheetName: "Sheet1" },
 };
 
-const SHEETS = [{ name: "Sheet1" }, { name: "Sheet2" }, { name: "My Sheet" }];
+// Real SheetInfo rows carry their TRUE index (the list omits object-backed
+// sheets, so a list position is not an index); the Name Box resolves by it.
+const SHEETS: Array<{ name: string; index: number; kind?: "worksheet" | "canvas" }> = [
+  { name: "Sheet1", index: 0 },
+  { name: "Sheet2", index: 1 },
+  { name: "My Sheet", index: 2 },
+];
 
 vi.mock("../../../api", () => ({
   useGridContext: () => ({ state: gridState, dispatch }),
@@ -248,6 +254,33 @@ describe("Name Box - sheet-qualified entries", () => {
     expect(lastSelection()).toBeNull();
     expect(showToastMock).toHaveBeenCalledTimes(1);
     expect(String(showToastMock.mock.calls[0][0])).toContain("NoSuchSheet");
+  });
+});
+
+describe("Name Box - a CANVAS has no cells", () => {
+  afterEach(() => {
+    SHEETS.splice(3);
+  });
+
+  it("an address on a canvas sheet is refused out loud, before any switch or scroll", async () => {
+    SHEETS.push({ name: "Dashboard", index: 3, kind: "canvas" });
+    await render();
+    await commit("Dashboard!Z1000");
+
+    expect(setActiveSheetApiMock).not.toHaveBeenCalled();
+    expect(dispatch.mock.calls.some((c) => c[0]?.type === "SCROLL_TO_CELL")).toBe(false);
+    expect(showToastMock).toHaveBeenCalledTimes(1);
+    expect(String(showToastMock.mock.calls[0][0])).toMatch(/canvas/);
+  });
+
+  it("a plain address typed while a canvas is active is refused the same way", async () => {
+    SHEETS.push({ name: "Dashboard", index: 3, kind: "canvas" });
+    gridState.sheetContext = { activeSheetIndex: 3, activeSheetName: "Dashboard" };
+    await render();
+    await commit("Z1000");
+
+    expect(dispatch.mock.calls.some((c) => c[0]?.type === "SCROLL_TO_CELL")).toBe(false);
+    expect(String(showToastMock.mock.calls[0][0])).toMatch(/canvas/);
   });
 });
 

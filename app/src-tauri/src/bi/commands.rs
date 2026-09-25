@@ -3763,6 +3763,27 @@ pub async fn bi_refresh_connection(
     let mut failure: Option<String> = None;
 
     for active_query in &active_queries {
+        // A result block whose sheet is now a CANVAS is not written: its rows
+        // would land in the canvas's hidden grid, where nobody sees them.
+        // (`bi_insert_result` refuses a canvas; a block reaches one only when
+        // its stored index went stale.) Skipped LOUDLY -- the other blocks
+        // still refresh, and the command reports the skip at the end.
+        if crate::sheets::is_canvas_sheet(&state.sheet_kinds.read().unwrap(), active_query.sheet_index) {
+            crate::log_warn!(
+                "BI",
+                "bi_refresh_connection: result block {} targets canvas sheet {}; not written",
+                active_query.region_id,
+                active_query.sheet_index
+            );
+            failure.get_or_insert_with(|| {
+                format!(
+                    "A query result block targets sheet {}, which is a canvas sheet and holds no cells; \
+                     that block was not refreshed. Insert the query result on a worksheet.",
+                    active_query.sheet_index + 1
+                )
+            });
+            continue;
+        }
         let query_request = build_engine_query(&active_query.request);
 
         let (batches, refreshed_tables) = {

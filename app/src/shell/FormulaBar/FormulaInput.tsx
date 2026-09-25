@@ -218,7 +218,14 @@ export function FormulaInput({
         cancelled = true;
       };
     }
-  }, [editing, state.selection, state.referenceStyle, dispatch, chartSeriesFormula]);
+
+    // A CANVAS has no cell cursor. Without this the bar would keep showing the
+    // last cell's formula from the sheet the user just left.
+    if (!editing && !state.selection && state.surface === "canvas") {
+      setDisplayValue("");
+      setIsSpillRef(false);
+    }
+  }, [editing, state.selection, state.surface, state.referenceStyle, dispatch, chartSeriesFormula]);
 
   // Listen for chart selection changes to show SERIES formula
   useEffect(() => {

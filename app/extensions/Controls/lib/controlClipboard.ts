@@ -14,6 +14,7 @@ import {
   getControlMetadata,
   setControlMetadata,
 } from "./controlApi";
+import { findFreeAnchorCell, runControlCreation } from "./controlAnchors";
 import {
   selectFloatingControl,
 } from "../Button/floatingSelection";
@@ -135,23 +136,10 @@ export async function duplicateControl(controlId: string): Promise<void> {
 // Internal: Create a control copy
 // ============================================================================
 
-/**
- * Find the next free anchor cell on the given sheet.
- * Controls are anchored by (sheetIndex, row, col). We search for an unused cell
- * starting from (0, maxCol+1) to avoid collisions.
- */
-async function findFreeAnchorCell(sheetIndex: number): Promise<{ row: number; col: number }> {
-  const { getAllControls } = await import("./controlApi");
-  const controls = await getAllControls(sheetIndex);
-
-  // Find max col used, then use the next one at row 0
-  let maxCol = -1;
-  for (const entry of controls) {
-    if (entry.col > maxCol) maxCol = entry.col;
-  }
-  // Use row 0 and maxCol+1 to avoid collisions
-  return { row: 0, col: maxCol + 1 };
-}
+// The free-anchor allocator that used to live here moved to ./controlAnchors,
+// which the create seams share: a canvas insert at a pixel position needs an
+// anchor for exactly the reason a pasted copy does, and two private copies of
+// "which cell is free" would disagree the first time one of them changed.
 
 /**
  * Create a copy of a control with the given metadata and dimensions,
@@ -175,9 +163,12 @@ async function createControlCopy(
   metadata.properties.x = { valueType: "static", value: String(newX) };
   metadata.properties.y = { valueType: "static", value: String(newY) };
 
-  // Find a free anchor cell
-  const anchor = await findFreeAnchorCell(sheetIndex);
-
+  // Find a free anchor cell AND claim it, as one step on the shared creation
+  // queue. Allocating is a read and claiming is a later write; two creates in
+  // flight (a double Ctrl+V, a paste racing a canvas insert) would otherwise
+  // both be handed the same cell and the second write would silently REPLACE
+  // the first control.
+  //
   // Save metadata to backend.
   //
   // A refusal has to be SHOWN. Both callers (the Ctrl+V/Ctrl+D keydown handler
@@ -194,16 +185,21 @@ async function createControlCopy(
   // Returning here (rather than after `addFloatingControl`) is the point: a
   // floating control with no backend metadata is an orphan that paints until
   // the next reload and then vanishes.
-  try {
-    await setControlMetadata(sheetIndex, anchor.row, anchor.col, metadata);
-  } catch (err) {
-    const { showToast } = await import("@api/notifications");
-    showToast(
-      `The control could not be copied: ${err instanceof Error ? err.message : String(err)}`,
-      { type: "error", duration: 9000 },
-    );
-    return;
-  }
+  const anchor = await runControlCreation(async () => {
+    const cell = await findFreeAnchorCell(sheetIndex);
+    try {
+      await setControlMetadata(sheetIndex, cell.row, cell.col, metadata);
+    } catch (err) {
+      const { showToast } = await import("@api/notifications");
+      showToast(
+        `The control could not be copied: ${err instanceof Error ? err.message : String(err)}`,
+        { type: "error", duration: 9000 },
+      );
+      return null;
+    }
+    return cell;
+  });
+  if (!anchor) return;
 
   // Add to floating store
   const controlId = makeFloatingControlId(sheetIndex, anchor.row, anchor.col);

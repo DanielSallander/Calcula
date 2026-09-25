@@ -616,9 +616,10 @@ fn the_two_commands_that_hold_their_guards_release_them_before_ending_the_histor
     //
     // `move_sheet` and `copy_sheet` are the two whose guards are function-level
     // bindings that live to the end, so each releases them explicitly first.
-    // The other three already end inside a block that drops everything.
+    // The other three already end inside a block that drops everything. Both
+    // bodies live in their `_impl` testability split; the commands forward.
     let bodies = crate::formula_serialisation_tests::free_function_bodies(SHEETS_RS);
-    for command in ["move_sheet", "copy_sheet"] {
+    for command in ["move_sheet_impl", "copy_sheet_impl"] {
         let (_, body) = bodies
             .iter()
             .find(|(name, _)| name == command)

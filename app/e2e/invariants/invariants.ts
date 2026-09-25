@@ -90,6 +90,18 @@ const CONTEXTUAL_TAB_RULES: Record<string, ContextualTabRule> = {
     expectation: "at least one sparkline group must exist",
   },
 
+  // --- Canvas sheet ---
+  // Shown exactly while a CANVAS sheet is active. Either view of "active" is
+  // accepted (the frontend's and the backend's); a mismatch between the two is
+  // its own invariant, not this one's.
+  Canvas: {
+    validate: (s) => {
+      const kinds = s.logical.sheetKinds ?? [];
+      return kinds[s.logical.activeSheet] === "canvas" || kinds[s.logical.backendActiveSheet] === "canvas";
+    },
+    expectation: "the active sheet must be a canvas sheet",
+  },
+
   // Generic "Design" tab could be chart, table, or pivot — accept any
   Design: {
     validate: (s) =>

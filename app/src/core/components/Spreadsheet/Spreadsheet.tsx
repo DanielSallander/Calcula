@@ -17,6 +17,7 @@ import { useActiveGridTheme } from "../../theme/useActiveGridTheme";
 import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
 import { useScrollbarMetrics } from "../Scrollbar/useScrollbarMetrics";
+import { getLayoutSurface, onLayoutSurfaceChanged, GRID_SCROLLBAR_GUTTER_PX } from "../../lib/layoutSurface";
 import { useSpreadsheet } from "./useSpreadsheet";
 import { gridPointerMouseDown, gridPointerDoubleClick } from "./gridPointerEntry";
 import { getGlobalIsEditing } from "../../hooks/useEditing";
@@ -62,7 +63,7 @@ import * as S from "./Spreadsheet.styles";
 import { alertAsync } from "../../lib/dialogs";
 import { rowHeaderGutter, colHeaderGutter, effectiveGridConfig } from "../../lib/gridRenderer/layout/headerVisibility";
 
-const SCROLLBAR_SIZE = 14;
+const SCROLLBAR_SIZE = GRID_SCROLLBAR_GUTTER_PX;
 const SPLIT_BAR_SIZE = 4;
 const SPLIT_BAR_HIT_TOLERANCE = 4; // Extra pixels on each side for easier clicking
 
@@ -138,7 +139,14 @@ function SpreadsheetContent({
   } = state;
 
   // 5. Extract freezeConfig, splitConfig, viewMode from gridState
-  const { freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros, displayGridlines, displayHeadings, referenceStyle } = gridState;
+  const { freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros, referenceStyle, surface } = gridState;
+  // A CANVAS surface shows neither headings nor gridlines, whatever the stored
+  // per-sheet flags say: the gutters must collapse for the hit-testers exactly
+  // as the painter collapses them, or every floating object on the page would
+  // be a header-width off from where a click lands.
+  const isCanvasSurface = surface === "canvas";
+  const displayGridlines = isCanvasSurface ? false : gridState.displayGridlines;
+  const displayHeadings = isCanvasSurface ? false : gridState.displayHeadings;
 
   // THE config every consumer below sees: the stored one with the header rule
   // applied. `View > Headings` off collapses both gutters to zero, and the
@@ -353,6 +361,29 @@ function SpreadsheetContent({
     dispatch(setFreezeConfig(view.freezeRow, view.freezeCol));
   }, [dispatch]);
 
+  // PER-SHEET VIEW STATE FOLLOWS THE ACTIVE SHEET, whichever route moved it:
+  // the tab strip, a script's api.setActiveSheet, a bookmark, an internal
+  // hyperlink, a backend-driven switch. Keyed on the NAME as well as the index,
+  // because deleting the active sheet can leave the index unchanged while a
+  // different sheet takes it. The mount effect below hydrates the first sheet,
+  // so the first run here is skipped.
+  const activeSheetIndexForView = gridState.sheetContext.activeSheetIndex;
+  const activeSheetNameForView = gridState.sheetContext.activeSheetName;
+  const viewHydratedOnceRef = useRef(false);
+  useEffect(() => {
+    if (!viewHydratedOnceRef.current) {
+      viewHydratedOnceRef.current = true;
+      return;
+    }
+    invoke<boolean>("get_show_gridlines")
+      .then((show) => {
+        dispatch(setDisplayGridlines(show));
+      })
+      .catch(() => {});
+    void hydrateSheetView();
+    void hydrateSheetDisplayFlags();
+  }, [activeSheetIndexForView, activeSheetNameForView, hydrateSheetView, hydrateSheetDisplayFlags, dispatch]);
+
   // Write zoom back to the authority whenever the user actually changes it.
   // Guarded by lastSyncedZoomFactorRef so hydration (mount / sheet switch)
   // does not bounce straight back out as a write.
@@ -481,16 +512,11 @@ function SpreadsheetContent({
       console.log("[Spreadsheet] Sheet switch - refreshing dimensions");
       refreshDimensions();
 
-      // Sync per-sheet gridlines visibility from backend
-      invoke<boolean>("get_show_gridlines").then((show) => {
-        dispatch(setDisplayGridlines(show));
-      }).catch(() => {});
-
-      // Sync per-sheet zoom + split bars from the backend. Zoom is per SHEET
-      // in Excel and now here too, so switching sheets must adopt the new
-      // sheet's zoom rather than carrying the old one across.
-      hydrateSheetView();
-      hydrateSheetDisplayFlags();
+      // Gridlines, zoom, split/freeze and the display flags are hydrated by the
+      // ACTIVE-SHEET effect below, not here: this listener only hears the tab
+      // strip's switches, and a script, a bookmark, a hyperlink or a backend-
+      // driven switch never fires it -- so a worksheet reached from a canvas
+      // that way kept the canvas's headings-off, gridlines-off and zoom.
 
       // Restore the new sheet's saved state if available
       const savedState = sheetStatesMap.get(newSheetIndex);
@@ -1012,6 +1038,12 @@ function SpreadsheetContent({
         return;
       }
 
+      // Empty space on a CANVAS is not a cell: the cell context menu (cut,
+      // insert rows, format cells...) has nothing to act on there.
+      if (isCanvasSurface) {
+        return;
+      }
+
       // The pane options are what make this agree with the SELECTION under a
       // frozen header row or a split: without them the pixel is mapped as if
       // nothing were frozen, and the context menu acts on a different cell from
@@ -1070,7 +1102,7 @@ function SpreadsheetContent({
       // Emit event for Shell to handle rendering
       emitAppEvent(AppEvents.CONTEXT_MENU_REQUEST, request);
     },
-    [containerRef, config, viewport, dimensions, selection, gridState.sheetContext, gridState.zoom, freezeConfig, splitConfig, splitViewport]
+    [containerRef, config, viewport, dimensions, selection, gridState.sheetContext, gridState.zoom, freezeConfig, splitConfig, splitViewport, isCanvasSurface]
   );
 
   // -------------------------------------------------------------------------
@@ -1128,13 +1160,45 @@ function SpreadsheetContent({
     };
   }, [dispatch, containerRef]);
 
+  // A CANVAS is page-bounded: its scroll extent is its page (from the layout
+  // surface the canvas sheet extension provides), and its header gutters are
+  // zero, so it takes the EFFECTIVE config. Re-read whenever a provider
+  // announces a change (a new page size, a provider registered late).
+  const [, setLayoutSurfaceTick] = useState(0);
+  useEffect(
+    () => onLayoutSurfaceChanged(() => setLayoutSurfaceTick((t) => t + 1)),
+    [],
+  );
+  const canvasPage = isCanvasSurface
+    ? getLayoutSurface(gridState.sheetContext.activeSheetIndex)?.page ?? null
+    : null;
   const scrollbarMetrics = useScrollbarMetrics({
-    config: gridState.config,
+    config: isCanvasSurface ? config : gridState.config,
     viewport: gridState.viewport,
     viewportDimensions: gridState.viewportDimensions,
     dimensions: gridState.dimensions,
     zoom: gridState.zoom,
+    page: canvasPage,
   });
+
+  // A canvas's scroll must stay inside its page extent. The wheel and the
+  // scrollbar clamp to the metrics above, but a sheet switch keeps the
+  // previous sheet's scroll (a worksheet scrolled to row 200 would open a new
+  // canvas with its page far off-screen), and a smaller page or a larger zoom
+  // shrinks the extent under the current position. Only ever pulls back.
+  const canvasMaxScrollX = scrollbarMetrics.maxScrollX;
+  const canvasMaxScrollY = scrollbarMetrics.maxScrollY;
+  const canvasScrollX = gridState.viewport.scrollX;
+  const canvasScrollY = gridState.viewport.scrollY;
+  // A fresh page object per render; its SIZE reaches the effect through the
+  // max-scroll values, so the dependency is only whether there is one.
+  const hasCanvasPage = canvasPage !== null;
+  useEffect(() => {
+    if (!isCanvasSurface || !hasCanvasPage) return;
+    const x = Math.min(canvasScrollX, canvasMaxScrollX);
+    const y = Math.min(canvasScrollY, canvasMaxScrollY);
+    if (x !== canvasScrollX || y !== canvasScrollY) dispatch(scrollToPosition(x, y));
+  }, [isCanvasSurface, hasCanvasPage, canvasMaxScrollX, canvasMaxScrollY, canvasScrollX, canvasScrollY, dispatch]);
 
   const handleHorizontalScroll = useCallback(
     (scrollX: number) => {
@@ -1451,6 +1515,7 @@ function SpreadsheetContent({
             displayGridlines={displayGridlines}
             displayHeadings={displayHeadings}
             referenceStyle={referenceStyle}
+            surface={surface}
             currentSheetName={gridState.sheetContext.activeSheetName}
             zoom={gridState.zoom}
           />

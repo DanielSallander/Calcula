@@ -90,6 +90,11 @@ pub struct SheetDigest {
     /// to losing it.
     pub zoom: f64,
     pub scroll_area: Option<String>,
+    /// The sheet KIND (worksheet, or canvas with its layout). In the digest so
+    /// the save/reload oracle can see a canvas that came back as a worksheet --
+    /// without it that loss produced an identical digest, the same blind spot
+    /// zoom and the user-hidden sets once had.
+    pub kind: Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -428,6 +433,7 @@ pub(crate) fn build_workbook_state_digest(
         let page_setups = state.page_setups.read().map_err(|e| e.to_string())?;
         let scroll_areas = state.scroll_areas.lock().map_err(|e| e.to_string())?;
         let sheet_zooms = state.sheet_zooms.read().map_err(|e| e.to_string())?;
+        let sheet_kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
 
         for i in 0..sheet_count {
             // The active-sheet mirror is authoritative for the active sheet.
@@ -462,6 +468,7 @@ pub(crate) fn build_workbook_state_digest(
                     split: Value::Null,
                     zoom: persistence::DEFAULT_SHEET_ZOOM_PERCENT,
                     scroll_area: None,
+                    kind: Value::Null,
                 });
                 continue;
             }
@@ -556,6 +563,7 @@ pub(crate) fn build_workbook_state_digest(
                     .copied()
                     .unwrap_or(persistence::DEFAULT_SHEET_ZOOM_PERCENT),
                 scroll_area: scroll_areas.get(i).cloned().flatten(),
+                kind: to_value_or_null(&sheet_kinds.get(i).cloned().unwrap_or_default()),
             });
         }
         (sheets, sheet_names, active_sheet)

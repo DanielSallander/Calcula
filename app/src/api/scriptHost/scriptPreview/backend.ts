@@ -118,6 +118,12 @@ export const UNPREVIEWABLE: ReadonlyMap<string, string> = new Map([
   ["api.copySheet", "a preview holds ONE sheet's copy"],
   ["api.deleteSheet", "a preview holds ONE sheet's copy"],
   ["api.renameSheet", "a preview holds ONE sheet's copy"],
+  // A canvas layout is SHEET state a preview does not hold: the preview knows
+  // other sheets only by name (never their kind), and its one grid is a
+  // worksheet's. Answering "not a canvas" or inventing a default layout would
+  // both be fabrications, the same reason setPrintArea is listed above.
+  ["api.getCanvasLayout", "a preview holds ONE worksheet's grid and no canvas sheet or page model"],
+  ["api.setCanvasLayout", "a preview holds ONE worksheet's grid and no canvas sheet or page model"],
 ]);
 
 /**
@@ -697,6 +703,11 @@ export function respond(state: PreviewBackendState, method: string, args: unknow
     case "api.recalculate":
       return { cellsUpdated: 0 }; // no evaluator; a no-op is the honest answer
     case "api.addSheet": {
+      // [name?, position?, kind?]. The KIND is accepted (vAddSheet already
+      // refused a bad spelling) and deliberately not modelled: the preview
+      // tracks sheet NAMES only, every later unqualified grid call gaps once a
+      // sheet is added (activeSheetMoved), and both canvas-layout rows are
+      // UNPREVIEWABLE — so a canvas vs. a worksheet changes no answer here.
       const [name] = args as [string | undefined];
       const sheetName = name ?? `Sheet${state.sheetNames.length + 1}`;
       if (state.sheetNames.includes(sheetName)) throw new Error(`A sheet named "${sheetName}" already exists`);

@@ -19,6 +19,7 @@ use crate::features::scheduled_jobs::{
 use crate::features::script_authoring::{SCRIPT_AUTHORING_FEATURE, SCRIPT_AUTHORING_FILE};
 use crate::manifest::{
     stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION, PINNED_FILTER_MIN_FORMAT_VERSION,
+    CANVAS_SHEET_MIN_FORMAT_VERSION,
     PENDING_RECALC_MIN_FORMAT_VERSION, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION,
     SHEET_VIEW_MIN_FORMAT_VERSION,
     SPILL_EXTENT_MIN_FORMAT_VERSION,
@@ -249,6 +250,15 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     {
         manifest.features.push("pinned_filters".to_string());
         stamp_feature_format_version(&mut manifest, PINNED_FILTER_MIN_FORMAT_VERSION);
+    }
+    // Canvas sheets. An older reader ignores the unknown `kind` and presents
+    // the canvas as an EDITABLE worksheet with its objects over an empty grid,
+    // then drops the kind on its next save (see
+    // CANVAS_SHEET_MIN_FORMAT_VERSION). Stamped only when a sheet actually is
+    // a canvas, so ordinary workbooks stay v1-v8.
+    if workbook.sheets.iter().any(|s| s.kind.is_canvas()) {
+        manifest.features.push("canvas_sheets".to_string());
+        stamp_feature_format_version(&mut manifest, CANVAS_SHEET_MIN_FORMAT_VERSION);
     }
     manifest.features.push("theme".to_string());
 
@@ -734,6 +744,7 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
             display_headings: true,
             split_row: None,
             split_col: None,
+            kind: persistence::SheetKind::Worksheet,
         };
 
         // metadata.json — merges, freeze, split, zoom, hidden rows/cols, tab
@@ -1363,6 +1374,7 @@ mod tests {
             show_formulas: false,
             view_mode: persistence::DEFAULT_SHEET_VIEW_MODE.to_string(),
             display_headings: true,
+            kind: persistence::SheetKind::Worksheet,
         };
 
         Workbook {
@@ -2153,6 +2165,75 @@ mod tests {
         let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
         assert!(manifest.format_version < SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION);
         assert!(!manifest.features.iter().any(|f| f == "sheet_display_flags"));
+    }
+
+    /// A CANVAS sheet round-trips the real archive with its whole layout and
+    /// stamps v9 plus the `canvas_sheets` feature id. An older reader would
+    /// otherwise hand the canvas back as an editable worksheet and drop the
+    /// kind on its next save.
+    #[test]
+    fn test_canvas_sheet_roundtrips_and_stamps_the_version() {
+        let mut workbook = make_test_workbook();
+        let mut layout = persistence::CanvasLayout::default();
+        layout.snap_to_grid = false;
+        layout.grid_size_px = 25;
+        layout.show_grid = false;
+        layout.page_preset = persistence::CANVAS_CUSTOM_PAGE_PRESET.to_string();
+        layout.page_width = 1500;
+        layout.page_height = 900;
+        layout.background = "#f0f0f0".to_string();
+        layout.z_order = vec![persistence::CanvasObjectRef { kind: "chart".into(), id: "7".into() }];
+        layout.locked = vec![persistence::CanvasObjectRef { kind: "slicer".into(), id: "3".into() }];
+        workbook.sheets[0].kind = persistence::SheetKind::Canvas(layout.clone());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("canvas.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(
+            loaded.sheets[0].kind,
+            persistence::SheetKind::Canvas(layout),
+            "the canvas kind and its layout must survive the archive"
+        );
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(manifest.format_version, CANVAS_SHEET_MIN_FORMAT_VERSION);
+        assert!(manifest.features.iter().any(|f| f == "canvas_sheets"));
+    }
+
+    /// A canvas at the DEFAULT layout must still be written: its metadata.json
+    /// is never omittable, or the sheet reloads as a worksheet.
+    #[test]
+    fn test_a_default_layout_canvas_is_still_a_canvas_after_reload() {
+        let mut workbook = make_test_workbook();
+        workbook.sheets[0].kind = persistence::SheetKind::new_canvas();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("canvas-default.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+        assert!(loaded.sheets[0].kind.is_canvas(), "a default-layout canvas reloaded as a worksheet");
+    }
+
+    /// A workbook of worksheets only must NOT be stamped up to v9 -- ordinary
+    /// saves stay openable by older builds.
+    #[test]
+    fn test_worksheets_only_mean_no_canvas_stamp() {
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no-canvas.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(manifest.format_version < CANVAS_SHEET_MIN_FORMAT_VERSION);
+        assert!(!manifest.features.iter().any(|f| f == "canvas_sheets"));
+    }
+
+    /// The canvas link sits ABOVE every earlier link, so a build whose ceiling
+    /// is the previous maximum (v8) refuses a canvas workbook through the
+    /// reader gate rather than reading it as a worksheet.
+    #[test]
+    fn test_the_canvas_link_is_above_every_earlier_link() {
+        assert!(CANVAS_SHEET_MIN_FORMAT_VERSION > PINNED_FILTER_MIN_FORMAT_VERSION);
+        assert_eq!(CANVAS_SHEET_MIN_FORMAT_VERSION, CALA_MAX_SUPPORTED_FORMAT_VERSION);
     }
 
     /// A split ALONE stamps it too: the split is as unrecoverable as the zoom.

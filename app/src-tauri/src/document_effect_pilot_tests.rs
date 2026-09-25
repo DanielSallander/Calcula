@@ -155,7 +155,7 @@ fn register_snapshot(state: &AppState, token: &str) {
         .animation_snapshots
         .lock()
         .unwrap()
-        .insert(token.to_string(), Vec::new());
+        .insert(token.to_string(), crate::animation_commands::AnimSnapshot::default());
 }
 
 #[test]

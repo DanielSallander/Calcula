@@ -18,6 +18,42 @@ import {
 import type { ArrowDirection } from "./lib";
 import type { CellUpdateInput } from "./lib";
 import { navigateToCell, navigateToRange, borderAround } from "./grid";
+import { emitAppEvent, AppEvents, type CellValueChange } from "./events";
+
+// ============================================================================
+// Background-sheet write announcement
+// ============================================================================
+
+/**
+ * Announce cells written to a sheet that is NOT active. `update_cell_on_sheets`
+ * returns no CellData, so without this nothing said the sheet changed — and a
+ * chart placed on a canvas sheet reading its data from `sheetIndex` kept the
+ * old numbers. Two CELLS_UPDATED events, once per setValue/setValues call:
+ *   1. the written cells, TAGGED with `sheetIndex` (always explicit), so
+ *      Charts' scoped invalidation matches them against each chart's source
+ *      sheet;
+ *   2. one BARE event ("refresh everything"): the backend also recalculated
+ *      the formula dependents of the write and reported none of them, so a
+ *      chart over a formula column that reads a written cell must redraw too.
+ * CELLS_UPDATED only — never cellEvents, whose CELL_VALUES_CHANGED would feed
+ * script onDataChange hooks with a write nobody typed. (range.ts has no frame
+ * loop of its own; the script host's writers coalesce theirs per frame.)
+ */
+function announceBackgroundWrite(
+  sheetIndex: number,
+  cells: ReadonlyArray<{ row: number; col: number; value: string }>,
+): void {
+  if (cells.length === 0) return;
+  const changes: CellValueChange[] = cells.map((c) => ({
+    row: c.row,
+    col: c.col,
+    sheetIndex,
+    newValue: c.value,
+    formula: c.value.startsWith("=") ? c.value : null,
+  }));
+  emitAppEvent(AppEvents.CELLS_UPDATED, { changes });
+  emitAppEvent(AppEvents.CELLS_UPDATED);
+}
 
 // ============================================================================
 // Address Parsing Helpers
@@ -446,7 +482,10 @@ export class CellRange {
       // wrote. `bg` was another sheet when we resolved it a moment ago, so an
       // absence here means it became the ACTIVE sheet in between — write it
       // through the active path instead of silently losing the value.
-      if (Array.isArray(written) && written.includes(bg)) return;
+      if (Array.isArray(written) && written.includes(bg)) {
+        announceBackgroundWrite(bg, [{ row: this.startRow, col: this.startCol, value }]);
+        return;
+      }
     }
     await updateCellsBatch([{ row: this.startRow, col: this.startCol, value }]);
   }
@@ -466,17 +505,21 @@ export class CellRange {
       // mid-block) is re-issued through the active path — never dropped; see
       // the note in setValue.
       const skipped: Array<{ row: number; col: number; value: string }> = [];
+      const landed: Array<{ row: number; col: number; value: string }> = [];
       for (let r = 0; r < values.length && r < this.rowCount; r++) {
         const row = values[r];
         for (let c = 0; c < row.length && c < this.colCount; c++) {
-          const written = await updateCellOnSheets(
-            [bg], this.startRow + r, this.startCol + c, row[c],
-          );
+          const cell = { row: this.startRow + r, col: this.startCol + c, value: row[c] };
+          const written = await updateCellOnSheets([bg], cell.row, cell.col, cell.value);
           if (Array.isArray(written) && !written.includes(bg)) {
-            skipped.push({ row: this.startRow + r, col: this.startCol + c, value: row[c] });
+            skipped.push(cell);
+          } else {
+            landed.push(cell);
           }
         }
       }
+      // ONE announcement for the whole block (not one per cell).
+      announceBackgroundWrite(bg, landed);
       if (skipped.length > 0) await updateCellsBatch(skipped);
       return;
     }

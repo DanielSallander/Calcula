@@ -214,6 +214,8 @@ pub(crate) fn create_floating_range_inner(
             &effect,
             new_name,
             crate::sheets::OBJECT_SHEET_VISIBILITY,
+            // A backing cell store is always a plain worksheet grid.
+            ::persistence::SheetKind::Worksheet,
             &mut sheet_names,
             &mut grids,
             &mut freeze_configs,
@@ -573,22 +575,24 @@ pub(crate) fn update_floating_range_cell_inner(
 pub fn rename_floating_range(
     state: State<AppState>,
     file_state: State<FileState>,
+    pivot_state: State<'_, PivotState>,
     id: identity::EntityId,
     new_name: String,
 ) -> Result<FloatingRangeInfo, String> {
-    rename_floating_range_inner(&state, &file_state, id, new_name)
+    rename_floating_range_inner(&state, &file_state, &pivot_state, id, new_name)
 }
 
 pub(crate) fn rename_floating_range_inner(
     state: &AppState,
     file_state: &FileState,
+    pivot_state: &PivotState,
     id: identity::EntityId,
     new_name: String,
 ) -> Result<FloatingRangeInfo, String> {
     let row = find_row(state, id)?;
     let backing_index = sheet_index_of(state, row.backing_sheet_id)
         .ok_or_else(|| "Floating range backing sheet is missing".to_string())?;
-    crate::sheets::rename_sheet_inner(state, file_state, backing_index, new_name, true)?;
+    crate::sheets::rename_sheet_inner(state, file_state, pivot_state, backing_index, new_name, true)?;
     info_for(state, row)
 }
 

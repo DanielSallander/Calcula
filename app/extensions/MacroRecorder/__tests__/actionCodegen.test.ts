@@ -18,7 +18,7 @@ import {
 import type { RecordedAction, RecordedEvent } from "../lib/types";
 // The REAL broker validators, so "the generated call is accepted by the
 // script API" is a fact this suite checks rather than a claim it makes.
-import { vSortRange, vBiModelMutation } from "@api/scriptHost/validators";
+import { vSortRange, vBiModelMutation, vAddSheet } from "@api/scriptHost/validators";
 
 // ============================================================================
 // Fixtures
@@ -575,6 +575,28 @@ describe("structural actions (object script)", () => {
       expect(gen([act(event)], NB).unsupported).toHaveLength(1);
     });
   }
+
+  // A canvas sheet's KIND is fixed at creation, so a recorded canvas must
+  // replay as a canvas — never as the one-argument (worksheet) form.
+  it("replays a recorded CANVAS sheet with its kind, in a form the broker accepts", () => {
+    const event: RecordedEvent = { kind: "addSheet", index: 3, name: "Dashboard", sheetKind: "canvas" };
+    const { source } = gen([act(event)]);
+    expect(source).toContain('await api.addSheet("Dashboard", undefined, "canvas");');
+    expect(source).not.toContain('await api.addSheet("Dashboard");');
+    expect(vAddSheet(["Dashboard", undefined, "canvas"])).toBe(true);
+    const nb = gen([act(event)], NB).unsupported;
+    expect(nb).toHaveLength(1);
+    expect(nb[0]).toContain("add canvas");
+  });
+
+  it("keeps the worksheet form byte-identical (no kind argument)", () => {
+    const { source } = gen([act({ kind: "addSheet", index: 2, name: "Summary" })]);
+    expect(source).toContain('await api.addSheet("Summary");');
+    expect(source).not.toContain("canvas");
+    expect(gen([act({ kind: "addSheet", index: 2, name: "Summary" })], NB).unsupported[0]).toContain(
+      "add sheet",
+    );
+  });
 
   it("emits replaceAll with its options", () => {
     const { source } = gen([

@@ -473,6 +473,16 @@ pub struct AppState {
     /// ONE store rather than four parallel `Vec`s because they are one user-facing unit
     /// and four vectors would be four chances to forget to resize on sheet insert.
     pub sheet_display_flags: document_effect::Persisted<Vec<api_types::SheetDisplayFlags>>,
+    /// Per-sheet KIND: worksheet (default) or canvas with its page / snap-grid /
+    /// stacking layout. PERSISTED (`Sheet::kind`, .cala v9) -> `Persisted<T>`.
+    ///
+    /// Its own vector rather than a value in `sheet_visibility` the way the
+    /// floating-range "object" marker is: a canvas must stay HIDEABLE, and
+    /// `hide_sheet_inner` overwrites the visibility slot. Maintained at every
+    /// site `sheet_display_flags` is (append, rotate, delete, move, copy, save,
+    /// open, reset, .calp materialize); the lifecycle guard in sheets.rs pins
+    /// the four sheet commands.
+    pub sheet_kinds: document_effect::Persisted<Vec<::persistence::SheetKind>>,
     /// Merged cell regions for the current (active) sheet
     pub merged_regions: document_effect::Persisted<HashSet<MergedRegion>>,
     /// Merged cell regions for ALL sheets (swapped on sheet switch)
@@ -587,10 +597,11 @@ pub struct AppState {
     pub theme: crate::document_effect::Persisted<engine::ThemeDefinition>,
     /// Scenario Manager: per-sheet list of scenarios
     pub scenarios: document_effect::Persisted<HashMap<usize, Vec<api_types::Scenario>>>,
-    /// Animation playback transient snapshots: token -> saved (cell coord, prior
-    /// Cell). Used by the anim_* commands to apply transient frame writes and
-    /// restore the model on stop WITHOUT touching the undo stack. Never serialized.
-    pub animation_snapshots: Mutex<HashMap<String, Vec<((u32, u32), Option<engine::Cell>)>>>,
+    /// Animation playback transient snapshots: token -> the SHEET the cells were
+    /// read from (by stable id) and the saved (cell coord, prior Cell) pairs.
+    /// Used by the anim_* commands to apply transient frame writes and restore
+    /// the model on stop WITHOUT touching the undo stack. Never serialized.
+    pub animation_snapshots: Mutex<HashMap<String, animation_commands::AnimSnapshot>>,
     // linked_sheets removed: replaced by .calp collaboration system (Phase 2+)
     /// Locale/regional settings (decimal separator, list separator, date format, etc.)
     pub locale: Mutex<engine::LocaleSettings>,
@@ -827,6 +838,7 @@ pub fn create_app_state() -> AppState {
         sheet_zooms: document_effect::Persisted::new(vec![::persistence::DEFAULT_SHEET_ZOOM_PERCENT]),
         show_gridlines: document_effect::Persisted::new(vec![true]),
         sheet_display_flags: document_effect::Persisted::new(vec![api_types::SheetDisplayFlags::default()]),
+        sheet_kinds: document_effect::Persisted::new(vec![::persistence::SheetKind::Worksheet]),
         merged_regions: document_effect::Persisted::new(HashSet::new()),
         all_merged_regions: document_effect::Persisted::new(Vec::new()),
         protected_regions: Mutex::new(Vec::new()),
@@ -5092,6 +5104,7 @@ pub fn run() {
             sheets::set_show_gridlines,
             sheets::get_sheet_display_flags,
             sheets::set_sheet_display_flags,
+            sheets::set_canvas_layout,
             sheets::set_active_sheet,
             sheets::add_sheet,
             sheets::delete_sheet,

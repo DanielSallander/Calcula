@@ -64,6 +64,7 @@ import {
   CONTROL_VALUE_CHANGED,
   type ControlValueChangedDetail,
 } from "@api/controlValues";
+import { cellEvents } from "@api/cellEvents";
 import {
   getAllControls,
   getControlById,
@@ -636,5 +637,76 @@ describe("clearControlsCache", () => {
 
     expect(getAllControls()).toEqual([]);
     expect(getControlById("c-1")).toBeUndefined();
+  });
+});
+
+// ============================================================================
+// GET.CONTROLVALUE recalc announces OFF-SHEET cells (canvas sheets, M4)
+// ============================================================================
+// A chart on a canvas sheet reading a GET.CONTROLVALUE column on another sheet
+// never redrew when the control moved: the recalculated off-sheet cells were
+// dropped here. They are now emitted, TAGGED with their sheetIndex, through the
+// same cellEvents.emit call as active-sheet cells (which stay untagged).
+
+describe("triggerControlValueRecalc (via commitValue) emits off-sheet cells tagged", () => {
+  beforeEach(async () => {
+    await seedControls([makeControl({ id: "c-1", name: "Rate" })]);
+    vi.clearAllMocks();
+    mockSetPaneControlValue.mockResolvedValue(undefined);
+  });
+
+  /** Let the fire-and-forget recalc chain (.then) settle. */
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+  }
+
+  it("emits an off-sheet recalculated cell WITH its sheetIndex", async () => {
+    const emitSpy = vi.spyOn(cellEvents, "emit").mockImplementation(() => undefined);
+    try {
+      mockRecalcControlDependents.mockResolvedValueOnce([
+        { row: 1, col: 2, display: "7", formula: "=GET.CONTROLVALUE(\"Rate\")", sheetIndex: 0 },
+        { row: 4, col: 0, display: "14", formula: "=A1*2" },
+      ] as never);
+
+      await commitValue("c-1", { kind: "number", value: 7 });
+      await settle();
+
+      expect(emitSpy).toHaveBeenCalledTimes(2);
+      expect(emitSpy).toHaveBeenNthCalledWith(1, {
+        row: 1,
+        col: 2,
+        sheetIndex: 0,
+        newValue: "7",
+        formula: "=GET.CONTROLVALUE(\"Rate\")",
+      });
+      // An active-sheet cell stays UNTAGGED (Core mirrors only those into the
+      // formula bar).
+      expect(emitSpy).toHaveBeenNthCalledWith(2, {
+        row: 4,
+        col: 0,
+        sheetIndex: undefined,
+        newValue: "14",
+        formula: "=A1*2",
+      });
+    } finally {
+      emitSpy.mockRestore();
+    }
+  });
+
+  it("normalises a null sheetIndex to untagged (active sheet)", async () => {
+    const emitSpy = vi.spyOn(cellEvents, "emit").mockImplementation(() => undefined);
+    try {
+      mockRecalcControlDependents.mockResolvedValueOnce([
+        { row: 0, col: 0, display: "1", formula: null, sheetIndex: null },
+      ] as never);
+
+      await commitValue("c-1", { kind: "number", value: 1 });
+      await settle();
+
+      expect(emitSpy).toHaveBeenCalledTimes(1);
+      expect(emitSpy.mock.calls[0][0].sheetIndex).toBeUndefined();
+    } finally {
+      emitSpy.mockRestore();
+    }
   });
 });

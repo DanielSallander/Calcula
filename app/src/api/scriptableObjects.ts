@@ -623,8 +623,16 @@ export interface UnlockedAPI {
 
   // ---- Sheets (B2) ----
 
-  /** Add a sheet (and make it active). Rejects a name that already exists. */
-  addSheet(name?: string): Promise<{ index: number; name: string }>;
+  /**
+   * Add a sheet (and make it active). Rejects a name that already exists.
+   * `position` places it before or after a named (or indexed) sheet instead of
+   * at the end; `kind` "canvas" adds a canvas page (objects only, no cells).
+   */
+  addSheet(
+    name?: string,
+    position?: { before?: string | number; after?: string | number },
+    kind?: "worksheet" | "canvas",
+  ): Promise<{ index: number; name: string }>;
   /** Delete a sheet and everything on it. Rejects on the last remaining sheet. */
   deleteSheet(index: number): Promise<void>;
   /** Rename a sheet. Rejects a name that already exists. */

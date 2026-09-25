@@ -809,10 +809,294 @@ pub struct Sheet {
     pub view_mode: String,
     /// Whether row/column headings (1,2,3 / A,B,C) are shown.
     pub display_headings: bool,
+    /// What kind of surface this sheet is: an ordinary cell WORKSHEET, or a
+    /// CANVAS that shows only floating objects on a fixed page.
+    ///
+    /// An AUTHORITY like `zoom` and the display flags: it lives nowhere else,
+    /// so an older reader that dropped it would hand the canvas back as an
+    /// editable, empty worksheet with its charts floating over cells -- the
+    /// reason it takes a format-version link
+    /// (`CANVAS_SHEET_MIN_FORMAT_VERSION` in calcula-format).
+    pub kind: SheetKind,
 }
 
 /// Default for `Sheet::view_mode` and `SheetMetadata::view_mode`.
 pub const DEFAULT_SHEET_VIEW_MODE: &str = "normal";
+
+// ============================================================================
+// SHEET KIND -- WORKSHEET OR CANVAS
+// ============================================================================
+//
+// ONE definition shared by every layer that carries a sheet: this crate's
+// `Sheet`, calcula-format's `SheetMetadata` (.cala), calp's
+// `PublishedSheetMetadata` (.calp) and the app's `AppState.sheet_kinds`. It is
+// defined here because `persistence` is the lowest crate all of them already
+// depend on -- three mirrored enums would drift on the first new field.
+//
+// A canvas is still a real engine sheet with a real (empty) grid. What makes it
+// a canvas is only this tag: the frontend paints no cells, headers or selection
+// for it, and the backend refuses every user-facing cell writer against it.
+// Its LAYOUT (page, snap grid, background, stacking) rides inside the variant,
+// so there is exactly one per-sheet vector to keep in step, not two.
+
+/// Default canvas page width in logical px: Power BI's 16:9 page.
+pub const CANVAS_DEFAULT_PAGE_WIDTH: u32 = 1280;
+/// Default canvas page height in logical px: Power BI's 16:9 page.
+pub const CANVAS_DEFAULT_PAGE_HEIGHT: u32 = 720;
+/// Default snap-grid pitch in logical px. 16 divides both default page edges.
+pub const CANVAS_DEFAULT_GRID_SIZE_PX: u32 = 16;
+/// Smallest snap-grid pitch a canvas accepts.
+pub const CANVAS_MIN_GRID_SIZE_PX: u32 = 4;
+/// Largest snap-grid pitch a canvas accepts.
+pub const CANVAS_MAX_GRID_SIZE_PX: u32 = 200;
+/// Smallest page edge a canvas accepts, in logical px.
+pub const CANVAS_MIN_PAGE_EDGE_PX: u32 = 100;
+/// Largest page edge a canvas accepts, in logical px.
+pub const CANVAS_MAX_PAGE_EDGE_PX: u32 = 10_000;
+/// The page presets a canvas offers, with their logical-px sizes. "custom"
+/// keeps whatever width/height the layout carries.
+pub const CANVAS_PAGE_PRESETS: &[(&str, u32, u32)] = &[
+    ("16:9", 1280, 720),
+    ("4:3", 960, 720),
+    ("letter", 816, 1056),
+];
+/// The preset id meaning "the width/height fields are authoritative".
+pub const CANVAS_CUSTOM_PAGE_PRESET: &str = "custom";
+
+/// What kind of surface a sheet is.
+///
+/// Serialized internally tagged: `{"type":"worksheet"}` or
+/// `{"type":"canvas", "snapToGrid": true, ...}`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SheetKind {
+    #[default]
+    Worksheet,
+    Canvas(CanvasLayout),
+}
+
+impl SheetKind {
+    /// A fresh canvas with the default layout.
+    pub fn new_canvas() -> Self {
+        SheetKind::Canvas(CanvasLayout::default())
+    }
+
+    /// True for a canvas sheet.
+    pub fn is_canvas(&self) -> bool {
+        matches!(self, SheetKind::Canvas(_))
+    }
+
+    /// True for an ordinary worksheet (the default).
+    pub fn is_worksheet(&self) -> bool {
+        matches!(self, SheetKind::Worksheet)
+    }
+
+    /// The canvas layout, or None for a worksheet.
+    pub fn canvas_layout(&self) -> Option<&CanvasLayout> {
+        match self {
+            SheetKind::Canvas(layout) => Some(layout),
+            SheetKind::Worksheet => None,
+        }
+    }
+
+    /// This kind with its canvas layout REPAIRED (see
+    /// [`CanvasLayout::sanitized`]), plus one line per repaired field. A
+    /// worksheet comes back unchanged with no lines. Called where a kind enters
+    /// from OUTSIDE the running app: a `.cala` load and a `.calp` pull.
+    pub fn sanitized(self) -> (SheetKind, Vec<String>) {
+        match self {
+            SheetKind::Worksheet => (SheetKind::Worksheet, Vec::new()),
+            SheetKind::Canvas(layout) => {
+                let (layout, repairs) = layout.sanitized();
+                (SheetKind::Canvas(layout), repairs)
+            }
+        }
+    }
+
+    /// The wire name of the kind: `"worksheet"` or `"canvas"`. The same
+    /// spelling the serde tag uses, for surfaces that carry the kind as a
+    /// plain string (sheet lists, MCP inventories, the AI context).
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            SheetKind::Worksheet => "worksheet",
+            SheetKind::Canvas(_) => "canvas",
+        }
+    }
+}
+
+/// A reference to one floating object hosted on a canvas, by the owning
+/// family's kind and its stable id (for example `{"kind":"chart","id":"12"}`).
+/// Used by the canvas's stacking order and lock list.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasObjectRef {
+    pub kind: String,
+    pub id: String,
+}
+
+/// The layout of a canvas sheet: its page, its snap grid, its background and
+/// the stacking/lock state of the objects on it. All sizes are LOGICAL px, the
+/// same units as a floating object's `x/y/width/height`, so the snap grid and
+/// the objects it positions can never disagree about scale.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CanvasLayout {
+    /// Whether dragging/resizing an object snaps its edges to the grid.
+    pub snap_to_grid: bool,
+    /// Grid pitch in logical px (`CANVAS_MIN_GRID_SIZE_PX..=CANVAS_MAX_GRID_SIZE_PX`).
+    pub grid_size_px: u32,
+    /// Whether the transparent snap grid is painted (in design mode).
+    pub show_grid: bool,
+    /// A `CANVAS_PAGE_PRESETS` id or `CANVAS_CUSTOM_PAGE_PRESET`.
+    pub page_preset: String,
+    /// Page width in logical px.
+    pub page_width: u32,
+    /// Page height in logical px.
+    pub page_height: u32,
+    /// Page background as a CSS hex colour; empty means the theme's default.
+    pub background: String,
+    /// Paint order of the canvas's objects, bottom first. Objects missing from
+    /// the list paint below every listed one, in their family's own order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub z_order: Vec<CanvasObjectRef>,
+    /// Objects the designer locked against move/resize.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub locked: Vec<CanvasObjectRef>,
+}
+
+impl Default for CanvasLayout {
+    fn default() -> Self {
+        CanvasLayout {
+            snap_to_grid: true,
+            grid_size_px: CANVAS_DEFAULT_GRID_SIZE_PX,
+            show_grid: true,
+            page_preset: "16:9".to_string(),
+            page_width: CANVAS_DEFAULT_PAGE_WIDTH,
+            page_height: CANVAS_DEFAULT_PAGE_HEIGHT,
+            background: String::new(),
+            z_order: Vec::new(),
+            locked: Vec::new(),
+        }
+    }
+}
+
+impl CanvasLayout {
+    /// Validate a layout, naming the first field that is out of range. Every
+    /// EDIT runs through it (the Tauri command and the script row both apply a
+    /// `CanvasLayoutPatch`, which validates the merged result), so a bad value
+    /// is refused identically wherever an edit comes from. A layout that
+    /// arrives from OUTSIDE -- a `.cala` load, a `.calp` pull -- is REPAIRED
+    /// by [`CanvasLayout::sanitized`] instead: refusing a whole file or package
+    /// over a cosmetic field would be too harsh, and installing it unchecked
+    /// would make every later patch fail on a field the user never touched.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(CANVAS_MIN_GRID_SIZE_PX..=CANVAS_MAX_GRID_SIZE_PX).contains(&self.grid_size_px) {
+            return Err(format!(
+                "Canvas grid size {} is out of range ({}..={} px).",
+                self.grid_size_px, CANVAS_MIN_GRID_SIZE_PX, CANVAS_MAX_GRID_SIZE_PX
+            ));
+        }
+        for (name, edge) in [("width", self.page_width), ("height", self.page_height)] {
+            if !(CANVAS_MIN_PAGE_EDGE_PX..=CANVAS_MAX_PAGE_EDGE_PX).contains(&edge) {
+                return Err(format!(
+                    "Canvas page {} {} is out of range ({}..={} px).",
+                    name, edge, CANVAS_MIN_PAGE_EDGE_PX, CANVAS_MAX_PAGE_EDGE_PX
+                ));
+            }
+        }
+        if self.page_preset != CANVAS_CUSTOM_PAGE_PRESET {
+            match CANVAS_PAGE_PRESETS.iter().find(|(id, _, _)| *id == self.page_preset) {
+                None => {
+                    return Err(format!(
+                        "Unknown canvas page preset '{}'. Use one of 16:9, 4:3, letter or custom.",
+                        self.page_preset
+                    ))
+                }
+                Some((_, w, h)) if *w != self.page_width || *h != self.page_height => {
+                    return Err(format!(
+                        "Canvas page preset '{}' is {}x{} px, but the layout says {}x{}. \
+                         Use the 'custom' preset for other sizes.",
+                        self.page_preset, w, h, self.page_width, self.page_height
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+        if !self.background.is_empty() && !is_css_hex_colour(&self.background) {
+            return Err(format!(
+                "Canvas background '{}' is not a CSS hex colour (#rgb or #rrggbb).",
+                self.background
+            ));
+        }
+        Ok(())
+    }
+
+    /// This layout with every out-of-range field repaired, plus one line per
+    /// repair. Each field is repaired on its own, so one bad value never costs
+    /// the others:
+    ///
+    /// * grid size and page edges CLAMP into their ranges;
+    /// * an unknown preset id (a newer build's `"a4"`) becomes `custom` at the
+    ///   exact size the file carries, as does a known preset whose size does
+    ///   not match it;
+    /// * a background that is not a CSS hex colour becomes the theme default.
+    ///
+    /// The result always passes [`CanvasLayout::validate`].
+    pub fn sanitized(mut self) -> (CanvasLayout, Vec<String>) {
+        let mut repairs = Vec::new();
+        let grid = self
+            .grid_size_px
+            .clamp(CANVAS_MIN_GRID_SIZE_PX, CANVAS_MAX_GRID_SIZE_PX);
+        if grid != self.grid_size_px {
+            repairs.push(format!("grid size {} px -> {} px", self.grid_size_px, grid));
+            self.grid_size_px = grid;
+        }
+        let width = self
+            .page_width
+            .clamp(CANVAS_MIN_PAGE_EDGE_PX, CANVAS_MAX_PAGE_EDGE_PX);
+        if width != self.page_width {
+            repairs.push(format!("page width {} px -> {} px", self.page_width, width));
+            self.page_width = width;
+        }
+        let height = self
+            .page_height
+            .clamp(CANVAS_MIN_PAGE_EDGE_PX, CANVAS_MAX_PAGE_EDGE_PX);
+        if height != self.page_height {
+            repairs.push(format!("page height {} px -> {} px", self.page_height, height));
+            self.page_height = height;
+        }
+        if self.page_preset != CANVAS_CUSTOM_PAGE_PRESET {
+            match Self::preset_size(&self.page_preset) {
+                Some((w, h)) if w == self.page_width && h == self.page_height => {}
+                _ => {
+                    repairs.push(format!(
+                        "page preset '{}' -> '{}' at {}x{} px",
+                        self.page_preset, CANVAS_CUSTOM_PAGE_PRESET, self.page_width, self.page_height
+                    ));
+                    self.page_preset = CANVAS_CUSTOM_PAGE_PRESET.to_string();
+                }
+            }
+        }
+        if !self.background.is_empty() && !is_css_hex_colour(&self.background) {
+            repairs.push(format!("background '{}' -> theme default", self.background));
+            self.background.clear();
+        }
+        (self, repairs)
+    }
+
+    /// The size a preset id stands for, or None for "custom" / unknown ids.
+    pub fn preset_size(preset: &str) -> Option<(u32, u32)> {
+        CANVAS_PAGE_PRESETS
+            .iter()
+            .find(|(id, _, _)| *id == preset)
+            .map(|(_, w, h)| (*w, *h))
+    }
+}
+
+fn is_css_hex_colour(s: &str) -> bool {
+    let Some(hex) = s.strip_prefix('#') else { return false };
+    (hex.len() == 3 || hex.len() == 6) && hex.chars().all(|c| c.is_ascii_hexdigit())
+}
 
 impl Sheet {
     pub fn new(name: String) -> Self {
@@ -845,6 +1129,7 @@ impl Sheet {
             show_formulas: false,
             view_mode: DEFAULT_SHEET_VIEW_MODE.to_string(),
             display_headings: true,
+            kind: SheetKind::Worksheet,
         }
     }
 
@@ -890,6 +1175,7 @@ impl Sheet {
             show_formulas: false,
             view_mode: DEFAULT_SHEET_VIEW_MODE.to_string(),
             display_headings: true,
+            kind: SheetKind::Worksheet,
         }
     }
 
@@ -1934,5 +2220,119 @@ mod capability_pragma_tests {
             parse_declared_capabilities(source),
             vec!["storage".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod sheet_kind_tests {
+    use super::*;
+
+    #[test]
+    fn sanitizing_repairs_each_bad_field_on_its_own_and_always_validates() {
+        let bad = CanvasLayout {
+            snap_to_grid: false,
+            grid_size_px: 0,
+            show_grid: false,
+            page_preset: "a4".to_string(),
+            page_width: 1123,
+            page_height: 20_000,
+            background: "rebeccapurple".to_string(),
+            z_order: vec![CanvasObjectRef { kind: "chart".into(), id: "7".into() }],
+            locked: Vec::new(),
+        };
+        assert!(bad.validate().is_err());
+        let (fixed, repairs) = bad.sanitized();
+        fixed.validate().unwrap();
+        assert_eq!(fixed.grid_size_px, CANVAS_MIN_GRID_SIZE_PX);
+        assert_eq!(fixed.page_width, 1123, "an in-range edge is kept exactly");
+        assert_eq!(fixed.page_height, CANVAS_MAX_PAGE_EDGE_PX);
+        assert_eq!(fixed.page_preset, CANVAS_CUSTOM_PAGE_PRESET, "a newer build's preset keeps its size as custom");
+        assert_eq!(fixed.background, "");
+        assert!(!fixed.snap_to_grid && !fixed.show_grid, "valid fields are untouched");
+        assert_eq!(fixed.z_order.len(), 1, "the stacking order survives a repair");
+        assert_eq!(repairs.len(), 4, "{repairs:?}");
+    }
+
+    #[test]
+    fn sanitizing_a_valid_layout_or_a_worksheet_changes_nothing() {
+        let (same, repairs) = CanvasLayout::default().sanitized();
+        assert_eq!(same, CanvasLayout::default());
+        assert!(repairs.is_empty());
+        let (kind, repairs) = SheetKind::Worksheet.sanitized();
+        assert_eq!(kind, SheetKind::Worksheet);
+        assert!(repairs.is_empty());
+        // A known preset whose size disagrees becomes custom at the stored size.
+        let mismatched = CanvasLayout { page_width: 1000, ..CanvasLayout::default() };
+        let (fixed, _) = mismatched.sanitized();
+        assert_eq!((fixed.page_preset.as_str(), fixed.page_width), (CANVAS_CUSTOM_PAGE_PRESET, 1000));
+        fixed.validate().unwrap();
+    }
+
+    #[test]
+    fn a_new_sheet_is_a_worksheet() {
+        assert!(Sheet::new("Sheet1".to_string()).kind.is_worksheet());
+        assert_eq!(SheetKind::default(), SheetKind::Worksheet);
+    }
+
+    #[test]
+    fn the_default_canvas_layout_is_valid_and_matches_its_preset() {
+        let layout = CanvasLayout::default();
+        layout.validate().unwrap();
+        assert_eq!(
+            CanvasLayout::preset_size(&layout.page_preset),
+            Some((layout.page_width, layout.page_height))
+        );
+    }
+
+    #[test]
+    fn the_validator_refuses_each_out_of_range_field() {
+        let cases: Vec<(&str, Box<dyn Fn(&mut CanvasLayout)>)> = vec![
+            ("grid too small", Box::new(|l| l.grid_size_px = CANVAS_MIN_GRID_SIZE_PX - 1)),
+            ("grid too large", Box::new(|l| l.grid_size_px = CANVAS_MAX_GRID_SIZE_PX + 1)),
+            ("page too narrow", Box::new(|l| {
+                l.page_preset = CANVAS_CUSTOM_PAGE_PRESET.to_string();
+                l.page_width = CANVAS_MIN_PAGE_EDGE_PX - 1;
+            })),
+            ("page too tall", Box::new(|l| {
+                l.page_preset = CANVAS_CUSTOM_PAGE_PRESET.to_string();
+                l.page_height = CANVAS_MAX_PAGE_EDGE_PX + 1;
+            })),
+            ("unknown preset", Box::new(|l| l.page_preset = "a4".to_string())),
+            ("preset disagrees with size", Box::new(|l| l.page_width = 1000)),
+            ("bad background", Box::new(|l| l.background = "red".to_string())),
+        ];
+        for (label, mutate) in cases {
+            let mut layout = CanvasLayout::default();
+            mutate(&mut layout);
+            assert!(layout.validate().is_err(), "{label} must be refused");
+        }
+    }
+
+    #[test]
+    fn a_custom_page_accepts_any_in_range_size() {
+        let mut layout = CanvasLayout::default();
+        layout.page_preset = CANVAS_CUSTOM_PAGE_PRESET.to_string();
+        layout.page_width = 1000;
+        layout.page_height = 500;
+        layout.background = "#abc".to_string();
+        layout.validate().unwrap();
+    }
+
+    #[test]
+    fn the_wire_shape_is_internally_tagged_camel_case() {
+        let json = serde_json::to_value(SheetKind::new_canvas()).unwrap();
+        assert_eq!(json["type"], "canvas");
+        assert_eq!(json["gridSizePx"], CANVAS_DEFAULT_GRID_SIZE_PX);
+        assert_eq!(json["pageWidth"], CANVAS_DEFAULT_PAGE_WIDTH);
+        assert!(json.get("zOrder").is_none(), "empty stacking lists are omitted");
+        let worksheet = serde_json::to_value(SheetKind::Worksheet).unwrap();
+        assert_eq!(worksheet, serde_json::json!({ "type": "worksheet" }));
+        // A layout missing fields fills them from the defaults.
+        let partial: SheetKind =
+            serde_json::from_value(serde_json::json!({ "type": "canvas", "gridSizePx": 30 })).unwrap();
+        let layout = partial.canvas_layout().unwrap();
+        assert_eq!(layout.grid_size_px, 30);
+        assert_eq!(layout.page_width, CANVAS_DEFAULT_PAGE_WIDTH);
+        assert_eq!(partial.wire_name(), "canvas");
     }
 }

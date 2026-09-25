@@ -76,6 +76,15 @@ export interface RibbonTabDefinition {
    * visually group related contextual tabs.
    */
   color?: string;
+  /**
+   * Contextual tabs only: SELECT this tab when it first appears, and when it
+   * disappears again return the ribbon to the tab that was selected before it.
+   * A contextual tab normally appears WITHOUT stealing the selection (a pivot's
+   * Analyze tab must not yank the user off Home on every click into a pivot);
+   * a tab that belongs to a whole SURFACE -- the Canvas tab, shown for as long
+   * as a canvas sheet is active -- is the exception.
+   */
+  activateOnRegister?: boolean;
 }
 
 /**

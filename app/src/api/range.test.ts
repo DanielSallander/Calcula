@@ -566,3 +566,90 @@ describe("sheet-aware ranges (C3 step 2)", () => {
     expect(mBatch).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Canvas sheets (M4) — a background-sheet write ANNOUNCES itself
+// ---------------------------------------------------------------------------
+// A chart placed on a canvas sheet reads its data from another sheet and
+// invalidates on CELLS_UPDATED, scoped by each change's sheetIndex. A write
+// through updateCellOnSheets returns no CellData, so before this nothing said
+// the background sheet had changed and the chart kept the old numbers.
+describe("background-sheet writes emit CELLS_UPDATED (canvas sheets, M4)", () => {
+  const mBatch = vi.mocked(updateCellsBatch);
+  const mActive = vi.mocked(getActiveSheet);
+  const mOnSheets = vi.mocked(updateCellOnSheets);
+
+  const CELLS_UPDATED = "app:cells-updated";
+  const CELL_VALUES_CHANGED = "app:cell-values-changed";
+  let cellsUpdated: unknown[] = [];
+  let cellValuesChanged: unknown[] = [];
+  const onCellsUpdated = (e: Event): void => {
+    cellsUpdated.push((e as CustomEvent).detail);
+  };
+  const onCellValuesChanged = (e: Event): void => {
+    cellValuesChanged.push((e as CustomEvent).detail);
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mBatch.mockResolvedValue([] as never);
+    mActive.mockResolvedValue(0);
+    // The backend reports the sheets it WROTE.
+    mOnSheets.mockImplementation(async (sheets: number[]) => sheets);
+    cellsUpdated = [];
+    cellValuesChanged = [];
+    window.addEventListener(CELLS_UPDATED, onCellsUpdated);
+    window.addEventListener(CELL_VALUES_CHANGED, onCellValuesChanged);
+    return () => {
+      window.removeEventListener(CELLS_UPDATED, onCellsUpdated);
+      window.removeEventListener(CELL_VALUES_CHANGED, onCellValuesChanged);
+    };
+  });
+
+  it("setValue on a background sheet emits the change TAGGED with its sheet, then ONE bare event", async () => {
+    const r = CellRange.fromCell(3, 1, 2); // sheet 2, active is 0
+    await r.setValue("42");
+    expect(mOnSheets).toHaveBeenCalledWith([2], 3, 1, "42");
+    expect(mBatch).not.toHaveBeenCalled();
+    expect(cellsUpdated).toEqual([
+      { changes: [{ row: 3, col: 1, sheetIndex: 2, newValue: "42", formula: null }] },
+      // Bare = "refresh everything" (the backend recalculated the dependents
+      // and reported none); a bare CustomEvent carries detail null.
+      null,
+    ]);
+    // CELLS_UPDATED only: never the per-cell CELL_VALUES_CHANGED script hooks read.
+    expect(cellValuesChanged).toEqual([]);
+  });
+
+  it("setValues on a background sheet emits ONE tagged event for the block + ONE bare", async () => {
+    const r = CellRange.fromAddress("A1:B2", 1);
+    await r.setValues([["1", "=A1*2"], ["x", "y"]]);
+    expect(cellsUpdated).toHaveLength(2);
+    expect(cellsUpdated[0]).toEqual({
+      changes: [
+        { row: 0, col: 0, sheetIndex: 1, newValue: "1", formula: null },
+        { row: 0, col: 1, sheetIndex: 1, newValue: "=A1*2", formula: "=A1*2" },
+        { row: 1, col: 0, sheetIndex: 1, newValue: "x", formula: null },
+        { row: 1, col: 1, sheetIndex: 1, newValue: "y", formula: null },
+      ],
+    });
+    expect(cellsUpdated[1]).toBeNull();
+    expect(cellValuesChanged).toEqual([]);
+  });
+
+  it("a cell the backend SKIPPED (sheet became active) is not announced as off-sheet", async () => {
+    mOnSheets.mockResolvedValue([]);
+    const r = CellRange.fromCell(0, 0, 1);
+    await r.setValue("v");
+    // Re-issued through the active path, which is unchanged (no announcement here).
+    expect(mBatch).toHaveBeenCalledWith([{ row: 0, col: 0, value: "v" }]);
+    expect(cellsUpdated).toEqual([]);
+  });
+
+  it("an active-sheet write is unchanged: no CELLS_UPDATED from range.ts", async () => {
+    await CellRange.fromCell(0, 0).setValue("x");
+    await CellRange.fromAddress("A1:B1").setValues([["a", "b"]]);
+    expect(mOnSheets).not.toHaveBeenCalled();
+    expect(cellsUpdated).toEqual([]);
+  });
+});

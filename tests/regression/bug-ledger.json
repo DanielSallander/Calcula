@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 135,
+  "nextId": 139,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4935,6 +4935,109 @@
       "repro": {
         "description": "Collaboration > Application Inspector..., type C:\\Temp\\no-such-workspace in the location field, press Enter. The folder now exists and is empty. Fix direction: split `open` (must exist, for read paths) from an explicit create used only by the publish routes and calp_add_workspace."
       }
+    },
+    {
+      "id": "BUG-0135",
+      "status": "fixed",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M1 review + grid-writer classification (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "sheet-keyed-store-remap",
+        "message": "COMPUTED PROPERTIES WERE NEVER REMAPPED ON A SHEET MOVE OR DELETE. `computed_properties` is keyed by sheet INDEX and its two derived indexes (`computed_prop_dependencies`, `computed_prop_dependents`) carry the sheet inside a cell key, but `remap_sheet_keyed_stores` (sheets.rs) reached neither. After moving or deleting a sheet, one sheet's row/column/cell properties were re-evaluated by Calculate Now against WHICHEVER sheet inherited the index -- and written, as fills, styles and dimensions, onto that sheet's cells.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The re-evaluation pass is active-sheet machinery and silently does nothing when the index holds no properties, so the symptom only appears when a sheet WITH properties is followed by a move and a Calculate Now on the sheet that inherited its index.",
+      "repro": {
+        "description": "Add a computed column-width property on Sheet3, move Sheet3 to the front, activate the sheet now at index 2, Calculate Now: the property is applied to the wrong sheet. Found by the canvas-sheet M1 grid-writer classification (a canvas inheriting the index received styled cells in its hidden grid)."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "sheets.rs remap_sheet_keyed_stores now remaps computed_properties (remap_indexed_map), computed_prop_dependents (remap_cell_keyed_map) and rewrites the sheet index inside every computed_prop_dependencies entry, dropping deleted sheets.",
+        "filesChanged": [
+          "app/src-tauri/src/sheets.rs (remap_sheet_keyed_stores: computed_properties + both derived indexes)",
+          "app/src-tauri/src/computed_properties.rs (add/update refuse a canvas before the effect)"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0136",
+      "status": "fixed",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M1 review + grid-writer classification (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "protection-gate-parity",
+        "message": "scenario_merge HAD NO allowEditScenarios GATE. scenario_add and scenario_delete both call check_sheet_action(\"editScenarios\"); scenario_merge copied scenarios onto ANY target sheet with no gate at all, so a protected sheet (and, since M1, a canvas sheet) could receive scenarios, after which Show wrote their changing cells into it.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Merge is reached only from the Scenario Manager's Merge button, rarely used, and its result is invisible until Show is pressed.",
+      "repro": {
+        "description": "Protect Sheet2 with editScenarios disallowed; Scenario Manager > Merge from Sheet1 into Sheet2: the merge succeeded."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "scenario_merge now calls check_sheet_action(target, \"editScenarios\") before its DocumentEffect; scenario_show and scenario_summary also refuse a canvas directly.",
+        "filesChanged": [
+          "app/src-tauri/src/scenario_manager.rs (scenario_merge gated by check_sheet_action editScenarios; show/summary refuse a canvas)"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0137",
+      "status": "fixed",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M1 review + grid-writer classification (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "checkpoint-structure-match",
+        "message": "NOTEBOOK REWIND INSTALLED A CHECKPOINT OVER A DIFFERENT SHEET STRUCTURE. notebook_rewind_internal replaced the whole grid list with the checkpoint's copy BY POSITION with no check that the workbook still had the same sheets. A sheet added since the checkpoint truncated the grid list below every other per-sheet store; a sheet deleted since poured one sheet's cells into its neighbour.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Rewind is normally used moments after running cells, before anyone restructures the workbook.",
+      "repro": {
+        "description": "Run a notebook cell, add a sheet, rewind to that cell: grids.len() < sheet_names.len()."
+      },
+      "fix": {
+        "status": "fixed",
+        "diffSummary": "The rewind is refused when the checkpoint's sheet count differs from the workbook's, and every CANVAS slot keeps its live grid. A same-count REORDER is still installed by position (recorded as open follow-up in open-items).",
+        "filesChanged": [
+          "app/src-tauri/src/scripting/notebook_commands.rs (notebook_rewind_internal: sheet-count gate before the effect; canvas slots keep their live grid)"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0138",
+      "status": "open",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M1 review + grid-writer classification (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "sheet-keyed-store-remap",
+        "message": "BI QUERY RESULT BLOCKS ARE NEVER REMAPPED ON A SHEET MOVE OR DELETE. Each connection's active_queries entry stores the sheet_index its block was inserted on; nothing in sheets.rs (or anywhere) remaps it. After a move or delete, bi_refresh_connection clears and rewrites the block on WHICHEVER sheet inherited the index, overwriting that sheet's cells.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Refresh works perfectly until the sheet order changes, and the overwrite looks like fresh query data.",
+      "repro": {
+        "description": "Insert a BI query result on Sheet2, move Sheet2 to the front, Refresh the connection: the block is written onto the sheet now at index 1."
+      },
+      "notes": "Since M1 a block whose index now names a CANVAS is skipped loudly (bi_refresh_connection reports it); the worksheet case is unchanged."
     }
   ]
 }

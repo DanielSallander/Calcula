@@ -38,6 +38,7 @@ import { getCellCursorOverride } from "../../lib/cellClickInterceptors";
 import { getColumnWidth } from "../../lib/gridRenderer/layout/dimensions";
 import { createEmptyDimensionOverrides } from "../../types";
 import { getGridRegions, getOverlayRegistration } from "../../../api/gridOverlays";
+import { getGridStateSnapshot } from "../../state/GridContext";
 import { rowHeaderGutter } from "../../lib/gridRenderer/layout/headerVisibility";
 
 // Custom cursor data URLs for Excel-style header selection arrows
@@ -473,6 +474,27 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         return;
       }
 
+      // CANVAS SURFACE: a press no floating object took lands on empty page.
+      // A canvas has no cells to select, drag, fill or pick as a formula
+      // reference, so nothing below runs -- otherwise the click would plant an
+      // invisible cell selection that Home-tab formatting, paste and Ctrl+A then
+      // act on. The press is announced as a generic BACKGROUND press so object
+      // families (and the canvas marquee) can clear their own selection.
+      if (getGridStateSnapshot()?.surface === "canvas") {
+        window.dispatchEvent(
+          new CustomEvent("floatingObject:backgroundPointerDown", {
+            detail: {
+              x: mouseX,
+              y: mouseY,
+              button: event.button,
+              shiftKey: event.shiftKey,
+              ctrlKey: event.ctrlKey,
+            },
+          }),
+        );
+        return;
+      }
+
       // FIX: Check formula mode synchronously at event time, not just from props
       // The isFormulaMode prop might be stale if the user just typed "+" and
       // React hasn't re-rendered yet. isGlobalFormulaMode() checks the actual
@@ -601,13 +623,13 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
 
       // Handle overlay resize operation (table/chart resize drag)
       if (isOverlayResizing && overlayResizeStateRef.current) {
-        overlayResizeHandlers.handleOverlayResizeMouseMove(mouseX, mouseY);
+        overlayResizeHandlers.handleOverlayResizeMouseMove(mouseX, mouseY, event.altKey);
         return;
       }
 
       // Handle overlay move operation (floating chart drag)
       if (isOverlayMoving && overlayMoveStateRef.current) {
-        overlayMoveHandlers.handleOverlayMoveMouseMove(mouseX, mouseY);
+        overlayMoveHandlers.handleOverlayMoveMouseMove(mouseX, mouseY, event.altKey);
         return;
       }
 
@@ -1106,13 +1128,13 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
 
       // Handle overlay resize during global mouse move (table/chart resize)
       if (isOverlayResizing && overlayResizeStateRef.current) {
-        overlayResizeHandlers.handleOverlayResizeMouseMove(mouseX, mouseY);
+        overlayResizeHandlers.handleOverlayResizeMouseMove(mouseX, mouseY, event.altKey);
         return;
       }
 
       // Handle overlay move during global mouse move (floating chart move)
       if (isOverlayMoving && overlayMoveStateRef.current) {
-        overlayMoveHandlers.handleOverlayMoveMouseMove(mouseX, mouseY);
+        overlayMoveHandlers.handleOverlayMoveMouseMove(mouseX, mouseY, event.altKey);
         return;
       }
 

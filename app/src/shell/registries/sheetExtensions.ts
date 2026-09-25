@@ -12,8 +12,8 @@ import { alertAsync, promptAsync } from "@api/dialogs";
 
 /** Context passed to sheet-related extension callbacks */
 export interface SheetContext {
-  /** The sheet being acted upon */
-  sheet: { name: string; index: number };
+  /** The sheet being acted upon. `kind` is absent for a worksheet. */
+  sheet: { name: string; index: number; kind?: "worksheet" | "canvas" };
   /** TRUE workbook index — what the backend commands take, and a bad cache key */
   index: number;
   /** Stable identity, for anything an extension remembers about this sheet */
@@ -270,10 +270,23 @@ export function registerCoreSheetContextMenu(): void {
     },
   });
 
-  // Duplicate (Copy)
+  // Insert a CANVAS sheet. A CORE item on purpose: the registry has no ordering
+  // key, so only an item registered here lands next to "Insert Sheet".
+  sheetExtensions.registerContextMenuItem({
+    id: "core:insertCanvas",
+    label: "Insert Canvas",
+    onClick: async () => {
+      window.dispatchEvent(new CustomEvent("sheet:requestAdd", { detail: { kind: "canvas" } }));
+    },
+  });
+
+  // Duplicate (Copy). Hidden for a CANVAS: copying a sheet clones its grid and
+  // view state but none of the objects a canvas consists of, so the backend
+  // refuses it rather than hand back an empty page presented as a copy.
   sheetExtensions.registerContextMenuItem({
     id: "core:copySheet",
     label: "Duplicate Sheet",
+    visible: (context) => context.sheet.kind !== "canvas",
     separatorAfter: true,
     onClick: async (context) => {
       window.dispatchEvent(new CustomEvent("sheet:requestCopy", {

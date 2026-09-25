@@ -827,6 +827,7 @@ pub async fn insights_create_report_sheet(
         &state,
         &file_state,
         Some(unique_report_name(&state)?),
+        ::persistence::SheetKind::Worksheet,
     )?;
     let sheet_index = created.active_index;
     let sheet_name = created

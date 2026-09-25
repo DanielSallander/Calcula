@@ -226,8 +226,10 @@ pub(crate) fn replace_all_off_sheet(
         let grid = grids
             .get(target)
             .ok_or_else(|| format!("Sheet index {} out of range", target))?;
+        let sheet_kinds = state.sheet_kinds.read().unwrap();
         let protection_storage = state.sheet_protection.read().unwrap();
         crate::protection::check_sheet_protection_cells_in(
+            &sheet_kinds,
             &protection_storage,
             grid,
             &styles,
@@ -408,8 +410,10 @@ pub fn replace_all(
     // wrapper would deadlock here. `sheet_protection` is taken last, matching
     // the canonical grid -> style_registry -> sheet_protection order.
     {
+        let sheet_kinds = state.sheet_kinds.read().unwrap();
         let protection_storage = state.sheet_protection.read().unwrap();
         crate::protection::check_sheet_protection_cells_in(
+            &sheet_kinds,
             &protection_storage,
             &grid,
             &styles,
@@ -615,9 +619,10 @@ pub(crate) fn replace_single_off_sheet(
         // it can still refuse -- so it runs under the PENDING guard, before any
         // dirty decision, without releasing the lock it was taken under.
         {
+            let sheet_kinds = state.sheet_kinds.read().unwrap();
             let protection_storage = state.sheet_protection.read().unwrap();
             crate::protection::check_sheet_protection_range_in(
-                &protection_storage, grid, &styles, target, row, col, row, col,
+                &sheet_kinds, &protection_storage, grid, &styles, target, row, col, row, col,
             )?;
         }
 
@@ -782,9 +787,10 @@ pub fn replace_single(
     // Sheet protection (Replace on a locked cell). Borrowed form — `grid` and
     // `styles` are already held above; see the note in `replace_all`.
     {
+        let sheet_kinds = state.sheet_kinds.read().unwrap();
         let protection_storage = state.sheet_protection.read().unwrap();
         crate::protection::check_sheet_protection_range_in(
-            &protection_storage, &grid, &styles, active_sheet, row, col, row, col,
+            &sheet_kinds, &protection_storage, &grid, &styles, active_sheet, row, col, row, col,
         )?;
     }
 

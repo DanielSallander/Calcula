@@ -50,6 +50,7 @@ export type {
 
   // View mode
   ViewMode,
+  SheetSurface,
 
   // Sorting
   SortRangeResult,

@@ -2621,6 +2621,82 @@ impl Default for SheetDisplayFlags {
     }
 }
 
+/// The sheet-kind types are defined ONCE, in the persistence crate, and shared
+/// by the .cala format, the .calp manifest and this app (see the SHEET KIND
+/// section of `core/persistence/src/lib.rs`). Re-exported here so Tauri API
+/// consumers find them beside the other API types.
+pub use ::persistence::{CanvasLayout, CanvasObjectRef, SheetKind};
+
+/// Partial update for a canvas sheet's [`CanvasLayout`]: every field optional,
+/// so the ribbon's Snap toggle does not have to know the page size (and cannot
+/// clobber it). Applied by `set_canvas_layout` and validated as a whole AFTER
+/// the patch, so a combination can be refused even when each field is legal.
+///
+/// Setting `page_preset` to a named preset also sets the page size to it;
+/// setting `page_width`/`page_height` without a preset switches the preset to
+/// "custom".
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CanvasLayoutPatch {
+    pub snap_to_grid: Option<bool>,
+    pub grid_size_px: Option<u32>,
+    pub show_grid: Option<bool>,
+    pub page_preset: Option<String>,
+    pub page_width: Option<u32>,
+    pub page_height: Option<u32>,
+    pub background: Option<String>,
+    pub z_order: Option<Vec<CanvasObjectRef>>,
+    pub locked: Option<Vec<CanvasObjectRef>>,
+}
+
+impl CanvasLayoutPatch {
+    /// Apply this patch to `layout` and validate the result. Pure, so the
+    /// Tauri command, the script row and the tests share one rule.
+    pub fn apply(&self, mut layout: CanvasLayout) -> Result<CanvasLayout, String> {
+        if let Some(v) = self.snap_to_grid {
+            layout.snap_to_grid = v;
+        }
+        if let Some(v) = self.grid_size_px {
+            layout.grid_size_px = v;
+        }
+        if let Some(v) = self.show_grid {
+            layout.show_grid = v;
+        }
+        if let Some(preset) = &self.page_preset {
+            layout.page_preset = preset.clone();
+            if let Some((w, h)) = CanvasLayout::preset_size(preset) {
+                layout.page_width = w;
+                layout.page_height = h;
+            }
+        }
+        if self.page_width.is_some() || self.page_height.is_some() {
+            if let Some(w) = self.page_width {
+                layout.page_width = w;
+            }
+            if let Some(h) = self.page_height {
+                layout.page_height = h;
+            }
+            // An explicit size is custom unless it IS the named preset's size.
+            let matches_preset = CanvasLayout::preset_size(&layout.page_preset)
+                == Some((layout.page_width, layout.page_height));
+            if !matches_preset {
+                layout.page_preset = ::persistence::CANVAS_CUSTOM_PAGE_PRESET.to_string();
+            }
+        }
+        if let Some(v) = &self.background {
+            layout.background = v.trim().to_string();
+        }
+        if let Some(v) = &self.z_order {
+            layout.z_order = v.clone();
+        }
+        if let Some(v) = &self.locked {
+            layout.locked = v.clone();
+        }
+        layout.validate()?;
+        Ok(layout)
+    }
+}
+
 /// Partial update for [`SheetDisplayFlags`]: every field optional, so a caller that
 /// toggles one flag does not have to know the other three (and cannot clobber them).
 #[derive(Debug, Clone, Default, Deserialize)]

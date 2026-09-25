@@ -160,6 +160,44 @@ pub fn write_cell_range(
     Ok(format!("Set {} cell(s)", cells.len()))
 }
 
+/// The `## Canvases` section of the AI summary: one line per canvas sheet with
+/// its index, page and snap grid, and the rule an AI most needs -- a canvas
+/// holds objects only and its data lives on worksheets. Pure (unit-tested);
+/// None when the workbook has no canvas, so ordinary summaries are unchanged.
+pub(crate) fn format_canvas_inventory(
+    sheet_names: &[String],
+    sheet_visibility: &[String],
+    sheet_kinds: &[::persistence::SheetKind],
+) -> Option<String> {
+    let mut lines = String::new();
+    for (i, name) in sheet_names.iter().enumerate() {
+        if !crate::sheets::is_user_sheet(sheet_visibility, i) {
+            continue;
+        }
+        let Some(layout) = sheet_kinds.get(i).and_then(|k| k.canvas_layout()) else {
+            continue;
+        };
+        lines.push_str(&format!(
+            "- index={} name=\"{}\" page={}x{}px snap={} grid={}px\n",
+            i,
+            name,
+            layout.page_width,
+            layout.page_height,
+            if layout.snap_to_grid { "on" } else { "off" },
+            layout.grid_size_px
+        ));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\n\n## Canvases\nCanvas sheets hold floating objects only (charts, slicers, shapes, floating grids, \
+         pivot tables) and have NO cells: cell writes to them are refused. Put data on a worksheet \
+         and reference it from the canvas's objects as Sheet!A1.\n{}",
+        lines.trim_end()
+    ))
+}
+
 /// Get an AI-optimized workbook summary.
 pub fn get_sheet_summary(
     handle: &AppHandle,
@@ -172,6 +210,10 @@ pub fn get_sheet_summary(
     let sheet_visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+    // `sheet_kinds` after the active index is COPIED out, never while it is
+    // being taken: a path that held `active_sheet` and then took `sheet_kinds`
+    // would otherwise deadlock against this one.
+    let sheet_kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
 
     let options = AiSerializeOptions {
         max_chars: max_chars as usize,
@@ -189,8 +231,15 @@ pub fn get_sheet_summary(
     // worksheets — the AI would read them as mystery sheets with no tab. They
     // surface through the floating-range inventory instead.
     let mut sheet_inputs: Vec<SheetInput> = Vec::new();
+    //
+    // CANVAS sheets are withheld the same way: they have no cells, so as a
+    // SheetInput they would read as "(empty sheet)" -- an invitation to write
+    // data onto a surface that refuses every cell write. They surface through
+    // the canvas inventory below instead.
     for (i, name) in sheet_names.iter().enumerate() {
-        if !crate::sheets::is_user_sheet(&sheet_visibility, i) {
+        if !crate::sheets::is_user_sheet(&sheet_visibility, i)
+            || crate::sheets::is_canvas_sheet(&sheet_kinds, i)
+        {
             continue;
         }
         if i == active_sheet {
@@ -216,6 +265,9 @@ pub fn get_sheet_summary(
     drop(protection_storage);
 
     let mut summary = serialize_for_ai(&sheet_inputs, &options);
+    // The canvases, captured while the sheet locks are held, appended below
+    // with the same char-budget guard as every other host section.
+    let canvas_section = format_canvas_inventory(&sheet_names, &sheet_visibility, &sheet_kinds);
     // Release the sheet-data locks before touching the (unrelated) charts lock.
     drop(sheet_inputs);
     drop(active_grid);
@@ -223,6 +275,14 @@ pub fn get_sheet_summary(
     drop(styles);
     drop(sheet_names);
     drop(sheet_visibility);
+    drop(sheet_kinds);
+
+    if let Some(section) = canvas_section {
+        let limit = max_chars as usize;
+        if limit == 0 || summary.len() + section.len() <= limit {
+            summary.push_str(&section);
+        }
+    }
 
     // Fold in a chart inventory so the AI knows what charts exist (mirrors how
     // list_charts renders them). Appended at the MCP host layer — the pure
@@ -326,6 +386,14 @@ pub fn apply_cell_formatting(
     )?;
 
     let state = handle.state::<AppState>();
+    // A canvas sheet has no cells to format. Decided BEFORE the effect and the
+    // grid locks: the active sheet is read on its own here so the refusal can
+    // come first (the read further down is the same value, taken under the
+    // locks this command then holds).
+    {
+        let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        crate::sheets::ensure_not_canvas_in_state(&state, active_sheet, "format cells")?;
+    }
     // Past the AI access-ceiling gate: this writes cell styles into the grid.
     let file_state = handle.state::<crate::persistence::FileState>();
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);

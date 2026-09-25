@@ -118,6 +118,7 @@ export {
   previousSheet,
   setScrollArea,
   getScrollArea,
+  setCanvasLayout,
 
   // Row/Column operations
   insertRows,
@@ -254,6 +255,10 @@ export type {
   SheetInfo,
   SheetVisibility,
   SheetsResult,
+  SheetKindName,
+  CanvasLayout,
+  CanvasLayoutPatch,
+  CanvasObjectRef,
   UndoState,
   UndoResult,
   FindResult,

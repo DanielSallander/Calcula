@@ -236,6 +236,39 @@ export const AddButton = styled.button<AddButtonProps>`
   `}
 `;
 
+/**
+ * The caret half of the split "+" control. The "+" itself keeps its one-click
+ * "add a worksheet" behaviour (and its title, which journeys select by); this
+ * narrow sibling opens the kind menu (Worksheet / Canvas).
+ */
+export const AddCaretButton = styled.button<AddButtonProps>`
+  width: 12px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background-color: transparent;
+  color: ${v('--text-secondary')};
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 1px;
+  transition: background-color 80ms ease-out;
+
+  &:hover:not(:disabled) {
+    background-color: ${v('--sheet-tab-bg')};
+    color: ${v('--text-primary')};
+  }
+
+  ${props => props.$disabled && `
+    opacity: 0.4;
+    cursor: not-allowed;
+  `}
+`;
+
 export const LoadingText = styled.span`
   color: ${v('--text-tertiary')};
   font-style: italic;

@@ -682,13 +682,12 @@ export function useSpreadsheetSelection({
         canvas.redraw();
       }
 
-      cellEvents.emit({
-        row: updatedCells[0].row,
-        col: updatedCells[0].col,
-        oldValue: undefined,
-        newValue: updatedCells[0].display,
-        formula: updatedCells[0].formula ?? null,
-      });
+      // EVERY recalculated cell, each with its sheet tag: the backend returns
+      // the complete set, including dependents on OTHER sheets (a chart on a
+      // canvas sheet reads its data from a worksheet, and only a tagged change
+      // tells it its source moved). Announcing the first cell alone, untagged,
+      // left every other dependent's readers stale.
+      cellEvents.emitBatch(updatedCells.map(cellToChange));
     } catch (error) {
       console.error("[useSpreadsheetSelection] Control-dependent recalc failed:", error);
     }
@@ -1677,7 +1676,10 @@ export function useSpreadsheetSelection({
   // which correctly reflects the current editing state.
   useGridKeyboard({
     containerRef: focusContainerRef,
-    enabled: isFocused,
+    // A CANVAS surface has no cells: arrows, typing, Delete, clipboard and
+    // select-all all act on the cell cursor, which a canvas does not have.
+    // Object keyboard handling on a canvas belongs to the object families.
+    enabled: isFocused && state.surface !== "canvas",
     onClearClipboard: clearClipboardState,
     hasClipboardContent: clipboardMode !== "none",
     onDelete: handleDeleteContents,

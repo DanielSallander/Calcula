@@ -926,6 +926,11 @@ pub(crate) fn apply_script_modified_grids_core(
         // deadlock here. Acquire the rest in canonical order
         // (grids -> style_registry -> sheet_protection).
         let styles = state.style_registry.read().map_err(|e| e.to_string())?;
+        // A CANVAS sheet refuses every cell write -- the same gate the
+        // interactive paths hit, so a script (or an MCP write_cell, which runs
+        // through here) cannot plant invisible data in a canvas's hidden grid.
+        // Read before sheet_protection: the crate-wide order for these two.
+        let sheet_kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
         let protection_storage = state.sheet_protection.read().map_err(|e| e.to_string())?;
         let empty_grid = Grid::new();
         for (idx, after_grid) in modified_grids.iter().enumerate() {
@@ -941,6 +946,7 @@ pub(crate) fn apply_script_modified_grids_core(
             // write a cell depends on what the sheet looks like now, not on what
             // the script wants it to become.
             crate::protection::check_sheet_protection_cells_in(
+                &sheet_kinds,
                 &protection_storage,
                 before,
                 &styles,

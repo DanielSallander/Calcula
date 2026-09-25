@@ -31,6 +31,13 @@
 // file in a native dialog, and the host (`read_media_file`, MAIN-window gated,
 // magic-byte validated, byte- and pixel-capped) reads, validates and stores it.
 // This seam is the PLACEMENT half of that story and nothing else.
+//
+// FREE POSITIONING (canvas sheets). A request may give an exact `x`/`y` in
+// sheet pixels instead of relying on the anchor cell's walked origin, and may
+// OMIT the anchor, in which case the PROVIDER allocates a free one. It has to
+// be the provider: creating a picture REPLACES whatever control an occupied
+// anchor holds, so a caller that picked a "free" cell itself would race every
+// other insert between its check and the write. See `PictureControlPlacement`.
 
 /** Where a picture sits: the anchor cell it is attached to. */
 export interface PictureControlAnchor {
@@ -39,10 +46,45 @@ export interface PictureControlAnchor {
   col: number;
 }
 
+/**
+ * WHERE a new picture goes. A request names an anchor cell, a position, or
+ * both — never neither:
+ *
+ *   * ANCHOR only (`row` + `col`): the historical address, unchanged. The
+ *     picture sits at the anchor cell's walked origin.
+ *   * POSITION only (`x` + `y`, sheet pixels, no scroll): the picture is placed
+ *     at exactly that point, and the PROVIDER allocates an anchor no control on
+ *     that sheet occupies — in the same serialised step as the write, so two
+ *     inserts in flight can never share one.
+ *   * BOTH: the named anchor is the identity, the position is where it paints.
+ *
+ * Always written unpinned (`pinToGrid: "false"`). `x` and `y` go together;
+ * one without the other is refused, as is a negative or non-finite coordinate.
+ */
+export type PictureControlPlacement =
+  | (PictureControlAnchor & {
+      /** Sheet-pixel left edge. Omitted = the anchor cell's walked origin. */
+      x?: number;
+      /** Sheet-pixel top edge. Omitted = the anchor cell's walked origin. */
+      y?: number;
+    })
+  | {
+      sheetIndex: number;
+      /** Omitted: the provider allocates a free anchor cell. */
+      row?: undefined;
+      /** Omitted: the provider allocates a free anchor cell. */
+      col?: undefined;
+      /** Sheet-pixel left edge the picture is placed at, exactly. */
+      x: number;
+      /** Sheet-pixel top edge the picture is placed at, exactly. */
+      y: number;
+    };
+
 /** What a caller may ASK for. Everything else — the pixel geometry defaults,
  *  the pin/embed flags, the floating-store registration — is the provider's
- *  business, exactly as it is for a picture the user inserts from the ribbon. */
-export interface CreatePictureControlRequest extends PictureControlAnchor {
+ *  business, exactly as it is for a picture the user inserts from the ribbon.
+ *  Where it goes is a `PictureControlPlacement`. */
+export type CreatePictureControlRequest = PictureControlPlacement & {
   /**
    * The document handle for the image: `media:` followed by 64 lowercase hex
    * characters, as returned by `read_media_file` / `importImageViaPicker`.
@@ -61,9 +103,10 @@ export interface CreatePictureControlRequest extends PictureControlAnchor {
   height?: number;
   /** A display name for the object list. Optional; the provider auto-names. */
   name?: string;
-}
+};
 
-/** A created picture, as the provider actually placed it. */
+/** A created picture, as the provider actually placed it. `row`/`col` are the
+ *  anchor it got — named by the caller, or allocated by the provider. */
 export interface PictureControlHandle extends PictureControlAnchor {
   /** The control's instance id — the object-script / api.listObjects key. */
   instanceId: string;
@@ -78,11 +121,13 @@ export interface PictureControlHandle extends PictureControlAnchor {
  * What the Controls extension provides.
  *
  * Anchor-addressed, because one cell holds at most one control — the same
- * identity rule the backend's control metadata enforces.
+ * identity rule the backend's control metadata enforces. A create that gives
+ * only a position gets an allocated anchor, returned on the handle.
  */
 export interface PictureControlProvider {
-  /** Create a real, visible picture at an anchor cell and return its handle.
-   *  Creating over an existing control at the same anchor REPLACES it. */
+  /** Create a real, visible picture — at an anchor cell, or at exactly
+   *  `x`/`y` — and return its handle. Creating over an existing control at a
+   *  NAMED anchor REPLACES it; an allocated anchor is always free. */
   createPicture(request: CreatePictureControlRequest): Promise<PictureControlHandle>;
   /** Delete the control at an anchor cell (no-op when there is none). Used to
    *  roll back a half-made picture when a later step fails. */

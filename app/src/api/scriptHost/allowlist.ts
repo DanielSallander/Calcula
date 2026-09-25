@@ -49,6 +49,7 @@ import {
   vSelect, vScrollTo, vClearRange, MAX_SELECT_AREAS,
   vRangeEdge, vUsedRange, vTabColor,
   vMoveSheet, vCopySheet, vAddSheet, vSplit,
+  vCanvasLayout, vCanvasLayoutQuery,
   vPageSetupPatch, vPrintArea, vPageBreak, vGroupSpan, vOutlineLevel,
   vAutoFilterRange, vAutoFilterColumn, vAutoFilterClear, vAutoFilterCriteria,
   MAX_AUTOFILTER_COLUMNS, MAX_AUTOFILTER_VALUES,
@@ -412,7 +413,7 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "api.splitPanes":        { tier: "unlocked", class: "mutate", validate: vSplit,
                              desc: "Split the window into scrollable panes at a row and/or column (pass nothing to remove the split)" },
   "api.addSheet":          { tier: "unlocked", class: "mutate", validate: vAddSheet,
-                             desc: "Add a new sheet to the workbook (at the end, or before/after a named sheet)" },
+                             desc: "Add a new sheet to the workbook — a worksheet or a canvas page (at the end, or before/after a named sheet)" },
   "api.deleteSheet":       { tier: "unlocked", class: "mutate", validate: vSheetRef, desc: "Delete a sheet and everything on it" },
   "api.renameSheet":       { tier: "unlocked", class: "mutate", validate: vSheetRename, desc: "Rename a sheet" },
   "api.setSheetVisibility":{ tier: "unlocked", class: "mutate", validate: vSheetVisibility, desc: "Show or hide a sheet" },
@@ -505,12 +506,26 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "api.clearRange":        { tier: "unlocked", class: "mutate", validate: vClearRange, limits: { maxCells: MAX_RANGE_CELLS },
                              desc: "Clear a block of cells on a sheet — everything, only their contents, or only their formatting (one undo step)" },
   "api.getSheets":         { tier: "unlocked", class: "read",   validate: vNone,
-                             desc: "List the sheets in this workbook, with each one's visibility and tab colour" },
+                             desc: "List the sheets in this workbook, with each one's kind (worksheet or canvas), visibility and tab colour" },
   // Tab colour is the one sheet attribute the CRUD rows above left unreachable.
   // Same tier and no capability as setSheetVisibility: pure document chrome,
   // nothing outside the workbook.
   "api.setTabColor":       { tier: "unlocked", class: "mutate", validate: vTabColor,
                              desc: "Change (or remove) the colour of a sheet's tab in the tab bar" },
+  // ---- unlocked: CANVAS LAYOUT (2026-09-25). A canvas sheet's page size, snap
+  //      grid and background, over the SAME set_canvas_layout command the
+  //      Canvas ribbon tab writes, so a script and a person are the same act.
+  //      Same tier and no capability as setTabColor / setPageSetup: document
+  //      layout that changes no value and reaches nothing outside the file.
+  //      ANY sheet (index or name), because laying out a canvas must not need
+  //      an activate-dance; a worksheet is refused by name. zOrder / locked
+  //      are READ here but not settable (they name other objects) — the
+  //      settable keys are vCanvasLayout's list, and a "canvas.*" setState
+  //      aspect is refused so this row stays the only door.
+  "api.getCanvasLayout":   { tier: "unlocked", class: "read",   validate: vCanvasLayoutQuery,
+                             desc: "Read a canvas sheet's page layout (page size, snap grid, background)" },
+  "api.setCanvasLayout":   { tier: "unlocked", class: "mutate", validate: vCanvasLayout,
+                             desc: "Change a canvas sheet's page layout (page size, snap grid, grid display, background) — only the settings named are touched" },
   // ---- unlocked: RANGE DISCOVERY (Wave 2). VBA's Range.End / CurrentRegion /
   //      UsedRange, answered by the SAME engine::navigation functions the
   //      grid's own Ctrl+Arrow and Ctrl+A use. All three are COORDINATES ONLY

@@ -15,12 +15,9 @@ import { emitAppEvent } from "@api/events";
 import { ControlContextMenu } from "../components/ControlContextMenu";
 import { buildControlObjectMenu } from "./controlContextMenu";
 import { floatingControlRegionAtClientPoint } from "./controlHitTest";
-import { getFloatingControl, getGroupForControl, getGroupMembers } from "./floatingStore";
-import {
-  isFloatingControlSelected,
-  selectFloatingControl,
-  selectFloatingControls,
-} from "../Button/floatingSelection";
+import { getFloatingControl } from "./floatingStore";
+import { isFloatingControlSelected } from "../Button/floatingSelection";
+import { selectControlWithGroup } from "./controlObjectSelection";
 
 export const CONTROL_CONTEXT_MENU_ID = "controls:contextMenu";
 
@@ -35,17 +32,13 @@ export const CONTROL_CONTEXT_MENU_ID = "controls:contextMenu";
  *
  * Selection happens HERE rather than by dispatching `floatingObject:selected`,
  * the event Core sends on a left mousedown: that handler RUNS a button's script
- * in run mode, and a right-click must never fire a macro.
+ * in run mode, and a right-click must never fire a macro. The group expansion
+ * is `selectControlWithGroup`, the one the keyboard selection provider uses.
  */
 function selectForMenu(controlId: string): void {
   if (isFloatingControlSelected(controlId)) return;
 
-  const groupId = getGroupForControl(controlId);
-  if (groupId) {
-    selectFloatingControls(getGroupMembers(groupId));
-  } else {
-    selectFloatingControl(controlId);
-  }
+  selectControlWithGroup(controlId);
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
 

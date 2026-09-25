@@ -6,7 +6,7 @@
 //! BUG-0018 freeze panes, plus merges/notes/hyperlinks).
 
 use persistence::{
-    SavedHyperlink, SavedMergedRegion, SavedNote, SavedPageSetup, Sheet,
+    SavedHyperlink, SavedMergedRegion, SavedNote, SavedPageSetup, Sheet, SheetKind,
     DEFAULT_SHEET_ZOOM_PERCENT, DEFAULT_SHEET_VIEW_MODE,
 };
 use serde::{Deserialize, Serialize};
@@ -76,6 +76,12 @@ pub struct SheetMetadata {
     /// Whether row/column headings are shown.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub display_headings: bool,
+    /// Worksheet (default, omitted) or canvas with its layout. Omitted for a
+    /// worksheet so ordinary sheets keep writing the same bytes -- which is
+    /// also what keeps the v9 link from being stamped on workbooks without a
+    /// canvas.
+    #[serde(default, skip_serializing_if = "SheetKind::is_worksheet")]
+    pub kind: SheetKind,
 }
 
 fn default_view_mode() -> String {
@@ -120,6 +126,7 @@ impl Default for SheetMetadata {
             show_formulas: false,
             view_mode: default_view_mode(),
             display_headings: true,
+            kind: SheetKind::Worksheet,
         }
     }
 }
@@ -171,6 +178,7 @@ impl SheetMetadata {
             show_formulas: sheet.show_formulas,
             view_mode: sheet.view_mode.clone(),
             display_headings: sheet.display_headings,
+            kind: sheet.kind.clone(),
         }
     }
 
@@ -196,6 +204,9 @@ impl SheetMetadata {
             && !self.show_formulas
             && is_default_view_mode(&self.view_mode)
             && self.display_headings
+            // A canvas is NEVER default: omitting metadata.json would reload
+            // it as a worksheet.
+            && self.kind.is_worksheet()
     }
 
     pub fn apply_to_sheet(&self, sheet: &mut Sheet) {
@@ -219,6 +230,15 @@ impl SheetMetadata {
         sheet.show_formulas = self.show_formulas;
         sheet.view_mode = self.view_mode.clone();
         sheet.display_headings = self.display_headings;
+        // Repaired on load, never refused: a file from a newer build may carry
+        // a page preset this one does not know (see CanvasLayout::sanitized).
+        sheet.kind = self.kind.clone().sanitized().0;
+    }
+
+    /// True when this sheet is a canvas, i.e. the archive must be stamped
+    /// `CANVAS_SHEET_MIN_FORMAT_VERSION`.
+    pub fn is_canvas(&self) -> bool {
+        self.kind.is_canvas()
     }
 
     /// True when this sheet carries a non-default DISPLAY FLAG, i.e. the archive must
@@ -244,6 +264,55 @@ mod tests {
             ..Default::default()
         };
         assert!(meta.is_default());
+    }
+
+    /// A worksheet writes NO `kind` key at all (so every existing workbook
+    /// keeps writing the same bytes), while a canvas forces metadata.json to
+    /// exist and round-trips its layout through the wire shape.
+    #[test]
+    fn test_kind_is_omitted_for_worksheets_and_carried_for_canvases() {
+        let worksheet = SheetMetadata::from_sheet(&Sheet::new("Sheet1".to_string()));
+        assert!(worksheet.is_default());
+        let json = serde_json::to_string(&worksheet).unwrap();
+        assert!(!json.contains("kind"), "a worksheet must not write a kind key: {json}");
+
+        let mut canvas_sheet = Sheet::new("Canvas1".to_string());
+        canvas_sheet.kind = SheetKind::new_canvas();
+        let canvas = SheetMetadata::from_sheet(&canvas_sheet);
+        assert!(!canvas.is_default(), "a canvas must never be omittable");
+        assert!(canvas.is_canvas());
+        let json = serde_json::to_string(&canvas).unwrap();
+        assert!(json.contains(r#""type":"canvas""#), "internally tagged kind expected: {json}");
+        assert!(json.contains("gridSizePx"), "camelCase layout keys expected: {json}");
+
+        let parsed: SheetMetadata = serde_json::from_str(&json).unwrap();
+        let mut restored = Sheet::new("Canvas1".to_string());
+        parsed.apply_to_sheet(&mut restored);
+        assert_eq!(restored.kind, canvas_sheet.kind);
+    }
+
+    /// A layout from OUTSIDE (a newer build's preset, a hand-edited zero grid)
+    /// is repaired on load, so it arrives valid and every later layout edit
+    /// still works.
+    #[test]
+    fn test_a_loaded_canvas_layout_is_repaired_not_installed_raw() {
+        let json = r#"{"kind":{"type":"canvas","gridSizePx":0,"pagePreset":"a4","pageWidth":1123,"pageHeight":794}}"#;
+        let parsed: SheetMetadata = serde_json::from_str(json).unwrap();
+        let mut restored = Sheet::new("Canvas1".to_string());
+        parsed.apply_to_sheet(&mut restored);
+        let layout = restored.kind.canvas_layout().expect("still a canvas");
+        layout.validate().unwrap();
+        assert_eq!((layout.page_width, layout.page_height), (1123, 794));
+        assert_eq!(layout.page_preset, persistence::CANVAS_CUSTOM_PAGE_PRESET);
+    }
+
+    /// Metadata written before canvases existed (no `kind` key) still reads,
+    /// as a worksheet.
+    #[test]
+    fn test_metadata_without_a_kind_reads_as_a_worksheet() {
+        let parsed: SheetMetadata = serde_json::from_str(r#"{"freezeRow":2}"#).unwrap();
+        assert!(parsed.kind.is_worksheet());
+        assert_eq!(parsed.freeze_row, Some(2));
     }
 
     #[test]

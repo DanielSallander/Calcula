@@ -378,12 +378,39 @@ interface ScriptFillOptions {
 }
 
 /** One sheet as api.getSheets() lists it (mirrors the host executor's shape —
- *  the visibility/tabColor that getSheetNames discards). */
+ *  the kind/visibility/tabColor that getSheetNames discards). */
 interface ScriptSheetInfo {
   index: number;
   name: string;
+  /** "worksheet" (cells) or "canvas" (a fixed page of floating objects). */
+  kind: "worksheet" | "canvas";
   visibility: "visible" | "hidden" | "veryHidden";
   tabColor: string | null;
+}
+
+/** A canvas sheet's page layout, as api.getCanvasLayout answers it. Sizes are
+ *  logical px. zOrder / locked are READ-ONLY to scripts. */
+interface ScriptCanvasLayoutShim {
+  snapToGrid: boolean;
+  gridSizePx: number;
+  showGrid: boolean;
+  pagePreset: string;
+  pageWidth: number;
+  pageHeight: number;
+  background: string;
+  zOrder?: Array<{ kind: string; id: string }>;
+  locked?: Array<{ kind: string; id: string }>;
+}
+
+/** What api.setCanvasLayout accepts: any subset of the settable keys. */
+interface ScriptCanvasLayoutPatchShim {
+  snapToGrid?: boolean;
+  gridSizePx?: number;
+  showGrid?: boolean;
+  pagePreset?: string;
+  pageWidth?: number;
+  pageHeight?: number;
+  background?: string;
 }
 
 /** How one column of an AutoFilter is currently filtered (read back). */
@@ -2746,9 +2773,11 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
 
     // ---- Sheet CRUD (B2; positioning Wave 4) ----
     /** Add a sheet (and make it active). `position` places it before/after an
-     *  existing sheet (VBA's Add Before:=/After:=); omitted = at the end. */
-    addSheet: (name?: string, position?: ScriptSheetPositionShim) =>
-      call(rt, "api.addSheet", [name, position]),
+     *  existing sheet (VBA's Add Before:=/After:=); omitted = at the end.
+     *  `kind` "canvas" adds a canvas page instead of a worksheet (fixed at
+     *  creation); omitted = a worksheet. */
+    addSheet: (name?: string, position?: ScriptSheetPositionShim, kind?: "worksheet" | "canvas") =>
+      call(rt, "api.addSheet", [name, position, kind]),
     deleteSheet: (sheet: SheetRef) => call(rt, "api.deleteSheet", [sheet]),
     renameSheet: (sheet: SheetRef, newName: string) => call(rt, "api.renameSheet", [sheet, newName]),
     setSheetVisibility: (sheet: SheetRef, visibility: "visible" | "hidden" | "veryHidden") =>
@@ -2955,12 +2984,21 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
       options?: ScriptClearOptions, sheet?: SheetRef,
     ) => call(rt, "api.clearRange", [startRow, startCol, endRow, endCol, options, sheet]) as
       Promise<{ count: number }>,
-    /** Every sheet with its visibility and tab colour (getSheetNames keeps
-     *  only the names). */
+    /** Every sheet with its kind, visibility and tab colour (getSheetNames
+     *  keeps only the names). */
     getSheets: () => call(rt, "api.getSheets", []) as Promise<ScriptSheetInfo[]>,
     /** Change (or remove, with null) a sheet's tab colour. */
     setTabColor: (sheet: SheetRef, color: string | null) =>
       call(rt, "api.setTabColor", [sheet, color]) as Promise<void>,
+    // ---- Canvas layout (2026-09-25): page size, snap grid, background ----
+    /** A canvas sheet's layout (omitted sheet = the active one); rejects a
+     *  worksheet by name. */
+    getCanvasLayout: (sheet?: SheetRef) =>
+      call(rt, "api.getCanvasLayout", [sheet]) as Promise<ScriptCanvasLayoutShim>,
+    /** Patch a canvas sheet's layout — only the keys named are touched — and
+     *  resolve to the resulting layout. */
+    setCanvasLayout: (patch: ScriptCanvasLayoutPatchShim, sheet?: SheetRef) =>
+      call(rt, "api.setCanvasLayout", [patch, sheet]) as Promise<ScriptCanvasLayoutShim>,
     // ---- Range discovery (Wave 2): Range.End / CurrentRegion / UsedRange ----
     /** Where Ctrl+Arrow would land from (row, col) — a pure read, nothing moves. */
     getRangeEdge: (row: number, col: number, direction: EdgeDirection, sheet?: SheetRef) =>

@@ -24,6 +24,7 @@ import {
   useGridContext,
   setActiveSheet,
   setSheetContext,
+  setSheetSurfaces,
   // Events
   emitAppEvent,
   AppEvents,
@@ -48,6 +49,8 @@ import type {
   SheetsResult,
   SheetContext,
   ResolvedSheetContextMenuItem,
+  SheetKindName,
+  SheetSurface,
 } from "../../api";
 import * as S from './SheetTabs.styles';
 import { alertAsync, promptAsync } from "@api/dialogs";
@@ -81,6 +84,21 @@ let coreMenuRegistered = false;
 const sheetAt = (sheets: SheetInfo[], index: number): SheetInfo | undefined =>
   sheets.find((s) => s.index === index);
 
+/**
+ * The Core surface a listed sheet paints as. Every sheet switch below passes
+ * it in the SAME dispatch that moves the sheet context, so the canvas surface
+ * can never tear against the sheet it belongs to (BUG-0052's one flush).
+ */
+const surfaceOf = (sheet: SheetInfo | undefined): SheetSurface =>
+  sheet?.kind === "canvas" ? "canvas" : "grid";
+
+/** Every listed sheet's surface, keyed by TRUE index (never list position). */
+const surfacesOf = (sheets: SheetInfo[]): Record<number, SheetSurface> => {
+  const out: Record<number, SheetSurface> = {};
+  for (const s of sheets) out[s.index] = surfaceOf(s);
+  return out;
+};
+
 export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement {
   const { state, dispatch } = useGridContext();
   const { editing, sheetContext } = state;
@@ -102,6 +120,14 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     () => onSheetTabDecorationsChanged(() => setDecorationTick((t) => t + 1)),
     [],
   );
+
+  // Keep Core's per-sheet SURFACE map in step with the list. The switch
+  // dispatches below carry the surface themselves; this map is what lets a
+  // dispatcher that does NOT hold the list (the Name Box, the script host,
+  // bookmarks) still land on the right surface.
+  useEffect(() => {
+    if (!isLoading) dispatch(setSheetSurfaces(surfacesOf(sheets)));
+  }, [sheets, isLoading, dispatch]);
 
   // Sync local activeIndex with Redux state when it changes from outside
   // This handles the case when commitEdit switches back to the source sheet
@@ -131,6 +157,10 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     index: number;
     name: string;
   } | null>(null);
+
+  // The "+" caret's kind menu (Worksheet / Canvas), anchored above the caret.
+  const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
+  const addMenuRef = useRef<HTMLDivElement>(null);
 
   // Drag-to-reorder state
   const [dragState, setDragState] = useState<{
@@ -204,7 +234,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         setActiveIndex(result.activeIndex);
         const newActive = sheetAt(result.sheets, result.activeIndex);
         if (newActive) {
-          dispatch(setActiveSheet(result.activeIndex, newActive.name));
+          dispatch(setActiveSheet(result.activeIndex, newActive.name, surfaceOf(newActive)));
         }
         onSheetChange?.(result.activeIndex, newActive?.name || "");
         window.dispatchEvent(new CustomEvent("sheet:normalSwitch", {
@@ -224,7 +254,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         setActiveIndex(switchResult.activeIndex);
         const newActive = sheetAt(switchResult.sheets, switchResult.activeIndex);
         if (newActive) {
-          dispatch(setActiveSheet(switchResult.activeIndex, newActive.name));
+          dispatch(setActiveSheet(switchResult.activeIndex, newActive.name, surfaceOf(newActive)));
         }
         onSheetChange?.(switchResult.activeIndex, newActive?.name || "");
         window.dispatchEvent(new CustomEvent("sheet:normalSwitch", {
@@ -252,8 +282,9 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       await handleDeleteSheetRef.current(index);
     };
 
-    const handleAdd = async () => {
-      await handleAddSheetRef.current();
+    const handleAdd = async (e: Event) => {
+      const kind = (e as CustomEvent<{ kind?: SheetKindName } | null>).detail?.kind;
+      await handleAddSheetRef.current(kind === "canvas" ? "canvas" : undefined);
     };
 
     const handleMove = async (e: Event) => {
@@ -360,6 +391,28 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [contextMenu]);
 
+  // Close the "+" kind menu on an outside click or Escape.
+  useEffect(() => {
+    if (!addMenu) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      // The caret is its own toggle: closing here on its press would let its
+      // click reopen the menu, so a second click on the caret could never close it.
+      if ((e.target as Element | null)?.closest?.("[data-add-sheet-menu-trigger]")) return;
+      if (addMenuRef.current && !addMenuRef.current.contains(e.target as Node)) {
+        setAddMenu(null);
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setAddMenu(null);
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleKey, true);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleKey, true);
+    };
+  }, [addMenu]);
+
   const loadSheets = useCallback(async () => {
     try {
       const result = await getSheets();
@@ -368,7 +421,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       // Sync sheet context with state
       const activeSheet = sheetAt(result.sheets, result.activeIndex);
       if (activeSheet) {
-        dispatch(setSheetContext(result.activeIndex, activeSheet.name));
+        dispatch(setSheetContext(result.activeIndex, activeSheet.name, surfaceOf(activeSheet)));
       }
       setError(null);
     } catch (err) {
@@ -427,6 +480,13 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
       // Ctrl+Click: Toggle sheet grouping (multi-select) when NOT in formula mode
       if (event?.ctrlKey && !isCurrentlyFormulaMode) {
+        // A CANVAS never joins a sheet group, from either end: a group
+        // replicates cell edits, clears and formats, and the backend refuses
+        // every one of those on a canvas -- for the WHOLE group, so the
+        // worksheets in it would silently stop receiving them.
+        if (sheetAt(sheets, index)?.kind === "canvas" || sheetAt(sheets, activeIndex)?.kind === "canvas") {
+          return;
+        }
         const newSelection = toggleSheetInGroup(index, activeIndex);
         const newSet = new Set(newSelection);
         setGroupedSheets(newSet);
@@ -443,6 +503,13 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       }
 
       if (index === activeIndex && !(event?.shiftKey && isCurrentlyFormulaMode)) return;
+
+      // A CANVAS has no cells, so it can be neither a formula's reference
+      // target nor an endpoint of a 3D reference. While a formula is being
+      // written, a click on a canvas tab does nothing.
+      if (isCurrentlyFormulaMode && sheetAt(sheets, index)?.kind === "canvas") {
+        return;
+      }
 
       console.log("[SheetTabs] Sheet click, index:", index, "isCurrentlyFormulaMode:", isCurrentlyFormulaMode, "shift:", event?.shiftKey);
 
@@ -497,7 +564,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           // This allows the grid to show the new sheet's cells
           // while keeping the formula editing state intact
           if (newActiveSheet) {
-            dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name));
+            dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name, surfaceOf(newActiveSheet)));
           }
 
           onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
@@ -556,7 +623,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         const newActiveSheet = sheetAt(result.sheets, result.activeIndex);
 
         if (newActiveSheet) {
-          dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name));
+          dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name, surfaceOf(newActiveSheet)));
         }
 
         onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
@@ -584,11 +651,12 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     [activeIndex, sheets, onSheetChange, isInFormulaMode, dispatch, dragState, groupedSheets]
   );
 
-  const handleAddSheet = useCallback(async () => {
+  const handleAddSheet = useCallback(async (kind?: SheetKindName) => {
     // Don't allow adding sheets while in formula mode
     if (isInFormulaMode) {
       return;
     }
+    setAddMenu(null);
 
     try {
       // Dispatch event BEFORE adding sheet to save current sheet's state
@@ -599,7 +667,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         }
       }));
 
-      const result = await addSheet();
+      const result = await addSheet(undefined, kind);
       // BUG-0052: same prime-before-commit as a tab click — a new sheet's
       // empty viewport still has to replace the old sheet's cells in the
       // same paint as the tab that claims it.
@@ -609,7 +677,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
       const newActiveSheet = sheetAt(result.sheets, result.activeIndex);
       if (newActiveSheet) {
-        dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name));
+        dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name, surfaceOf(newActiveSheet)));
       }
       onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
 
@@ -664,7 +732,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
         const newActiveSheet = sheetAt(result.sheets, result.activeIndex);
         if (newActiveSheet) {
-          dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name));
+          dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name, surfaceOf(newActiveSheet)));
         }
         onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
 
@@ -1155,18 +1223,58 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       {/* Hidden tabs indicator (right) */}
       {hiddenRight > 0 && <S.HiddenCount>({hiddenRight})</S.HiddenCount>}
 
-      {/* Add sheet button - outside TabsArea to avoid overflow clipping */}
+      {/* Add sheet: a SPLIT control. The "+" keeps its one-click worksheet add
+          (and its title, which journeys select by); the caret opens the kind
+          menu. Outside TabsArea to avoid overflow clipping. */}
       {!isLoading && (
         <S.AddButton
           type="button"
           tabIndex={-1}
           $disabled={isInFormulaMode}
-          onClick={handleAddSheet}
+          onClick={() => void handleAddSheet()}
           title={isInFormulaMode ? "Finish formula editing first" : "Add new sheet"}
           disabled={isInFormulaMode}
         >
           +
         </S.AddButton>
+      )}
+      {!isLoading && (
+        <S.AddCaretButton
+          type="button"
+          tabIndex={-1}
+          $disabled={isInFormulaMode}
+          disabled={isInFormulaMode}
+          aria-haspopup="menu"
+          aria-expanded={addMenu !== null}
+          data-add-sheet-menu-trigger
+          title={isInFormulaMode ? "Finish formula editing first" : "Add a worksheet or a canvas"}
+          onClick={(e) => {
+            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+            setAddMenu((open) => (open ? null : { x: rect.left, y: rect.top - 2 }));
+          }}
+        >
+          &#9662;
+        </S.AddCaretButton>
+      )}
+      {addMenu && (
+        <S.ContextMenu ref={addMenuRef} role="menu" $x={addMenu.x} $y={addMenu.y}>
+          <S.ContextMenuItem
+            type="button"
+            role="menuitem"
+            data-add-sheet-kind="worksheet"
+            onClick={() => void handleAddSheet("worksheet")}
+          >
+            Worksheet
+          </S.ContextMenuItem>
+          <S.ContextMenuItem
+            type="button"
+            role="menuitem"
+            data-add-sheet-kind="canvas"
+            onClick={() => void handleAddSheet("canvas")}
+          >
+            Canvas
+          </S.ContextMenuItem>
+        </S.ContextMenu>
       )}
 
       {/* Formula mode indicator */}

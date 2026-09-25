@@ -52,6 +52,7 @@ export {
   clearClipboard,
   setSheetContext,
   setActiveSheet,
+  setSheetSurfaces,
   setFreezeConfig,
   setHiddenRows,
   setHiddenCols,

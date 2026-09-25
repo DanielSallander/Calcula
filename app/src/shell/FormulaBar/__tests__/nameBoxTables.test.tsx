@@ -48,7 +48,11 @@ const gridState = {
   sheetContext: { activeSheetIndex: 0, activeSheetName: "Sheet1" },
 };
 
-const SHEETS = [{ name: "Sheet1" }, { name: "Sheet2" }];
+// Real SheetInfo rows carry their TRUE index; the Name Box resolves by it.
+const SHEETS = [
+  { name: "Sheet1", index: 0 },
+  { name: "Sheet2", index: 1 },
+];
 
 vi.mock("../../../api", () => ({
   useGridContext: () => ({ state: gridState, dispatch }),

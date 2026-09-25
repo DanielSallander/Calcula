@@ -6,7 +6,7 @@
 // UPDATED: Removed Find actions - Find state now lives in the FindReplaceDialog extension.
 // FIX: Skip scroll-to-visible for column/row selections to match Excel behavior.
 
-import type { GridState, Selection, ClipboardMode, GridConfig } from "../types";
+import type { GridState, Selection, ClipboardMode, GridConfig, SheetSurface } from "../types";
 import {
   createInitialGridState,
   DEFAULT_VIRTUAL_BOUNDS,
@@ -294,9 +294,59 @@ function isCellInViewport(
 /**
  * Grid state reducer - handles all state transitions.
  */
+/**
+ * Move the grid onto `surface`. Entering a CANVAS drops the cell selection:
+ * a canvas shows no cells, and a hidden selection would make every
+ * selection-driven command (formatting, paste, Ctrl+A, the Name Box) act on
+ * cells nobody can see. Leaving a canvas for a worksheet restores a cell cursor
+ * at A1 when nothing else has put one there yet.
+ */
+function applySurface(state: GridState, surface: SheetSurface): GridState {
+  if (surface === "canvas") {
+    return { ...state, surface, selection: null };
+  }
+  if (state.surface === "canvas" && state.selection === null) {
+    return {
+      ...state,
+      surface,
+      selection: { startRow: 0, startCol: 0, endRow: 0, endCol: 0, type: "cells" },
+    };
+  }
+  return state.surface === surface ? state : { ...state, surface };
+}
+
+/** The one place the sheet context moves: context, surface map and surface in
+ *  ONE reducer step (see `SheetSurface`). */
+function enterSheet(
+  state: GridState,
+  index: number,
+  name: string,
+  explicit: SheetSurface | undefined,
+): GridState {
+  const sheetSurfaces =
+    explicit !== undefined && state.sheetSurfaces[index] !== explicit
+      ? { ...state.sheetSurfaces, [index]: explicit }
+      : state.sheetSurfaces;
+  const surface = explicit ?? sheetSurfaces[index] ?? "grid";
+  return applySurface(
+    {
+      ...state,
+      sheetContext: { activeSheetIndex: index, activeSheetName: name },
+      sheetSurfaces,
+    },
+    surface,
+  );
+}
+
+/** Cell-selection actions are meaningless on a canvas surface: ignored there. */
+function selectionIsFrozenOnCanvas(state: GridState): boolean {
+  return state.surface === "canvas";
+}
+
 export function gridReducer(state: GridState, action: GridAction): GridState {
   switch (action.type) {
     case GRID_ACTIONS.SET_SELECTION: {
+      if (selectionIsFrozenOnCanvas(state)) return state;
       const { startRow, startCol, endRow, endCol, type, additionalRanges } = action.payload;
       const maxRow = state.config.totalRows - 1;
       const maxCol = state.config.totalCols - 1;
@@ -416,6 +466,7 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
     }
 
     case GRID_ACTIONS.ADD_TO_SELECTION: {
+      if (selectionIsFrozenOnCanvas(state)) return state;
       const { row, col, endRow: payloadEndRow, endCol: payloadEndCol } = action.payload;
       const maxRow = state.config.totalRows - 1;
       const maxCol = state.config.totalCols - 1;
@@ -457,6 +508,7 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
     }
 
     case GRID_ACTIONS.EXTEND_SELECTION: {
+      if (selectionIsFrozenOnCanvas(state)) return state;
       if (!state.selection) {
         return state;
       }
@@ -492,6 +544,7 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
     }
 
     case GRID_ACTIONS.MOVE_SELECTION: {
+      if (selectionIsFrozenOnCanvas(state)) return state;
       const { deltaRow, deltaCol, extend } = action.payload;
       const { config, dimensions } = state;
       const maxRow = config.totalRows - 1;
@@ -826,6 +879,9 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
     }
 
     case GRID_ACTIONS.SCROLL_TO_CELL: {
+      // A canvas has no cells to scroll to; its scroll extent is its page.
+      // (Fit-to-window uses SCROLL_TO_POSITION, which stays live.)
+      if (state.surface === "canvas") return state;
       const { row, col, center } = action.payload;
       const { config, viewportDimensions, dimensions } = state;
 
@@ -1105,21 +1161,25 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
     }
 
     case GRID_ACTIONS.SET_SHEET_CONTEXT: {
-      return {
-        ...state,
-        sheetContext: action.payload,
-      };
+      const { activeSheetIndex, activeSheetName, surface } = action.payload;
+      return enterSheet(state, activeSheetIndex, activeSheetName, surface);
     }
 
     case GRID_ACTIONS.SET_ACTIVE_SHEET: {
-      const { index, name } = action.payload;
-      return {
-        ...state,
-        sheetContext: {
-          activeSheetIndex: index,
-          activeSheetName: name,
-        },
-      };
+      const { index, name, surface } = action.payload;
+      return enterSheet(state, index, name, surface);
+    }
+
+    case GRID_ACTIONS.SET_SHEET_SURFACES: {
+      // The MAP only. The active surface moves with the active sheet, in the
+      // same step as the context (SET_SHEET_CONTEXT / SET_ACTIVE_SHEET carry
+      // it). Re-deriving it here read a sheet list that can be AHEAD of the
+      // context -- during a move, the list already says index 0 is the canvas
+      // while the context still points the old worksheet at 0 -- and briefly
+      // turned the active worksheet into a canvas.
+      const { surfaces, reset } = action.payload;
+      const sheetSurfaces = reset ? { ...surfaces } : { ...state.sheetSurfaces, ...surfaces };
+      return { ...state, sheetSurfaces };
     }
 
     case GRID_ACTIONS.SET_FREEZE_CONFIG: {

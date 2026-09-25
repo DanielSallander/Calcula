@@ -913,6 +913,24 @@ pub fn solver_revert(
     // Reverting writes cell values just as solving does, so it dirties too: the
     // document after a revert is not the document that was last saved unless the
     // save happened to fall exactly between solve and revert.
+    //
+    // The protection exemption above does NOT extend to the sheet KIND:
+    // solver_solve refuses a canvas (its variable cells go through the
+    // protection wrapper, which gates the kind), so a canvas is never a
+    // legitimate revert target. A stale index (sheets moved between solve and
+    // revert) or a scripted call aimed at one is refused, before the effect.
+    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(&state, sheet_index, "revert Solver values") {
+        return SolverResult {
+            found_solution: false,
+            objective_value: f64::NAN,
+            variable_values: Vec::new(),
+            iterations: 0,
+            status_message: e.clone(),
+            updated_cells: Vec::new(),
+            original_values: Vec::new(),
+            error: Some(e),
+        };
+    }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();

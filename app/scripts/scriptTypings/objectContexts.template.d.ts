@@ -2827,11 +2827,65 @@ declare interface ScriptSheetInfo {
   /** 0-based position in the tab bar. */
   index: number;
   name: string;
+  /** What the sheet IS, fixed when it was created: "worksheet" (a grid of
+   *  cells) or "canvas" (a fixed page that shows only floating objects —
+   *  charts, shapes, slicers — laid out with `api.getCanvasLayout` /
+   *  `api.setCanvasLayout`). */
+  kind: "worksheet" | "canvas";
   /** "visible" | "hidden" (unhidable from the UI) | "veryHidden" (only code
    *  can unhide it — Excel's xlSheetVeryHidden). */
   visibility: "visible" | "hidden" | "veryHidden";
   /** The tab's colour ("#RRGGBB"), or null when it has none. */
   tabColor: string | null;
+}
+
+/** An object on a canvas, by its family's kind and stable id. */
+declare interface ScriptCanvasObjectRef {
+  kind: string;
+  id: string;
+}
+
+/**
+ * A canvas sheet's page layout, as `api.getCanvasLayout()` answers it. Every
+ * size is in logical px — the same units as a floating object's position — so
+ * the snap grid and the objects it positions never disagree about scale.
+ */
+declare interface ScriptCanvasLayout {
+  /** Whether dragged objects snap to the grid. */
+  snapToGrid: boolean;
+  /** The snap-grid pitch, a whole number from 4 to 200 px. */
+  gridSizePx: number;
+  /** Whether the snap grid is drawn on the page. */
+  showGrid: boolean;
+  /** "16:9" (1280 x 720), "4:3" (960 x 720), "letter" (816 x 1056) or
+   *  "custom" (pageWidth / pageHeight are authoritative). */
+  pagePreset: string;
+  /** Page width, a whole number from 100 to 10000 px. */
+  pageWidth: number;
+  /** Page height, a whole number from 100 to 10000 px. */
+  pageHeight: number;
+  /** The page colour as "#rgb" / "#rrggbb", or "" for the theme default. */
+  background: string;
+  /** Paint order, bottom first (absent when empty). READ-ONLY to scripts. */
+  zOrder?: ScriptCanvasObjectRef[];
+  /** Objects locked against move/resize (absent when empty). READ-ONLY to
+   *  scripts. */
+  locked?: ScriptCanvasObjectRef[];
+}
+
+/**
+ * What `api.setCanvasLayout()` accepts: any subset of the settable layout
+ * keys. Any other key — including `zOrder` and `locked` — is refused by name,
+ * never silently dropped.
+ */
+declare interface ScriptCanvasLayoutPatch {
+  snapToGrid?: boolean;
+  gridSizePx?: number;
+  showGrid?: boolean;
+  pagePreset?: string;
+  pageWidth?: number;
+  pageHeight?: number;
+  background?: string;
 }
 
 /**
@@ -3713,8 +3767,12 @@ declare interface UnlockedAPI {
    * `position` places it before or after an existing sheet — VBA's
    * `Sheets.Add Before:=/After:=`; omitted = at the end:
    * `await api.addSheet("Summary", { before: 0 })`.
+   * `kind` "canvas" adds a canvas page (floating objects on a fixed page, laid
+   * out with `setCanvasLayout`) instead of a worksheet; omitted = a worksheet.
+   * The kind is fixed at creation:
+   * `await api.addSheet("Dashboard", undefined, "canvas")`.
    */
-  addSheet(name?: string, position?: ScriptSheetPosition): Promise<{ index: number; name: string }>;
+  addSheet(name?: string, position?: ScriptSheetPosition, kind?: "worksheet" | "canvas"): Promise<{ index: number; name: string }>;
   /** Delete a sheet (by 0-based index or name) and everything on it. Rejects
    *  on the last remaining sheet. */
   deleteSheet(sheet: SheetRef): Promise<void>;
@@ -3923,12 +3981,35 @@ declare interface UnlockedAPI {
    * ```
    */
   clearRange(startRow: number, startCol: number, endRow: number, endCol: number, options?: { applyTo?: "all" | "contents" | "formats" }, sheet?: SheetRef): Promise<{ count: number }>;
-  /** Every sheet with its visibility ("visible" | "hidden" | "veryHidden")
-   *  and tab colour — the metadata `getSheetNames()` throws away. */
+  /** Every sheet with its kind ("worksheet" | "canvas"), visibility
+   *  ("visible" | "hidden" | "veryHidden") and tab colour — the metadata
+   *  `getSheetNames()` throws away. */
   getSheets(): Promise<ScriptSheetInfo[]>;
   /** Change a sheet's tab colour (`"#RRGGBB"`); `null` removes it. The sheet
    *  may be a 0-based index or a name. */
   setTabColor(sheet: SheetRef, color: string | null): Promise<void>;
+
+  // -- Canvas layout (a canvas sheet's page, snap grid and background) --
+
+  /**
+   * Read a canvas sheet's page layout. `sheet` is a 0-based index or a name;
+   * omitted = the active sheet. Rejects a worksheet by name ("Sheet 'Data' is
+   * not a canvas sheet") — check `kind` from `getSheets()` first when unsure.
+   */
+  getCanvasLayout(sheet?: SheetRef): Promise<ScriptCanvasLayout>;
+  /**
+   * Change part of a canvas sheet's page layout — only the keys named are
+   * touched — and resolve to the resulting layout. The same act as the Canvas
+   * ribbon tab. An unknown key, `zOrder`/`locked` (read-only to scripts) or an
+   * out-of-range value is refused with the reason; a worksheet is refused by
+   * name. `sheet` is a 0-based index or a name; omitted = the active sheet.
+   *
+   * ```js
+   * await api.setCanvasLayout({ pagePreset: "4:3", gridSizePx: 20 }, "Dashboard");
+   * await api.setCanvasLayout({ pagePreset: "custom", pageWidth: 1600, pageHeight: 900 });
+   * ```
+   */
+  setCanvasLayout(patch: ScriptCanvasLayoutPatch, sheet?: SheetRef): Promise<ScriptCanvasLayout>;
 
   // -- Range discovery (VBA's Range.End / CurrentRegion / UsedRange) --
   // All three are answered by the SAME engine function the grid's own

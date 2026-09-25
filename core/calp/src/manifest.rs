@@ -381,6 +381,11 @@ pub struct PublishedSheetMetadata {
     pub view_mode: String,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub display_headings: bool,
+    /// Worksheet (default, omitted) or canvas with its page/snap/stacking
+    /// layout. A canvas published without this would arrive as an editable,
+    /// empty worksheet with its objects floating over cells.
+    #[serde(default, skip_serializing_if = "persistence::SheetKind::is_worksheet")]
+    pub kind: persistence::SheetKind,
 }
 
 fn default_view_mode() -> String {
@@ -433,6 +438,7 @@ impl Default for PublishedSheetMetadata {
             show_formulas: false,
             view_mode: default_view_mode(),
             display_headings: true,
+            kind: persistence::SheetKind::Worksheet,
         }
     }
 }
@@ -461,6 +467,7 @@ impl PublishedSheetMetadata {
             show_formulas: sheet.show_formulas,
             view_mode: sheet.view_mode.clone(),
             display_headings: sheet.display_headings,
+            kind: sheet.kind.clone(),
         }
     }
 

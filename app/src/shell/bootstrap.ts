@@ -36,6 +36,7 @@ import { onAppEvent, emitAppEvent, AppEvents, type MutationDomain, type Mutation
 import { WRITEBACK_INDEX_CHANGED_EVENT } from "../api/collaboration";
 import { bridgeDirtyStateAnnouncement } from "./dirtyStateBridge";
 import { bridgeSheetDisplayFlagsAnnouncement } from "./sheetDisplayFlagsBridge";
+import { bridgeCanvasLayoutAnnouncement } from "./canvasLayoutBridge";
 import { bridgeUndoStateAnnouncement } from "./undoStateBridge";
 
 import {
@@ -614,6 +615,11 @@ export function bootstrapShell(): void {
   // other than the View menu (a script, an MCP tool, a package pull, an E2E
   // spec). See shell/sheetDisplayFlagsBridge.ts for the defect this closes.
   void bridgeSheetDisplayFlagsAnnouncement();
+
+  // 2h: bridge the backend's CANVAS LAYOUT announcement, so a canvas sheet's
+  // page and snap grid follow the authority when a script, an MCP tool or a
+  // package refresh moves it. See shell/canvasLayoutBridge.ts.
+  void bridgeCanvasLayoutAnnouncement();
 
   // Bridge the backend's undo/redo AVAILABILITY announcement, so the ribbon's
   // Undo/Redo buttons and the Edit menu items reflect a stack the user really

@@ -587,6 +587,11 @@ pub fn pull_with_options(
             show_formulas: metadata.show_formulas,
             view_mode: metadata.view_mode.clone(),
             display_headings: metadata.display_headings,
+            // A published canvas arrives as a canvas, layout and all. The
+            // layout is REPAIRED on the way in (a package from a newer build
+            // may carry a preset this one does not know): installed unchecked,
+            // every later layout edit would fail on a field nobody touched.
+            kind: metadata.kind.clone().sanitized().0,
         };
 
         pulled_sheets.push(PulledSheet {
@@ -1995,6 +2000,137 @@ mod tests {
             !publish::carries_wave_content(&req),
             "an array on a sheet this package does not publish must not stamp"
         );
+    }
+
+    /// A published CANVAS sheet declares a minimum app version (an older app
+    /// would materialize it as an editable worksheet), only when the canvas is
+    /// actually published -- and its kind and layout survive the pull.
+    #[test]
+    fn a_published_canvas_stamps_a_minimum_and_arrives_as_a_canvas() {
+        let plain_wb = make_test_workbook();
+        let mut req = PublishRequest {
+            model_writebacks: None,
+            workbook: &plain_wb,
+            package_name: "canvas-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
+            sheet_indices: vec![0, 1],
+            now: "2026-09-25T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        assert!(
+            !publish::carries_wave_content(&req),
+            "precondition: this workbook carries no wave content yet"
+        );
+
+        let mut canvas_wb = make_test_workbook();
+        let mut layout = persistence::CanvasLayout::default();
+        layout.grid_size_px = 32;
+        canvas_wb.sheets[0].kind = persistence::SheetKind::Canvas(layout.clone());
+        req.workbook = &canvas_wb;
+        assert!(
+            publish::carries_wave_content(&req),
+            "a published canvas must declare a minimum app version"
+        );
+        req.sheet_indices = vec![1];
+        assert!(
+            !publish::carries_wave_content(&req),
+            "a canvas this package does not publish must not stamp"
+        );
+
+        // The kind rides the signed per-sheet metadata and comes back intact.
+        let meta = crate::manifest::PublishedSheetMetadata::from_sheet(&canvas_wb.sheets[0]);
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: crate::manifest::PublishedSheetMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, persistence::SheetKind::Canvas(layout.clone()));
+        let plain_json =
+            serde_json::to_string(&crate::manifest::PublishedSheetMetadata::from_sheet(&canvas_wb.sheets[1]))
+                .unwrap();
+        assert!(!plain_json.contains("kind"), "a worksheet must not write a kind key: {plain_json}");
+
+        // And through a REAL publish + pull: the Sheet the subscriber
+        // materializes is built by pull.rs, so a serde round trip alone could
+        // not see that builder drop the kind.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        req.sheet_indices = vec![0, 1];
+        publish::publish(&reg, &req, prof.path()).unwrap();
+        let pull_req = PullRequest {
+            package_name: "canvas-pkg".to_string(),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
+            now: "2026-09-25T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        assert_eq!(result.sheets.len(), 2);
+        assert_eq!(
+            result.sheets[0].sheet.kind,
+            persistence::SheetKind::Canvas(layout),
+            "the pulled canvas must arrive as a canvas with its layout"
+        );
+        assert!(result.sheets[1].sheet.kind.is_worksheet(), "the worksheet beside it stays a worksheet");
+    }
+
+    /// A package whose canvas layout this build cannot express (a newer
+    /// build's page preset, a zero grid) is REPAIRED on pull, not installed
+    /// raw: installed raw, every later layout edit would fail on a field the
+    /// subscriber never touched.
+    #[test]
+    fn a_pulled_canvas_with_an_unknown_layout_is_repaired() {
+        let mut wb = make_test_workbook();
+        let mut layout = persistence::CanvasLayout::default();
+        layout.page_preset = "a4".to_string();
+        layout.page_width = 1123;
+        layout.page_height = 794;
+        layout.grid_size_px = 0;
+        wb.sheets[0].kind = persistence::SheetKind::Canvas(layout);
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let req = PublishRequest {
+            model_writebacks: None,
+            workbook: &wb,
+            package_name: "canvas-a4".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
+            sheet_indices: vec![0],
+            now: "2026-09-25T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        publish::publish(&reg, &req, prof.path()).unwrap();
+        let pull_req = PullRequest {
+            package_name: "canvas-a4".to_string(),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
+            now: "2026-09-25T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let pulled = result.sheets[0].sheet.kind.canvas_layout().expect("still a canvas").clone();
+        pulled.validate().unwrap();
+        assert_eq!((pulled.page_width, pulled.page_height), (1123, 794));
+        assert_eq!(pulled.page_preset, persistence::CANVAS_CUSTOM_PAGE_PRESET);
+        assert_eq!(pulled.grid_size_px, persistence::CANVAS_MIN_GRID_SIZE_PX);
     }
 
     #[test]

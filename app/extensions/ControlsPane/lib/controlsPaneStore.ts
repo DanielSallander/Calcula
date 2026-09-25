@@ -39,12 +39,18 @@ function triggerControlValueRecalc(names?: string[]): void {
     .then((cells) => {
       if (cells.length === 0) return;
       for (const cell of cells) {
-        // Non-active sheets are recalculated backend-side and refresh on
-        // sheet switch; only emit for active-sheet cells.
-        if (cell.sheetIndex != null) continue;
+        // Every recalculated cell is announced, off-sheet ones TAGGED with
+        // their sheetIndex (absent = the active sheet). They used to be
+        // dropped here, so a chart on a canvas sheet whose source range held a
+        // GET.CONTROLVALUE formula on another sheet never redrew when the
+        // control moved. Safe for the grid: Core's listener only mirrors
+        // `sheetIndex === undefined` changes into the formula bar (hence the
+        // null -> undefined normalisation: an active-sheet cell must stay
+        // untagged).
         cellEvents.emit({
           row: cell.row,
           col: cell.col,
+          sheetIndex: cell.sheetIndex ?? undefined,
           newValue: cell.display,
           formula: cell.formula ?? null,
         });

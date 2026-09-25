@@ -2498,6 +2498,32 @@ fn materialize_pulled_sheet_state(
         }
     }
     {
+        // The DISPLAY FLAGS were carried in metadata.json and rebuilt onto the
+        // pulled Sheet by core pull, but never written here -- so a published
+        // formulas-visible review sheet or zeros-hidden summary arrived in the
+        // default display mode with no error anywhere.
+        let mut v = state.sheet_display_flags.write(effect).map_err(|e| e.to_string())?;
+        for (idx, p) in &targets {
+            ensure_slot(&mut v, *idx, crate::api_types::SheetDisplayFlags::default());
+            v[*idx] = crate::api_types::SheetDisplayFlags {
+                display_zeros: p.display_zeros,
+                show_formulas: p.show_formulas,
+                view_mode: p.view_mode.clone(),
+                display_headings: p.display_headings,
+            };
+        }
+    }
+    {
+        // The sheet KIND: a published canvas must arrive as a canvas, with its
+        // page / snap grid / stacking. Written with reset semantics like every
+        // store here, so a refresh follows the publisher.
+        let mut v = state.sheet_kinds.write(effect).map_err(|e| e.to_string())?;
+        for (idx, p) in &targets {
+            ensure_slot(&mut v, *idx, persistence::SheetKind::Worksheet);
+            v[*idx] = p.kind.clone();
+        }
+    }
+    {
         // User-hidden rows/cols ride along with the rest of the sheet's
         // presentation state. The application carries them as their own authority
         // (PublishedSheetMetadata.user_hidden_*), so a subscriber can unhide by
@@ -6578,6 +6604,30 @@ pub fn calp_import_overrides(
             let skipped = before - patch.overrides.len();
             if skipped > 0 {
                 crate::log_info!("CALP", "Skipped {} overrides targeting writeback cells", skipped);
+            }
+        }
+    }
+
+    // Filter out overrides targeting a CANVAS sheet. A canvas holds no cells,
+    // so no user edit can have captured one there -- an imported patch is the
+    // only way in, and the next refresh would overlay its value into the
+    // canvas's hidden grid. Each store is read ALONE and released.
+    {
+        let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+        let kinds: Vec<::persistence::SheetKind> =
+            state.sheet_kinds.read().map_err(|e| e.to_string())?.clone();
+        let canvas_ids: std::collections::HashSet<SheetId> = sheet_ids
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| crate::sheets::is_canvas_sheet(&kinds, *i))
+            .map(|(_, id)| *id)
+            .collect();
+        if !canvas_ids.is_empty() {
+            let before = patch.overrides.len();
+            patch.overrides.retain(|ovr| !canvas_ids.contains(&ovr.sheet_id));
+            let skipped = before - patch.overrides.len();
+            if skipped > 0 {
+                crate::log_warn!("CALP", "Skipped {} overrides targeting canvas sheets (they hold no cells)", skipped);
             }
         }
     }
@@ -16601,6 +16651,13 @@ pub(crate) fn apply_refreshed_pivots(
             Ok(sn) => sn.clone(),
             Err(_) => return,
         };
+        // Each sheet's KIND, snapshotted alone (released before `grids`): a
+        // destination that resolves to a CANVAS is skipped exactly like one that
+        // does not resolve at all.
+        let sheet_kinds: Vec<::persistence::SheetKind> = match state.sheet_kinds.read() {
+            Ok(k) => k.clone(),
+            Err(_) => return,
+        };
         let grids = match state.grids.read() {
             Ok(g) => g,
             Err(_) => return,
@@ -16651,6 +16708,17 @@ pub(crate) fn apply_refreshed_pivots(
                 );
                 continue;
             };
+            // A GRID pivot never materializes into a canvas's hidden grid.
+            if crate::sheets::is_canvas_sheet(&sheet_kinds, dest_sheet_idx) {
+                crate::log_warn!(
+                    "CALP",
+                    "refresh: pivot {} names destination sheet '{}', which is a canvas sheet \
+                     here — a grid pivot is never written into a canvas, skipped",
+                    pivot_id,
+                    dest_name
+                );
+                continue;
+            }
 
             // Source: by name (see the header). No name, or a name this
             // workbook does not have, means an empty cache — the pivot renders
@@ -16701,9 +16769,16 @@ pub(crate) fn apply_refreshed_pivots(
     }
 
     // ---- PHASE B: write, holding nothing ------------------------------------
+    //
+    // A refused write (the destination became a canvas after PHASE A read the
+    // kinds) wrote nothing, so the region is NOT moved onto it. The definition
+    // is still adopted below: the pivot exists, has no output, and a later
+    // refresh or a delete settles it.
     for p in &planned {
-        update_pivot_in_grid(state, effect, p.def.id, p.dest_sheet_idx, p.def.destination, &p.view);
-        update_pivot_region(state, p.def.id, p.dest_sheet_idx, p.def.destination, &p.view);
+        match update_pivot_in_grid(state, effect, p.def.id, p.dest_sheet_idx, p.def.destination, &p.view) {
+            Ok(()) => update_pivot_region(state, p.def.id, p.dest_sheet_idx, p.def.destination, &p.view),
+            Err(refusal) => crate::log_warn!("CALP", "refresh: pivot {} not written: {}", p.def.id, refusal),
+        }
     }
 
     // Withdrawn pivots: clear the cells they own before forgetting them, or the
@@ -16824,7 +16899,7 @@ pub(crate) fn apply_refreshed_pivots(
 
 /// Restore pivot definitions from a pulled .calp application: deserialize, rebuild
 /// cache from source grid data, calculate the view, and write output cells.
-fn restore_pulled_pivots(
+pub(crate) fn restore_pulled_pivots(
     effect: &crate::document_effect::DocumentEffect,
     pivot_defs: &[persistence::SavedPivotDefinition],
     bi_pivot_metadata: &[serde_json::Value],
@@ -16855,6 +16930,16 @@ fn restore_pulled_pivots(
     // skip ran to EOF and took 5,363 lines of production code with it. The
     // census passed by not looking. Fixing the stripper made it fire here, and
     // here only.
+    //
+    // THE SHEET KINDS, snapshotted ALONE and released before `grids` is taken:
+    // a pulled definition whose destination resolves to a CANVAS is skipped
+    // below exactly like one whose destination does not resolve. This writes
+    // straight through `write_pivot_to_grid`, so the rule `update_pivot_in_grid`
+    // enforces for every other grid-pivot write has to be applied here too.
+    let sheet_kinds: Vec<::persistence::SheetKind> = match state.sheet_kinds.read() {
+        Ok(k) => k.clone(),
+        Err(_) => return,
+    };
     let mut grids = match state.grids.write(effect) {
         Ok(g) => g,
         Err(_) => return,
@@ -16961,6 +17046,18 @@ fn restore_pulled_pivots(
             );
             continue;
         };
+        // A GRID pivot never materializes into a canvas's hidden grid: no cells,
+        // no region, no definition -- the same skip as a name that misses.
+        if crate::sheets::is_canvas_sheet(&sheet_kinds, dest_sheet_idx) {
+            crate::log_warn!(
+                "CALP",
+                "pulled pivot {} names destination sheet '{}', which is a canvas sheet — \
+                 a grid pivot is never written into a canvas, skipped",
+                pivot_id,
+                dest_sheet_name
+            );
+            continue;
+        }
 
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
             let _merged = write_pivot_to_grid(

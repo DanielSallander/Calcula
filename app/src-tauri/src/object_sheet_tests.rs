@@ -70,6 +70,7 @@ fn append_object_sheet(state: &AppState, name: &str) -> (usize, identity::SheetI
         &effect,
         name.to_string(),
         OBJECT_SHEET_VISIBILITY,
+        ::persistence::SheetKind::Worksheet,
         &mut sheet_names,
         &mut grids,
         &mut freeze_configs,
@@ -96,12 +97,14 @@ fn listed(state: &AppState) -> Vec<(usize, String)> {
     let tab_colors = state.tab_colors.read().unwrap();
     let sheet_visibility = state.sheet_visibility.read().unwrap();
     let sheet_ids = state.sheet_ids.read().unwrap();
+    let sheet_kinds = state.sheet_kinds.read().unwrap();
     crate::sheets::build_sheet_list(
         &sheet_names,
         &freeze_configs,
         &tab_colors,
         &sheet_visibility,
         &sheet_ids,
+        &sheet_kinds,
     )
         .into_iter()
         .map(|s| (s.index, s.name))
@@ -202,7 +205,7 @@ fn adding_a_sheet_rotates_in_front_of_the_object_tail_and_rekeys_its_edges() {
     }
 
     let result =
-        crate::sheets::add_sheet_inner(&state, &file, None).expect("add a user sheet");
+        crate::sheets::add_sheet_inner(&state, &file, None, ::persistence::SheetKind::Worksheet).expect("add a user sheet");
 
     // The new user sheet took the object sheet's old position; the object
     // sheet moved to the tail. User sheets are a contiguous prefix again.
@@ -268,7 +271,7 @@ fn adding_a_sheet_with_no_object_tail_is_a_plain_append() {
     let state = workbook_with_sheets(2);
     let file = FileState::default();
 
-    let result = crate::sheets::add_sheet_inner(&state, &file, None).expect("add");
+    let result = crate::sheets::add_sheet_inner(&state, &file, None, ::persistence::SheetKind::Worksheet).expect("add");
     assert_eq!(*state.active_sheet.read().unwrap(), 2);
     assert_eq!(result.sheets.len(), 3);
 }
@@ -283,10 +286,10 @@ fn adding_a_sheet_with_a_floating_ranges_name_is_refused() {
     let file = FileState::default();
     append_object_sheet(&state, "Float1");
 
-    crate::sheets::add_sheet_inner(&state, &file, Some("Float1".to_string()))
+    crate::sheets::add_sheet_inner(&state, &file, Some("Float1".to_string()), ::persistence::SheetKind::Worksheet)
         .expect_err("the sheet namespace is shared with floating ranges");
     // Case-insensitively, like every other sheet-name collision.
-    crate::sheets::add_sheet_inner(&state, &file, Some("FLOAT1".to_string()))
+    crate::sheets::add_sheet_inner(&state, &file, Some("FLOAT1".to_string()), ::persistence::SheetKind::Worksheet)
         .expect_err("sheet-name uniqueness ignores case");
 }
 

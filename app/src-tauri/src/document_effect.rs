@@ -1120,6 +1120,7 @@ mod tests {
             ("all_user_hidden_cols", "Sheet::user_hidden_cols, background sheets"),
             ("sheet_zooms", "Sheet::zoom (.cala v6)"),
             ("split_configs", "Sheet::split_row / split_col"),
+            ("sheet_kinds", "Sheet::kind (.cala v9) -- worksheet or canvas with its layout"),
             ("auto_filters", "user_files/autofilters.json"),
             ("sheet_protection", "workbook.sheet_protections"),
             ("workbook_protection", "workbook.workbook_protection"),
@@ -1237,7 +1238,7 @@ mod tests {
         out
     }
 
-    /// The published 105 / 63 / 40 / 2 split, pinned.
+    /// The published 107 / 65 / 40 / 2 split, pinned.
     ///
     /// WHY A TEST AND NOT A DOC LINE. This count has been published wrong four
     /// times (36, 51, 59, and a 2026-08-17 miscount reading 39 bare + 3 unlocked
@@ -1267,8 +1268,8 @@ mod tests {
             .map(|(n, _)| n)
             .collect();
 
-        assert_eq!(decls.len(), 106, "AppState field count changed");
-        assert_eq!(persisted.len(), 64, "Persisted<T> count changed");
+        assert_eq!(decls.len(), 107, "AppState field count changed");
+        assert_eq!(persisted.len(), 65, "Persisted<T> count changed");
         assert_eq!(bare.len(), 40, "bare Mutex/RwLock count changed");
         assert_eq!(
             neither,

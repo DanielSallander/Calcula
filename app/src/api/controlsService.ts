@@ -48,6 +48,17 @@
 // ever true because no create path existed. Enumeration and creation belong to
 // one contract, so the registry keeps the component STORES and this file owns
 // the whole control surface.
+//
+// FREE POSITIONING (canvas sheets). A canvas sheet is a report page with no
+// cells, so "the top-left of the anchor cell" is not a place anyone can aim at:
+// its objects go where a snapped rectangle says. A request may therefore name
+// an exact `x`/`y` in sheet pixels instead of — or as well as — an anchor
+// cell, and may OMIT the anchor altogether, in which case the provider
+// allocates one. The anchor never stops existing: it is the control's
+// IDENTITY (the backend keys control metadata by cell, and the instanceId an
+// object script binds to is derived from it), so it has to be unique on the
+// sheet — which is exactly why the caller does not pick it. See
+// `ControlPlacementRequest`.
 
 // ============================================================================
 // Identity
@@ -104,11 +115,54 @@ export interface ShapeCatalogEntry {
 // Create
 // ============================================================================
 
+/**
+ * WHERE a new control goes. A request names an anchor cell, a position, or
+ * both — never neither:
+ *
+ *   * ANCHOR only (`row` + `col`): the historical address, unchanged. The
+ *     control sits at the anchor cell's top-left, found by WALKING the actual
+ *     column widths and row heights.
+ *   * POSITION only (`x` + `y`, sheet pixels, no scroll): the control is placed
+ *     at exactly that point and the PROVIDER allocates the anchor — a cell no
+ *     control on that sheet occupies. The allocation and the metadata write
+ *     happen in one serialised step inside the provider, so two inserts in
+ *     flight can never be handed the same anchor. Callers must not pick a
+ *     "free" cell themselves: their check and the write would be two steps
+ *     with a race between them, and button/picture creation REPLACES whatever
+ *     an occupied anchor holds.
+ *   * BOTH: the named anchor is the identity, the position is where it paints.
+ *
+ * A positioned control is written unpinned (`pinToGrid: "false"`), like every
+ * floating control: it keeps its pixels when rows or columns change.
+ * `x` and `y` go together; one without the other is refused, as is a negative
+ * or non-finite coordinate.
+ */
+export type ControlPlacementRequest =
+  | (ControlAnchor & {
+      /** Sheet-pixel left edge. Omitted = the anchor cell's walked origin. */
+      x?: number;
+      /** Sheet-pixel top edge. Omitted = the anchor cell's walked origin. */
+      y?: number;
+    })
+  | {
+      sheetIndex: number;
+      /** Omitted: the provider allocates a free anchor cell. */
+      row?: undefined;
+      /** Omitted: the provider allocates a free anchor cell. */
+      col?: undefined;
+      /** Sheet-pixel left edge the control is placed at, exactly. */
+      x: number;
+      /** Sheet-pixel top edge the control is placed at, exactly. */
+      y: number;
+    };
+
 /** What a caller may ASK for when placing a shape. Everything else — the fill
  *  and stroke defaults, the font, the alignment, the pin/opacity/rotation
  *  flags, the pixel walk, the floating-store registration — is the provider's
- *  business, exactly as it is for a shape the user inserts from the ribbon. */
-export interface CreateShapeControlRequest extends ControlAnchor {
+ *  business, exactly as it is for a shape the user inserts from the ribbon.
+ *  Where it goes is a `ControlPlacementRequest`: an anchor cell, an exact
+ *  position, or both. */
+export type CreateShapeControlRequest = ControlPlacementRequest & {
   /** A catalog id from `listShapeCatalog()` (e.g. "rectangle", "roundedRectangle",
    *  "rightArrow"). An id the catalog does not hold is a programming error and
    *  providers must THROW, naming the ids they accept — the old behaviour was to
@@ -127,9 +181,11 @@ export interface CreateShapeControlRequest extends ControlAnchor {
   /** A display name for the object list. Optional; omitted leaves the property
    *  unwritten rather than storing "". */
   name?: string;
-}
+};
 
-/** A created shape, as the provider actually placed it. */
+/** A created shape, as the provider actually placed it. `row`/`col` are the
+ *  anchor it got — the one the caller named, or the one the provider
+ *  allocated when the request gave only a position. */
 export interface ShapeControlHandle extends ControlAnchor {
   /**
    * The control's instance id — the object-script binding key and the id
@@ -157,7 +213,9 @@ export interface ShapeControlHandle extends ControlAnchor {
  * What the Controls extension provides.
  *
  * Creation is ANCHOR-addressed (one cell holds at most one control — the
- * identity rule the backend's control storage enforces), deletion is
+ * identity rule the backend's control storage enforces), with the anchor
+ * either named by the caller or allocated by the provider when the request
+ * gives only a position (`ControlPlacementRequest`). Deletion is
  * INSTANCE-addressed, because that is the id every other surface already
  * carries: `api.listObjects("shape")` reports it, an object script binds to it,
  * and the click path emits it.
@@ -167,9 +225,11 @@ export interface ControlsProvider {
   listShapeCatalog(): ShapeCatalogEntry[];
 
   /**
-   * Create a real, visible shape at an anchor cell and return its handle.
+   * Create a real, visible shape and return its handle: at the anchor cell's
+   * origin, or at exactly `x`/`y` when the request gives a position (with an
+   * allocated anchor when it names none — see `ControlPlacementRequest`).
    *
-   * REFUSES rather than overwrites when the anchor already holds a control.
+   * REFUSES rather than overwrites when a NAMED anchor already holds a control.
    * `set_control_metadata` is a plain map insert, so creating over an occupied
    * cell would wipe the existing control while its object script — bound to the
    * anchor-derived instanceId — stayed behind for the new control to inherit.

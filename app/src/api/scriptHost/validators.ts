@@ -58,6 +58,8 @@ import {
   SHAPE_HIT_REGION_ID_RE,
   SHAPE_HIT_REGION_KEY_SET,
 } from "./shapeHitRegionSpec";
+import { checkCanvasLayoutPatch } from "../canvasSheet";
+import type { CanvasLayoutPatch } from "../lib";
 
 export type Validator = (args: unknown[]) => true | string;
 
@@ -216,6 +218,17 @@ export const vSetState: Validator = ([aspect, aspectArgs]) => {
       "floating ranges are not addressed through setState aspects; use " +
       "api.createFloatingRange / api.floatingRangeSetCells / " +
       "api.floatingRangeResize / api.deleteFloatingRange"
+    );
+  }
+  // A canvas LAYOUT (page size, snap grid, background, stacking) belongs to the
+  // SHEET, not to any object a script is attached to, so it is not an object
+  // aspect at all. Refused BY NAME for the same reason as floatingRange.* above:
+  // the tail of this ladder is `return true`, and a "canvas.*" aspect would be a
+  // second, unvalidated door around vCanvasLayout's key list and ranges.
+  if (typeof aspect === "string" && aspect.startsWith("canvas.")) {
+    return (
+      "a canvas layout is not an object aspect; use api.setCanvasLayout(patch, sheet?) " +
+      "(and api.getCanvasLayout(sheet?) to read it)"
     );
   }
   return true;
@@ -6073,15 +6086,95 @@ function checkSheetPosition(position: unknown): true | string {
   return true;
 }
 
-/** api.addSheet args: [name?, position?]. Omitted name = the app's next
+/** The sheet kinds api.addSheet accepts (Rust `SheetKind::wire_name`). */
+export const SCRIPT_SHEET_KINDS = ["worksheet", "canvas"] as const;
+
+/** api.addSheet args: [name?, position?, kind?]. Omitted name = the app's next
  *  default ("Sheet3"); omitted position = appended at the end (the historical
- *  contract). */
-export const vAddSheet: Validator = ([name, position]) => {
+ *  contract); omitted kind = a worksheet. A kind is fixed at creation, so an
+ *  unknown spelling is refused here rather than quietly adding a worksheet the
+ *  script did not ask for. */
+export const vAddSheet: Validator = ([name, position, kind]) => {
   if (name !== undefined && name !== null) {
     const named = checkSheetName(name);
     if (named !== true) return named;
   }
-  return checkSheetPosition(position);
+  const placed = checkSheetPosition(position);
+  if (placed !== true) return placed;
+  if (kind === undefined || kind === null) return true;
+  if (typeof kind !== "string" || !(SCRIPT_SHEET_KINDS as readonly string[]).includes(kind)) {
+    const got = typeof kind === "string" ? `"${kind.slice(0, 40)}"` : typeof kind;
+    return `kind must be "worksheet" or "canvas" (got ${got})`;
+  }
+  return true;
+};
+
+/**
+ * The canvas layout keys a script may SET (api.setCanvasLayout), and the JS
+ * type each takes. The RANGES are not here: they live once, in
+ * `checkCanvasLayoutPatch` (../canvasSheet.ts), which is pinned against the
+ * Rust validator by a drift test.
+ *
+ * `zOrder` and `locked` are layout fields too, but deliberately NOT settable
+ * from a script in this milestone: they name OTHER objects by kind and id, so a
+ * patch could reorder or unlock something the script never created. They stay
+ * readable through api.getCanvasLayout.
+ */
+export const CANVAS_LAYOUT_SCRIPT_KEYS: Readonly<Record<string, "boolean" | "number" | "string">> = {
+  snapToGrid: "boolean",
+  gridSizePx: "number",
+  showGrid: "boolean",
+  pagePreset: "string",
+  pageWidth: "number",
+  pageHeight: "number",
+  background: "string",
+};
+
+/** Layout keys that exist but are read-only to scripts (see above). */
+const CANVAS_LAYOUT_READ_ONLY_KEYS = new Set(["zOrder", "locked"]);
+
+/** api.getCanvasLayout args: [sheet?]. Omitted = the active sheet. Whether the
+ *  sheet IS a canvas is a question about live state, answered host-side. */
+export const vCanvasLayoutQuery: Validator = ([sheet]) => checkOptionalSheetRef(sheet, "sheet");
+
+/**
+ * api.setCanvasLayout args: [patch, sheet?]. Only the keys named are touched.
+ * An unknown key is refused BY NAME (never dropped: a typo like `gridSize` must
+ * not "succeed" and change nothing), each value is type-checked, and the
+ * ranges go through the shared `checkCanvasLayoutPatch` so the message is the
+ * one the Canvas ribbon shows. The backend re-validates the merged result.
+ */
+export const vCanvasLayout: Validator = ([patch, sheet]) => {
+  if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
+    return "patch must be an object like { gridSizePx: 20, showGrid: true }";
+  }
+  const p = patch as Record<string, unknown>;
+  const keys = Object.keys(p);
+  const allowed = Object.keys(CANVAS_LAYOUT_SCRIPT_KEYS);
+  for (const k of keys) {
+    if (CANVAS_LAYOUT_READ_ONLY_KEYS.has(k)) {
+      return (
+        `canvas layout key "${k}" cannot be set from a script (it names other objects ` +
+        `on the canvas); settable keys: ${allowed.join(", ")}`
+      );
+    }
+    if (!Object.prototype.hasOwnProperty.call(CANVAS_LAYOUT_SCRIPT_KEYS, k)) {
+      return `unknown canvas layout key "${k.slice(0, 64)}" (allowed: ${allowed.join(", ")})`;
+    }
+  }
+  if (keys.length === 0) {
+    return `patch must name at least one canvas layout key (${allowed.join(", ")})`;
+  }
+  for (const k of keys) {
+    const want = CANVAS_LAYOUT_SCRIPT_KEYS[k];
+    const v = p[k];
+    if (want === "number" ? !isFiniteNumber(v) : typeof v !== want) {
+      return `${k} must be a ${want}`;
+    }
+  }
+  const inRange = checkCanvasLayoutPatch(p as CanvasLayoutPatch);
+  if (inRange !== null) return inRange;
+  return checkOptionalSheetRef(sheet, "sheet");
 };
 
 /** api.copySheet args: [sourceSheet, newName?, position?]. `sourceSheet` is an

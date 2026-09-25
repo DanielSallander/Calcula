@@ -538,12 +538,19 @@ fn protection_error(row: u32, col: u32) -> String {
 /// that re-locked those would self-deadlock (`std::sync::Mutex` is not
 /// reentrant), so those callers pass their borrows straight through.
 pub(crate) fn check_sheet_protection_cells_in<'a>(
+    sheet_kinds: &[::persistence::SheetKind],
     protection_storage: &ProtectionStorage,
     grid: &engine::Grid,
     styles: &engine::StyleRegistry,
     sheet_index: usize,
     mut cells: impl Iterator<Item = (u32, u32)> + 'a,
 ) -> Result<(), String> {
+    // A CANVAS refuses every cell write, protected or not -- so this runs
+    // BEFORE the unprotected early return below, or it would never run for the
+    // (almost always unprotected) canvas. The kinds are passed in pre-read:
+    // callers of this pure form already hold grid/grids/styles/protection, and
+    // taking a new lock here would add an edge to the documented order.
+    crate::sheets::ensure_not_canvas(sheet_kinds, sheet_index, "edit cells")?;
     match protection_storage.get(&sheet_index) {
         Some(p) if p.protected => {}
         _ => return Ok(()),
@@ -575,6 +582,11 @@ pub(crate) fn check_sheet_protection_cells<'a>(
     sheet_index: usize,
     cells: impl Iterator<Item = (u32, u32)> + 'a,
 ) -> Result<(), String> {
+    // A CANVAS refuses every cell write. Checked BEFORE the probe below: the
+    // probe returns Ok for an unprotected sheet, and a canvas is almost never
+    // protected, so a gate placed after it would never run. Takes only the
+    // sheet_kinds lock and releases it.
+    crate::sheets::ensure_not_canvas_in_state(state, sheet_index, "edit cells")?;
     // Probe and release. The overwhelmingly common case is an unprotected
     // sheet, and this runs on every batch write — not worth locking the grid.
     let protected = {
@@ -592,7 +604,7 @@ pub(crate) fn check_sheet_protection_cells<'a>(
         let grid = state.grid.read().unwrap();
         let styles = state.style_registry.read().unwrap();
         let protection_storage = state.sheet_protection.read().unwrap();
-        check_sheet_protection_cells_in(&protection_storage, &grid, &styles, sheet_index, cells)
+        check_sheet_protection_cells_in(&[], &protection_storage, &grid, &styles, sheet_index, cells)
     } else {
         let grids = state.grids.read().unwrap();
         let styles = state.style_registry.read().unwrap();
@@ -600,7 +612,7 @@ pub(crate) fn check_sheet_protection_cells<'a>(
         let Some(grid) = grids.get(sheet_index) else {
             return Ok(());
         };
-        check_sheet_protection_cells_in(&protection_storage, grid, &styles, sheet_index, cells)
+        check_sheet_protection_cells_in(&[], &protection_storage, grid, &styles, sheet_index, cells)
     }
 }
 
@@ -625,6 +637,8 @@ pub(crate) fn check_sheet_protection_range(
     end_row: u32,
     end_col: u32,
 ) -> Result<(), String> {
+    // Canvas first, before the probe (see `check_sheet_protection_cells`).
+    crate::sheets::ensure_not_canvas_in_state(state, sheet_index, "edit cells")?;
     // Probe and release, then acquire in canonical order — see the lock-order
     // note on `check_sheet_protection_cells`.
     let protected = {
@@ -640,8 +654,9 @@ pub(crate) fn check_sheet_protection_range(
         let grid = state.grid.read().unwrap();
         let styles = state.style_registry.read().unwrap();
         let protection_storage = state.sheet_protection.read().unwrap();
+        // The canvas gate already ran above, before the probe; no kinds needed.
         check_sheet_protection_range_in(
-            &protection_storage, &grid, &styles, sheet_index,
+            &[], &protection_storage, &grid, &styles, sheet_index,
             start_row, start_col, end_row, end_col,
         )
     } else {
@@ -652,7 +667,7 @@ pub(crate) fn check_sheet_protection_range(
             return Ok(());
         };
         check_sheet_protection_range_in(
-            &protection_storage, grid, &styles, sheet_index,
+            &[], &protection_storage, grid, &styles, sheet_index,
             start_row, start_col, end_row, end_col,
         )
     }
@@ -660,6 +675,7 @@ pub(crate) fn check_sheet_protection_range(
 
 /// Pure form of [`check_sheet_protection_range`], over borrowed state.
 pub(crate) fn check_sheet_protection_range_in(
+    sheet_kinds: &[::persistence::SheetKind],
     protection_storage: &ProtectionStorage,
     grid: &engine::Grid,
     styles: &engine::StyleRegistry,
@@ -669,6 +685,8 @@ pub(crate) fn check_sheet_protection_range_in(
     end_row: u32,
     end_col: u32,
 ) -> Result<(), String> {
+    // Canvas first, before the unprotected early return (see the cells form).
+    crate::sheets::ensure_not_canvas(sheet_kinds, sheet_index, "edit cells")?;
     let protection = match protection_storage.get(&sheet_index) {
         Some(p) if p.protected => p,
         _ => return Ok(()),
@@ -762,6 +780,11 @@ pub(crate) fn check_sheet_protection_range_in(
     Ok(())
 }
 
+/// The `check_sheet_action` actions that act on OBJECTS rather than cells, and
+/// so remain legal on a canvas sheet: editing charts/shapes/controls, and
+/// creating or changing pivot tables (a canvas pivot is an object).
+pub(crate) const CANVAS_OBJECT_SCOPE_ACTIONS: &[&str] = &["editObjects", "pivotTables"];
+
 /// Reject an ACTION that a protected sheet's options disallow.
 ///
 /// The per-cell gates above answer "may this cell be written?". This answers the
@@ -777,6 +800,14 @@ pub(crate) fn check_sheet_action(
     action: &str,
     what: &str,
 ) -> Result<(), String> {
+    // A CANVAS has no cells, rows or columns, so every CELL-scope action
+    // (format, insert/delete rows and columns, sort, filter, hyperlinks,
+    // scenarios) is refused there, protected or not. The OBJECT-scope actions
+    // are exactly what a canvas is for and stay allowed. Checked before the
+    // protection lookup, which returns Ok for an unprotected sheet.
+    if !CANVAS_OBJECT_SCOPE_ACTIONS.contains(&action) {
+        crate::sheets::ensure_not_canvas_in_state(state, sheet_index, what)?;
+    }
     let protection_storage = state.sheet_protection.read().unwrap();
     let Some(protection) = protection_storage.get(&sheet_index) else {
         return Ok(());
@@ -1430,6 +1461,14 @@ pub fn set_cell_protection(
     // first means a refusal needs no rollback. Excel greys out the Protection
     // tab on a protected sheet rather than failing the whole dialog, so a no-op
     // call (the Format Cells case above) is still accepted.
+    // The KIND gate too: lock state is a cell format, and a CANVAS has no
+    // cells to format -- the tier fixup would materialize styled cells in its
+    // hidden grid. `require_sheet_unprotected` checks protection only, which is
+    // why this sits beside it rather than inside it. Taken with no other lock
+    // held, before the effect.
+    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(&state, active_sheet, "change cell locking") {
+        return ProtectionResult::err(&e);
+    }
     if let Err(e) = require_sheet_unprotected(&state, active_sheet, "cell locking") {
         return ProtectionResult::err(&e);
     }
@@ -2005,7 +2044,7 @@ mod tests {
         // Decided without touching a single one of the million positions.
         let (p, g, st) = tiered(vec![4], vec![]);
         assert!(
-            check_sheet_protection_range_in(&p, &g, &st, 0, 0, 4, 1_048_575, 4).is_ok(),
+            check_sheet_protection_range_in(&[], &p, &g, &st, 0, 0, 4, 1_048_575, 4).is_ok(),
             "an unlocked column tier grants the whole column"
         );
     }
@@ -2014,7 +2053,7 @@ mod tests {
     fn a_neighbouring_column_stays_locked() {
         let (p, g, st) = tiered(vec![4], vec![]);
         assert!(
-            check_sheet_protection_range_in(&p, &g, &st, 0, 0, 5, 10, 5).is_err(),
+            check_sheet_protection_range_in(&[], &p, &g, &st, 0, 0, 5, 10, 5).is_err(),
             "column 5 has no tier, so the default (locked) applies"
         );
     }
@@ -2035,7 +2074,7 @@ mod tests {
         cell.style_index = shut;
         g.set_cell(7, 4, cell);
         assert!(
-            check_sheet_protection_range_in(&p, &g, &st, 0, 0, 4, 1_048_575, 4).is_err(),
+            check_sheet_protection_range_in(&[], &p, &g, &st, 0, 0, 4, 1_048_575, 4).is_err(),
             "one re-locked cell refuses the range"
         );
     }
@@ -2043,9 +2082,9 @@ mod tests {
     #[test]
     fn an_unlocked_row_tier_grants_its_row() {
         let (p, g, st) = tiered(vec![], vec![2]);
-        assert!(check_sheet_protection_range_in(&p, &g, &st, 0, 2, 0, 2, 500).is_ok());
+        assert!(check_sheet_protection_range_in(&[], &p, &g, &st, 0, 2, 0, 2, 500).is_ok());
         assert!(
-            check_sheet_protection_range_in(&p, &g, &st, 0, 3, 0, 3, 500).is_err(),
+            check_sheet_protection_range_in(&[], &p, &g, &st, 0, 3, 0, 3, 500).is_err(),
             "row 3 has no tier"
         );
     }
@@ -2056,7 +2095,7 @@ mod tests {
         p.insert(0, SheetProtection::default()); // protected: false
         let g = engine::Grid::new();
         let st = engine::StyleRegistry::new();
-        assert!(check_sheet_protection_range_in(&p, &g, &st, 0, 0, 0, 1_048_575, 16_383).is_ok());
+        assert!(check_sheet_protection_range_in(&[], &p, &g, &st, 0, 0, 0, 1_048_575, 16_383).is_ok());
     }
 
 

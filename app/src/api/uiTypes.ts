@@ -408,11 +408,15 @@ export interface PanelDefinition {
   /** Ribbon-specific: accent colour of a contextual tab — its label and its
    *  active indicator. Pass a theme token with a light fallback so skins can
    *  retint it: `"var(--tab-accent-pivot, #1a7a43)"` (tokens: --tab-accent-chart,
-   *  -table, -pivot, -slicer, -sparkline, -report). Its presence is also what
+   *  -table, -pivot, -slicer, -sparkline, -report, -canvas). Its presence is also what
    *  marks the tab as contextual. */
   ribbonColor?: string;
   /** Ribbon-specific: sort order when displayed as a ribbon tab (lower = first) */
   ribbonOrder?: number;
+  /** Ribbon-specific, contextual tabs only: select the tab when it is
+   *  registered and restore the previously selected tab when it is removed.
+   *  See `RibbonTabDefinition.activateOnRegister`. */
+  ribbonActivateOnRegister?: boolean;
   /** Sidebar-specific: show in bottom section (like VS Code settings gear) */
   sidebarBottom?: boolean;
 }

@@ -312,6 +312,7 @@ const chromeColorConfigs = [
       'extensions/Sparklines/components/SparklineColorPicker.tsx',
       'extensions/ControlsPane/components/**/*.{ts,tsx}',
       'extensions/Reports/components/ReportTabSection.tsx',
+      'extensions/CanvasSheet/components/**/*.{ts,tsx}',
       'extensions/ExtensionsManager/AddInsRibbonSection.tsx',
       'extensions/Animation/components/TimelineSections.tsx',
       'extensions/Settings/components/**/*.{ts,tsx}',

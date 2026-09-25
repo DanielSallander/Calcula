@@ -44,6 +44,13 @@ export const AppEvents = {
   // would bounce the value the backend just reported straight back at it.
   SHEET_DISPLAY_FLAGS_CHANGED: "app:sheet-display-flags-changed",
 
+  // A CANVAS sheet's layout (page, snap grid, background, stacking) was
+  // replaced in the BACKEND -- by the Canvas ribbon tab, a script row, an MCP
+  // tool or a .calp refresh; `shell/canvasLayoutBridge.ts` re-emits the Rust
+  // announcement. No payload, like SHEET_DISPLAY_FLAGS_CHANGED: subscribers
+  // re-read `get_sheets`, so nobody acts on a stale copy.
+  CANVAS_LAYOUT_CHANGED: "app:canvas-layout-changed",
+
   // Selection events
   SELECTION_CHANGED: "app:selection-changed",
 

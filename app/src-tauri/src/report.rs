@@ -652,6 +652,10 @@ pub async fn create_report(
     request: CreateReportRequest,
 ) -> Result<ReportResult, String> {
     let (_def, _cache, view) = compute_design_query_view(&bi_state, &request.query).await?;
+    // A grid report materializes CELLS; a canvas sheet shows none, so the
+    // report would be invisible there. Refused before the effect so the
+    // refusal leaves the document clean.
+    crate::sheets::ensure_not_canvas_in_state(&state, request.sheet_index, "create a grid report")?;
     // The query resolved; everything below writes grid cells and the report
     // registry. Built after the await so a failed query leaves the doc clean.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
@@ -865,8 +869,6 @@ pub fn restore_report(
     bi_state: State<'_, BiState>,
     report: SavedReport,
 ) -> Result<Option<String>, String> {
-    // Restoring re-materializes the report into the grid and re-registers it.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut report = report;
 
     {
@@ -880,6 +882,11 @@ pub fn restore_report(
             ));
         }
     }
+    // A pulled report whose index lands on a canvas would materialize into the
+    // canvas's hidden grid, where nobody can see it.
+    // Both refusals above run BEFORE the effect: a refused restore must not
+    // leave the document dirty for a change that never happened.
+    crate::sheets::ensure_not_canvas_in_state(&state, report.sheet_index, "restore a grid report")?;
 
     // Rebind the connection: find the local connection whose stable data-source
     // id matches the report's (the publisher's connection id is stale here).
@@ -908,6 +915,8 @@ pub fn restore_report(
         }
     }
 
+    // Restoring re-materializes the report into the grid and re-registers it.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     with_reports_mut(&state, &effect, |defs| {
         defs.retain(|d| d.id != report.id);
         defs.push(report.clone());

@@ -18,6 +18,7 @@ import type {
   VisibleRange,
   SpillRangeInfo,
   ViewMode,
+  SheetSurface,
 } from "../../../core/types";
 import type { GridTheme, RenderState } from "./types";
 import { DEFAULT_THEME } from "./types";
@@ -728,7 +729,23 @@ export function renderGrid(
   displayHeadings?: boolean,
   // Reference style - "R1C1" renders formulas (and headers) in R1C1 notation
   referenceStyle?: "A1" | "R1C1",
+  // The sheet's surface. "canvas" paints a page of floating objects only: no
+  // cells, gridlines, headers, selection, formula references or clipboard
+  // chrome, and no cell-anchored overlay regions -- while every grid-layer
+  // anchor and the floating overlay passes still run.
+  surface: SheetSurface = "grid",
 ): void {
+  // CANVAS SURFACE. A canvas is a real engine sheet whose (hidden) grid can
+  // hold cells -- a canvas pivot materializes its output there -- so the cell
+  // passes must be SKIPPED, not merely left with nothing to draw. Headings and
+  // gridlines are forced off so the gutters collapse through the one
+  // `effectiveGridConfig` rule below, which makes every floating object's
+  // x/y page-relative for the painter and the hit-testers alike.
+  const isCanvasSurface = surface === "canvas";
+  if (isCanvasSurface) {
+    displayHeadings = false;
+    displayGridlines = false;
+  }
   // When headings are hidden, collapse header dimensions to 0 so the cell area
   // expands to fill the full canvas.
   //
@@ -834,9 +851,9 @@ export function renderGrid(
   // the pane it must be clipped to when it is replayed.
   let deferredCellDecorations: DeferredCellDecoration[] = [];
 
-  // Split window rendering
-  const hasSplitRows = splitConfig && splitConfig.splitRow !== null && splitConfig.splitRow > 0;
-  const hasSplitCols = splitConfig && splitConfig.splitCol !== null && splitConfig.splitCol > 0;
+  // Split window rendering (never on a canvas: it has no rows or columns)
+  const hasSplitRows = !isCanvasSurface && splitConfig && splitConfig.splitRow !== null && splitConfig.splitRow > 0;
+  const hasSplitCols = !isCanvasSurface && splitConfig && splitConfig.splitCol !== null && splitConfig.splitCol > 0;
 
   if (hasSplitRows || hasSplitCols) {
     // Split windows create independent scrollable panes.
@@ -921,8 +938,8 @@ export function renderGrid(
     }
   }
 
-  const hasFreezeRows = !hasSplitRows && !hasSplitCols && freezeConfig && freezeConfig.freezeRow !== null && freezeConfig.freezeRow > 0;
-  const hasFreezeCols = !hasSplitRows && !hasSplitCols && freezeConfig && freezeConfig.freezeCol !== null && freezeConfig.freezeCol > 0;
+  const hasFreezeRows = !isCanvasSurface && !hasSplitRows && !hasSplitCols && freezeConfig && freezeConfig.freezeRow !== null && freezeConfig.freezeRow > 0;
+  const hasFreezeCols = !isCanvasSurface && !hasSplitRows && !hasSplitCols && freezeConfig && freezeConfig.freezeCol !== null && freezeConfig.freezeCol > 0;
 
   if (hasFreezeRows || hasFreezeCols) {
     const layout = calculateFreezePaneLayout(freezeConfig!, effectiveConfig, dims);
@@ -977,7 +994,7 @@ export function renderGrid(
       ctx.stroke();
     }
     
-  } else if (!hasSplitRows && !hasSplitCols) {
+  } else if (!isCanvasSurface && !hasSplitRows && !hasSplitCols) {
     if (displayGridlines !== false) {
       drawGridLines(state);
     }
@@ -987,16 +1004,24 @@ export function renderGrid(
     deferredCellDecorations = drawCellText(state);
   }
 
-  if (formulaReferences.length > 0) {
+  if (!isCanvasSurface && formulaReferences.length > 0) {
     drawFormulaReferences(state);
   }
 
-  if (fillPreviewRange) {
+  if (!isCanvasSurface && fillPreviewRange) {
     drawFillPreview(state);
   }
 
   // Draw selection drag preview (shows where cells will move to)
-  drawSelectionDragPreview(state);
+  if (!isCanvasSurface) {
+    drawSelectionDragPreview(state);
+  }
+
+  // A canvas renders FLOATING regions only. A cell-anchored region (a grid
+  // pivot, a report block) describes cells, and a canvas shows none.
+  const surfaceRegions = isCanvasSurface
+    ? overlayRegions.filter((r) => r.floating)
+    : overlayRegions;
 
   // Split overlays into two groups:
   // - belowSelection: cell-based overlays (e.g., pivot) that render BEFORE selection
@@ -1051,22 +1076,24 @@ export function renderGrid(
 
   // Render below-selection overlays (e.g., pivot tables)
   for (const renderer of belowSelectionRenderers) {
-    const matchingRegions = overlayRegions.filter(r => r.type === renderer.type);
+    const matchingRegions = surfaceRegions.filter(r => r.type === renderer.type);
     for (const region of matchingRegions) {
       renderOverlayRegion(renderer, region);
     }
   }
 
   // Draw spill range borders (blue dashed) before selection so selection draws on top
-  drawSpillBorders(state);
+  if (!isCanvasSurface) {
+    drawSpillBorders(state);
+  }
 
   paintLayers("under-selection");
 
-  if (selection) {
+  if (!isCanvasSurface && selection) {
     drawSelection(state);
   }
 
-  if (clipboardSelection && clipboardMode && clipboardMode !== "none") {
+  if (!isCanvasSurface && clipboardSelection && clipboardMode && clipboardMode !== "none") {
     drawClipboardSelection(state);
   }
 
@@ -1083,7 +1110,7 @@ export function renderGrid(
 
   // Render above-selection overlays (e.g., charts)
   for (const renderer of aboveSelectionRenderers) {
-    const matchingRegions = overlayRegions.filter(r => r.type === renderer.type);
+    const matchingRegions = surfaceRegions.filter(r => r.type === renderer.type);
     for (const region of matchingRegions) {
       renderOverlayRegion(renderer, region);
     }
@@ -1105,7 +1132,8 @@ export function renderGrid(
   paintLayers("over-headers");
 
   // Page Layout View: draw page boundaries, margins, and header/footer areas
-  if (viewMode === "pageLayout" && pageSetup) {
+  // (a canvas has its own page, painted by its layers)
+  if (!isCanvasSurface && viewMode === "pageLayout" && pageSetup) {
     drawPageLayoutOverlay(ctx, effectiveConfig, viewport, dims, width, height, pageSetup);
   }
 }

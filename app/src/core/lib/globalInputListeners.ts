@@ -441,6 +441,8 @@ export const GLOBAL_INPUT_LISTENERS: readonly GlobalInputListener[] = [
     note: "Click-outside dismissal for a popup this surface itself opened; it closes only its own surface." },
   { file: "src/shell/Ribbon/RibbonContainer.tsx", event: "mousedown", verdict: "session-scoped",
     note: "Click-outside dismissal for a popup this surface itself opened; it closes only its own surface." },
+  { file: "src/shell/SheetTabs/SheetTabs.tsx", event: "keydown", verdict: "session-scoped",
+    note: "Escape closes the add-sheet kind menu (Worksheet / Canvas) this surface itself opened; registered only while that menu is open, and it acts only on it." },
   { file: "src/shell/SheetTabs/SheetTabs.tsx", event: "mousedown", verdict: "session-scoped",
     note: "Click-outside dismissal for a popup this surface itself opened; it closes only its own surface." },
   { file: "src/shell/SheetTabs/SheetTabs.tsx", event: "mousemove", verdict: "session-scoped",

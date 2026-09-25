@@ -53,6 +53,15 @@ export interface RibbonTabDefinition {
    * When set, the tab header displays a colored top border and tinted text.
    */
   color?: string;
+  /**
+   * Contextual tabs only: SELECT this tab when it first appears, and when it
+   * disappears again return the ribbon to the tab that was selected before it.
+   * A contextual tab normally appears WITHOUT stealing the selection (a pivot's
+   * Analyze tab must not yank the user off Home on every click into a pivot);
+   * a tab that belongs to a whole SURFACE -- the Canvas tab, shown for as long
+   * as a canvas sheet is active -- is the exception.
+   */
+  activateOnRegister?: boolean;
 }
 
 export interface RibbonGroupDefinition {
@@ -123,7 +132,12 @@ export type GridCommand =
 // ============================================================================
 
 export interface SheetContext {
-  sheet: { name: string; index: number };
+  /**
+   * The sheet the menu was opened on. `kind` is `"canvas"` for a canvas
+   * sheet (objects only, no cells) and absent or `"worksheet"` otherwise, so
+   * an item that acts on cells can hide itself with `visible`.
+   */
+  sheet: { name: string; index: number; kind?: "worksheet" | "canvas" };
   /**
    * The TRUE workbook index — what every backend sheet command takes. Correct
    * for the call you are about to make, and wrong as a cache key: an insert, a

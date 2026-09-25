@@ -766,6 +766,11 @@ pub fn create_table(
     params: CreateTableParams,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.read().unwrap();
+    // A table is a block of CELLS; a canvas sheet shows none. Refused before
+    // the effect so the refusal leaves the document clean.
+    if let Err(e) = crate::sheets::ensure_not_canvas_in_state(&state, active_sheet, "create a table") {
+        return TableResult::err(e);
+    }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     // CANONICAL LOCK ORDER: the grid mirror first (see `delete_table`). It is
     // read further down to pick up the header text; taken there, it was taken

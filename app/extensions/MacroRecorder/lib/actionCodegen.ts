@@ -852,11 +852,22 @@ function emitEvent(ctx: EmitContext, event: RecordedEvent): void {
     }
 
     case "addSheet":
-      emitObjectScriptOnly(
-        ctx,
-        `await api.addSheet(${jsString(event.name)});`,
-        `add sheet ${jsString(event.name)}`,
-      );
+      // A canvas replays AS a canvas: the kind is fixed at creation, so a
+      // macro that re-added it as a worksheet would build a different
+      // workbook. A worksheet keeps the historical one-argument form.
+      if (event.sheetKind === "canvas") {
+        emitObjectScriptOnly(
+          ctx,
+          `await api.addSheet(${jsString(event.name)}, undefined, "canvas");`,
+          `add canvas ${jsString(event.name)}`,
+        );
+      } else {
+        emitObjectScriptOnly(
+          ctx,
+          `await api.addSheet(${jsString(event.name)});`,
+          `add sheet ${jsString(event.name)}`,
+        );
+      }
       return;
 
     case "deleteSheet":

@@ -54,7 +54,10 @@ pub const CALA_BASE_FORMAT_VERSION: u32 = 1;
 /// v8 adds PINNED FILTER LEVELS — `filterLevel` on slicers and ribbon
 /// filters, and `engine_filters` on pivot definitions
 /// (`PINNED_FILTER_MIN_FORMAT_VERSION`).
-pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 8;
+///
+/// v9 adds CANVAS SHEETS — the per-sheet `kind` in metadata.json
+/// (`CANVAS_SHEET_MIN_FORMAT_VERSION`).
+pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 9;
 
 /// Minimum `.cala` format version a reader must be to handle
 /// `pending_recalc.json` — the record of which cells a cancelled
@@ -154,6 +157,24 @@ pub const SPILL_EXTENT_MIN_FORMAT_VERSION: u32 = 7;
 /// > 1) or some pivot carries an engine filter, so an ordinary workbook
 /// keeps the lowest version that can express it.
 pub const PINNED_FILTER_MIN_FORMAT_VERSION: u32 = 8;
+
+/// Minimum `.cala` format version a reader must be to handle CANVAS SHEETS —
+/// the per-sheet `kind` (with its page, snap grid and stacking layout) in
+/// metadata.json.
+///
+/// THE TEST THIS PASSES: would an older reader MISHANDLE the document? Yes.
+/// An older reader ignores the unknown `kind` and presents the canvas as an
+/// ordinary, EDITABLE worksheet: an empty cell grid with the canvas's charts,
+/// slicers and controls drawn over it, and the hidden pivot output a canvas
+/// pivot writes suddenly visible as loose cells. On its next save the kind is
+/// gone for good, so the canvas silently becomes a worksheet -- the same
+/// "comes back looking like a different document, with no error anywhere"
+/// class that earned zoom (v5) and the display flags (v6) their links.
+/// Refusing the open is the honest failure.
+///
+/// Stamped ONLY when some sheet actually is a canvas, so an ordinary workbook
+/// keeps the lowest version that can express it.
+pub const CANVAS_SHEET_MIN_FORMAT_VERSION: u32 = 9;
 
 /// Raise (never lower) a manifest's `format_version` to the minimum a present
 /// feature requires. Idempotent, and safe to call once per feature.

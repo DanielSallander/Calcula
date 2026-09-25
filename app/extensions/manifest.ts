@@ -83,6 +83,7 @@ import ControlsPaneExtension from "./ControlsPane";
 import TimelineSlicerExtension from "./TimelineSlicer";
 import AutoFilterExtension from "./AutoFilter";
 import ControlsExtension from "./Controls";
+import CanvasSheetExtension from "./CanvasSheet";
 import ExternalDataExtension from "./ExternalData";
 import ModelMenuExtension from "./ModelMenu";
 import SelectVisibleCellsExtension from "./SelectVisibleCells";
@@ -216,6 +217,10 @@ export const builtInExtensions: ExtensionModule[] = [
   ControlsPaneExtension,
   TimelineSlicerExtension,
   ControlsExtension,
+  // Canvas sheets (report pages): the layout surface Core asks while an object
+  // is dragged, the page painter, and the contextual Canvas tab. After every
+  // floating-object family, whose objects it lays out.
+  CanvasSheetExtension,
   BusinessIntelligenceExtension,
   // In-app model authoring (measures) — edits BI connections' embedded models
   ModelEditorExtension,

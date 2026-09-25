@@ -8,7 +8,7 @@
 import React, { useRef, useEffect, useLayoutEffect, useCallback, useImperativeHandle, forwardRef, useState } from "react";
 import { renderGrid, DEFAULT_THEME, calculateVisibleRange } from "../../lib/gridRenderer";
 import { getViewportCells, getSpillRanges } from "../../lib/tauri-api";
-import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation, FreezeConfig, SplitConfig, SpillRangeInfo, ViewMode } from "../../types";
+import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation, FreezeConfig, SplitConfig, SpillRangeInfo, ViewMode, SheetSurface } from "../../types";
 import { cellKey, createEmptyDimensionOverrides, DEFAULT_FREEZE_CONFIG, DEFAULT_SPLIT_CONFIG } from "../../types";
 import type { GridTheme } from "../../lib/gridRenderer";
 import { getGridRegions, getOverlayRenderers, getPostHeaderOverlayRenderers, onRegionChange } from "../../../api/gridOverlays";
@@ -73,6 +73,8 @@ export interface GridCanvasProps {
   displayHeadings?: boolean;
   /** Reference style — "R1C1" renders formulas/headers in R1C1 notation */
   referenceStyle?: "A1" | "R1C1";
+  /** The sheet's surface: "canvas" paints floating objects only (see renderGrid). */
+  surface?: SheetSurface;
   /** Optional theme override */
   theme?: GridTheme;
   /** Callback when canvas is clicked */
@@ -197,6 +199,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       displayGridlines = true,
       displayHeadings = true,
       referenceStyle = "A1",
+      surface = "grid",
       theme = DEFAULT_THEME,
       onMouseDown,
       onMouseMove,
@@ -586,6 +589,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         displayGridlines,
         displayHeadings,
         referenceStyle,
+        surface,
       );
 
       // The frame is on the canvas. Stamp it, so a capture can tell "painted
@@ -596,7 +600,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       if (perfDrawMs > 5) {
         console.log(`[PERF] draw ms=${perfDrawMs.toFixed(1)}`, new Error().stack?.split('\n').slice(1, 4).join(' <- '));
       }
-    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, selectionDragMode, clipboardSelection, clipboardMode, freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros, displayGridlines, displayHeadings, referenceStyle, currentSheetName, zoom, spillRanges]);
+    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, selectionDragMode, clipboardSelection, clipboardMode, freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros, displayGridlines, displayHeadings, referenceStyle, surface, currentSheetName, zoom, spillRanges]);
 
     /**
      * Start row insertion animation.

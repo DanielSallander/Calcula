@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 134 | Open: 3 | Triaged: 0 | Fixed: 131 | Other: 0
+Total: 138 | Open: 4 | Triaged: 0 | Fixed: 134 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1634,3 +1634,45 @@ In every dev build (React 18 StrictMode, i.e. every E2E run and `tauri dev`) the
 LocalWorkspace::open (core/calp/src/workspace.rs) calls fs::create_dir_all on ANY path that does not exist. It runs on READ paths — the Application Inspector's typed location, calp_browse_workspace behind Subscribe and Open for Editing — so a mistyped path in a strictly read-only window creates an empty directory on the user's disk or a shared drive, and the browse then reports 'No applications found' about a folder the product just made. The same file's own rule, on ensure_marker, says `open` must not write because it runs on read paths too; it writes the directory itself.
 
 **Repro:** Collaboration > Application Inspector..., type C:\Temp\no-such-workspace in the location field, press Enter. The folder now exists and is empty. Fix direction: split `open` (must exist, for read paths) from an explicit create used only by the publish routes and calp_add_workspace.
+
+## BUG-0135 `[fixed]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** sheet-keyed-store-remap
+
+COMPUTED PROPERTIES WERE NEVER REMAPPED ON A SHEET MOVE OR DELETE. `computed_properties` is keyed by sheet INDEX and its two derived indexes (`computed_prop_dependencies`, `computed_prop_dependents`) carry the sheet inside a cell key, but `remap_sheet_keyed_stores` (sheets.rs) reached neither. After moving or deleting a sheet, one sheet's row/column/cell properties were re-evaluated by Calculate Now against WHICHEVER sheet inherited the index -- and written, as fills, styles and dimensions, onto that sheet's cells.
+
+**Repro:** Add a computed column-width property on Sheet3, move Sheet3 to the front, activate the sheet now at index 2, Calculate Now: the property is applied to the wrong sheet. Found by the canvas-sheet M1 grid-writer classification (a canvas inheriting the index received styled cells in its hidden grid).
+**Fix:** fixed — sheets.rs remap_sheet_keyed_stores now remaps computed_properties (remap_indexed_map), computed_prop_dependents (remap_cell_keyed_map) and rewrites the sheet index inside every computed_prop_dependencies entry, dropping deleted sheets.
+  Files: app/src-tauri/src/sheets.rs (remap_sheet_keyed_stores: computed_properties + both derived indexes), app/src-tauri/src/computed_properties.rs (add/update refuse a canvas before the effect)
+
+## BUG-0136 `[fixed]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** protection-gate-parity
+
+scenario_merge HAD NO allowEditScenarios GATE. scenario_add and scenario_delete both call check_sheet_action("editScenarios"); scenario_merge copied scenarios onto ANY target sheet with no gate at all, so a protected sheet (and, since M1, a canvas sheet) could receive scenarios, after which Show wrote their changing cells into it.
+
+**Repro:** Protect Sheet2 with editScenarios disallowed; Scenario Manager > Merge from Sheet1 into Sheet2: the merge succeeded.
+**Fix:** fixed — scenario_merge now calls check_sheet_action(target, "editScenarios") before its DocumentEffect; scenario_show and scenario_summary also refuse a canvas directly.
+  Files: app/src-tauri/src/scenario_manager.rs (scenario_merge gated by check_sheet_action editScenarios; show/summary refuse a canvas)
+
+## BUG-0137 `[fixed]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** checkpoint-structure-match
+
+NOTEBOOK REWIND INSTALLED A CHECKPOINT OVER A DIFFERENT SHEET STRUCTURE. notebook_rewind_internal replaced the whole grid list with the checkpoint's copy BY POSITION with no check that the workbook still had the same sheets. A sheet added since the checkpoint truncated the grid list below every other per-sheet store; a sheet deleted since poured one sheet's cells into its neighbour.
+
+**Repro:** Run a notebook cell, add a sheet, rewind to that cell: grids.len() < sheet_names.len().
+**Fix:** fixed — The rewind is refused when the checkpoint's sheet count differs from the workbook's, and every CANVAS slot keeps its live grid. A same-count REORDER is still installed by position (recorded as open follow-up in open-items).
+  Files: app/src-tauri/src/scripting/notebook_commands.rs (notebook_rewind_internal: sheet-count gate before the effect; canvas slots keep their live grid)
+
+## BUG-0138 `[open]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** sheet-keyed-store-remap
+
+BI QUERY RESULT BLOCKS ARE NEVER REMAPPED ON A SHEET MOVE OR DELETE. Each connection's active_queries entry stores the sheet_index its block was inserted on; nothing in sheets.rs (or anywhere) remaps it. After a move or delete, bi_refresh_connection clears and rewrites the block on WHICHEVER sheet inherited the index, overwriting that sheet's cells.
+
+**Repro:** Insert a BI query result on Sheet2, move Sheet2 to the front, Refresh the connection: the block is written onto the sheet now at index 1.

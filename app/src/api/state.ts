@@ -20,4 +20,5 @@ export {
   setFreezeConfig,
   setSheetContext,
   setActiveSheet,
+  setSheetSurfaces,
 } from "../core/state/gridActions";

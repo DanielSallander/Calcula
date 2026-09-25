@@ -342,6 +342,7 @@ class PanelRegistryImpl implements PanelService {
       order: panel.ribbonOrder ?? 999,
       component: TabComponent,
       color: panel.ribbonColor,
+      activateOnRegister: panel.ribbonActivateOnRegister === true && !!panel.ribbonColor,
     };
 
     extensionRegistryImpl.registerRibbonTab(tabDef);

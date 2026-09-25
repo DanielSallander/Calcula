@@ -488,7 +488,7 @@ Full per-dialog reasoning, risks and corrected proposals: the workflow result at
 
 ### 2.2 The `Persisted<T>` migration — the SAVE SOURCES are done (2026-08-17); the rest is not
 
-`AppState` has **105 fields**: **63** are `Persisted<T>`, **40** are still a bare
+`AppState` has **107 fields**: **65** are `Persisted<T>`, **40** are still a bare
 `Mutex`/`RwLock`, and 2 are neither — `undo_stack` and `calc_cancel`. **These four numbers are
 PINNED by `the_appstate_lock_census_reconciles` (`document_effect.rs:1191-1228`), which parses the
 struct body and fails the build when the split moves.** Do not re-derive them by hand and do not
@@ -2565,6 +2565,36 @@ layer lingers with grayscale text.
 | **Green still touches grey in 72 icons (2026-09-24).** The owner's report (Paste's green clip vanished into its 50% grey board) was fixed on the Home tab and in Lock / Filter Pages: the Light icon green went one step darker and nine drawings give the green a pixel of background. The rest are pinned in the allowlist and may only shrink (`npm run check:icon-contact`). Worst, in units of green outline within 1.2 of grey: Gridlines 84, SparkColumn 52.4, Report 43.2, Expand 40, SparkLine 34.5, ClearAll 34 (DANGER, on the Home band), PrintArea 34, Save 33.2, ChartRadar 31.2, PageSize 31. Dark's weak pair is green next to the LIGHT strong colour (1.46:1): Slicer, Markers, Trendline, Link, ChartPie, Colors; Markers and Trendline need a redraw, not a gap. Remaining Home contact: ClearAll, Undo, Redo, WrapText, Find, Percent, Replace. | `app/scripts/icon-accent-contact.allowlist.json`, `docs/design/ICONS.md` 2.2 |
 | **A user accent is only checked against white.** Settings > Appearance warns when a picked accent is under 3:1 on white, but the accent also paints the icons on the DARK cluster, where #b91c1c is 2.18:1 and #2563eb 2.73:1 (measured 2026-09-24). Measure against the active skin's `--ribbon-cluster-bg` as well. Not built. | `app/extensions/Settings/components/AppearancePage.tsx:171,654` (`contrastOnWhite`) |
 | **CLOSED the same day: the placement residue.** `panel-placement.spec` restored the Animation panel with `setPlacement("sidebar")`, which leaves an explicit `{animation.timeline: "sidebar"}` that the journey residue guard reads as a reconfigured app (seen only when journeys follow the functional specs). `panelRegistry.resetPlacement` now drops the override (unit-tested), and both placement specs clean up through it; the guard passes after them. | `app/src/shell/registries/panelRegistry.ts` (`resetPlacement`) |
+
+### 2.af Canvas sheets (report pages) — M1–M4 built 2026-09-25; what is open
+
+**Built.** A sheet can be a CANVAS: no cells, floating objects on a fixed page with a snap grid (the
+Power BI report canvas). Kind authority `AppState.sheet_kinds` + `persistence::SheetKind`
+(`core/persistence/src/lib.rs`), `.cala` v9 stamped only when a canvas exists, every user-facing
+cell writer refused through one predicate and pinned by the door census
+`every_canvas_write_door_is_wired_and_ordered` (`app/src-tauri/src/commands/canvas_sheet_tests.rs`);
+Core's `GridState.surface` (no cells, selection, headers or cell keyboard on a canvas); the split
+"+" control; the contextual Canvas tab (`app/extensions/CanvasSheet`); the ONE layout seam Core asks
+during every drag (`app/src/core/lib/layoutSurface.ts`: snap, page clamp, Alt bypass, consume mode);
+charts bound to their source sheet by `sheetId` (`app/extensions/Charts/lib/dataSourceResolver.ts`);
+the Insert group through each family's seam; the object-selection seam
+(`app/src/api/objectSelection.ts`) with Tab / Shift+Tab / Escape cycling; script rows
+`api.getCanvasLayout` / `api.setCanvasLayout`. One deliberate departure from the plan: a canvas is
+EDITABLE unless it is SUBSCRIBED from an application; Design Mode is not part of the rule (it is
+session-only and starts off, so gating on it left a new canvas's charts immovable while the same chart
+on a worksheet moved freely).
+
+| item | verified at |
+|---|---|
+| **M5–M9 not built.** Collaboration carriage of every canvas object (`floating_ranges.json`, `timeline_slicers.json` actually written and read, chart `spec.data` sheet ids remapped at the two chart materializers, the partition rotation after a pull, the kind in the version listing and the HTML export); the canvas PIVOT in the hidden grid with a scrolling box (M6 — until then a grid pivot aimed at a canvas is refused before its effect); floating-grid overflow scroll (M7); arrange / z-order / lock (M8); the AI summary section, QuickJS `Sheet.kind`, `docs/design/canvas-sheets.md` (M9). | plan `i-want-to-introduce-wiggly-wozniak.md` (owner's plans folder), `app/src-tauri/src/pivot/operations.rs` (`ensure_pivot_destination_is_grid`) |
+| **BUG-0138 (open): a BI query result block's sheet index is never remapped** on a sheet move or delete, so Refresh writes the block onto whichever sheet inherited the index. A block that now names a CANVAS is skipped loudly; the worksheet case is unchanged. | `app/src-tauri/src/bi/commands.rs` (`bi_refresh_connection`) |
+| **Notebook rewind still installs a checkpoint by POSITION** when the sheet count is unchanged but the order is not (a move between the checkpoint and the rewind). A count change is refused and a canvas slot always keeps its live grid. | `app/src-tauri/src/scripting/notebook_commands.rs` (`notebook_rewind_internal`) |
+| **Lock-order risk older than canvases:** `delete_sheet_impl` holds `sheet_names` / `active_sheet` while taking `pivot_tables`, and the pivot destination resolver reads those two under `pivot_tables`. Documented as KNOWN OPEN in the resolver's LOCKS comment; fixing it means restructuring the delete's guarded block. | `app/src-tauri/src/pivot/operations.rs` (`resolve_dest_sheet_index`), `app/src-tauri/src/sheets.rs` (`delete_sheet_impl`) |
+| **Opening a workbook whose charts predate sheet ids marks it modified once** (and adds one chart-edit undo entry per migrated chart): the load migration stamps `sheetId` through the store's normal update path because the backend has no clean chart write. Charts created since carry the id from the start. | `app/extensions/Charts/lib/chartStore.ts` (`loadChartsFromBackend`) |
+| **The pivot listing has no sheet**, so the slicer dialog (which now lists tables from every sheet) labels a pivot without its sheet. Needs a `sheet_index` on `PivotTableInfo` from `get_all_pivot_tables`. | `app/extensions/Slicer/lib/insertSlicerPlan.ts` |
+| **A chart parameter bound to a cell reads the active sheet**, so on a canvas it keeps its literal default; a write-back on a canvas is refused with a message. | `app/extensions/Charts/lib/chartParamWriteBack.ts` |
+| **One-frame flash on a tab click from a canvas to a worksheet:** the worksheet's headings/gridlines/zoom are hydrated after the context switch (three IPCs), not in the switch's own flush. Every route now hydrates (it used to be tab clicks only); priming them in `primeSheetSwitch` would remove the flash. | `app/src/core/components/Spreadsheet/Spreadsheet.tsx` (active-sheet hydration effect) |
+| **Print and PDF of a canvas are refused with a message** (v1 decision: printing reads cells and a canvas has none). | `app/extensions/Print/index.ts` (`CANVAS_PRINT_REFUSAL`) |
 
 ## 3. How to keep this file honest
 
