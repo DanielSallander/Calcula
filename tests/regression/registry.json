@@ -779,8 +779,8 @@
       "notes": "No automated test coverage. A prior registry entry cited e2e/tests/bi.spec.ts and two screenshots that were never committed to the repo (corrected 2026-06-11, vision-gap-review P0.5). A database-free spec covering bi_get_connections, bi_get_connection (unknown id error), bi_create_connection (missing model file rejection), and bi_get_region_at_cell remains to be written."
     },
     {
-      "id": "feat.distribution",
-      "name": "Distribution (.calp)",
+      "id": "feat.collaboration",
+      "name": "Collaboration (.calp)",
       "tier": 4,
       "category": "Collaboration",
       "description": "Publish/subscribe, overrides, writeback, audit log",

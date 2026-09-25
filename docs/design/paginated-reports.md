@@ -60,7 +60,7 @@ time it grows print/pagination semantics (the "paginated" in the name).
 | Refresh without undo pollution | transient-write: `anim_snapshot`/`anim_apply_frame`/`anim_restore` (token-keyed buffer, scoped recalc, no undo/dirty) | `app/src-tauri/src/animation_commands.rs` |
 | Object persistence | mirror `SavedPivotLayout` (`AppState.pivot_layouts`, included in `build_workbook_for_save`) | `persistence.rs:598`, `core/persistence` — *note: reports did NOT end up following this pattern; see the correction under D2* |
 | Undo for object mutations | `record_custom_restore` + handlers (`pivot_create`/`delete`/`definition`) | `undo_commands.rs:4318`, `pivot/commands.rs` |
-| Distribution (.calp) | generic `custom_objects` channel `{kind,id,name,sheet_id,payload}` (pane-controls precedent) | `core/calp/src/{manifest,publish,pull}.rs` |
+| Collaboration (.calp) | generic `custom_objects` channel `{kind,id,name,sheet_id,payload}` (pane-controls precedent) | `core/calp/src/{manifest,publish,pull}.rs` |
 | Interactive filter values | `GET.CONTROLVALUE("name")` + pane controls; ribbon-filter → pivot targeting | `pane_control/`, `ribbon_filter/` |
 | Refresh events | `GRID_REFRESH`, `MUTATION_REFRESH{domains}`, `BiEvents.REFRESHED`, `pivot:refresh` | `app/src/api/events.ts` |
 
@@ -326,7 +326,7 @@ data-change path requires a manual refresh.
   don't map cleanly onto a report already materialized as *all rows into cells*;
   pagination (page breaks, repeated headers, print/PDF) likely belongs to a future
   distinct "paginated report" form, not the grid report. Revisit later.
-- **Slice 4 — Distribution. ✅ BUILT.** Reports publish/subscribe in `.calp`
+- **Slice 4 — Collaboration. ✅ BUILT.** Reports publish/subscribe in `.calp`
   packages via the generic distributable-object channel (`@api/distributableObjects`,
   the same one cell-types dogfood). The Reports extension registers a provider
   (`kind: "calcula.report"`): `collect()` → `list_reports` payloads; `materialize()`

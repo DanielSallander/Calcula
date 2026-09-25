@@ -916,12 +916,12 @@ function setupRegistration(mw: MountedExtension, reg: ExtRegistration): void {
       } as HX2W);
     });
     // WRITEBACK_SUBMISSION_RECEIVED does not fire on its own — it is raised by
-    // the demand-driven publisher-inbox poll in @api/distribution.ts, which runs
+    // the demand-driven publisher-inbox poll in @api/collaboration.ts, which runs
     // only while somebody holds a watch. Subscribing IS the demand, so take one
     // and give it back with the subscription; an extension that is unloaded (or
     // faults) must not leave a timer polling a registry on its behalf.
     if (eventName === AppEvents.WRITEBACK_SUBMISSION_RECEIVED) {
-      const releasing = import("../distribution")
+      const releasing = import("../collaboration")
         .then((mod) => mod.acquireSubmissionWatch())
         .catch((e: unknown) => {
           // A silent null leaves this subscription PERMANENTLY inert: the

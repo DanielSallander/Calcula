@@ -239,13 +239,13 @@
  *                 : OUTBOUND. Push this workbook to a .calp registry as a
  *                   published package version, UNDER THE USER'S PUBLISHER
  *                   IDENTITY, where other people will pull it. Rust-enforced
- *                   authoritatively in script_distribution.
+ *                   authoritatively in script_collaboration.
  *  - distribution.subscribe
  *                 : INBOUND. Bring SOMEBODY ELSE'S published content — sheets,
  *                   object scripts, module scripts, notebooks, model overlays,
  *                   writeback regions — into this workbook, by pulling a
  *                   package or refreshing the ones already subscribed.
- *                   Rust-enforced authoritatively in script_distribution.
+ *                   Rust-enforced authoritatively in script_collaboration.
  *
  *                   WHY THESE ARE TWO IDS AND NOT ONE "distribution" — read
  *                   this before anyone "simplifies" them together. They are
@@ -263,7 +263,7 @@
  *
  *                   THREE BOUNDS hold on both, and they are what make these
  *                   grantable at all (app/src-tauri/src/scripting/
- *                   distribution_gateway.rs):
+ *                   collaboration_gateway.rs):
  *                     1. NO CONSENT BY PROXY. A pulled object script still
  *                        lands forced-restricted, distributed and UNMOUNTED;
  *                        module scripts and notebooks still land inert. The

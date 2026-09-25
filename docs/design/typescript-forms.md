@@ -108,7 +108,7 @@ The Rust variant sites, all exhaustive matches that cargo enforces:
 | `object_type_to_string` / `string_to_object_type` | `app/src-tauri/src/scripting/object_script_commands.rs` |
 | `VALID_OBJECT_TYPES` (MCP drafts; order pinned by `chatToolSurface.test.ts` `"matches VALID_OBJECT_TYPES in mcp/drafts.rs exactly, in order"`) | `app/src-tauri/src/mcp/drafts.rs` |
 
-Distribution: publish lifts the ceiling from the `// @capability ui.dialog` pragma like any script;
+Collaboration: publish lifts the ceiling from the `// @capability ui.dialog` pragma like any script;
 pull forces `Restricted` + `Distributed` + the manifest ceiling (`core/calp/src/pull.rs`
 `pull_with_options`), and an unconsented form is not mounted, so it cannot be shown by anyone (§9).
 The Subscribe dialog lists it as an object script with its raw `objectType`
@@ -288,7 +288,7 @@ unchanged and pinned as source text by `formConsentHonesty.test.ts`
 (`describe("the four user-facing ui.dialog sentences still promise a dialog and an answer")`) —
 FOUR file locations carrying THREE distinct wordings:
 `capabilities.ts` `CAP_DESCRIPTION` "show you a dialog and receive what you enter";
-`Distribution/components/SubscribeDialog.tsx` `CAPABILITY_PHRASE` and
+`Collaboration/components/SubscribeDialog.tsx` `CAPABILITY_PHRASE` and
 `inspector/ScriptsSection.tsx` `CAPABILITY_PHRASE`, which share "interrupt you with a dialog and
 read your answer"; and `ScriptableObjects/index.ts` `CAPABILITY_DESCRIPTION` "Interrupt you with a
 dialog box and read what you answer". A host-painted modal that collects keystrokes is exactly that
@@ -700,9 +700,9 @@ earlier statement here that "nothing connects the two yet" is no longer true:
   emitted a request no renderer heard, and the show died ten seconds later on
   `FORM_SHOWN_ACK_TIMEOUT_MS`. The **wire** now crosses the windows instead of the call:
   `InspectorFormPreviewEvents.REQUEST` / `.RESULT` on the existing inspector seam
-  (`Distribution/lib/inspectorWindowEvents.ts`, beside `package-inspector:open-package`), with
-  `Distribution/lib/inspectorFormPreview.ts` holding both halves —
-  `installInspectorFormPreviewBridge` (registered in the Distribution extension's `activate`, torn
+  (`Collaboration/lib/inspectorWindowEvents.ts`, beside `package-inspector:open-package`), with
+  `Collaboration/lib/inspectorFormPreview.ts` holding both halves —
+  `installInspectorFormPreviewBridge` (registered in the Collaboration extension's `activate`, torn
   down in `deactivate`) runs `previewFormLayout` and paints in the MAIN window;
   `installInspectorFormPreviewClient` (`ApplicationInspectorApp`) hears the outcome and
   `requestInspectorFormPreview` / `inspectorPreviewStateFor` render it inline beside the action.
@@ -756,8 +756,8 @@ and `npm run gen:canary-tasks` regenerates `generated/canaryTasks.ts` from `test
 | The shared preview procedure: seed planning, the two-pass read-back, the four-source merge, control seeds; the listbox `multi` seed SHAPE; an active-sheet-qualified bind (and failing closed with no name); a formula seeded from the run's computed value; the layout note taken from the field and never from a line the script printed | `app/src/api/scriptHost/scriptPreview/__tests__/scriptFormPreview.test.ts` |
 | The rung's own three fields — `activeSheetName`, `readBackDisplays` (omitted for a cell it computed nothing for), `formLayoutVerdict` — driven through the real snapshot, preview grid, substituted backend and report builder with only the Worker realm doubled | `app/src/api/scriptHost/scriptPreview/__tests__/previewFormReport.test.ts` |
 | The editor's Preview form bridge (request/result/dismiss, replay on EDITOR_READY, the English of each status) | `extensions/ScriptableObjects/__tests__/formPreviewBridge.test.ts`, `objectScriptEditorFormPreview.test.tsx` |
-| The inspector's Preview layout action: forms only, the declared type named as a CLAIM, the hint that admits setup is run and says which window, the request going over the wire instead of the core being called in a window that cannot paint, each answer rendered inline, the note cleared on close | `extensions/Distribution/__tests__/inspectorFormPreview.test.tsx` |
-| Its MAIN-window half: `readControls: false`, a package origin an application NAMED "local" cannot collapse, every outcome answered (shown/closed/each failure/a thrown core), the wire, the teardown, and the status store (application-scoped key, superseded results ignored, a bounded wait when the main window never answers) | `extensions/Distribution/__tests__/inspectorFormPreviewBridge.test.ts` |
+| The inspector's Preview layout action: forms only, the declared type named as a CLAIM, the hint that admits setup is run and says which window, the request going over the wire instead of the core being called in a window that cannot paint, each answer rendered inline, the note cleared on close | `extensions/Collaboration/__tests__/inspectorFormPreview.test.tsx` |
+| Its MAIN-window half: `readControls: false`, a package origin an application NAMED "local" cannot collapse, every outcome answered (shown/closed/each failure/a thrown core), the wire, the teardown, and the status store (application-scoped key, superseded results ignored, a bounded wait when the main window never answers) | `extensions/Collaboration/__tests__/inspectorFormPreviewBridge.test.ts` |
 | `formOriginForMount` reads `provenance`, never the package name; the nameless-package placeholder matches the trust handle's | `src/api/scriptHost/__tests__/scriptFormSpec.test.ts`, `describe("formOriginForMount")` |
 | The band says PACKAGE for an application literally named "local" | `scriptFormDialog.test.tsx`, `it("still says PACKAGE for an application literally named \"local\"")` |
 | Generated typings lockstep (686 chains / 743 entries with the form type) | `objectContextsTypings.test.ts`, `it("keeps one slice entry per DISTINCT DECLARATION, covering every declaration site")` |

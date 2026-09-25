@@ -11,7 +11,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { RootErrorBoundary } from "./shell/RootErrorBoundary";
-import { ApplicationInspectorApp } from "../extensions/Distribution/components/inspector/ApplicationInspectorApp";
+import { ApplicationInspectorApp } from "../extensions/Collaboration/components/inspector/ApplicationInspectorApp";
 
 // A render-time exception with no boundary above it unmounts the tree and
 // leaves this window blank -- and a standalone Tauri window has no devtools

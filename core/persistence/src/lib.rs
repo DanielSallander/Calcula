@@ -1723,7 +1723,7 @@ pub const KNOWN_CAPABILITY_IDS: [&str; 18] = [
     // publish, which would silently disarm the declaration the gate reads.
     "grid.read",
     // The .calp package loop, split by DIRECTION (outbound publish vs inbound
-    // pull/refresh). Both are Rust-enforced in `script_distribution`, and both
+    // pull/refresh). Both are Rust-enforced in `script_collaboration`, and both
     // must be declarable: a capability missing from this list is stripped out
     // of a local script's ceiling at save and out of a .calp at publish, so a
     // library that declared `// @capability distribution.subscribe` would ship

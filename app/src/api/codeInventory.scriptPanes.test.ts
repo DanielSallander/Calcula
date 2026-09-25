@@ -49,7 +49,7 @@ vi.mock("./scriptHost/host", () => ({
   scriptClipboardSize: vi.fn(() => null),
   clearScriptClipboard: vi.fn(),
 }));
-vi.mock("./distribution", () => ({
+vi.mock("./collaboration", () => ({
   getSubmissionWatchStatus: vi.fn(() => ({
     refCount: 0,
     running: false,

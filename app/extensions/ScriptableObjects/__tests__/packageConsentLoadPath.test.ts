@@ -17,7 +17,7 @@
 //      `isPackageConsentCurrent` — the only place a macro's presence and hash are
 //      ever checked — ran only when the session set did not already hold the
 //      package. That set is cleared on AFTER_OPEN but NOT by PACKAGE_UPDATED, so
-//      a Distribution ▸ Update bringing a new or changed macro recorded nothing.
+//      a subscription refresh bringing a new or changed macro recorded nothing.
 //   3. THE DIALOG AND THE RECORDER NORMALIZED THE NAME DIFFERENTLY. The prompt
 //      named zero macros while the recorder granted them — consent covering
 //      artifacts the screen never showed.
@@ -758,7 +758,7 @@ describe("a module listing that fails does not fabricate an empty macro set", ()
 // `moduleScriptIds`; the `consent-granted` handler received only
 // `{ packageName }` and RE-DERIVED both sets from a second, independent listing.
 // The consent dialog is non-modal and `AppEvents.PACKAGE_UPDATED` re-runs the
-// whole load, so a Distribution ▸ Update or a gateway pull landing while the
+// whole load, so a subscription refresh or a gateway pull landing while the
 // user reads the screen made Allow record a set the screen never showed. The
 // transparency requirement is the exact inverse.
 //
@@ -799,7 +799,7 @@ describe("a grant is tied to the screen that produced it", () => {
     await activateFreshExtension();
     const stale = lastPromptFor(PKG).promptId;
 
-    // A Distribution ▸ Update lands while the prompt is open: the load re-runs,
+    // A subscription refresh lands while the prompt is open: the load re-runs,
     // the package is re-checked, and a NEW screen is emitted for the new code.
     moduleRecords = [
       moduleRecord(),

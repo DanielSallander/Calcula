@@ -332,7 +332,7 @@ export default function ScriptConsentDialog({
   // THE IDENTITY OF THIS SCREEN, echoed back with Allow. The grant handler
   // records the artifact set THIS prompt enumerated and refuses a grant whose
   // prompt is no longer standing — so a workbook that changed while the user was
-  // reading (a Distribution ▸ Update, a gateway pull) re-asks instead of
+  // reading (a subscription refresh, a gateway pull) re-asks instead of
   // recording an approval for code that was never displayed.
   const promptId = data?.promptId as string | undefined;
   const scriptCount = (data?.scriptCount as number) ?? 0;

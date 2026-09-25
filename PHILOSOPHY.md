@@ -12,7 +12,7 @@ Excel's greatest gift was that a user with a specific problem could build a spec
 
 VBA did not fail because it was powerful; it failed because the power was invisible. Code hid inside binary files, ran with the full authority of the machine, and a recipient could never quite know what a workbook would do when opened. Calcula keeps the power and removes the darkness: custom code is written in TypeScript, lives where it can be seen and audited, must run inside a tiered sandbox, and must cross no trust boundary without explicit consent. You should never have to wonder *where the code is* or *what it can touch*.
 
-## Distribution is Part of the Model
+## Collaboration is Part of the Model
 
 A spreadsheet that can only be shared by emailing copies of itself will always end in twelve versions of the truth. Calcula treats distribution as an engine capability, not an afterthought: workbooks are published as versioned packages, consumers subscribe to updates, local changes live in override layers -- and data flows back upstream through audited writeback. Sharing a model and collecting data are part of the spreadsheet itself, not chores delegated to an inbox. This holds for the data model literally: a BI model is published as a signed, versioned `dataset` package -- never a loose file -- and the transparency rule extends to publishing itself: every publish reports exactly what shipped and what could not, because a silent drop is just hidden behavior wearing a different coat.
 

@@ -10,11 +10,11 @@ At the same time, Calcula must fix the legitimate downsides that got VBA shunned
 
 - **Security:** Custom code must run sandboxed, with tiered access levels -- never with full machine access like VBA macros. (Current state: DONE through Wave 3. Object scripts run in per-script hardened Worker realms; distributed extensions that opt in run sandboxed too; all privileged reach is broker-mediated behind a capability model -- the canonical id list is `ALL_CAPABILITY_IDS` in `app/src/api/scriptHost/capabilityIds.ts`, never re-typed elsewhere -- with a declared-capability ceiling, consent, and audit. Notebooks/one-off scripts run in an isolated Rust QuickJS interpreter over cloned grid state. See docs/design/wave3-scripting-security.md.)
 - **Transparency:** Custom code must be visible and auditable. The user must always know where code resides and what it can touch -- never hidden inside a binary file. Scripts arriving in distributed packages must not run without explicit consent. (Current state: DONE through Wave 3. Consent + a per-script audit ring + a transparency panel; Ed25519 signing/TOFU for .calp packages AND distributed extensions via signed sidecar manifests verified at scan; a single queryable script-surface taxonomy. One per-workbook audit trail now spans all script activity: the Rust QuickJS surfaces (notebook/one-off/MCP) record always-on, structured grid-mutation entries (surface + id + sheet + range), and capability calls also persist -- net.fetch/bi.query/bi.sql authoritatively server-side in their Rust gates, and the rest (storage/ui.html/formula.udf + broker-policy denials) via a write-through from the broker ring -- so capability use survives reload too. Surfaced as "Scripts"/"Capabilities" categories in the audit viewer. The codeInventory "reach" for grid-only surfaces is no longer asserted: `core/script-engine/src/manifest.rs` is the source of truth and its own test BOOTS a real QuickJS runtime to diff the manifest against what the realm actually registers (both directions), while `app/src/api/__tests__/interpreterReachDrift.test.ts` reads that Rust file at test time and diffs it against every TypeScript consumer. The direction is fixed Rust -> TypeScript, because the renderer can be compromised and the interpreter is where the sandbox is.)
-- **Distribution:** Excel's model of emailing copies of files is replaced by `.calp` **applications**
+- **Collaboration:** Excel's model of emailing copies of files is replaced by `.calp` **applications**
   published into a **workspace**: publish/subscribe report distribution, plus two-way data collection
   via writeback. The vocabulary is Power BI's, and deliberately: a *workspace* is the folder or URL
   that hosts applications, an *application* is the `.calp` a team develops together, and a developer
-  opens one as a **working copy** (Distribution > Open Application for Editing) to edit and push it
+  opens one as a **working copy** (Collaboration > Open Application for Editing) to edit and push it
   back through the gates in `core/calp/src/publish.rs`. A push lands on the ONE development
   line; who receives it is a separate signed act -- an **environment** (`test`, `prod`) is a
   named pointer to a version on that line, promotion moves the pointer and copies nothing, and the
@@ -28,7 +28,11 @@ At the same time, Calcula must fix the legitimate downsides that got VBA shunned
   would see a name-conflict hijack warning aimed at a colleague. **`package` and `registry` survive
   ONLY as wire and on-disk names** -- serde fields (`package_name`, `registry_url`, `registryPath`),
   filenames (`calp-manifest.json`), the `caps.packages` script namespace, and the `"package-inspector"`
-  Tauri window label matched by `capabilities/package-inspector.json`. Renaming any of those breaks a
+  Tauri window label matched by `capabilities/package-inspector.json`. The feature itself was called
+  *Distribution* until 2026-09-25, and that word survives only in the three script capability ids
+  `distribution.writeback` / `distribution.publish` / `distribution.subscribe`: they are persisted in
+  `.cala` ceilings, SIGNED `.calp` manifests, consent files and audit rows, and a renamed id is
+  silently dropped by every exact-match reader. Renaming any of those breaks a
   contract; renaming a type, a command, a UI string or a doc does not. See
   `docs/design/calp-workspace-collaboration.md`.
 

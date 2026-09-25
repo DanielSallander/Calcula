@@ -328,7 +328,7 @@ export const RUST_MIRRORED_CAPABILITIES: ReadonlySet<CapabilityId> = new Set([
   // "due"), which is the whole point: a revoke has to stop a job that is
   // already persisted in the workbook, not merely block new registrations.
   "schedule",
-  // The .calp distribution gateway (script_distribution) re-checks the ACTION'S
+  // The .calp collaboration gateway (script_collaboration) re-checks the ACTION'S
   // OWN capability per call — and these two are never one grant, so both have
   // to be mirrored or one of them is silently unusable.
   "distribution.publish",

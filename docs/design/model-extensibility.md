@@ -69,7 +69,7 @@ What already aligns with the philosophy:
 | Custom code *inside* the model | `script_functions`: sandboxed Rhai, persisted in the model, compiled to scalar UDFs (`engine-core/src/compute/script.rs`); host UDF registry also exists (`engine-core/src/compute/udf.rs`, `Engine::register_udf`) |
 | Query layer for scripts | `bi.query` (structured) / `bi.sql` (raw read-only) / `cube.*`, consent + Rust-side grant re-check + always-on audit (`bi/commands.rs`, the `bi.query` gate at `:2445` and the `bi.sql` gate at `:2565`) |
 | Engine connector seam | `Connector` trait + `ConnectorCapabilities` (`engine-connectors/src/traits.rs`), closed-enum dispatch macro `define_any_connector!` (`engine-query/src/registry.rs`) — microkernel-shaped, compile-time only |
-| Distribution | Dataset `.calp` packages ship the whole serialized model, signed Ed25519+TOFU, credential-free (`calp_publish_model`, `calp_commands.rs:814`); subscribed models are read-only (`model_editor.rs:326`) |
+| Collaboration | Dataset `.calp` packages ship the whole serialized model, signed Ed25519+TOFU, credential-free (`calp_publish_model`, `calp_commands.rs:814`); subscribed models are read-only (`model_editor.rs:326`) |
 
 What is closed with no door at all:
 

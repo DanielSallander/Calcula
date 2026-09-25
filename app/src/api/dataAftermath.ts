@@ -5,7 +5,7 @@
  *          works.
  *
  * CONTEXT: this sequence was written twice before it was written once. Two
- * Distribution commands that rewrite subscribed sheets each grew their own
+ * Collaboration commands that rewrite subscribed sheets each grew their own
  * fan-out and drifted, in the direction that loses data on screen (the refresh
  * path never refreshed pivots, so every pivot region on a refreshed sheet went
  * blank and stayed blank). It is now needed a third time, by a completely
@@ -13,7 +13,7 @@
  * BI-derived cell should say, and nothing repainted them at all.
  *
  * It lives in `@api` because the callers are in DIFFERENT extensions
- * (Distribution, BusinessIntelligence) and the Seam Rule forbids one reaching
+ * (Collaboration, BusinessIntelligence) and the Seam Rule forbids one reaching
  * into another's internals. A third hand-written copy is what this file exists
  * to prevent.
  *

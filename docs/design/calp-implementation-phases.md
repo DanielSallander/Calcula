@@ -28,7 +28,7 @@ Deferred items:
   `calp_rename_cell_id` / `calp_merge_cell_ids` are real commands, not stubs
   (`app/src-tauri/src/calp_commands.rs:6144` and `:6171`), each window-guarded
   and each dirtying the document only when it actually merged. `renameCellId` /
-  `mergeCellIds` are exposed on the facade (`app/src/api/distribution.ts:776`,
+  `mergeCellIds` are exposed on the facade (`app/src/api/collaboration.ts:776`,
   `:789`). Nothing in `app/extensions/` calls either one, so the remaining work
   is exactly the author-facing surface and nothing underneath it.
 - Full dep graph migration from coordinate keys to (SheetId, CellId) keys —
@@ -48,7 +48,7 @@ Deferred items:
   profile, and cross-workspace name conflicts are surfaced rather than
   silently accepted. See "Security and Trust" in `calp-distribution.md`.
 
-See `docs/guide/distribution.md` for user-facing documentation and
+See `docs/guide/collaboration.md` for user-facing documentation and
 `docs/spec/calp-format.md` for the on-disk format specification.
 
 ## Sequencing

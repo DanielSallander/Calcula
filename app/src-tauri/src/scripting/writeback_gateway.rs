@@ -267,7 +267,7 @@ pub struct WritebackCellGuard {
 
 /// Coerce a raw JSON value into a `SubmissionValue` using the region's DECLARED
 /// type — never the value's shape. Same rule (and same reason) as the
-/// interactive commit guard in app/extensions/Distribution/index.ts: a product
+/// interactive commit guard in app/extensions/Collaboration/index.ts: a product
 /// code "12345" typed into a TEXT region must travel as text, not be sniffed
 /// into a number and rejected.
 ///
@@ -395,7 +395,7 @@ pub fn grant_script_capability(
 // The gateway
 // ---------------------------------------------------------------------------
 
-/// Multiplexed, consent-gated writeback/distribution gateway for sandboxed
+/// Multiplexed, consent-gated writeback/collaboration gateway for sandboxed
 /// scripts and distributed extensions.
 ///
 /// `action` is one of: `listRegions` | `getLayer` | `saveDraft` |
@@ -872,7 +872,7 @@ mod tests {
         use crate::scripting::capability_store::is_grantable;
         assert!(is_grantable(WRITEBACK_CAPABILITY));
         // `distribution.publish` used to stand here as an INVENTED id. It is a
-        // real capability now (B3, scripting/distribution_gateway.rs), so the
+        // real capability now (B3, scripting/collaboration_gateway.rs), so the
         // negative case moved to spellings that must stay unreachable — the
         // namespace root and a plausible-looking sub-id.
         for invented in [

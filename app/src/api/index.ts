@@ -1114,7 +1114,7 @@ export {
   IconTemplate,
   IconMarketplace,
   IconDesignMode,
-  // External data & distribution icons
+  // External data & collaboration icons
   IconDataModel,
   IconRefreshData,
   IconPackage,
@@ -2047,7 +2047,7 @@ export type {
 } from "./lib";
 
 // ============================================================================
-// Distribution (.calp)
+// Collaboration (.calp)
 // ============================================================================
 
 export {
@@ -2092,7 +2092,7 @@ export {
   promotionImpact,
   setSubscriptionEnvironment,
   ENVIRONMENTS_CHANGED_EVENT,
-} from "./distribution";
+} from "./collaboration";
 
 export type {
   PublishParams,
@@ -2109,7 +2109,7 @@ export type {
   PullResponse,
   ApplicationInfo,
   VersionInfo,
-  SheetInfo as DistSheetInfo,
+  SheetInfo as CollaborationSheetInfo,
   SubscriptionManifest,
   SubscriptionTrustInfo,
   CalpTrustStatus,
@@ -2173,7 +2173,7 @@ export type {
   PromoteResult,
   EnvironmentNotice,
   UnavailableSubscription,
-} from "./distribution";
+} from "./collaboration";
 
 // ============================================================================
 // Scenario Manager

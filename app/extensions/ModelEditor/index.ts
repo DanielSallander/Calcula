@@ -4,7 +4,7 @@
 //          relationships, hierarchies, KPIs, security roles, calculation
 //          groups, schema import, blank models). Edits land on the live
 //          shared engine, persist with the workbook, and distribute via
-//          "Publish Model as Package".
+//          "Publish Model as Application".
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {

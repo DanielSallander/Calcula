@@ -1149,7 +1149,7 @@ export interface ScriptHeldStateSummary {
 }
 
 /** The submission watch's row id — stable so the UI can key on it. */
-const SUBMISSION_WATCH_ID = "distribution.submissionWatch";
+const SUBMISSION_WATCH_ID = "collaboration.submissionWatch";
 
 /** Human cadence for a millisecond interval, reusing the job phrasing so the two
  *  sections cannot describe "every minute" differently. */
@@ -1279,12 +1279,12 @@ export async function getScriptHeldState(units?: CodeUnit[]): Promise<ScriptHeld
   // user's question regardless of who asked for it.
   const watches: BackgroundWatchEntry[] = [];
   try {
-    const { getSubmissionWatchStatus } = await import("./distribution");
+    const { getSubmissionWatchStatus } = await import("./collaboration");
     const s = getSubmissionWatchStatus();
     if (s.refCount > 0 || s.running) {
       watches.push({
         id: SUBMISSION_WATCH_ID,
-        what: "Checks the distribution registry for new writeback submissions",
+        what: "Checks the workspace for new writeback submissions",
         running: s.running,
         refCount: s.refCount,
         intervalMs: s.intervalMs,

@@ -3,7 +3,7 @@
  * PURPOSE: The order is load-bearing, the cube round-trip must be FORCED, and
  *          the repaint must be the event that actually refetches.
  *
- * CONTEXT: this sequence drifted once already, between two Distribution call
+ * CONTEXT: this sequence drifted once already, between two Collaboration call
  * sites, in the direction that loses data on screen. It is now shared with
  * BusinessIntelligence's "view as" role change. Two traps it must not fall
  * into again:

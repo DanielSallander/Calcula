@@ -321,7 +321,7 @@ chain is transport-agnostic** — an HTTP pull runs the identical Ed25519
 signature + TOFU pin + min-app-version + per-artifact SHA-256 verification
 (inspect switched to `verify_manifest_signature_via`). A per-machine
 saved-registry catalog (`registries.json` in the profile dir, never the
-workbook) + a picker in the Subscribe dialog. `@api/distributionWorkspaces.ts`.
+workbook) + a picker in the Subscribe dialog. `@api/collaborationWorkspaces.ts`.
 
 **Brick 2 — Pluggable package kinds (SHIPPED).** `registerPackageKind({ id,
 label, description, refreshDefaults })` — the publish picker and package

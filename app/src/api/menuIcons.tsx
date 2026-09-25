@@ -1641,7 +1641,7 @@ export const IconDesignMode = (
 );
 
 // ============================================================================
-// External Data & Distribution Icons
+// External Data & Collaboration Icons
 // ============================================================================
 
 /** Two tables connected by a line (Data Model) */

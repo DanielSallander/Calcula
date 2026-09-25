@@ -178,8 +178,8 @@ describe("ui.shortcut is a fully threaded capability", () => {
     const root = nodePath.resolve(__dirname, "../../../../");
     for (const rel of [
       "extensions/Charts/components/ChartLibraryConsentDialog.tsx",
-      "extensions/Distribution/components/inspector/ScriptsSection.tsx",
-      "extensions/Distribution/components/SubscribeDialog.tsx",
+      "extensions/Collaboration/components/inspector/ScriptsSection.tsx",
+      "extensions/Collaboration/components/SubscribeDialog.tsx",
       "extensions/ScriptableObjects/components/CodeInThisFilePanel.tsx",
       "extensions/ScriptableObjects/components/ScriptConsentDialog.tsx",
       "extensions/ScriptableObjects/index.ts",

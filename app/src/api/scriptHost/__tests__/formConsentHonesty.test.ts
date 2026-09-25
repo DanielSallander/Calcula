@@ -132,8 +132,8 @@ describe("the four user-facing ui.dialog sentences still promise a dialog and an
   // both make the pairing dishonest.
   const SENTENCES: Array<[string, string]> = [
     ["src/api/scriptHost/capabilities.ts", `"ui.dialog": "show you a dialog and receive what you enter"`],
-    ["extensions/Distribution/components/SubscribeDialog.tsx", `"ui.dialog": "interrupt you with a dialog and read your answer"`],
-    ["extensions/Distribution/components/inspector/ScriptsSection.tsx", `"ui.dialog": "interrupt you with a dialog and read your answer"`],
+    ["extensions/Collaboration/components/SubscribeDialog.tsx", `"ui.dialog": "interrupt you with a dialog and read your answer"`],
+    ["extensions/Collaboration/components/inspector/ScriptsSection.tsx", `"ui.dialog": "interrupt you with a dialog and read your answer"`],
     ["extensions/ScriptableObjects/index.ts", `"ui.dialog": "Interrupt you with a dialog box and read what you answer"`],
   ];
 

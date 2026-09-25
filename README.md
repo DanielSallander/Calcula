@@ -91,11 +91,13 @@ Calcula ships its own in-process BI engine and a full in-app model designer -- t
 
 The model is embedded in the workbook and distributed with it -- no external server, no separate designer application.
 
-### Report Distribution (`.calp` Packages)
+### Collaboration (`.calp` Applications)
 
 Spreadsheets are terrible at distribution. You email a copy, someone edits it, and now there are twelve versions of the truth. Calcula replaces the copy-of-a-workbook paradigm with a **publish/subscribe model**:
 
-- **Publish** a workbook as a `.calp` package with versioning and distribution channels
+- **Publish** a workbook as a `.calp` application into a shared **workspace**, versioned on one development line
+- **Develop together**: open an application for editing as a working copy, and push changes back through merge and conflict gates
+- **Promote** a version through **environments** (dev, test, prod): a promotion moves a signed pointer and copies nothing
 - **Subscribe** from other workbooks to receive upstream updates
 - **Override layers** track local edits separately from the upstream source
 - **Refresh** rebases your overrides onto the latest published version
@@ -232,7 +234,7 @@ Plus sandboxed **custom functions**: user-defined JavaScript functions that regi
 
 | Area | Status |
 | --- | --- |
-| Report distribution (`.calp` publish/subscribe) | Working |
+| Collaboration (`.calp` publish/subscribe, working copies, environments) | Working |
 | Writeback (submit, drafts, audit trail, event-log fold) | Working |
 | Writeback-to-BI (submissions as model tables) | Working |
 | Scripting (object scripts, notebooks, templates) | Working |

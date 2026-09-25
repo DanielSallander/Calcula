@@ -2768,7 +2768,7 @@ fn restore_scheduled_jobs(
 /// so the compiler forces a value in every arm — the shape `autofilters.json`
 /// and `restore_scheduled_jobs` already use. Takes `&AppState` (not
 /// `State<AppState>`) so the whole restore is exercisable without a Tauri app.
-fn restore_distribution_user_files(
+fn restore_collaboration_user_files(
     state: &AppState,
     workbook: &mut Workbook,
 ) -> Result<(), String> {
@@ -3763,7 +3763,7 @@ pub fn open_file(
     // Subscriptions, override layer, audit log, writeback drafts and the AI
     // authoring transcript. Absent OR unparseable both reset to empty — see the
     // function for why.
-    restore_distribution_user_files(&state, &mut workbook)?;
+    restore_collaboration_user_files(&state, &mut workbook)?;
 
     // Re-materialize the BI connections that a `.calp` pull created, and point
     // this workbook's package BI pivots back at them.
@@ -3779,7 +3779,7 @@ pub fn open_file(
     // `PinPolicy::RequirePinned` — see its doc comment for what happens when the
     // package is missing, when verification fails, and when offline.
     //
-    // MUST FOLLOW `restore_distribution_user_files` (it reads the subscription
+    // MUST FOLLOW `restore_collaboration_user_files` (it reads the subscription
     // ledger that call restores) and `load_pending_roles` (so a restored package
     // connection picks up its saved "view as" role, as the pull path does).
     {
@@ -4408,7 +4408,7 @@ pub(crate) fn reset_document_scoped_stores(
         };
     }
 
-    // ---- Distribution (.calp) stores ---------------------------------------
+    // ---- Collaboration (.calp) stores ---------------------------------------
     *state.subscriptions.write(effect).map_err(|e| e.to_string())? =
         calp::manifest::SubscriptionManifest::default();
     // The workspace link is as document-scoped as they come: it names the
@@ -5798,11 +5798,11 @@ pub(crate) fn scheduler_test_guard() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(test)]
-mod distribution_user_file_restore_tests {
-    //! A workbook's DISTRIBUTION state must never be inherited from the
+mod collaboration_user_file_restore_tests {
+    //! A workbook's COLLABORATION state must never be inherited from the
     //! previously open document.
     //!
-    //! The regression these cover: `restore_distribution_user_files` used to be
+    //! The regression these cover: `restore_collaboration_user_files` used to be
     //! four `if let Some { if let Ok { assign } } else { reset }` blocks, which
     //! have THREE paths and only two assignments. A file that was present but
     //! unparseable fell through both, leaving workbook A's subscriptions,
@@ -5840,7 +5840,7 @@ mod distribution_user_file_restore_tests {
             ));
         }
         // ScriptExecuted is one of the ALWAYS-recorded events, so this lands
-        // without having to enable opt-in distribution auditing first.
+        // without having to enable opt-in collaboration auditing first.
         state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)).unwrap().record(
             calp::audit::AuditEvent::ScriptExecuted,
             "workbook A ran a script",
@@ -5905,11 +5905,11 @@ mod distribution_user_file_restore_tests {
     }
 
     #[test]
-    fn corrupt_distribution_files_reset_instead_of_inheriting_the_previous_workbook() {
+    fn corrupt_collaboration_files_reset_instead_of_inheriting_the_previous_workbook() {
         let state = state_of_workbook_a();
         let mut wb = workbook_b_with_corrupt_files();
 
-        restore_distribution_user_files(&state, &mut wb).expect("restore succeeds");
+        restore_collaboration_user_files(&state, &mut wb).expect("restore succeeds");
 
         assert!(
             state.subscriptions.read().unwrap().subscriptions.is_empty(),
@@ -5964,7 +5964,7 @@ mod distribution_user_file_restore_tests {
         wb.user_files.insert("working_copy_link.json".to_string(), json);
 
         let fresh = crate::create_app_state();
-        restore_distribution_user_files(&fresh, &mut wb).expect("restore succeeds");
+        restore_collaboration_user_files(&fresh, &mut wb).expect("restore succeeds");
         let restored = fresh.working_copy_link.read().unwrap().clone();
         assert_eq!(
             restored,
@@ -6004,11 +6004,11 @@ mod distribution_user_file_restore_tests {
     }
 
     #[test]
-    fn absent_distribution_files_reset_too() {
+    fn absent_collaboration_files_reset_too() {
         let state = state_of_workbook_a();
         let mut wb = Workbook::new();
 
-        restore_distribution_user_files(&state, &mut wb).expect("restore succeeds");
+        restore_collaboration_user_files(&state, &mut wb).expect("restore succeeds");
 
         assert!(state.subscriptions.read().unwrap().subscriptions.is_empty());
         assert!(state.override_layer.read().unwrap().overrides.is_empty());
@@ -6017,7 +6017,7 @@ mod distribution_user_file_restore_tests {
     }
 
     #[test]
-    fn well_formed_distribution_files_are_restored() {
+    fn well_formed_collaboration_files_are_restored() {
         let state = crate::create_app_state();
         let mut wb = Workbook::new();
 
@@ -6040,7 +6040,7 @@ mod distribution_user_file_restore_tests {
         wb.user_files
             .insert("audit_log.json".to_string(), serde_json::to_vec(&log).unwrap());
 
-        restore_distribution_user_files(&state, &mut wb).expect("restore succeeds");
+        restore_collaboration_user_files(&state, &mut wb).expect("restore succeeds");
 
         let subs = state.subscriptions.read().unwrap();
         assert_eq!(subs.subscriptions.len(), 1);
@@ -6054,7 +6054,7 @@ mod distribution_user_file_restore_tests {
     fn the_four_files_are_removed_from_user_files() {
         let state = crate::create_app_state();
         let mut wb = workbook_b_with_corrupt_files();
-        restore_distribution_user_files(&state, &mut wb).expect("restore succeeds");
+        restore_collaboration_user_files(&state, &mut wb).expect("restore succeeds");
         assert!(wb.user_files.is_empty(), "left over: {:?}", wb.user_files.keys());
     }
 }
@@ -6492,7 +6492,7 @@ mod script_authoring_persistence_tests {
         // arriving FROM DISK is a legacy orphan or a planted slot — the writer
         // never produces one — and either way no surface could list, adopt or
         // clear it, since the id died with the process that minted it.
-        // Sabotage: delete the `retain` in `restore_distribution_user_files`
+        // Sabotage: delete the `retain` in `restore_collaboration_user_files`
         // and this reds.
         let state = crate::create_app_state();
         let mut log = ScriptAuthoringLog::new();
@@ -6510,7 +6510,7 @@ mod script_authoring_persistence_tests {
             ScriptAuthoringFile::new(log).to_json_bytes().unwrap(),
         );
 
-        restore_distribution_user_files(&state, &mut wb).unwrap();
+        restore_collaboration_user_files(&state, &mut wb).unwrap();
 
         let stored = state.script_authoring.read().unwrap();
         assert!(
@@ -6555,7 +6555,7 @@ mod script_authoring_persistence_tests {
 
     #[test]
     fn a_corrupt_section_starts_empty_rather_than_inheriting_the_previous_document() {
-        // The `restore_distribution_user_files` contract: PRESENT-but-corrupt
+        // The `restore_collaboration_user_files` contract: PRESENT-but-corrupt
         // resets, exactly as ABSENT does. Seed the store with workbook A's
         // prompts first, so an assignment that never happens is visible.
         let state = crate::create_app_state();
@@ -6569,7 +6569,7 @@ mod script_authoring_persistence_tests {
         let mut wb = Workbook::new();
         wb.user_files
             .insert(SCRIPT_AUTHORING_FILE.to_string(), b"{not json".to_vec());
-        restore_distribution_user_files(&state, &mut wb).unwrap();
+        restore_collaboration_user_files(&state, &mut wb).unwrap();
 
         assert!(
             state.script_authoring.read().unwrap().is_empty(),
@@ -6593,7 +6593,7 @@ mod script_authoring_persistence_tests {
         seed_log(&state, previous);
 
         let mut wb = Workbook::new();
-        restore_distribution_user_files(&state, &mut wb).unwrap();
+        restore_collaboration_user_files(&state, &mut wb).unwrap();
 
         assert!(
             state.script_authoring.read().unwrap().is_empty(),
@@ -6622,7 +6622,7 @@ mod script_authoring_persistence_tests {
             ScriptAuthoringFile::new(log).to_json_bytes().unwrap(),
         );
 
-        restore_distribution_user_files(&state, &mut wb).unwrap();
+        restore_collaboration_user_files(&state, &mut wb).unwrap();
 
         let stored = state.script_authoring.read().unwrap();
         assert_eq!(stored["obj-1"].len(), MAX_RUNS_PER_SCRIPT);
@@ -6783,7 +6783,7 @@ mod default_geometry_and_sheet_view_tests {
 
     /// `new_file` must reset the view state too, or a new workbook inherits the
     /// zoom and split of the one that was open -- the class of bug the
-    /// distribution-user-file tests above exist for.
+    /// collaboration-user-file tests above exist for.
     #[test]
     fn resetting_to_a_new_workbook_clears_zoom_and_split() {
         let state = crate::create_app_state();

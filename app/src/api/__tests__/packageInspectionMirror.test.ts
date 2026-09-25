@@ -28,7 +28,7 @@ const rustSrc = fs.readFileSync(
   path.join(REPO, "app/src-tauri/src/calp_commands.rs"),
   "utf8",
 );
-const tsSrc = fs.readFileSync(path.join(__dirname, "../distribution.ts"), "utf8");
+const tsSrc = fs.readFileSync(path.join(__dirname, "../collaboration.ts"), "utf8");
 
 /** Field names of a `pub struct NAME { ... }`, comments stripped. */
 function rustStructFields(name: string): string[] {
@@ -41,7 +41,7 @@ function rustStructFields(name: string): string[] {
 /** Property names of an `export interface NAME { ... }`, comments stripped. */
 function tsInterfaceFields(name: string): string[] {
   const at = tsSrc.indexOf(`export interface ${name} {`);
-  expect(at, `export interface ${name} not found in distribution.ts`).toBeGreaterThan(-1);
+  expect(at, `export interface ${name} not found in collaboration.ts`).toBeGreaterThan(-1);
   const body = tsSrc.slice(at, tsSrc.indexOf("\n}", at));
   return [...body.matchAll(/^\s{2}(\w+)\??:/gm)].map((m) => m[1]);
 }
@@ -58,7 +58,7 @@ describe("ApplicationInspection mirrors the Rust struct the pre-pull review is b
       `these fields come back from inspect_package and the API type does not declare them, so ` +
         `nothing in the Subscribe review can render them. A package's contents that the user is ` +
         `not shown before subscribing arrive undisclosed. Add them to ApplicationInspection in ` +
-        `app/src/api/distribution.ts (camelCase, mirroring the Rust field exactly).`,
+        `app/src/api/collaboration.ts (camelCase, mirroring the Rust field exactly).`,
     ).toEqual([]);
   });
 

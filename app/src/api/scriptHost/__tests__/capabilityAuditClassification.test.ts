@@ -6,7 +6,7 @@
 //          server-side records it, so the broker's write is the only one).
 // CONTEXT: The original set was written in Wave A/B with eight entries and was
 //          never extended. Waves C-I added five more Rust gates
-//          (script_writeback, script_scheduler, script_distribution, the cube
+//          (script_writeback, script_scheduler, script_collaboration, the cube
 //          UDFs, and the bi.model diagnostics/batch actions) and every call
 //          through them wrote TWO audit rows for one call. The failure mode in
 //          the other direction is worse and is what this guard really protects:
@@ -90,7 +90,7 @@ describe("capability-call audit classification", () => {
     script_bi_model: "app/src-tauri/src/bi/model_editor.rs",
     bi_script_source: "app/src-tauri/src/bi/script_source.rs",
     script_writeback: "app/src-tauri/src/scripting/writeback_gateway.rs",
-    script_distribution: "app/src-tauri/src/scripting/distribution_gateway.rs",
+    script_collaboration: "app/src-tauri/src/scripting/collaboration_gateway.rs",
     script_scheduler: "app/src-tauri/src/scripting/scheduler.rs",
     cube_udf_value: "app/src-tauri/src/bi/cube.rs",
     cube_udf_kpi: "app/src-tauri/src/bi/cube.rs",

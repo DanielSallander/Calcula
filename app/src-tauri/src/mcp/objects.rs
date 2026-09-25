@@ -1741,7 +1741,7 @@ mod tests {
     #[test]
     fn record_mcp_tool_action_writes_an_always_on_entry_with_the_tool_fields() {
         let state = crate::create_app_state();
-        // Distribution auditing is OFF by default; script activity is recorded
+        // Collaboration auditing is OFF by default; script activity is recorded
         // regardless, which is exactly what these tools rely on.
         assert!(!state.audit_log.read().unwrap().enabled);
 

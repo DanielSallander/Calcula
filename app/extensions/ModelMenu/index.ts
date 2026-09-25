@@ -11,7 +11,7 @@
 //            BusinessIntel.   -> "PivotTable from Model..."   (order 30)
 //            Reports          -> "Report from Design Query...",
 //                                "Manage Reports..."          (order 31-32)
-//            Distribution     -> "Publish Model as Package..." (order 50)
+//            Collaboration    -> "Publish Model as Application..." (order 50)
 //          This extension only owns the menu shell and its section separators.
 //          Range-based pivot tables stay under Insert > PivotTable... — the
 //          Model menu is strictly for model-backed surfaces.

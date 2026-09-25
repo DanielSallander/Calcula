@@ -966,7 +966,7 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Approve or reject somebody else's submitted answer for an area you publish, changing what everyone downstream sees (only possible if this workbook can sign that application)" },
   // ---- distribution.subscribe (INBOUND) + distribution.publish (OUTBOUND):
   //      the .calp application loop, automated. Every row dispatches into the Rust
-  //      `script_distribution` gateway, which re-checks the ROW'S OWN capability
+  //      `script_collaboration` gateway, which re-checks the ROW'S OWN capability
   //      grant, refuses any workspace the user has not already configured,
   //      demands Ed25519 publisher-key possession before a workspace write, and
   //      then calls the SAME calp_* command the interactive UI calls — so a
@@ -1380,7 +1380,7 @@ export const SCRIPT_SUBSCRIBABLE_APP_EVENTS: ReadonlySet<string> = new Set([
   // script learns that answers arrived and never learns whose or what — the
   // answers stay behind cap.writebackListSubmissions, which Rust gates on
   // Ed25519 key possession per call. And it is NOT FREE: subscribing is what
-  // STARTS the publisher-inbox poll in @api/distribution.ts (nothing pushes into
+  // STARTS the publisher-inbox poll in @api/collaboration.ts (nothing pushes into
   // this process when somebody else's machine appends to a registry). The poll
   // is demand-driven, one pass a minute, bounded to regions this machine can
   // prove it publishes, and disclosed by getSubmissionWatchStatus().

@@ -36,8 +36,8 @@ function paneSentence(src: string): string | null {
 }
 
 const PROSE_MAPS = [
-  "extensions/Distribution/components/inspector/ScriptsSection.tsx",
-  "extensions/Distribution/components/SubscribeDialog.tsx",
+  "extensions/Collaboration/components/inspector/ScriptsSection.tsx",
+  "extensions/Collaboration/components/SubscribeDialog.tsx",
   "extensions/ScriptableObjects/index.ts",
 ];
 const ICON_MAPS = [

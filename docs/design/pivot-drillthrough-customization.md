@@ -38,7 +38,7 @@ something Excel can't do safely and Power BI can't do at all. It is mostly
   cells.
 - **Request type:** `DrillThroughRequest { pivotId, groupPath, maxRecords }`
   (`app/src-tauri/src/pivot/types.rs`).
-- **Persistence/distribution:** pivot config persists in `SavedBiPivotMetadata`
+- **Persistence/collaboration:** pivot config persists in `SavedBiPivotMetadata`
   (`pivot/types.rs:1508`), which is captured into `.calp` packages.
 - **Scripting:** Buttons already prove "object event → sandboxed script":
   `executeButtonAction` in `app/extensions/Controls/Button/interceptors.ts`

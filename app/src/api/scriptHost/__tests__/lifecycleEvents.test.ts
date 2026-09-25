@@ -1,6 +1,6 @@
 //! FILENAME: app/src/api/scriptHost/__tests__/lifecycleEvents.test.ts
 // PURPOSE: Pin what B5 exposed to scripts — the new bus events a script may
-//          subscribe to, the THINNING applied to the distribution event, and the
+//          subscribe to, the THINNING applied to the collaboration event, and the
 //          read-only context.package provenance mirror.
 
 import { describe, it, expect } from "vitest";
@@ -23,7 +23,7 @@ describe("SCRIPT_SUBSCRIBABLE_APP_EVENTS", () => {
     AppEvents.PACKAGE_UPDATED,
   ];
 
-  it("includes the sheet-collection, recalc and distribution events", () => {
+  it("includes the sheet-collection, recalc and collaboration events", () => {
     for (const name of added) {
       expect(SCRIPT_SUBSCRIBABLE_APP_EVENTS.has(name), name).toBe(true);
     }

@@ -185,7 +185,7 @@ export const ScriptableObjectEvents = {
  * the workbook between the prompt appearing and Allow being pressed wrote a
  * record for a set the screen never showed. That is not theoretical: the consent
  * dialog is non-modal, `AppEvents.PACKAGE_UPDATED` re-runs the whole load, and a
- * Distribution ▸ Update or a gateway pull fires it — so a publisher's refresh
+ * subscription refresh or a gateway pull fires it — so a publisher's refresh
  * landing while the user reads the screen made Allow approve the NEW code under
  * the OLD screen's authority. The transparency requirement is the exact
  * inverse: what is granted must be what was displayed.
@@ -284,7 +284,7 @@ const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
   // So these two can be REQUESTED here and never exercised. Saying only what
   // the capability means would overstate what allowing actually permits; say
   // what it asked for, then say that this surface refuses it. Same phrasing as
-  // Distribution/components/SubscribeDialog.tsx, which reached this conclusion
+  // Collaboration/components/SubscribeDialog.tsx, which reached this conclusion
   // first.
   "distribution.publish":
     "Publish this workbook to one of your workspaces, signed with YOUR publisher key, where everyone subscribed will receive it (a script that arrived in an application cannot actually do this — Calcula refuses it — but it asked)",
@@ -623,7 +623,7 @@ async function loadAndMountScripts(cause?: "open"): Promise<void> {
       // cleared on AFTER_OPEN but NOT by AppEvents.PACKAGE_UPDATED, which
       // re-runs this whole load — so for an application approved earlier in
       // the session (or hydrated as current when the workbook opened), a
-      // Distribution ▸ Update that brought a NEW or CHANGED macro was never
+      // subscription refresh that brought a NEW or CHANGED macro was never
       // looked at: nothing was recorded, the macro was then refused by Rust,
       // and no prompt would ever appear to fix it. Once the check ran on every
       // pass the set had no reader left, and a write-only cache of a security
@@ -1098,7 +1098,7 @@ async function activate(context: ExtensionContext): Promise<void> {
       //
       // Without this the handler re-derived the artifact set from scratch, so
       // Allow recorded whatever the workbook happened to hold at that instant —
-      // which a Distribution ▸ Update or a gateway pull landing while the prompt
+      // which a subscription refresh or a gateway pull landing while the prompt
       // was open had already changed. The user's yes then covered code they were
       // never shown.
       const pending = pendingGrants.get(packageName);

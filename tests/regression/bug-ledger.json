@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 134,
+  "nextId": 135,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4916,6 +4916,25 @@
         ]
       },
       "notes": "Found while chasing BUG-0130; the two compound (dead probes leave the model with stale widths, and a backstop that waits for measurements then has nothing fresh to wait for)."
+    },
+    {
+      "id": "BUG-0134",
+      "status": "open",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Found by the census behind the Distribution->Collaboration rename, while checking what the Application Inspector does with a typed location; confirmed by reading core/calp/src/workspace.rs."
+      },
+      "violation": {
+        "oracleId": "workspace-open-creates-directories",
+        "message": "LocalWorkspace::open (core/calp/src/workspace.rs) calls fs::create_dir_all on ANY path that does not exist. It runs on READ paths — the Application Inspector's typed location, calp_browse_workspace behind Subscribe and Open for Editing — so a mistyped path in a strictly read-only window creates an empty directory on the user's disk or a shared drive, and the browse then reports 'No applications found' about a folder the product just made. The same file's own rule, on ensure_marker, says `open` must not write because it runs on read paths too; it writes the directory itself.",
+        "severity": "low"
+      },
+      "whyNobodyNoticed": "Every publish path NEEDS the directory created, so the create-on-open behaviour looks correct from the write side, and a read of an existing workspace never exercises it. The only symptom is an empty folder appearing where someone mistyped.",
+      "repro": {
+        "description": "Collaboration > Application Inspector..., type C:\\Temp\\no-such-workspace in the location field, press Enter. The folder now exists and is empty. Fix direction: split `open` (must exist, for read paths) from an explicit create used only by the publish routes and calp_add_workspace."
+      }
     }
   ]
 }

@@ -134,7 +134,7 @@ export interface SheetContext {
    * The sheet's stable identity, for anything an extension REMEMBERS about a
    * sheet.
    *
-   * Distribution cached "which application did this sheet come from?" by index
+   * Collaboration cached "which application did this sheet come from?" by index
    * and refreshed it on open only. Drag a tab and the sheet menu then offered
    * `Detach from "vendor-kpis"` on a sheet that never came from an application,
    * while the real one — still wearing the badge, which keys on the id — showed

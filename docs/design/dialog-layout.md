@@ -178,7 +178,7 @@ Both are invisible in jsdom, which has no layout and no `ResizeObserver`:
    `bodyWidth` stays 0, so `twoPane` comes out true and a naive test passes on a broken dialog.
    The width is now keyed on `mode`, which no measurement can change, so `isNarrowBody` is a pure
    CONSUMER of the width — it can only collapse a dialog that is already wide, and collapsing
-   terminates. Pinned as a SHAPE by `extensions/Distribution/__tests__/publishDialogWidth.test.ts`.
+   terminates. Pinned as a SHAPE by `extensions/Collaboration/__tests__/publishDialogWidth.test.ts`.
 
 2. **Moving a dialog pinned its size.** `useDialogWindow` materialised the whole rect on the first
    interaction of *either* kind, so a drag-to-move froze the width — and every dialog whose CSS

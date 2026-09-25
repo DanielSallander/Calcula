@@ -1,7 +1,7 @@
 //! FILENAME: app/src/api/scriptHost/writebackWriteGuard.ts
 // PURPOSE: Close the DRAFT-CAPTURE BYPASS. A .calp writeback region is the
 //          publisher's input form: a human typing into one never writes the grid
-//          directly — the Distribution extension's commit guard intercepts the
+//          directly — the Collaboration extension's commit guard intercepts the
 //          keystroke, coerces the value to the region's DECLARED type, runs the
 //          publisher's advisory validator, saves a schema-validated draft
 //          through calp_save_writeback_draft, and only then returns
@@ -52,7 +52,7 @@ import {
   getWritebackRegions,
   WRITEBACK_INDEX_CHANGED_EVENT,
   type WritebackRegionEntry,
-} from "../distribution";
+} from "../collaboration";
 
 /** One grid write a script asked for, already resolved to a concrete sheet. */
 export interface ScriptCellWrite {

@@ -30,7 +30,7 @@ const code = (s: string): string =>
   s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 
 const FILE_API = code(read("core/lib/file-api.ts"));
-const DISTRIBUTION = code(read("api/distribution.ts"));
+const COLLABORATION = code(read("api/collaboration.ts"));
 
 describe("a replaced document announces through one helper", () => {
   it("open and new both call it", () => {
@@ -46,7 +46,7 @@ describe("a replaced document announces through one helper", () => {
     // `checkoutApplication`. That is precisely the shipped bug: the tab strip
     // keeps the previous document's sheets and the next click asks the backend
     // for an index that is gone.
-    expect(DISTRIBUTION).toMatch(/announceBackendStateReplaced\(\)/);
+    expect(COLLABORATION).toMatch(/announceBackendStateReplaced\(\)/);
   });
 
   it("the helper still refreshes the SHEET LIST, which is the tab a user can click", () => {
@@ -66,7 +66,7 @@ describe("a replaced document announces through one helper", () => {
     // drift: the helper gained SHEET_DISPLAY_FLAGS_CHANGED after it was written,
     // and a hand-rolled copy would not have.
     // SABOTAGE: replace the helper call with the four emits.
-    const checkout = DISTRIBUTION.match(
+    const checkout = COLLABORATION.match(
       /export async function checkoutApplication\([\s\S]*?\n\}/,
     );
     expect(checkout, "checkoutApplication moved or was renamed").toBeTruthy();

@@ -107,7 +107,7 @@ describe("package consent does not overstate distribution capabilities", () => {
   });
 
   it("uses the same refusal clause as the Subscribe review", () => {
-    const subscribeDialog = read("extensions/Distribution/components/SubscribeDialog.tsx");
+    const subscribeDialog = read("extensions/Collaboration/components/SubscribeDialog.tsx");
     const refusal = "a script that arrived in an application cannot actually do this — Calcula refuses it — but it asked";
     expect(subscribeDialog).toContain(refusal);
   });

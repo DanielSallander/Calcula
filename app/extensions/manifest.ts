@@ -98,7 +98,7 @@ import JsonViewExtension from "./JsonView";
 import ErrorCheckingExtension from "./ErrorChecking";
 import AutoRecoverExtension from "./AutoRecover";
 import DataFormExtension from "./DataForm";
-import DistributionExtension from "./Distribution";
+import CollaborationExtension from "./Collaboration";
 import EncryptionExtension from "./BuiltIn/Encryption";
 
 // Dev-only extensions
@@ -164,7 +164,7 @@ export const builtInExtensions: ExtensionModule[] = [
   // ExternalData creates the "externalData" menu — must load before CSV/BI
   ExternalDataExtension,
   // ModelMenu creates the "model" menu shell (Reports/BI/ModelEditor/
-  // CubeFormulas/Distribution contribute items; order-independent via the
+  // CubeFormulas/Collaboration contribute items; order-independent via the
   // menu registry's dynamic-item merge)
   ModelMenuExtension,
   CsvImportExportExtension,
@@ -233,7 +233,7 @@ export const builtInExtensions: ExtensionModule[] = [
   // and after Charts, whose context menu it contributes "Explain this chart" to.
   InsightsExtension,
   JsonViewExtension,
-  DistributionExtension,
+  CollaborationExtension,
   // Workbook Encryption (File-menu "Encrypt with Password…" + unlock dialog)
   EncryptionExtension,
   // Quick Access (loads last — needs all menu items registered for command palette)

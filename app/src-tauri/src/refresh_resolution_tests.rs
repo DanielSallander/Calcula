@@ -209,7 +209,7 @@ fn the_apply_is_pinned_to_the_versions_the_preview_showed() {
 
     // The dialog's half: it has to send them.
     const DIALOG: &str =
-        include_str!("../../extensions/Distribution/components/RefreshPreviewDialog.tsx");
+        include_str!("../../extensions/Collaboration/components/RefreshPreviewDialog.tsx");
     assert!(
         DIALOG.contains("previewedVersions"),
         "RefreshPreviewDialog must echo back what it showed; without it the \

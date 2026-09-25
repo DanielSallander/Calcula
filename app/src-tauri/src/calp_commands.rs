@@ -172,8 +172,8 @@ pub struct PullParams {
     /// REFUSE to create a TOFU pin: the application must already be pinned on this
     /// machine or the pull fails.
     ///
-    /// Set ONLY by the scripted distribution gateway
-    /// (`scripting/distribution_gateway.rs`, `Action::Pull`). Subscribing is the
+    /// Set ONLY by the scripted collaboration gateway
+    /// (`scripting/collaboration_gateway.rs`, `Action::Pull`). Subscribing is the
     /// one .calp flow allowed to mint a pin, and what makes that sound is that a
     /// human was shown the publisher and said yes. A script calling
     /// `cap.pkgPull` is not that human: it would pin whatever key the workspace
@@ -1147,7 +1147,7 @@ pub fn calp_publish(
             None => {
                 return Err(format!(
                     "CALP_PUSH_NOT_LINKED: This workbook is not a working copy of '{}'. \
-                     Open the application for editing first (Distribution > Open Application \
+                     Open the application for editing first (Collaboration > Open Application \
                      for Editing), or publish this workbook as a NEW application.",
                     params.package_name
                 ));
@@ -1181,7 +1181,7 @@ pub fn calp_publish(
                  are a local copy with their own identity, so publishing from here would look \
                  to every other subscriber like every sheet was deleted and replaced, and \
                  would discard their local edits. To change the application itself, use \
-                 Distribution > Open Application for Editing.",
+                 Collaboration > Open Application for Editing.",
                 params.package_name, params.registry_path
             ));
         }
@@ -4729,7 +4729,7 @@ pub fn calp_checkout(
                  workbook can hold one role per application, not both — a subscribed copy's \
                  sheets carry their own local identity, and editing them as the application \
                  itself is exactly the confusion that would produce. Remove the subscription \
-                 first (Distribution > Manage Subscriptions), or open the application in a \
+                 first (Collaboration > Manage Subscriptions), or open the application in a \
                  new window.",
                 params.package_name
             ));
@@ -4878,11 +4878,11 @@ pub struct HoldBackCellsResponse {
 /// folded into `calp_publish`: doing it there would mean restructuring that
 /// command's 190-line critical region so an un-revert ran on each of its six
 /// `?` sites, and the guard that pins its shape
-/// (`distributionGateway.test.ts`, which slices the source between
+/// (`collaborationGateway.test.ts`, which slices the source between
 /// `pub fn calp_publish(` and `let assembly = assemble_publish_workbook`) goes
 /// BLIND rather than red if that region moves. A `try/finally` in one caller is
 /// a stronger guarantee than six hand-written error paths, and leaves the most
-/// consequential command in the distribution stack untouched.
+/// consequential command in the collaboration stack untouched.
 ///
 /// WHY REVERT AT ALL, rather than substituting values as the artifact is
 /// written. Nothing on the receiving side ever recalculates: neither
@@ -5634,7 +5634,7 @@ pub fn calp_inspect_application(
     // PASSIVE -- VerifyOnly. This is the "Review" button in SubscribeDialog, the
     // step whose entire purpose is "nothing is materialized until the user
     // explicitly accepts", and it is additionally script-reachable through
-    // `distribution_gateway::Action::InspectPackage`. Neither reviewing an
+    // `collaboration_gateway::Action::InspectPackage`. Neither reviewing an
     // application nor a script asking about one is a decision to trust its
     // publisher, so first contact reports `notPinned` and writes nothing to the
     // pin store. The publisher name and key are still returned in full -- that
@@ -8598,7 +8598,7 @@ pub fn calp_refresh_apply(
 
 /// The display name of the current subscriber identity, for an audit `user`
 /// field (best-effort; empty when no identity is established).
-/// Record one distribution audit entry.
+/// Record one collaboration audit entry.
 ///
 /// `pub(crate)` so `calp_environments` records through the same path rather
 /// than re-deriving the `deliberately_clean(AuditTrail)` effect and the
@@ -8651,7 +8651,7 @@ fn summarize_ids<'a>(ids: impl Iterator<Item = &'a str>) -> String {
 ///
 /// Best-effort and non-fatal: a poisoned audit mutex must never fail a refresh
 /// that has already applied. Note this still honors the audit log's `enabled`
-/// flag (it is a distribution event, not an always-recorded script event), so
+/// flag (it is a collaboration event, not an always-recorded script event), so
 /// it is a record for workbooks that opted in — not a user-facing notice.
 fn record_writeback_invalidated(state: &AppState, description: &str) {
     let user = audit_user(state);
@@ -9578,7 +9578,7 @@ fn calp_skip_reason(err: &calp::error::CalpError) -> &'static str {
 /// thread, and by then the user may have opened a DIFFERENT workbook. Installing
 /// a set of region declarations that belongs to a document which is no longer
 /// open is the same class of defect as inheriting the previous workbook's
-/// `subscriptions.json` (persistence.rs) — one workbook's distribution state
+/// `subscriptions.json` (persistence.rs) — one workbook's collaboration state
 /// governing another's cells. Every rebuild request takes a ticket here; a
 /// worker installs only if its ticket is still the newest.
 static WRITEBACK_REBUILD_SEQ: std::sync::atomic::AtomicU64 =
@@ -9647,7 +9647,7 @@ pub(crate) fn rebuild_writeback_index_deferring_http(state: &AppState) {
         // shell/bootstrap.ts; the second event is for the Subscriptions /
         // Writeback panes.
         let _ = app.emit("grid:refresh", ());
-        let _ = app.emit("distribution:writeback-index-changed", ());
+        let _ = app.emit("collaboration:writeback-index-changed", ());
     });
 }
 
@@ -9727,7 +9727,7 @@ fn rebuild_writeback_index_inner(
         // manifest copy; on failure, skip (never install unsigned decls).
         //
         // REQUIRES AN EXISTING PIN. This was the highest-severity pin site in
-        // the whole distribution stack: opening a `.cala` -- a file that arrives
+        // the whole collaboration stack: opening a `.cala` -- a file that arrives
         // by email -- walked the subscription list the FILE names and pinned a
         // publisher key for every (application, workspace) pair in it, with no user
         // gesture whatsoever. A crafted workbook naming `acme.finance` at an
@@ -10448,7 +10448,7 @@ pub fn calp_get_writeback_layer(
 /// Reconcile local submission states from the workspace.
 ///
 /// TAKES `&FileState`, NOT A READY-MADE `DocumentEffect`, ON PURPOSE. This runs on
-/// every workbook load (the Distribution extension calls `calp_reconcile_writeback`
+/// every workbook load (the Collaboration extension calls `calp_reconcile_writeback`
 /// during bootstrap), and `DocumentEffect::mutates` dirties AT CONSTRUCTION. Building
 /// the effect up front therefore marked EVERY opened workbook as unsaved before the
 /// user touched anything — the close prompt fired on a document that had merely been
@@ -11888,8 +11888,8 @@ pub fn calp_export_application_html(
 /// every subscriber holding the workbook, so the promise was not kept.
 /// "They can read the shared workspace folder anyway" is not a defense: the
 /// app must not be the tool that does it.
-/// `pub(crate)` so the SCRIPT distribution gateway
-/// (`scripting::distribution_gateway`) can run the SAME publisher gate before
+/// `pub(crate)` so the SCRIPT collaboration gateway
+/// (`scripting::collaboration_gateway`) can run the SAME publisher gate before
 /// dispatching a scripted publish — the alternative was a second ownership
 /// check written from scratch, which is exactly the drift this function exists
 /// to prevent.
@@ -19540,7 +19540,7 @@ mod tofu_pin_policy_guard_tests {
             ("managed_policy.rs", include_str!("managed_policy.rs")),
             ("bi/writeback.rs", include_str!("bi/writeback.rs")),
             ("bi/writeback_source.rs", include_str!("bi/writeback_source.rs")),
-            ("scripting/distribution_gateway.rs", include_str!("scripting/distribution_gateway.rs")),
+            ("scripting/collaboration_gateway.rs", include_str!("scripting/collaboration_gateway.rs")),
         ] {
             let prod = scan(src.split("#[cfg(test)]").next().unwrap());
             assert!(
@@ -19582,8 +19582,8 @@ mod tofu_pin_policy_guard_tests {
             ("bi/writeback.rs", include_str!("bi/writeback.rs")),
             ("bi/writeback_source.rs", include_str!("bi/writeback_source.rs")),
             (
-                "scripting/distribution_gateway.rs",
-                include_str!("scripting/distribution_gateway.rs"),
+                "scripting/collaboration_gateway.rs",
+                include_str!("scripting/collaboration_gateway.rs"),
             ),
         ] {
             let prod = scan(src.split("#[cfg(test)]").next().unwrap());

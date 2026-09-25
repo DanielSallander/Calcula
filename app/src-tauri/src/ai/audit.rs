@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn the_event_is_recorded_even_with_distribution_auditing_switched_off() {
+    fn the_event_is_recorded_even_with_collaboration_auditing_switched_off() {
         // A workbook that never subscribed to anything has `enabled: false`,
         // and that is precisely the workbook where someone later asks who wrote
         // a formula. If this ever goes opt-in, the trail is empty in the common

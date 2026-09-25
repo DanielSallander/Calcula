@@ -3820,7 +3820,7 @@ const WRITEBACK_REVIEW_STATES: ReadonlySet<string> = new Set([
 ]);
 
 /** The wire shape of one submitted value (mirrors SubmissionValue in
- *  api/distribution.ts and calp::writeback::SubmissionValue in Rust). */
+ *  api/collaboration.ts and calp::writeback::SubmissionValue in Rust). */
 function submissionValueError(v: unknown): string | null {
   if (typeof v !== "object" || v === null || Array.isArray(v)) {
     return "value must be an object like { type: \"number\", value: 42 }";
@@ -3927,7 +3927,7 @@ export const vWritebackReview: Validator = ([decision]) => {
 // ============================================================================
 //
 // Every shape here is a CHEAP pre-flight. The authoritative gate is the Rust
-// `script_distribution` gateway, which re-checks the ACTION'S OWN capability
+// `script_collaboration` gateway, which re-checks the ACTION'S OWN capability
 // (outbound and inbound never share a grant), refuses any registry the user has
 // not already configured, demands Ed25519 publisher-key possession before a
 // registry write, rate-limits per bucket, and then dispatches into the very same

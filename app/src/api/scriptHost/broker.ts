@@ -258,7 +258,7 @@ function checkPolicy(handle: ScriptHandle, method: string, args: unknown[]): Met
  *
  * THIS SET WENT STALE ONCE. It was written in Wave A/B and never extended, so
  * every gate Waves C-I added (script_writeback, script_scheduler,
- * script_distribution, the cube UDFs, the bi.model diagnostics/batch actions)
+ * script_collaboration, the cube UDFs, the bi.model diagnostics/batch actions)
  * double-recorded: one row from the Rust gate, one from the broker, for the same
  * call. The guard test now fails when a `cap.*` row is neither listed here nor
  * listed as broker-audited below, so the next gate cannot be forgotten.
@@ -287,19 +287,19 @@ const SERVER_AUDITED_METHODS: ReadonlyMap<string, string> = new Map([
   ["cap.writebackPreview", "script_writeback"],
   ["cap.writebackListSubmissions", "script_writeback"],
   ["cap.writebackReview", "script_writeback"],
-  // script_distribution: same shape — step (8) audits both outcomes and every
+  // script_collaboration: same shape — step (8) audits both outcomes and every
   // earlier refusal.
-  ["cap.pkgListRegistries", "script_distribution"],
-  ["cap.pkgListSubscriptions", "script_distribution"],
-  ["cap.pkgBrowse", "script_distribution"],
-  ["cap.pkgInspect", "script_distribution"],
-  ["cap.pkgPull", "script_distribution"],
-  ["cap.pkgRefreshPreview", "script_distribution"],
-  ["cap.pkgRefreshApply", "script_distribution"],
-  ["cap.pkgPublishPreview", "script_distribution"],
-  ["cap.pkgNextVersion", "script_distribution"],
-  ["cap.pkgPublish", "script_distribution"],
-  ["cap.pkgPublishModel", "script_distribution"],
+  ["cap.pkgListRegistries", "script_collaboration"],
+  ["cap.pkgListSubscriptions", "script_collaboration"],
+  ["cap.pkgBrowse", "script_collaboration"],
+  ["cap.pkgInspect", "script_collaboration"],
+  ["cap.pkgPull", "script_collaboration"],
+  ["cap.pkgRefreshPreview", "script_collaboration"],
+  ["cap.pkgRefreshApply", "script_collaboration"],
+  ["cap.pkgPublishPreview", "script_collaboration"],
+  ["cap.pkgNextVersion", "script_collaboration"],
+  ["cap.pkgPublish", "script_collaboration"],
+  ["cap.pkgPublishModel", "script_collaboration"],
   // script_scheduler records the three REGISTRATION ops on both outcomes.
   ["cap.scheduleEvery", "script_scheduler (every)"],
   ["cap.scheduleAt", "script_scheduler (at)"],

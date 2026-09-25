@@ -140,7 +140,7 @@ impl HttpWorkspace {
     /// never configured as a workspace. It cannot change the HOST (the authority
     /// is fixed by base_url and redirects are disabled), so this is a bounded
     /// escape rather than an SSRF — but "only workspaces you configured" is the
-    /// rule the whole script-distribution gateway rests on, and a rule enforced
+    /// rule the whole script collaboration gateway rests on, and a rule enforced
     /// on one transport and not the other is not enforced.
     ///
     /// Applied to application name, version, and every segment of an artifact's

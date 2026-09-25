@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 133 | Open: 2 | Triaged: 0 | Fixed: 131 | Other: 0
+Total: 134 | Open: 3 | Triaged: 0 | Fixed: 131 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1625,3 +1625,12 @@ In every dev build (React 18 StrictMode, i.e. every E2E run and `tauri dev`) the
 **Triage:** app (confidence high) — Two owners for one observer's lifetime: the callback ref (attach/null) and an unmount-only effect. Under StrictMode only one of them is replayed.
 **Fix:** fixed — Removed the unmount-only disconnect effects from SectionCell and useSectionFit; the callback refs' own null call is the unmount path (React calls it). Verified live: the diagnostic's three Table Design mounts all fit the band and every cluster reported its real natural width.
   Files: app/src/shell/components/SectionCell.tsx, app/src/shell/components/useSectionFit.ts, app/src/shell/components/__tests__/sectionWidthProbe.test.tsx
+
+## BUG-0134 `[open]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** workspace-open-creates-directories
+
+LocalWorkspace::open (core/calp/src/workspace.rs) calls fs::create_dir_all on ANY path that does not exist. It runs on READ paths — the Application Inspector's typed location, calp_browse_workspace behind Subscribe and Open for Editing — so a mistyped path in a strictly read-only window creates an empty directory on the user's disk or a shared drive, and the browse then reports 'No applications found' about a folder the product just made. The same file's own rule, on ensure_marker, says `open` must not write because it runs on read paths too; it writes the directory itself.
+
+**Repro:** Collaboration > Application Inspector..., type C:\Temp\no-such-workspace in the location field, press Enter. The folder now exists and is empty. Fix direction: split `open` (must exist, for read paths) from an explicit create used only by the publish routes and calp_add_workspace.

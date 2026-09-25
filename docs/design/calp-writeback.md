@@ -26,7 +26,7 @@ to ensure the necessary doors were left open.
 
 ## Motivation
 
-The v1.0 distribution system is read-only from the consumer perspective:
+The v1.0 collaboration system is read-only from the consumer perspective:
 subscribers consume published applications and may override locally, but
 contributions do not flow back to the publisher or to other subscribers.
 Writeback extends the model to support collaborative input: regions of a
@@ -393,7 +393,7 @@ Writeback cells are visually distinct from regular cells and from overrides:
   read-only treatment with explanatory tooltip
 
 The visual treatment is delivered through the existing style interceptor
-pipeline, registered by the Distribution extension. In v1.0 the interceptor
+pipeline, registered by the Collaboration extension. In v1.0 the interceptor
 is registered with a no-op return for writeback cells; v1.1 fills in the
 visual.
 
@@ -483,13 +483,13 @@ For v1.0 to leave doors open for v1.1 writeback:
 1. The `.calp` manifest format reserves a `writeback_regions` field. v1.0
    parsers must accept, validate, and round-trip the field (including
    opaque sub-fields).
-2. The edit/range guards registered by the Distribution extension must refuse
+2. The edit/range guards registered by the Collaboration extension must refuse
    edits on any cell falling within a declared writeback region, even though
    v1.0 has no other writeback behavior. Backend mutation paths that bypass
    frontend guards (find-and-replace at minimum) must consult the same index.
 
    > **SUPERSEDED 2026-08-16 by v1.1 Phase 14 — deliberately, not by drift.**
-   > The EDIT guard is gone: `app/extensions/Distribution/index.ts:392-394`
+   > The EDIT guard is gone: `app/extensions/Collaboration/index.ts:392-394`
    > carries the marker "writeback cells ARE editable (subscriber fills them).
    > No edit guard block needed." A commit guard took its place
    > (`index.ts:415`): it coerces the typed value by the region's DECLARED

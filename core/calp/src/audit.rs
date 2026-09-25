@@ -108,7 +108,7 @@ pub enum AuditEvent {
 }
 
 impl AuditEvent {
-    /// Events recorded EVEN WHEN the (distribution) audit log is disabled.
+    /// Events recorded EVEN WHEN the (collaboration) audit log is disabled.
     ///
     /// The Transparency pillar requires that a user never has to wonder what
     /// touched their data, so two classes are always on:
@@ -132,7 +132,7 @@ impl AuditEvent {
     ///   precisely the question asked after something went wrong — i.e. when
     ///   nobody thought to turn logging on first.
     ///
-    /// The remaining distribution events (subscribe/refresh/override/…) stay
+    /// The remaining collaboration events (subscribe/refresh/override/…) stay
     /// opt-in via the `enabled` flag.
     pub fn is_always_recorded(&self) -> bool {
         matches!(
@@ -144,11 +144,11 @@ impl AuditEvent {
                 | AuditEvent::WritebackInvalidated
                 | AuditEvent::Published
                 // Protection changes are a security boundary moving; recording
-                // them only when distribution auditing happens to be on would
+                // them only when collaboration auditing happens to be on would
                 // make the trail useless exactly when it matters.
                 | AuditEvent::ProtectionChanged
                 // Provenance of generated content. A workbook that never
-                // subscribed to anything has distribution auditing off, and that
+                // subscribed to anything has collaboration auditing off, and that
                 // is exactly the workbook where a colleague later asks "did a
                 // person write this formula or did a model?". Opt-in would make
                 // the trail empty in the common case.
@@ -158,7 +158,7 @@ impl AuditEvent {
 }
 
 /// Default rolling cap for the audit log when one is not explicitly set, so the
-/// always-on script-activity trail (and a default-on distribution log) cannot
+/// always-on script-activity trail (and a default-on collaboration log) cannot
 /// grow unbounded in the workbook. Mirrors the frontend broker ring capacity.
 pub const DEFAULT_MAX_ENTRIES: usize = 2000;
 
@@ -299,7 +299,7 @@ mod tests {
             3,
             "writeback egress/review/invalidation must not depend on the opt-in flag"
         );
-        // Distribution bookkeeping stays opt-in.
+        // Collaboration bookkeeping stays opt-in.
         log.record(AuditEvent::Refresh, "r", "user", "2026-01-01T00:00:00Z");
         assert_eq!(log.entry_count(), 3);
     }
@@ -404,11 +404,11 @@ mod tests {
     #[test]
     fn script_events_record_even_when_disabled() {
         // Transparency: a DISABLED (default) log still records script activity,
-        // but NOT opt-in distribution events.
+        // but NOT opt-in collaboration events.
         let mut log = AuditLog::new();
         assert!(!log.enabled);
-        log.record(AuditEvent::Subscribe, "distribution event", "user", "2026-01-01T00:00:00Z");
-        assert_eq!(log.entry_count(), 0, "distribution events stay opt-in");
+        log.record(AuditEvent::Subscribe, "collaboration event", "user", "2026-01-01T00:00:00Z");
+        assert_eq!(log.entry_count(), 0, "collaboration events stay opt-in");
         log.record(AuditEvent::ScriptExecuted, "a script wrote cells", "local", "2026-01-01T00:00:00Z");
         assert_eq!(log.entry_count(), 1, "script activity is always recorded");
     }

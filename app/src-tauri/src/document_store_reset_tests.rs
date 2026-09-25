@@ -518,10 +518,10 @@ fn scripts_notebooks_and_pane_controls_do_not_survive_the_document() {
     );
 }
 
-/// The distribution stores — subscriptions, overrides, the audit log, the
+/// The collaboration stores — subscriptions, overrides, the audit log, the
 /// writeback layer and the draft regions — all reach the archive, and all reset.
 #[test]
-fn the_distribution_stores_do_not_survive_the_document() {
+fn the_collaboration_stores_do_not_survive_the_document() {
     let s = Stores::new();
     s.state
         .subscriptions

@@ -1061,7 +1061,7 @@ const NOT_DOCUMENT_REPLACING: &[(&str, &str)] = &[
     ("bi_refresh_connection", "re-fetches one connection's tables"),
     ("create_report", "adds a report"),
     ("refresh_report", "re-materializes one report"),
-    ("script_distribution", "the sandboxed gateway for the `.calp` script API; every route it reaches is one of the commands already classified here"),
+    ("script_collaboration", "the sandboxed gateway for the `.calp` script API; every route it reaches is one of the commands already classified here"),
 ];
 
 /// NOTHING BECOMES A THIRD DOCUMENT-REPLACING PATH WITHOUT A DECISION.

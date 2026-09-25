@@ -80,13 +80,20 @@ is never written while merely reading — a workspace on a read-only share has t
 stay browsable, so `LocalWorkspace::open` tolerates its absence.
 
 **No dialog offers a folder picker as a FALLBACK.** Because publishing into a
-location is what makes it a workspace, every workspace a subscriber or an editor
-could reach already has a pointer file — Subscribe and Open-for-editing therefore
-offer the file picker alone. The two PUBLISH dialogs each keep a second gesture
+location is what makes it a workspace, every workspace a subscriber, an editor or
+a reviewer could reach already has a pointer file — Subscribe, Open-for-editing
+and the Application Inspector therefore offer the file picker alone. The
+Inspector was the exception until 2026-09-25: this paragraph listed the dialogs
+its author knew about, the Inspector is a separate window, and it kept a raw
+folder picker that nobody had decided it should have. The rule is now a scan
+(`workspacePickerSeam.test.ts`) that fails on any native open picker in the
+extension outside the seam, rather than a list. The Inspector's typed field still
+accepts an application or version folder and walks up from it, which is the one
+thing its folder picker did that the file picker cannot. The two PUBLISH dialogs each keep a second gesture
 ("New workspace…") for the one case a file picker cannot serve: you cannot aim it
 at a `workspace.calcula` that has not been written yet, and that publish is what
 writes it. Both go through the `pickWorkspace` seam
-(`app/extensions/Distribution/lib/pickWorkspace.ts`); the model dialog used to
+(`app/extensions/Collaboration/lib/pickWorkspace.ts`); the model dialog used to
 hand-roll its own directory picker, which is how it came to offer a folder
 gesture only. The typed field remains everywhere, because an `https://` workspace
 is reached by URL and never by a picker at all.
@@ -172,7 +179,7 @@ a while the only surface that said which you held was the Working copy section
 of the Application Explorer — a sidebar you had to go and open. A developer
 working both sides at once loses track of which window is which, and finds out
 from a refusal. So the status bar carries a permanent badge
-(`DistributionRoleStatusItem`): *"✎ Working copy: sales-report v1.0.0"*, *"↓
+(`CollaborationRoleStatusItem`): *"✎ Working copy: sales-report v1.0.0"*, *"↓
 Subscribed: vendor-kpis v2.1.0"*, both when both apply, and nothing at all for a
 standalone workbook — a chip on every new file would be noise, and the status bar
 is shared space. A stale working copy says so ("behind"), because that is the
@@ -188,7 +195,7 @@ breaking.
 "what is this workbook"; a sheet that came from an application sits beside your
 own, looks identical, and behaves oppositely on the one gesture that matters. So
 the tab carries the same glyph the chip does, through a new general seam
-(`@api/sheetTabDecorations`) rather than the shell reaching into Distribution: any
+(`@api/sheetTabDecorations`) rather than the shell reaching into Collaboration: any
 extension may mark any sheet for any reason.
 
 Two marks, because there are two ways a sheet is not simply yours and they point
@@ -542,7 +549,7 @@ second one's *read* was stale.
 
 **One developer, adding a button and a formula.**
 
-1. *Distribution ▸ Open Application for Editing…* → pick workspace,
+1. *Collaboration ▸ Open Application for Editing…* → pick workspace,
    application, version (default: latest). The application materializes into a
    fresh workbook at full subscriber fidelity, keeping its sheet ids. The
    workbook is now a working copy based on v1.2.0.

@@ -172,7 +172,7 @@ import type {
   ScriptDialogTextOptions,
 } from "./scriptDialogSpec";
 import { AppEvents, emitAppEvent, onAppEvent, type ApplicationUpdatedPayload } from "../events";
-import type { PullResponse } from "../distribution";
+import type { PullResponse } from "../collaboration";
 import {
   registerLifecycleGuard,
   type LifecycleAction,
@@ -3823,7 +3823,7 @@ function scheduleOwnerOf(definition: HostMountDefinition): {
  */
 async function announcePulledPackage(response: PullResponse | null): Promise<void> {
   if (response) {
-    const { applyPulledCustomObjects } = await import("../distribution");
+    const { applyPulledCustomObjects } = await import("../collaboration");
     await applyPulledCustomObjects(response);
   }
   const payload: ApplicationUpdatedPayload = response
@@ -5053,7 +5053,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // Windows user name by calp::identity_provider) — one identity for the
       // whole app, read through the existing calp_get_subscriber_identity
       // command. Nothing else from the identity is disclosed (no machine id).
-      const dist = await import("../distribution");
+      const dist = await import("../collaboration");
       return (await dist.getSubscriberIdentity()).displayName;
     }
     case "api.getViewOption": {
@@ -6393,7 +6393,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     }
     // ---- distribution.subscribe / distribution.publish: the .calp package
     // loop, automated. Everything routes through ONE Rust gateway
-    // (script_distribution) which re-checks the ACTION'S OWN capability (the two
+    // (script_collaboration) which re-checks the ACTION'S OWN capability (the two
     // are never one grant), refuses a registry the user has not configured,
     // gates a registry write on Ed25519 publisher-key possession, rate-limits
     // per bucket, and dispatches into the very same calp_* commands the
@@ -6409,7 +6409,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     case "cap.pkgListSubscriptions":
     case "cap.pkgRefreshPreview": {
       const { invokeBackend } = await import("../backend");
-      return invokeBackend("script_distribution", {
+      return invokeBackend("script_collaboration", {
         scriptId: definition.id,
         action:
           method === "cap.pkgListRegistries"
@@ -6423,7 +6423,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     case "cap.pkgBrowse": {
       const [registry] = args as [string];
       const { invokeBackend } = await import("../backend");
-      return invokeBackend("script_distribution", {
+      return invokeBackend("script_collaboration", {
         scriptId: definition.id,
         // THE WIRE NAME, which is a contract and not a vocabulary choice.
         // The rename to the application/workspace vocabulary moved this to
@@ -6443,7 +6443,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         string | null | undefined,
       ];
       const { invokeBackend } = await import("../backend");
-      return invokeBackend("script_distribution", {
+      return invokeBackend("script_collaboration", {
         scriptId: definition.id,
         // The wire name. See `cap.pkgBrowse` above: the vocabulary rename
         // broke this verb the same way.
@@ -6465,7 +6465,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         boolean | undefined,
       ];
       const { invokeBackend } = await import("../backend");
-      const response = await invokeBackend<PullResponse>("script_distribution", {
+      const response = await invokeBackend<PullResponse>("script_collaboration", {
         scriptId: definition.id,
         action: "pull",
         payload: {
@@ -6485,7 +6485,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     }
     case "cap.pkgRefreshApply": {
       const { invokeBackend } = await import("../backend");
-      const result = await invokeBackend("script_distribution", {
+      const result = await invokeBackend("script_collaboration", {
         scriptId: definition.id,
         action: "refreshApply",
         payload: {},
@@ -6496,7 +6496,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     case "cap.pkgPublishPreview": {
       const [sheetIndices] = args as [number[] | undefined];
       const { invokeBackend } = await import("../backend");
-      return invokeBackend("script_distribution", {
+      return invokeBackend("script_collaboration", {
         scriptId: definition.id,
         action: "publishPreview",
         payload: { sheetIndices: sheetIndices ?? null },
@@ -6505,7 +6505,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     case "cap.pkgNextVersion": {
       const [registry, packageName, bump] = args as [string, string, string];
       const { invokeBackend } = await import("../backend");
-      const result = await invokeBackend<{ version: string }>("script_distribution", {
+      const result = await invokeBackend<{ version: string }>("script_collaboration", {
         scriptId: definition.id,
         action: "nextVersion",
         payload: { registryPath: registry, packageName, bump },
@@ -6520,7 +6520,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // them.
       const [spec] = args as [Record<string, unknown>];
       const { invokeBackend } = await import("../backend");
-      return invokeBackend("script_distribution", {
+      return invokeBackend("script_collaboration", {
         scriptId: definition.id,
         action: method === "cap.pkgPublish" ? "publish" : "publishModel",
         payload:
@@ -14678,7 +14678,7 @@ function wireAppEventForwarder(mw: MountedWorker, hook: string, eventName: strin
   // imported; the release closes over the promise so an unmount that lands
   // first still releases.
   if (eventName === AppEvents.WRITEBACK_SUBMISSION_RECEIVED) {
-    const releasing = import("../distribution")
+    const releasing = import("../collaboration")
       .then((mod) => mod.acquireSubmissionWatch())
       .catch(() => null);
     addForwarder(mw, hook, () => {

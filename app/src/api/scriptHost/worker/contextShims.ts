@@ -981,7 +981,7 @@ interface BiConnectionSummary {
   measureCount?: number;
 }
 
-// Writeback shapes (mirror api/distribution.ts; defined inline so the worker
+// Writeback shapes (mirror api/collaboration.ts; defined inline so the worker
 // bundle never imports the Tauri backend).
 
 /** One value a script fills into a subscribed package's input cell. */

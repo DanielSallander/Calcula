@@ -24,7 +24,7 @@ export type PrivilegedCapability =
   | "mcpServer"
   | "localRuntime"
   | "biData"
-  | "distributionTrust";
+  | "collaborationTrust";
 
 /**
  * Backend commands that must NEVER be callable by a non-trusted (third-party)
@@ -190,14 +190,14 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     // key possession, and rate-limits per bucket. A direct call would hand a
     // non-trusted extension every respondent's submitted answers.
     "script_writeback",
-    // The .calp DISTRIBUTION gateway. Reachable by scripts ONLY through the
+    // The .calp COLLABORATION gateway. Reachable by scripts ONLY through the
     // broker's consent-gated cap.pkg* methods; Rust re-checks the action's own
     // capability (distribution.publish vs distribution.subscribe — never one
     // grant), refuses any registry the user has not configured, and demands
     // Ed25519 publisher-key possession before a registry write. A direct call
     // would let a non-trusted extension pull attacker-chosen packages into the
     // workbook and publish under the user's signing identity.
-    "script_distribution",
+    "script_collaboration",
     // The persistent scheduler. Reachable by scripts ONLY through the broker's
     // consent-gated cap.schedule* methods; Rust re-checks the `schedule` grant
     // at every firing and requires the owning script to be mounted. The reason
@@ -222,7 +222,7 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "bi_model_connect",
   ],
   // WHICH REGISTRIES THIS MACHINE TRUSTS, and the one subscribe path that skips
-  // verification entirely. `script_distribution` refuses any registry the user
+  // verification entirely. `script_collaboration` refuses any registry the user
   // did not configure, and that refusal is the reason its signature/TOFU/
   // integrity checks mean anything — so the commands that EDIT the configured
   // set have to be at least as protected as the gateway they guard. A
@@ -233,7 +233,7 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
   // calp_dev_subscribe / calp_dev_refresh are here for a blunter reason: they
   // subscribe to an ARBITRARY local .cala path with no signature, no publisher
   // key and no TOFU pin. That is the sharpest code-delivery channel in the
-  // distribution system; it is human-only in the script gateway and must be
+  // collaboration system; it is human-only in the script gateway and must be
   // human-only here too. calp_import_overrides injects cell content from a
   // hand-carried patch that never passed a signed pull, and calp_detach
   // destroys the provenance record the whole .calp transparency story rests on.
@@ -243,7 +243,7 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
   //
   // calp_get_sheet_provenance is deliberately NOT here: it only discloses what
   // the Application Explorer already shows, and the tab badge needs it.
-  distributionTrust: [
+  collaborationTrust: [
     "calp_add_workspace",
     "calp_remove_workspace",
     "calp_dev_subscribe",

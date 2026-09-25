@@ -15,7 +15,7 @@
 //          that in place — a security state with no label reads as benign.
 //
 //          Source-text assertions, same technique as
-//          Distribution/__tests__/calpTrustPresentation.test.ts.
+//          Collaboration/__tests__/calpTrustPresentation.test.ts.
 
 import fs from "fs";
 import path from "path";

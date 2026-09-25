@@ -28,7 +28,7 @@
 import React, { useState, useCallback, useEffect, useMemo } from "react";
 import { showToast } from "@api";
 import { useDialogWindow } from "@api/dialogWindow";
-import { listWorkspaces, type SavedWorkspace } from "@api/distributionWorkspaces";
+import { listWorkspaces, type SavedWorkspace } from "@api/collaborationWorkspaces";
 import {
   searchLibraries,
   planInstall,

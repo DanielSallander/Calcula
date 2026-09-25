@@ -92,7 +92,7 @@ pub enum CalpError {
     #[error("Publisher key for application {package}@{version} changed since first use: pinned {pinned} but this version is signed by {got} — refusing to trust (possible application hijack)")]
     PublisherKeyChanged { package: String, version: String, pinned: String, got: String },
 
-    #[error("Application {package}@{version} is signed by {got}, but nobody on this computer has ever agreed to trust that publisher for '{package}' from {scope}. Subscribe to it (Distribution > Subscribe to Application) to review the publisher and trust it — a signature alone is not trust.")]
+    #[error("Application {package}@{version} is signed by {got}, but nobody on this computer has ever agreed to trust that publisher for '{package}' from {scope}. Subscribe to it (Collaboration > Subscribe to Application) to review the publisher and trust it — a signature alone is not trust.")]
     PublisherNotPinned { package: String, version: String, scope: String, got: String },
 
     #[error("The application name '{package}' is already trusted on this computer from a DIFFERENT workspace: {other_scope} is pinned to publisher {pinned}, but {scope} is offering {package}@{version} signed by {got}. Two workspaces claiming one name is exactly what an application hijack looks like. Review both publishers before accepting this one.")]

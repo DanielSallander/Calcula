@@ -42,7 +42,7 @@
 //          both sides pin them.
 //
 // ARCHITECTURE: @api module. Extensions drive it through the plumbing in
-//               extensions/Distribution/lib/writebackValidatorSync.ts.
+//               extensions/Collaboration/lib/writebackValidatorSync.ts.
 
 import { invoke } from "@tauri-apps/api/core";
 import { hostMountScript, hostUnmountScript } from "./scriptHost/host";

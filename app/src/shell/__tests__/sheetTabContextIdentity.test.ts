@@ -67,7 +67,7 @@ describe("the strip resolves a sheet by index, not by position", () => {
 
   it("hands the extension the sheet's stable id", () => {
     // Without it an extension caching anything per sheet has only the index to
-    // key on — which is exactly how Distribution's tab menu ended up pointing
+    // key on — which is exactly how Collaboration's tab menu ended up pointing
     // one sheet over after a drag.
     // SABOTAGE: drop `sheetId: sheet.sheetId` from the context literal.
     const literal = CODE.match(/const contextFor = useCallback\(([\s\S]*?)\n {4}\[/);

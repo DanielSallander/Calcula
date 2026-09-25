@@ -12,7 +12,7 @@
 //          conflict cannot quietly become invisible history.
 //
 //          Source-text assertions, same technique as
-//          Distribution/__tests__/calpTrustPresentation.test.ts: this extension
+//          Collaboration/__tests__/calpTrustPresentation.test.ts: this extension
 //          may not import the backend, and a reconstructed copy of the wire
 //          shape would pass happily while the real one drifted.
 
@@ -25,7 +25,7 @@ const read = (rel: string): string => fs.readFileSync(path.join(APP_ROOT, rel), 
 
 const CMDS_RS = read("src-tauri/src/calp_commands.rs");
 const SIGNING_RS = read("../core/calp/src/signing.rs");
-const DISTRIBUTION_TS = read("src/api/distribution.ts");
+const COLLABORATION_TS = read("src/api/collaboration.ts");
 const PANEL = read("extensions/ScriptableObjects/components/CodeInThisFilePanel.tsx");
 
 describe("the backend trusted-publisher report", () => {
@@ -80,9 +80,9 @@ describe("the TS mirror", () => {
       "export interface TrustedPublisherReport",
       "export async function listTrustedPublishers",
     ]) {
-      expect(DISTRIBUTION_TS, `${decl} is missing`).toContain(decl);
+      expect(COLLABORATION_TS, `${decl} is missing`).toContain(decl);
     }
-    const report = DISTRIBUTION_TS.match(
+    const report = COLLABORATION_TS.match(
       /export interface TrustedPublisherReport \{[\s\S]*?\n\}/,
     )![0];
     expect(report).toContain("conflictCount: number;");

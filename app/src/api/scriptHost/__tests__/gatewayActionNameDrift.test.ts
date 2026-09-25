@@ -48,7 +48,7 @@ const stripComments = (src: string): string =>
 const HOST = SENDERS.map((rel) => stripComments(read(rel))).join(
   "\n/* --- next sender --- */\n",
 );
-const DIST_GATEWAY = read("src-tauri/src/scripting/distribution_gateway.rs");
+const DIST_GATEWAY = read("src-tauri/src/scripting/collaboration_gateway.rs");
 const WRITEBACK_GATEWAY = read("src-tauri/src/scripting/writeback_gateway.rs");
 
 /** `"name" => Action::Variant,` — the parser's accepted set. */
@@ -72,7 +72,7 @@ function sentActions(command: string): string[] {
     // EVERY LITERAL IN THE BLOCK, including both arms of a ternary. Several
     // actions are chosen with `action: method === "x" ? "a" : "b"`, and a
     // pattern anchored on `action:\s*"` saw neither arm — five of the eleven
-    // distribution verbs were unguarded by a guard that reported success.
+    // collaboration verbs were unguarded by a guard that reported success.
     for (const a of m[0].matchAll(/"([A-Za-z][A-Za-z0-9]*)"/g)) {
       out.push(a[1]);
     }
@@ -81,14 +81,14 @@ function sentActions(command: string): string[] {
 }
 
 describe("scripted gateway action names", () => {
-  it("the distribution gateway accepts every action the host sends it", () => {
+  it("the collaboration gateway accepts every action the host sends it", () => {
     // SABOTAGE: change one `action:` literal in host.ts to a new noun, as the
     // vocabulary rename did. The verb is then refused before it is audited.
     const accepted = acceptedActions(DIST_GATEWAY);
     expect(accepted.size).toBeGreaterThan(5);
 
-    const sent = sentActions("script_distribution");
-    expect(sent.length, "the host must still send distribution actions").toBeGreaterThan(4);
+    const sent = sentActions("script_collaboration");
+    expect(sent.length, "the host must still send collaboration actions").toBeGreaterThan(4);
 
     // A literal in the block that LOOKS like an action name but is not one (a
     // payload key, a capability id) would be a false positive, so only
@@ -98,7 +98,7 @@ describe("scripted gateway action names", () => {
     // the vocabulary rename's failure mode — is caught because it is neither
     // accepted nor a known payload key.
     const PAYLOAD_KEYS = new Set([
-      "script_distribution", "script_writeback", "scriptId", "action", "payload",
+      "script_collaboration", "script_writeback", "scriptId", "action", "payload",
       "registryPath", "packageName", "versionPin", "environment", "followLine",
       "sheetIndices", "bump", "registryUrl", "regionId", "submitterId",
       "cellRow", "cellCol", "newState", "reason", "submissionId", "writebackId",

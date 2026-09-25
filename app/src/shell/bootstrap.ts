@@ -33,7 +33,7 @@ import { getLocaleSettings } from "../api/locale";
 import { listenTauriEvent } from "../api/backend";
 import { getGridRegions } from "../api/gridOverlays";
 import { onAppEvent, emitAppEvent, AppEvents, type MutationDomain, type MutationRefreshPayload } from "../api/events";
-import { WRITEBACK_INDEX_CHANGED_EVENT } from "../api/distribution";
+import { WRITEBACK_INDEX_CHANGED_EVENT } from "../api/collaboration";
 import { bridgeDirtyStateAnnouncement } from "./dirtyStateBridge";
 import { bridgeSheetDisplayFlagsAnnouncement } from "./sheetDisplayFlagsBridge";
 import { bridgeUndoStateAnnouncement } from "./undoStateBridge";
@@ -597,7 +597,7 @@ export function bootstrapShell(): void {
   // learn that the deferred half finally landed — without it the regions are
   // installed in the backend but nothing on screen re-reads them, which looks
   // exactly like a package that declares no writeback.
-  void listenTauriEvent("distribution:writeback-index-changed", () => {
+  void listenTauriEvent("collaboration:writeback-index-changed", () => {
     emitAppEvent(WRITEBACK_INDEX_CHANGED_EVENT, {});
   }).catch(() => {
     // No Tauri runtime (test context) — no deferred rebuild to bridge.

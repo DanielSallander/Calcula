@@ -28,7 +28,7 @@ fn body_of(src: &str, signature: &str) -> String {
 
 const ENV_SRC: &str = include_str!("calp_environments.rs");
 const CALP_SRC: &str = include_str!("calp_commands.rs");
-const GATEWAY_SRC: &str = include_str!("scripting/distribution_gateway.rs");
+const GATEWAY_SRC: &str = include_str!("scripting/collaboration_gateway.rs");
 
 fn at(hay: &str, needle: &str, what: &str) -> usize {
     hay.find(needle)

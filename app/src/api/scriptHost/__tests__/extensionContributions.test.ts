@@ -1370,9 +1370,9 @@ function readExtensionSource(rel: string): string {
 function extensionPhraseFile(rel: string): string {
   switch (rel) {
     case "SubscribeDialog.tsx":
-      return "Distribution/components/SubscribeDialog.tsx";
+      return "Collaboration/components/SubscribeDialog.tsx";
     case "inspector/ScriptsSection.tsx":
-      return "Distribution/components/inspector/ScriptsSection.tsx";
+      return "Collaboration/components/inspector/ScriptsSection.tsx";
     default:
       return "ScriptableObjects/index.ts";
   }

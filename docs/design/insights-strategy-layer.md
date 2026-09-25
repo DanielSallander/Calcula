@@ -572,7 +572,7 @@ rather than added quietly beside it:
 > strategy file can put a number in front of a reader that the model did not compute* — survives
 > intact, because a producer computes only over numbers the model did compute.
 
-### 13.5 Distribution and consent
+### 13.5 Collaboration and consent
 
 A producer travelling in a `.calp` is distributed code and inherits the existing path: a new
 surface-namespaced consent key, consent bound to the triple *(package key, artifact id,

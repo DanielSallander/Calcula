@@ -399,7 +399,7 @@ fn verify_password(password: &str, salt: &str, hash: &str) -> bool {
 //     publisher's content wholesale; protection on those sheets is the
 //     subscriber's own and is re-installed by the reset.
 //   * Report writeback. A writeback value reaches the grid through the ordinary
-//     edit path (Distribution's commit guard allows the commit and the normal
+//     edit path (Collaboration's commit guard allows the commit and the normal
 //     `update_cell` runs), so it is gated there like any other user edit —
 //     nothing separate to exempt.
 //   * `solver_revert`. The undo of `solver_solve`, restoring values the sheet
@@ -857,7 +857,7 @@ fn record_protection_undo(
 /// `record_protection_undo` / `record_workbook_protection_undo`), so the trail
 /// cannot miss one by omission at a call site. `ProtectionChanged` is
 /// always-recorded: a security boundary moving is precisely what a user needs to
-/// be able to see later, and gating it on distribution auditing would switch it
+/// be able to see later, and gating it on collaboration auditing would switch it
 /// off in the cases that matter most.
 fn record_protection_audit(state: &AppState, description: &str, sheet_index: Option<usize>) {
     use serde_json::json;

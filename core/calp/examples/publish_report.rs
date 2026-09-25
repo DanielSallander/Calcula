@@ -613,7 +613,7 @@ fn main() {
     println!("  Pivots:   {}", workbook.pivot_definitions.len());
     println!();
     println!("Subscribe in Calcula:");
-    println!("  Distribution > Subscribe to Package...");
+    println!("  Collaboration > Subscribe to Application...");
     println!("  Registry: {}", registry_path.display());
     println!("  Package:  sales-report");
 }

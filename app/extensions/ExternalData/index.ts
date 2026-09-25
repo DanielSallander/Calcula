@@ -2,11 +2,11 @@
 // PURPOSE: External Data extension entry point.
 // CONTEXT: Registers the "External Data" top-level menu — import/export and
 //          data connections only. Other extensions append items to it:
-//          CsvImportExport ("Get Data") and Distribution ("Refresh Data").
+//          CsvImportExport ("Get Data") and Collaboration ("Refresh Data").
 //          Model-specific surfaces live in the "Model" menu (ModelMenu ext);
 //          .calp packaging and writeback are their own top-level menus
-//          ("Distribution" order 46, "Writeback" order 47, both owned by the
-//          Distribution extension) rather than a submenu here.
+//          ("Collaboration" order 46, "Writeback" order 47, both owned by the
+//          Collaboration extension) rather than a submenu here.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 

@@ -24,7 +24,7 @@ describe('AppEvents', () => {
     // publisher could learn that answers had arrived ONLY by opening the
     // Responses pane and looking, and a script could not learn it at all. The
     // count is bumped deliberately, and the event is a real one — it is raised
-    // by the demand-driven publisher-inbox poll in @api/distribution.ts, which
+    // by the demand-driven publisher-inbox poll in @api/collaboration.ts, which
     // exists precisely so this id is not a promise nothing keeps.
     // 67 since the formula evaluation budget added CALC_PROGRESS and
     // RECALC_INCOMPLETE. Both are load-bearing rather than decorative:

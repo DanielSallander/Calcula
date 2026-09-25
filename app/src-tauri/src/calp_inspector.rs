@@ -252,7 +252,9 @@ fn submission_value_display(value: &SubmissionValue) -> (String, String) {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedWorkspaceLocation {
-    /// The workspace ROOT to browse (walked up from whatever was picked).
+    /// The workspace to browse: its root directory (walked up from an application
+    /// or version folder), or the `workspace.calcula` pointer file that names it.
+    /// Every command that opens a workspace folds the pointer file to its directory.
     pub registry_path: String,
     /// Set when the picked folder was an application (or version) directory.
     pub package_name: Option<String>,
@@ -260,32 +262,60 @@ pub struct ResolvedWorkspaceLocation {
     pub version: Option<String>,
 }
 
-/// Users naturally browse INTO the thing they want to inspect —
-/// `C:\reg\sales-report\1.0.0` — but a workspace location is the ROOT folder
-/// (`C:\reg`), so a raw browse finds nothing. Recognize an application directory
-/// (contains calp-manifest.json) or a version directory (its parent does) and
-/// walk up to the root, remembering what was picked so the UI can pre-select
-/// it. Purely local probing; anything unrecognized passes through unchanged.
+/// Resolve whatever the user pointed at to a workspace ROOT, remembering what
+/// they pointed at so the UI can pre-select it.
+///
+/// Three spellings arrive here. The Browse button hands over the workspace's
+/// `workspace.calcula` pointer file, which names the root directly. A typed or
+/// pasted path may instead name something INSIDE the workspace —
+/// `C:\ws\sales-report\1.0.0` — because people naturally aim at the thing they
+/// want to inspect; an application directory (contains calp-manifest.json) or a
+/// version directory (its parent does) is recognised and walked up from. Purely
+/// local probing; anything unrecognised passes through unchanged.
 #[tauri::command]
 pub fn calp_inspector_resolve_location(
     path: String,
     window: tauri::Window,
 ) -> Result<ResolvedWorkspaceLocation, String> {
     window_guard::require_label(&window, window_guard::MAIN_AND_APPLICATION_INSPECTOR)?;
+    Ok(resolve_location(path))
+}
 
+/// The body of [`calp_inspector_resolve_location`], without the `Window` its
+/// guard needs — so the three spellings can be tested rather than only compiled.
+pub(crate) fn resolve_location(path: String) -> ResolvedWorkspaceLocation {
     // HTTP workspaces have no local directory structure to probe.
     if crate::calp_registry::is_http_location(&path) {
-        return Ok(ResolvedWorkspaceLocation {
+        return ResolvedWorkspaceLocation {
             registry_path: path,
             package_name: None,
             version: None,
-        });
+        };
     }
 
     // The crate's ONE `file://` stripper — a local `strip_prefix("file://")`
     // leaves `file:///C:/reg` as `/C:/reg` (an unopenable path) and turns
     // `file://server/share` into a cwd-relative one.
     let raw = calp::workspace_id::strip_file_scheme(&path);
+
+    // THE POINTER FILE NAMES THE DIRECTORY IT SITS IN, and is recognised as such
+    // rather than probed as if it were a folder. This is what the inspector's
+    // Browse button now hands over, like every other workspace picker. At a
+    // real workspace root the probes below both miss and it falls through to
+    // the same answer — but only by luck: the first probe reads a path THROUGH
+    // a file, and the second asks whether the marker's parent is an
+    // application. A stray marker inside an application folder answers yes, and
+    // the resolver then named a different workspace than every command that
+    // OPENS the same string. The spelling is passed through unchanged: those
+    // commands fold the marker the same way (`strip_workspace_marker`), so the
+    // file and its folder are one workspace and one pin scope.
+    if calp::workspace_id::strip_workspace_marker(&raw) != raw.trim() {
+        return ResolvedWorkspaceLocation {
+            registry_path: raw,
+            package_name: None,
+            version: None,
+        };
+    }
     let picked = std::path::PathBuf::from(&raw);
 
     // The application name comes from the manifest (authoritative), not the
@@ -300,11 +330,11 @@ pub fn calp_inspector_resolve_location(
     // Picked the APPLICATION directory: workspace is its parent.
     if let Some(name) = manifest_name(&picked) {
         if let Some(registry) = picked.parent() {
-            return Ok(ResolvedWorkspaceLocation {
+            return ResolvedWorkspaceLocation {
                 registry_path: registry.display().to_string(),
                 package_name: Some(name),
                 version: None,
-            });
+            };
         }
     }
 
@@ -317,20 +347,20 @@ pub fn calp_inspector_resolve_location(
                     .is_file()
                     .then(|| picked.file_name().map(|s| s.to_string_lossy().to_string()))
                     .flatten();
-                return Ok(ResolvedWorkspaceLocation {
+                return ResolvedWorkspaceLocation {
                     registry_path: registry.display().to_string(),
                     package_name: Some(name),
                     version,
-                });
+                };
             }
         }
     }
 
-    Ok(ResolvedWorkspaceLocation {
+    ResolvedWorkspaceLocation {
         registry_path: raw,
         package_name: None,
         version: None,
-    })
+    }
 }
 
 // ============================================================================
@@ -2148,4 +2178,136 @@ pub fn calp_inspector_verify_artifacts(
         unlisted,
         all_ok,
     })
+}
+
+#[cfg(test)]
+mod resolve_location_tests {
+    //! The inspector's location resolver, over a real workspace on disk.
+    //!
+    //! It had no test at all: the command takes a `tauri::Window` for its guard,
+    //! so every branch was reachable only by launching Calcula. The body now
+    //! lives in `resolve_location` and each spelling a user can hand it is
+    //! proved here.
+
+    use super::resolve_location;
+    use tempfile::TempDir;
+
+    /// `{workspace}/sales/calp-manifest.json` and `{workspace}/sales/1.2.0/`
+    /// with a version manifest in it, plus the workspace's pointer file.
+    fn workspace() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        let app = dir.path().join("sales");
+        std::fs::create_dir_all(app.join("1.2.0")).unwrap();
+        let manifest = calp::manifest::ApplicationManifest::new(
+            "sales",
+            "report",
+            "tester",
+            "2026-09-25T00:00:00Z",
+        );
+        std::fs::write(
+            app.join("calp-manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("1.2.0").join(calp::integrity::VERSION_MANIFEST_FILE),
+            b"{}",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(calp::workspace_id::WORKSPACE_MARKER_FILE),
+            b"{}",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn s(p: &std::path::Path) -> String {
+        p.to_string_lossy().to_string()
+    }
+
+    /// THE POINTER FILE IS THE WORKSPACE.
+    ///
+    /// This is what Browse hands over now. Its spelling passes through, because
+    /// every command that opens a workspace folds the marker the same way, and
+    /// nothing is pre-selected because nothing inside the workspace was picked.
+    ///
+    /// For a marker at a real workspace root this answer does NOT depend on the
+    /// explicit marker branch: both folder probes miss and the path falls
+    /// through unchanged. The branch is proved by the next test, which is the
+    /// one case where the two disagree. This test pins the everyday answer.
+    #[test]
+    fn the_pointer_file_resolves_to_its_workspace_and_selects_nothing() {
+        let ws = workspace();
+        let marker = ws.path().join(calp::workspace_id::WORKSPACE_MARKER_FILE);
+        let r = resolve_location(s(&marker));
+        assert_eq!(r.registry_path, s(&marker), "the spelling is passed through");
+        assert_eq!(r.package_name, None);
+        assert_eq!(r.version, None);
+    }
+
+    /// THE MARKER MEANS HERE WHAT IT MEANS TO EVERY COMMAND THAT OPENS IT.
+    ///
+    /// A stray `workspace.calcula` inside an application folder is the one case
+    /// the fall-through reads differently. Its second probe asks whether the
+    /// marker's PARENT holds a `calp-manifest.json`, which an application folder
+    /// does, so the old resolver answered "workspace one level up, `sales`
+    /// pre-selected". Every command that OPENS the same string answers "the
+    /// directory the marker sits in" (`strip_workspace_marker`, then
+    /// `LocalWorkspace::open`). A resolver that disagrees with the opener sends
+    /// Inspect to a different workspace than Subscribe for one typed path.
+    ///
+    /// SABOTAGE: delete the `strip_workspace_marker` early return in
+    /// `resolve_location`.
+    #[test]
+    fn a_marker_inside_an_application_folder_is_not_read_as_a_version() {
+        let ws = workspace();
+        let app = ws.path().join("sales");
+        let stray = app.join(calp::workspace_id::WORKSPACE_MARKER_FILE);
+        std::fs::write(&stray, b"{}").unwrap();
+        let r = resolve_location(s(&stray));
+        assert_eq!(r.registry_path, s(&stray));
+        assert_eq!(r.package_name, None, "a marker is never an application pick");
+        assert_eq!(r.version, None, "a marker is never a version pick");
+
+        // And it is the directory the OPENER would open for the same string.
+        assert_eq!(
+            calp::workspace_id::strip_workspace_marker(&r.registry_path),
+            s(&app),
+            "the resolver and the opener must name the same workspace",
+        );
+    }
+
+    /// TYPING AN APPLICATION OR VERSION FOLDER STILL JUMPS STRAIGHT TO IT.
+    ///
+    /// Browse no longer picks folders, so this is now the only route to the
+    /// jump the folder picker used to offer — and the Inspector's copy says so.
+    ///
+    /// SABOTAGE: delete the application-directory probe, or the version probe.
+    #[test]
+    fn a_typed_application_or_version_folder_is_walked_up_from() {
+        let ws = workspace();
+        let app = resolve_location(s(&ws.path().join("sales")));
+        assert_eq!(app.registry_path, s(ws.path()));
+        assert_eq!(app.package_name.as_deref(), Some("sales"));
+        assert_eq!(app.version, None);
+
+        let ver = resolve_location(s(&ws.path().join("sales").join("1.2.0")));
+        assert_eq!(ver.registry_path, s(ws.path()));
+        assert_eq!(ver.package_name.as_deref(), Some("sales"));
+        assert_eq!(ver.version.as_deref(), Some("1.2.0"));
+    }
+
+    /// The workspace root itself, and an `https://` workspace, pass through.
+    #[test]
+    fn a_workspace_root_and_a_url_pass_through_unchanged() {
+        let ws = workspace();
+        let root = resolve_location(s(ws.path()));
+        assert_eq!(root.registry_path, s(ws.path()));
+        assert_eq!(root.package_name, None);
+
+        let url = resolve_location("https://example.test/ws".to_string());
+        assert_eq!(url.registry_path, "https://example.test/ws");
+        assert_eq!(url.package_name, None);
+    }
 }

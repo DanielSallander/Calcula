@@ -78,7 +78,7 @@ import {
 import {
   listTrustedPublishers,
   type TrustedPublisherReport,
-} from "@api/distribution";
+} from "@api/collaboration";
 import type { PanelSectionProps } from "@api/uiTypes";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { ScriptableObjectEvents } from "../index";

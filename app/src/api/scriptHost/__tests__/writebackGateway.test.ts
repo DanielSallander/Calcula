@@ -10,7 +10,7 @@
 //          path a human keystroke takes, and never reaches the grid when that
 //          path refuses.
 // CONTEXT: The bypass was real: `api.setCellValue` -> `lib.updateCell` skipped
-//          the Distribution extension's commit guard entirely (it is an
+//          the Collaboration extension's commit guard entirely (it is an
 //          editor-commit hook), so a script could write a writeback cell with
 //          no draft, no schema check and no lifecycle check, leaving the grid
 //          showing a value the writeback layer had never heard of.
@@ -37,7 +37,7 @@ import {
   auditScriptSurfaceCapabilities,
   brokerGatedCapabilities,
 } from "../../scriptSurfaces";
-import type { WritebackRegionEntry } from "../../distribution";
+import type { WritebackRegionEntry } from "../../collaboration";
 import {
   __setWritebackIndexForTests,
   captureWritebackWrite,

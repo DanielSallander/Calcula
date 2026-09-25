@@ -39,7 +39,7 @@ import {
   SUBMISSION_POLL_INTERVAL_MS,
   MAX_REPORTED_SUBMISSIONS,
   type RegionSubmission,
-} from "../distribution";
+} from "../collaboration";
 
 // ---------------------------------------------------------------------------
 // A stand-in registry: regions this workbook knows about, and per region either
@@ -433,7 +433,7 @@ describe("subscribing is what starts the poll, and unsubscribing stops it", () =
 
   it("the Responses pane holds a watch only while it is open", () => {
     const src = fs.readFileSync(
-      path.resolve(__dirname, "../../../extensions/Distribution/components/PublisherDashboardPane.tsx"),
+      path.resolve(__dirname, "../../../extensions/Collaboration/components/PublisherDashboardPane.tsx"),
       "utf8",
     );
     expect(src).toContain("const release = acquireSubmissionWatch();");

@@ -46,7 +46,7 @@ vi.mock("./scriptHost/host", () => ({
   scriptClipboardSize: vi.fn(),
   clearScriptClipboard: vi.fn(),
 }));
-vi.mock("./distribution", () => ({ getSubmissionWatchStatus: vi.fn() }));
+vi.mock("./collaboration", () => ({ getSubmissionWatchStatus: vi.fn() }));
 vi.mock("./backend", () => ({ invokeBackend: vi.fn() }));
 
 import { loadAllObjectScripts } from "./objectScriptBackend";
@@ -58,7 +58,7 @@ import { loadPersistedMarkLibraryWithProvenance } from "./chartMarkScripts";
 import { mountedWritebackValidators } from "./writebackValidators";
 import { listScriptKeybindings } from "./keybindings";
 import { scriptClipboardSize, clearScriptClipboard as hostClear } from "./scriptHost/host";
-import { getSubmissionWatchStatus } from "./distribution";
+import { getSubmissionWatchStatus } from "./collaboration";
 import { invokeBackend } from "./backend";
 import {
   getScriptHeldState,
@@ -273,7 +273,12 @@ describe("getScriptHeldState — background watch", () => {
     expect(w.watchedRegionIds).toEqual(["r1", "r2"]);
     expect(w.skippedRegionIds).toEqual(["r3"]);
     expect(w.lastPollCalls).toBe(3);
-    expect(w.what).toMatch(/registry/i);
+    // The panel names what the poll touches in the product's own words: the
+    // WORKSPACE. It said "distribution registry" — two retired terms in one
+    // phrase — for a month after both were renamed, because this assertion
+    // pinned the old word.
+    expect(w.what).toMatch(/workspace/i);
+    expect(w.what).not.toMatch(/registry|distribution/i);
     expect(summarizeScriptHeldState(state).runningWatches).toBe(1);
   });
 

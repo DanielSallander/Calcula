@@ -1,12 +1,26 @@
-# .calp Distribution System - Design Document
+# .calp Collaboration — the subscriber side
 
 ## Status
 
 **Implemented** (May 2026). Pre-production — no deployed users.
 
+**Two documents, one feature.** The feature was called *Distribution* until
+2026-09-25 and is now **Collaboration**: the menu, the extension
+(`app/extensions/Collaboration`), the API module (`@api/collaboration`) and the
+script gateway (`script_collaboration`) all carry the new name. This document is
+the original design and still owns the SUBSCRIBER side — subscribe, refresh,
+overrides, writeback. `calp-workspace-collaboration.md` owns the AUTHOR side —
+working copies, push gates, co-publishers, environments. The filename keeps the
+old word because it is cited from dated records that are never rewritten, and
+"distribution" still describes what this half does: delivering a published
+version to the people who consume it. The three script capability ids
+`distribution.writeback` / `.publish` / `.subscribe` did NOT change: they are
+persisted in `.cala` ceilings, in SIGNED `.calp` manifests, in consent files and
+in audit rows, and a renamed id would silently strip every declared ceiling.
+
 All core features from this design are implemented across the `identity`,
 `calp`, and `calcula-format` crates, with Tauri commands and a
-Distribution extension in the frontend. See `docs/design/calp-implementation-phases.md`
+Collaboration extension in the frontend. See `docs/design/calp-implementation-phases.md`
 for phase-by-phase status and deferred items.
 
 **July 2026 fidelity + transparency round:** publish/pull were audited
@@ -37,7 +51,7 @@ no compatibility shims.
 
 ## Motivation
 
-Distribution is one of Calcula's founding pillars. Excel never had a real
+Collaboration is one of Calcula's founding pillars. Excel never had a real
 distribution model: sharing a workbook means emailing a copy, and the moment
 it leaves your outbox you have lost control of it -- no versioning, no
 controlled updates, twelve diverging copies of the truth. The `.calp` system
@@ -298,7 +312,7 @@ button — a true sentence answering a question they were not asking.
 Reported from live testing as *"I subscribed to a sheet, overwrote some values,
 clicked refresh subscription, and nothing happened."* The verb they wanted is
 `calp_reset_subscription` ("discard my local edits, restore the published
-content"), which existed but was reachable only from Distribution > Manage
+content"), which existed but was reachable only from Collaboration > Manage
 Subscriptions.
 
 The fix is not to widen refresh — a refresh that undid local edits when no new
@@ -982,8 +996,9 @@ A side pane with three views (filterable or tabbed - implementation choice):
   > an approve/reject changes whether someone's answer counts; an invalidation
   > silently discards entered work. Recording those only when a workbook
   > happened to opt in meant the trail was absent exactly when someone needed to
-  > reconstruct what they had sent. Distribution bookkeeping
-  > (subscribe/refresh/override/publish) does stay opt-in, as written above.
+  > reconstruct what they had sent. Collaboration bookkeeping
+  > (subscribe/refresh/override) does stay opt-in, as written above; publishing
+  > is always recorded too (`AuditEvent::is_always_recorded`).
   > Pinned by `writeback_events_record_even_when_disabled` (`audit.rs:250`), and
   > the ring's overflow policy drops opt-in entries before always-recorded ones
   > (`audit.rs:185-207`) so high-volume traffic cannot push the egress trail out.
@@ -994,7 +1009,7 @@ This section described a `--dev` flag, a dev-channel URL and a "Publish to test
 workspace" command. None of the three was ever built, and the shape they were
 sketching arrived differently. What exists:
 
-- **Working copy.** *Distribution ▸ Open Application for Editing* materializes an
+- **Working copy.** *Collaboration ▸ Open Application for Editing* materializes an
   application into a workbook keeping its sheet ids, and *Push* publishes the
   next version through the base-version / merge / conflict gates. That is the
   iteration loop; see `calp-workspace-collaboration.md`.

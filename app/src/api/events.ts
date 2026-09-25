@@ -289,7 +289,7 @@ export const AppEvents = {
   // HONESTY NOTE — READ BEFORE SUBSCRIBING. Submissions are appended to a
   // registry on disk by OTHER people's machines. Nothing pushes into this
   // process when that happens, so this event cannot fire on its own: it is
-  // raised by the DEMAND-DRIVEN publisher-inbox poll in @api/distribution.ts,
+  // raised by the DEMAND-DRIVEN publisher-inbox poll in @api/collaboration.ts,
   // which runs ONLY while something is subscribed (a script's api.onEvent, or
   // the Responses dashboard being open) and only for regions this machine can
   // prove it publishes (Ed25519 key possession, re-checked in Rust on every

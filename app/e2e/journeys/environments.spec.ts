@@ -706,4 +706,35 @@ test.describe.serial("environments — one line, named pointers, over a real wor
     expect(sub.environment == null || sub.environment === "").toBe(true);
     expect(sub.resolvedVersion, "the line's head, not prod's pointer").toBe("1.2.0");
   });
+
+  // =========================================================================
+  // 10. THE FEATURE IS CALLED COLLABORATION, in the live menu bar.
+  // =========================================================================
+  //
+  // The term was renamed from Distribution on 2026-09-25, together with the
+  // extension directory, the API module and the script gateway. The unit tier
+  // proves the source moved; only a launched app proves the renamed extension
+  // still REGISTERS — a manifest import pointing at the old directory fails
+  // at load, not at compile time, and takes the whole menu with it.
+  test("the menu is called Collaboration and still carries the application lifecycle", async ({
+    appPage: page,
+  }) => {
+    const bar = (label: string) =>
+      page.locator("button").filter({ hasText: new RegExp("^" + label + "$") });
+    await expect(bar("Collaboration").first()).toBeVisible();
+    await expect(bar("Distribution"), "the retired name must not survive").toHaveCount(0);
+
+    // Open it: the items are the extension's own, so a menu that registered
+    // with no items (an extension that half-loaded) fails here.
+    await bar("Collaboration").first().click();
+    for (const item of [
+      "Publish Application...",
+      "Open Application for Editing...",
+      "Subscribe to Application...",
+      "Application Inspector...",
+    ]) {
+      await expect(page.getByText(item, { exact: true }).first(), item).toBeVisible();
+    }
+    await page.keyboard.press("Escape");
+  });
 });

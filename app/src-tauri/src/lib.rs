@@ -100,7 +100,7 @@ pub mod autofilter;
 pub mod hyperlinks;
 pub mod protection;
 pub mod grouping;
-// pub mod linked_sheets; // Removed: replaced by .calp distribution system (Phase 2+)
+// pub mod linked_sheets; // Removed: replaced by .calp collaboration system (Phase 2+)
 pub mod conditional_formatting;
 pub mod tables;
 pub mod goal_seek;
@@ -591,7 +591,7 @@ pub struct AppState {
     /// Cell). Used by the anim_* commands to apply transient frame writes and
     /// restore the model on stop WITHOUT touching the undo stack. Never serialized.
     pub animation_snapshots: Mutex<HashMap<String, Vec<((u32, u32), Option<engine::Cell>)>>>,
-    // linked_sheets removed: replaced by .calp distribution system (Phase 2+)
+    // linked_sheets removed: replaced by .calp collaboration system (Phase 2+)
     /// Locale/regional settings (decimal separator, list separator, date format, etc.)
     pub locale: Mutex<engine::LocaleSettings>,
     /// Auto-recover enabled (background save to prevent data loss)
@@ -5570,10 +5570,10 @@ pub fn run() {
             // 32MB main-thread stack reserve set in build.rs.
             scripting::grant_script_capability,
             scripting::script_writeback,
-            // .calp distribution gateway (distribution.publish OUTBOUND /
+            // .calp collaboration gateway (distribution.publish OUTBOUND /
             // distribution.subscribe INBOUND — two capabilities, one command,
             // for the same stack-headroom reason).
-            scripting::script_distribution,
+            scripting::script_collaboration,
             // Persistent consented scheduler (the `schedule` capability — the
             // Application.OnTime replacement). Likewise ONE op-multiplexed
             // command for the same stack-headroom reason.
@@ -5628,7 +5628,7 @@ pub fn run() {
             mcp::mcp_stop,
             mcp::mcp_status,
             mcp::mcp_set_port,
-            // Linked Sheet commands removed: replaced by .calp distribution system (Phase 2+)
+            // Linked Sheet commands removed: replaced by .calp collaboration system (Phase 2+)
             // Slicer commands
             slicer::create_slicer,
             slicer::delete_slicer,
@@ -5720,7 +5720,7 @@ pub fn run() {
             uninstall_extension,
             extension_install::install_extension,
             extension_audit::list_extension_audit,
-            // .calp distribution commands
+            // .calp collaboration commands
             calp_commands::calp_publish,
             calp_commands::calp_publish_preview,
             calp_commands::calp_publish_model,

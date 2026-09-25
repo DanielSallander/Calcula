@@ -73,7 +73,7 @@ pub const GRANTABLE_CAPABILITIES: &[&str] = &[
     "bi.connector",
     "distribution.writeback",
     "schedule",
-    // The .calp distribution gateway (scripting/distribution_gateway.rs) checks
+    // The .calp collaboration gateway (scripting/collaboration_gateway.rs) checks
     // the ACTION'S OWN capability on every call, so both directions have to be
     // grantable independently — an omission here would make one of them
     // permanently denied while looking implemented.
@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn the_two_distribution_directions_are_independent_grants() {
+    fn the_two_collaboration_directions_are_independent_grants() {
         // The property the whole B3 split rests on: an inbound grant must never
         // satisfy an outbound check, or the consent text ("bring somebody
         // else's packages in") would be paying for something else entirely
