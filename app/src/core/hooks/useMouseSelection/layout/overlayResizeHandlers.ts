@@ -7,10 +7,15 @@
 
 import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig } from "../../../types";
 import { createEmptyDimensionOverrides } from "../../../types";
-import { getGridRegions, type GridRegion } from "../../../../api/gridOverlays";
+import {
+  getGridRegions,
+  floatingHitOrder,
+  hasStackingOrder,
+  type GridRegion,
+} from "../../../../api/gridOverlays";
 import { getCellFromPixel } from "../../../lib/gridRenderer";
 import { rowHeaderGutter, colHeaderGutter } from "../../../lib/gridRenderer/layout/headerVisibility";
-import { getLayoutSurface, applySurfaceToResize, edgesOfCorner } from "../../../lib/layoutSurface";
+import { getLayoutSurface, applySurfaceToResize, edgesOfCorner, isRegionLocked } from "../../../lib/layoutSurface";
 import { getGridStateSnapshot } from "../../../state/GridContext";
 
 /** The layout surface of the sheet being edited (null = unconstrained). */
@@ -22,6 +27,17 @@ function activeLayoutSurface() {
 function floatingResizeAllowed(): boolean {
   const surface = activeLayoutSurface();
   return !surface || surface.editable;
+}
+
+/**
+ * Whether ONE floating region's handles are live: its family did not set
+ * `resizable: false`, and the layout surface does not LOCK it. A locked
+ * object still occludes what lies beneath it and a press still selects it --
+ * only its geometry is frozen.
+ */
+function floatingResizable(region: GridRegion): boolean {
+  if (region.data?.resizable === false) return false;
+  return !isRegionLocked(activeLayoutSurface(), region);
 }
 
 /** Size of the resize handle hit area in pixels */
@@ -155,6 +171,47 @@ function getFloatingCornerPixels(
   ];
 }
 
+type FloatingCorner = { corner: ResizeCorner; x: number; y: number; cursor: string };
+
+/**
+ * The floating resize handle under the point while a STACKING ORDER is in
+ * force (@api/gridOverlays `hasStackingOrder`), or null.
+ *
+ * Walks `floatingHitOrder` (topmost first) and STOPS at the first region whose
+ * body contains the point: a handle of an object covered by another must not
+ * be grabbable through the object on top. A region's own handles -- which
+ * reach HANDLE_HIT_SIZE past its edge -- are tested before its body occludes,
+ * and a region that cannot be resized still occludes what lies beneath it.
+ *
+ * Without a stacking order the historical forward scan runs instead, unchanged.
+ */
+function findStackedFloatingHandle(
+  mouseX: number,
+  mouseY: number,
+  config: GridConfig,
+  viewport: Viewport,
+  floatingAllowed: boolean,
+): { region: GridRegion; corner: FloatingCorner } | null {
+  for (const region of floatingHitOrder(getGridRegions())) {
+    const corners = getFloatingCornerPixels(region, config, viewport);
+    if (!corners) continue;
+    if (floatingAllowed && floatingResizable(region)) {
+      for (const c of corners) {
+        if (Math.abs(mouseX - c.x) <= HANDLE_HIT_SIZE && Math.abs(mouseY - c.y) <= HANDLE_HIT_SIZE) {
+          return { region, corner: c };
+        }
+      }
+    }
+    const f = region.floating!;
+    const left = corners[0].x;
+    const top = corners[0].y;
+    if (mouseX >= left && mouseX <= left + f.width && mouseY >= top && mouseY <= top + f.height) {
+      return null; // occluded: nothing beneath this object is reachable here
+    }
+  }
+  return null;
+}
+
 // ============================================================================
 // Factory
 // ============================================================================
@@ -193,11 +250,28 @@ export function createOverlayResizeHandlers(
   ): GridRegion | null => {
     const regions = getGridRegions();
     const floatingAllowed = floatingResizeAllowed();
+
+    // Stacking order in force: floating handles topmost first, occlusion
+    // respected; then the cell-anchored regions, scanned exactly as before.
+    if (hasStackingOrder(regions)) {
+      const stacked = findStackedFloatingHandle(mouseX, mouseY, config, viewport, floatingAllowed);
+      if (stacked) return stacked.region;
+      for (const region of regions) {
+        if (region.floating) continue;
+        const corner = getOverlayBottomRightPixel(region, config, viewport, dimensions);
+        if (!corner) continue;
+        if (Math.abs(mouseX - corner.x) <= HANDLE_HIT_SIZE && Math.abs(mouseY - corner.y) <= HANDLE_HIT_SIZE) {
+          return region;
+        }
+      }
+      return null;
+    }
+
     for (const region of regions) {
       // Floating overlay: check all 4 corners
       if (region.floating) {
         // Skip if region is not resizable (or the surface is in consume mode)
-        if (!floatingAllowed || region.data?.resizable === false) continue;
+        if (!floatingAllowed || !floatingResizable(region)) continue;
 
         const corners = getFloatingCornerPixels(region, config, viewport);
         if (!corners) continue;
@@ -240,10 +314,35 @@ export function createOverlayResizeHandlers(
     // Check floating overlays first (all 4 corners). None is live in consume
     // mode (a subscribed canvas, or design mode off).
     const floatingAllowed = floatingResizeAllowed();
-    for (const region of regions) {
+
+    // Stacking order in force: topmost first, and a handle covered by another
+    // object is not grabbable through it (findStackedFloatingHandle). The
+    // historical forward scan below then has nothing left to do.
+    const stackingOrder = hasStackingOrder(regions);
+    if (stackingOrder) {
+      const stacked = findStackedFloatingHandle(mouseX, mouseY, config, viewport, floatingAllowed);
+      if (stacked) {
+        const { region, corner: c } = stacked;
+        event.preventDefault();
+        setIsOverlayResizing(true);
+        setCursorStyle(c.cursor);
+        overlayResizeStateRef.current = {
+          region,
+          currentEndRow: 0,
+          currentEndCol: 0,
+          corner: c.corner,
+          floatingBounds: { ...region.floating! },
+          startMouseX: mouseX,
+          startMouseY: mouseY,
+        };
+        return true;
+      }
+    }
+
+    for (const region of stackingOrder ? [] : regions) {
       if (!region.floating) continue;
       // Skip if region is not resizable (extensions set this via data)
-      if (!floatingAllowed || region.data?.resizable === false) continue;
+      if (!floatingAllowed || !floatingResizable(region)) continue;
 
       const corners = getFloatingCornerPixels(region, config, viewport);
       if (!corners) continue;

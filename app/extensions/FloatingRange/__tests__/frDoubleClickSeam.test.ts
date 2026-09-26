@@ -37,6 +37,8 @@ vi.mock("@api/editing", () => ({
 import { handleFrDoubleClick } from "../index";
 import { upsertFromInfo, resetFloatingRangeStore, FLOATING_RANGE_REGION_TYPE } from "../lib/floatingRangeStore";
 import { getLocalSelection, clearLocalSelection } from "../lib/frSelection";
+import { setFrScroll, getFrScroll } from "../lib/frScroll";
+import { recordFrUsedExtent, resetFrExtents } from "../lib/frExtent";
 import type { FloatingRangeInfo } from "@api/floatingRanges";
 import type { GridRegion, OverlayHitTestContext } from "@api/gridOverlays";
 
@@ -149,6 +151,31 @@ describe("the FR double-click arrives through the overlay seam", () => {
     resetFloatingRangeStore();
     expect(handleFrDoubleClick(ctxAt(CELL_00.dx, CELL_00.dy))).toBe(false);
     expect(openFrEditor).not.toHaveBeenCalled();
+  });
+});
+
+describe("the double-click follows the overflow scroll (M7)", () => {
+  afterEach(() => {
+    resetFrExtents();
+  });
+
+  it("opens the SCROLLED cell, including one past the window", () => {
+    // The window is 4 rows; the content reaches row 11. Scrolled by 5 rows,
+    // the viewport's first cell is (5, 0) -- a cell the window alone never shows.
+    recordFrUsedExtent(FR_ID, 12, 3);
+    setFrScroll(FR_ID, 0, 5 * 20);
+    expect(handleFrDoubleClick(ctxAt(CELL_00.dx, CELL_00.dy))).toBe(true);
+    expect(openFrEditor).toHaveBeenCalledWith(FR_ID, 5, 0, null);
+    expect(getLocalSelection()).toMatchObject({ anchorRow: 5, anchorCol: 0 });
+  });
+
+  it("completes a part-scrolled cell before its editor opens over it", () => {
+    recordFrUsedExtent(FR_ID, 12, 3);
+    // Half of row 5 scrolled away; the top of the viewport still shows it.
+    setFrScroll(FR_ID, 0, 5 * 20 + 10);
+    expect(handleFrDoubleClick(ctxAt(CELL_00.dx, 20 + 16 + 4))).toBe(true);
+    expect(openFrEditor).toHaveBeenCalledWith(FR_ID, 5, 0, null);
+    expect(getFrScroll(FR_ID).top).toBe(5 * 20);
   });
 });
 

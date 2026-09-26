@@ -869,6 +869,240 @@ fn a_scripted_batch_of_non_cell_mutations_is_one_undo_step() {
     assert_eq!(f.undo_depth(), 0);
 }
 
+// ---------------------------------------------------------------------------
+// M8 arrange: a slicer move and a control geometry batch are undoable, each is
+// ONE step on its own, and neither may dirty or record on a refusal or no-op.
+// (The cross-family "one Ctrl+Z for the whole arrange" case lives beside the
+// canvas pivot frame tests in commands/canvas_sheet_tests.rs.)
+// ---------------------------------------------------------------------------
+
+fn seed_slicer(f: &Fixture, sheet_index: usize) -> identity::EntityId {
+    let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+    let slicer: crate::slicer::Slicer = serde_json::from_value(serde_json::json!({
+        "id": id.to_string(),
+        "name": "Region",
+        "sheetIndex": sheet_index,
+        "x": 10.0, "y": 20.0, "width": 180.0, "height": 240.0,
+        "sourceType": "pivot",
+        "cacheSourceId": id.to_string(),
+        "fieldName": "Region",
+        "selectedItems": null,
+        "showHeader": true,
+        "columns": 1,
+        "stylePreset": "SlicerStyleLight1",
+        "connectedSources": []
+    }))
+    .expect("slicer from json");
+    f.slicer.slicers.write(&loading()).unwrap().insert(id, slicer);
+    id
+}
+
+fn slicer_frame(f: &Fixture, id: identity::EntityId) -> (f64, f64, f64, f64) {
+    let s = &f.slicer.slicers.read().unwrap()[&id];
+    (s.x, s.y, s.width, s.height)
+}
+
+fn protect(f: &Fixture, sheet: usize) {
+    // Excel-default options: editing objects is NOT allowed.
+    f.state.sheet_protection.write(&crate::document_effect::test_seed_effect()).unwrap().insert(
+        sheet,
+        crate::protection::SheetProtection { protected: true, ..Default::default() },
+    );
+}
+
+fn undo_description(f: &Fixture) -> Option<String> {
+    f.state.undo_stack.lock().unwrap().undo_description().map(String::from)
+}
+
+#[test]
+fn moving_a_slicer_is_one_undo_step_that_puts_it_back_and_redoes() {
+    // `update_slicer_position` recorded NOTHING: dragging a slicer was
+    // invisible to Ctrl+Z, which skipped straight past it to the user's
+    // previous action while the slicer stayed where it had been dropped.
+    let f = Fixture::new(1);
+    let id = seed_slicer(&f, 0);
+    crate::document_effect::mark_saved(&f.file);
+
+    crate::slicer::commands::update_slicer_position_core(&f.state, &f.file, &f.slicer, id, 50.0, 60.0, 200.0, 300.0)
+        .expect("a slicer on an unprotected sheet moves");
+    assert_eq!(slicer_frame(&f, id), (50.0, 60.0, 200.0, 300.0));
+    assert!(f.file.is_dirty(), "moving a slicer is a document change");
+    assert_eq!(f.undo_depth(), 1, "a slicer move is exactly ONE undo step");
+    assert_eq!(undo_description(&f).as_deref(), Some("Move slicer"));
+
+    let undone = f.undo();
+    assert_eq!(slicer_frame(&f, id), (10.0, 20.0, 180.0, 240.0), "undo puts the slicer back");
+    assert!(
+        undone.refresh_domains.iter().any(|d| d == "slicer"),
+        "the Slicer extension re-reads only on its domain; got {:?}",
+        undone.refresh_domains
+    );
+    f.redo();
+    assert_eq!(slicer_frame(&f, id), (50.0, 60.0, 200.0, 300.0), "redo moves it again");
+}
+
+#[test]
+fn a_refused_or_unchanged_slicer_move_is_clean_and_records_nothing() {
+    let f = Fixture::new(1);
+    let id = seed_slicer(&f, 0);
+    crate::document_effect::mark_saved(&f.file);
+    let unknown = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+
+    assert!(
+        crate::slicer::commands::update_slicer_position_core(&f.state, &f.file, &f.slicer, unknown, 1.0, 2.0, 3.0, 4.0)
+            .is_err(),
+        "an unknown slicer is refused"
+    );
+    crate::slicer::commands::update_slicer_position_core(&f.state, &f.file, &f.slicer, id, 10.0, 20.0, 180.0, 240.0)
+        .expect("saving the same frame is not an error");
+    assert!(!f.file.is_dirty(), "a refusal or a no-op leaves the document clean");
+    assert_eq!(f.undo_depth(), 0, "and adds no Ctrl+Z step that restores itself");
+
+    // The chart move's gate: a protected sheet whose options do not allow
+    // editing objects refuses the move, before the effect.
+    protect(&f, 0);
+    let refused =
+        crate::slicer::commands::update_slicer_position_core(&f.state, &f.file, &f.slicer, id, 99.0, 99.0, 180.0, 240.0);
+    assert!(refused.is_err_and(|e| e.contains("protected")), "a protected sheet refuses the move");
+    assert_eq!(slicer_frame(&f, id), (10.0, 20.0, 180.0, 240.0), "and the slicer did not move");
+    assert!(!f.file.is_dirty());
+    assert_eq!(f.undo_depth(), 0);
+}
+
+fn floating_control(pinned: bool) -> crate::controls::ControlMetadata {
+    let mut properties = HashMap::new();
+    for (name, value) in [
+        ("x", "10"),
+        ("y", "20"),
+        ("width", "80"),
+        ("height", "28"),
+        ("pinToGrid", if pinned { "true" } else { "false" }),
+    ] {
+        properties.insert(
+            name.to_string(),
+            crate::controls::ControlPropertyValue { value_type: "static".to_string(), value: value.to_string() },
+        );
+    }
+    crate::controls::ControlMetadata { control_type: "shape".to_string(), properties }
+}
+
+fn geometry(key: (usize, u32, u32), x: f64, y: f64, w: f64, h: f64) -> crate::api_types::ControlGeometryChange {
+    crate::api_types::ControlGeometryChange {
+        sheet_index: key.0,
+        row: key.1,
+        col: key.2,
+        x,
+        y,
+        width: w,
+        height: h,
+        offset_x: None,
+        offset_y: None,
+    }
+}
+
+fn control_prop(f: &Fixture, key: (usize, u32, u32), name: &str) -> Option<String> {
+    f.state.controls.read().unwrap().get(&key)?.properties.get(name).map(|p| p.value.clone())
+}
+
+#[test]
+fn a_control_geometry_batch_is_one_undo_step_that_restores_every_control() {
+    // The extension persisted a move as 4-6 `set_control_property` calls PER
+    // control, none undoable. The batch is one write and one step, and it
+    // stores exactly what `persistFloatingPosition` stored:
+    // `String(Math.round(v))` for x/y/width/height (+ offsetX/offsetY when
+    // pinned). Math.round is half-UP, so -2.5 is "-2" (Rust's round says -3)
+    // and 50.5 is "51".
+    let f = Fixture::new(1);
+    let plain = (0, 2, 1);
+    let pinned = (0, 5, 3);
+    {
+        let mut store = f.state.controls.write(&loading()).unwrap();
+        store.insert(plain, floating_control(false));
+        store.insert(pinned, floating_control(true));
+    }
+    crate::document_effect::mark_saved(&f.file);
+
+    let mut pinned_change = geometry(pinned, -2.5, 300.0, 120.0, 40.0);
+    pinned_change.offset_x = Some(12.5);
+    pinned_change.offset_y = Some(-0.5);
+    let changed = crate::controls::set_control_geometry_core(
+        &f.state,
+        &f.file,
+        &[geometry(plain, 100.4, 50.5, 80.0, 28.0), pinned_change],
+    )
+    .expect("two existing controls move");
+    assert_eq!(changed, 2);
+    assert_eq!(control_prop(&f, plain, "x").as_deref(), Some("100"));
+    assert_eq!(control_prop(&f, plain, "y").as_deref(), Some("51"));
+    assert_eq!(control_prop(&f, plain, "offsetX"), None, "an unpinned control gets no offsets");
+    assert_eq!(control_prop(&f, pinned, "x").as_deref(), Some("-2"), "JavaScript's Math.round, not Rust's");
+    assert_eq!(control_prop(&f, pinned, "width").as_deref(), Some("120"));
+    assert_eq!(control_prop(&f, pinned, "offsetX").as_deref(), Some("13"));
+    assert_eq!(control_prop(&f, pinned, "offsetY").as_deref(), Some("0"), "String(Math.round(-0.5)) is \"0\"");
+    assert!(f.file.is_dirty(), "moving a control is a document change");
+    assert_eq!(f.undo_depth(), 1, "the whole batch is ONE undo step");
+    assert_eq!(undo_description(&f).as_deref(), Some("Move control"));
+
+    let undone = f.undo();
+    for key in [plain, pinned] {
+        assert_eq!(control_prop(&f, key, "x").as_deref(), Some("10"), "undo puts {key:?} back");
+        assert_eq!(control_prop(&f, key, "height").as_deref(), Some("28"));
+    }
+    assert_eq!(control_prop(&f, pinned, "offsetX"), None, "undo removes the offsets the move added");
+    assert!(
+        undone.refresh_domains.iter().any(|d| d == "controls"),
+        "the Controls extension re-reads only on its domain; got {:?}",
+        undone.refresh_domains
+    );
+    f.redo();
+    assert_eq!(control_prop(&f, plain, "x").as_deref(), Some("100"), "redo moves them again");
+    assert_eq!(control_prop(&f, pinned, "offsetX").as_deref(), Some("13"));
+}
+
+#[test]
+fn a_control_geometry_batch_refuses_whole_and_writes_nothing() {
+    let f = Fixture::new(1);
+    let known = (0, 2, 1);
+    f.state.controls.write(&loading()).unwrap().insert(known, floating_control(false));
+    crate::document_effect::mark_saved(&f.file);
+    let run = |changes: Vec<crate::api_types::ControlGeometryChange>| {
+        crate::controls::set_control_geometry_core(&f.state, &f.file, &changes)
+    };
+
+    let mut lone_offset = geometry(known, 1.0, 1.0, 50.0, 50.0);
+    lone_offset.offset_x = Some(4.0);
+    let refusals: Vec<(&str, Vec<crate::api_types::ControlGeometryChange>)> = vec![
+        (
+            "an unknown control, even beside a known one",
+            vec![geometry(known, 500.0, 500.0, 80.0, 28.0), geometry((0, 9, 9), 1.0, 1.0, 10.0, 10.0)],
+        ),
+        ("the same control twice", vec![geometry(known, 1.0, 1.0, 50.0, 50.0), geometry(known, 2.0, 2.0, 50.0, 50.0)]),
+        ("a lone offset", vec![lone_offset]),
+        ("a non-finite value", vec![geometry(known, f64::NAN, 1.0, 50.0, 50.0)]),
+        ("a size that rounds to zero", vec![geometry(known, 1.0, 1.0, 0.4, 50.0)]),
+    ];
+    for (label, changes) in refusals {
+        assert!(run(changes).is_err(), "{label} must be refused");
+        assert_eq!(control_prop(&f, known, "x").as_deref(), Some("10"), "{label}: nothing may be written");
+    }
+
+    assert_eq!(run(Vec::new()), Ok(0), "an empty batch is not an error");
+    assert_eq!(
+        run(vec![geometry(known, 10.2, 19.6, 80.0, 28.0)]),
+        Ok(0),
+        "values that encode to what is stored change nothing"
+    );
+    assert!(!f.file.is_dirty(), "refusals and no-ops leave the document clean");
+    assert_eq!(f.undo_depth(), 0, "and record no undo step");
+
+    protect(&f, 0);
+    let refused = run(vec![geometry(known, 300.0, 300.0, 80.0, 28.0)]);
+    assert!(refused.is_err_and(|e| e.contains("protected")), "a protected sheet refuses the move");
+    assert_eq!(control_prop(&f, known, "x").as_deref(), Some("10"));
+    assert!(!f.file.is_dirty());
+    assert_eq!(f.undo_depth(), 0);
+}
+
 #[test]
 fn every_outline_command_records_an_undo_entry() {
     // Grouping had no undo entry AT ALL, so Ctrl+Z after grouping a block undid

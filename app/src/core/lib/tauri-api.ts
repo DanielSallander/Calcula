@@ -1474,7 +1474,11 @@ export interface CanvasLayout {
   pageHeight: number;
   /** CSS hex colour; "" means the theme's default page colour. */
   background: string;
-  /** Paint order, bottom first (absent when empty). */
+  /**
+   * Paint order, bottom first (absent when empty). Objects MISSING from the
+   * list paint above every listed one; a duplicated ref counts at its first
+   * position. Refs follow `CANVAS_OBJECT_KINDS` (@api/canvasSheet).
+   */
   zOrder?: CanvasObjectRef[];
   /** Objects locked against move/resize (absent when empty). */
   locked?: CanvasObjectRef[];

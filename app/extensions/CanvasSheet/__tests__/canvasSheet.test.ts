@@ -118,6 +118,8 @@ describe("the layout surface (editable = not subscribed)", () => {
       showGrid: true,
       page: { width: 900, height: 600 },
       editable: true,
+      // M8: the surface also answers which objects the layout LOCKS.
+      isLocked: expect.any(Function),
     });
   });
 

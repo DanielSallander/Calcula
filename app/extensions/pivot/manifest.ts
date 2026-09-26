@@ -210,6 +210,9 @@ function CreatePivotDialogWrapper(props: DialogProps): React.ReactElement {
       | { startRow: number; startCol: number; endRow: number; endCol: number }
       | undefined,
     tableName: props.data?.tableName as string | undefined,
+    // A canvas insert (the Canvas tab) hands the frame's rectangle; the
+    // dialog validates it and switches to canvas mode.
+    placement: props.data?.placement,
   });
 }
 

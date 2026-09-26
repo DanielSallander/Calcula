@@ -183,11 +183,12 @@ pub struct ArtifactDiffSummary {
 pub struct ObjectChange {
     /// A closed-ish vocabulary: "chart", "table", "objectScript", "moduleScript",
     /// "notebook", "namedRange", "modelMeasure", "modelTable", "control",
-    /// "paneControl", "slicer", "ribbonFilter", "pivot", "pivotLayout",
-    /// "customObject", "media", "conditionalFormat", "dataValidation",
-    /// "comment", "scenario", "outline", "cellBehavior", "theme",
-    /// "extensionData", "writebackRegion", "modelWriteback", or "artifact" for
-    /// anything a future version adds that this build does not recognise.
+    /// "paneControl", "slicer", "timelineSlicer", "floatingRange",
+    /// "ribbonFilter", "pivot", "pivotLayout", "customObject", "media",
+    /// "conditionalFormat", "dataValidation", "comment", "scenario", "outline",
+    /// "cellBehavior", "sparkline", "theme", "extensionData", "writebackRegion",
+    /// "modelWriteback", or "artifact" for anything a future version adds that
+    /// this build does not recognise.
     pub domain: String,
     pub id: String,
     pub name: String,
@@ -654,6 +655,8 @@ impl DiffContext<'_, '_> {
             ("custom_objects/", "customObject"),
             ("charts/", "chart"),
             ("slicers/", "slicer"),
+            ("timeline_slicers/", "timelineSlicer"),
+            ("floating_ranges/", "floatingRange"),
             ("ribbon_filters/", "ribbonFilter"),
             ("pivot_layouts/", "pivotLayout"),
             ("controls/", "control"),
@@ -682,6 +685,8 @@ impl DiffContext<'_, '_> {
         const GROUPED: &[(&str, &str)] = &[
             ("charts.json", "chart"),
             ("slicers.json", "slicer"),
+            ("timeline_slicers.json", "timelineSlicer"),
+            ("floating_ranges.json", "floatingRange"),
             ("ribbon_filters.json", "ribbonFilter"),
             ("pivot_layouts.json", "pivotLayout"),
             ("controls.json", "control"),

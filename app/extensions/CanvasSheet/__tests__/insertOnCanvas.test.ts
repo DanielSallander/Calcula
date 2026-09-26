@@ -48,7 +48,7 @@ vi.mock("../lib/layoutSurfaceProvider", () => ({
   canvasLayoutSurface: () => surface,
 }));
 
-import { defaultInsertRect, insertOnCanvas, resetInsertCascade } from "../lib/insertOnCanvas";
+import { INSERT_SIZES, defaultInsertRect, insertOnCanvas, resetInsertCascade } from "../lib/insertOnCanvas";
 
 const VIEW = { sheetIndex: 2, scrollX: 0, scrollY: 0, viewWidth: 1000, viewHeight: 600 };
 
@@ -88,6 +88,18 @@ describe("where a new object lands", () => {
     expect(r.x + r.width).toBeLessThanOrEqual(1280);
     expect(r.y + r.height).toBeLessThanOrEqual(720);
   });
+
+  it("keeps an object's size on a page smaller than it unless asked to fit the page", () => {
+    surface = { ...surface!, page: { width: 300, height: 200 } };
+    expect(defaultInsertRect(VIEW, { width: 480, height: 320 })).toEqual({ x: 0, y: 0, width: 480, height: 320 });
+    resetInsertCascade();
+    expect(defaultInsertRect(VIEW, { width: 480, height: 320 }, { fitPage: true })).toEqual({
+      x: 0,
+      y: 0,
+      width: 300,
+      height: 200,
+    });
+  });
 });
 
 describe("each kind goes to its owner's seam", () => {
@@ -97,6 +109,42 @@ describe("each kind goes to its owner's seam", () => {
       "chart:createDialog",
       expect.objectContaining({ suppressAutoRange: true, placement: expect.objectContaining({ sheetIndex: 2 }) }),
     );
+  });
+
+  it("pivot: the pivot create dialog, with the canvas and a snapped default frame (never a range or a cell)", async () => {
+    await insertOnCanvas("pivot");
+    expect(showDialog).toHaveBeenCalledTimes(1);
+    const [id, data] = showDialog.mock.calls[0];
+    expect(id).toBe("pivot:createDialog");
+    // Centre of the 1000x600 view: (1000-480)/2 = 260 -> 256 and
+    // (600-320)/2 = 140 -> 144 on the 16 px grid. Bigger than a chart.
+    expect(data).toEqual({ placement: { sheetIndex: 2, x: 256, y: 144, width: 480, height: 320 } });
+    expect(data.placement.width * data.placement.height).toBeGreaterThan(
+      INSERT_SIZES.chart.width * INSERT_SIZES.chart.height,
+    );
+  });
+
+  it("pivot: the frame is kept on the page when the view is scrolled past it", async () => {
+    gridSnapshot = { ...gridSnapshot!, viewport: { scrollX: 5000, scrollY: 5000 } };
+    await insertOnCanvas("pivot");
+    const { placement } = showDialog.mock.calls[0][1];
+    expect(placement.x + placement.width).toBeLessThanOrEqual(1280);
+    expect(placement.y + placement.height).toBeLessThanOrEqual(720);
+    expect(placement.x % 16).toBe(0);
+    expect(placement.y % 16).toBe(0);
+    expect(placement).toMatchObject({ width: 480, height: 320 });
+  });
+
+  it("pivot: on a page smaller than the default frame the frame shrinks to the page", async () => {
+    surface = { ...surface!, page: { width: 400, height: 240 } };
+    await insertOnCanvas("pivot");
+    expect(showDialog.mock.calls[0][1].placement).toEqual({ sheetIndex: 2, x: 0, y: 0, width: 400, height: 240 });
+  });
+
+  it("pivot: with no grid yet nothing opens", async () => {
+    gridSnapshot = null;
+    await insertOnCanvas("pivot");
+    expect(showDialog).not.toHaveBeenCalled();
   });
 
   it("slicer and timeline: their insert dialogs, with a placement origin", async () => {

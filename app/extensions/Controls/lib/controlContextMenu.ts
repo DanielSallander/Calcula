@@ -25,6 +25,8 @@
 import { gridExtensions } from "@api";
 import { AppEvents } from "@api";
 import { emitAppEvent } from "@api/events";
+import { getGridRegions } from "@api/gridOverlays";
+import { getObjectStackingService, type ObjectStackingCommand } from "@api/objectStacking";
 import type { GridContextMenuItem, GridMenuContext } from "@api/extensions";
 import {
   getSelectedFloatingControls,
@@ -40,6 +42,7 @@ import {
   groupControls,
   ungroupControls,
   getGroupForControl,
+  getGroupMembers,
 } from "./floatingStore";
 import {
   setControlProperty,
@@ -174,25 +177,54 @@ function handleUngroup(id: string): void {
 // Z-Order Handlers
 // ============================================================================
 
+/**
+ * ON A CANVAS the page owns the paint order of EVERY object
+ * (`CanvasLayout.zOrder`) and Core paints and hit-tests by it, so this
+ * extension's own order -- its store array, session-only -- would compete with
+ * it and silently lose. When the page's stacking service (@api/objectStacking)
+ * orders the control, the command goes there instead: the control and its
+ * group members move as one block in the page's order. Returns false (the
+ * caller falls back to the store's own order) on a worksheet.
+ */
+export function routeToPageStacking(controlId: string, command: ObjectStackingCommand): boolean {
+  const regions = getGridRegions();
+  const own = regions.find((r) => r.id === controlId);
+  if (!own) return false;
+  const service = getObjectStackingService(own);
+  if (!service) return false;
+  const groupId = getGroupForControl(controlId);
+  const ids = new Set(groupId ? getGroupMembers(groupId) : [controlId]);
+  ids.add(controlId);
+  void service.restack(
+    command,
+    regions.filter((r) => ids.has(r.id)),
+  );
+  return true;
+}
+
 function handleBringToFront(id: string): void {
+  if (routeToPageStacking(id, "bringToFront")) return;
   bringToFront(id);
   syncFloatingControlRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
 function handleSendToBack(id: string): void {
+  if (routeToPageStacking(id, "sendToBack")) return;
   sendToBack(id);
   syncFloatingControlRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
 function handleBringForward(id: string): void {
+  if (routeToPageStacking(id, "bringForward")) return;
   bringForward(id);
   syncFloatingControlRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
 function handleSendBackward(id: string): void {
+  if (routeToPageStacking(id, "sendBackward")) return;
   sendBackward(id);
   syncFloatingControlRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);

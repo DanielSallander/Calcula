@@ -26,9 +26,7 @@ import {
 } from "@api";
 import type { AutoFitColumnContribution, AutoFitRowContribution } from "@api";
 import { emitAppEvent, onAppEvent } from "@api/events";
-import { setActiveSheet } from "@api/lib";
 import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
-import { decideDrillDispatch, diagnoseScriptDrill } from "./lib/drillDispatch";
 
 import { PivotEvents } from "../_shared/lib/pivotEvents";
 import type { PivotProgressEvent } from "../_shared/lib/pivotEvents";
@@ -86,9 +84,36 @@ import {
   shiftCachedRegionsForRowDelete,
   ensureDesignTabRegistered,
   setJustCreatedPivot,
+  getSelectedVisualPivotId,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData, PivotEditorViewData, BiPivotModelInfo } from "./types";
-import { getPivotRegionsForSheet, getPivotAtCell, getPivotDataFormula, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies, drillThroughToSheet, isTotalCell, getPivotDrillBehavior } from "./lib/pivot-api";
+import { getPivotRegionsForSheet, getPivotAtCell, getPivotDataFormula, getPivotView, getPivotCellWindow, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies } from "./lib/pivot-api";
+import {
+  togglePivotHeaderAt,
+  openPivotReportFilterAt,
+  openPivotHeaderFilter,
+  cancelPivotLoading,
+  getPivotViewCell,
+} from "./lib/pivotChromeActions";
+import { runPivotCellDoubleClick } from "./lib/pivotCellDoubleClick";
+import {
+  publishPivotRegions,
+  removePivotVisualRegions,
+  resetPivotVisualRegionState,
+  currentFrameGeneration,
+} from "./lib/pivotVisualRegions";
+import { prunePivotVisualRecords, resetPivotVisualHits, getPivotVisualRecord } from "./lib/pivotVisualHits";
+import { resetPivotVisualScrolls } from "./lib/pivotVisualScroll";
+import { installPivotVisual, clearPivotVisualHoverOutside } from "./lib/pivotVisualOverlay";
+import {
+  notePivotCreated,
+  adoptCreatedCanvasPivot,
+  resetCreatedPivotTracking,
+} from "./lib/pivotVisualSelection";
+import {
+  paintPivotPlaceholderContent,
+  paintPivotLoadingIndicator,
+} from "./rendering/pivotStatusPainters";
 import { pivotBackend } from "./lib/pivotBackend";
 import type { PivotViewResponse } from "./lib/pivot-api";
 import {
@@ -105,8 +130,6 @@ import {
   setLoading,
   clearLoading,
   applyBackendProgress,
-  restorePreviousView,
-  markUserCancelled,
 } from "./lib/pivotViewStore";
 import {
   prepareWritebackContexts,
@@ -349,64 +372,16 @@ function drawLoadingOverlay(overlayCtx: OverlayRenderContext, pivotId: string): 
   );
   ctx.clip();
 
-  // Semi-transparent overlay to dim the previous view
-  ctx.fillStyle = "rgba(255, 255, 255, 0.6)";
-  ctx.fillRect(startX, startY, width, height);
-
-  // Indeterminate progress bar (3px, animated at top of pivot)
-  const BAR_HEIGHT = 3;
-  const elapsed = performance.now() - loadingState.startedAt;
-  const barWidth = width * 0.3;
-  const period = 1500; // ms for one full sweep
-  const progress = (elapsed % period) / period;
-  // Smooth ease-in-out using sine
-  const eased = 0.5 - 0.5 * Math.cos(progress * Math.PI * 2);
-  const barX = startX + (width - barWidth) * eased;
-
-  ctx.fillStyle = "#5B9BD5";
-  ctx.fillRect(barX, startY, barWidth, BAR_HEIGHT);
-
-  // Build stage text with step indicator, e.g. "Calculating... (2/4)"
-  const { stage, stageIndex, totalStages } = loadingState;
-  const stepText = totalStages > 0
-    ? `${stage} (${stageIndex + 1}/${totalStages})`
-    : stage;
-
-  // Position text and cancel button just below the progress bar (fixed at top)
-  const textY = startY + BAR_HEIGHT + 16;
-  const centerX = startX + width / 2;
-
-  ctx.fillStyle = "#555555";
-  ctx.font = "13px Segoe UI, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(stepText, centerX, textY);
-
-  // Cancel button (shown after 1s to avoid flicker for fast operations)
-  if (elapsed > 1000) {
-    const btnWidth = 70;
-    const btnHeight = 24;
-    const btnX = centerX - btnWidth / 2;
-    const btnY = textY + 14;
-
-    // Button background
-    ctx.fillStyle = "#e5e7eb";
-    ctx.strokeStyle = "#9ca3af";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.roundRect(btnX, btnY, btnWidth, btnHeight, 4);
-    ctx.fill();
-    ctx.stroke();
-
-    // Button text
-    ctx.fillStyle = "#374151";
-    ctx.font = "12px Segoe UI, sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("Cancel", btnX + btnWidth / 2, btnY + btnHeight / 2);
-
+  // Dim, progress bar, stage text and (after 1s) the Cancel button -- the same
+  // painter the canvas pivot box uses, so the two cannot drift apart.
+  const cancelBounds = paintPivotLoadingIndicator(
+    ctx,
+    { x: startX, y: startY, width, height },
+    loadingState,
+  );
+  if (cancelBounds) {
     // Store bounds for click handler
-    overlayCancelBounds.set(pivotId, { x: btnX, y: btnY, width: btnWidth, height: btnHeight });
+    overlayCancelBounds.set(pivotId, cancelBounds);
   }
 
   ctx.restore();
@@ -917,49 +892,12 @@ function drawPivotPlaceholderText(overlayCtx: OverlayRenderContext): void {
   );
   ctx.clip();
 
-  // Draw pivot name box at top center of region
-  const pivotName = (region.data?.name as string) || "PivotTable";
-  const nameBoxPadding = 8;
-  ctx.font = "12px system-ui, -apple-system, sans-serif";
-  const nameWidth = ctx.measureText(pivotName).width;
-  const nameBoxWidth = nameWidth + nameBoxPadding * 2;
-  const nameBoxHeight = 24;
-  const nameBoxX = startX + (regionWidth - nameBoxWidth) / 2;
-  const nameBoxY = startY + 10;
-
-  // Name box background
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(nameBoxX, nameBoxY, nameBoxWidth, nameBoxHeight);
-  // Name box border
-  ctx.strokeStyle = "#b0b0b0";
-  ctx.lineWidth = 1;
-  ctx.setLineDash([]);
-  ctx.strokeRect(
-    Math.floor(nameBoxX) + 0.5,
-    Math.floor(nameBoxY) + 0.5,
-    nameBoxWidth,
-    nameBoxHeight,
+  // Name box + "Click in this area" hint -- shared with the canvas pivot box.
+  paintPivotPlaceholderContent(
+    ctx,
+    { x: startX, y: startY, width: regionWidth, height: regionHeight },
+    (region.data?.name as string) || "PivotTable",
   );
-  // Name text
-  ctx.fillStyle = "#333333";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(pivotName, nameBoxX + nameBoxWidth / 2, nameBoxY + nameBoxHeight / 2);
-
-  // Draw centered instruction text below the name box
-  const centerX = startX + regionWidth / 2;
-  const centerY = startY + regionHeight / 2 + 10;
-
-  if (regionWidth > 120 && regionHeight > 60) {
-    ctx.fillStyle = "#888888";
-    ctx.font = "12px system-ui, -apple-system, sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("Click in this area to work with", centerX, centerY - 8);
-    ctx.font = "11px system-ui, -apple-system, sans-serif";
-    ctx.fillStyle = "#aaaaaa";
-    ctx.fillText("the PivotTable report", centerX, centerY + 8);
-  }
 
   ctx.restore();
 }
@@ -983,6 +921,9 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
   // If a structural change (row/col insert/delete) happens while we are
   // awaiting IPC, the version will increment and our fetched data is stale.
   const versionAtStart = structuralVersion;
+  // A canvas pivot box's frame saved while this fetch is in flight must win
+  // over the pre-save frame the fetch will bring back (pivotVisualRegions).
+  const frameGenerationAtStart = currentFrameGeneration();
 
   const tTotal = performance.now();
   try {
@@ -1033,22 +974,23 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
       });
     }
 
-    const gridRegions: GridRegion[] = regions.map((r: PivotRegionData) => ({
-      id: `pivot-${r.pivotId}`,
-      type: "pivot",
-      startRow: r.startRow,
-      startCol: r.startCol,
-      endRow: r.endRow,
-      endCol: r.endCol,
-      data: { isEmpty: r.isEmpty, pivotId: r.pivotId, name: r.name },
-    }));
-
     // Atomically replace pivot regions and always notify listeners so the overlay
     // redraws immediately with the freshly-cached pivotViewCache data.
     // The transition bounds mechanism covers the old (larger) region area with a
     // white fill, so stale cells underneath are hidden even before refreshCells()
     // completes from the grid:refresh below.
-    replaceGridRegionsByType("pivot", gridRegions);
+    //
+    // A CANVAS pivot (one with a `canvasFrame`) publishes a floating
+    // `pivot-visual` region INSTEAD of the cell-anchored `pivot` one: the Core
+    // paints no cell region on a canvas, but would keep its bottom-right
+    // resize handle live somewhere on the page.
+    const published = publishPivotRegions(regions, frameGenerationAtStart);
+    prunePivotVisualRecords(new Set(published.visual.map((r) => String(r.data?.pivotId ?? ""))));
+    if (published.cell.length === 0) {
+      // Only the worksheet overlay's paint clears its bound maps; with no
+      // worksheet pivot on this sheet it never paints, so clear them here.
+      clearOverlayIconBounds();
+    }
 
     // Update BI connection status for overlay badges (non-blocking)
     updateBiConnectionStatus(regions);
@@ -1087,6 +1029,7 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
   } catch (error) {
     console.error("[Pivot Extension] Failed to fetch pivot regions:", error);
     removeGridRegionsByType("pivot");
+    removePivotVisualRegions();
     emitAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, { regions: [] });
   } finally {
     isRefreshingPivotRegions = false;
@@ -1515,18 +1458,10 @@ function activate(context: ExtensionContext): void {
           canvasY >= bounds.y &&
           canvasY <= bounds.y + bounds.height
         ) {
-          // Immediately restore previous view on the frontend (instant feedback)
-          // Mark as user-cancelled so the in-flight result is suppressed
-          markUserCancelled(pivotId);
-          clearLoading(pivotId);
-          restorePreviousView(pivotId);
+          // Restore the previous view at once, suppress the in-flight result
+          // and ask the backend to stop (shared with the canvas pivot box).
           overlayCancelBounds.delete(pivotId);
-          requestOverlayRedraw();
-
-          // Also tell the backend to cancel (best-effort, may arrive too late)
-          cancelPivotOperation(pivotId).catch((err) => {
-            console.warn("[Pivot Extension] Cancel failed:", err);
-          });
+          cancelPivotLoading(pivotId);
           return true;
         }
       }
@@ -1552,43 +1487,11 @@ function activate(context: ExtensionContext): void {
           canvasY >= bounds.y - ICON_HIT_PADDING &&
           canvasY <= bounds.y + bounds.height + ICON_HIT_PADDING
         ) {
-          // Found a matching icon - toggle expand/collapse
-          const cachedView = getCachedPivotView(bounds.pivotId);
-          if (!cachedView) return false;
-
-          // Find the pivot-relative row/col
+          // Found a matching icon - toggle expand/collapse (shared with the
+          // canvas pivot box; false when the cell is not in the cached view)
           const pivotRowIndex = bounds.gridRow - (gridRegionsCache.get(bounds.pivotId)?.startRow ?? 0);
           const pivotColIndex = bounds.gridCol - (gridRegionsCache.get(bounds.pivotId)?.startCol ?? 0);
-
-          const pivotRow = cachedView.rows[pivotRowIndex];
-          if (!pivotRow) return false;
-          const cell = pivotRow.cells[pivotColIndex];
-          if (!cell) return false;
-
-          const itemLabel = cell.formattedValue;
-          // In compact layout, all row headers share col 0 but have different indent levels.
-          // Use indentLevel to determine the correct field index.
-          // For columns, indentLevel carries the column field depth directly.
-          const fieldIndex = bounds.isRow
-            ? (cell.indentLevel ?? pivotColIndex)
-            : (cell.indentLevel ?? 0);
-
-          try {
-            await togglePivotGroup({
-              pivotId: bounds.pivotId,
-              isRow: bounds.isRow,
-              fieldIndex,
-              value: itemLabel,
-              // Send full group path so that toggling "Female under Gothenburg"
-              // doesn't affect "Female under Stockholm"
-              groupPath: cell.groupPath,
-            });
-            // Trigger refresh to reload pivot data
-            window.dispatchEvent(new CustomEvent("pivot:refresh"));
-          } catch (error) {
-            console.error("[Pivot Extension] Failed to toggle expand/collapse:", error);
-          }
-          return true;
+          return togglePivotHeaderAt(bounds.pivotId, pivotRowIndex, pivotColIndex, bounds.isRow);
         }
       }
       return false;
@@ -1611,27 +1514,14 @@ function activate(context: ExtensionContext): void {
           canvasY >= bounds.y &&
           canvasY <= bounds.y + bounds.height
         ) {
-          try {
-            const pivotInfo = await getPivotAtCell(bounds.gridRow, bounds.gridCol);
-            if (!pivotInfo?.filterZones) return false;
-
-            for (const zone of pivotInfo.filterZones) {
-              if (zone.fieldIndex === bounds.fieldIndex) {
-                context.events.emit(PivotEvents.PIVOT_OPEN_FILTER_MENU, {
-                  fieldIndex: zone.fieldIndex,
-                  fieldName: zone.fieldName,
-                  row: zone.row,
-                  col: zone.col,
-                  anchorX: event.clientX,
-                  anchorY: event.clientY,
-                });
-                return true;
-              }
-            }
-          } catch (error) {
-            console.error("[Pivot Extension] Failed to check pivot filter:", error);
-          }
-          return false;
+          // Shared with the canvas pivot box.
+          return openPivotReportFilterAt(
+            bounds.gridRow,
+            bounds.gridCol,
+            bounds.fieldIndex,
+            event.clientX,
+            event.clientY,
+          );
         }
       }
       return false;
@@ -1655,12 +1545,7 @@ function activate(context: ExtensionContext): void {
           canvasY <= bounds.y + bounds.height
         ) {
           // Found a matching header filter button - open header filter dropdown
-          context.events.emit(PivotEvents.PIVOT_OPEN_HEADER_FILTER_MENU, {
-            pivotId: bounds.pivotId,
-            zone: bounds.zone,
-            anchorX: event.clientX,
-            anchorY: event.clientY + 2,
-          });
+          openPivotHeaderFilter(bounds.pivotId, bounds.zone, event.clientX, event.clientY + 2);
           return true;
         }
       }
@@ -1710,101 +1595,12 @@ function activate(context: ExtensionContext): void {
           // also allow these cells) starts edit mode.
           if (resolveWritebackCell(pivotId, row, col)) return false;
 
-          const pivotRow = cachedView.rows[pivotRowIndex];
-          if (!pivotRow) return true;
-          const cell = pivotRow.cells[pivotColIndex];
+          const cell = getPivotViewCell(pivotId, pivotRowIndex, pivotColIndex);
           if (!cell) return true;
 
-          // If this cell is an expandable row header, toggle it
-          if (cell.cellType === "RowHeader" && cell.isExpandable) {
-            try {
-              togglePivotGroup({
-                pivotId,
-                isRow: true,
-                fieldIndex: cell.indentLevel || pivotColIndex,
-                value: cell.formattedValue,
-              });
-              window.dispatchEvent(new CustomEvent("pivot:refresh"));
-            } catch (error) {
-              console.error("[Pivot Extension] Failed to toggle hierarchy on double-click:", error);
-            }
-          } else if (cell.cellType === "Data" || isTotalCell(cell.cellType)) {
-            // Data / total cell: drill through. A "script"-mode pivot dispatches
-            // the onDrillThrough hook to its sandboxed script (which produces the
-            // drill via its consented capabilities); otherwise the host runs the
-            // built-in / query secured drill into a new sheet.
-            const groupPath = (cell.groupPath ?? []) as Array<[number, number]>;
-            void (async () => {
-              try {
-                const behavior = await getPivotDrillBehavior(pivotId);
-                // Dispatch to the pivot's script only when a MOUNTED script has
-                // actually REGISTERED a drill handler. "Does this pivot have a
-                // script" answers the wrong question: the handler side is opt-in
-                // (the forwarder exists only once the script calls
-                // `pivot.onDrillThrough`), so a script that hooks only, say,
-                // `onRefresh` left the emitted event with no subscriber — and
-                // because this branch had already returned, the user got no
-                // drill, no fallback and no message at all (BUG-0096). Every
-                // other case falls through to the built-in drill below, which is
-                // what makes "a double-click is never a silent no-op" true rather
-                // than merely intended.
-                if (behavior?.kind === "script") {
-                  // Dynamic, matching the ObjectScriptManager use in Controls:
-                  // the script host pulls in the worker bootstrap, and Pivot
-                  // activates long before any script does.
-                  const { ObjectScriptManager, mountedScriptHasHook } = await import("@api");
-                  const script = ObjectScriptManager.getScript("pivot", pivotId);
-                  const mounted = script ? ObjectScriptManager.isScriptMounted(script.id) : false;
-                  const facts = {
-                    kind: behavior.kind,
-                    script: script ? { id: script.id, name: script.name } : null,
-                    mounted,
-                    handlesDrill:
-                      script && mounted
-                        ? mountedScriptHasHook(script.id, "pivot.onDrillThrough")
-                        : false,
-                  };
-
-                  if (decideDrillDispatch(facts) === "script") {
-                    // Resolve the drilled cell to (table, column, value) pairs and
-                    // dispatch the hook; the pivot's script handles the rest.
-                    // `getPivotDataFormula` stays INSIDE this branch: it is an
-                    // extra IPC round trip that only the script path needs.
-                    const resolved = await getPivotDataFormula(row, col);
-                    const drillCell = (resolved?.fieldItemPairs ?? []).map(([fn, value]) => {
-                      const dot = fn.lastIndexOf(".");
-                      return dot >= 0
-                        ? { table: fn.slice(0, dot), column: fn.slice(dot + 1), value }
-                        : { table: "", column: fn, value };
-                    });
-                    emitAppEvent("pivot:drillThrough", { pivotId, cell: drillCell });
-                    return;
-                  }
-
-                  const diagnosis = diagnoseScriptDrill(facts);
-                  if (diagnosis) showToast(diagnosis.message, { type: diagnosis.variant });
-                }
-                const resp = await drillThroughToSheet({ pivotId, groupPath });
-                try {
-                  await setActiveSheet(resp.sheetIndex);
-                } catch {
-                  /* the SHEET_CHANGED emit below still re-syncs the tab bar */
-                }
-                emitAppEvent(AppEvents.SHEET_CHANGED, { sheetIndex: resp.sheetIndex });
-              } catch (error) {
-                // MUST be visible. The backend now REFUSES a drill whose
-                // dimension column the active "view as" role denies, instead
-                // of silently retrying without it — so without this toast a
-                // denied double-click would do nothing at all, with the
-                // reason only in devtools. That is verbatim the BUG-0096
-                // failure mode ("no drill, no fallback and no message") the
-                // comment above this handler exists to prevent. The same line
-                // also covers a failed getPivotDrillBehavior.
-                console.error("[Pivot Extension] Drill-through failed:", error);
-                showToast(String(error), { type: "error" });
-              }
-            })();
-          }
+          // Expandable row header: toggle. Data / total cell: drill through.
+          // One implementation, shared with the canvas pivot box's double-click.
+          runPivotCellDoubleClick(pivotId, cell, row, col, pivotColIndex);
 
           // Any cell in a pivot region: consume double-click (no edit mode)
           return true;
@@ -1926,6 +1722,17 @@ function activate(context: ExtensionContext): void {
     })
   );
 
+  // CANVAS pivots: a floating `pivot-visual` box per canvas pivot -- painted
+  // clipped and scrolled inside its frame, movable/resizable through Core,
+  // with its chrome reached through the body-drag claim (the cellClicks
+  // interceptors above are never asked over a floating object), its own
+  // double-click, object selection (Tab / Escape on the canvas) and wheel.
+  cleanupFunctions.push(
+    ...installPivotVisual({ getTheme: getThemeForPivot }, (registration) =>
+      context.grid.overlays.register(registration),
+    ),
+  );
+
   // Double-click best-fit must size pivot columns/rows for the overlay-drawn
   // content (themed fonts + in-cell chrome), not the underlying grid cells
   cleanupFunctions.push(
@@ -1939,6 +1746,9 @@ function activate(context: ExtensionContext): void {
   // Track filter dropdown hover state for visual highlight via document-level
   // mousemove (the core cursor system handles pointer cursor via getCursor above)
   const handleDocMouseMove = (event: MouseEvent) => {
+    // A canvas pivot box's hover (set by its getCursor) must clear when the
+    // pointer leaves the box -- getCursor is only asked over an object.
+    clearPivotVisualHoverOutside(event.clientX, event.clientY);
     if (!cachedCanvasElement) return;
     const isOverCanvas = event.target === cachedCanvasElement || cachedCanvasElement.contains(event.target as Node);
 
@@ -1984,6 +1794,13 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(
     context.events.on<{ pivotId: string }>(PivotEvents.PIVOT_CREATED, handlePivotCreated)
   );
+  // A pivot created on a canvas starts as the SELECTED box (see
+  // adoptCreatedCanvasPivot), so a click on the empty page deselects it.
+  cleanupFunctions.push(
+    context.events.on<{ pivotId: string }>(PivotEvents.PIVOT_CREATED, (detail) => {
+      if (detail?.pivotId) notePivotCreated(String(detail.pivotId));
+    })
+  );
 
   cleanupFunctions.push(
     context.events.on<{
@@ -2016,7 +1833,10 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(
     context.events.on<{ regions: PivotRegionData[] }>(
       PivotEvents.PIVOT_REGIONS_UPDATED,
-      (detail) => updateCachedRegions(detail.regions)
+      (detail) => {
+        updateCachedRegions(detail.regions);
+        adoptCreatedCanvasPivot(detail.regions ?? []);
+      }
     )
   );
 
@@ -2139,6 +1959,24 @@ function activate(context: ExtensionContext): void {
     })
   );
 
+  // A pull, refresh or push of a .calp application can replace pivots and the
+  // canvas frames they are shown in; re-read regions AND views (no cache hit).
+  cleanupFunctions.push(
+    context.events.on(AppEvents.PACKAGE_UPDATED, () => {
+      refreshPivotRegions(true);
+    })
+  );
+
+  // A canvas pivot box's scroll is a session VIEWING state keyed by pivot id;
+  // a different document starts every box at its top-left again.
+  for (const event of [AppEvents.AFTER_NEW, AppEvents.AFTER_OPEN]) {
+    cleanupFunctions.push(
+      context.events.on(event, () => {
+        resetPivotVisualScrolls();
+      })
+    );
+  }
+
   // Shift pivot overlay regions synchronously when rows/columns are
   // inserted or deleted. The sync shift uses the same arithmetic as the
   // backend so positions are guaranteed correct. We do NOT call
@@ -2216,6 +2054,17 @@ function activate(context: ExtensionContext): void {
     getCachedRegions,
     findPivotRegionAtCell,
     handleSelectionChange,
+    // Canvas pivot boxes: what the box last painted (canvas-space box, session
+    // scroll, first body row) -- read-only, for journey assertions.
+    getVisualState: (pivotId: string) => {
+      const record = getPivotVisualRecord(pivotId);
+      if (!record) return null;
+      return {
+        box: { ...record.box },
+        scroll: { ...record.scroll },
+        selected: getSelectedVisualPivotId() === pivotId,
+      };
+    },
   };
 
   console.log("[Pivot Extension] Registered successfully");
@@ -2250,6 +2099,11 @@ function deactivate(): void {
 
   // Clear overlay regions
   removeGridRegionsByType("pivot");
+  removePivotVisualRegions();
+  resetPivotVisualRegionState();
+  resetPivotVisualHits();
+  resetPivotVisualScrolls();
+  resetCreatedPivotTracking();
 
   // Unregister from extension registries
   ExtensionRegistry.unregisterAddIn(PivotManifest.id);

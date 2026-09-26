@@ -1,10 +1,50 @@
 //! FILENAME: app/extensions/pivot/components/CreatePivotDialog.tsx
+// PURPOSE: Insert > PivotTable: pick the source and where the pivot goes.
+// CONTEXT: Two modes.
+//          - WORKSHEET mode (the classic dialog): a range or table source, and
+//            a new or existing worksheet destination; afterwards the dialog
+//            switches to the destination and navigates to the pivot.
+//          - CANVAS mode, when an opener hands a `placement` (the Canvas tab's
+//            Insert group) or the active sheet IS a canvas (Insert menu on a
+//            canvas): the pivot is a real pivot written into the canvas's
+//            hidden grid and shown inside a box (its frame). The destination
+//            is fixed to "this canvas"; the source is a range WITH its
+//            worksheet, a table, or a data model -- never guessed from the
+//            canvas, which has no cells; the request carries `canvasFrame`,
+//            an explicit non-canvas `sourceSheet` and the canvas as
+//            `destinationSheet`; afterwards nothing navigates (the pivot is
+//            already in view where it was inserted). The rules live in
+//            ../lib/canvasPivotCreate.ts.
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useDialogWindow } from '@api/dialogWindow';
 import { pivot } from '@api/pivot';
-import { addSheet, getSheets, setActiveSheetApi, indexToCol, colToIndex, detectDataRegion, useGridState } from '@api';
+import {
+  addSheet,
+  getSheets,
+  setActiveSheetApi,
+  indexToCol,
+  colToIndex,
+  detectDataRegion,
+  useGridState,
+  getUsedRange,
+  getCurrentRegion,
+  getPivotStoreService,
+} from '@api';
 import { emitAppEvent, AppEvents } from '@api/events';
+import { getTableByName, type ConnectionInfo } from '@api/backend';
+import { getConnections } from '../../_shared/lib/bi-api';
+import { getConnectionBiModel } from '../lib/pivot-api';
+import {
+  CANVAS_SOURCE_HINT,
+  CANVAS_SOURCE_NO_DATA_NOTE,
+  canvasFrameOf,
+  defaultCanvasPivotPlacement,
+  findDefaultCanvasSource,
+  readCanvasPivotPlacement,
+  resolveCanvasPivotSource,
+  type CanvasPivotPlacement,
+} from '../lib/canvasPivotCreate';
 
 /** Excel-compatible grid limits (0-indexed max values). */
 const MAX_ROW_INDEX = 1048576 - 1; // 1,048,575
@@ -33,9 +73,19 @@ export interface CreatePivotDialogProps {
   /** Source table name (e.g. "Table1"). When set, the pivot source is linked
    *  to the table and auto-updates when the table expands. */
   tableName?: string;
+  /** Canvas placement from the opener's dialog data, as handed over
+   *  (`{ sheetIndex, x, y, width, height }`, logical page px). Validated here;
+   *  a valid one puts the dialog in canvas mode with that frame. */
+  placement?: unknown;
 }
 
 type DestinationType = 'new' | 'existing';
+
+/** Where a canvas pivot's data comes from. */
+type CanvasSourceKind = 'range' | 'model';
+
+/** The message when the data-model source is chosen with nothing to choose. */
+const NO_CONNECTION_MESSAGE = 'Please choose a data model connection.';
 
 // ============================================================================
 // Utility Functions
@@ -161,9 +211,16 @@ export function CreatePivotDialog({
   onCreated,
   selection,
   tableName,
+  placement,
 }: CreatePivotDialogProps): React.ReactElement | null {
   // Read current grid selection (active cell) for auto-detection
   const gridState = useGridState();
+
+  // Canvas mode: an opener-supplied placement, or a canvas as the active sheet
+  // (the Insert menu opened on a canvas hands no placement; the frame is then
+  // chosen here, centred in the view, through the layout surface).
+  const canvasPlacement = readCanvasPivotPlacement(placement);
+  const canvasMode = canvasPlacement !== null || gridState.surface === 'canvas';
 
   // Movable + resizable dialog window (shared @api hook)
   const win = useDialogWindow({ minWidth: 340, minHeight: 300 });
@@ -178,7 +235,7 @@ export function CreatePivotDialog({
   // UI state
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [sheets, setSheets] = useState<{ index: number; name: string }[]>([]);
+  const [sheets, setSheets] = useState<{ index: number; name: string; kind?: string }[]>([]);
   const [currentSheetName, setCurrentSheetName] = useState('Sheet1');
   const [sourceSheetIndex, setSourceSheetIndex] = useState<number | undefined>(undefined);
 
@@ -191,6 +248,13 @@ export function CreatePivotDialog({
   const [isPicking, setIsPicking] = useState(false);
   // Snapshot the selection at the moment picking started so we can detect changes
   const pickStartSelRef = useRef<{ endRow: number; endCol: number } | null>(null);
+
+  // Canvas mode state: the source kind, the data-model connections, and the
+  // note shown when no worksheet has data to default the source to.
+  const [canvasSourceKind, setCanvasSourceKind] = useState<CanvasSourceKind>('range');
+  const [connections, setConnections] = useState<ConnectionInfo[]>([]);
+  const [connectionId, setConnectionId] = useState('');
+  const [canvasSourceNote, setCanvasSourceNote] = useState<string | null>(null);
 
   // Load sheets on mount and reset initialization flags
   useEffect(() => {
@@ -233,8 +297,11 @@ export function CreatePivotDialog({
     setIsPicking(false);
   }, [isPicking, gridState.selection]);
 
-  // Auto-detect the contiguous data region around the active cell
+  // Auto-detect the contiguous data region around the active cell. Never on a
+  // canvas: it has no cells, so its "selection" is not data (the canvas
+  // effect below chooses the default source instead).
   useEffect(() => {
+    if (canvasMode) return;
     if (!isOpen || hasAutoDetected || !currentSheetName) return;
 
     // If a table name is provided, use it directly as the source reference
@@ -286,7 +353,50 @@ export function CreatePivotDialog({
           setSourceRange(fullRange);
         }
       });
-  }, [isOpen, hasAutoDetected, currentSheetName, selection, tableName, gridState.selection]);
+  }, [canvasMode, isOpen, hasAutoDetected, currentSheetName, selection, tableName, gridState.selection]);
+
+  // Canvas mode, once per open: the default source (a table the opener named,
+  // else the data on the first worksheet that has any, else a note saying
+  // there is none), and the data-model connections for the model source.
+  useEffect(() => {
+    if (!isOpen || !canvasMode) return;
+    let cancelled = false;
+    setCanvasSourceKind('range');
+    setCanvasSourceNote(null);
+    setSourceRange(tableName ?? '');
+
+    getConnections()
+      .then((conns) => {
+        if (cancelled) return;
+        setConnections(conns);
+        setConnectionId((prev) => (prev && conns.some((c) => c.id === prev) ? prev : (conns[0]?.id ?? '')));
+      })
+      .catch((err) => {
+        console.warn('[CreatePivotDialog] Could not list data model connections:', err);
+        if (!cancelled) setConnections([]);
+      });
+
+    if (!tableName) {
+      getSheets()
+        .then((result) => findDefaultCanvasSource(result.sheets, { getUsedRange, getCurrentRegion }))
+        .then((found) => {
+          if (cancelled) return;
+          if (found) {
+            // Never overwrite what the reader already typed.
+            setSourceRange((prev) => (prev.trim() ? prev : found));
+          } else {
+            setCanvasSourceNote(CANVAS_SOURCE_NO_DATA_NOTE);
+          }
+        })
+        .catch((err) => {
+          console.warn('[CreatePivotDialog] Could not choose a default source:', err);
+          if (!cancelled) setCanvasSourceNote(CANVAS_SOURCE_NO_DATA_NOTE);
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, canvasMode, tableName]);
 
   // Generate default new sheet name ONLY once when sheets are loaded
   useEffect(() => {
@@ -321,7 +431,111 @@ export function CreatePivotDialog({
     onClose();
   }, [onClose]);
 
+  // Canvas mode: the canvas the pivot goes on and its frame -- the opener's
+  // placement, or a default centred in the current view.
+  const zoom = gridState.zoom > 0 ? gridState.zoom : 1;
+  const canvasTarget: CanvasPivotPlacement | null = !canvasMode
+    ? null
+    : canvasPlacement ??
+      defaultCanvasPivotPlacement({
+        sheetIndex: gridState.sheetContext?.activeSheetIndex ?? 0,
+        scrollX: gridState.viewport?.scrollX ?? 0,
+        scrollY: gridState.viewport?.scrollY ?? 0,
+        viewWidth: Math.max(1, (gridState.viewportDimensions?.width ?? 0) / zoom),
+        viewHeight: Math.max(1, (gridState.viewportDimensions?.height ?? 0) / zoom),
+      });
+  const canvasName =
+    canvasTarget !== null
+      ? (sheets.find((s) => s.index === canvasTarget.sheetIndex)?.name ?? currentSheetName)
+      : '';
+
+  const handleCreateOnCanvas = async (target: CanvasPivotPlacement) => {
+    setError(null);
+    setIsLoading(true);
+
+    try {
+      const canvasFrame = canvasFrameOf(target);
+      const name = pivotName.trim() || undefined;
+
+      if (canvasSourceKind === 'model') {
+        if (!connectionId) {
+          setError(NO_CONNECTION_MESSAGE);
+          return;
+        }
+        const view = await pivot.createFromBiModel({
+          destinationCell: 'A1',
+          destinationSheet: target.sheetIndex,
+          name,
+          connectionId,
+          canvasFrame,
+        });
+        handleClose();
+        // The new pivot is in the canvas's hidden grid: re-read the regions so
+        // its box paints where it was inserted.
+        window.dispatchEvent(new Event('pivot:refresh'));
+        // Open the field list on the model's fields (the BI flow's own path);
+        // without them, the created-pivot handler finds the model itself.
+        let biModel: Awaited<ReturnType<typeof getConnectionBiModel>> = null;
+        try {
+          biModel = await getConnectionBiModel(connectionId);
+        } catch (err) {
+          console.warn('[CreatePivotDialog] Could not read the model for the field list:', err);
+        }
+        const store = getPivotStoreService();
+        if (biModel && store) {
+          store.openBiPivotEditor(view.pivotId, biModel);
+        } else if (onCreated) {
+          onCreated(view.pivotId);
+        }
+        return;
+      }
+
+      // Resolve the source against the LIVE sheet list before anything is
+      // sent: a canvas, an unknown sheet or a range without its sheet is a
+      // sentence in the dialog, never a request the backend has to refuse.
+      const { sheets: liveSheets } = await getSheets();
+      const source = await resolveCanvasPivotSource(sourceRange, liveSheets, getTableByName);
+      if (!source.ok) {
+        setError(source.message);
+        return;
+      }
+
+      // On a canvas the backend allocates the hidden-grid anchor itself;
+      // `destinationCell` is only there because the wire requires a cell.
+      const view = await pivot.create({
+        sourceRange: source.sourceRange,
+        destinationCell: 'A1',
+        sourceSheet: source.sourceSheet,
+        destinationSheet: target.sheetIndex,
+        hasHeaders: true,
+        name,
+        sourceTableName: source.sourceTableName,
+        canvasFrame,
+      });
+
+      if (onCreated) {
+        onCreated(view.pivotId);
+      }
+      handleClose();
+
+      // No sheet switch and no navigation: the pivot is on the canvas the
+      // reader is looking at, inside the box they inserted, and scrolling to
+      // its anchor would scroll the page towards the hidden grid block.
+      window.dispatchEvent(new Event('pivot:refresh'));
+    } catch (err) {
+      console.error('[CreatePivotDialog] Error creating pivot table on the canvas:', err);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleCreate = async () => {
+    if (canvasTarget !== null) {
+      await handleCreateOnCanvas(canvasTarget);
+      return;
+    }
+
     setError(null);
     setIsLoading(true);
 
@@ -544,96 +758,199 @@ export function CreatePivotDialog({
             />
           </div>
 
-          {/* Source Range */}
-          <div style={styles.fieldGroup}>
-            <label style={styles.label}>
-              Select a table or range:
-            </label>
-            <input
-              type="text"
-              style={styles.input}
-              value={sourceRange}
-              onChange={e => setSourceRange(e.target.value)}
-              placeholder="e.g., Sheet1!A1:D100"
-              disabled={isLoading}
-            />
-            <span style={styles.hint}>
-              Include the sheet name and range (e.g., Sheet1!A1:D100)
-            </span>
-          </div>
+          {canvasTarget !== null && (
+            <>
+              {/* Source (canvas): a worksheet range or table, or a data model */}
+              <div style={styles.fieldGroup}>
+                <label style={styles.label}>
+                  Choose the data to analyze:
+                </label>
 
-          {/* Destination */}
-          <div style={styles.fieldGroup}>
-            <label style={styles.label}>
-              Choose where to place the PivotTable:
-            </label>
-            
-            <div style={styles.radioGroup}>
-              <label style={styles.radioLabel}>
-                <input
-                  type="radio"
-                  name="destination"
-                  value="new"
-                  checked={destinationType === 'new'}
-                  onChange={() => setDestinationType('new')}
-                  disabled={isLoading}
-                  style={styles.radio}
-                />
-                <span>New Worksheet</span>
-              </label>
-              
-              {destinationType === 'new' && (
-                <div style={styles.subField}>
-                  <input
-                    type="text"
-                    style={styles.inputSmall}
-                    value={newSheetName}
-                    onChange={e => setNewSheetName(e.target.value)}
-                    placeholder="Sheet name"
-                    disabled={isLoading}
-                  />
-                </div>
-              )}
-            </div>
-
-            <div style={styles.radioGroup}>
-              <label style={styles.radioLabel}>
-                <input
-                  type="radio"
-                  name="destination"
-                  value="existing"
-                  checked={destinationType === 'existing'}
-                  onChange={() => setDestinationType('existing')}
-                  disabled={isLoading}
-                  style={styles.radio}
-                />
-                <span>Existing Worksheet</span>
-              </label>
-              
-              {destinationType === 'existing' && (
-                <div style={styles.subField}>
-                  <div style={styles.inputWithPicker}>
+                <div style={styles.radioGroup}>
+                  <label style={styles.radioLabel}>
                     <input
-                      type="text"
-                      style={styles.inputSmall}
-                      value={existingDestination}
-                      onChange={e => setExistingDestination(e.target.value)}
-                      placeholder="e.g., Sheet2!F1"
+                      type="radio"
+                      name="canvasSource"
+                      value="range"
+                      checked={canvasSourceKind === 'range'}
+                      onChange={() => setCanvasSourceKind('range')}
                       disabled={isLoading}
+                      style={styles.radio}
+                      data-testid="pivot-canvas-source-range"
                     />
-                    <button
-                      style={styles.pickButton}
-                      onClick={startPicking}
-                      disabled={isLoading}
-                      title="Click to select a cell on the grid"
-                    >
-                      [^]
-                    </button>
-                  </div>
+                    <span>A table or range on a worksheet</span>
+                  </label>
+
+                  {canvasSourceKind === 'range' && (
+                    <div style={styles.subField}>
+                      <input
+                        type="text"
+                        style={styles.input}
+                        value={sourceRange}
+                        onChange={e => setSourceRange(e.target.value)}
+                        placeholder="e.g., Sheet1!A1:D100 or Table1"
+                        disabled={isLoading}
+                        aria-label="Source table or range"
+                        data-testid="pivot-canvas-source"
+                      />
+                      <span style={styles.hint}>
+                        {canvasSourceNote ?? CANVAS_SOURCE_HINT}
+                      </span>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          </div>
+
+                <div style={styles.radioGroup}>
+                  <label style={styles.radioLabel}>
+                    <input
+                      type="radio"
+                      name="canvasSource"
+                      value="model"
+                      checked={canvasSourceKind === 'model'}
+                      onChange={() => setCanvasSourceKind('model')}
+                      disabled={isLoading}
+                      style={styles.radio}
+                      data-testid="pivot-canvas-source-model"
+                    />
+                    <span>A data model connection</span>
+                  </label>
+
+                  {canvasSourceKind === 'model' && (
+                    <div style={styles.subField}>
+                      {connections.length > 0 ? (
+                        <select
+                          style={styles.select}
+                          value={connectionId}
+                          onChange={e => setConnectionId(e.target.value)}
+                          disabled={isLoading}
+                          aria-label="Data model connection"
+                          data-testid="pivot-canvas-connection"
+                        >
+                          {connections.map(c => (
+                            <option key={c.id} value={c.id}>
+                              {c.name}{c.isConnected ? '' : ' (not connected)'}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span style={styles.hint}>
+                          This workbook has no data model connections yet. Add one from the Model menu first.
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Destination (canvas): fixed to the canvas the box is on */}
+              <div style={styles.fieldGroup}>
+                <label style={styles.label}>
+                  Where the PivotTable goes:
+                </label>
+                <div style={styles.canvasDestination} data-testid="pivot-canvas-destination">
+                  This canvas ({canvasName}), {Math.round(canvasTarget.width)} x {Math.round(canvasTarget.height)} px
+                </div>
+                <span style={styles.hint}>
+                  The PivotTable is shown in this box on the page; scroll inside the box to see the rest of it.
+                </span>
+              </div>
+            </>
+          )}
+
+          {canvasTarget === null && (
+            <>
+              {/* Source Range */}
+              <div style={styles.fieldGroup}>
+                <label style={styles.label}>
+                  Select a table or range:
+                </label>
+                <input
+                  type="text"
+                  style={styles.input}
+                  value={sourceRange}
+                  onChange={e => setSourceRange(e.target.value)}
+                  placeholder="e.g., Sheet1!A1:D100"
+                  disabled={isLoading}
+                />
+                <span style={styles.hint}>
+                  Include the sheet name and range (e.g., Sheet1!A1:D100)
+                </span>
+              </div>
+
+              {/* Destination */}
+              <div style={styles.fieldGroup}>
+                <label style={styles.label}>
+                  Choose where to place the PivotTable:
+                </label>
+                
+                <div style={styles.radioGroup}>
+                  <label style={styles.radioLabel}>
+                    <input
+                      type="radio"
+                      name="destination"
+                      value="new"
+                      checked={destinationType === 'new'}
+                      onChange={() => setDestinationType('new')}
+                      disabled={isLoading}
+                      style={styles.radio}
+                    />
+                    <span>New Worksheet</span>
+                  </label>
+                  
+                  {destinationType === 'new' && (
+                    <div style={styles.subField}>
+                      <input
+                        type="text"
+                        style={styles.inputSmall}
+                        value={newSheetName}
+                        onChange={e => setNewSheetName(e.target.value)}
+                        placeholder="Sheet name"
+                        disabled={isLoading}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div style={styles.radioGroup}>
+                  <label style={styles.radioLabel}>
+                    <input
+                      type="radio"
+                      name="destination"
+                      value="existing"
+                      checked={destinationType === 'existing'}
+                      onChange={() => setDestinationType('existing')}
+                      disabled={isLoading}
+                      style={styles.radio}
+                    />
+                    <span>Existing Worksheet</span>
+                  </label>
+                  
+                  {destinationType === 'existing' && (
+                    <div style={styles.subField}>
+                      <div style={styles.inputWithPicker}>
+                        <input
+                          type="text"
+                          style={styles.inputSmall}
+                          value={existingDestination}
+                          onChange={e => setExistingDestination(e.target.value)}
+                          placeholder="e.g., Sheet2!F1"
+                          disabled={isLoading}
+                        />
+                        <button
+                          style={styles.pickButton}
+                          onClick={startPicking}
+                          disabled={isLoading}
+                          title="Click to select a cell on the grid"
+                        >
+                          [^]
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
 
           {/* Error Message */}
           {error && (
@@ -760,6 +1077,25 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '11px',
     color: '#888888',
     marginTop: '4px',
+  },
+  select: {
+    width: '100%',
+    padding: '6px 10px',
+    fontSize: '13px',
+    backgroundColor: '#1e1e1e',
+    border: '1px solid #454545',
+    borderRadius: '4px',
+    color: '#ffffff',
+    outline: 'none',
+    boxSizing: 'border-box',
+  },
+  canvasDestination: {
+    padding: '8px 12px',
+    fontSize: '13px',
+    backgroundColor: '#1e1e1e',
+    border: '1px solid #454545',
+    borderRadius: '4px',
+    color: '#cccccc',
   },
   radioGroup: {
     marginBottom: '8px',

@@ -408,6 +408,41 @@ describe("API Facade Completeness", () => {
       const mod = await import("../notifications");
       expect(typeof mod.showToast).toBe("function");
     });
+
+    it("object selection set API is available (canvas multi-select, M8)", async () => {
+      const mod = await import("../objectSelection");
+      expect(typeof mod.getSelectedObjectRegions).toBe("function");
+      expect(typeof mod.setObjectSelectionSet).toBe("function");
+      expect(typeof mod.addToObjectSelection).toBe("function");
+      expect(typeof mod.removeFromObjectSelection).toBe("function");
+      expect(typeof mod.clearObjectSelection).toBe("function");
+      expect(typeof mod.onObjectSelectionChanged).toBe("function");
+      expect(typeof mod.notifyObjectSelectionChanged).toBe("function");
+    });
+
+    it("object label API is available", async () => {
+      const mod = await import("../objectSelectionLabel");
+      expect(typeof mod.publishObjectLabel).toBe("function");
+      expect(typeof mod.getObjectLabel).toBe("function");
+      expect(typeof mod.onObjectLabelChanged).toBe("function");
+    });
+
+    it("object geometry API is available (canvas arrange / nudge / group drag, M8)", async () => {
+      const mod = await import("../objectGeometry");
+      expect(typeof mod.registerObjectGeometryProvider).toBe("function");
+      expect(typeof mod.previewObjectGeometry).toBe("function");
+      expect(typeof mod.commitObjectGeometry).toBe("function");
+      expect(typeof mod.flushObjectGeometry).toBe("function");
+      expect(typeof mod.openUndoTransaction).toBe("function");
+      expect(typeof mod.runInUndoTransaction).toBe("function");
+      expect(typeof mod.joinUndoTransaction).toBe("function");
+    });
+
+    it("object stacking API is available (canvas z-order, M8)", async () => {
+      const mod = await import("../objectStacking");
+      expect(typeof mod.registerObjectStackingService).toBe("function");
+      expect(typeof mod.getObjectStackingService).toBe("function");
+    });
   });
 
   // --------------------------------------------------------------------------

@@ -12,6 +12,8 @@ import {
   overlaySheetToCanvas,
   requestOverlayRedraw,
   getGridRegions,
+  floatingHitOrder,
+  hasStackingOrder,
   type OverlayRenderContext,
   type OverlayHitTestContext,
 } from "@api/gridOverlays";
@@ -262,11 +264,15 @@ export function getChartLocalCoords(
  * (active-sheet charts only — regions are synced per sheet). Independent of
  * hover state, so it works for any spot on the chart (title, plot background,
  * data marks), not just the hover-tracked element types.
+ *
+ * Charts are walked in Core's one hit order (`floatingHitOrder`,
+ * @api/gridOverlays), so of two overlapping charts the one painted on top
+ * answers. Whether some OTHER family's object covers the point is the
+ * caller's question (the context menu asks it before this).
  */
 export function findChartAtCanvasPos(canvasX: number, canvasY: number): string | null {
-  const regions = getGridRegions().filter((r) => r.type === "chart");
-  for (let i = regions.length - 1; i >= 0; i--) {
-    const region = regions[i];
+  const regions = floatingHitOrder(getGridRegions()).filter((r) => r.type === "chart");
+  for (const region of regions) {
     if (!region.floating) continue;
     const chartId = region.data?.chartId as string | undefined;
     if (chartId == null) continue;
@@ -348,28 +354,42 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
     return;
   }
 
-  // Check if mouse is over any chart region
-  const regions = getGridRegions().filter((r) => r.type === "chart");
+  // Check if mouse is over any chart region.
+  //
+  // With a STACKING ORDER in force (a canvas's zOrder, @api/gridOverlays) the
+  // walk is Core's hit order over EVERY floating object and the topmost one
+  // under the pointer decides: a chart covered by another object -- or by
+  // another chart -- shows no hover through it, exactly as a press cannot
+  // reach it. Without one, the historical walk over the charts alone is kept.
+  const stacked = hasStackingOrder();
+  const regions = stacked
+    ? floatingHitOrder()
+    : getGridRegions().filter((r) => r.type === "chart");
   let foundHover = false;
 
   for (const region of regions) {
     if (!region.floating) continue;
-    const chartId = region.data?.chartId as string;
-    if (chartId == null) continue;
 
-    // Compute canvas bounds for this chart
+    // Compute canvas bounds for this region
     const chartCanvasX = cachedRowHeaderWidth + region.floating.x - cachedScrollX;
     const chartCanvasY = cachedColHeaderHeight + region.floating.y - cachedScrollY;
     const chartWidth = region.floating.width;
     const chartHeight = region.floating.height;
-
-    // Check if mouse is within chart bounds
-    if (
+    const inBounds =
       canvasX >= chartCanvasX &&
       canvasX <= chartCanvasX + chartWidth &&
       canvasY >= chartCanvasY &&
-      canvasY <= chartCanvasY + chartHeight
-    ) {
+      canvasY <= chartCanvasY + chartHeight;
+
+    const chartId = region.type === "chart" ? (region.data?.chartId as string) : null;
+    if (chartId == null) {
+      // Another family's object on top of the pointer (stacked walk only).
+      if (stacked && inBounds) break;
+      continue;
+    }
+
+    // Check if mouse is within chart bounds
+    if (inBounds) {
       // Get chart-local coordinates
       const localX = canvasX - chartCanvasX;
       const localY = canvasY - chartCanvasY;
@@ -421,6 +441,9 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
           break;
         }
       }
+      // Stacked walk: this chart is the topmost object here; nothing beneath
+      // it is under the pointer.
+      if (stacked) break;
     }
   }
 

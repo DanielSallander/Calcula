@@ -689,8 +689,18 @@ fn make_sheet<'js>(
         .cloned()
         .unwrap_or_default();
 
+    // "worksheet" or "canvas"; a sheet the host did not describe is a worksheet.
+    let kind = shared_ctx
+        .borrow()
+        .host
+        .sheet_kinds
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| "worksheet".to_string());
+
     obj.set("index", index as u32)?;
     obj.set("name", name)?;
+    obj.set("kind", kind)?;
 
     // range(address) -> a Range on THIS sheet. A "Sheet!" prefix must resolve:
     // it stays here if it names THIS sheet, REBINDS the range if it names

@@ -1075,20 +1075,166 @@ pub(crate) fn update_pivot_region(
 }
 
 /// The refusal a GRID pivot gets when its destination is a canvas sheet. One
-/// wording for the pre-effect gates (`ensure_pivot_destination_is_grid`) and
+/// wording for the pre-effect gates (`ensure_pivot_destination_writable`) and
 /// the write-site backstop (`update_pivot_in_grid`), so a caller cannot tell
 /// which of the two caught it -- and the message names the canvas.
 pub(crate) const GRID_PIVOT_CANVAS_ACTION: &str = "write a grid pivot table";
 
-/// Resolve `pivot_id`'s destination and refuse when it is a canvas -- the
-/// pre-effect half of the rule `update_pivot_in_grid` enforces at the write.
-/// A pivot command that will rewrite the grid calls this BEFORE it mints its
-/// `DocumentEffect`, so a refusal leaves the document clean.
+// ============================================================================
+// CANVAS PIVOTS (M6): a real pivot in the canvas's hidden grid
+// ============================================================================
+//
+// THE RULE, both halves: a pivot carrying a `canvas_frame` lives ONLY on a
+// canvas, and a pivot without one NEVER on a canvas. A canvas pivot's output is
+// written into the canvas's hidden grid like any pivot's (so `=Canvas1!C5`,
+// GETPIVOTDATA, slicers and pivot charts all find real cells); the canvas shows
+// it through the frame, not as cells.
+//
+// Its anchor is not the user's to choose: the hidden grid is carved into
+// column BLOCKS of `CANVAS_PIVOT_BLOCK_COLS`, each canvas pivot owns one, and
+// `allocate_canvas_pivot_anchor` hands out the first free one. That is what
+// keeps two pivots on one canvas from ever writing over each other -- which on
+// a canvas nobody could SEE happen.
+
+/// Width, in columns, of one canvas pivot's block in the canvas's hidden grid.
+/// A canvas pivot wider than this is refused at the write, never clipped and
+/// never allowed to spill into its neighbour's block.
+pub(crate) const CANVAS_PIVOT_BLOCK_COLS: u32 = 1024;
+/// How many blocks a canvas holds: 16 x 1024 = 16,384 columns, the whole
+/// Excel-sized grid (A..XFD).
+pub(crate) const CANVAS_PIVOT_MAX_BLOCKS: u32 = 16;
+
+/// The anchor for a NEW pivot on canvas `sheet_index`: row 0, the first column
+/// of the first block whose column band holds no generated output region
+/// (`pivot` / `bi` / `report`) on that sheet.
+///
+/// Whole BANDS are checked, not just the anchor cell (`check_pivot_overlap`
+/// tests the anchor only): a block is taken if anything reaches into it.
+///
+/// LOCKS: `protected_regions` alone. The caller must hold nothing that is
+/// ordered after it (`pivot_tables` is ordered BEFORE it, so do not hold that
+/// either -- the create doors call this holding nothing).
+pub(crate) fn allocate_canvas_pivot_anchor(
+    state: &AppState,
+    sheet_index: usize,
+) -> Result<(u32, u32), String> {
+    let regions = state
+        .protected_regions
+        .lock()
+        .map_err(|e| format!("protected_regions lock poisoned: {}", e))?;
+    for block in 0..CANVAS_PIVOT_MAX_BLOCKS {
+        let first = block * CANVAS_PIVOT_BLOCK_COLS;
+        let last = first + CANVAS_PIVOT_BLOCK_COLS - 1;
+        let taken = regions.iter().any(|r| {
+            matches!(r.region_type.as_str(), "pivot" | "bi" | "report")
+                && r.sheet_index == sheet_index
+                && r.start_col <= last
+                && r.end_col >= first
+        });
+        if !taken {
+            return Ok((0, first));
+        }
+    }
+    Err(format!(
+        "Cannot create pivot table: this canvas already holds the maximum of {} pivot tables. \
+         Delete one, or put the pivot on another canvas.",
+        CANVAS_PIVOT_MAX_BLOCKS
+    ))
+}
+
+/// A canvas pivot's view must fit the block its anchor is in. `Err` -- LOUD,
+/// naming the width -- when it would reach past the block's last column: a
+/// silent clip would show the user a pivot with columns missing, and writing
+/// on would overwrite the next canvas pivot's cells. Pure; no locks.
+pub(crate) fn ensure_canvas_pivot_fits_block(
+    pivot_id: PivotId,
+    destination: (u32, u32),
+    view: &PivotView,
+) -> Result<(), String> {
+    let offset = (destination.1 % CANVAS_PIVOT_BLOCK_COLS) as u64;
+    let width = view.col_count as u64;
+    if offset + width > CANVAS_PIVOT_BLOCK_COLS as u64 {
+        return Err(format!(
+            "Cannot show pivot table {} on the canvas: it is {} columns wide, and a canvas pivot \
+             holds at most {} columns. Remove a column field or filter the pivot to fewer columns.",
+            pivot_id,
+            view.col_count,
+            CANVAS_PIVOT_BLOCK_COLS as u64 - offset
+        ));
+    }
+    Ok(())
+}
+
+/// The refusal a FRAMED pivot gets when its destination is NOT a canvas: its
+/// anchor is a canvas block (column 1024*n), and writing it into a worksheet
+/// would drop a pivot nobody asked for far to the right of the user's data.
+pub(crate) fn ensure_canvas_destination(
+    state: &AppState,
+    pivot_id: PivotId,
+    dest_sheet_idx: usize,
+) -> Result<(), String> {
+    let is_canvas = {
+        let kinds = state
+            .sheet_kinds
+            .read()
+            .map_err(|e| format!("sheet_kinds lock poisoned: {}", e))?;
+        crate::sheets::is_canvas_sheet(&kinds, dest_sheet_idx)
+    };
+    if is_canvas {
+        Ok(())
+    } else {
+        Err(format!(
+            "Cannot write pivot table {} to sheet {}: it has a canvas frame, and a canvas pivot \
+             lives only on a canvas sheet (this one is a worksheet).",
+            pivot_id, dest_sheet_idx
+        ))
+    }
+}
+
+/// Does `pivot_id` carry a canvas frame? `false` for an unknown pivot.
+///
+/// LOCKS: `pivot_tables` ALONE, released on return. Callers must not hold it
+/// (it is `Persisted`, so even a read guard is exclusive).
+pub(crate) fn pivot_is_framed(pivot_state: &PivotState, pivot_id: PivotId) -> bool {
+    pivot_state
+        .pivot_tables
+        .read()
+        .map(|tables| tables.get(&pivot_id).is_some_and(|(def, _)| def.canvas_frame.is_some()))
+        .unwrap_or(false)
+}
+
+/// Refuse an operation that only makes sense for a GRID pivot (`action` reads
+/// as a verb phrase) when the pivot has a canvas frame: its anchor belongs to
+/// the canvas block allocator, and the user moves the BOX instead
+/// (`update_pivot_properties` with `canvas_frame`). Run before the caller's
+/// effect, so the refusal leaves the document clean.
+pub(crate) fn ensure_pivot_not_framed(
+    pivot_state: &PivotState,
+    pivot_id: PivotId,
+    action: &str,
+) -> Result<(), String> {
+    if pivot_is_framed(pivot_state, pivot_id) {
+        Err(format!(
+            "Cannot {} pivot table {}: it is shown on a canvas, where its cells are placed by the \
+             canvas. Move or resize its box on the canvas instead.",
+            action, pivot_id
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Resolve `pivot_id`'s destination and refuse when it is the wrong KIND for
+/// the pivot -- a frameless (grid) pivot aimed at a canvas, or a framed
+/// (canvas) pivot aimed at a worksheet. The pre-effect half of the rule
+/// `update_pivot_in_grid` enforces at the write: a pivot command that will
+/// rewrite the grid calls this BEFORE it mints its `DocumentEffect`, so a
+/// refusal leaves the document clean.
 ///
 /// LOCKS: `pivot_tables` is taken alone to clone the definition and released
 /// before the resolver runs; then `sheet_kinds` alone. The caller must hold
 /// none of them.
-pub(crate) fn ensure_pivot_destination_is_grid(
+pub(crate) fn ensure_pivot_destination_writable(
     state: &AppState,
     pivot_state: &PivotState,
     pivot_id: PivotId,
@@ -1105,16 +1251,28 @@ pub(crate) fn ensure_pivot_destination_is_grid(
         }
     };
     let dest = resolve_dest_sheet_index(state, &definition);
-    crate::sheets::ensure_not_canvas_in_state(state, dest, GRID_PIVOT_CANVAS_ACTION)
+    if definition.canvas_frame.is_some() {
+        ensure_canvas_destination(state, pivot_id, dest)
+    } else {
+        crate::sheets::ensure_not_canvas_in_state(state, dest, GRID_PIVOT_CANVAS_ACTION)
+    }
 }
 
 /// Clears the old pivot region and writes the new view to the grid.
 /// Also syncs to state.grid if needed.
 ///
-/// `Err` -- having written NOTHING -- when `dest_sheet_idx` is a canvas.
-/// Every caller must then skip what follows a successful write:
-/// `update_pivot_region` (which would move the pivot's protection onto the
-/// canvas and orphan its real cells), `store_view`, and the undo record.
+/// `framed` is the pivot's `definition.canvas_frame.is_some()`, passed in by
+/// the caller rather than read here: some callers write BEFORE the definition
+/// is in `pivot_tables` (the `.calp` refresh writes in its phase B and inserts
+/// the definitions in phase C), and some hold definitions that are not the
+/// stored ones.
+///
+/// `Err` -- having written NOTHING -- when the destination is the wrong kind
+/// for the pivot (a grid pivot on a canvas, a canvas pivot on a worksheet) or
+/// when a canvas pivot's view is wider than its block. Every caller must then
+/// skip what follows a successful write: `update_pivot_region` (which would
+/// move the pivot's protection off its real cells), `store_view`, and the undo
+/// record.
 pub(crate) fn update_pivot_in_grid(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
@@ -1122,22 +1280,29 @@ pub(crate) fn update_pivot_in_grid(
     dest_sheet_idx: usize,
     destination: (u32, u32),
     view: &PivotView,
+    framed: bool,
 ) -> Result<(), String> {
-    // A GRID pivot never materializes into a canvas's hidden grid: its cells
-    // would be real (formulas could read them) and invisible (a canvas paints
-    // no cells). Every grid-pivot write passes here, so this is the one rule;
-    // the creation doors and `ensure_pivot_destination_is_grid` refuse a
-    // canvas destination up front, and this catches the rest (a destination
-    // that changed after that check, or a caller with no pre-check). Read
-    // ALONE, before any other lock.
-    if let Err(refusal) =
+    // THE KIND RULE, at the one funnel every pivot write passes. A GRID pivot
+    // never materializes into a canvas's hidden grid: its cells would be real
+    // (formulas could read them) and invisible (a canvas paints no cells). A
+    // CANVAS pivot never materializes anywhere else, and never wider than its
+    // block. The creation doors and `ensure_pivot_destination_writable` refuse
+    // up front; this catches the rest (a destination that changed after that
+    // check, or a caller with no pre-check). Read ALONE, before any other lock.
+    let kind_check = if framed {
+        ensure_canvas_destination(state, pivot_id, dest_sheet_idx)
+            .and_then(|()| ensure_canvas_pivot_fits_block(pivot_id, destination, view))
+    } else {
         crate::sheets::ensure_not_canvas_in_state(state, dest_sheet_idx, GRID_PIVOT_CANVAS_ACTION)
-    {
+    };
+    if let Err(refusal) = kind_check {
         log_warn!(
             "PIVOT",
-            "pivot {:?} resolves to canvas sheet {}; a grid pivot never materializes into a canvas, output not written",
+            "pivot {:?} (framed={}) not written to sheet {}: {}",
             pivot_id,
-            dest_sheet_idx
+            framed,
+            dest_sheet_idx,
+            refusal
         );
         return Err(refusal);
     }
@@ -1195,25 +1360,36 @@ pub(crate) fn update_pivot_in_grid(
         let new_end_row = dest_row + view.row_count.max(1) as u32 - 1;
         let new_end_col = dest_col + view.col_count.max(1) as u32 - 1;
 
-        let mut merged = state.merged_regions.write(effect).unwrap();
-
-        // Remove merges in old pivot region
-        if let Some(ref region) = old_region {
+        // THE DESTINATION SHEET'S merge set: `merged_regions` is the ACTIVE
+        // sheet's mirror, so a pivot on any other sheet (a canvas pivot
+        // refiltered by a slicer while the user is on Sheet1, or any
+        // cross-sheet pivot) used to put its merges on the sheet the user was
+        // looking at -- merging cells there that the pivot never wrote -- and
+        // leave its own sheet unmerged. `with_sheet_merges_mut` picks the
+        // mirror or `all_merged_regions[dest]`. Taken after grid -> grids ->
+        // styles, as before.
+        crate::report::with_sheet_merges_mut(state, effect, dest_sheet_idx, |merged| {
+            // Remove merges in old pivot region (only when it was on this
+            // sheet -- the cells were cleared under the same condition above).
+            if let Some(ref region) = old_region {
+                if region.sheet_index == dest_sheet_idx {
+                    merged.retain(|m| {
+                        !(m.start_row >= region.start_row && m.end_row <= region.end_row
+                            && m.start_col >= region.start_col && m.end_col <= region.end_col)
+                    });
+                }
+            }
+            // Also remove merges in new pivot region (in case of overlap)
             merged.retain(|m| {
-                !(m.start_row >= region.start_row && m.end_row <= region.end_row
-                    && m.start_col >= region.start_col && m.end_col <= region.end_col)
+                !(m.start_row >= dest_row && m.end_row <= new_end_row
+                    && m.start_col >= dest_col && m.end_col <= new_end_col)
             });
-        }
-        // Also remove merges in new pivot region (in case of overlap)
-        merged.retain(|m| {
-            !(m.start_row >= dest_row && m.end_row <= new_end_row
-                && m.start_col >= dest_col && m.end_col <= new_end_col)
-        });
 
-        // Add new pivot merge regions
-        for mr in pivot_merges {
-            merged.insert(mr);
-        }
+            // Add new pivot merge regions
+            for mr in pivot_merges {
+                merged.insert(mr);
+            }
+        });
     }
     Ok(())
 }
@@ -1360,8 +1536,14 @@ pub(crate) fn auto_fit_pivot_columns(
 }
 
 /// Looks up a value in a pivot table for GETPIVOTDATA.
-/// Searches all pivot tables to find one containing the referenced cell,
-/// then queries it for the matching aggregated value.
+/// Searches all pivot tables to find the one containing the referenced cell ON
+/// THE REFERENCED SHEET, then queries it for the matching aggregated value.
+///
+/// `pivot_sheet` is the sheet the reference names (the formula's own sheet
+/// when unqualified; `None` only with no multi-sheet context, where any pivot
+/// at the cell answers). It is compared case-insensitively with the pivot's
+/// destination sheet: the lexer upper-cases a bare sheet qualifier. A pivot
+/// with no recorded destination sheet matches any sheet, as before.
 ///
 /// Uses each data cell's `group_path` (which contains both row and column
 /// field values) to match against the requested field/item pairs.
@@ -1369,13 +1551,22 @@ pub fn lookup_pivot_data(
     pivot_tables: &HashMap<PivotId, (PivotDefinition, PivotCache)>,
     pivot_views: &HashMap<PivotId, PivotView>,
     data_field: &str,
+    pivot_sheet: Option<&str>,
     pivot_row: u32,
     pivot_col: u32,
     field_item_pairs: &[(&str, &str)],
 ) -> Option<f64> {
+    let wanted_sheet = pivot_sheet.map(str::to_lowercase);
     // Find which pivot table contains the referenced cell
     let (pivot_id, view) = pivot_views.iter().find(|(_id, v)| {
         if let Some((def, _cache)) = pivot_tables.get(_id) {
+            let on_sheet = match (&wanted_sheet, def.destination_sheet.as_deref()) {
+                (Some(wanted), Some(dest)) => *wanted == dest.to_lowercase(),
+                _ => true,
+            };
+            if !on_sheet {
+                return false;
+            }
             let (dest_row, dest_col) = def.destination;
             let end_row = dest_row + v.row_count as u32;
             let end_col = dest_col + v.col_count as u32;
@@ -1672,23 +1863,122 @@ pub(crate) fn save_overwritten_cells(
     saved
 }
 
+/// Everything a pivot write needs to reach the ONE shared cascade
+/// (`recalc_after_active_sheet_bulk_rewrite` / `recalc_after_off_sheet_write`):
+/// the control stores for GET.CONTROLVALUE and the user files for formulas that
+/// read them. A command builds it from its own `State` handles; `None` in its
+/// place (unit tests with no command around them) keeps the old active-sheet
+/// pass.
+#[derive(Clone, Copy)]
+pub(crate) struct PivotRecalcStates<'a> {
+    pub(crate) pane: &'a crate::pane_control::PaneControlState,
+    pub(crate) ribbon: &'a crate::ribbon_filter::RibbonFilterState,
+    pub(crate) user_files: &'a crate::persistence::UserFilesState,
+}
+
+/// Recalculate what reads a pivot block that was just (re)written on
+/// `dest_sheet_idx`: the new rectangle PLUS the old one (a pivot that shrank or
+/// moved leaves emptied cells behind, and a formula reading one of those is
+/// exactly the reader that must drop to 0), seeded into the shared cascade with
+/// the same two-branch shape `create_pivot_core` uses.
+///
+/// THE DEFECT THIS CLOSES. Every pivot mutation used to end in
+/// `recalculate_sheet_formulas`, which re-evaluates the ACTIVE sheet only. A
+/// pivot on any other sheet -- a canvas pivot refiltered by a slicer while the
+/// user is on Sheet1, or the user on the canvas while Sheet1's
+/// `='Canvas1'!C5` reads it -- left every reader on every other sheet stale.
+///
+/// GETPIVOTDATA: the active-sheet cascade evaluates with no pivot lookup wired
+/// (`reevaluate_formula_cell` / `recalc_walked_cell` pass none), so every
+/// GETPIVOTDATA it reaches -- on the active sheet AND on any sheet reading it
+/// across a sheet boundary -- comes out of it as #REF!. On that branch the
+/// cascade is therefore followed by `recalc_after_off_sheet_write(&[dest])`,
+/// which re-evaluates the active sheet and every sheet that reads it through
+/// `recalculate_sheet_values`, where the lookup IS wired: the pass ends on the
+/// pivot's numbers. (Running only the active sheet's whole-sheet pass here --
+/// the first version of this fix -- left Sheet2's `=GETPIVOTDATA(..;
+/// Sheet1!E1)` at #REF!, where the old active-only pass had at least left it
+/// alone; `a_cross_sheet_getpivotdata_survives_a_write_to_a_pivot_on_the_
+/// active_sheet` pins it.) The off-sheet branch is that same call alone.
+///
+/// LOCKS: the caller must hold NONE (both cascade entry points take their own).
+pub(crate) fn recalc_after_pivot_write(
+    state: &AppState,
+    pivot_state: &PivotState,
+    states: Option<PivotRecalcStates<'_>>,
+    dest_sheet_idx: usize,
+    old_region: Option<&ProtectedRegion>,
+    destination: (u32, u32),
+    view: &PivotView,
+) {
+    let Some(states) = states else {
+        recalculate_sheet_formulas(state, pivot_state, None);
+        return;
+    };
+    let mut seeds = crate::pivot::commands::pivot_block_seeds(destination, view.row_count, view.col_count);
+    if let Some(old) = old_region.filter(|r| r.sheet_index == dest_sheet_idx) {
+        let new_block: std::collections::HashSet<(u32, u32)> = seeds.iter().copied().collect();
+        for r in old.start_row..=old.end_row {
+            for c in old.start_col..=old.end_col {
+                if !new_block.contains(&(r, c)) {
+                    seeds.push((r, c));
+                }
+            }
+        }
+    }
+    let active_sheet = *state.active_sheet.read().unwrap();
+    if dest_sheet_idx == active_sheet {
+        let mut recalculated = Vec::new();
+        crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+            state,
+            states.user_files,
+            states.pane,
+            states.ribbon,
+            &seeds,
+            &mut recalculated,
+        );
+        // GETPIVOTDATA repair pass (see above): the active sheet and every
+        // sheet reading it, re-evaluated WITH the pivot lookup.
+        crate::commands::data::recalc_after_off_sheet_write(
+            state,
+            states.user_files,
+            pivot_state,
+            states.pane,
+            states.ribbon,
+            &[dest_sheet_idx],
+        );
+    } else {
+        crate::commands::data::recalc_after_off_sheet_write(
+            state,
+            states.user_files,
+            pivot_state,
+            states.pane,
+            states.ribbon,
+            &[dest_sheet_idx],
+        );
+    }
+}
+
 /// Combined helper that writes pivot cells to the grid, updates the protected
-/// region, and recalculates all formula cells on the active sheet so that
-/// formulas referencing pivot cells (both regular refs like =E5 and
-/// GETPIVOTDATA) pick up the new values.
+/// region, and recalculates every formula that reads the pivot's block -- on
+/// ANY sheet, through the shared cascade (see [`recalc_after_pivot_write`]).
 ///
 /// NOTE: This function does NOT compute the overwrite count.  Callers that
 /// need it (Tauri commands) should call `count_overwritten_cells` **before**
-/// this function — while `state.grids` is not yet locked.  The undo/redo
-/// path calls `finalize_pivot_update` while already holding `state.grids`,
-/// so embedding the check here would deadlock.
+/// this function — while `state.grids` is not yet locked.
 ///
 /// Every pivot command that modifies cell values should call this instead of
 /// calling `update_pivot_in_grid` + `update_pivot_region` separately.
 ///
-/// `Err` when the write was refused (a canvas destination): nothing was
-/// written, the region was NOT moved, and nothing was recalculated. Commands
-/// propagate it with `?`, which also skips their `store_view` / undo record.
+/// The pivot's frame is read here from `pivot_tables`, taken ALONE before the
+/// write: no caller holds it (the recalculation below takes it, and it is an
+/// exclusive lock), and every caller has already put the definition it is
+/// rendering into the store.
+///
+/// `Err` when the write was refused (the destination is the wrong kind for
+/// the pivot, or a canvas pivot is wider than its block): nothing was written,
+/// the region was NOT moved, and nothing was recalculated. Commands propagate
+/// it with `?`, which also skips their `store_view` / undo record.
 pub(crate) fn finalize_pivot_update(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
@@ -1697,11 +1987,21 @@ pub(crate) fn finalize_pivot_update(
     dest_sheet_idx: usize,
     destination: (u32, u32),
     view: &PivotView,
-    control_states: Option<(&crate::pane_control::PaneControlState, &crate::ribbon_filter::RibbonFilterState)>,
+    recalc_states: Option<PivotRecalcStates<'_>>,
 ) -> Result<(), String> {
-    update_pivot_in_grid(state, effect, pivot_id, dest_sheet_idx, destination, view)?;
+    let framed = pivot_is_framed(pivot_state, pivot_id);
+    let old_region = get_pivot_region(state, pivot_id);
+    update_pivot_in_grid(state, effect, pivot_id, dest_sheet_idx, destination, view, framed)?;
     update_pivot_region(state, pivot_id, dest_sheet_idx, destination, view);
-    recalculate_sheet_formulas(state, pivot_state, control_states);
+    recalc_after_pivot_write(
+        state,
+        pivot_state,
+        recalc_states,
+        dest_sheet_idx,
+        old_region.as_ref(),
+        destination,
+        view,
+    );
     Ok(())
 }
 
@@ -1752,8 +2052,8 @@ pub(crate) fn recalculate_sheet_formulas(
     // Build pivot data lookup closure for GETPIVOTDATA evaluation
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
-    let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
-        lookup_pivot_data(&pivot_tables, &pivot_views, data_field, pivot_row, pivot_col, pairs)
+    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+        lookup_pivot_data(&pivot_tables, &pivot_views, data_field, pivot_sheet, pivot_row, pivot_col, pairs)
     };
 
     // Collect all cells with formulas on the active sheet

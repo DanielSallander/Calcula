@@ -4,9 +4,30 @@
 //          type-based alignment, FR-local selection paint, object-selection
 //          chrome, and the quantized-resize ghost.
 // CONTEXT: Async-fetch/sync-render cache per Controls/Shape/shapeRenderer.ts
-//          (staleEntries kept visible while a re-fetch is in flight — no
+//          (stale data kept visible while a re-fetch is in flight — no
 //          blink). Floating regions get NO gridline suppression from Core, so
 //          the frame paints its own opaque background first.
+//
+//          M7 -- OVERFLOW SCROLL. The frame is the WINDOW; its cell area is a
+//          viewport onto content that can be larger (lib/frExtent.ts), scrolled
+//          by a session scroll (lib/frScroll.ts), read together as the live
+//          view (lib/frView.ts). The paint follows the canvas pivot box
+//          (Pivot/rendering/pivotVisualRenderer.ts):
+//
+//          - NO offscreen buffer. The grid context already carries the
+//            dpr * zoom transform, so drawing straight into it under a clip
+//            stays sharp; a blitted buffer would blur at fractional offsets.
+//          - The cell area is CLIPPED to its viewport and only the rows and
+//            columns that show through it -- and are on the canvas at all --
+//            are painted, at their content offset minus the scroll.
+//          - The local column letters and row numbers are STICKY: each strip
+//            stays put and shows the scrolled labels, clipped to itself.
+//          - Overlay scroll indicators (shared with the pivot box) mark an axis
+//            that overflows.
+//          - The cell FETCH is viewport-limited too: only the on-screen cells
+//            plus a margin, never the whole window. That also retires a latent
+//            failure: the whole-window read of a window over 100,000 cells was
+//            refused by the backend every frame, so such a range never painted.
 
 import type {
   OverlayRenderContext,
@@ -19,8 +40,8 @@ import {
   requestOverlayRedraw,
 } from "@api/gridOverlays";
 import { columnToLetter } from "@api";
-import { getFloatingRangeCells } from "@api/floatingRanges";
 import type { TypedCellData } from "@api/lib";
+import { paintScrollIndicators } from "../../_shared/lib/scrollIndicators";
 import {
   getFloatingRangeById,
   type FloatingRangeEntry,
@@ -36,16 +57,33 @@ import {
   frRowHeight,
   frameWidth,
   frameHeight,
-  localCellOrigin,
+  contentWidth,
+  contentHeight,
+  frColOffsets,
+  frRowOffsets,
+  frMaxScroll,
+  frVisibleRange,
   frEdgeHandles,
   frEdgeHandleAt,
   edgeAxis,
+  type FrCellRange,
+  type FrView,
 } from "../lib/frDimensions";
 import {
   isFloatingRangeSelected,
   getLocalSelection,
   localSelectionRect,
 } from "../lib/frSelection";
+import { readFrCells, type FrCellRect } from "../lib/frCellReads";
+import { FrFetchLedger } from "../lib/frFetchLedger";
+import {
+  ensureFrExtent,
+  invalidateFrExtent,
+  invalidateAllFrExtents,
+  removeFrExtent,
+  resetFrExtents,
+} from "../lib/frExtent";
+import { getFrView, commitFrViewClamp } from "../lib/frView";
 import { layoutFrEditorForFrame } from "../editor/frEditor";
 
 // ============================================================================
@@ -57,12 +95,26 @@ interface CachedFrCell {
   align: CanvasTextAlign;
 }
 
-/** frId -> "row,col" -> cell. Whole-window fetches (counts are bounded). */
-const cellCache = new Map<string, Map<string, CachedFrCell>>();
-const pendingFetches = new Set<string>();
+/** One range's cached cells: the rectangle that was READ, and what it held. */
+interface FrCellCacheEntry {
+  /** Inclusive rectangle of local cells the map answers for. */
+  rect: FrCellRect;
+  /** "row,col" -> cell, for the non-empty cells inside `rect`. */
+  cells: Map<string, CachedFrCell>;
+}
 
-/** frIds whose cached data is stale — kept visible while a re-fetch runs. */
-const staleEntries = new Set<string>();
+/** frId -> the last read that landed (kept visible while a newer one is in flight). */
+const cellCache = new Map<string, FrCellCacheEntry>();
+/** Stale / in-flight / landing order for the cell reads. */
+const cellLedger = new FrFetchLedger();
+
+/**
+ * Rows / columns read beyond the on-screen rectangle, so a few wheel notches
+ * scroll into cells that are already cached instead of painting empty cells
+ * for a round trip.
+ */
+const FR_FETCH_MARGIN_ROWS = 20;
+const FR_FETCH_MARGIN_COLS = 4;
 
 function alignmentForType(cell: TypedCellData): CanvasTextAlign {
   switch (cell.type) {
@@ -76,19 +128,48 @@ function alignmentForType(cell: TypedCellData): CanvasTextAlign {
   }
 }
 
-/** Exported for the unit tier: the failure verdict below must be pinned
- *  (silent on a lost delete race, loud on a persistent inconsistency). */
-export async function fetchFrCells(entry: FloatingRangeEntry): Promise<void> {
+function rectCovers(outer: FrCellRect, inner: FrCellRange): boolean {
+  return (
+    inner.startRow >= outer.startRow &&
+    inner.endRow <= outer.endRow &&
+    inner.startCol >= outer.startCol &&
+    inner.endCol <= outer.endCol
+  );
+}
+
+/** The rectangle to read for an on-screen range: it, plus a margin, inside the extent. */
+export function frFetchRectFor(range: FrCellRange, view: FrView): FrCellRect {
+  return {
+    startRow: Math.max(0, range.startRow - FR_FETCH_MARGIN_ROWS),
+    endRow: Math.min(view.rows - 1, range.endRow + FR_FETCH_MARGIN_ROWS),
+    startCol: Math.max(0, range.startCol - FR_FETCH_MARGIN_COLS),
+    endCol: Math.min(view.cols - 1, range.endCol + FR_FETCH_MARGIN_COLS),
+  };
+}
+
+/**
+ * Read one rectangle of an FR's cells into the cache. `rect` defaults to the
+ * whole window (the pre-M7 read); the paint passes the on-screen rectangle.
+ *
+ * Exported for the unit tier: the failure verdict below must be pinned
+ * (silent on a lost delete race, loud on a persistent inconsistency).
+ */
+export async function fetchFrCells(
+  entry: FloatingRangeEntry,
+  rect: FrCellRect = {
+    startRow: 0,
+    startCol: 0,
+    endRow: entry.rows - 1,
+    endCol: entry.cols - 1,
+  },
+): Promise<void> {
   const frId = entry.id;
-  pendingFetches.add(frId);
+  const n = cellLedger.begin(frId);
   try {
-    const cells = await getFloatingRangeCells(
-      frId,
-      0,
-      0,
-      entry.rows - 1,
-      entry.cols - 1,
-    );
+    const cells = await readFrCells(frId, rect);
+    // An answer older than the one on screen (IPC reads can land out of
+    // order), or for a range that was forgotten meanwhile, is dropped.
+    if (!cellLedger.mayApply(frId, n)) return;
     const map = new Map<string, CachedFrCell>();
     for (const cell of cells) {
       if (cell.type === "empty") continue;
@@ -97,8 +178,8 @@ export async function fetchFrCells(entry: FloatingRangeEntry): Promise<void> {
         align: alignmentForType(cell),
       });
     }
-    cellCache.set(frId, map);
-    staleEntries.delete(frId);
+    cellCache.set(frId, { rect: { ...rect }, cells: map });
+    cellLedger.applied(frId, n);
     requestOverlayRedraw();
   } catch (err) {
     // A fetch can legitimately lose a race with DELETION. Backend-initiated
@@ -116,12 +197,12 @@ export async function fetchFrCells(entry: FloatingRangeEntry): Promise<void> {
       } else {
         // The row is gone from the store too: the fetch lost the delete race.
         cellCache.delete(frId);
-        staleEntries.delete(frId);
+        cellLedger.forget(frId);
         requestOverlayRedraw();
       }
     }, FR_FETCH_FAILURE_VERDICT_MS);
   } finally {
-    pendingFetches.delete(frId);
+    cellLedger.end(frId, n);
   }
 }
 
@@ -135,31 +216,35 @@ export async function fetchFrCells(entry: FloatingRangeEntry): Promise<void> {
  */
 const FR_FETCH_FAILURE_VERDICT_MS = 1000;
 
-/** Mark one FR's cell cache stale (kept visible until the re-fetch lands). */
+/**
+ * Mark one FR's cell cache stale (kept visible until the re-fetch lands). The
+ * content extent goes stale with it: whatever changed the cells can have
+ * changed how far they reach (a spill, a cleared last row).
+ */
 export function invalidateFrCache(frId: string): void {
-  staleEntries.add(frId);
-  pendingFetches.delete(frId);
+  cellLedger.invalidate(frId);
+  invalidateFrExtent(frId);
 }
 
-/** Mark every FR's cache stale (coarse CELLS_UPDATED safety net). */
+/** Mark every FR's cache stale (coarse CELLS_UPDATED safety net). An FR that
+ *  has never fetched yet re-kicks on its next paint too. */
 export function invalidateAllFrCaches(): void {
-  for (const key of cellCache.keys()) staleEntries.add(key);
-  // An FR that has never fetched yet must also re-kick on next paint.
-  pendingFetches.clear();
+  cellLedger.invalidateAll(cellCache.keys());
+  invalidateAllFrExtents();
 }
 
 /** Drop an FR's cache entirely (object deleted). */
 export function removeFrFromCache(frId: string): void {
   cellCache.delete(frId);
-  staleEntries.delete(frId);
-  pendingFetches.delete(frId);
+  cellLedger.forget(frId);
+  removeFrExtent(frId);
 }
 
 /** Drop everything (document change / deactivate). */
 export function resetFrRenderCaches(): void {
   cellCache.clear();
-  staleEntries.clear();
-  pendingFetches.clear();
+  cellLedger.reset();
+  resetFrExtents();
   resizeGhost = null;
 }
 
@@ -234,18 +319,60 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
   const w = frameWidth(entry);
   const h = frameHeight(entry);
 
+  // The live view (content extent + session scroll, clamped) — the SAME read
+  // the hit router and the editor layout make, so paint and click agree.
+  const view = getFrView(entry);
+
   // The editor is repositioned every render frame (DOM-over-canvas contract) —
   // including when the frame is clipped/off-screen, which HIDES it.
-  layoutFrEditorForFrame(entry, canvasX, canvasY, overlayCtx);
+  layoutFrEditorForFrame(entry, canvasX, canvasY, overlayCtx, view);
 
   // Skip paint if fully invisible.
   if (canvasX + w < rowHeaderWidth || canvasY + h < colHeaderHeight) return;
   if (canvasX > overlayCtx.canvasWidth || canvasY > overlayCtx.canvasHeight) return;
 
-  // Kick the async fetch when needed; paint from whatever the cache holds.
+  // The content extent is read lazily, for on-screen ranges only; once it is
+  // known, a scroll left past a shrunken end is clamped for good.
+  ensureFrExtent(entry);
+  commitFrViewClamp(entry, view);
+
+  // Chrome extents: 0 for whatever the object hides, which is what makes the
+  // blocks below skippable WITHOUT leaving a gap — every coordinate here is
+  // derived from these, never from the raw constants.
+  const titleH = frTitleH(entry);
+  const colHdrH = frColHdrH(entry);
+  const rowHdrW = frRowHdrW(entry);
+
+  const hdrTop = canvasY + titleH;
+  const cellsTop = canvasY + frCellsTop(entry);
+  const cellsLeft = canvasX + rowHdrW;
+  // The cell VIEWPORT: the window's cells, whatever the content behind it.
+  const vpW = contentWidth(entry);
+  const vpH = contentHeight(entry);
+
+  // Content offsets over the extent, and the rows/cols that show through the
+  // viewport AND lie on the canvas (the grid's own cell area).
+  const colOff = frColOffsets(entry, view.cols);
+  const rowOff = frRowOffsets(entry, view.rows);
+  const range = frVisibleRange(entry, view, {
+    x0: rowHeaderWidth - cellsLeft,
+    y0: colHeaderHeight - cellsTop,
+    x1: overlayCtx.canvasWidth - cellsLeft,
+    y1: overlayCtx.canvasHeight - cellsTop,
+  });
+  const colsShown = range.endCol >= range.startCol;
+  const rowsShown = range.endRow >= range.startRow;
+  /** Canvas x of column c's left edge / y of row r's top edge, scrolled. */
+  const colLeft = (c: number) => cellsLeft + colOff[c] - view.scrollLeft;
+  const rowTopY = (r: number) => cellsTop + rowOff[r] - view.scrollTop;
+
+  // Kick the async fetch when the cache is missing, stale, or does not cover
+  // what is on screen; paint from whatever the cache holds meanwhile.
   const cached = cellCache.get(frId);
-  if ((!cached || staleEntries.has(frId)) && !pendingFetches.has(frId)) {
-    void fetchFrCells(entry);
+  if (colsShown && rowsShown && !cellLedger.isPending(frId)) {
+    if (!cached || cellLedger.isStale(frId) || !rectCovers(cached.rect, range)) {
+      void fetchFrCells(entry, frFetchRectFor(range, view));
+    }
   }
 
   ctx.save();
@@ -266,14 +393,7 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
   ctx.lineWidth = 1;
   ctx.strokeRect(canvasX + 0.5, canvasY + 0.5, w - 1, h - 1);
 
-  // Chrome extents: 0 for whatever the object hides, which is what makes the
-  // three blocks below skippable WITHOUT leaving a gap — every coordinate here
-  // is derived from these, never from the raw constants.
-  const titleH = frTitleH(entry);
-  const colHdrH = frColHdrH(entry);
-  const rowHdrW = frRowHdrW(entry);
-
-  // ---- 2. Title bar (the Core-move grab zone; optional) ----
+  // ---- 2. Title bar (the Core-move grab zone; optional; never scrolls) ----
   if (titleH > 0) {
     ctx.fillStyle = COLORS.titleBg;
     ctx.fillRect(canvasX, canvasY, w, titleH);
@@ -295,10 +415,8 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
   }
 
   // ---- 3. Local headers (optional — they advertise the private A1 space) ----
-  const hdrTop = canvasY + titleH;
-  const cellsTop = canvasY + frCellsTop(entry);
-  const cellsLeft = canvasX + rowHdrW;
-
+  // STICKY: the strips stay put and carry the SCROLLED labels, each clipped to
+  // its own strip so a label never slides over the corner or out of the frame.
   ctx.fillStyle = COLORS.headerBg;
   if (colHdrH > 0) {
     ctx.fillRect(canvasX, hdrTop, w, colHdrH); // col header strip (incl. corner)
@@ -313,22 +431,28 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
 
   // Column letters.
   ctx.textAlign = "center";
-  if (colHdrH > 0) {
-    let x = cellsLeft;
-    for (let c = 0; c < entry.cols; c++) {
+  if (colHdrH > 0 && colsShown) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(cellsLeft, hdrTop, vpW, colHdrH);
+    ctx.clip();
+    for (let c = range.startCol; c <= range.endCol; c++) {
       const cw = frColWidth(entry, c);
-      ctx.fillText(columnToLetter(c), x + cw / 2, hdrTop + colHdrH / 2 + 0.5);
-      x += cw;
+      ctx.fillText(columnToLetter(c), colLeft(c) + cw / 2, hdrTop + colHdrH / 2 + 0.5);
     }
+    ctx.restore();
   }
   // Row numbers.
-  if (rowHdrW > 0) {
-    let y = cellsTop;
-    for (let r = 0; r < entry.rows; r++) {
+  if (rowHdrW > 0 && rowsShown) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(canvasX, cellsTop, rowHdrW, vpH);
+    ctx.clip();
+    for (let r = range.startRow; r <= range.endRow; r++) {
       const rh = frRowHeight(entry, r);
-      ctx.fillText(String(r + 1), canvasX + rowHdrW / 2, y + rh / 2 + 0.5);
-      y += rh;
+      ctx.fillText(String(r + 1), canvasX + rowHdrW / 2, rowTopY(r) + rh / 2 + 0.5);
     }
+    ctx.restore();
   }
 
   // Header separators — one per strip that is actually there.
@@ -344,40 +468,45 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
   }
   ctx.stroke();
 
-  // ---- 4. Gridlines ----
+  // ---- 4-6. The cell viewport: clipped, scrolled, visible cells only ----
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(cellsLeft, cellsTop, vpW, vpH);
+  ctx.clip();
+
+  // ---- 4. Gridlines (each shown cell's right / bottom edge) ----
   ctx.strokeStyle = COLORS.gridline;
   ctx.beginPath();
-  {
-    let x = cellsLeft;
-    for (let c = 0; c < entry.cols; c++) {
-      x += frColWidth(entry, c);
+  if (colsShown) {
+    for (let c = range.startCol; c <= range.endCol; c++) {
+      const x = colLeft(c + 1);
       ctx.moveTo(x + 0.5 - 1, cellsTop);
-      ctx.lineTo(x + 0.5 - 1, canvasY + h);
+      ctx.lineTo(x + 0.5 - 1, cellsTop + vpH);
     }
-    let y = cellsTop;
-    for (let r = 0; r < entry.rows; r++) {
-      y += frRowHeight(entry, r);
+  }
+  if (rowsShown) {
+    for (let r = range.startRow; r <= range.endRow; r++) {
+      const y = rowTopY(r + 1);
       ctx.moveTo(cellsLeft, y + 0.5 - 1);
-      ctx.lineTo(canvasX + w, y + 0.5 - 1);
+      ctx.lineTo(cellsLeft + vpW, y + 0.5 - 1);
     }
   }
   ctx.stroke();
 
   // ---- 5. FR-local selection (under the values' ink is fine — it is a fill) ----
+  // Clamped to the EXTENT, not the window: a selection may reach cells that
+  // only scrolling shows. The viewport clip trims what is scrolled away.
   const localSel = getLocalSelection();
   if (localSel && localSel.frId === frId) {
     const rect = localSelectionRect(localSel);
-    const minRow = Math.min(rect.minRow, entry.rows - 1);
-    const minCol = Math.min(rect.minCol, entry.cols - 1);
-    const maxRow = Math.min(rect.maxRow, entry.rows - 1);
-    const maxCol = Math.min(rect.maxCol, entry.cols - 1);
-    const origin = localCellOrigin(entry, minRow, minCol);
-    let selW = 0;
-    for (let c = minCol; c <= maxCol; c++) selW += frColWidth(entry, c);
-    let selH = 0;
-    for (let r = minRow; r <= maxRow; r++) selH += frRowHeight(entry, r);
-    const sx = canvasX + origin.x;
-    const sy = canvasY + origin.y;
+    const minRow = Math.min(rect.minRow, view.rows - 1);
+    const minCol = Math.min(rect.minCol, view.cols - 1);
+    const maxRow = Math.min(rect.maxRow, view.rows - 1);
+    const maxCol = Math.min(rect.maxCol, view.cols - 1);
+    const sx = colLeft(minCol);
+    const sy = rowTopY(minRow);
+    const selW = colOff[maxCol + 1] - colOff[minCol];
+    const selH = rowOff[maxRow + 1] - rowOff[minRow];
     ctx.fillStyle = COLORS.selectionFill;
     ctx.fillRect(sx, sy, selW, selH);
     ctx.strokeStyle = COLORS.selectionBorder;
@@ -389,35 +518,44 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
   // ---- 6. Cell values (single line, clipped per cell, type alignment) ----
   ctx.font = CELL_FONT;
   ctx.textBaseline = "middle";
-  if (cached) {
-    let y = cellsTop;
-    for (let r = 0; r < entry.rows; r++) {
+  if (cached && colsShown && rowsShown) {
+    for (let r = range.startRow; r <= range.endRow; r++) {
       const rh = frRowHeight(entry, r);
-      let x = cellsLeft;
-      for (let c = 0; c < entry.cols; c++) {
+      const y = rowTopY(r);
+      for (let c = range.startCol; c <= range.endCol; c++) {
+        const cell = cached.cells.get(`${r},${c}`);
+        if (!cell || cell.display === "") continue;
         const cw = frColWidth(entry, c);
-        const cell = cached.get(`${r},${c}`);
-        if (cell && cell.display !== "") {
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(x, y, cw, rh);
-          ctx.clip();
-          ctx.fillStyle = COLORS.cellText;
-          ctx.textAlign = cell.align;
-          const tx =
-            cell.align === "right"
-              ? x + cw - CELL_PAD_X
-              : cell.align === "center"
-                ? x + cw / 2
-                : x + CELL_PAD_X;
-          ctx.fillText(cell.display, tx, y + rh / 2 + 0.5);
-          ctx.restore();
-        }
-        x += cw;
+        const x = colLeft(c);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, y, cw, rh);
+        ctx.clip();
+        ctx.fillStyle = COLORS.cellText;
+        ctx.textAlign = cell.align;
+        const tx =
+          cell.align === "right"
+            ? x + cw - CELL_PAD_X
+            : cell.align === "center"
+              ? x + cw / 2
+              : x + CELL_PAD_X;
+        ctx.fillText(cell.display, tx, y + rh / 2 + 0.5);
+        ctx.restore();
       }
-      y += rh;
     }
   }
+
+  // Overlay scroll indicators on each axis whose content overflows the window.
+  const { maxLeft, maxTop } = frMaxScroll(entry, view.rows, view.cols);
+  if (maxLeft > 0 || maxTop > 0) {
+    paintScrollIndicators(ctx, {
+      box: { x: cellsLeft, y: cellsTop, width: vpW, height: vpH },
+      scroll: { left: view.scrollLeft, top: view.scrollTop },
+      maxScroll: { maxLeft, maxTop },
+      content: { width: colOff[view.cols], height: rowOff[view.rows] },
+    });
+  }
+  ctx.restore(); // the cell viewport clip
 
   // ---- 7. Object-selection chrome (FR paints its own — Core paints none) ----
   if (isFloatingRangeSelected(frId)) {

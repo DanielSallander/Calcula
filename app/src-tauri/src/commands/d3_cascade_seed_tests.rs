@@ -11,7 +11,8 @@
 //! THE DEFECT THESE PIN. Eight functions sat in the census's `EXEMPT` list
 //! writing cells and recalculating nothing:
 //!
-//!   * `pivot/commands.rs`  — create_pivot_inner, delete_pivot_table,
+//!   * `pivot/commands.rs`  — create_pivot_inner (its body is now
+//!                            `create_pivot_core`), delete_pivot_table,
 //!                            undo_pivot_overwrite
 //!   * `tables.rs`          — toggle_totals_row, set_totals_row_function,
 //!                            set_calculated_column, check_table_auto_expand
@@ -24,8 +25,9 @@
 //! all eight now seed the shared cascade.
 //!
 //! WHAT THESE TESTS CAN AND CANNOT DO. All eight are `#[tauri::command]`s (or,
-//! for `create_pivot_inner`, take `State` directly), so none can run
-//! in-process. This file therefore uses the SAME two-part split the
+//! for `create_pivot_inner`, took `State` directly -- M6 split its body into
+//! `create_pivot_core` over plain references, which `canvas_sheet_tests` now
+//! drives in-process), so none could run in-process. This file therefore uses the SAME two-part split the
 //! `sort_range` and `clear_range` tests use and for the same reason:
 //!
 //!   1. reproduce the command's WRITE exactly, run the phase-B seeding the
@@ -422,12 +424,19 @@ fn every_pivot_cell_write_seeds_the_shared_cascade() {
     // and `consolidate_data`, which write result blocks of the same shape —
     // each must recalculate on BOTH branches.
     const PIVOT_RS: &str = include_str!("../pivot/commands.rs");
-    for name in [
-        "create_pivot_inner",
-        "delete_pivot_table",
-        "undo_pivot_overwrite",
+    const PIVOT_OPS_RS: &str = include_str!("../pivot/operations.rs");
+    for (source, name) in [
+        (PIVOT_RS, "create_pivot_core"),
+        (PIVOT_RS, "delete_pivot_table"),
+        (PIVOT_RS, "undo_pivot_overwrite"),
+        // M6: every OTHER pivot write -- the refresh/refilter/field-change
+        // funnel -- seeds the same cascade through this one helper. It used to
+        // run `recalculate_sheet_formulas`, the ACTIVE sheet only, so a canvas
+        // pivot refiltered while the user was on Sheet1 (or the user on the
+        // canvas while Sheet1 read it) left every reader elsewhere stale.
+        (PIVOT_OPS_RS, "recalc_after_pivot_write"),
     ] {
-        let body = body_of(PIVOT_RS, name);
+        let body = body_of(source, name);
         assert!(
             body.contains("recalc_after_active_sheet_bulk_rewrite("),
             "`{}` writes a block of pivot cells without seeding the shared \
@@ -443,6 +452,43 @@ fn every_pivot_cell_write_seeds_the_shared_cascade() {
             name
         );
     }
+
+    // `finalize_pivot_update` is the funnel for thirty-odd pivot commands and
+    // both pivot undo restores: it must reach the helper above, not the old
+    // active-sheet-only pass.
+    let finalize = body_of(PIVOT_OPS_RS, "finalize_pivot_update");
+    assert!(
+        finalize.contains("recalc_after_pivot_write("),
+        "`finalize_pivot_update` no longer seeds the shared cascade — every pivot \
+         refresh, refilter and field change leaves readers on other sheets stale"
+    );
+    assert!(
+        !finalize.contains("recalculate_sheet_formulas("),
+        "`finalize_pivot_update` calls the active-sheet-only pass directly again"
+    );
+
+    // The commands that write through `update_pivot_in_grid` directly (they do
+    // something between the write and the region update, so they cannot use
+    // `finalize_pivot_update`) must reach the same helper -- and no pivot
+    // command may fall back to the active-sheet-only pass on its own.
+    for name in ["update_pivot_fields", "relocate_pivot", "refresh_pivot_cache", "update_bi_pivot_fields"] {
+        let body = body_of(PIVOT_RS, name);
+        let writes = body.matches("update_pivot_in_grid(").count();
+        let recalcs = body.matches("recalc_after_pivot_write(").count();
+        assert!(writes > 0, "test out of date: `{}` no longer calls update_pivot_in_grid directly", name);
+        assert!(
+            recalcs >= writes,
+            "`{}` writes a pivot block {} time(s) but seeds the shared cascade only {} time(s)",
+            name,
+            writes,
+            recalcs
+        );
+    }
+    assert!(
+        !PIVOT_RS.contains("recalculate_sheet_formulas("),
+        "a pivot command calls `recalculate_sheet_formulas` directly again — the \
+         active sheet only; go through `recalc_after_pivot_write`"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 139,
+  "nextId": 157,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -5038,6 +5038,412 @@
         "description": "Insert a BI query result on Sheet2, move Sheet2 to the front, Refresh the connection: the block is written onto the sheet now at index 1."
       },
       "notes": "Since M1 a block whose index now names a CANVAS is skipped loudly (bi_refresh_connection reports it); the worksheet case is unchanged."
+    },
+    {
+      "id": "BUG-0139",
+      "status": "fixed",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "paint-hit-agreement",
+        "message": "THE MOUSE LAYER HIT-TESTED AGAINST THE STORED HEADER GUTTERS WHILE THE PAINTER USED THE COLLAPSED ONES. Spreadsheet.tsx applies effectiveGridConfig (headings hidden -> gutters 0) to the config it paints with, but the mouse handlers are built in useSpreadsheet -> useSpreadsheetSelection -> useMouseSelection from the grid STATE and read state.config. On a canvas sheet (headings always hidden) every floating object's clickable rectangle sat one row-header width right and one column-header height below its paint, so a press near an object's top or left edge landed on the empty page; on a worksheet with View > Headings off, cell clicks, the fill handle and floating objects were off by the same amount.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Presses in the middle of an object hit both rectangles; only a press within ~20px of the top/left edge misses, and the canvas journey's chart drags pressed 40px in.",
+      "repro": {
+        "description": "Canvas sheet with a pivot box at (64,64); click 8px below the box's top edge: the press is announced as a background press and the box is not selected. Found live by e2e/journeys/canvas.spec.ts #6."
+      },
+      "fix": {
+        "status": "fixed",
+        "description": "useSpreadsheetSelection derives its config through effectiveGridConfig(storedConfig, paintedDisplayHeadings(surface, displayHeadings)); paintedDisplayHeadings is the one rule (headerVisibility.ts), used by Spreadsheet.tsx too; source census in headerVisibility.test.ts. FloatingRange's own frameCanvasBounds had the same raw-gutter defect and was fixed in M7 (frCanvasGeometry.ts).",
+        "date": "2026-09-25"
+      }
+    },
+    {
+      "id": "BUG-0140",
+      "status": "fixed",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "pivot-destination-sheet",
+        "message": "A PIVOT'S MERGED CELLS WERE WRITTEN TO THE ACTIVE SHEET'S MERGE SET WHATEVER ITS DESTINATION. update_pivot_in_grid and both create doors inserted the pivot's merges into state.merged_regions (the active-sheet mirror), so refreshing or refiltering a pivot on another sheet merged cells on the sheet the user was looking at.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Only filter rows under several row-label columns produce merges, and most refreshes happen with the pivot's own sheet active.",
+      "repro": {
+        "description": "Pivot with a multi-column row-label filter row on Sheet2; activate Sheet1; refilter it from a slicer: Sheet1 gains merged cells."
+      },
+      "fix": {
+        "status": "fixed",
+        "description": "All three writers go through crate::report::with_sheet_merges_mut(state, effect, dest, ..); test merges_of_a_canvas_pivot_written_while_sheet1_is_active_land_in_the_canvas_set.",
+        "date": "2026-09-25"
+      }
+    },
+    {
+      "id": "BUG-0141",
+      "status": "fixed",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "cross-sheet-recalc",
+        "message": "A PIVOT WRITE RECALCULATED ONLY THE ACTIVE SHEET. finalize_pivot_update (and the four commands that write through update_pivot_in_grid directly) ended with recalculate_sheet_formulas, which re-evaluates formulas on the active grid only; a formula on another sheet reading the pivot's output stayed stale after a refilter, field change or refresh.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Readers of pivot output usually sit on the pivot's own sheet.",
+      "repro": {
+        "description": "Pivot on Sheet2, =SUM(Sheet2!B:B) on Sheet1; refilter the pivot while Sheet2 is active: Sheet1 keeps the old total."
+      },
+      "fix": {
+        "status": "fixed",
+        "description": "recalc_after_pivot_write seeds the shared cascade over the union of the old and new pivot rectangles (active branch + off-sheet branch); 29 commands gained UserFilesState; census in d3_cascade_seed_tests. The active branch ends with recalc_after_off_sheet_write because the active-sheet cascade evaluates with no pivot lookup (a GETPIVOTDATA elsewhere turned #REF!).",
+        "date": "2026-09-25"
+      }
+    },
+    {
+      "id": "BUG-0142",
+      "status": "fixed",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "calp-refresh-sheet-identity",
+        "message": "A COLLABORATION REFRESH SENT A PULLED PIVOT ONTO THE SUBSCRIBER'S OWN SAME-NAMED SHEET. The refresh rename map covered only sheets NEW in this version, so a pivot on an already-tracked sheet that had been renamed on subscribe ('Data' -> 'Data (2)') matched the publisher's name 'Data' to the subscriber's OWN 'Data', built its cache from the subscriber's data and wrote its output over the subscriber's cells, leaving the old output on 'Data (2)'.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "It needs a name collision on subscribe AND a later version that ships the same pivot; the only test covered a v2-added sheet.",
+      "repro": {
+        "description": "Subscriber has 'Data'; subscribe to an application whose 'Data' holds a pivot; publisher pushes v2; Refresh: the subscriber's Data cells are overwritten."
+      },
+      "fix": {
+        "status": "fixed",
+        "description": "prepare_refresh_payloads maps every pulled sheet's publisher name to its CURRENT local name (tracked, tombstoned and new) per payload; tombstoned/detached ids join the collision skip set; test a_refreshed_pivot_follows_its_renamed_sheet_not_the_subscribers_same_named_one.",
+        "date": "2026-09-25"
+      }
+    },
+    {
+      "id": "BUG-0143",
+      "status": "fixed",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "dirty-flag",
+        "message": "DEV SUBSCRIBE / DEV REFRESH DIRTIED THE DOCUMENT BEFORE THE PULL COULD FAIL. Both dev commands constructed DocumentEffect::mutates before pull_dev, so a failed dev pull marked the workbook modified with nothing changed.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Dev mode is a developer-only path and the extra save prompt is easy to dismiss.",
+      "repro": {
+        "description": "Developer > dev subscribe to a folder that fails to pull: the title bar shows the unsaved asterisk."
+      },
+      "fix": {
+        "status": "fixed",
+        "description": "The effect is constructed after the pull (dev_subscribe_inner / dev_refresh_inner).",
+        "date": "2026-09-25"
+      }
+    },
+    {
+      "id": "BUG-0144",
+      "status": "fixed",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "ipc-read-cap",
+        "message": "A FLOATING RANGE LARGER THAN 100,000 CELLS NEVER PAINTED. The renderer read the whole window in one get_floating_range_cells call, which get_range_cells_typed refuses above MAX_TYPED_RANGE_CELLS = 100_000, so e.g. a 1000x101 window showed empty cells.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Windows that large are rare; the refusal was logged, not shown.",
+      "repro": {
+        "description": "Resize a floating range to 1000 rows x 101 columns: its cells stop painting."
+      },
+      "fix": {
+        "status": "fixed",
+        "description": "M7: the renderer reads only the visible rect, in row bands of at most 100,000 cells (frCellReads.ts); Delete across the extent uses the same bands. The script provider's getCells still reads in one call (open follow-up in open-items).",
+        "date": "2026-09-25"
+      }
+    },
+    {
+      "id": "BUG-0145",
+      "status": "fixed",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "getpivotdata-sheet",
+        "message": "GETPIVOTDATA IGNORES THE SHEET OF ITS PIVOT REFERENCE. lookup_pivot_data answers with the first pivot (HashMap order) whose rectangle contains the referenced cell on ANY sheet. Canvas pivot block 0 sits at A1 of the canvas's hidden grid, so it collides with a worksheet pivot at A1: =GETPIVOTDATA(\"Sum of X\";Sheet1!A1) can answer from the canvas pivot.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Before canvas pivots, two pivots at the same address on different sheets were uncommon.",
+      "repro": {
+        "description": "Pivot at Sheet1!A1 and a canvas pivot (block 0, A1); =GETPIVOTDATA(\"Sum of Units\";Sheet1!A1) returns either pivot's total depending on hash order."
+      },
+      "notes": "Found by the M6 backend agent (2026-09-25).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-25",
+        "description": "The engine's GETPIVOTDATA callback now carries the SHEET its pivot reference names (the formula's own sheet when unqualified; None only with no multi-sheet context), and lookup_pivot_data matches it case-insensitively against each pivot's destination_sheet. Test getpivotdata_answers_from_the_pivot_on_the_referenced_sheet_not_any_pivot_at_that_cell (canvas_sheet_tests.rs): a Sheet3 pivot and a canvas pivot both at A1 answer their own totals; red under a sabotage of the sheet filter whatever the hash order."
+      }
+    },
+    {
+      "id": "BUG-0146",
+      "status": "open",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "getpivotdata-fields",
+        "message": "GETPIVOTDATA WITH FIELD/ITEM PAIRS RETURNS #REF! EVEN WHEN FIRST ENTERED. =GETPIVOTDATA(\"Sum of Sales\";E1;\"Region\";\"North\") gives #REF! in the backend test harness while the grand-total form gives the right number.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The grand-total form is what most tests exercise.",
+      "repro": {
+        "description": "Harness pivot with a Region row field; enter the field/item form of GETPIVOTDATA: #REF!."
+      },
+      "notes": "Found by the M6 backend agent; predates M6."
+    },
+    {
+      "id": "BUG-0147",
+      "status": "open",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "pivot-load",
+        "message": "restore_pivot_definitions RESOLVES THE DESTINATION BY EXACT NAME WITH unwrap_or(0) AND NEVER STORES THE VIEW. A case-only mismatch writes the pivot's region onto sheet 0, and GETPIVOTDATA answers #REF! after a load until something fetches the pivot's view.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Tab names normally match their definitions exactly, and opening a pivot's sheet fetches its view.",
+      "repro": {
+        "description": "Save a workbook with =GETPIVOTDATA(..) on Sheet1 reading a pivot on Sheet2; reopen without visiting Sheet2: #REF!."
+      }
+    },
+    {
+      "id": "BUG-0148",
+      "status": "open",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "undo-completeness",
+        "message": "UNDOING A PIVOT CREATE LEAVES ITS MERGED CELLS. apply_pivot_create_restore clears the cells and region but does not remove the merges the create wrote.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Only pivots with merged filter rows are affected.",
+      "repro": {
+        "description": "Create a pivot whose layout merges a filter row; Ctrl+Z: the merged range remains."
+      }
+    },
+    {
+      "id": "BUG-0149",
+      "status": "open",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "dialog-input-honoured",
+        "message": "THE WORKSHEET-MODE CREATE PIVOT DIALOG IGNORES A TYPED SHEET PREFIX. Typing 'Sheet2!A1:D9' as the source sends sourceSheet = the sheet that was active when the dialog opened, so the pivot is built from the wrong sheet's cells.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Users usually select the source on the active sheet before opening the dialog.",
+      "repro": {
+        "description": "On Sheet1, Insert > PivotTable, type Sheet2!A1:D9: the pivot summarises Sheet1!A1:D9."
+      },
+      "notes": "Canvas mode resolves the prefix correctly (Pivot/lib/canvasPivotCreate.ts); worksheet mode deliberately left unchanged in M6."
+    },
+    {
+      "id": "BUG-0150",
+      "status": "open",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "calp-preview-fidelity",
+        "message": "THE PUSH PREVIEW AND THE MERGE ANALYSIS CANNOT SEE THE FRONTEND'S DISTRIBUTABLE OBJECTS. custom_objects/... artifacts (model overlay, reports) are merged in by calp_publish from frontend params the preview and merge commands never receive, so they are reported as REMOVED in both. (The minAppVersion line this also caused is reconciled.)",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The diff line reads like a real removal and the push itself carries the objects.",
+      "repro": {
+        "description": "Publish an application with a model overlay; open the push preview: the overlay artifact is listed as removed."
+      }
+    },
+    {
+      "id": "BUG-0151",
+      "status": "open",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "calp-collision-rename",
+        "message": "A COLLISION RENAME ON PULL DOES NOT REWRITE NAME-BOUND REFERENCES IN THE PULLED CONTENT. When a pulled 'Data' arrives as 'Data (2)', formulas on the pulled sheets (object/backing sheets included), named-range refers_to and chart string sources still say 'Data' and read the subscriber's OWN sheet.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "It needs a name collision, and the pulled content must reference the renamed sheet by name.",
+      "repro": {
+        "description": "Subscriber has 'Data'; subscribe to an application whose 'Report' has =Data!A1: the pulled Report reads the subscriber's Data."
+      },
+      "notes": "Needs a SIMULTANEOUS multi-name rewriter (pairwise application chains wrongly, e.g. {B->A, A->A (2)}) over pulled grids before edges are built, named ranges and chart string sources, on subscribe and on refresh."
+    },
+    {
+      "id": "BUG-0152",
+      "status": "open",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "calp-active-mirror",
+        "message": "SUSPECTED: restore_pulled_pivots WRITES grids ONLY. On checkout the first application sheet is active and its mirror is synced before the pivots are written, so a pulled pivot on the active sheet could be erased by the next recalculation copying the stale mirror back.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Reasoned from the code by the M5 refresh agent; not reproduced.",
+      "repro": {
+        "description": "Open Application for Editing where the first sheet holds a pivot; edit any cell: check whether the pivot's cells survive."
+      }
+    },
+    {
+      "id": "BUG-0153",
+      "status": "open",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "calp-detach",
+        "message": "AFTER A SHEET IS DETACHED, (a) distributed object scripts bound to its controls are orphaned by the next refresh (the script swap replaces the package's set and rebinds through a map that excludes detached sheets), and (b) a sheet-scoped named range on it is upserted by refresh with sheet_index None and silently becomes workbook-scoped.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Detach is new and rarely combined with scripts or sheet-scoped names.",
+      "repro": {
+        "description": "(a) Detach a pulled sheet with a scripted button, Refresh: the button's script is gone. (b) Detach a sheet with a sheet-scoped name, Refresh: the name is workbook-scoped."
+      },
+      "notes": "Converting the scripts to local was NOT done because it would bypass consent."
+    },
+    {
+      "id": "BUG-0154",
+      "status": "open",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "sheet-name-unique",
+        "message": "THE DEV PULL HAS NO SHEET-NAME COLLISION RESOLUTION: pulling a source sheet named like an existing sheet yields two sheets with the same name.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Dev pulls usually go into a fresh workbook.",
+      "repro": {
+        "description": "Dev subscribe to a source folder whose sheet is named Sheet1 into a workbook that has Sheet1."
+      }
+    },
+    {
+      "id": "BUG-0155",
+      "status": "open",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M5-M7 (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "document-replaced-cache",
+        "message": "SUSPECTED: THE GRID CELL CACHE IS NOT INVALIDATED WHEN THE DOCUMENT IS REPLACED WITHOUT A RELOAD. GridCanvas keeps its fetched cells and needsFetch() finds the viewport covered, so after a no-reload document replacement (announceBackendStateReplaced: calp_checkout, and the E2E newFile helper) the previous document's cells can stay painted. File > New in the product reloads the window and is not affected.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Only the no-reload replacement paths are exposed; observed in the E2E harness (a canvas pivot's hidden-grid cells painted on the new Sheet1).",
+      "repro": {
+        "description": "E2E: create a canvas pivot, call file-api newFile() without a reload: the new Sheet1 shows the pivot's cells although get_cells_in_rows returns none."
+      }
+    },
+    {
+      "id": "BUG-0156",
+      "status": "fixed",
+      "discovered": "2026-09-25",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas-sheet M8 part A (2026-09-25)"
+      },
+      "violation": {
+        "oracleId": "paint-hit-agreement",
+        "severity": "medium",
+        "message": "CHART POINTER PATHS IGNORE ZOOM. The Charts extension's hover/tooltip (index.ts handleMouseMove) and context-menu lookup convert a pointer with clientX - rect.left / clientY - rect.top and never divide by the zoom, while chart geometry is in logical (unzoomed) page px. At any zoom other than 100% bar hover, tooltips, the sub-selection ladder's pending click and the right-click target resolve against the wrong point. Selecting the chart itself is unaffected (Core's press path divides by zoom).",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every chart journey runs at 100% zoom.",
+      "repro": {
+        "description": "Zoom to 150%, hover a bar near the chart's right edge: the tooltip names a different bar, or none."
+      },
+      "notes": "Found by reading during M8 part A; Core's new topFloatingRegionAtClient is zoom-corrected, so at zoom != 1 the chart's own lookup can also disagree with the occlusion check.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-25",
+        "description": "M8 part C/D: ONE conversion, extensions/Charts/lib/chartPointer.ts -- clientToChartCanvas divides the client offset by the grid zoom (as Core's press path and @api topFloatingRegionAtClient do), insideChartCanvas measures the grid box in logical px, and chartCanvasToClient scales back for the two DOM popup anchors (pivot field-button filter menu, quick-access panel) that turned the canvas point into a screen point. Both pointer paths of Charts/index.ts (handleMouseMove -> hover, tooltips and the pending ladder click; the context-menu lookup) use it. Tests: extensions/Charts/lib/__tests__/chartArrange.test.ts at zoom 1.5 (client (250,130) with the grid at (100,40) -> logical (100,60) and back), plus a source pin that no raw `clientX - rect.left` remains and both paths call the helper; red under a sabotage that drops the division."
+      }
     }
   ]
 }

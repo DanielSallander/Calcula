@@ -62,28 +62,45 @@ vi.mock("@api/events", () => ({
   onAppEvent: vi.fn(() => () => {}),
 }));
 
-vi.mock("@api/gridOverlays", () => ({
-  getGridRegions: () => publishedRegions,
-  replaceGridRegionsByType: (_type: string, regions: unknown[]) => {
-    publishedRegions = regions;
-  },
-  removeGridRegionsByType: () => {
-    publishedRegions = [];
-  },
-  requestOverlayRedraw: vi.fn(),
-}));
+// `floatingHitOrder` is Core's REAL one ordering (M8): the menu walks the same
+// topmost-first order a press does, over whatever this double publishes.
+vi.mock("@api/gridOverlays", async () => {
+  const actual = await vi.importActual<typeof import("@api/gridOverlays")>("@api/gridOverlays");
+  return {
+    getGridRegions: () => publishedRegions,
+    floatingHitOrder: actual.floatingHitOrder,
+    replaceGridRegionsByType: (_type: string, regions: unknown[]) => {
+      publishedRegions = regions;
+    },
+    removeGridRegionsByType: () => {
+      publishedRegions = [];
+    },
+    requestOverlayRedraw: vi.fn(),
+  };
+});
 
 // A 50 px row-header gutter and a 24 px column-header gutter, no scroll, zoom 1:
-// a control at sheet pixel (100, 50) therefore paints at canvas (150, 74).
-vi.mock("@api/grid", () => ({
-  getGridStateSnapshot: () => ({
-    config: { rowHeaderWidth: 50, colHeaderHeight: 24 },
-    viewport: { scrollX: 0, scrollY: 0 },
-    zoom: 1,
-  }),
-  rowHeaderGutter: (config: { rowHeaderWidth?: number }) => config.rowHeaderWidth ?? 50,
-  colHeaderGutter: (config: { colHeaderHeight?: number }) => config.colHeaderHeight ?? 24,
-}));
+// a control at sheet pixel (100, 50) therefore paints at canvas (150, 74) on a
+// worksheet. `surface` flips to "canvas" for the painted-gutter case.
+const gridSnapshot = {
+  surface: "grid" as "grid" | "canvas",
+  displayHeadings: true,
+  config: { rowHeaderWidth: 50, colHeaderHeight: 24 },
+  viewport: { scrollX: 0, scrollY: 0 },
+  zoom: 1,
+};
+vi.mock("@api/grid", async () => {
+  const header = await vi.importActual<
+    typeof import("../../../src/core/lib/gridRenderer/layout/headerVisibility")
+  >("../../../src/core/lib/gridRenderer/layout/headerVisibility");
+  return {
+    getGridStateSnapshot: () => gridSnapshot,
+    rowHeaderGutter: header.rowHeaderGutter,
+    colHeaderGutter: header.colHeaderGutter,
+    resolveHeaderSizes: header.resolveHeaderSizes,
+    paintedDisplayHeadings: header.paintedDisplayHeadings,
+  };
+});
 
 import { installControlObjectMenu, CONTROL_CONTEXT_MENU_ID } from "../lib/controlObjectMenu";
 import { buildControlObjectMenu } from "../lib/controlContextMenu";
@@ -162,6 +179,7 @@ beforeEach(() => {
   registerOverlay.mockReset();
   unregisterOverlay.mockReset();
   publishedRegions = [];
+  gridSnapshot.surface = "grid";
 
   resetFloatingStore();
   deselectFloatingControl();
@@ -214,6 +232,49 @@ describe("right-clicking an on-grid control opens the control's own menu", () =>
     // The shape sits at sheet (300, 200) -> canvas (350, 224).
     rightClickOnGrid({ clientX: 360, clientY: 240 });
     expect(showOverlay.mock.calls[0][1].data.controlId).toBe(SHAPE_ID);
+  });
+
+  it("on a CANVAS finds the control where it is PAINTED (no header gutters)", () => {
+    // A canvas never shows headings, but the stored config still says 50 x 24:
+    // the button paints at canvas (100..180, 50..74), and the raw-config box
+    // (150..230, 74..98) is where the menu used to look.
+    gridSnapshot.surface = "canvas";
+    rightClickOnGrid({ clientX: 105, clientY: 55 });
+    expect(showOverlay).toHaveBeenCalledTimes(1);
+    expect(showOverlay.mock.calls[0][1].data.controlId).toBe(BUTTON_ID);
+
+    showOverlay.mockReset();
+    const oldBox = rightClickOnGrid({ clientX: 225, clientY: 95 });
+    expect(showOverlay).not.toHaveBeenCalled();
+    expect(oldBox.defaultPrevented).toBe(false);
+  });
+});
+
+describe("a control covered by another family's object", () => {
+  /** A chart region over the button (canvas 140..260, 70..110 on a worksheet). */
+  const CHART = {
+    id: "chart-c1",
+    type: "chart",
+    startRow: 0,
+    startCol: 0,
+    endRow: 0,
+    endCol: 0,
+    floating: { x: 90, y: 46, width: 120, height: 40 },
+    data: { chartId: "c1" },
+  };
+
+  it("does not open the control menu: the object on top owns the right-click", () => {
+    publishedRegions = [...publishedRegions, CHART]; // published last = on top
+    const event = rightClickOnGrid(ON_BUTTON);
+    expect(showOverlay).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("POSITIVE CONTROL: the same chart UNDER the button leaves the menu working", () => {
+    publishedRegions = [CHART, ...publishedRegions]; // published first = beneath
+    rightClickOnGrid(ON_BUTTON);
+    expect(showOverlay).toHaveBeenCalledTimes(1);
+    expect(showOverlay.mock.calls[0][1].data.controlId).toBe(BUTTON_ID);
   });
 });
 

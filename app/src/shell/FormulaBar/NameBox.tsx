@@ -72,6 +72,13 @@ import {
 // tests install — a barrel mock that does not list a newly used export makes it
 // `undefined` and the component throws on mount.
 import { getChartSelection, onChartSelectionChanged } from "../../api/chartSelection";
+// The same reasoning, and the same shape, for every other floating object.
+import {
+  EMPTY_OBJECT_LABEL,
+  getObjectLabel,
+  onObjectLabelChanged,
+  type ObjectLabelSnapshot,
+} from "../../api/objectSelectionLabel";
 import type { NamedRange } from "../../api";
 import { resolveNamedRangeCoords } from "../../api/lib";
 import type { NamedRangeCoords } from "../../api/lib";
@@ -207,6 +214,16 @@ export function NameBox(): React.ReactElement {
    * the sync is waiting for.
    */
   const [chartLabel, setChartLabel] = useState<string>("");
+
+  /**
+   * What the Name Box shows while floating OBJECTS are selected on a canvas:
+   * the object's name ("Slicer_Region", "Sales"), or "3 objects" for a
+   * multi-selection -- published by the canvas through
+   * `@api/objectSelectionLabel`, rendered verbatim. Starts EMPTY for the same
+   * reason `chartLabel` does: the subscribing effect's first read is the change
+   * the input sync waits for.
+   */
+  const [objectLabel, setObjectLabel] = useState<ObjectLabelSnapshot>(EMPTY_OBJECT_LABEL);
 
   const displayAddress = state.selection
     ? formatSelectionAddress(
@@ -382,6 +399,15 @@ export function NameBox(): React.ReactElement {
     });
   }, []);
 
+  // Follow the published object label. Its text is "" when nothing is
+  // labelled -- a worksheet, or a canvas with nothing selected.
+  useEffect(() => {
+    setObjectLabel(getObjectLabel());
+    return onObjectLabelChanged((snapshot) => {
+      setObjectLabel(snapshot);
+    });
+  }, []);
+
   // Listen for F5 / Go To - focus the Name Box input
   useEffect(() => {
     return onAppEvent(AppEvents.NAMEBOX_FOCUS, () => {
@@ -400,8 +426,20 @@ export function NameBox(): React.ReactElement {
   // The chart label wins outright because while a chart is selected the grid
   // selection underneath it has not moved, so the address would name a cell the
   // user is not looking at.
+  //
+  // Then the OBJECT label (a canvas's selected slicer, timeline, floating range,
+  // pivot box or control), for the same reason. One exception reorders the two:
+  // a MULTI-selection's "3 objects" beats the chart label, because a chart's
+  // rung ("Series 1") names one member of the selection, not the selection.
+  const objectText = objectLabel.text !== "" ? objectLabel.text : null;
+  const multiObjectText = objectLabel.count > 1 ? objectText : null;
   const displayValue =
-    (chartLabel !== "" ? chartLabel : null) ?? matchedName ?? matchedTable ?? displayAddress;
+    multiObjectText ??
+    (chartLabel !== "" ? chartLabel : null) ??
+    objectText ??
+    matchedName ??
+    matchedTable ??
+    displayAddress;
 
   // Sync inputValue with displayValue when not editing.
   //

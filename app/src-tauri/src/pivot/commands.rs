@@ -39,9 +39,10 @@ use tauri::{Emitter, State};
 /// mutation and may pass `&effect` to any other `Persisted<T>` the same command touches.
 ///
 /// THE SECOND REFUSAL, for a command that will REWRITE THE GRID: a pivot whose
-/// destination resolves to a CANVAS sheet is refused here too, before the token
-/// exists (`ensure_pivot_destination_is_grid`). Without it the command mutated
-/// the definition, dirtied the document and only then learned -- at the write --
+/// destination is the wrong KIND for it -- a grid pivot on a canvas, a canvas
+/// (framed) pivot on a worksheet -- is refused here too, before the token exists
+/// (`ensure_pivot_destination_writable`). Without it the command mutated the
+/// definition, dirtied the document and only then learned -- at the write --
 /// that the output had nowhere to go. `update_pivot_in_grid` still refuses at the
 /// write for a destination that changes after this check.
 fn pivot_write<'a>(
@@ -57,7 +58,7 @@ fn pivot_write<'a>(
     String,
 > {
     ensure_pivot_exists(pivot_state, pivot_id)?;
-    ensure_pivot_destination_is_grid(state, pivot_state, pivot_id)?;
+    ensure_pivot_destination_writable(state, pivot_state, pivot_id)?;
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let guard = pivot_state
         .pivot_tables
@@ -112,9 +113,10 @@ fn ensure_pivot_exists(pivot_state: &PivotState, pivot_id: PivotId) -> Result<()
 /// same "does this pivot exist?" refusal under a READ guard, releases it, and returns
 /// only the token -- which then authorises every later `.write(&effect)` in the command.
 ///
-/// Refuses a canvas destination before the token exists, like [`pivot_write`]:
-/// every caller rewrites the grid. `delete_pivot_table` -- which must be able to
-/// remove a pivot stranded on a canvas -- uses [`pivot_exists_token`] instead.
+/// Refuses a destination of the wrong kind before the token exists, like
+/// [`pivot_write`]: every caller rewrites the grid. `delete_pivot_table` -- which
+/// must be able to remove a pivot stranded on a canvas -- uses
+/// [`pivot_exists_token`] instead.
 fn pivot_mutation_token(
     state: &AppState,
     pivot_state: &PivotState,
@@ -122,7 +124,7 @@ fn pivot_mutation_token(
     pivot_id: PivotId,
 ) -> Result<crate::document_effect::DocumentEffect, String> {
     ensure_pivot_exists(pivot_state, pivot_id)?;
-    ensure_pivot_destination_is_grid(state, pivot_state, pivot_id)?;
+    ensure_pivot_destination_writable(state, pivot_state, pivot_id)?;
     Ok(crate::document_effect::DocumentEffect::mutates(file_state))
 }
 
@@ -191,26 +193,22 @@ fn record_pivot_definition_undo(
     );
     // ONE critical section for the whole step. The width record is serialized
     // here rather than through `record_pivot_col_widths_undo` so the stack lock
-    // is taken exactly once: releasing it between `begin_transaction` and the
-    // second `record_custom_restore` would let a concurrent command open its own
-    // transaction in the gap and split what the user sees as one action.
+    // is taken exactly once: releasing it between the two records would let a
+    // concurrent command open its own transaction in the gap and split what the
+    // user sees as one action.
+    //
+    // And a MEMBER of an open transaction: the guarded join records into the
+    // caller's transaction when one is open instead of an unconditional
+    // `begin`/`commit` pair, whose `commit` closed the caller's OUTER
+    // transaction early -- a canvas arrange that moved a pivot box mid-way
+    // became two Ctrl+Z steps.
     let widths_data =
         crate::undo_commands::encode_pivot_col_widths_snapshot(dest_sheet_idx, prev_col_widths);
-    let mut undo_stack = state.undo_stack.lock().unwrap();
-    undo_stack.begin_transaction(description);
-    undo_stack.record_custom_restore(
-        crate::undo_commands::PIVOT_DEFINITION_RESTORE_KIND.to_string(),
-        data,
-        description,
-    );
+    let mut restores = vec![(crate::undo_commands::PIVOT_DEFINITION_RESTORE_KIND, data)];
     if let Some(widths) = widths_data {
-        undo_stack.record_custom_restore(
-            crate::undo_commands::PIVOT_COL_WIDTHS_RESTORE_KIND.to_string(),
-            widths,
-            description,
-        );
+        restores.push((crate::undo_commands::PIVOT_COL_WIDTHS_RESTORE_KIND, widths));
     }
-    undo_stack.commit_transaction();
+    crate::undo_commands::record_restores_joining_open_transaction(state, description, restores);
 }
 
 /// Populate children_indices from parent_index on a PivotView.
@@ -361,16 +359,8 @@ pub fn create_pivot_table(
     )
 }
 
-/// Core pivot creation, optionally with row/value fields configured UP FRONT so
-/// the whole creation is a SINGLE undoable step (used by the MCP create_pivot
-/// tool; create_pivot_table passes empty field lists). Field NAMES are resolved
-/// to source-column indices against the freshly built cache.
-///
-/// DEPENDENTS RECALCULATE (D3). Creating a pivot writes a block over cells that
-/// may already have held data, and it recalculated nothing: `=B12*2` beside the
-/// destination kept the value of whatever the pivot had just overwritten. Every
-/// other pivot mutation reaches a recalculation through `finalize_pivot_update`;
-/// creation, deletion and the overwrite-undo were the three that did not.
+/// [`create_pivot_core`] reached through `State` handles: the body of the
+/// `create_pivot_table` command and of the MCP `create_pivot` tool.
 #[allow(clippy::too_many_arguments)]
 pub fn create_pivot_inner(
     state: State<AppState>,
@@ -383,97 +373,205 @@ pub fn create_pivot_inner(
     row_field_names: Vec<String>,
     value_specs: Vec<(String, AggregationType)>,
 ) -> Result<PivotViewResponse, String> {
-    // A GRID pivot writes its output as visible cells; on a canvas sheet those
-    // cells would be invisible (the windowed canvas pivot is its own path).
-    // Decided BEFORE the effect below so the refusal leaves the document clean;
-    // the destination is resolved the same way it is further down.
-    {
-        let dest = request
-            .destination_sheet
-            .unwrap_or_else(|| *state.active_sheet.read().unwrap());
-        crate::sheets::ensure_not_canvas_in_state(&state, dest, "create a grid pivot table")?;
+    create_pivot_core(
+        &state,
+        &file_state,
+        &pivot_state,
+        PivotRecalcStates {
+            pane: &pane_control_state,
+            ribbon: &ribbon_filter_state,
+            user_files: &user_files_state,
+        },
+        request,
+        row_field_names,
+        value_specs,
+    )
+}
+
+/// The canvas half of both create doors: a pivot aimed at a canvas must carry
+/// a frame, and the frame must be valid. `Err` names the canvas and says what
+/// is missing.
+fn canvas_create_frame(
+    frame: Option<CanvasFrameConfig>,
+    dest_sheet_idx: usize,
+) -> Result<pivot_engine::CanvasFrame, String> {
+    let Some(config) = frame else {
+        return Err(format!(
+            "Cannot create a pivot table on sheet {}: it is a canvas sheet, and a pivot on a \
+             canvas needs a frame (the box it is shown in). Insert it from the canvas, or choose \
+             a worksheet destination.",
+            dest_sheet_idx
+        ));
+    };
+    let frame: pivot_engine::CanvasFrame = config.into();
+    frame.validate()?;
+    Ok(frame)
+}
+
+/// The worksheet half of both create doors: a frame on a worksheet destination
+/// is refused, never silently dropped -- the caller asked for a canvas pivot.
+fn frame_on_worksheet_refusal(dest_sheet_idx: usize) -> String {
+    format!(
+        "Cannot create a pivot table with a canvas frame on sheet {}: it is a worksheet, and a \
+         frame is only for a pivot on a canvas sheet.",
+        dest_sheet_idx
+    )
+}
+
+/// Core pivot creation over plain references (so the unit tier can drive the
+/// real door -- `State<T>` cannot be built in a test; same split as
+/// `add_sheet_inner`), optionally with row/value fields configured UP FRONT so
+/// the whole creation is a SINGLE undoable step (used by the MCP create_pivot
+/// tool; create_pivot_table passes empty field lists). Field NAMES are resolved
+/// to source-column indices against the freshly built cache.
+///
+/// EVERY REFUSAL COMES BEFORE THE EFFECT. The destination (resolved ONCE), its
+/// kind, the frame, the protection option, the ranges, the overlap, the source
+/// sheet, the self-overlap, the field names and a canvas pivot's width are all
+/// decided before `DocumentEffect::mutates`, so a refused create leaves the
+/// document clean. (The overlap and protection checks used to run after it.)
+///
+/// CANVAS DESTINATION (M6). The request must carry `canvas_frame`, the anchor is
+/// allocated by `allocate_canvas_pivot_anchor` (`destination_cell` is ignored),
+/// and `source_sheet` must name a NON-canvas sheet explicitly: the default --
+/// the active sheet -- is the canvas itself when the user inserts from the
+/// Canvas tab, and a pivot over an empty canvas is never what was meant.
+///
+/// DEPENDENTS RECALCULATE (D3). Creating a pivot writes a block over cells that
+/// may already have held data, and it recalculated nothing: `=B12*2` beside the
+/// destination kept the value of whatever the pivot had just overwritten. Every
+/// other pivot mutation reaches a recalculation through `finalize_pivot_update`;
+/// creation, deletion and the overwrite-undo were the three that did not.
+pub(crate) fn create_pivot_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    pivot_state: &PivotState,
+    recalc: PivotRecalcStates<'_>,
+    request: CreatePivotRequest,
+    row_field_names: Vec<String>,
+    value_specs: Vec<(String, AggregationType)>,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "create_pivot_table source={} dest={} dest_sheet={:?} framed={}",
+        request.source_range,
+        request.destination_cell,
+        request.destination_sheet,
+        request.canvas_frame.is_some()
+    );
+
+    // The destination -- ONCE. This index is what the kind gate checks, what
+    // `destination_sheet` names, where the region is registered and where the
+    // cells are written. The active sheet is copied out first, so no
+    // `active_sheet` guard is alive while the kind is read.
+    let active_sheet_now = *state.active_sheet.read().unwrap();
+    let dest_sheet_idx = request.destination_sheet.unwrap_or(active_sheet_now);
+    let sheet_count = state.sheet_names.read().unwrap().len();
+    if dest_sheet_idx >= sheet_count {
+        return Err(format!(
+            "Destination sheet index {} does not exist (only {} sheets available)",
+            dest_sheet_idx, sheet_count
+        ));
     }
-    // Creating a pivot: nothing to refuse on identity, the command has already
-    // committed by this point.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let dest_is_canvas = {
+        let kinds = state.sheet_kinds.read().unwrap();
+        crate::sheets::is_canvas_sheet(&kinds, dest_sheet_idx)
+    };
+
+    let (destination, source_sheet_idx, canvas_frame) = if dest_is_canvas {
+        let frame = canvas_create_frame(request.canvas_frame, dest_sheet_idx)?;
+        let Some(source_sheet_idx) = request.source_sheet else {
+            return Err(format!(
+                "Cannot create a pivot table on canvas sheet {} without an explicit source sheet: \
+                 the default source is the active sheet, which is the canvas itself. Name the \
+                 worksheet that holds the data.",
+                dest_sheet_idx
+            ));
+        };
+        let source_is_canvas = {
+            let kinds = state.sheet_kinds.read().unwrap();
+            crate::sheets::is_canvas_sheet(&kinds, source_sheet_idx)
+        };
+        if source_is_canvas {
+            return Err(format!(
+                "Cannot create a pivot table from sheet {}: it is a canvas sheet, which holds no \
+                 data. Choose the worksheet that holds the data as the source.",
+                source_sheet_idx
+            ));
+        }
+        let anchor = allocate_canvas_pivot_anchor(state, dest_sheet_idx)?;
+        (anchor, source_sheet_idx, Some(frame))
+    } else {
+        // A GRID pivot writes its output as visible cells; on a canvas sheet
+        // those cells would be invisible (the framed canvas pivot above is the
+        // one path onto a canvas). Kept as the literal gate the census pins.
+        crate::sheets::ensure_not_canvas_in_state(state, dest_sheet_idx, "create a grid pivot table")?;
+        if request.canvas_frame.is_some() {
+            return Err(frame_on_worksheet_refusal(dest_sheet_idx));
+        }
+        let destination = parse_cell_ref(&request.destination_cell)?;
+        (destination, request.source_sheet.unwrap_or(active_sheet_now), None)
+    };
 
     log_info!(
         "PIVOT",
-        "create_pivot_table source={} dest={} dest_sheet={:?}",
-        request.source_range,
-        request.destination_cell,
-        request.destination_sheet
+        "source_sheet_idx={} dest_sheet_idx={} destination=({},{})",
+        source_sheet_idx,
+        dest_sheet_idx,
+        destination.0,
+        destination.1
     );
 
     // allowPivotTables option gate, on the ACTIVE sheet (the pivot is created
     // from the current selection context; the destination sheet is resolved
-    // below and is gated by the per-cell write gates that follow).
-    {
-        let active_sheet = *state.active_sheet.read().unwrap();
-        crate::protection::check_sheet_action(
-            &state, active_sheet, "pivotTables", "create or change pivot tables",
-        )?;
-    }
-
-    // Parse ranges
-    let (source_start, mut source_end) = parse_range(&request.source_range)?;
-    let destination = parse_cell_ref(&request.destination_cell)?;
-
-    // Get source sheet
-    let source_sheet_idx = request.source_sheet.unwrap_or_else(|| {
-        *state.active_sheet.read().unwrap()
-    });
-
-    // Get destination sheet - use provided value or fall back to active sheet
-    let dest_sheet_idx = request.destination_sheet.unwrap_or_else(|| {
-        *state.active_sheet.read().unwrap()
-    });
-
-    log_info!(
-        "PIVOT",
-        "source_sheet_idx={} dest_sheet_idx={}",
-        source_sheet_idx,
-        dest_sheet_idx
-    );
-
-    // Check that destination doesn't overlap an existing pivot table
-    check_pivot_overlap(&state, dest_sheet_idx, destination)?;
-
-    // Get grid data for source
-    let grids = state.grids.read().unwrap();
-    let grid = grids
-        .get(source_sheet_idx)
-        .ok_or_else(|| format!("Sheet index {} not found", source_sheet_idx))?;
-
-    // Clamp source_end row to the grid's actual data extent.
-    // This handles full-column selections (e.g. A:D -> A1:D1048576) by
-    // trimming to only the populated rows, matching Excel's behaviour.
-    if source_end.0 > grid.max_row {
-        log_info!(
-            "PIVOT",
-            "clamping source end_row from {} to {} (grid.max_row)",
-            source_end.0,
-            grid.max_row
-        );
-        source_end.0 = grid.max_row;
-    }
-
-    // Reject a pivot that would overwrite its own source. Checked AFTER the
-    // clamp above: an unclamped full-column selection (A:D -> A1:D1048576)
-    // would otherwise swallow every destination in those columns.
-    check_pivot_source_destination_overlap(
-        source_sheet_idx,
-        source_start,
-        source_end,
-        dest_sheet_idx,
-        destination,
+    // above and is gated by the per-cell write gates that follow).
+    crate::protection::check_sheet_action(
+        state, active_sheet_now, "pivotTables", "create or change pivot tables",
     )?;
+
+    // Parse the source range
+    let (source_start, mut source_end) = parse_range(&request.source_range)?;
+
+    // Check that destination doesn't overlap an existing pivot table. For a
+    // canvas this is a backstop: the allocator already skipped taken blocks.
+    check_pivot_overlap(state, dest_sheet_idx, destination)?;
 
     let has_headers = request.has_headers.unwrap_or(true);
 
-    // Build cache from grid
-    let (cache, _headers) = build_cache_from_grid(grid, source_start, source_end, has_headers)?;
-    drop(grids); // Release lock early
+    // Build the cache from the source grid, then release it.
+    let cache = {
+        let grids = state.grids.read().unwrap();
+        let grid = grids
+            .get(source_sheet_idx)
+            .ok_or_else(|| format!("Sheet index {} not found", source_sheet_idx))?;
+
+        // Clamp source_end row to the grid's actual data extent.
+        // This handles full-column selections (e.g. A:D -> A1:D1048576) by
+        // trimming to only the populated rows, matching Excel's behaviour.
+        if source_end.0 > grid.max_row {
+            log_info!(
+                "PIVOT",
+                "clamping source end_row from {} to {} (grid.max_row)",
+                source_end.0,
+                grid.max_row
+            );
+            source_end.0 = grid.max_row;
+        }
+
+        // Reject a pivot that would overwrite its own source. Checked AFTER the
+        // clamp above: an unclamped full-column selection (A:D -> A1:D1048576)
+        // would otherwise swallow every destination in those columns.
+        check_pivot_source_destination_overlap(
+            source_sheet_idx,
+            source_start,
+            source_end,
+            dest_sheet_idx,
+            destination,
+        )?;
+
+        let (cache, _headers) = build_cache_from_grid(grid, source_start, source_end, has_headers)?;
+        cache
+    };
 
     // Generate new pivot ID
     let pivot_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
@@ -482,6 +580,7 @@ pub fn create_pivot_inner(
     let mut definition = PivotDefinition::new(pivot_id, source_start, source_end);
     definition.source_has_headers = has_headers;
     definition.destination = destination;
+    definition.canvas_frame = canvas_frame;
     definition.name = request.name.or_else(|| Some(format!("PivotTable{}", pivot_id)));
     // If linked to a table, display the table name; otherwise use the raw range
     definition.source_range_display = Some(
@@ -533,11 +632,23 @@ pub fn create_pivot_inner(
     // Calculate initial view (empty only if no fields were configured)
     let mut cache_mut = cache;
     let view = safe_calculate_pivot(&definition, &mut cache_mut);
-    store_view(&pivot_state, pivot_id, &view);
+
+    // A canvas pivot must fit its block -- refused LOUDLY here, before
+    // anything is written, rather than clipped or spilled into the next block.
+    if definition.canvas_frame.is_some() {
+        ensure_canvas_pivot_fits_block(pivot_id, destination, &view)?;
+    }
+
+    // Creating a pivot: every refusal is behind us -- destination kind, frame,
+    // protection, ranges, overlap, source, field names and width -- so the
+    // command commits here.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+
+    store_view(pivot_state, pivot_id, &view);
     let response = view_to_response(&view, &definition, &mut cache_mut);
 
     // Update pivot region tracking (tracks even empty pivots with reserved space)
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(state, pivot_id, dest_sheet_idx, destination, &view);
 
     // Write pivot output to destination grid (empty for now, but reserves the space)
     {
@@ -548,7 +659,7 @@ pub fn create_pivot_inner(
         let mut grids = state.grids.write(&effect).unwrap();
         let mut styles = state.style_registry.write(&effect).unwrap();
 
-        // Verify destination sheet exists
+        // Verify destination sheet exists (a backstop: checked before the effect)
         if dest_sheet_idx >= grids.len() {
             return Err(format!(
                 "Destination sheet index {} does not exist (only {} sheets available)",
@@ -569,12 +680,16 @@ pub fn create_pivot_inner(
                 view.col_count
             );
 
-            // Insert pivot merge regions
+            // Insert pivot merge regions into the DESTINATION sheet's set --
+            // `merged_regions` is the active sheet's mirror, and a pivot created
+            // onto another sheet (every canvas pivot inserted while a worksheet
+            // is active, any cross-sheet pivot) put its merges there.
             if !pivot_merges.is_empty() {
-                let mut merged = state.merged_regions.write(&effect).unwrap();
-                for mr in pivot_merges {
-                    merged.insert(mr);
-                }
+                crate::report::with_sheet_merges_mut(state, &effect, dest_sheet_idx, |merged| {
+                    for mr in pivot_merges {
+                        merged.insert(mr);
+                    }
+                });
             }
 
             // IMPORTANT: If dest_sheet is the currently active sheet, sync state.grid
@@ -632,20 +747,20 @@ pub fn create_pivot_inner(
     if dest_sheet_idx == active_sheet {
         let mut recalculated = Vec::new();
         crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
-            &state,
-            &user_files_state,
-            &pane_control_state,
-            &ribbon_filter_state,
+            state,
+            recalc.user_files,
+            recalc.pane,
+            recalc.ribbon,
             &seeds,
             &mut recalculated,
         );
     } else {
         crate::commands::data::recalc_after_off_sheet_write(
-            &state,
-            &user_files_state,
-            &pivot_state,
-            &pane_control_state,
-            &ribbon_filter_state,
+            state,
+            recalc.user_files,
+            pivot_state,
+            recalc.pane,
+            recalc.ribbon,
             &[dest_sheet_idx],
         );
     }
@@ -691,6 +806,7 @@ pub fn revert_pivot_operation(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     pivot_id: PivotId,
 ) -> Result<(), String> {
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
@@ -719,7 +835,7 @@ pub fn revert_pivot_operation(
         }
 
         // Re-write grid with the old view
-        finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+        finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
         Ok(())
     } else {
@@ -788,7 +904,7 @@ pub fn undo_pivot_overwrite(
                                 store_view(&pivot_state, pivot_id, &view);
                                 drop(pivot_tables);
 
-                                finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+                                finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
                                 // Restore cells that were overwritten by the pivot expansion
                                 if !snapshot.overwritten_cells.is_empty() {
@@ -867,6 +983,7 @@ pub async fn update_pivot_fields(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     bi_state: State<'_, crate::bi::types::BiState>,
     request: UpdatePivotFieldsRequest,
 ) -> Result<PivotViewResponse, String> {
@@ -927,6 +1044,7 @@ pub async fn update_pivot_fields(
                 pivot_state,
                 pane_control_state,
                 ribbon_filter_state,
+                user_files_state,
                 bi_state,
                 pivot_id,
             )
@@ -1075,6 +1193,7 @@ pub async fn update_pivot_fields(
     let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
     let auto_fit = definition.layout.auto_fit_column_widths;
     let destination = definition.destination;
+    let framed = definition.canvas_frame.is_some();
 
     // 5. Put updated definition + cache back
     {
@@ -1109,11 +1228,15 @@ pub async fn update_pivot_fields(
     let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     response.overwritten_cell_count = saved_cells.len() as u32;
 
+    // The block the write is about to clear, for the recalculation seeds.
+    let old_region = get_pivot_region(&state, pivot_id);
+
     // Update pivot in grid (clears old region, writes new view)
     let t2 = Instant::now();
-    if let Err(refusal) = update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view) {
-        // Nothing was written (a canvas destination): put the definition back
-        // exactly as a cancel does, and skip the region, fit and undo record.
+    if let Err(refusal) = update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view, framed) {
+        // Nothing was written (a destination of the wrong kind, or a canvas
+        // pivot wider than its block): put the definition back exactly as a
+        // cancel does, and skip the region, fit and undo record.
         {
             let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
             if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
@@ -1139,8 +1262,16 @@ pub async fn update_pivot_fields(
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
     let region_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
-    // Recalculate formulas referencing pivot cells
-    recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
+    // Recalculate formulas referencing pivot cells -- on every sheet
+    recalc_after_pivot_write(
+        &state,
+        &pivot_state,
+        Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }),
+        dest_sheet_idx,
+        old_region.as_ref(),
+        destination,
+        &view,
+    );
 
     // Clean up cancellation token (keep previous_states for potential revert command)
     pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
@@ -1183,6 +1314,7 @@ pub fn toggle_pivot_group(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: ToggleGroupRequest,
 ) -> Result<PivotViewResponse, String> {
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
@@ -1334,7 +1466,7 @@ pub fn toggle_pivot_group(
 
                 let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 response.overwritten_cell_count = saved_cells.len() as u32;
-                finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+                finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
                 record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, Vec::new(), None, "Pivot expand/collapse");
 
                 let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
@@ -1369,7 +1501,7 @@ pub fn toggle_pivot_group(
             // when pivot shrinks after collapse)
             let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, view);
             response.overwritten_cell_count = saved_cells.len() as u32;
-            finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+            finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
             record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, Vec::new(), None, "Pivot expand/collapse");
 
             let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
@@ -1404,7 +1536,7 @@ pub fn toggle_pivot_group(
     // Clear old cells and write updated view to grid, then update region bounds
     let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     response.overwritten_cell_count = saved_cells.len() as u32;
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
     record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo, saved_cells, dest_sheet_idx, Vec::new(), None, "Pivot expand/collapse");
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
@@ -1686,10 +1818,17 @@ pub fn relocate_pivot(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     pivot_id: PivotId,
     new_row: u32,
     new_col: u32,
 ) -> Result<(), String> {
+    // A CANVAS pivot's anchor belongs to the block allocator, not the user:
+    // moving it would walk it out of its block and over a neighbour's. The
+    // user moves its BOX instead (`update_pivot_properties` with a frame).
+    // Refused before the token, so the document stays clean.
+    ensure_pivot_not_framed(&pivot_state, pivot_id, "move the cells of")?;
+
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
     // token, so a refused command leaves the document clean.
     let effect = pivot_mutation_token(&state, &pivot_state, &file_state, pivot_id)?;
@@ -1728,9 +1867,16 @@ pub fn relocate_pivot(
     // 4. Clear old region and write new cells at new destination. A refusal (a
     //    canvas destination) wrote nothing: the move is put back and nothing
     //    after this -- region, view, undo record -- happens.
-    if let Err(refusal) =
-        update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, (new_row, new_col), &view)
-    {
+    let old_region = get_pivot_region(&state, pivot_id);
+    if let Err(refusal) = update_pivot_in_grid(
+        &state,
+        &effect,
+        pivot_id,
+        dest_sheet_idx,
+        (new_row, new_col),
+        &view,
+        old_definition.canvas_frame.is_some(),
+    ) {
         let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
         if let Some((definition, _)) = pivot_tables.get_mut(&pivot_id) {
             *definition = old_definition;
@@ -1741,8 +1887,17 @@ pub fn relocate_pivot(
     // 5. Update protected region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, (new_row, new_col), &view);
 
-    // 5b. Recalculate formulas referencing pivot cells
-    recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
+    // 5b. Recalculate formulas referencing pivot cells -- the block it left
+    //     and the block it landed on, on every sheet that reads them.
+    recalc_after_pivot_write(
+        &state,
+        &pivot_state,
+        Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }),
+        dest_sheet_idx,
+        old_region.as_ref(),
+        (new_row, new_col),
+        &view,
+    );
 
     // 6. Store the updated view
     store_view(&pivot_state, pivot_id, &view);
@@ -1874,6 +2029,7 @@ pub async fn refresh_pivot_cache(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     bi_state: State<'_, crate::bi::types::BiState>,
     pivot_id: PivotId,
 ) -> Result<PivotViewResponse, String> {
@@ -2057,7 +2213,7 @@ pub async fn refresh_pivot_cache(
         }
 
         // Delegate to update_bi_pivot_fields which handles the full BI query flow
-        return update_bi_pivot_fields(state, file_state, pivot_state, pane_control_state, ribbon_filter_state, bi_state, bi_request).await;
+        return update_bi_pivot_fields(state, file_state, pivot_state, pane_control_state, ribbon_filter_state, user_files_state, bi_state, bi_request).await;
     }
 
     // Snapshot sheet names BEFORE the pivot_tables lock — `delete_sheet` takes
@@ -2188,6 +2344,7 @@ pub async fn refresh_pivot_cache(
     let t1 = Instant::now();
     let mut response = view_to_response(&view, &definition, &mut cache);
     let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
+    let framed = definition.canvas_frame.is_some();
 
     // 5. Put updated definition + cache back
     {
@@ -2221,9 +2378,13 @@ pub async fn refresh_pivot_cache(
     // Count overwritten cells before writing pivot to grid
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
 
-    // Update pivot in grid. A refusal (a canvas destination) wrote nothing: put
-    // the definition back exactly as a cancel does and skip the region.
-    if let Err(refusal) = update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view) {
+    // The block the write is about to clear, for the recalculation seeds.
+    let old_region = get_pivot_region(&state, pivot_id);
+
+    // Update pivot in grid. A refusal (a destination of the wrong kind, or a
+    // canvas pivot wider than its block) wrote nothing: put the definition back
+    // exactly as a cancel does and skip the region.
+    if let Err(refusal) = update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view, framed) {
         {
             let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
             if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
@@ -2238,8 +2399,16 @@ pub async fn refresh_pivot_cache(
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
 
-    // Recalculate formulas referencing pivot cells
-    recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
+    // Recalculate formulas referencing pivot cells -- on every sheet
+    recalc_after_pivot_write(
+        &state,
+        &pivot_state,
+        Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }),
+        dest_sheet_idx,
+        old_region.as_ref(),
+        destination,
+        &view,
+    );
 
     // Clean up cancellation token
     pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
@@ -2539,13 +2708,14 @@ pub fn get_pivot_regions_for_sheet(
         .filter(|r| r.region_type == "pivot" && r.sheet_index == active_sheet)
         .map(|r| {
             let pid = r.owner_id;
-            let (is_empty, name) = pivot_tables
+            let (is_empty, name, canvas_frame) = pivot_tables
                 .get(&pid)
                 .map(|(def, _)| (
                     !has_fields_configured(def),
                     def.name.clone().unwrap_or_else(|| format!("PivotTable{}", pid)),
+                    def.canvas_frame.map(CanvasFrameConfig::from),
                 ))
-                .unwrap_or_else(|| (true, format!("PivotTable{}", pid)));
+                .unwrap_or_else(|| (true, format!("PivotTable{}", pid), None));
 
             PivotRegionData {
                 pivot_id: pid,
@@ -2555,6 +2725,8 @@ pub fn get_pivot_regions_for_sheet(
                 end_row: r.end_row,
                 end_col: r.end_col,
                 is_empty,
+                // The frontend region sync reads the canvas pivot's box here.
+                canvas_frame,
             }
         })
         .collect()
@@ -2669,16 +2841,63 @@ pub fn get_pivot_table_info(
 }
 
 /// Updates pivot table properties.
+///
+/// Also where a CANVAS pivot's box is moved or resized (`canvas_frame`): the
+/// frame is definition-only -- the pivot's cells stay in their block, only the
+/// window onto them moves -- so it rides this definition-only command rather
+/// than a new one. Refused, before the effect, for a pivot with no frame (a
+/// pivot never converts between grid and canvas) and for an invalid frame. A
+/// frame change records ONE undo step ("Move pivot"), so Ctrl+Z puts the box
+/// back.
 #[tauri::command]
 pub fn update_pivot_properties(
-    _state: State<AppState>,
+    state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     request: UpdatePivotPropertiesRequest,
 ) -> Result<PivotTableInfo, String> {
+    update_pivot_properties_core(&state, &file_state, &pivot_state, request)
+}
+
+/// [`update_pivot_properties`] over plain references, for the unit tier.
+pub(crate) fn update_pivot_properties_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    pivot_state: &PivotState,
+    request: UpdatePivotPropertiesRequest,
+) -> Result<PivotTableInfo, String> {
     log_info!("PIVOT", "update_pivot_properties pivot_id={}", request.pivot_id);
 
-    let (_effect, mut pivot_tables) = pivot_write_definition_only(&pivot_state, &file_state, request.pivot_id)?;
+    // A FRAME EDIT is decided before the effect: the pivot must already be a
+    // canvas pivot, and the new frame must be valid. `pivot_tables` is taken
+    // alone and released. Carries the definition as it was, for the undo step.
+    let frame_edit: Option<(pivot_engine::CanvasFrame, PivotDefinition)> = match request.canvas_frame {
+        None => None,
+        Some(config) => {
+            let before = {
+                let tables = pivot_state
+                    .pivot_tables
+                    .read()
+                    .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+                match tables.get(&request.pivot_id) {
+                    Some((def, _)) => def.clone(),
+                    None => return Err(format!("Pivot table {} not found", request.pivot_id)),
+                }
+            };
+            if before.canvas_frame.is_none() {
+                return Err(format!(
+                    "Cannot set a canvas frame on pivot table {}: it is a worksheet pivot, and a \
+                     pivot never converts between a worksheet and a canvas.",
+                    request.pivot_id
+                ));
+            }
+            let frame: pivot_engine::CanvasFrame = config.into();
+            frame.validate()?;
+            Some((frame, before))
+        }
+    };
+
+    let (_effect, mut pivot_tables) = pivot_write_definition_only(pivot_state, file_state, request.pivot_id)?;
     let (definition, _) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -2686,6 +2905,9 @@ pub fn update_pivot_properties(
     // Update properties
     if let Some(name) = request.name {
         definition.name = Some(name);
+    }
+    if let Some((frame, _)) = &frame_edit {
+        definition.canvas_frame = Some(*frame);
     }
     if let Some(v) = request.allow_multiple_filters_per_field {
         definition.allow_multiple_filters_per_field = v;
@@ -2704,7 +2926,7 @@ pub fn update_pivot_properties(
         .unwrap_or_else(|| format_range(definition.source_start, definition.source_end));
     let destination = format_cell(definition.destination);
 
-    Ok(PivotTableInfo {
+    let info = PivotTableInfo {
         id: definition.id,
         name: definition.name.clone().unwrap_or_else(|| format!("PivotTable{}", request.pivot_id)),
         source_range,
@@ -2715,7 +2937,31 @@ pub fn update_pivot_properties(
         use_custom_sort_lists: definition.use_custom_sort_lists,
         has_headers: definition.source_has_headers,
         source_table_name: definition.source_table_name.clone(),
-    })
+    };
+    drop(pivot_tables);
+
+    // The box moved: ONE undo step that puts the definition -- and so the box --
+    // back. The restore (`apply_pivot_definition_restore`) re-renders through
+    // `finalize_pivot_update`, which is framed-aware. Recorded after the store
+    // guard drops (the resolver must not run under it), and only when the frame
+    // actually changed, so a no-op save of the same box adds no Ctrl+Z step.
+    if let Some((frame, before)) = frame_edit {
+        if before.canvas_frame != Some(frame) {
+            let dest_sheet_idx = resolve_dest_sheet_index(state, &before);
+            record_pivot_definition_undo(
+                state,
+                request.pivot_id,
+                before,
+                Vec::new(),
+                dest_sheet_idx,
+                Vec::new(),
+                None,
+                "Move pivot",
+            );
+        }
+    }
+
+    Ok(info)
 }
 
 /// Changes the source data range of an existing pivot table.
@@ -2728,6 +2974,7 @@ pub async fn change_pivot_data_source(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: ChangePivotDataSourceRequest,
 ) -> Result<PivotViewResponse, String> {
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
@@ -2834,7 +3081,7 @@ pub async fn change_pivot_data_source(
     emit_pivot_progress(&window, pivot_id, "Updating grid...", 3, 4);
     let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     let overwritten = saved_cells.len() as u32;
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     // Store updated cache
     {
@@ -3008,6 +3255,7 @@ pub fn update_pivot_layout(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: UpdatePivotLayoutRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!("PIVOT", "update_pivot_layout pivot_id={}", request.pivot_id);
@@ -3066,7 +3314,7 @@ pub fn update_pivot_layout(
 
     // Update pivot in grid
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -3233,6 +3481,7 @@ pub fn add_pivot_hierarchy(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: AddHierarchyRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3316,7 +3565,7 @@ pub fn add_pivot_hierarchy(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -3329,6 +3578,7 @@ pub fn remove_pivot_hierarchy(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: RemoveHierarchyRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3391,7 +3641,7 @@ pub fn remove_pivot_hierarchy(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -3404,6 +3654,7 @@ pub fn move_pivot_field(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: MoveFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3524,7 +3775,7 @@ pub fn move_pivot_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -3537,6 +3788,7 @@ pub fn set_pivot_aggregation(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: SetAggregationRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3576,7 +3828,7 @@ pub fn set_pivot_aggregation(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -3589,6 +3841,7 @@ pub fn set_pivot_number_format(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: SetNumberFormatRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3627,7 +3880,7 @@ pub fn set_pivot_number_format(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -3641,6 +3894,7 @@ pub async fn apply_pivot_filter(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     bi_state: State<'_, crate::bi::types::BiState>,
     request: ApplyPivotFilterRequest,
 ) -> Result<PivotViewResponse, String> {
@@ -3924,7 +4178,7 @@ pub async fn apply_pivot_filter(
             drop(pivot_tables);
 
             response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-            finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+            finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
             Some(response)
         }
@@ -3940,6 +4194,7 @@ pub async fn apply_pivot_filter(
         pivot_state,
         pane_control_state,
         ribbon_filter_state,
+        user_files_state,
         bi_state,
         request.pivot_id,
     )
@@ -3955,6 +4210,7 @@ pub async fn clear_pivot_filter(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     bi_state: State<'_, crate::bi::types::BiState>,
     request: ClearPivotFilterRequest,
 ) -> Result<PivotViewResponse, String> {
@@ -4034,7 +4290,7 @@ pub async fn clear_pivot_filter(
             drop(pivot_tables);
 
             response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-            finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+            finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
             Some(response)
         }
@@ -4050,6 +4306,7 @@ pub async fn clear_pivot_filter(
         pivot_state,
         pane_control_state,
         ribbon_filter_state,
+        user_files_state,
         bi_state,
         request.pivot_id,
     )
@@ -4064,6 +4321,7 @@ pub fn sort_pivot_field(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: SortPivotFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -4109,7 +4367,7 @@ pub fn sort_pivot_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -4203,6 +4461,7 @@ pub fn set_pivot_item_visibility(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: SetItemVisibilityRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -4261,7 +4520,7 @@ pub fn set_pivot_item_visibility(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -4382,6 +4641,7 @@ pub fn set_pivot_item_expanded(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: SetItemExpandedRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -4434,7 +4694,7 @@ pub fn set_pivot_item_expanded(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -4447,6 +4707,7 @@ pub fn expand_collapse_level(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: ExpandCollapseLevelRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -4496,7 +4757,7 @@ pub fn expand_collapse_level(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -4509,6 +4770,7 @@ pub fn expand_collapse_all(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: ExpandCollapseAllRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -4541,7 +4803,7 @@ pub fn expand_collapse_all(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -4555,6 +4817,7 @@ pub async fn refresh_all_pivot_tables(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     bi_state: State<'_, crate::bi::types::BiState>,
 ) -> Result<Vec<PivotViewResponse>, String> {
     log_info!("PIVOT", "refresh_all_pivot_tables");
@@ -4566,7 +4829,7 @@ pub async fn refresh_all_pivot_tables(
 
     let mut responses = Vec::new();
     for pivot_id in pivot_ids {
-        match refresh_pivot_cache(window.clone(), state.clone(), file_state.clone(), pivot_state.clone(), pane_control_state.clone(), ribbon_filter_state.clone(), bi_state.clone(), pivot_id).await {
+        match refresh_pivot_cache(window.clone(), state.clone(), file_state.clone(), pivot_state.clone(), pane_control_state.clone(), ribbon_filter_state.clone(), user_files_state.clone(), bi_state.clone(), pivot_id).await {
             Ok(response) => responses.push(response),
             Err(e) => log_debug!("PIVOT", "Failed to refresh pivot {}: {}", pivot_id, e),
         }
@@ -4690,6 +4953,7 @@ pub fn group_pivot_field(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: GroupFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -4733,7 +4997,7 @@ pub fn group_pivot_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -4746,6 +5010,7 @@ pub fn create_manual_group(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: CreateManualGroupRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -4808,7 +5073,7 @@ pub fn create_manual_group(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -4821,6 +5086,7 @@ pub fn ungroup_pivot_field(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: UngroupFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -4863,7 +5129,7 @@ pub fn ungroup_pivot_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -5978,19 +6244,35 @@ pub async fn create_pivot_from_bi_model(
     // registered and where the cells are written. The active sheet is copied
     // out first so no `active_sheet` guard is alive while the gate takes
     // `sheet_kinds`.
-    let destination = parse_cell_ref(&request.destination_cell)?;
     let active_sheet_now = *state.active_sheet.read().unwrap();
     let dest_sheet_idx = request.destination_sheet.unwrap_or(active_sheet_now);
+    let dest_is_canvas = {
+        let kinds = state.sheet_kinds.read().unwrap();
+        crate::sheets::is_canvas_sheet(&kinds, dest_sheet_idx)
+    };
 
-    // A GRID pivot writes its output as visible cells; on a canvas sheet those
-    // cells would be invisible (the windowed canvas pivot is its own path).
-    crate::sheets::ensure_not_canvas_in_state(&state, dest_sheet_idx, "create a grid pivot table")?;
+    // A CANVAS destination needs a frame and gets its anchor from the canvas
+    // block allocator (`destination_cell` is ignored). A WORKSHEET destination
+    // refuses a frame -- and a GRID pivot writes its output as visible cells,
+    // which on a canvas would be invisible (the literal gate the census pins).
+    let (destination, canvas_frame) = if dest_is_canvas {
+        let frame = canvas_create_frame(request.canvas_frame, dest_sheet_idx)?;
+        (allocate_canvas_pivot_anchor(&state, dest_sheet_idx)?, Some(frame))
+    } else {
+        crate::sheets::ensure_not_canvas_in_state(&state, dest_sheet_idx, "create a grid pivot table")?;
+        if request.canvas_frame.is_some() {
+            return Err(frame_on_worksheet_refusal(dest_sheet_idx));
+        }
+        (parse_cell_ref(&request.destination_cell)?, None)
+    };
 
     // Check that destination doesn't overlap an existing pivot table
     check_pivot_overlap(&state, dest_sheet_idx, destination)?;
 
     // Creating a pivot: every refusal is behind us -- the connection, the
-    // destination's kind and the overlap -- so the command commits here.
+    // destination's kind, the frame and the overlap -- so the command commits
+    // here. (The placeholder view is EMPTY, so a canvas pivot's block width
+    // cannot be exceeded at this point; later writes check it.)
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     // Generate pivot ID
@@ -5999,6 +6281,7 @@ pub async fn create_pivot_from_bi_model(
     // Create empty definition (no fields yet)
     let mut definition = PivotDefinition::new(pivot_id, (0, 0), (0, 0));
     definition.destination = destination;
+    definition.canvas_frame = canvas_frame;
     definition.name = request.name.or_else(|| Some(format!("PivotTable{}", pivot_id)));
     {
         let sheet_names = state.sheet_names.read().unwrap();
@@ -6043,19 +6326,21 @@ pub async fn create_pivot_from_bi_model(
                 write_pivot_to_grid(dest_grid, None, &view, destination, &mut styles)
             };
 
-            // Update merge regions
+            // Update merge regions -- the DESTINATION sheet's set, not the
+            // active sheet's mirror (see `update_pivot_in_grid`).
             if !pivot_merges.is_empty() {
-                let mut merged = state.merged_regions.write(&effect).unwrap();
-                // Clear merges in pivot region first
-                let (dr, dc) = destination;
-                let er = dr + view.row_count.max(1) as u32 - 1;
-                let ec = dc + view.col_count.max(1) as u32 - 1;
-                merged.retain(|m| {
-                    !(m.start_row >= dr && m.end_row <= er && m.start_col >= dc && m.end_col <= ec)
+                crate::report::with_sheet_merges_mut(&state, &effect, dest_sheet_idx, |merged| {
+                    // Clear merges in pivot region first
+                    let (dr, dc) = destination;
+                    let er = dr + view.row_count.max(1) as u32 - 1;
+                    let ec = dc + view.col_count.max(1) as u32 - 1;
+                    merged.retain(|m| {
+                        !(m.start_row >= dr && m.end_row <= er && m.start_col >= dc && m.end_col <= ec)
+                    });
+                    for mr in pivot_merges {
+                        merged.insert(mr);
+                    }
                 });
-                for mr in pivot_merges {
-                    merged.insert(mr);
-                }
             }
         }
     }
@@ -6160,6 +6445,7 @@ pub async fn update_bi_pivot_fields(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     bi_state: State<'_, BiState>,
     request: UpdateBiPivotFieldsRequest,
 ) -> Result<PivotViewResponse, String> {
@@ -6275,12 +6561,14 @@ pub async fn update_bi_pivot_fields(
                 let mut response = view_to_response(&view, definition, stored_cache);
                 let destination = definition.destination;
                 let auto_fit = definition.layout.auto_fit_column_widths;
+                let framed = definition.canvas_frame.is_some();
                 let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
                 drop(pivot_tables);
 
                 let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 response.overwritten_cell_count = saved_cells.len() as u32;
-                update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view)?;
+                let old_region = get_pivot_region(&state, pivot_id);
+                update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view, framed)?;
                 // The widths this fit overwrites now ride in the SAME undo step
                 // as the change that caused them, exactly as the non-BI path
                 // does. They used to be discarded because this command recorded
@@ -6291,7 +6579,15 @@ pub async fn update_bi_pivot_fields(
                     Vec::new()
                 };
                 update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
-                recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
+                recalc_after_pivot_write(
+                    &state,
+                    &pivot_state,
+                    Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }),
+                    dest_sheet_idx,
+                    old_region.as_ref(),
+                    destination,
+                    &view,
+                );
 
                 // A cosmetic change renders the SAME records, so no cache
                 // snapshot is needed (and one would be a large clone per rename).
@@ -6364,7 +6660,7 @@ pub async fn update_bi_pivot_fields(
         drop(pt);
 
         response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-        finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+        finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
         // The cache was REPLACED with an empty one, so the old records travel
         // with the old definition or the undo renders an empty pivot.
         record_pivot_definition_undo(
@@ -6443,7 +6739,7 @@ pub async fn update_bi_pivot_fields(
             "No data: this model has no measure to list members with. The field assignments \
              were kept.",
         ));
-        finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+        finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
         // Same as the branch above: an empty cache replaced the records.
         record_pivot_definition_undo(
             &state,
@@ -7029,7 +7325,7 @@ pub async fn update_bi_pivot_fields(
                          assignments were kept.",
                     )
                 });
-                finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+                finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
                 // The query failed but the FIELDS were still written, so this is
                 // a real document change and gets a real undo step — with the
                 // cache, which was replaced by an empty one.
@@ -7632,6 +7928,7 @@ pub async fn update_bi_pivot_fields(
     let resp_ms = t_resp.elapsed().as_secs_f64() * 1000.0;
     let destination = definition.destination;
     let auto_fit = definition.layout.auto_fit_column_widths;
+    let framed = definition.canvas_frame.is_some();
     let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
     drop(pivot_tables);
 
@@ -7639,7 +7936,8 @@ pub async fn update_bi_pivot_fields(
     let t_grid = Instant::now();
     let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     response.overwritten_cell_count = saved_cells.len() as u32;
-    update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view)?;
+    let old_region = get_pivot_region(&state, pivot_id);
+    update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view, framed)?;
     // Carried into the undo step below, like the non-BI path: Excel undoes a
     // pivot change and the column resize it caused as ONE press.
     let prev_col_widths = if auto_fit {
@@ -7648,7 +7946,15 @@ pub async fn update_bi_pivot_fields(
         Vec::new()
     };
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
-    recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
+    recalc_after_pivot_write(
+        &state,
+        &pivot_state,
+        Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }),
+        dest_sheet_idx,
+        old_region.as_ref(),
+        destination,
+        &view,
+    );
     let grid_ms = t_grid.elapsed().as_secs_f64() * 1000.0;
 
     // Store last query + lookup column set in bi_metadata
@@ -7895,6 +8201,7 @@ pub fn add_calculated_field(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: CalculatedFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -7933,7 +8240,7 @@ pub fn add_calculated_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -7946,6 +8253,7 @@ pub fn update_calculated_field(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: UpdateCalculatedFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -7992,7 +8300,7 @@ pub fn update_calculated_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -8005,6 +8313,7 @@ pub fn remove_calculated_field(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: RemoveCalculatedFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -8041,7 +8350,7 @@ pub fn remove_calculated_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -8058,6 +8367,7 @@ pub fn add_calculated_item(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: CalculatedItemRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -8096,7 +8406,7 @@ pub fn add_calculated_item(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }
@@ -8109,6 +8419,7 @@ pub fn remove_calculated_item(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: RemoveCalculatedItemRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -8145,7 +8456,7 @@ pub fn remove_calculated_item(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)))?;
+    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
 }

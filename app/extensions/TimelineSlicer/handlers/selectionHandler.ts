@@ -8,6 +8,7 @@ import {
 import { registerPanel, unregisterPanel } from "@api/ui";
 import { getTimelineById } from "../lib/timelineSlicerStore";
 import { requestOverlayRedraw } from "@api/gridOverlays";
+import { notifyObjectSelectionChanged } from "@api/objectSelection";
 import {
   TIMELINE_OPTIONS_TAB_ID,
   TimelineOptionsPanelDefinition,
@@ -59,6 +60,9 @@ export function selectTimeline(timelineId: string, additive = false): void {
   }
 
   requestOverlayRedraw();
+  // The canvas-wide selection set (@api/objectSelection) follows every
+  // family's own selection; these functions are the timeline's chokepoints.
+  notifyObjectSelectionChanged();
 }
 
 /**
@@ -92,6 +96,7 @@ export function deselectTimeline(): void {
 
     window.dispatchEvent(new Event("timelineSlicer:deselected"));
     requestOverlayRedraw();
+    notifyObjectSelectionChanged();
   }
 }
 
@@ -115,6 +120,7 @@ export function dropTimelineFromSelection(timelineId: string): void {
   }
   broadcastSelectedTimelines();
   requestOverlayRedraw();
+  notifyObjectSelectionChanged();
 }
 
 export function getSelectedTimelineId(): string | null {

@@ -1205,6 +1205,7 @@ mod tests {
                 sheet_id,
                 name: "Dashboard".to_string(),
                 description: String::new(),
+                kind: String::new(),
                 extra: std::collections::HashMap::new(),
             }],
             named_ranges: Vec::new(),

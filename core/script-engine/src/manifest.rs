@@ -250,6 +250,7 @@ pub const OP_MANIFEST: &[OpEntry] = &[
     op("Sheet.activate", ReachClass::View),
     op("Sheet.cell", ReachClass::Grid),
     op("Sheet.index", ReachClass::Workbook),
+    op("Sheet.kind", ReachClass::Workbook),
     op("Sheet.name", ReachClass::Workbook),
     op("Sheet.range", ReachClass::Grid),
     // -- Range (Sheet.range("A1:B2")) ----------------------------------------

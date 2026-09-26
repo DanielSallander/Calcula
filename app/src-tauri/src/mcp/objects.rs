@@ -1051,6 +1051,7 @@ pub fn update_pivot(
                 enable_data_value_editing: None,
                 refresh_on_open: None,
                 use_custom_sort_lists: None,
+                canvas_frame: None,
             },
         )?;
         applied.push(format!("renamed to \"{}\"", n));
@@ -1063,6 +1064,7 @@ pub fn update_pivot(
             handle.state::<crate::pivot::PivotState>(),
             handle.state::<crate::pane_control::PaneControlState>(),
             handle.state::<crate::ribbon_filter::RibbonFilterState>(),
+            handle.state::<crate::persistence::UserFilesState>(),
             crate::pivot::types::MoveFieldRequest {
                 pivot_id: id,
                 field_index: index,
@@ -1080,6 +1082,7 @@ pub fn update_pivot(
             handle.state::<crate::pivot::PivotState>(),
             handle.state::<crate::pane_control::PaneControlState>(),
             handle.state::<crate::ribbon_filter::RibbonFilterState>(),
+            handle.state::<crate::persistence::UserFilesState>(),
             crate::pivot::types::SetAggregationRequest {
                 pivot_id: id,
                 value_field_index: index,
@@ -1096,6 +1099,7 @@ pub fn update_pivot(
             handle.state::<crate::pivot::PivotState>(),
             handle.state::<crate::pane_control::PaneControlState>(),
             handle.state::<crate::ribbon_filter::RibbonFilterState>(),
+            handle.state::<crate::persistence::UserFilesState>(),
             id,
             row,
             col,

@@ -278,6 +278,9 @@ pub struct VersionInfo {
 pub struct SheetInfo {
     pub name: String,
     pub description: String,
+    /// The sheet's kind from the signed version manifest: "canvas" for a
+    /// canvas (a report page of objects), EMPTY for an ordinary worksheet.
+    pub kind: String,
 }
 
 /// Resolve the per-user Calcula profile directory (%LOCALAPPDATA%\Calcula).
@@ -299,15 +302,18 @@ pub(crate) fn calcula_profile_dir() -> std::path::PathBuf {
 
 /// Everything calp_publish hands to core publish, assembled once so the real
 /// publish and the dry-run preview (calp_publish_preview) can never drift.
-struct PublishAssembly {
-    workbook: persistence::Workbook,
-    writeback_regions: Option<Vec<calp::WritebackRegionDeclaration>>,
-    object_scripts: Option<Vec<persistence::SavedObjectScript>>,
-    data_sources: Vec<calp::publish::PublishDataSource>,
+///
+/// `pub(crate)` so the transparency report can be computed in a test from a
+/// hand-built carrier; only `assemble_publish_workbook` builds one for real.
+pub(crate) struct PublishAssembly {
+    pub(crate) workbook: persistence::Workbook,
+    pub(crate) writeback_regions: Option<Vec<calp::WritebackRegionDeclaration>>,
+    pub(crate) object_scripts: Option<Vec<persistence::SavedObjectScript>>,
+    pub(crate) data_sources: Vec<calp::publish::PublishDataSource>,
     /// Writeback COLUMN declarations derived from the captured models
     /// (engine v21) — governance for model-keyed submissions.
-    model_writebacks: Vec<calp::writeback::ModelWritebackDeclaration>,
-    excluded_regions: Vec<calp::publish::ExcludedRegion>,
+    pub(crate) model_writebacks: Vec<calp::writeback::ModelWritebackDeclaration>,
+    pub(crate) excluded_regions: Vec<calp::publish::ExcludedRegion>,
 }
 
 /// Build the publish carrier. ONE collector — the same enriched builder as the
@@ -355,7 +361,10 @@ fn assemble_publish_workbook(
     // must not borrow its names.
     registry_path: &str,
     package_name: &str,
-) -> Result<PublishAssembly, String> {
+    // The carrier, and the pivots it had to leave behind (see
+    // `prune_unpublished_pivots`). A separate value rather than a field of
+    // `PublishAssembly`, which tests build by hand.
+) -> Result<(PublishAssembly, Vec<calp::publish::UnpublishedPivot>), String> {
     // Timelines CARRY into the application. Their EFFECT already travels as the
     // pivot's hidden_items/slicer_filters, so excluding the control while
     // carrying its filter would hand a subscriber a pivot pinned to the
@@ -582,92 +591,27 @@ fn assemble_publish_workbook(
     // source or destination sheet isn't included, and remap grid-source
     // sheet indices from workbook positions to application positions (pull
     // appends application sheets in order, offset by the pre-pull sheet count).
+    // The pivots dropped come back out with the sheet that kept each home, so
+    // the warnings can say so rather than guess (`object_source_warnings_with`).
+    let unpublished_pivots =
+        prune_unpublished_pivots(&mut workbook, sheet_indices, &renamed_for_publish);
+
+    // A CHART'S SOURCES LEAVE NAMING THEIR SHEET BY ID. A DataRangeRef written
+    // by a script, the MCP layer, or a build before sheet ids were stamped
+    // carries only the PUBLISHER's `sheetIndex`, and on the subscriber that
+    // index names whatever sheet sits there -- the chart silently reads the
+    // wrong data. Stamped HERE, the one door publish, the dry-run preview and
+    // the working-copy diff all go through, so the three agree byte for byte
+    // with what core publish writes (which stamps too, for its direct callers).
     {
-        let index_map: std::collections::HashMap<usize, usize> = sheet_indices
-            .iter()
-            .enumerate()
-            .map(|(package_idx, &wb_idx)| (wb_idx, package_idx))
-            .collect();
-        // LOWERCASED, because every other sheet-name comparison in the product
-        // is `eq_ignore_ascii_case` — the lexer uppercases bare identifiers, so
-        // `Data` and `data` are one name to a formula. This set was matched
-        // case-SENSITIVELY, which silently DROPPED a pivot whose
-        // `destination_sheet` was recorded as `data` from an application whose
-        // tab is spelled `Data`. Found while closing the rename leak; the two
-        // are the same class of defect, a name compared one way here and
-        // another way everywhere else.
-        let published_names: std::collections::HashSet<String> = sheet_indices
-            .iter()
-            .filter_map(|&i| workbook.sheets.get(i).map(|s| s.name.to_ascii_lowercase()))
-            .collect();
-
-        workbook.pivot_definitions.retain_mut(|def| {
-            // A PIVOT FOLLOWS ITS SHEET — BOTH ANCHORS. If the sheet was
-            // restored to the name the application publishes it under, the
-            // pivot's stored names have to be rewritten to match, or the
-            // published pivot names a sheet the package does not contain.
-            //
-            // `source_sheet` matters as much as `destination_sheet` and was
-            // missed the first time. The subscriber's `refresh_pivot_cache`
-            // resolves the SOURCE anchor by name and falls back to
-            // `.unwrap_or(0)`, so a stale source rebuilds the pivot's entire
-            // cache from sheet 0 of THEIR workbook at the publisher's
-            // coordinates, and drill-through then lists rows from an unrelated
-            // sheet. The pull side already remaps both
-            // (`restore_pulled_pivots`); the push side remapped one.
-            //
-            // Looked up LOWERCASED: `renamed_for_publish` is keyed that way
-            // because a stored anchor's spelling can drift from its tab, and a
-            // case-sensitive miss here means the anchor is left stale and the
-            // `dest_ok` test three lines down then drops the pivot silently.
-            for anchor in ["destination_sheet", "source_sheet"] {
-                let Some(local) = def
-                    .definition
-                    .get(anchor)
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_ascii_lowercase())
-                else {
-                    continue;
-                };
-                if let Some(published) = renamed_for_publish.get(&local) {
-                    if let Some(obj) = def.definition.as_object_mut() {
-                        obj.insert(
-                            anchor.to_string(),
-                            serde_json::Value::String(published.clone()),
-                        );
-                    }
-                }
+        let workbook_sheet_ids: Vec<SheetId> = workbook.sheets.iter().map(|s| s.id).collect();
+        for chart in workbook.charts.iter_mut() {
+            if let Some(stamped) =
+                calp::chart_refs::stamp_chart_spec_sheet_ids(&chart.spec_json, &workbook_sheet_ids)
+            {
+                chart.spec_json = stamped;
             }
-            let dest_ok = def
-                .definition
-                .get("destination_sheet")
-                .and_then(|v| v.as_str())
-                .map_or(true, |name| published_names.contains(&name.to_ascii_lowercase()));
-            if !dest_ok {
-                return false;
-            }
-            match def.source_sheet_index {
-                Some(wb_idx) => match index_map.get(&wb_idx) {
-                    Some(&package_idx) => {
-                        def.source_sheet_index = Some(package_idx);
-                        true
-                    }
-                    None => false, // grid source sheet not published
-                },
-                None => true, // BI pivot — no grid source sheet
-            }
-        });
-
-        let kept: std::collections::HashSet<String> = workbook
-            .pivot_definitions
-            .iter()
-            .map(|d| d.id.to_string())
-            .collect();
-        workbook.bi_pivot_metadata.retain(|m| {
-            m.get("pivotId")
-                .and_then(|v| v.as_str())
-                .map_or(false, |id| kept.contains(id))
-        });
+        }
     }
 
     // Include any author-designated writeback regions in the publish
@@ -677,10 +621,18 @@ fn assemble_publish_workbook(
     };
 
     // Include object scripts in the publish
-    let object_scripts = {
+    let mut object_scripts = {
         let scripts = state.object_scripts.read().map_err(|e| e.to_string())?;
         if scripts.is_empty() { None } else { Some(scripts.clone()) }
     };
+
+    // A CONTROL'S SCRIPT BINDING NAMES THE APPLICATION'S SHEET, NOT THE AUTHOR'S
+    // TAB -- see `canonicalize_control_bindings`. Both copies: the request's
+    // list, and the carrier's own, which a `None` list falls back to.
+    if let Some(scripts) = object_scripts.as_mut() {
+        canonicalize_control_bindings(scripts, sheet_indices);
+    }
+    canonicalize_control_bindings(&mut workbook.object_scripts, sheet_indices);
 
     // Capture active BI connections as data sources (+ their writeback-column
     // declarations for governed model-keyed submissions).
@@ -718,14 +670,196 @@ fn assemble_publish_workbook(
             .collect::<Vec<_>>()
     };
 
-    Ok(PublishAssembly {
-        workbook,
-        writeback_regions,
-        object_scripts,
-        data_sources,
-        model_writebacks,
-        excluded_regions,
-    })
+    Ok((
+        PublishAssembly {
+            workbook,
+            writeback_regions,
+            object_scripts,
+            data_sources,
+            model_writebacks,
+            excluded_regions,
+        },
+        unpublished_pivots,
+    ))
+}
+
+/// Drop every pivot whose destination or grid source sheet is not in
+/// `sheet_indices`, rewrite both of a kept pivot's name anchors to the names
+/// the application publishes its sheets under, remap its grid-source index to
+/// the sheet's POSITION in the application, and drop the BI metadata of every
+/// pivot that did not survive. Returns the pivots it dropped, each with the
+/// sheet that kept it home.
+///
+/// Pure over the carrier, and the ONE place this happens, so the publish, the
+/// dry-run preview and the working-copy diff prune identically -- and so the
+/// pruning can be tested without nine `State` handles.
+///
+/// WHY IT RETURNS WHAT IT DROPPED. Everything downstream -- core publish's
+/// warnings, the preview's -- sees only the pruned carrier, where a pivot left
+/// behind is indistinguishable from one the workbook never had. The slicer
+/// that filtered it went silent, and the timeline blamed "a pivot table this
+/// workbook no longer has" when the workbook has it and the author simply did
+/// not tick its sheet.
+pub(crate) fn prune_unpublished_pivots(
+    workbook: &mut persistence::Workbook,
+    sheet_indices: &[usize],
+    // LOWERCASED local name -> the name the application publishes the sheet
+    // under (`assemble_publish_workbook`'s collision-rename restoration).
+    renamed_for_publish: &std::collections::HashMap<String, String>,
+) -> Vec<calp::publish::UnpublishedPivot> {
+    let index_map: std::collections::HashMap<usize, usize> = sheet_indices
+        .iter()
+        .enumerate()
+        .map(|(package_idx, &wb_idx)| (wb_idx, package_idx))
+        .collect();
+    // LOWERCASED, because every other sheet-name comparison in the product
+    // is `eq_ignore_ascii_case` — the lexer uppercases bare identifiers, so
+    // `Data` and `data` are one name to a formula. This set was matched
+    // case-SENSITIVELY, which silently DROPPED a pivot whose
+    // `destination_sheet` was recorded as `data` from an application whose
+    // tab is spelled `Data`. Found while closing the rename leak; the two
+    // are the same class of defect, a name compared one way here and
+    // another way everywhere else.
+    let published_names: std::collections::HashSet<String> = sheet_indices
+        .iter()
+        .filter_map(|&i| workbook.sheets.get(i).map(|s| s.name.to_ascii_lowercase()))
+        .collect();
+    // Every tab name, for naming the sheet a pivot was left behind for.
+    let tab_names: Vec<String> = workbook.sheets.iter().map(|s| s.name.clone()).collect();
+    let tab_named = |stored: &str| -> String {
+        tab_names
+            .iter()
+            .find(|n| n.eq_ignore_ascii_case(stored))
+            .cloned()
+            .unwrap_or_else(|| stored.to_string())
+    };
+
+    let mut unpublished: Vec<calp::publish::UnpublishedPivot> = Vec::new();
+    workbook.pivot_definitions.retain_mut(|def| {
+        // A PIVOT FOLLOWS ITS SHEET — BOTH ANCHORS. If the sheet was
+        // restored to the name the application publishes it under, the
+        // pivot's stored names have to be rewritten to match, or the
+        // published pivot names a sheet the package does not contain.
+        //
+        // `source_sheet` matters as much as `destination_sheet` and was
+        // missed the first time. The subscriber's `refresh_pivot_cache`
+        // resolves the SOURCE anchor by name and falls back to
+        // `.unwrap_or(0)`, so a stale source rebuilds the pivot's entire
+        // cache from sheet 0 of THEIR workbook at the publisher's
+        // coordinates, and drill-through then lists rows from an unrelated
+        // sheet. The pull side already remaps both
+        // (`restore_pulled_pivots`); the push side remapped one.
+        //
+        // Looked up LOWERCASED: `renamed_for_publish` is keyed that way
+        // because a stored anchor's spelling can drift from its tab, and a
+        // case-sensitive miss here means the anchor is left stale and the
+        // `dest_ok` test three lines down then drops the pivot silently.
+        for anchor in ["destination_sheet", "source_sheet"] {
+            let Some(local) = def
+                .definition
+                .get(anchor)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_ascii_lowercase())
+            else {
+                continue;
+            };
+            if let Some(published) = renamed_for_publish.get(&local) {
+                if let Some(obj) = def.definition.as_object_mut() {
+                    obj.insert(
+                        anchor.to_string(),
+                        serde_json::Value::String(published.clone()),
+                    );
+                }
+            }
+        }
+        let pivot_name = || {
+            def.definition
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| def.id.to_string())
+        };
+        let destination = def
+            .definition
+            .get("destination_sheet")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if let Some(destination) = destination {
+            if !published_names.contains(&destination.to_ascii_lowercase()) {
+                unpublished.push(calp::publish::UnpublishedPivot {
+                    id: def.id,
+                    name: pivot_name(),
+                    missing_sheet: tab_named(&destination),
+                });
+                return false;
+            }
+        }
+        match def.source_sheet_index {
+            Some(wb_idx) => match index_map.get(&wb_idx) {
+                Some(&package_idx) => {
+                    def.source_sheet_index = Some(package_idx);
+                    true
+                }
+                // grid source sheet not published
+                None => {
+                    unpublished.push(calp::publish::UnpublishedPivot {
+                        id: def.id,
+                        name: pivot_name(),
+                        missing_sheet: tab_names.get(wb_idx).cloned().unwrap_or_default(),
+                    });
+                    false
+                }
+            },
+            None => true, // BI pivot — no grid source sheet
+        }
+    });
+
+    let kept: std::collections::HashSet<String> = workbook
+        .pivot_definitions
+        .iter()
+        .map(|d| d.id.to_string())
+        .collect();
+    workbook.bi_pivot_metadata.retain(|m| {
+        m.get("pivotId")
+            .and_then(|v| v.as_str())
+            .map_or(false, |id| kept.contains(id))
+    });
+    unpublished.sort_by(|a, b| a.id.cmp(&b.id));
+    unpublished
+}
+
+/// Rewrite every object script's CONTROL binding from the author's workbook
+/// index to the sheet's POSITION in the application being published.
+///
+/// An object script finds its button by the derived id
+/// `control-<sheetIndex>-<row>-<col>`, and that index is a position in the
+/// AUTHOR's workbook -- which means nothing on a subscriber, whose pulled
+/// sheets sit wherever they land. Canonicalized to the position in the
+/// application (the convention pivot `source_sheet_index` already uses), the
+/// materializer can map position -> local sheet
+/// (`rebind_pulled_control_script`). A binding to a control on a sheet this
+/// publish does not carry is ORPHANED (`None`, the value a deleted sheet
+/// leaves behind) rather than shipped naming an index that would pick out some
+/// other sheet's control on the other side. Other instance ids are untouched.
+pub(crate) fn canonicalize_control_bindings(
+    scripts: &mut [persistence::SavedObjectScript],
+    sheet_indices: &[usize],
+) {
+    let application_position: std::collections::HashMap<usize, usize> = sheet_indices
+        .iter()
+        .enumerate()
+        .map(|(position, &wb_idx)| (wb_idx, position))
+        .collect();
+    for script in scripts.iter_mut() {
+        let Some(current) = script.instance_id.as_deref() else { continue };
+        if let Some(canonical) = crate::sheets::remap_control_instance_id(current, &|i| {
+            application_position.get(&i).copied()
+        }) {
+            script.instance_id = canonical;
+        }
+    }
 }
 
 /// One line of the publish transparency report.
@@ -747,7 +881,7 @@ pub struct PublishReport {
     pub excluded: Vec<PublishReportItem>,
 }
 
-fn compute_publish_report(
+pub(crate) fn compute_publish_report(
     assembly: &PublishAssembly,
     state: &AppState,
     sheet_indices: &[usize],
@@ -861,6 +995,50 @@ fn compute_publish_report(
     item(&mut included, "slicers",
         wb.slicers.iter().filter(|s| published_sheet_ids.contains(&s.sheet_id)).count(),
         "slicers on published sheets (position, style, selections, report connections)");
+    // Counted by the rule core publish SELECTS them with (on a published sheet
+    // AND filtering a pivot the application carries -- `timeline_slicers.json`
+    // leaves the others out, and `object_source_warnings` says so). The SAME
+    // function, not a copy: a copy is how the version stamp came to disagree
+    // with the writer.
+    item(&mut included, "timelineSlicers",
+        wb.timeline_slicers
+            .iter()
+            .filter(|t| {
+                calp::publish::timeline_slicer_travels(t, wb, |id| published_sheet_ids.contains(id))
+            })
+            .count(),
+        "timeline slicers on published sheets whose pivot table travels too (date range, level, style)");
+    // A floating range travels as its OBJECT row plus its backing cell-store
+    // sheet, which the selection pulls in with its host. Counted by core
+    // publish's own rule: host AND backing sheet both published.
+    item(&mut included, "floatingRanges",
+        wb.floating_ranges
+            .iter()
+            .filter(|fr| {
+                calp::publish::floating_range_travels(fr, |id| published_sheet_ids.contains(id))
+            })
+            .count(),
+        "floating ranges on published sheets (position, size, visible window; their cells travel as a hidden backing sheet)");
+    // Canvas sheets are counted inside `sheets` above; this line says what a
+    // canvas IS on the other side, because it carries no cells of its own.
+    item(&mut included, "canvasSheets",
+        sheet_indices
+            .iter()
+            .filter(|&&i| wb.sheets.get(i).is_some_and(|s| s.kind.is_canvas()))
+            .count(),
+        "report pages: page size, snap grid and stacking order; the charts, slicers, shapes and floating ranges on them travel in their own families");
+    // Sheets the selection ADDED because an object on a published sheet reads
+    // from them. They are counted in `sheets` too; this line says why they are
+    // leaving, since the author did not tick them.
+    if !selection.auto_included.is_empty() {
+        let mut names = selection.auto_included.clone();
+        names.sort();
+        item(&mut included, "objectSourceSheets", names.len(),
+            &format!(
+                "added because a chart, pivot table, slicer or timeline on a published sheet reads from them ({})",
+                names.join(", ")
+            ));
+    }
     item(&mut included, "ribbonFilters", wb.ribbon_filters.len(),
         "ribbon filters (BI-only; re-bound to the application's embedded data sources on pull)");
     item(&mut included, "pivotLayouts", wb.pivot_layouts.len(),
@@ -878,11 +1056,6 @@ fn compute_publish_report(
     let mut excluded: Vec<PublishReportItem> = Vec::new();
     item(&mut excluded, "workbookFiles", wb.user_files.len(),
         "workbook files (bookmarks, stored documents, filter state) are subscriber-local by policy");
-    item(&mut excluded, "floatingRanges",
-        wb.floating_ranges.iter().filter(|fr| published_sheet_ids.contains(&fr.host_sheet_id)).count(),
-        "floating range OBJECTS do not distribute yet; their backing cell-store \
-         sheets DO travel with the host sheet, so formulas referencing them stay \
-         live — the subscriber just sees no floating object");
     if !include_comments {
         item(&mut excluded, "comments", comment_threads,
             "comments stay private unless 'Include comments' is checked");
@@ -1002,8 +1175,11 @@ pub(crate) fn publish_into_for_preview(
     sheet_indices: Vec<usize>,
     include_comments: bool,
 ) -> Result<(), String> {
-    let sheet_indices = resolve_publish_sheet_indices(state, kind, sheet_indices)?.indices;
-    let assembly = assemble_publish_workbook(
+    let filter_links =
+        FilterObjectLinks::snapshot(slicer_state, timeline_slicer_state, pivot_state)?;
+    let sheet_indices =
+        resolve_publish_sheet_indices(state, kind, sheet_indices, &filter_links)?.indices;
+    let (assembly, _unpublished_pivots) = assemble_publish_workbook(
         state,
         bi_state,
         pivot_state,
@@ -1027,13 +1203,24 @@ pub(crate) fn publish_into_for_preview(
         excluded_regions,
     } = assembly;
 
+    // Only the HOST-collected custom objects: the frontend's providers are
+    // merged in by `calp_publish` from its params, which no preview caller
+    // has. That is the one input to the version stamp the preview cannot see;
+    // `reconcile_unknowable_min_app_version` handles it on the diff.
     let custom_objects = collect_cell_type_custom_objects(state, &sheet_indices)?;
 
-    let request = calp::publish::PublishRequest {
+    let mut request = calp::publish::PublishRequest {
         workbook: &workbook,
         package_name: package_name.to_string(),
         version,
-        kind: "report".to_string(),
+        // The caller's kind, as the push would write it. A hard-coded "report"
+        // made every template or library working copy diff as `kind template ->
+        // report`, a change no push would make.
+        kind: if kind.trim().is_empty() {
+            "report".to_string()
+        } else {
+            kind.to_string()
+        },
         // A preview application is created, not pushed: there is no prior version
         // in a fresh in-memory workspace, and no gate to satisfy.
         mode: PushMode::CreateNew,
@@ -1056,10 +1243,85 @@ pub(crate) fn publish_into_for_preview(
         include_comments,
         min_app_version: String::new(),
     };
+    // THE SAME STAMP THE PUSH APPLIES. Without it every canvas, floating-range
+    // or timeline application diffed as `minAppVersion <version> -> (none)`,
+    // so the push preview never said "no differences".
+    stamp_min_app_version(&mut request);
 
     calp::publish::publish(registry, &request, &calcula_profile_dir())
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Declare THIS app's version as the application's minimum when it carries
+/// anything an older app would silently drop -- the one rule `calp_publish` and
+/// the push preview (`publish_into_for_preview`) both apply, so the preview's
+/// manifest cannot disagree with the push's about `minAppVersion`.
+///
+/// Wave A/B artifacts (slicers, ribbon filters, pivot layouts, extension data,
+/// comments/scenarios/outlines, non-default theme, canvases, floating ranges,
+/// timelines -- see `carries_wave_content`) make an older app's pull fail
+/// honestly at the compat gate instead of silently dropping them. Same version
+/// source the gate compares against (set_host_app_version(env!("CARGO_PKG_VERSION"))
+/// at startup). Cell-only applications stay pullable by older apps.
+pub(crate) fn stamp_min_app_version(request: &mut calp::publish::PublishRequest) {
+    if calp::publish::carries_wave_content(request)
+        // Model writeback declarations are inert to pre-feature apps (they
+        // only consult writeback_regions), but the columns' VALUES would be
+        // invisible there (pre-v21 engines refuse the model anyway) — declare
+        // this app's version as the minimum for an honest gate.
+        || request
+            .model_writebacks
+            .as_ref()
+            .is_some_and(|m| !m.is_empty())
+        // Custom objects (e.g. calcula.modelOverlay carrying workbook-layer
+        // measures) are exactly the silent-drop class this gate exists for: an
+        // app without distributable-object providers would pull "successfully"
+        // and never materialize them.
+        || !request.custom_objects.is_empty()
+    {
+        request.min_app_version = env!("CARGO_PKG_VERSION").to_string();
+    }
+}
+
+/// Drop a push-preview diff's `minAppVersion` change that the preview cannot
+/// know to be real.
+///
+/// The preview's working side is stamped by [`stamp_min_app_version`] from
+/// everything it can see. The one input it cannot see is the FRONTEND's
+/// distributable objects (the model overlay, reports), which `calp_publish`
+/// merges in from its params and no preview caller carries. So when the base
+/// version is stamped and the working side is not, the stamp may be one the
+/// real push would write too -- and it certainly is when the base carries a
+/// custom object the working side did not produce, which is exactly the
+/// frontend-provided kind. Only in that case is the line dropped: a base
+/// stamped by content the working side CAN see and no longer carries is a
+/// real change, and it stays.
+///
+/// Chosen over widening both preview commands (`calp_diff_working_copy`,
+/// `calp_push_merge_analyze`) with a custom-object payload the dialog would
+/// have to collect: that is a new IPC contract for one derived field, and the
+/// merge analysis has no params at all today.
+pub(crate) fn reconcile_unknowable_min_app_version(
+    diff: &mut calp::diff::VersionDiff,
+    base: &calp::manifest::VersionManifest,
+    working: &calp::manifest::VersionManifest,
+) {
+    if base.min_app_version.is_empty() || !working.min_app_version.is_empty() {
+        return;
+    }
+    let produced: std::collections::HashSet<(&str, &str)> = working
+        .custom_objects
+        .iter()
+        .map(|o| (o.kind.as_str(), o.id.as_str()))
+        .collect();
+    let base_has_unseen_objects = base
+        .custom_objects
+        .iter()
+        .any(|o| !produced.contains(&(o.kind.as_str(), o.id.as_str())));
+    if base_has_unseen_objects {
+        diff.manifest_changes.retain(|c| c.field != "minAppVersion");
+    }
 }
 
 /// A change summary is a headline for the version history, not the
@@ -1270,10 +1532,17 @@ pub fn calp_publish(
     // THE LIBRARY RULE NOW LIVES IN THE RESOLVER, not here. It used to be this
     // branch, which `calp_publish_preview` did not have — so a library preview
     // described every sheet for a publish that shipped none.
-    let selection = resolve_publish_sheet_indices(&state, &params.kind, params.sheet_indices)?;
+    let filter_links =
+        FilterObjectLinks::snapshot(&slicer_state, &timeline_slicer_state, &pivot_state)?;
+    let selection = resolve_publish_sheet_indices(
+        &state,
+        &params.kind,
+        params.sheet_indices,
+        &filter_links,
+    )?;
     let sheet_indices = selection.indices.clone();
 
-    let assembly = assemble_publish_workbook(
+    let (assembly, unpublished_pivots) = assemble_publish_workbook(
         &state,
         &bi_state,
         &pivot_state,
@@ -1340,30 +1609,9 @@ pub fn calp_publish(
         include_comments: params.include_comments,
         min_app_version: String::new(),
     };
-    // Compatibility stamp: an application carrying Wave A/B artifacts (slicers,
-    // ribbon filters, pivot layouts, extension data, comments/scenarios/
-    // outlines, non-default theme) declares THIS app's version as its minimum
-    // — an older app's pull fails honestly at the compat gate instead of
-    // silently dropping those artifacts. Same version source the gate
-    // compares against (set_host_app_version(env!("CARGO_PKG_VERSION")) at
-    // startup). Cell-only applications stay pullable by older apps.
-    if calp::publish::carries_wave_content(&request)
-        // Model writeback declarations are inert to pre-feature apps (they
-        // only consult writeback_regions), but the columns' VALUES would be
-        // invisible there (pre-v21 engines refuse the model anyway) — declare
-        // this app's version as the minimum for an honest gate.
-        || request
-            .model_writebacks
-            .as_ref()
-            .is_some_and(|m| !m.is_empty())
-        // Custom objects (e.g. calcula.modelOverlay carrying workbook-layer
-        // measures) are exactly the silent-drop class this gate exists for: an
-        // app without distributable-object providers would pull "successfully"
-        // and never materialize them.
-        || !request.custom_objects.is_empty()
-    {
-        request.min_app_version = env!("CARGO_PKG_VERSION").to_string();
-    }
+    // Compatibility stamp -- the ONE helper the push preview applies too, so the
+    // preview's manifest cannot disagree with this one about `minAppVersion`.
+    stamp_min_app_version(&mut request);
 
     // ---- PHASE B: core runs the workspace-fact gates under the workspace lock --
     let result = calp::publish::publish(&registry, &request, &calcula_profile_dir())
@@ -1494,8 +1742,79 @@ pub fn calp_publish(
         modules_published: result.modules_published,
         notebooks_published: result.notebooks_published,
         report,
-        warnings: result.warnings,
+        // The selection's own disclosures first -- a source sheet it declined
+        // to add explains the chart/object warnings core publish emits after.
+        // Core saw only the PRUNED carrier, so its pivot lines are re-said with
+        // the sheet that kept each pivot home.
+        warnings: selection
+            .source_warnings
+            .iter()
+            .cloned()
+            .chain(with_unpublished_pivot_reasons(
+                result.warnings,
+                request.workbook,
+                &request.sheet_indices,
+                &unpublished_pivots,
+            ))
+            .collect(),
     })
+}
+
+/// Core publish's warnings with every pivot-BLIND source line replaced by its
+/// pivot-aware twin.
+///
+/// Core `publish()` runs `chart_source_warnings` / `object_source_warnings` over
+/// the carrier it is handed, which the host has already pruned of every pivot
+/// whose sheet or source sheet is not published -- so, from core, a pivot left
+/// behind looks like one the workbook never had: a slicer filtering it went
+/// silent and a timeline was told its pivot is one "this workbook no longer
+/// has". The `_with` variants, given the pruned list, name the pivot and the
+/// sheet that kept it home.
+///
+/// Exact rather than heuristic: the blind lines are recomputed by the same two
+/// deterministic functions over the same carrier and selection core used, so
+/// precisely those lines are removed, and the aware set takes the place of the
+/// first of them. With nothing pruned the two sets are identical and the input
+/// comes back unchanged.
+pub(crate) fn with_unpublished_pivot_reasons(
+    core_warnings: Vec<String>,
+    workbook: &persistence::Workbook,
+    sheet_indices: &[usize],
+    unpublished: &[calp::publish::UnpublishedPivot],
+) -> Vec<String> {
+    if unpublished.is_empty() {
+        return core_warnings;
+    }
+    let blind: std::collections::HashSet<String> =
+        calp::publish::chart_source_warnings(workbook, sheet_indices)
+            .into_iter()
+            .chain(calp::publish::object_source_warnings(workbook, sheet_indices))
+            .collect();
+    let mut aware: Vec<String> =
+        calp::publish::chart_source_warnings_with(workbook, sheet_indices, unpublished)
+            .into_iter()
+            .chain(calp::publish::object_source_warnings_with(
+                workbook,
+                sheet_indices,
+                unpublished,
+            ))
+            .collect();
+    let mut out: Vec<String> = Vec::with_capacity(core_warnings.len() + aware.len());
+    let mut placed = false;
+    for warning in core_warnings {
+        if blind.contains(&warning) {
+            if !placed {
+                out.append(&mut aware);
+                placed = true;
+            }
+            continue;
+        }
+        out.push(warning);
+    }
+    if !placed {
+        out.append(&mut aware);
+    }
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -1743,6 +2062,9 @@ pub struct PublishPreviewSheet {
     pub subscribed_to: String,
     /// Whether a DEFAULT publish would include it (i.e. ticked on open).
     pub default_selected: bool,
+    /// The sheet's kind as its wire name: "worksheet" or "canvas" (a report
+    /// page of objects), so the dialog can say which is which.
+    pub kind: String,
 }
 
 /// Where a prospective push stands against each gate.
@@ -1796,10 +2118,13 @@ pub fn calp_publish_preview(
 ) -> Result<PublishPreviewResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
+    let filter_links =
+        FilterObjectLinks::snapshot(&slicer_state, &timeline_slicer_state, &pivot_state)?;
     let selection = resolve_publish_sheet_indices(
         &state,
         &params.kind,
         params.sheet_indices.unwrap_or_default(),
+        &filter_links,
     )?;
     let sheet_indices = selection.indices.clone();
 
@@ -1811,7 +2136,7 @@ pub fn calp_publish_preview(
             .unwrap_or_default()
     };
 
-    let assembly = assemble_publish_workbook(
+    let (assembly, unpublished_pivots) = assemble_publish_workbook(
         &state,
         &bi_state,
         &pivot_state,
@@ -1832,8 +2157,13 @@ pub fn calp_publish_preview(
     // Same checks core publish runs, over the same carrier — so the author sees
     // dangling dropdown references AND macro-linked buttons whose macro is not in
     // the module set at PREVIEW time, not only after the artifact is written.
-    let mut warnings =
-        calp::publish::dropdown_reference_warnings(&assembly.workbook, &sheet_indices);
+    // The selection's own disclosures first: a source sheet it declined to add
+    // explains the chart/object warnings below.
+    let mut warnings = selection.source_warnings.clone();
+    warnings.extend(calp::publish::dropdown_reference_warnings(
+        &assembly.workbook,
+        &sheet_indices,
+    ));
     // Preview carries the default module set (all workbook module scripts), which
     // is exactly what a default publish ships — so a linked macro is "missing"
     // only if it genuinely is not among the workbook's modules.
@@ -1847,6 +2177,23 @@ pub fn calp_publish_preview(
         &assembly.workbook,
         &sheet_indices,
         &published_module_ids,
+    ));
+    // A chart, slicer or timeline whose source sheet is not in the selection
+    // (a name that resolves nowhere, a working copy's non-base sheet the
+    // selection declined to add) arrives broken -- the same two checks core
+    // publish runs, over the same carrier, so the author sees them BEFORE
+    // publishing. Given the pivots the assembly pruned, as `calp_publish` does
+    // (`with_unpublished_pivot_reasons`), so both name the sheet a pivot was
+    // left behind for.
+    warnings.extend(calp::publish::chart_source_warnings_with(
+        &assembly.workbook,
+        &sheet_indices,
+        &unpublished_pivots,
+    ));
+    warnings.extend(calp::publish::object_source_warnings_with(
+        &assembly.workbook,
+        &sheet_indices,
+        &unpublished_pivots,
     ));
     let sheet_names = sheet_indices
         .iter()
@@ -2768,6 +3115,179 @@ pub(crate) struct PublishSelection {
     /// Subscribed sheets the author DELIBERATELY ticked. An informed act, and
     /// still a DISCLOSED one.
     pub included_subscribed: Vec<ProvenancedSheet>,
+    /// Names of the sheets the selection ADDED because a chart, slicer or
+    /// timeline on a selected sheet reads from them (a floating range's backing
+    /// sheet is not listed: it is part of the object, not a source of it).
+    pub auto_included: Vec<String>,
+    /// Sources the selection did NOT add, and why: a working copy's sheet that
+    /// is not part of the application's base version, and a sheet that came
+    /// from a subscribed application, are published by ticking them, never as
+    /// a side effect of an object reading from them.
+    pub source_warnings: Vec<String>,
+}
+
+/// Which tables and pivots each SLICER and TIMELINE reads from, keyed by the
+/// sheet the object sits on, plus where every PIVOT TABLE lives and reads --
+/// snapshotted from the three stores that live outside `AppState`, so the
+/// publish selection can bring an object's source sheets along with it. The
+/// sheets those sources live on are resolved from `AppState` itself (a table's
+/// own index, a pivot's anchors by name, a pivot's output region).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct FilterObjectLinks {
+    pub objects: Vec<FilterObjectLink>,
+    /// Every pivot table's two anchors. A pivot travels only when BOTH its
+    /// destination and its grid source sheet are published
+    /// (`prune_unpublished_pivots`), so a slicer, a timeline or a pivot CHART
+    /// that reads a pivot needs both sheets -- and so does a pivot whose
+    /// destination is published (a canvas pivot's page, typically).
+    pub pivots: Vec<PivotAnchors>,
+}
+
+/// One pivot table's two sheet anchors, by NAME exactly as the pivot store
+/// records them -- resolved the way `collect_pivot_definitions` resolves them,
+/// so the selection and the pruning cannot disagree about which sheet a pivot
+/// needs.
+#[derive(Debug, Clone)]
+pub(crate) struct PivotAnchors {
+    pub id: identity::EntityId,
+    /// Display name, for the warning a withheld sheet produces.
+    pub name: String,
+    /// The sheet its output (or, for a canvas pivot, its framed view) lives on.
+    pub destination_sheet: Option<String>,
+    /// The grid sheet it reads: `source_sheet`, falling back to the destination
+    /// for a same-sheet pivot that never recorded one. `None` for a BI pivot,
+    /// which reads the application's embedded model, not a sheet.
+    pub source_sheet: Option<String>,
+}
+
+/// One slicer or timeline and what it filters.
+#[derive(Debug, Clone)]
+pub(crate) struct FilterObjectLink {
+    /// "Slicer" or "Timeline", for the warning a withheld source produces.
+    pub kind: &'static str,
+    pub name: String,
+    /// The sheet the object sits on.
+    pub sheet_index: usize,
+    /// Tables it filters (its own source and its report connections).
+    pub tables: Vec<identity::EntityId>,
+    /// Pivot tables it filters.
+    pub pivots: Vec<identity::EntityId>,
+}
+
+impl FilterObjectLinks {
+    /// Snapshot the three stores, each under its own short lock, released
+    /// before the next is taken and before the caller takes any `AppState`
+    /// lock. The pivot store's two maps are read one at a time too (the BI
+    /// keys first), so this never holds `pivot_tables` and `bi_metadata`
+    /// together and cannot join any cycle through them.
+    pub(crate) fn snapshot(
+        slicer_state: &crate::slicer::SlicerState,
+        timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+        pivot_state: &crate::pivot::types::PivotState,
+    ) -> Result<Self, String> {
+        let bi_pivots: std::collections::HashSet<identity::EntityId> = pivot_state
+            .bi_metadata
+            .read()
+            .map_err(|e| e.to_string())?
+            .keys()
+            .copied()
+            .collect();
+        let mut pivots: Vec<PivotAnchors> = pivot_state
+            .pivot_tables
+            .read()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|(id, (def, _cache))| PivotAnchors {
+                id: *id,
+                name: def
+                    .name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| id.to_string()),
+                destination_sheet: def.destination_sheet.clone(),
+                // The SAME fallback `collect_pivot_definitions` applies, so the
+                // sheet the selection brings along is the sheet the pruning
+                // then checks for.
+                source_sheet: if bi_pivots.contains(id) {
+                    None
+                } else {
+                    def.source_sheet.clone().or_else(|| def.destination_sheet.clone())
+                },
+            })
+            .collect();
+        pivots.sort_by(|a, b| a.id.cmp(&b.id));
+        Self::snapshot_filter_objects(slicer_state, timeline_state).map(|mut links| {
+            links.pivots = pivots;
+            links
+        })
+    }
+
+    /// The slicer and timeline half of [`Self::snapshot`].
+    fn snapshot_filter_objects(
+        slicer_state: &crate::slicer::SlicerState,
+        timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    ) -> Result<Self, String> {
+        let mut objects: Vec<FilterObjectLink> = Vec::new();
+        {
+            let slicers = slicer_state.slicers.read().map_err(|e| e.to_string())?;
+            for slicer in slicers.values() {
+                let mut link = FilterObjectLink {
+                    kind: "Slicer",
+                    name: slicer.name.clone(),
+                    sheet_index: slicer.sheet_index,
+                    tables: Vec::new(),
+                    pivots: Vec::new(),
+                };
+                let mut add = |source_type: &crate::slicer::SlicerSourceType, id: identity::EntityId| {
+                    match source_type {
+                        crate::slicer::SlicerSourceType::Table => {
+                            if !link.tables.contains(&id) {
+                                link.tables.push(id);
+                            }
+                        }
+                        crate::slicer::SlicerSourceType::Pivot => {
+                            if !link.pivots.contains(&id) {
+                                link.pivots.push(id);
+                            }
+                        }
+                        // A BI slicer reads the application's embedded model, not a sheet.
+                        crate::slicer::SlicerSourceType::BiConnection => {}
+                    }
+                };
+                add(&slicer.source_type, slicer.cache_source_id);
+                for connection in &slicer.connected_sources {
+                    add(&connection.source_type, connection.source_id);
+                }
+                objects.push(link);
+            }
+        }
+        {
+            let timelines = timeline_state.timelines.read().map_err(|e| e.to_string())?;
+            for timeline in timelines.values() {
+                let mut pivots = vec![timeline.source_id];
+                for id in &timeline.connected_pivot_ids {
+                    if !pivots.contains(id) {
+                        pivots.push(*id);
+                    }
+                }
+                objects.push(FilterObjectLink {
+                    kind: "Timeline",
+                    name: timeline.name.clone(),
+                    sheet_index: timeline.sheet_index,
+                    tables: Vec::new(),
+                    pivots,
+                });
+            }
+        }
+        // Deterministic order, so the warnings a selection produces read the
+        // same on every run (both stores are hash maps).
+        objects.sort_by(|a, b| {
+            (a.sheet_index, a.kind, &a.name).cmp(&(b.sheet_index, b.kind, &b.name))
+        });
+        Ok(Self { objects, pivots: Vec::new() })
+    }
 }
 
 /// Normalize the author's sheet selection: empty means "every sheet you own".
@@ -2778,13 +3298,34 @@ pub(crate) fn resolve_publish_sheet_indices(
     state: &AppState,
     kind: &str,
     requested: Vec<usize>,
+    // The slicers, timelines and pivot anchors, snapshotted by the caller (they
+    // live outside `AppState`). `FilterObjectLinks::default()` means "no filter
+    // objects and no pivots".
+    filter_links: &FilterObjectLinks,
 ) -> Result<PublishSelection, String> {
     let provenance = crate::sheets::SheetProvenance::snapshot(state)?;
     let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
     let explicit = !requested.is_empty();
+    // What the author actually TICKED. A subscribed sheet in this set is a
+    // deliberate republish; one the expansion below would merely drag along is
+    // not, and is withheld instead (see the add loop).
+    let requested_explicitly: std::collections::HashSet<usize> =
+        requested.iter().copied().collect();
 
     let mut selected: Vec<usize> = if explicit {
+        // AN OBJECT SHEET JOINS ONLY THROUGH ITS OWNER, whatever the request
+        // said. The dialog lists user sheets only, but it used to SEED its
+        // selection from the default list, which carries every backing sheet
+        // the floating-range expansion added -- so unticking a canvas page left
+        // its range's hidden backing index in the request, and the range's cells
+        // shipped as an orphaned object sheet the author had withheld. The
+        // backing sheets of the hosts that ARE selected come back below, through
+        // the expansion, and nothing else does.
+        let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
         requested
+            .into_iter()
+            .filter(|&i| crate::sheets::is_user_sheet(&visibility, i))
+            .collect()
     } else if kind.eq_ignore_ascii_case(crate::library_commands::LIBRARY_KIND) {
         // A LIBRARY's payload is its standalone MODULE SCRIPTS, not its sheets.
         // Defaulting to "every sheet" would ship the author's whole workbook to a
@@ -2845,23 +3386,320 @@ pub(crate) fn resolve_publish_sheet_indices(
     // an object whose every cell is #REF!. Expansion happens HERE — the one
     // normalization both publish and preview share — so the dry-run report
     // can never describe a different application than the publish.
-    let backing: Vec<usize> = {
-        let rows = state.floating_ranges.read().map_err(|e| e.to_string())?;
-        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+    //
+    // AND OBJECTS TRAVEL WITH THEIR SOURCES. A chart on a published sheet that
+    // reads another sheet, and a slicer or timeline that filters a table or a
+    // pivot on another sheet, arrive broken without that sheet: the chart says
+    // its source sheet no longer exists, the filter is connected to nothing. So
+    // the source sheet joins too -- a table's own sheet, a pivot's destination
+    // AND grid source sheet (below). The expansions feed each other (a source
+    // sheet can host a floating range or a pivot, a range's host can be a
+    // chart's source), so they run to a fixpoint.
+    //
+    // PIVOTS TRAVEL WITH BOTH THEIR SHEETS. A pivot is published only when its
+    // destination AND its grid source sheet are (`prune_unpublished_pivots`),
+    // so anything that reads a pivot -- a pivot CHART, a slicer, a timeline --
+    // needs both, and a pivot whose destination is published (a canvas page's
+    // pivot, typically) needs its source. Without this the selection added a
+    // pivot's output sheet at most, the pruning then dropped the pivot for its
+    // missing source, and a pivot chart's pivot was never followed at all: the
+    // chart shipped reading a pivot the application did not carry, in silence.
+    //
+    // Two kinds of sheet are never added as a side effect, only by a tick:
+    //
+    // A WORKING COPY's sheet that is not part of the application's base version
+    // is published by TICKING it (the dialog marks it "(new)"): adding it here
+    // would sweep the author's own unrelated work into the application because
+    // one chart pointed at it.
+    //
+    // A SUBSCRIBED sheet is another publisher's content. The default already
+    // withholds it; the expansion used to add it back whenever an object read
+    // from it -- signing it into this application under the author's key, with
+    // no way to untick it, while the report said the author had ticked it.
+    //
+    // Both are left out and WARNED about, naming the object that reads them.
+    //
+    // Every store is snapshotted alone and released before the next is taken.
+    let sheet_ids: Vec<identity::SheetId> =
+        state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let visibility: Vec<String> =
+        state.sheet_visibility.read().map_err(|e| e.to_string())?.clone();
+    let fr_rows: Vec<(identity::SheetId, identity::SheetId)> = state
+        .floating_ranges
+        .read()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|fr| (fr.host_sheet_id, fr.backing_sheet_id))
+        .collect();
+    // (host sheet, chart name, the sheets it reads, the pivots it reads)
+    #[allow(clippy::type_complexity)]
+    let chart_sources: Vec<(
+        usize,
+        String,
+        Vec<calp::chart_refs::ChartSourceSheet>,
+        Vec<identity::EntityId>,
+    )> = state
+        .charts
+        .read()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|c| {
+            (
+                c.sheet_index,
+                chart_name_for_disclosure(&c.spec_json),
+                calp::chart_refs::chart_spec_source_sheets(&c.spec_json),
+                calp::chart_refs::chart_spec_pivot_ids(&c.spec_json),
+            )
+        })
+        .collect();
+    let table_sheets: std::collections::HashMap<identity::EntityId, usize> = state
+        .tables
+        .read()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .flat_map(|(idx, sheet_tables)| sheet_tables.keys().map(move |id| (*id, *idx)))
+        .collect();
+    let pivot_sheets: std::collections::HashMap<identity::EntityId, usize> = state
+        .protected_regions
+        .lock()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .filter(|r| r.region_type == "pivot")
+        .map(|r| (r.owner_id, r.sheet_index))
+        .collect();
+    let working_copy_base = working_copy_base_sheets(state)?;
+
+    let index_of_id = |id: &identity::SheetId| sheet_ids.iter().position(|s| s == id);
+    let resolve_chart_source = |source: &calp::chart_refs::ChartSourceSheet| -> Option<usize> {
+        match source {
+            calp::chart_refs::ChartSourceSheet::Id(id) => index_of_id(id),
+            calp::chart_refs::ChartSourceSheet::Index(i) => (*i < sheet_names.len()).then_some(*i),
+            calp::chart_refs::ChartSourceSheet::Name(name) => {
+                sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name))
+            }
+        }
+    };
+    let sheet_label = |i: usize| sheet_names.get(i).cloned().unwrap_or_default();
+    let index_of_name =
+        |name: &str| sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name));
+    // The sheets a pivot needs: its destination and its grid source, by the
+    // anchors the pruning checks (by name, case-insensitively -- the rule
+    // `collect_pivot_definitions` resolves with), plus the sheet its output
+    // region sits on (the only answer for a pivot the snapshot does not hold).
+    let pivot_needs = |pivot: &identity::EntityId| -> Vec<usize> {
+        let mut out: Vec<usize> = Vec::new();
+        if let Some(anchors) = filter_links.pivots.iter().find(|p| p.id == *pivot) {
+            for name in [&anchors.destination_sheet, &anchors.source_sheet].into_iter().flatten() {
+                if let Some(idx) = index_of_name(name) {
+                    if !out.contains(&idx) {
+                        out.push(idx);
+                    }
+                }
+            }
+        }
+        if let Some(&idx) = pivot_sheets.get(pivot) {
+            if !out.contains(&idx) {
+                out.push(idx);
+            }
+        }
+        out
+    };
+    // An object sheet's OWNER: the host of the floating range it backs.
+    let owner_of = |idx: usize| -> Option<usize> {
+        let id = sheet_ids.get(idx)?;
+        fr_rows
+            .iter()
+            .find(|(_, backing)| backing == id)
+            .and_then(|(host, _)| index_of_id(host))
+    };
+
+    /// Why the expansion left a source sheet out.
+    enum Withheld {
+        /// A working copy's sheet the base version does not carry.
+        OutsideBase,
+        /// Another application's sheet; the application's name.
+        Subscribed(String),
+    }
+
+    let mut auto_included: Vec<usize> = Vec::new();
+    // (withheld source sheet, why, the first object found reading from it)
+    let mut withheld_sources: Vec<(usize, Withheld, String)> = Vec::new();
+    loop {
+        let before = selected.len();
+
         let selected_ids: std::collections::HashSet<identity::SheetId> = selected
             .iter()
             .filter_map(|&i| sheet_ids.get(i).copied())
             .collect();
-        rows.iter()
-            .filter(|fr| selected_ids.contains(&fr.host_sheet_id))
-            .filter_map(|fr| sheet_ids.iter().position(|id| *id == fr.backing_sheet_id))
-            .collect()
-    };
-    for idx in backing {
-        if !selected.contains(&idx) {
+        for (host, backing) in &fr_rows {
+            if selected_ids.contains(host) {
+                if let Some(idx) = index_of_id(backing) {
+                    if !selected.contains(&idx) {
+                        selected.push(idx);
+                    }
+                }
+            }
+        }
+
+        // (source sheet, the object on a selected sheet that reads from it)
+        let mut needed: Vec<(usize, String)> = Vec::new();
+        for (host, name, sources, pivots) in &chart_sources {
+            if !selected.contains(host) {
+                continue;
+            }
+            let why = || format!("chart \"{}\" on sheet \"{}\"", name, sheet_label(*host));
+            for source in sources {
+                if let Some(idx) = resolve_chart_source(source) {
+                    needed.push((idx, why()));
+                }
+            }
+            // A PIVOT chart reads a pivot, which travels only with both of its
+            // sheets.
+            for pivot in pivots {
+                for idx in pivot_needs(pivot) {
+                    needed.push((idx, why()));
+                }
+            }
+        }
+        for link in &filter_links.objects {
+            if !selected.contains(&link.sheet_index) {
+                continue;
+            }
+            let why = || {
+                format!(
+                    "{} \"{}\" on sheet \"{}\"",
+                    link.kind.to_lowercase(),
+                    link.name,
+                    sheet_label(link.sheet_index)
+                )
+            };
+            for table in &link.tables {
+                if let Some(&idx) = table_sheets.get(table) {
+                    needed.push((idx, why()));
+                }
+            }
+            for pivot in &link.pivots {
+                for idx in pivot_needs(pivot) {
+                    needed.push((idx, why()));
+                }
+            }
+        }
+        // A PIVOT on a selected sheet needs the grid sheet it reads -- a canvas
+        // page's pivot shows data that lives on another sheet entirely.
+        for anchors in &filter_links.pivots {
+            let Some(destination) = anchors.destination_sheet.as_deref().and_then(index_of_name)
+            else {
+                continue;
+            };
+            if !selected.contains(&destination) {
+                continue;
+            }
+            if let Some(source) = anchors.source_sheet.as_deref().and_then(index_of_name) {
+                needed.push((
+                    source,
+                    format!(
+                        "pivot table \"{}\" on sheet \"{}\"",
+                        anchors.name,
+                        sheet_label(destination)
+                    ),
+                ));
+            }
+        }
+        for (idx, why) in needed {
+            // AN OBJECT SHEET JOINS ONLY THROUGH ITS OWNER: a chart reading a
+            // floating range's cells brings the range's HOST, whose expansion
+            // then brings the backing sheet -- never the backing sheet alone.
+            let idx = if crate::sheets::is_user_sheet(&visibility, idx) {
+                idx
+            } else {
+                match owner_of(idx) {
+                    Some(owner) => owner,
+                    None => continue,
+                }
+            };
+            if idx >= sheet_names.len() || selected.contains(&idx) {
+                continue;
+            }
+            if provenance.is_subscribed(idx) && !requested_explicitly.contains(&idx) {
+                let package = provenance
+                    .origin(idx)
+                    .map(|o| o.package_name.clone())
+                    .unwrap_or_default();
+                if !withheld_sources.iter().any(|(i, _, _)| *i == idx) {
+                    withheld_sources.push((idx, Withheld::Subscribed(package), why));
+                }
+                continue;
+            }
+            let outside_base = working_copy_base
+                .as_ref()
+                .is_some_and(|base| sheet_ids.get(idx).map_or(true, |id| !base.contains(id)));
+            if outside_base {
+                if !withheld_sources.iter().any(|(i, _, _)| *i == idx) {
+                    withheld_sources.push((idx, Withheld::OutsideBase, why));
+                }
+                continue;
+            }
             selected.push(idx);
+            if !auto_included.contains(&idx) {
+                auto_included.push(idx);
+            }
+        }
+
+        if selected.len() == before {
+            break;
         }
     }
+
+    // AN OBJECT SHEET STAYS ONLY WHILE ITS OWNER DOES. Nothing above adds one
+    // except through its host, and the explicit request was cleaned of them;
+    // this is the invariant stated once more over the FINAL set, so no path
+    // added later can ship a floating range's cells without the range.
+    let claimed_backing: std::collections::HashSet<identity::SheetId> = fr_rows
+        .iter()
+        .filter(|(host, _)| selected.iter().any(|&i| sheet_ids.get(i) == Some(host)))
+        .map(|(_, backing)| *backing)
+        .collect();
+    selected.retain(|&i| {
+        crate::sheets::is_user_sheet(&visibility, i)
+            || sheet_ids.get(i).is_some_and(|id| claimed_backing.contains(id))
+    });
+
+    // USER SHEETS FIRST, object sheets last -- the order the application lists
+    // them in, and so the order a subscriber's pull appends them in. The
+    // expansions above push in discovery order, which can put a chart's source
+    // (a user sheet) behind a floating range's backing sheet; the subscriber's
+    // partition repair would cope, but a block that arrives partitioned needs
+    // none. Stable, so the author's own order within each group is kept.
+    selected.sort_by_key(|&i| !crate::sheets::is_user_sheet(&visibility, i));
+
+    let source_warnings: Vec<String> = withheld_sources
+        .iter()
+        .filter(|(idx, _, _)| !selected.contains(idx))
+        .map(|(idx, reason, why)| {
+            let name = sheet_label(*idx);
+            match reason {
+                Withheld::Subscribed(package) => format!(
+                    "Sheet \"{}\" belongs to application \"{}\" (this workbook subscribes to \
+                     it), so it was not added to the publish although {} reads from it. Tick \
+                     \"{}\" to republish it deliberately; without it, that object arrives \
+                     without its source.",
+                    name, package, why, name
+                ),
+                Withheld::OutsideBase => format!(
+                    "Sheet \"{}\" is not part of this application (the version this working copy \
+                     is based on does not carry it), so it was not added to the push although {} \
+                     reads from it. Tick \"{}\" to publish it with the application; without it, \
+                     that object arrives without its source.",
+                    name, why, name
+                ),
+            }
+        })
+        .collect();
+    let auto_included_names: Vec<String> = auto_included
+        .iter()
+        .filter(|idx| selected.contains(idx))
+        .map(|&idx| sheet_label(idx))
+        .collect();
 
     // BOTH computed from the FINAL set, after the backing-sheet expansion — a
     // subscribed sheet that arrived through its host is disclosed as included,
@@ -2884,7 +3722,25 @@ pub(crate) fn resolve_publish_sheet_indices(
         indices: selected,
         withheld_subscribed,
         included_subscribed,
+        auto_included: auto_included_names,
+        source_warnings,
     })
+}
+
+/// A chart's name for a disclosure line: the envelope's `name`, else its
+/// `chartId`, else a placeholder. Malformed JSON names nothing.
+fn chart_name_for_disclosure(spec_json: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(spec_json).unwrap_or_default();
+    ["name", "chartId"]
+        .iter()
+        .find_map(|key| {
+            value
+                .get(*key)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "(unnamed)".to_string())
 }
 
 /// The publish dialog's sheet list: every choosable sheet, its TRUE index, and
@@ -2899,6 +3755,8 @@ pub(crate) fn publish_preview_sheet_list(
     let names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
     let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?.clone();
     let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    // Read ALONE and released, like the three above.
+    let sheet_kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?.clone();
     let provenance = crate::sheets::SheetProvenance::snapshot(state)?;
 
     Ok((0..names.len())
@@ -2914,6 +3772,13 @@ pub(crate) fn publish_preview_sheet_list(
                 .map(|o| o.package_name.clone())
                 .unwrap_or_default(),
             default_selected: selection.indices.contains(&i),
+            // `.get(i)` for the same reason as `sheet_id`: a short vector reads
+            // as the padding default, a worksheet.
+            kind: sheet_kinds
+                .get(i)
+                .map(|k| k.wire_name())
+                .unwrap_or("worksheet")
+                .to_string(),
         })
         .collect())
 }
@@ -3215,6 +4080,408 @@ fn materialize_pulled_slicers(
         slicers.insert(slicer.id, slicer);
     }
     Ok(applied)
+}
+
+/// Materialize pulled TIMELINE slicers into TimelineSlicerState -- shared by
+/// subscribe/checkout and refresh, the slicer shape exactly: ADDITIVE with
+/// don't-clobber (a timeline whose id already exists is skipped; refresh
+/// removes the application's own ledger-owned ids first), `resolve` maps the
+/// APPLICATION sheet id to the local sheet index, and a timeline whose sheet
+/// was not pulled is dropped. The conversion is the `.cala` load's own
+/// (`saved_timeline_to_timeline_at`), so a pulled timeline and a loaded one are
+/// the same object. Timelines carry no computed properties, so there is
+/// nothing to sanitize.
+///
+/// Returns (id, name) for each timeline ACTUALLY inserted, so callers record
+/// provenance-ledger entries only for what landed.
+pub(crate) fn materialize_pulled_timeline_slicers(
+    effect: &crate::document_effect::DocumentEffect,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    pulled: &[persistence::SavedTimelineSlicer],
+    resolve: impl Fn(SheetId) -> Option<usize>,
+) -> Result<Vec<(String, String)>, String> {
+    if pulled.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut timelines = timeline_state.timelines.write(effect).map_err(|e| e.to_string())?;
+    let mut applied: Vec<(String, String)> = Vec::new();
+    for saved in pulled {
+        let Some(sheet_index) = resolve(saved.sheet_id) else {
+            continue; // sheet not pulled -- drop, like slicers
+        };
+        if timelines.contains_key(&saved.id) {
+            continue; // the subscriber already has this timeline (id collision)
+        }
+        let timeline = crate::persistence::saved_timeline_to_timeline_at(saved, sheet_index);
+        applied.push((timeline.id.to_string(), timeline.name.clone()));
+        timelines.insert(timeline.id, timeline);
+    }
+    Ok(applied)
+}
+
+/// Refresh's ledger-scoped REPLACE for timeline slicers: remove the ones this
+/// subscription owns (`owned`, its "timelineSlicer" ledger ids -- a
+/// subscriber-authored timeline is never in it), then re-add the new version's
+/// set through the same materializer a first pull uses.
+pub(crate) fn replace_refreshed_timeline_slicers(
+    effect: &crate::document_effect::DocumentEffect,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    owned: &std::collections::HashSet<String>,
+    pulled: &[persistence::SavedTimelineSlicer],
+    resolve: impl Fn(SheetId) -> Option<usize>,
+) -> Result<Vec<(String, String)>, String> {
+    if !owned.is_empty() {
+        timeline_state
+            .timelines
+            .write(effect)
+            .map_err(|e| e.to_string())?
+            .retain(|id, _| !owned.contains(&id.to_string()));
+    }
+    materialize_pulled_timeline_slicers(effect, timeline_state, pulled, resolve)
+}
+
+/// Materialize pulled FLOATING RANGE object rows -- shared by subscribe/checkout
+/// and refresh.
+///
+/// A floating range is two things: an OBJECT-backed sheet holding its cells
+/// (which arrived with the other pulled sheets, visibility "object") and this
+/// row, which binds that sheet to a host sheet with geometry and a visible
+/// window. Both ids arrive as APPLICATION sheet ids; `resolve` maps each to the
+/// local index it landed on and the row is stored under the LOCAL ids there.
+/// A row whose host or backing sheet was not pulled is dropped, and so is one
+/// whose backing sheet another row already claims -- two objects over one cell
+/// store would each edit the other's cells (the same row already present is the
+/// quiet case of this: the workbook has that floating range).
+///
+/// STRUCTURE IS CHECKED against the LOCAL sheets the ids resolved to, and a row
+/// failing it is skipped LOUDLY: the backing sheet must already be an OBJECT
+/// sheet, the host a USER sheet, and the two different sheets. The markers are
+/// re-asserted from the row store afterwards, so an unchecked row naming a
+/// visible sheet as its backing turned that tab into an invisible object sheet
+/// -- after the partition repair, i.e. in the middle of the user prefix. (Core
+/// pull applies the same rule against the pulled metadata,
+/// `calp::pull::floating_range_row_is_well_formed`; refresh resolves some ids
+/// through sheets that pull did not carry, so the host checks again.)
+///
+/// AN ID COLLISION WITH A DIFFERENT OBJECT MINTS A FRESH ID. A row whose id the
+/// workbook already has, over a DIFFERENT backing sheet, is a different object
+/// that happens to share an id (a fork of the same workbook, say). Skipping it
+/// left its pulled backing sheet unclaimed for good -- an invisible object
+/// sheet nothing could ever reach. The minted id is what `applied` reports, so
+/// the ledger owns it, and a refresh removes and re-mints it consistently.
+///
+/// The object markers are re-asserted afterwards (the floating-range store is
+/// the authority on which sheets are object-backed), after the row lock is
+/// released: `reassert_object_sheet_markers` is called holding `visibility`
+/// and takes the row store itself -- visibility-then-rows, the crate-wide order.
+///
+/// Returns (id, backing sheet name) for each row ACTUALLY inserted.
+pub(crate) fn materialize_pulled_floating_ranges(
+    effect: &crate::document_effect::DocumentEffect,
+    state: &AppState,
+    pulled: &[persistence::SavedFloatingRange],
+    resolve: impl Fn(SheetId) -> Option<usize>,
+) -> Result<Vec<(String, String)>, String> {
+    if pulled.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Snapshotted and RELEASED before the row store is taken:
+    // `reassert_object_sheet_markers` takes the rows and then `sheet_ids`, so
+    // holding `sheet_ids` while waiting for the rows would invert that order.
+    // The visibility snapshot likewise: the crate-wide order is visibility
+    // BEFORE rows, so it is never taken while the rows are held.
+    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let sheet_names: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let visibility: Vec<String> = state.sheet_visibility.read().map_err(|e| e.to_string())?.clone();
+
+    let mut applied: Vec<(String, String)> = Vec::new();
+    {
+        let mut rows = state.floating_ranges.write(effect).map_err(|e| e.to_string())?;
+        for saved in pulled {
+            let (Some(host_index), Some(backing_index)) =
+                (resolve(saved.host_sheet_id), resolve(saved.backing_sheet_id))
+            else {
+                continue; // host or backing sheet not pulled
+            };
+            let (Some(&host_id), Some(&backing_id)) =
+                (sheet_ids.get(host_index), sheet_ids.get(backing_index))
+            else {
+                continue;
+            };
+            if backing_index == host_index
+                || crate::sheets::is_user_sheet(&visibility, backing_index)
+                || !crate::sheets::is_user_sheet(&visibility, host_index)
+            {
+                crate::log_warn!(
+                    "CALP",
+                    "Skipping pulled floating range {}: malformed -- its backing sheet must be an \
+                     object sheet other than its host, and its host a user sheet \
+                     (host index {}, backing index {})",
+                    saved.id,
+                    host_index,
+                    backing_index
+                );
+                continue;
+            }
+            if rows.iter().any(|fr| fr.id == saved.id && fr.backing_sheet_id == backing_id) {
+                continue; // the workbook already has this floating range
+            }
+            if rows.iter().any(|fr| fr.backing_sheet_id == backing_id) {
+                crate::log_warn!(
+                    "CALP",
+                    "Skipping pulled floating range {}: its backing sheet is already claimed",
+                    saved.id
+                );
+                continue;
+            }
+            let mut row = crate::persistence::saved_floating_range_to_row(saved);
+            if rows.iter().any(|fr| fr.id == saved.id) {
+                row.id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+                crate::log_warn!(
+                    "CALP",
+                    "Pulled floating range {} shares its id with a different floating range \
+                     here; materialized under the fresh id {}",
+                    saved.id,
+                    row.id
+                );
+            }
+            row.host_sheet_id = host_id;
+            row.backing_sheet_id = backing_id;
+            applied.push((
+                row.id.to_string(),
+                sheet_names.get(backing_index).cloned().unwrap_or_default(),
+            ));
+            rows.push(row);
+        }
+    }
+    if !applied.is_empty() {
+        let mut visibility = state.sheet_visibility.write(effect).map_err(|e| e.to_string())?;
+        crate::floating_range::reassert_object_sheet_markers(state, &mut visibility);
+    }
+    Ok(applied)
+}
+
+/// Refresh's ledger-scoped REPLACE for floating ranges: remove the rows this
+/// subscription owns (`owned`, its "floatingRange" ledger ids), then re-add the
+/// new version's rows through the same materializer a first pull uses.
+///
+/// KNOWN LIMIT: a floating range the new version DROPPED loses its row here,
+/// but refresh never removes sheets, so its backing sheet stays behind as an
+/// unowned object sheet -- invisible everywhere, which is what the load path
+/// already does with an orphan (it logs it and leaves the cells alone).
+pub(crate) fn replace_refreshed_floating_ranges(
+    effect: &crate::document_effect::DocumentEffect,
+    state: &AppState,
+    owned: &std::collections::HashSet<String>,
+    pulled: &[persistence::SavedFloatingRange],
+    resolve: impl Fn(SheetId) -> Option<usize>,
+) -> Result<Vec<(String, String)>, String> {
+    if !owned.is_empty() {
+        state
+            .floating_ranges
+            .write(effect)
+            .map_err(|e| e.to_string())?
+            .retain(|fr| !owned.contains(&fr.id.to_string()));
+    }
+    materialize_pulled_floating_ranges(effect, state, pulled, resolve)
+}
+
+/// Bind a pulled object script's CONTROL binding to the local sheet its
+/// control's sheet landed on.
+///
+/// A script finds its control by the derived id `control-<sheet>-<row>-<col>`,
+/// and publish canonicalizes `<sheet>` to the sheet's POSITION in the
+/// application. `position_to_local` answers where that position's sheet lives
+/// here; `None` (a sheet this pull did not bring, or a detached one) ORPHANS
+/// the binding -- the value a deleted sheet leaves -- rather than letting a
+/// distributed script attach to whatever control of the subscriber's own sits
+/// at that index. Any other instance id (a pane control's `pane-<id>`, a
+/// primitive object's `None`) is left exactly as it is.
+pub(crate) fn rebind_pulled_control_script(
+    script: &mut persistence::SavedObjectScript,
+    position_to_local: impl Fn(usize) -> Option<usize>,
+) {
+    let Some(current) = script.instance_id.as_deref() else {
+        return;
+    };
+    if let Some(rebound) = crate::sheets::remap_control_instance_id(current, &position_to_local) {
+        script.instance_id = rebound;
+    }
+}
+
+/// The LOCAL sheet id a refreshed application sheet lives under.
+///
+/// ONE answer for every refresh consumer, in this order:
+///   1. the subscription's own record (`sheets[].local_sheet_id`) -- an
+///      updated sheet keeps the id it was first materialized under;
+///   2. the tombstone of a sheet an earlier version DROPPED
+///      (`upstream_removed_sheets[].local_sheet_id`) -- a returning sheet is
+///      replaced in place at its old id, and a map that forgot this arm
+///      silently dropped that sheet's charts, CF/DV and named ranges;
+///   3. otherwise the fresh id this pull minted (`pulled.sheet.id`) -- a sheet
+///      NEW in this version, appended under exactly that id.
+///
+/// Never the fresh id for an updated sheet: refresh discards pull's fresh ids.
+pub(crate) fn refresh_local_sheet_id(
+    sub: &calp::manifest::Subscription,
+    pulled: &calp::pull::PulledSheet,
+) -> SheetId {
+    sub.sheets
+        .iter()
+        .find(|s| s.package_sheet_id == pulled.package_sheet_id)
+        .map(|s| s.local_sheet_id)
+        .or_else(|| {
+            sub.upstream_removed_sheets
+                .iter()
+                .find(|s| s.package_sheet_id == pulled.package_sheet_id)
+                .map(|s| s.local_sheet_id)
+        })
+        .unwrap_or(pulled.sheet.id)
+}
+
+/// For EACH payload, its application sheet ids -> the local sheet INDEX each
+/// lives at now, through `refresh_local_sheet_id`. A sheet that resolves to no
+/// local sheet (a detached one: its fresh id was never materialized) is absent.
+///
+/// ONE MAP PER PAYLOAD, aligned with `payloads`, and never one merged map. An
+/// application sheet id is unique within ONE application, not across them: two
+/// subscriptions can carry the same package sheet id (two applications forked
+/// from one workbook keep its sheet ids), and a merged map sent the second
+/// payload's CF/DV, controls, floating ranges and script bindings onto the
+/// FIRST subscription's copy of the sheet.
+///
+/// LOCK HYGIENE: the (package id -> local id) pairs are snapshotted under the
+/// `subscriptions` read lock, which is RELEASED before `sheet_ids` is read --
+/// the documented order is `sheet_ids` before `subscriptions` (sheets.rs,
+/// `SheetProvenance`), so the two are never held together here.
+pub(crate) fn refresh_pkg_to_index(
+    state: &AppState,
+    payloads: &[calp::refresh::RefreshPayload],
+) -> Result<Vec<std::collections::HashMap<SheetId, usize>>, String> {
+    let local_ids: Vec<Vec<(SheetId, SheetId)>> = {
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+        payloads
+            .iter()
+            .map(|payload| match subs.subscriptions.get(payload.subscription_index) {
+                Some(sub) => payload
+                    .pull_result
+                    .sheets
+                    .iter()
+                    .map(|pulled| (pulled.package_sheet_id, refresh_local_sheet_id(sub, pulled)))
+                    .collect(),
+                None => Vec::new(),
+            })
+            .collect()
+    };
+    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    Ok(local_ids
+        .into_iter()
+        .map(|pairs| {
+            pairs
+                .into_iter()
+                .filter_map(|(package_sid, local_sid)| {
+                    sheet_ids
+                        .iter()
+                        .position(|id| *id == local_sid)
+                        .map(|idx| (package_sid, idx))
+                })
+                .collect()
+        })
+        .collect())
+}
+
+/// Refresh's ledger-scoped REPLACE for charts, pure so it can be tested
+/// without a window.
+///
+/// Removes the charts this subscription owns (its "chart" ledger ids -- a
+/// subscriber-authored chart is never in it), then adds the new version's.
+/// Each chart lands on the OLD local sheet of its application sheet
+/// (`refresh_local_sheet_id`, tombstone returners included), found in
+/// `sheet_ids` -- never on the fresh id the pull minted, which refresh
+/// discards. The payload names a chart's sheet by that fresh id, so it is
+/// mapped fresh id -> application id -> old local sheet.
+///
+/// The chart's DATA SOURCES are rewritten the same way: every DataRangeRef
+/// naming an application sheet this refresh carries is pointed at that sheet's
+/// old local id and current index. A ref naming anything else is left alone.
+///
+/// A DETACHED sheet is a data source but never a destination. Its local id is
+/// the one the subscription recorded at detach (`detached_local_sheets`), and it
+/// is added to the DATA-SOURCE map only: a chart on a still-subscribed sheet
+/// that reads the detached sheet keeps reading it (it used to arrive naming the
+/// PUBLISHER's sheet id, which exists nowhere here), while a chart whose own
+/// sheet is the detached one is still dropped -- the subscriber owns that page.
+///
+/// Appends a fresh "chart" ledger entry per chart added.
+pub(crate) fn apply_refreshed_charts(
+    charts: &mut Vec<crate::api_types::ChartEntry>,
+    sub: &calp::manifest::Subscription,
+    pull: &calp::pull::PullResult,
+    sheet_ids: &[SheetId],
+    entries: &mut Vec<calp::manifest::SubscribedObject>,
+) {
+    let owned: std::collections::HashSet<String> = sub
+        .objects
+        .iter()
+        .filter(|o| o.kind == "chart")
+        .map(|o| o.id.clone())
+        .collect();
+    charts.retain(|c| !owned.contains(&c.id.to_string()));
+
+    // application sheet id -> (OLD local id, its current index)
+    let pkg_to_local: std::collections::HashMap<SheetId, (SheetId, usize)> = pull
+        .sheets
+        .iter()
+        .filter_map(|p| {
+            let local = refresh_local_sheet_id(sub, p);
+            sheet_ids
+                .iter()
+                .position(|id| *id == local)
+                .map(|idx| (p.package_sheet_id, (local, idx)))
+        })
+        .collect();
+    // The DATA-SOURCE map: everything above, plus the detached sheets at the
+    // local ids they were detached under (see the header -- never used to
+    // PLACE a chart).
+    let mut source_to_local = pkg_to_local.clone();
+    for detached in &sub.detached_local_sheets {
+        if source_to_local.contains_key(&detached.package_sheet_id) {
+            continue;
+        }
+        if let Some(idx) = sheet_ids.iter().position(|id| *id == detached.local_sheet_id) {
+            source_to_local.insert(detached.package_sheet_id, (detached.local_sheet_id, idx));
+        }
+    }
+    // The payload names each chart's sheet by the FRESH id this pull minted.
+    let fresh_to_pkg: std::collections::HashMap<SheetId, SheetId> = pull
+        .sheets
+        .iter()
+        .map(|p| (p.sheet.id, p.package_sheet_id))
+        .collect();
+
+    for chart in &pull.charts {
+        let Some(pkg_sid) = fresh_to_pkg.get(&chart.sheet_id) else {
+            continue;
+        };
+        let Some(&(_, idx)) = pkg_to_local.get(pkg_sid) else {
+            continue;
+        };
+        if charts.iter().any(|c| c.id == chart.id) {
+            continue;
+        }
+        entries.push(calp::manifest::SubscribedObject {
+            kind: "chart".to_string(),
+            id: chart.id.to_string(),
+            name: String::new(),
+            extra: std::collections::HashMap::new(),
+        });
+        charts.push(crate::api_types::ChartEntry {
+            id: chart.id,
+            sheet_index: idx,
+            spec_json: calp::chart_refs::remap_chart_spec_sheet_ids(&chart.spec_json, &source_to_local)
+                .unwrap_or_else(|| chart.spec_json.clone()),
+        });
+    }
 }
 
 /// Materialize pulled ribbon filters into RibbonFilterState — shared by
@@ -3568,6 +4835,7 @@ pub fn calp_pull(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     params: PullParams,
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
@@ -3767,6 +5035,7 @@ pub fn calp_pull(
         &ribbon_filter_state,
         &pane_control_state,
         &slicer_state,
+        &timeline_slicer_state,
         result,
         MaterializeMode::Subscribe,
         Some(&window),
@@ -3811,6 +5080,7 @@ pub(crate) fn materialize_pull_result(
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     pane_control_state: &crate::pane_control::PaneControlState,
     slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     mut result: calp::pull::PullResult,
     mode: MaterializeMode,
     // Needed for the one live-refresh emit below: an application that brings custom
@@ -3871,7 +5141,7 @@ pub(crate) fn materialize_pull_result(
     // Set inside the grid-lock scope below, consumed after it drops — the
     // mirror write takes its own lock. See the note at the assignment.
     let mut active_grid_after_materialize: Option<engine::grid::Grid> = None;
-    let (chart_sheet_index, pkg_to_index, pulled_index_range) = {
+    let (appended_pkg_to_index, pulled_index_range) = {
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
         let mut sheet_names = state.sheet_names.write(&effect).map_err(|e| e.to_string())?;
         let mut sheet_ids = state.sheet_ids.write(&effect).map_err(|e| e.to_string())?;
@@ -3879,14 +5149,11 @@ pub(crate) fn materialize_pull_result(
         let mut all_cw = state.all_column_widths.write(&effect).map_err(|e| e.to_string())?;
         let mut all_rh = state.all_row_heights.write(&effect).map_err(|e| e.to_string())?;
 
-        // Workbook index where pulled sheets land — a chart (keyed by its local
-        // sheet id) remaps to this for ChartEntry.sheet_index.
+        // Workbook index where pulled sheets are APPENDED. Where they finally
+        // live is decided by the partition repair below, which may move them in
+        // front of an object tail; this map serves only what runs before it.
         let base_index = grids.len();
-        let mut chart_index_map: std::collections::HashMap<_, usize> =
-            std::collections::HashMap::new();
-        // application sheet id -> local sheet index. Named ranges + CF/DV carry the
-        // un-remapped APPLICATION sheet id (unlike charts/sparklines, which pull.rs
-        // already remapped to the local sheet id), so they need this map.
+        // application sheet id -> APPENDED local index (pre-partition).
         let mut pkg_to_index: std::collections::HashMap<_, usize> =
             std::collections::HashMap::new();
 
@@ -3915,7 +5182,6 @@ pub(crate) fn materialize_pull_result(
                 base_index + i,
                 &pulled.sheet,
             );
-            chart_index_map.insert(pulled.sheet.id, base_index + i);
             pkg_to_index.insert(pulled.package_sheet_id, base_index + i);
         }
 
@@ -3949,9 +5215,10 @@ pub(crate) fn materialize_pull_result(
             active_grid_after_materialize = grids.get(active).cloned();
         }
 
-        // The true state-vector span the pulled sheets occupy. The landing
-        // decision needs it, but cannot be made here — see below.
-        (chart_index_map, pkg_to_index, base_index..grids.len())
+        // The state-vector span the pulled sheets were APPENDED at. The
+        // landing decision needs where they finally live, which is not known
+        // until the partition repair below has run.
+        (pkg_to_index, base_index..grids.len())
     };
     if let Some(grid) = active_grid_after_materialize {
         *state.grid.write(effect).map_err(|e| e.to_string())? = grid;
@@ -3979,8 +5246,57 @@ pub(crate) fn materialize_pull_result(
             .iter()
             .map(|p| (p.package_sheet_id, &p.sheet))
             .collect();
-        materialize_pulled_sheet_state(&state, &effect, &pairs, &pkg_to_index, active)?;
+        materialize_pulled_sheet_state(&state, &effect, &pairs, &appended_pkg_to_index, active)?;
     }
+
+    // THE PARTITION INVARIANT: user sheets a contiguous prefix, object-backed
+    // sheets at the tail. The pulled block was APPENDED, so a workbook that
+    // already had an object tail (a floating range of the subscriber's own)
+    // now has pulled user sheets sitting behind it -- which breaks 3D ranges'
+    // sheet order and every positional consumer of the filtered sheet list.
+    //
+    // HERE, and not later: after the sheets and their presentation state exist
+    // (so every aligned vector is the right length and rotates with them), and
+    // BEFORE anything anchored by sheet index is created for the pulled sheets
+    // -- tables, charts, CF/DV, controls, slicers, pivots. Everything below is
+    // placed at the FINAL indices, so none of it needs re-keying.
+    let partition = crate::sheets::restore_partition_invariant(
+        state,
+        effect,
+        slicer_state,
+        timeline_state,
+        ribbon_filter_state,
+    )?;
+    // Position i -> the local index the i-th pulled sheet finally lives at.
+    // This is also what an application-relative sheet POSITION resolves
+    // through (pivot `source_sheet_index`, control-script bindings), because
+    // publish canonicalizes both to the sheet's position in the application.
+    let pulled_indices: Vec<usize> = pulled_index_range
+        .clone()
+        .map(|appended| {
+            partition
+                .as_ref()
+                .and_then(|old_to_new| old_to_new.get(appended).copied())
+                .unwrap_or(appended)
+        })
+        .collect();
+    // application sheet id -> FINAL local index. Named ranges, CF/DV, tables,
+    // controls, slicers, timelines and floating ranges carry the un-remapped
+    // APPLICATION sheet id, so they resolve through this.
+    let pkg_to_index: std::collections::HashMap<SheetId, usize> = result
+        .sheets
+        .iter()
+        .zip(pulled_indices.iter())
+        .map(|(p, &idx)| (p.package_sheet_id, idx))
+        .collect();
+    // LOCAL sheet id -> FINAL local index, for charts and sparklines, whose
+    // `sheet_id` pull.rs already remapped to the pulled sheet's local id.
+    let chart_sheet_index: std::collections::HashMap<SheetId, usize> = result
+        .sheets
+        .iter()
+        .zip(pulled_indices.iter())
+        .map(|(p, &idx)| (p.sheet.id, idx))
+        .collect();
 
     // WHICH SHEET THE USER SHOULD LAND ON — answered here, where the true
     // state-vector indices are known, rather than reconstructed by the caller
@@ -4010,9 +5326,12 @@ pub(crate) fn materialize_pull_result(
     // "Sheet 'Raw' is hidden and cannot be activated", which both call sites
     // swallow into a `console.warn` — the dialog closed, the tabs appeared, and
     // the user was left on their own sheet with nothing said.
+    //
+    // AFTER THE PARTITION REPAIR too, for the same reason: it is the pulled
+    // sheets' FINAL indices that the caller activates.
     let first_pulled_user_sheet: Option<usize> = {
         let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
-        pulled_index_range.clone().find(|&i| {
+        pulled_indices.iter().copied().find(|&i| {
             crate::sheets::is_user_sheet(&visibility, i)
                 && crate::sheets::sheet_is_visible(&visibility, i)
         })
@@ -4029,9 +5348,15 @@ pub(crate) fn materialize_pull_result(
     let scripts_pulled = result.object_scripts.len();
     if !result.object_scripts.is_empty() {
         let mut scripts = state.object_scripts.write(&effect).map_err(|e| e.to_string())?;
-        for script in result.object_scripts {
+        for mut script in result.object_scripts {
             // Don't overwrite existing scripts with the same ID (subscriber may have modified)
             if !scripts.iter().any(|s| s.id == script.id) {
+                // A control binding arrives naming the control's sheet by its
+                // POSITION in the application; bind it to where that sheet
+                // landed here, or to nothing.
+                rebind_pulled_control_script(&mut script, |position| {
+                    pulled_indices.get(position).copied()
+                });
                 sub_objects.push(sub_object(
                     "objectScript",
                     script.id.clone(),
@@ -4045,16 +5370,40 @@ pub(crate) fn materialize_pull_result(
     // Materialize pulled charts onto their (remapped) sheet index, so the
     // subscriber sees the report's charts in-app. Don't overwrite a chart the
     // subscriber already has by id.
+    //
+    // A CHART'S DATA SOURCES NAME THEIR SHEET BY ID, and on a SUBSCRIBE that id
+    // is the publisher's -- a sheet that exists nowhere in this workbook, so
+    // every pulled chart would say its source sheet no longer exists. Each ref
+    // is rewritten to the pulled sheet's LOCAL id and index (a ref naming a
+    // sheet this pull did not bring is left alone and stays honestly broken).
+    //
+    // A CHECKOUT is skipped outright: it preserves the application's sheet ids,
+    // so the ids already match, and a rewrite would re-serialize the spec with
+    // reordered keys -- a spurious change in the next push's diff.
     if !result.charts.is_empty() {
+        let chart_ref_map: std::collections::HashMap<SheetId, (SheetId, usize)> = result
+            .sheets
+            .iter()
+            .zip(pulled_indices.iter())
+            .map(|(p, &idx)| (p.package_sheet_id, (p.sheet.id, idx)))
+            .collect();
         let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
         for chart in result.charts {
             if let Some(&sheet_index) = chart_sheet_index.get(&chart.sheet_id) {
                 if !charts.iter().any(|c| c.id == chart.id) {
                     sub_objects.push(sub_object("chart", chart.id.to_string(), String::new()));
+                    let spec_json = match mode {
+                        MaterializeMode::Subscribe => calp::chart_refs::remap_chart_spec_sheet_ids(
+                            &chart.spec_json,
+                            &chart_ref_map,
+                        )
+                        .unwrap_or(chart.spec_json),
+                        MaterializeMode::Checkout => chart.spec_json,
+                    };
                     charts.push(crate::api_types::ChartEntry {
                         id: chart.id,
                         sheet_index,
-                        spec_json: chart.spec_json,
+                        spec_json,
                     });
                 }
             }
@@ -4431,6 +5780,37 @@ pub(crate) fn materialize_pull_result(
         sub_objects.push(sub_object("slicer", id.clone(), name.clone()));
     }
 
+    // Materialize pulled TIMELINE slicers onto their (remapped) local sheet --
+    // shared with the refresh path, slicer semantics: APPLICATION sheet ids,
+    // dropped when the sheet was not pulled, skipped when the subscriber
+    // already has the id. The pivot a timeline filters keeps its stable id
+    // through the application, so the binding holds once that pivot restores
+    // below.
+    let applied_timelines = materialize_pulled_timeline_slicers(
+        &effect,
+        timeline_state,
+        &result.timeline_slicers,
+        |sid| pkg_to_index.get(&sid).copied(),
+    )?;
+    for (id, name) in &applied_timelines {
+        sub_objects.push(sub_object("timelineSlicer", id.clone(), name.clone()));
+    }
+
+    // Materialize pulled FLOATING RANGE object rows: both the host and the
+    // backing sheet id arrive as APPLICATION ids and are bound to the local
+    // sheets they landed on. The backing sheet itself already arrived above as
+    // an ordinary sheet with visibility "object"; the row is what makes it a
+    // floating range rather than an orphaned hidden sheet.
+    let applied_floating_ranges = materialize_pulled_floating_ranges(
+        &effect,
+        &state,
+        &result.floating_ranges,
+        |sid| pkg_to_index.get(&sid).copied(),
+    )?;
+    for (id, name) in &applied_floating_ranges {
+        sub_objects.push(sub_object("floatingRange", id.clone(), name.clone()));
+    }
+
     // Materialize pulled ribbon filters (Wave A) — workbook-scoped, BI-only.
     // Filters whose data source is not embedded in the application are skipped
     // (they could never re-bind on this machine); id/name collisions are
@@ -4533,23 +5913,39 @@ pub(crate) fn materialize_pull_result(
     crate::bi::writeback_source::invalidate_writeback_bi();
 
     // Restore pivot definitions from the application and render to grid.
-    // The source_sheet_index in each definition is relative to the publisher's
-    // workbook. We need to offset it by the number of sheets that existed
-    // before the pull (since pulled sheets are appended).
+    // Publish canonicalizes each definition's source_sheet_index to the
+    // sheet's POSITION in the application, so position i resolves to where the
+    // i-th pulled sheet finally landed -- after the partition repair, which
+    // an "append offset" could not express.
     if !result.pivot_definitions.is_empty() {
-        let sheet_offset = {
-            let names = state.sheet_names.read().map_err(|e| e.to_string())?;
-            names.len() - sheets_pulled
-        };
         restore_pulled_pivots(
             &effect,
             &result.pivot_definitions,
             &result.bi_pivot_metadata,
             &state,
             &pivot_state,
-            sheet_offset,
+            &pulled_indices,
             &embedded_connection_ids,
             &sheet_rename_map,
+        );
+    }
+
+    // THE PULLED BACKING SHEETS' DEPENDENCY EDGES. A floating range's cells
+    // live on an object sheet that is never ACTIVE, and the active-sheet edge
+    // rebuild is the only other installer -- so without this a pulled floating
+    // range's formulas came back with their values and never recalculated
+    // again. Load, refresh and reset already call the one shared installer;
+    // subscribe and checkout did not. Holds no lock on entry.
+    crate::floating_range::register_object_sheet_edges(state);
+
+    // Tell the frontend what moved. The pull appended sheets and may have
+    // rotated them in front of an object tail, and it added floating ranges
+    // and timelines whose extensions reload only on this cascade (refresh
+    // announces the same one).
+    if let Some(window) = window {
+        crate::object_deps::announce_cascade(
+            window_app_handle(window),
+            crate::object_deps::ObjectKind::Sheet,
         );
     }
 
@@ -4659,11 +6055,12 @@ pub fn calp_checkout(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     slicer_state: State<'_, crate::slicer::SlicerState>,
-    // Kept in the signature though the additive checkout no longer resets them:
-    // removing a Tauri command parameter is a wire change, and these two are the
-    // stores a future non-additive path would need again.
+    // Kept in the signature though the additive checkout no longer resets it:
+    // removing a Tauri command parameter is a wire change, and this is the
+    // store a future non-additive path would need again.
     _user_files_state: State<'_, crate::persistence::UserFilesState>,
-    _timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
+    // The application's timeline slicers materialize into this store.
+    timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     params: CheckoutParams,
     window: tauri::Window,
 ) -> Result<CheckoutResponse, String> {
@@ -4787,6 +6184,7 @@ pub fn calp_checkout(
         &ribbon_filter_state,
         &pane_control_state,
         &slicer_state,
+        &timeline_slicer_state,
         result,
         MaterializeMode::Checkout,
         Some(&window),
@@ -5450,6 +6848,7 @@ pub fn calp_browse_workspace(
                 .map(|vm| vm.sheets.iter().map(|s| SheetInfo {
                     name: s.name.clone(),
                     description: s.description.clone(),
+                    kind: s.kind.clone(),
                 }).collect())
                 .unwrap_or_default();
 
@@ -5803,6 +7202,7 @@ pub fn calp_inspect_application(
         sheets: manifest.sheets.iter().map(|s| SheetInfo {
             name: s.name.clone(),
             description: s.description.clone(),
+            kind: s.kind.clone(),
         }).collect(),
         scripts: manifest.object_scripts.iter().map(|s| InspectedScript {
             name: s.name.clone(),
@@ -6061,10 +7461,29 @@ pub fn calp_get_application_objects(
     pane_control_state: State<crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     slicer_state: State<crate::slicer::SlicerState>,
+    timeline_slicer_state: State<crate::timeline_slicer::TimelineSlicerState>,
     package_name: String,
     window: tauri::Window,
 ) -> Result<ApplicationObjectsResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // Timeline and floating-range presence, snapshotted FIRST and released:
+    // the floating-range store is taken before `sheet_ids` everywhere
+    // (`reassert_object_sheet_markers`), so it must not be taken below, where
+    // `sheet_ids` is already held.
+    let timeline_sheets: std::collections::HashMap<String, usize> = timeline_slicer_state
+        .timelines
+        .read()
+        .map_err(|e| e.to_string())?
+        .values()
+        .map(|t| (t.id.to_string(), t.sheet_index))
+        .collect();
+    let floating_range_hosts: std::collections::HashMap<String, SheetId> = state
+        .floating_ranges
+        .read()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|fr| (fr.id.to_string(), fr.host_sheet_id))
+        .collect();
     let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
     let Some(sub) = subs
         .subscriptions
@@ -6194,6 +7613,24 @@ pub fn calp_get_application_objects(
                     .iter()
                     .position(|id| id.to_string() == o.id)
                     .map(|idx| (true, sheet_name_at(idx)))
+                    .unwrap_or((false, String::new())),
+                // Timelines resolve their sheet like slicers.
+                "timelineSlicer" => timeline_sheets
+                    .get(&o.id)
+                    .map(|&idx| (true, sheet_name_at(idx)))
+                    .unwrap_or((false, String::new())),
+                // A floating range is present while its row is; it is shown on
+                // its HOST sheet (its backing sheet is never a tab).
+                "floatingRange" => floating_range_hosts
+                    .get(&o.id)
+                    .map(|host| {
+                        let sheet = sheet_ids
+                            .iter()
+                            .position(|id| id == host)
+                            .map(sheet_name_at)
+                            .unwrap_or_default();
+                        (true, sheet)
+                    })
                     .unwrap_or((false, String::new())),
                 _ => (false, String::new()),
             };
@@ -7039,6 +8476,7 @@ pub fn calp_refresh_apply(
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     pane_control_state: State<crate::pane_control::PaneControlState>,
     slicer_state: State<crate::slicer::SlicerState>,
+    timeline_slicer_state: State<crate::timeline_slicer::TimelineSlicerState>,
     params: Option<RefreshApplyParams>,
     window: tauri::Window,
 ) -> Result<calp::refresh::RefreshResult, String> {
@@ -7158,68 +8596,10 @@ pub fn calp_refresh_apply(
         all_payloads
     };
 
-    // Resolve name collisions for NEW pulled sheets before materialization
-    // (Excel-style "Name (2)"): already-tracked sheets replace in place under
-    // their existing local name and are skipped; a single taken-list threads
-    // across payloads so two subscriptions adding the same name also resolve.
-    // (sheet_names is cloned and released before the subscriptions lock is
-    // taken — no lock-order coupling with the materialization block below.)
+    // Resolve every pulled sheet's NAME against this workbook, and refuse a
+    // reserved script id -- both BEFORE the effect, both read-only.
     let mut payloads = payloads;
-    // publisher's original sheet name -> this workbook's resolved name, per
-    // payload. CAPTURED BEFORE the collision pass, because
-    // `resolve_sheet_name_collisions` rewrites `ps.name` IN PLACE
-    // (`core/calp/src/pull.rs`) and `PulledSheet` has only the one name field —
-    // after it runs, the publisher's spelling is simply gone.
-    //
-    // A pivot anchors its output by sheet NAME, so without this map a v2-ADDED
-    // sheet that collided would send the publisher's pivot to the subscriber's
-    // OWN same-named sheet and write over it. The pull path has always captured
-    // these; the refresh path never had to until pivots were adopted.
-    let mut sheet_rename_maps: Vec<std::collections::HashMap<String, String>> =
-        Vec::with_capacity(payloads.len());
-    {
-        let mut taken = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
-        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
-        for payload in payloads.iter_mut() {
-            let skip: std::collections::HashSet<SheetId> = subs
-                .subscriptions
-                .get(payload.subscription_index)
-                .map(|sub| sub.sheets.iter().map(|s| s.package_sheet_id).collect())
-                .unwrap_or_default();
-            let original_names: Vec<String> = payload
-                .pull_result
-                .sheets
-                .iter()
-                .map(|ps| ps.name.clone())
-                .collect();
-            calp::pull::resolve_sheet_name_collisions(
-                &mut payload.pull_result.sheets,
-                &mut payload.pull_result.subscription.sheets,
-                &mut taken,
-                &skip,
-            );
-            sheet_rename_maps.push(
-                original_names
-                    .into_iter()
-                    .zip(payload.pull_result.sheets.iter())
-                    .filter(|(orig, ps)| *orig != ps.name)
-                    .map(|(orig, ps)| (orig, ps.name.clone()))
-                    .collect(),
-            );
-        }
-    }
-
-    // An UPDATE may not write into the host's reserved `__calcula_` id
-    // namespace either — a publisher who could not claim one at subscribe must
-    // not be able to claim one at v2, which is the version nobody re-reads.
-    // Before the effect, so a refused refresh leaves the workbook clean.
-    for payload in &payloads {
-        refuse_reserved_distributed_script_ids(
-            &payload.pull_result.package_name,
-            &payload.pull_result.module_scripts,
-            &payload.pull_result.notebooks,
-        )?;
-    }
+    let sheet_names_by_payload = prepare_refresh_payloads(&state, &mut payloads)?;
 
     // NOTHING TO DO IS NOT A MUTATION. `DocumentEffect::mutates` dirties at
     // construction, and this command used to build it as its first statement —
@@ -7250,6 +8630,211 @@ pub fn calp_refresh_apply(
     // pass took and released its locks.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
 
+    apply_refresh_payloads(
+        &state,
+        &effect,
+        &user_files_state,
+        &pivot_state,
+        &script_state,
+        &bi_state,
+        &ribbon_filter_state,
+        &pane_control_state,
+        &slicer_state,
+        &timeline_slicer_state,
+        payloads,
+        sheet_names_by_payload,
+        &resolutions,
+        &now,
+        Some(&window),
+    )
+}
+
+/// How one refreshed application's sheet NAMES resolve in this workbook.
+///
+/// A pivot anchors its destination AND its source by sheet NAME -- the
+/// publisher's name -- so a refresh has to translate every one of them into the
+/// name the same sheet carries HERE before resolving it. Built by
+/// `prepare_refresh_payloads`, consumed by `apply_refreshed_pivots`.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RefreshSheetNames {
+    /// Publisher's sheet name -> the sheet's CURRENT name in this workbook, for
+    /// every sheet of the payload that has a local counterpart: a tracked sheet
+    /// (through its local id, so a subscriber's rename is followed), a sheet
+    /// returning from a tombstone, a NEW sheet (its collision-resolved name), and
+    /// a DETACHED sheet (a source may still read it).
+    pub local_names: std::collections::HashMap<String, String>,
+    /// Publisher's names of the sheets an application object may NOT be
+    /// written onto here: the DETACHED ones (the subscriber took them) and a
+    /// tracked one whose local sheet no longer exists. A pivot aimed at one is
+    /// skipped -- it used to resolve by the publisher's name, i.e. onto whatever
+    /// sheet of the subscriber's own happened to share it.
+    pub blocked_destinations: std::collections::HashSet<String>,
+}
+
+impl RefreshSheetNames {
+    /// The local name for a publisher's sheet name, case-insensitively (a
+    /// case-only rename updates no pivot definition), or `None` when this
+    /// payload has no sheet by that name.
+    pub(crate) fn local_name(&self, publisher_name: &str) -> Option<&str> {
+        self.local_names
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(publisher_name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// May an application object be WRITTEN onto the sheet the publisher
+    /// calls `publisher_name`?
+    pub(crate) fn is_blocked_destination(&self, publisher_name: &str) -> bool {
+        self.blocked_destinations
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(publisher_name))
+    }
+}
+
+/// The READ-ONLY half of a refresh that runs BEFORE its `DocumentEffect`:
+/// resolve every pulled sheet's name against this workbook, and refuse a
+/// reserved script id.
+///
+/// THE NAME MAP COVERS EVERY SHEET, not only the new ones. It used to hold only
+/// the collision renames of sheets NEW in this version, so a TRACKED sheet that
+/// had been renamed on subscribe ("Data" -> "Data (2)", because the subscriber
+/// already had a "Data") had no entry at all -- and the v2 pivot anchored on
+/// the publisher's "Data" resolved to the SUBSCRIBER's own "Data", built its
+/// cache from their data and wrote its output over their cells, leaving the
+/// old output on "Data (2)" as stale numbers. Every tracked sheet (and every
+/// tombstoned one, which a version may bring back) now maps to its CURRENT
+/// local name through its local id, which also follows a subscriber's rename.
+///
+/// THE COLLISION PASS skips every sheet that already has a local counterpart --
+/// tracked, tombstoned and detached alike. A tombstoned sheet coming back used
+/// to be renamed against its OWN tab ("Data" -> "Data (2)"), which then sent its
+/// pivot nowhere.
+///
+/// LOCKS: `sheet_ids` and `sheet_names` are cloned and released, then
+/// `subscriptions` is read -- the documented `sheet_ids` -> `subscriptions`
+/// order, never both held.
+pub(crate) fn prepare_refresh_payloads(
+    state: &AppState,
+    payloads: &mut [calp::refresh::RefreshPayload],
+) -> Result<Vec<RefreshSheetNames>, String> {
+    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let mut taken: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    // The CURRENT names, before `taken` starts growing with this pass's.
+    let current_names = taken.clone();
+    let name_of = |local_sid: SheetId| -> Option<String> {
+        sheet_ids
+            .iter()
+            .position(|id| *id == local_sid)
+            .and_then(|idx| current_names.get(idx).cloned())
+    };
+
+    let mut by_payload: Vec<RefreshSheetNames> = Vec::with_capacity(payloads.len());
+    {
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+        for payload in payloads.iter_mut() {
+            let mut names = RefreshSheetNames::default();
+            // CAPTURED BEFORE the collision pass: `resolve_sheet_name_collisions`
+            // rewrites `ps.name` IN PLACE (`core/calp/src/pull.rs`) and
+            // `PulledSheet` has only the one name field -- after it runs, the
+            // publisher's spelling is simply gone.
+            let original_names: Vec<String> = payload
+                .pull_result
+                .sheets
+                .iter()
+                .map(|ps| ps.name.clone())
+                .collect();
+            let mut skip: std::collections::HashSet<SheetId> = std::collections::HashSet::new();
+            if let Some(sub) = subs.subscriptions.get(payload.subscription_index) {
+                for (pulled, original) in payload.pull_result.sheets.iter().zip(original_names.iter()) {
+                    let package_sid = pulled.package_sheet_id;
+                    if sub.detached_sheets.contains(&package_sid) {
+                        skip.insert(package_sid);
+                        names.blocked_destinations.insert(original.clone());
+                        if let Some(name) = sub
+                            .detached_local_sheets
+                            .iter()
+                            .find(|d| d.package_sheet_id == package_sid)
+                            .and_then(|d| name_of(d.local_sheet_id))
+                        {
+                            names.local_names.insert(original.clone(), name);
+                        }
+                        continue;
+                    }
+                    let tracked = sub.sheets.iter().any(|s| s.package_sheet_id == package_sid)
+                        || sub
+                            .upstream_removed_sheets
+                            .iter()
+                            .any(|s| s.package_sheet_id == package_sid);
+                    if !tracked {
+                        continue; // NEW in this version: the collision pass names it
+                    }
+                    skip.insert(package_sid);
+                    match name_of(refresh_local_sheet_id(sub, pulled)) {
+                        Some(name) => {
+                            names.local_names.insert(original.clone(), name);
+                        }
+                        None => {
+                            names.blocked_destinations.insert(original.clone());
+                        }
+                    }
+                }
+            }
+            calp::pull::resolve_sheet_name_collisions(
+                &mut payload.pull_result.sheets,
+                &mut payload.pull_result.subscription.sheets,
+                &mut taken,
+                &skip,
+            );
+            for (pulled, original) in payload.pull_result.sheets.iter().zip(original_names) {
+                if !skip.contains(&pulled.package_sheet_id) {
+                    names.local_names.insert(original, pulled.name.clone());
+                }
+            }
+            by_payload.push(names);
+        }
+    }
+
+    // An UPDATE may not write into the host's reserved `__calcula_` id
+    // namespace either — a publisher who could not claim one at subscribe must
+    // not be able to claim one at v2, which is the version nobody re-reads.
+    // Before the effect, so a refused refresh leaves the workbook clean.
+    for payload in payloads.iter() {
+        refuse_reserved_distributed_script_ids(
+            &payload.pull_result.package_name,
+            &payload.pull_result.module_scripts,
+            &payload.pull_result.notebooks,
+        )?;
+    }
+    Ok(by_payload)
+}
+
+/// Everything `calp_refresh_apply` does once the payloads are pulled, verified
+/// and name-resolved and its `DocumentEffect` exists -- WITHOUT the window, so
+/// the whole orchestration (sheet append, presentation state, the partition
+/// repair, the per-payload index maps, every materializer, the override rebase,
+/// the recalculation) can be driven by a test. `window` is `None` in a test,
+/// which means "no frontend to notify" and nothing else.
+///
+/// `sheet_names_by_payload` comes from `prepare_refresh_payloads` and is
+/// aligned with `payloads`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_refresh_payloads(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::types::PivotState,
+    script_state: &crate::scripting::types::ScriptState,
+    bi_state: &BiState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_slicer_state: &crate::timeline_slicer::TimelineSlicerState,
+    payloads: Vec<calp::refresh::RefreshPayload>,
+    sheet_names_by_payload: Vec<RefreshSheetNames>,
+    resolutions: &[CellResolution],
+    now: &str,
+    window: Option<&tauri::Window>,
+) -> Result<calp::refresh::RefreshResult, String> {
     // Materialize new/updated sheets into grids.
     let active_grid_after_materialize = {
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
@@ -7326,7 +8911,7 @@ pub fn calp_refresh_apply(
                             // `restore_spill_extents_for_sheet` sweeps the index
                             // before installing the incoming sheet's extents.
                             crate::spill_restore::restore_spill_extents_for_sheet(
-                                state.inner(),
+                                state,
                                 grid_idx,
                                 &pulled.sheet,
                             );
@@ -7340,7 +8925,7 @@ pub fn calp_refresh_apply(
                     all_cw.push(pulled.sheet.column_widths.clone());
                     all_rh.push(pulled.sheet.row_heights.clone());
                     crate::spill_restore::restore_spill_extents_for_sheet(
-                        state.inner(),
+                        state,
                         grids.len() - 1,
                         &pulled.sheet,
                     );
@@ -7353,18 +8938,23 @@ pub fn calp_refresh_apply(
         // grids[active] can legitimately lag behind it (BUG-0016) — an
         // unconditional sync would regress unrefreshed active-sheet content.
         // (sheet_ids and subs are the guards already held by this block.)
+        //
+        // "Refreshed" is decided through `refresh_local_sheet_id`, the ONE rule
+        // every refresh consumer uses -- so a sheet coming back from a TOMBSTONE,
+        // which the block above replaced in place, counts. It used to be looked
+        // up in `sub.sheets` alone, which no longer holds a tombstoned sheet: a
+        // returner that was the active sheet had its grid replaced while the
+        // mirror kept the old content, and the next recalculation copied the
+        // stale mirror back over it. A detached sheet is never refreshed.
         let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         let active_was_refreshed = sheet_ids.get(active).map_or(false, |active_sid| {
             payloads.iter().any(|payload| {
-                let sub = match subs.subscriptions.get(payload.subscription_index) {
-                    Some(s) => s,
-                    None => return false,
+                let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
+                    return false;
                 };
                 payload.pull_result.sheets.iter().any(|pulled| {
-                    sub.sheets.iter().any(|s| {
-                        s.package_sheet_id == pulled.package_sheet_id
-                            && s.local_sheet_id == *active_sid
-                    })
+                    !sub.detached_sheets.contains(&pulled.package_sheet_id)
+                        && refresh_local_sheet_id(sub, pulled) == *active_sid
                 })
             })
         });
@@ -7382,34 +8972,65 @@ pub fn calp_refresh_apply(
         *state.grid.write(&effect).map_err(|e| e.to_string())? = grid;
     }
 
+    // Materialize refreshed sheet presentation state (merges, freeze panes,
+    // tab color, visibility, gridlines, page setup, notes, hyperlinks, kind)
+    // with reset semantics — the publisher owns a subscribed sheet's
+    // presentation — and keep the index-aligned per-sheet stores aligned for
+    // sheets this refresh appended. The refresh analog of the calp_pull
+    // materialization.
+    //
+    // HERE, BEFORE THE PARTITION REPAIR: a sheet this refresh APPENDED lands
+    // behind the workbook's object tail (the application's own floating ranges
+    // from an earlier version are enough), and every aligned vector has to be
+    // the right length for the rotation below to carry it along.
+    {
+        // One map PER PAYLOAD (see `refresh_pkg_to_index`), aligned with it.
+        let appended_maps = refresh_pkg_to_index(state, &payloads)?;
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        for (payload, appended_pkg_to_index) in payloads.iter().zip(appended_maps.iter()) {
+            let pairs: Vec<(SheetId, &persistence::Sheet)> = payload
+                .pull_result
+                .sheets
+                .iter()
+                .map(|p| (p.package_sheet_id, &p.sheet))
+                .collect();
+            materialize_pulled_sheet_state(state, effect, &pairs, appended_pkg_to_index, active)?;
+        }
+    }
+
+    // THE PARTITION INVARIANT: user sheets a contiguous prefix, object sheets
+    // at the tail. BEFORE anything anchored by sheet index is written for the
+    // refreshed sheets below (names, CF/DV, tables, charts, controls, ...), so
+    // all of it lands at the final indices. Objects an EARLIER version placed on
+    // a sheet the rotation moves are re-anchored by the helper itself.
+    crate::sheets::restore_partition_invariant(
+        state,
+        effect,
+        slicer_state,
+        timeline_slicer_state,
+        ribbon_filter_state,
+    )?;
+
     // Map each refreshed application sheet id -> its LOCAL sheet index, so named
     // ranges + CF/DV (which carry un-remapped APPLICATION sheet ids) materialize onto
-    // the right sheet. Updated sheets resolve via the subscription's local_sheet_id
-    // (still the pre-refresh mapping here); new sheets were just appended under
-    // their own fresh local id (pulled.sheet.id). Runs AFTER sheet materialization
-    // and BEFORE apply_refresh moves `payloads`.
-    let cfdv_pkg_to_index: std::collections::HashMap<SheetId, usize> = {
-        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
-        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
-        let mut map = std::collections::HashMap::new();
-        for payload in &payloads {
-            let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
-                continue;
-            };
-            for pulled in &payload.pull_result.sheets {
-                let local_sid = sub
-                    .sheets
-                    .iter()
-                    .find(|s| s.package_sheet_id == pulled.package_sheet_id)
-                    .map(|s| s.local_sheet_id)
-                    .unwrap_or(pulled.sheet.id); // new sheet: its own fresh local id
-                if let Some(idx) = sheet_ids.iter().position(|id| *id == local_sid) {
-                    map.insert(pulled.package_sheet_id, idx);
-                }
-            }
-        }
-        map
-    };
+    // the right sheet. ONE rule for the local id (`refresh_local_sheet_id`):
+    // the subscription's record, else the tombstone of a returning sheet, else
+    // the fresh id a NEW sheet was just appended under. The tombstone arm was
+    // missing here, so a sheet coming back from an earlier version's removal
+    // was replaced in place and then lost its charts, CF/DV and named ranges.
+    // Built AFTER the partition repair, so the indices are final; BEFORE
+    // apply_refresh moves `payloads`.
+    //
+    // ONE MAP PER PAYLOAD, `pkg_maps[i]` for `payloads[i]`, and every
+    // materializer below takes its own payload's map: an application sheet id
+    // is only unique within one application, so a merged map handed two
+    // subscriptions that share a package sheet id each other's objects.
+    let pkg_maps: Vec<std::collections::HashMap<SheetId, usize>> =
+        refresh_pkg_to_index(state, &payloads)?;
+    // Every local index some payload refreshed -- the reset set of the
+    // RESET-then-apply stores below.
+    let refreshed_indices: std::collections::HashSet<usize> =
+        pkg_maps.iter().flat_map(|m| m.values().copied()).collect();
 
     // Materialize refreshed named ranges + CF/DV — the refresh analog of the
     // calp_pull materialization. Without this a refresh delivers v2 sheets/scripts
@@ -7422,13 +9043,13 @@ pub fn calp_refresh_apply(
         // without provenance, so removals don't propagate — a known limit.)
         if payloads.iter().any(|p| !p.pull_result.named_ranges.is_empty()) {
             let mut names = state.named_ranges.write(&effect).map_err(|e| e.to_string())?;
-            for payload in &payloads {
+            for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
                 for nr in &payload.pull_result.named_ranges {
                     names.insert(
                         nr.name.to_uppercase(),
                         crate::named_ranges::NamedRange {
                             name: nr.name.clone(),
-                            sheet_index: nr.sheet_id.and_then(|sid| cfdv_pkg_to_index.get(&sid).copied()),
+                            sheet_index: nr.sheet_id.and_then(|sid| pkg_to_index.get(&sid).copied()),
                             refers_to: nr.refers_to.clone(),
                             comment: None,
                             folder: None,
@@ -7447,18 +9068,15 @@ pub fn calp_refresh_apply(
         // CF/DV: RESET each refreshed sheet's per-sheet entry, then apply v2's, so
         // rules the publisher added/changed/removed in v2 all land (extend would
         // duplicate across refreshes since refreshed sheets keep their local id).
-        let refreshed_indices: std::collections::HashSet<usize> =
-            cfdv_pkg_to_index.values().copied().collect();
-
         let mut max_cf_id: u64 = 0;
         {
             let mut store = state.conditional_formats.write(&effect).map_err(|e| e.to_string())?;
             for idx in &refreshed_indices {
                 store.remove(idx);
             }
-            for payload in &payloads {
+            for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
                 for entry in &payload.pull_result.conditional_formats {
-                    if let Some(&idx) = cfdv_pkg_to_index.get(&entry.sheet_id) {
+                    if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
                         if let Ok(defs) = serde_json::from_value::<
                             Vec<crate::conditional_formatting::ConditionalFormatDefinition>,
                         >(entry.rules.clone())
@@ -7483,9 +9101,9 @@ pub fn calp_refresh_apply(
             for idx in &refreshed_indices {
                 store.remove(idx);
             }
-            for payload in &payloads {
+            for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
                 for entry in &payload.pull_result.data_validations {
-                    if let Some(&idx) = cfdv_pkg_to_index.get(&entry.sheet_id) {
+                    if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
                         if let Ok(ranges) = serde_json::from_value::<
                             Vec<crate::data_validation::ValidationRange>,
                         >(entry.ranges.clone())
@@ -7507,9 +9125,9 @@ pub fn calp_refresh_apply(
             for idx in &refreshed_indices {
                 store.remove(idx);
             }
-            for payload in &payloads {
+            for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
                 for entry in &payload.pull_result.comments {
-                    if let Some(&idx) = cfdv_pkg_to_index.get(&entry.sheet_id) {
+                    if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
                         if let Ok(threads) = serde_json::from_value::<
                             Vec<crate::comments::Comment>,
                         >(entry.comments.clone())
@@ -7529,9 +9147,9 @@ pub fn calp_refresh_apply(
             for idx in &refreshed_indices {
                 store.remove(idx);
             }
-            for payload in &payloads {
+            for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
                 for entry in &payload.pull_result.scenarios {
-                    if let Some(&idx) = cfdv_pkg_to_index.get(&entry.sheet_id) {
+                    if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
                         if let Ok(mut scenarios) = serde_json::from_value::<
                             Vec<crate::api_types::Scenario>,
                         >(entry.scenarios.clone())
@@ -7550,9 +9168,9 @@ pub fn calp_refresh_apply(
             for idx in &refreshed_indices {
                 store.remove(idx);
             }
-            for payload in &payloads {
+            for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
                 for entry in &payload.pull_result.outlines {
-                    if let Some(&idx) = cfdv_pkg_to_index.get(&entry.sheet_id) {
+                    if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
                         if let Ok(outline) = serde_json::from_value::<
                             crate::grouping::SheetOutline,
                         >(entry.outline.clone())
@@ -7572,11 +9190,11 @@ pub fn calp_refresh_apply(
                 .write(&effect)
                 .map_err(|e| e.to_string())?;
             store.retain(|_, b| !refreshed_indices.contains(&b.sheet_index));
-            for payload in &payloads {
+            for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
                 crate::cell_behaviors::materialize_saved_cell_behaviors(
                     &payload.pull_result.cell_behaviors,
                     &mut store,
-                    |sid| cfdv_pkg_to_index.get(&sid).copied(),
+                    |sid| pkg_to_index.get(&sid).copied(),
                 );
             }
         }
@@ -7585,46 +9203,33 @@ pub fn calp_refresh_apply(
     // Cell types (distribution brick 4): refresh analog of the calp_pull
     // materialization — RESET each refreshed sheet's assignments then apply the
     // new version's, mirroring CF/DV so publisher add/change/remove all land.
+    // Per payload, through its own map, like everything else here.
     {
-        let refreshed_indices: std::collections::HashSet<usize> =
-            cfdv_pkg_to_index.values().copied().collect();
         let mut cell_types = state.cell_types.write(&effect).map_err(|e| e.to_string())?;
         cell_types.retain(|(si, _, _), _| !refreshed_indices.contains(si));
-        let saved: Vec<persistence::SavedSheetCellTypes> = payloads
-            .iter()
-            .flat_map(|p| p.pull_result.custom_objects.iter())
-            .filter(|co| co.kind == "cellType")
-            .filter_map(|co| {
-                co.package_sheet_id.map(|sid| persistence::SavedSheetCellTypes {
-                    sheet_id: sid,
-                    cells: co.payload.clone(),
-                })
-            })
-            .collect();
-        crate::cell_types::materialize_saved_cell_types(
-            &saved,
-            &mut cell_types,
-            |sid| cfdv_pkg_to_index.get(&sid).copied(),
-        );
-    }
-
-    // Materialize refreshed sheet presentation state (merges, freeze panes,
-    // tab color, visibility, gridlines, page setup, notes, hyperlinks) with
-    // reset semantics — the publisher owns a subscribed sheet's presentation —
-    // and keep the index-aligned per-sheet stores aligned for sheets this
-    // refresh appended. The refresh analog of the calp_pull materialization.
-    {
-        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
-        for payload in &payloads {
-            let pairs: Vec<(SheetId, &persistence::Sheet)> = payload
+        for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
+            let saved: Vec<persistence::SavedSheetCellTypes> = payload
                 .pull_result
-                .sheets
+                .custom_objects
                 .iter()
-                .map(|p| (p.package_sheet_id, &p.sheet))
+                .filter(|co| co.kind == "cellType")
+                .filter_map(|co| {
+                    co.package_sheet_id.map(|sid| persistence::SavedSheetCellTypes {
+                        sheet_id: sid,
+                        cells: co.payload.clone(),
+                    })
+                })
                 .collect();
-            materialize_pulled_sheet_state(&state, &effect, &pairs, &cfdv_pkg_to_index, active)?;
+            crate::cell_types::materialize_saved_cell_types(
+                &saved,
+                &mut cell_types,
+                |sid| pkg_to_index.get(&sid).copied(),
+            );
         }
     }
+
+    // (The refreshed sheets' presentation state was materialized above, before
+    // the partition repair.)
 
     // Provenance-ledger updates accumulated per subscription while payloads
     // are still borrowable; merged into the subscriptions after apply_refresh.
@@ -7670,59 +9275,33 @@ pub fn calp_refresh_apply(
                 }
             }
         }
-        for payload in &payloads {
+        for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
             materialize_pulled_tables(
                 &effect,
                 &state,
                 &payload.pull_result.tables,
-                &cfdv_pkg_to_index,
+                pkg_to_index,
                 Some(entries),
             )?;
         }
     }
 
     // Charts: same ledger-scoped replace, so v2 charts actually land on
-    // refresh (previously a subscriber stayed on v1 charts forever). Chart
-    // sheet ids in the payload are the FRESH local ids this pull minted; map
-    // fresh id -> application id -> existing local index.
+    // refresh (previously a subscriber stayed on v1 charts forever). Each
+    // chart lands on -- and its data sources are re-pointed at -- the OLD
+    // local sheet of its application sheet (`apply_refreshed_charts`).
     {
+        // Snapshotted and released before the subscriptions and chart locks.
+        let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
         for payload in &payloads {
             let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
                 continue;
             };
-            let owned: std::collections::HashSet<String> = sub
-                .objects
-                .iter()
-                .filter(|o| o.kind == "chart")
-                .map(|o| o.id.clone())
-                .collect();
-            charts.retain(|c| !owned.contains(&c.id.to_string()));
-            let fresh_to_pkg: std::collections::HashMap<SheetId, SheetId> = payload
-                .pull_result
-                .sheets
-                .iter()
-                .map(|p| (p.sheet.id, p.package_sheet_id))
-                .collect();
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
-            for chart in &payload.pull_result.charts {
-                let Some(pkg_sid) = fresh_to_pkg.get(&chart.sheet_id) else {
-                    continue;
-                };
-                let Some(&idx) = cfdv_pkg_to_index.get(pkg_sid) else {
-                    continue;
-                };
-                if !charts.iter().any(|c| c.id == chart.id) {
-                    entries.push(ledger_entry("chart", chart.id.to_string(), String::new()));
-                    charts.push(crate::api_types::ChartEntry {
-                        id: chart.id,
-                        sheet_index: idx,
-                        spec_json: chart.spec_json.clone(),
-                    });
-                }
-            }
+            apply_refreshed_charts(&mut charts, sub, &payload.pull_result, &sheet_ids, entries);
         }
     }
 
@@ -7735,12 +9314,11 @@ pub fn calp_refresh_apply(
     // never the applications' own (v1 or just-landed v2) names, which would
     // shadow the applications' own same-named pane controls.
     let on_grid_snapshot = {
-        let refreshed: std::collections::HashSet<usize> =
-            cfdv_pkg_to_index.values().copied().collect();
+        let refreshed = &refreshed_indices;
         {
             let mut sparklines = state.sparklines.write(&effect).map_err(|e| e.to_string())?;
             sparklines.retain(|e| !refreshed.contains(&e.sheet_index));
-            for payload in &payloads {
+            for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
                 let fresh_to_pkg: std::collections::HashMap<SheetId, SheetId> = payload
                     .pull_result
                     .sheets
@@ -7749,7 +9327,7 @@ pub fn calp_refresh_apply(
                     .collect();
                 for sp in &payload.pull_result.sparklines {
                     let Some(pkg_sid) = fresh_to_pkg.get(&sp.sheet_id) else { continue };
-                    let Some(&idx) = cfdv_pkg_to_index.get(pkg_sid) else { continue };
+                    let Some(&idx) = pkg_to_index.get(pkg_sid) else { continue };
                     sparklines.push(crate::api_types::SparklineEntry {
                         sheet_index: idx,
                         groups_json: sp.groups_json.clone(),
@@ -7800,18 +9378,20 @@ pub fn calp_refresh_apply(
             // snapshot_on_grid_controls here would re-lock and deadlock);
             // released with this scope, before the pane/filter locks below.
             let snapshot = controls.clone();
-            for (payload, sanitized) in payloads.iter().zip(admitted_controls.iter()) {
+            for ((payload, sanitized), pkg_to_index) in
+                payloads.iter().zip(admitted_controls.iter()).zip(pkg_maps.iter())
+            {
                 // Same admission as first pull: distributed onSelect wiring
                 // (inline script source) never materializes, and a legacy
                 // application's inline base64 arrives as a media handle.
                 crate::controls::materialize_saved_controls(
                     sanitized,
                     &mut controls,
-                    |sid| cfdv_pkg_to_index.get(&sid).copied(),
+                    |sid| pkg_to_index.get(&sid).copied(),
                 );
                 let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
                 for entry in &payload.pull_result.controls {
-                    if let Some(&idx) = cfdv_pkg_to_index.get(&entry.sheet_id) {
+                    if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
                         if let Some(local_sid) = sheet_ids.get(idx) {
                             entries.push(ledger_entry(
                                 "controlSheet",
@@ -7903,8 +9483,8 @@ pub fn calp_refresh_apply(
     // application's own slicers (from the provenance ledger; subscriber-authored
     // ones are never in it), then re-add the new version's set through the
     // SAME materializer calp_pull uses. Slicers carry APPLICATION sheet ids
-    // (CF/DV semantics), so cfdv_pkg_to_index resolves the local sheet.
-    // Computed properties of removed slicers are dropped with them.
+    // (CF/DV semantics), so their payload's own `pkg_maps` entry resolves the
+    // local sheet. Computed properties of removed slicers are dropped with them.
     {
         {
             let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
@@ -7934,7 +9514,7 @@ pub fn calp_refresh_apply(
                 }
             }
         }
-        for payload in &payloads {
+        for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
             // Same sanitization as first pull: distributed computed-property
             // formulas never materialize.
             let applied = materialize_pulled_slicers(
@@ -7942,11 +9522,66 @@ pub fn calp_refresh_apply(
                 &state,
                 &slicer_state,
                 &sanitize_distributed_slicers(&payload.pull_result.slicers),
-                |sid| cfdv_pkg_to_index.get(&sid).copied(),
+                |sid| pkg_to_index.get(&sid).copied(),
             )?;
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
             for (id, name) in applied {
                 entries.push(ledger_entry("slicer", id, name));
+            }
+        }
+    }
+
+    // Timeline slicers and floating ranges: the same ledger-scoped REPLACE,
+    // through the same materializers a first pull uses. Both carry
+    // APPLICATION sheet ids, so their payload's own map resolves the local
+    // sheets (a floating range needs BOTH its host and its backing sheet). Like
+    // every re-materialized kind their fresh ledger entries are the full truth,
+    // so neither is carried forward in the ledger merge below.
+    {
+        let owned_by_payload: Vec<(std::collections::HashSet<String>, std::collections::HashSet<String>)> = {
+            let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+            payloads
+                .iter()
+                .map(|payload| {
+                    let owned = |kind: &str| -> std::collections::HashSet<String> {
+                        subs.subscriptions
+                            .get(payload.subscription_index)
+                            .map(|sub| {
+                                sub.objects
+                                    .iter()
+                                    .filter(|o| o.kind == kind)
+                                    .map(|o| o.id.clone())
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
+                    (owned("timelineSlicer"), owned("floatingRange"))
+                })
+                .collect()
+        };
+        for ((payload, (owned_timelines, owned_ranges)), pkg_to_index) in
+            payloads.iter().zip(owned_by_payload.iter()).zip(pkg_maps.iter())
+        {
+            let applied_timelines = replace_refreshed_timeline_slicers(
+                &effect,
+                &timeline_slicer_state,
+                owned_timelines,
+                &payload.pull_result.timeline_slicers,
+                |sid| pkg_to_index.get(&sid).copied(),
+            )?;
+            let applied_ranges = replace_refreshed_floating_ranges(
+                &effect,
+                &state,
+                owned_ranges,
+                &payload.pull_result.floating_ranges,
+                |sid| pkg_to_index.get(&sid).copied(),
+            )?;
+            let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
+            for (id, name) in applied_timelines {
+                entries.push(ledger_entry("timelineSlicer", id, name));
+            }
+            for (id, name) in applied_ranges {
+                entries.push(ledger_entry("floatingRange", id, name));
             }
         }
     }
@@ -8145,8 +9780,7 @@ pub fn calp_refresh_apply(
                 })
                 .collect()
         };
-        let empty_rename_map: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
+        let no_names = RefreshSheetNames::default();
         for (i, payload) in payloads.iter().enumerate() {
             let previously_provided = prior_pivot_ledgers
                 .get(i)
@@ -8160,7 +9794,7 @@ pub fn calp_refresh_apply(
                 &payload.pull_result.pivot_definitions,
                 &payload.pull_result.bi_pivot_metadata,
                 &ds_to_conn,
-                sheet_rename_maps.get(i).unwrap_or(&empty_rename_map),
+                sheet_names_by_payload.get(i).unwrap_or(&no_names),
                 &previously_provided,
                 Some(entries),
             );
@@ -8180,7 +9814,19 @@ pub fn calp_refresh_apply(
     // per-cell ids yet), so matching is positional — correct when upstream
     // updates values in place; upstream row/column insertions are a known
     // limitation until applications carry cell-level ids.
+    //
+    // WHICH sheets were refreshed is `refresh_local_sheet_id`'s answer, the one
+    // rule every refresh consumer uses: a sheet coming back from a TOMBSTONE is
+    // one of them (its grid was replaced in place above), so its overrides are
+    // rebased and re-overlaid and it is recalculated. It used to be looked up in
+    // `sub.sheets` alone, which no longer holds a tombstoned sheet -- the
+    // returner came back as pristine upstream content with the subscriber's
+    // edits silently gone from the grid and never recalculated. A detached
+    // sheet is not refreshed; a local id no sheet carries (a detached sheet's
+    // fresh pull id) is skipped. `sheet_ids` is snapshotted first: the order
+    // is `sheet_ids` before `subscriptions`.
     let (upstream_values, refreshed_sheet_ids) = {
+        let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let layer = state.override_layer.read().map_err(|e| e.to_string())?;
         let id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
@@ -8193,10 +9839,13 @@ pub fn calp_refresh_apply(
                 continue;
             };
             for pulled in &payload.pull_result.sheets {
-                let Some(sheet_sub) = sub.sheets.iter()
-                    .find(|s| s.package_sheet_id == pulled.package_sheet_id)
-                else { continue };
-                let local_sid = sheet_sub.local_sheet_id;
+                if sub.detached_sheets.contains(&pulled.package_sheet_id) {
+                    continue;
+                }
+                let local_sid = refresh_local_sheet_id(sub, pulled);
+                if !sheet_ids.contains(&local_sid) {
+                    continue;
+                }
                 sheets.insert(local_sid);
                 for ovr in layer.overrides_for_sheet(local_sid) {
                     let pos = id_reg
@@ -8214,10 +9863,29 @@ pub fn calp_refresh_apply(
     };
 
     // Collect each payload's refreshed script set before the payloads move
-    // into apply_refresh below.
+    // into apply_refresh below -- with every CONTROL binding bound to where its
+    // sheet lives here. A binding names its control's sheet by its POSITION in
+    // the application (publish canonicalizes it), so position i resolves
+    // through the i-th pulled sheet; a sheet that resolves nowhere (detached,
+    // or not in this version) orphans the binding.
     let script_updates: Vec<(String, Vec<persistence::SavedObjectScript>)> = payloads
         .iter()
-        .map(|p| (p.pull_result.package_name.clone(), p.pull_result.object_scripts.clone()))
+        .zip(pkg_maps.iter())
+        .map(|(p, pkg_to_index)| {
+            let position_to_local: Vec<Option<usize>> = p
+                .pull_result
+                .sheets
+                .iter()
+                .map(|ps| pkg_to_index.get(&ps.package_sheet_id).copied())
+                .collect();
+            let mut scripts = p.pull_result.object_scripts.clone();
+            for script in scripts.iter_mut() {
+                rebind_pulled_control_script(script, |position| {
+                    position_to_local.get(position).copied().flatten()
+                });
+            }
+            (p.pull_result.package_name.clone(), scripts)
+        })
         .collect();
 
     // C8: likewise collect the refreshed standalone module scripts + notebooks
@@ -8254,7 +9922,7 @@ pub fn calp_refresh_apply(
         &mut subs.subscriptions,
         &mut layer,
         &upstream_values,
-        &now,
+        now,
     );
 
 
@@ -8275,7 +9943,7 @@ pub fn calp_refresh_apply(
     // block this thread forever, which is the rule `apply_override_value_to_grid`
     // documents for the same reason.
     let mut conflicts_resolved = 0usize;
-    for r in &resolutions {
+    for r in resolutions {
         // Was this actually a conflict? `accept_upstream` is `remove_override`,
         // which succeeds for ANY override present, including one `rebase`
         // deliberately left un-conflicted. Counting those would decrement a
@@ -8469,7 +10137,9 @@ pub fn calp_refresh_apply(
     if any_custom_functions_changed {
         // Re-install the live UDF registry NOW — without this, refreshed
         // custom-function formulas stay stale/#NAME? until a reopen.
-        let _ = tauri::Emitter::emit(&window, "custom-functions:refresh", ());
+        if let Some(window) = window {
+            let _ = tauri::Emitter::emit(window, "custom-functions:refresh", ());
+        }
     }
 
     // Complete the provenance ledger with the script kinds recorded above at
@@ -8624,10 +10294,12 @@ pub fn calp_refresh_apply(
     // AFTER the recalculation, never before: the event makes the frontend
     // re-read the sheet list and refetch the grid, and refetching mid-recalc
     // shows half-evaluated cells.
-    crate::object_deps::announce_cascade(
-        window_app_handle(&window),
-        crate::object_deps::ObjectKind::Sheet,
-    );
+    if let Some(window) = window {
+        crate::object_deps::announce_cascade(
+            window_app_handle(window),
+            crate::object_deps::ObjectKind::Sheet,
+        );
+    }
 
     // Audit (B4)
     {
@@ -8923,20 +10595,61 @@ pub(crate) fn sheet_provenance_rows(state: &AppState) -> Result<Vec<SheetProvena
 /// store: an edit on a subscribed sheet already wrote through to the grid and
 /// merely recorded baseline+current alongside. What detaching discards is the
 /// ability to revert to upstream — which is what detaching MEANS.
+///
+/// DETACHING CLAIMS THE OBJECTS ON THE SHEET TOO. The subscription's ledger rows
+/// for every application object that lives on the detached sheet -- its charts,
+/// tables, slicers, timelines, pivots, control sheet and the floating ranges it
+/// hosts -- are dropped, so the next refresh's ledger-scoped replace (which
+/// deletes every OWNED id and re-adds only what resolves onto a still-subscribed
+/// sheet) no longer deletes them from a sheet the user now owns. Each claimed
+/// floating range's BACKING sheet is detached with it: its cells are the
+/// range's, and a refresh would otherwise keep rewriting them from upstream
+/// under a host the user took.
+///
+/// Where each detached sheet lives is recorded (`detached_local_sheets`) so a
+/// chart that stays subscribed but READS the detached sheet keeps reading it.
 #[tauri::command]
 pub fn calp_detach_sheet(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     params: DetachSheetParams,
     window: tauri::Window,
 ) -> Result<DetachSheetResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    detach_sheet_inner(&state, &file_state, params.sheet_index)
+    detach_sheet_inner(
+        &state,
+        &file_state,
+        &pivot_state,
+        &slicer_state,
+        &timeline_slicer_state,
+        params.sheet_index,
+    )
+}
+
+/// Record where a detached application sheet lives (`detached_local_sheets`),
+/// once per package sheet id.
+fn record_detached_local_sheet(
+    sub: &mut calp::manifest::Subscription,
+    package_sheet_id: SheetId,
+    local_sheet_id: SheetId,
+) {
+    sub.detached_local_sheets.retain(|d| d.package_sheet_id != package_sheet_id);
+    sub.detached_local_sheets.push(calp::manifest::DetachedSheet {
+        package_sheet_id,
+        local_sheet_id,
+        extra: std::collections::HashMap::new(),
+    });
 }
 
 pub(crate) fn detach_sheet_inner(
     state: &AppState,
     file_state: &crate::persistence::FileState,
+    pivot_state: &crate::pivot::types::PivotState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     sheet_index: usize,
 ) -> Result<DetachSheetResponse, String> {
     let (local_sid, sheet_name) = {
@@ -8947,6 +10660,72 @@ pub(crate) fn detach_sheet_inner(
             .ok_or_else(|| format!("Sheet index {} is out of range.", sheet_index))?;
         (sid, names.get(sheet_index).cloned().unwrap_or_default())
     };
+    // An OBJECT sheet is detached through its host, never on its own: detaching
+    // a floating range's backing alone would leave the host subscribed, and the
+    // next refresh would re-create the range over a sheet upstream no longer
+    // speaks for.
+    let visibility: Vec<String> = state.sheet_visibility.read().map_err(|e| e.to_string())?.clone();
+    crate::sheets::ensure_user_sheet(&visibility, sheet_index, "detach")?;
+
+    // WHAT LIVES ON THE SHEET, snapshotted store by store, each lock released
+    // before the next and ALL of them before `subscriptions` is taken below --
+    // the object stores are never held together with it.
+    let claimed_charts: std::collections::HashSet<String> = state
+        .charts
+        .read()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .filter(|c| c.sheet_index == sheet_index)
+        .map(|c| c.id.to_string())
+        .collect();
+    let claimed_tables: std::collections::HashSet<String> = state
+        .tables
+        .read()
+        .map_err(|e| e.to_string())?
+        .get(&sheet_index)
+        .map(|tables| tables.keys().map(|id| id.to_string()).collect())
+        .unwrap_or_default();
+    let claimed_slicers: std::collections::HashSet<String> = slicer_state
+        .slicers
+        .read()
+        .map_err(|e| e.to_string())?
+        .values()
+        .filter(|s| s.sheet_index == sheet_index)
+        .map(|s| s.id.to_string())
+        .collect();
+    let claimed_timelines: std::collections::HashSet<String> = timeline_state
+        .timelines
+        .read()
+        .map_err(|e| e.to_string())?
+        .values()
+        .filter(|t| t.sheet_index == sheet_index)
+        .map(|t| t.id.to_string())
+        .collect();
+    // Floating ranges HOSTED here: (row id, its backing sheet's local id).
+    let hosted_ranges: Vec<(String, SheetId)> = state
+        .floating_ranges
+        .read()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .filter(|fr| fr.host_sheet_id == local_sid)
+        .map(|fr| (fr.id.to_string(), fr.backing_sheet_id))
+        .collect();
+    let claimed_ranges: std::collections::HashSet<String> =
+        hosted_ranges.iter().map(|(id, _)| id.clone()).collect();
+    // Pivots anchor their output by sheet NAME.
+    let claimed_pivots: std::collections::HashSet<String> = pivot_state
+        .pivot_tables
+        .read()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .filter(|(_, (def, _))| {
+            def.destination_sheet
+                .as_deref()
+                .is_some_and(|dest| dest.eq_ignore_ascii_case(&sheet_name))
+        })
+        .map(|(id, _)| id.to_string())
+        .collect();
+    let control_sheet_id = local_sid.to_string();
 
     // GATE AND MUTATION IN ONE CRITICAL SECTION. Tauri dispatches on a thread
     // pool, so a read-then-drop-then-write would be a TOCTOU window in which a
@@ -8989,6 +10768,9 @@ pub(crate) fn detach_sheet_inner(
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let mut subs = pending.authorize(&effect);
 
+    // Every local sheet this detach claims: the sheet itself, and the backing
+    // sheet of each floating range it hosts.
+    let mut claimed_sheets: Vec<SheetId> = vec![local_sid];
     let subscription_removed = {
         let sub = &mut subs.subscriptions[sub_index];
         sub.sheets.retain(|s| s.local_sheet_id != local_sid);
@@ -8999,6 +10781,49 @@ pub(crate) fn detach_sheet_inner(
         if !sub.detached_sheets.contains(&package_sheet_id) {
             sub.detached_sheets.push(package_sheet_id);
         }
+        record_detached_local_sheet(sub, package_sheet_id, local_sid);
+
+        // ...and the application objects that live on it (see the header).
+        sub.objects.retain(|o| {
+            let claimed = match o.kind.as_str() {
+                "chart" => claimed_charts.contains(&o.id),
+                "table" => claimed_tables.contains(&o.id),
+                "slicer" => claimed_slicers.contains(&o.id),
+                "timelineSlicer" => claimed_timelines.contains(&o.id),
+                "floatingRange" => claimed_ranges.contains(&o.id),
+                "pivot" => claimed_pivots.contains(&o.id),
+                "controlSheet" => o.id == control_sheet_id,
+                _ => false,
+            };
+            !claimed
+        });
+
+        // Each hosted floating range's BACKING sheet goes with its host.
+        for (_, backing_local) in &hosted_ranges {
+            let backing_package = sub
+                .sheets
+                .iter()
+                .find(|s| s.local_sheet_id == *backing_local)
+                .map(|s| s.package_sheet_id)
+                .or_else(|| {
+                    sub.upstream_removed_sheets
+                        .iter()
+                        .find(|s| s.local_sheet_id == *backing_local)
+                        .map(|s| s.package_sheet_id)
+                });
+            let Some(backing_package) = backing_package else {
+                continue; // not this application's sheet (the subscriber's own range)
+            };
+            sub.sheets.retain(|s| s.local_sheet_id != *backing_local);
+            sub.upstream_removed_sheets
+                .retain(|s| s.local_sheet_id != *backing_local);
+            if !sub.detached_sheets.contains(&backing_package) {
+                sub.detached_sheets.push(backing_package);
+            }
+            record_detached_local_sheet(sub, backing_package, *backing_local);
+            claimed_sheets.push(*backing_local);
+        }
+
         // Remove the whole row only when it owns NOTHING else. A library or
         // dataset subscription legitimately has zero sheets, so "no sheets ⇒
         // delete" would be wrong; "nothing left at all ⇒ delete" is not.
@@ -9013,7 +10838,7 @@ pub(crate) fn detach_sheet_inner(
     let overrides_dropped = {
         let mut layer = state.override_layer.write(&effect).map_err(|e| e.to_string())?;
         let before = layer.overrides.len();
-        layer.overrides.retain(|o| o.sheet_id != local_sid);
+        layer.overrides.retain(|o| !claimed_sheets.contains(&o.sheet_id));
         before - layer.overrides.len()
     };
 
@@ -9065,19 +10890,81 @@ pub struct DevSubscribeParams {
 pub fn calp_dev_subscribe(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: DevSubscribeParams,
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    // A dev subscribe materializes application sheets, tables and controls into THIS
-    // workbook and records the subscription -- all persisted, and nothing resets
-    // the flag afterwards the way `open_file` does.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let response = dev_subscribe_inner(
+        &state,
+        &file_state,
+        &slicer_state,
+        &timeline_slicer_state,
+        &ribbon_filter_state,
+        &params,
+    )?;
+    // The pull appended sheets, may have rotated them in front of an object
+    // tail, and may have added floating ranges -- the same announcement a real
+    // pull makes.
+    crate::object_deps::announce_cascade(
+        window_app_handle(&window),
+        crate::object_deps::ObjectKind::Sheet,
+    );
+    Ok(response)
+}
+
+/// A dev pull APPENDS its sheets, exactly like a real one, so it breaks the
+/// partition invariant the same way when the workbook already has an object
+/// tail -- and it now brings object sheets of its own (floating ranges). Repair
+/// it, and return `dev_map` (source sheet id -> local index) rebuilt through the
+/// rotation, exactly as `materialize_pull_result` rebuilds its maps.
+fn repair_dev_partition(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    dev_map: std::collections::HashMap<SheetId, usize>,
+) -> Result<std::collections::HashMap<SheetId, usize>, String> {
+    let partition = crate::sheets::restore_partition_invariant(
+        state,
+        effect,
+        slicer_state,
+        timeline_state,
+        ribbon_filter_state,
+    )?;
+    Ok(match partition {
+        Some(old_to_new) => dev_map
+            .into_iter()
+            .map(|(sid, idx)| (sid, old_to_new.get(idx).copied().unwrap_or(idx)))
+            .collect(),
+        None => dev_map,
+    })
+}
+
+/// `calp_dev_subscribe` without its window, so the dev path can be tested.
+pub(crate) fn dev_subscribe_inner(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    params: &DevSubscribeParams,
+) -> Result<PullResponse, String> {
     let source = std::path::Path::new(&params.source_path);
     let now = chrono::Utc::now().to_rfc3339();
 
     let result = calp::dev_mode::pull_dev(source, &params.sheet_names)
         .map_err(|e| e.to_string())?;
+
+    // A dev subscribe materializes application sheets, tables and controls into THIS
+    // workbook and records the subscription -- all persisted, and nothing resets
+    // the flag afterwards the way `open_file` does. AFTER the pull, which is the
+    // one step that can refuse: a missing or unreadable source must leave a
+    // clean workbook clean.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
 
     let sheets_pulled = result.sheets.len();
 
@@ -9110,7 +10997,7 @@ pub fn calp_dev_subscribe(
             all_rh.push(pulled.sheet.row_heights.clone());
             // Dev preview = subscriber fidelity, spill ownership included.
             crate::spill_restore::restore_spill_extents_for_sheet(
-                state.inner(),
+                state,
                 grids.len() - 1,
                 &pulled.sheet,
             );
@@ -9123,7 +11010,7 @@ pub fn calp_dev_subscribe(
     // and the lexer upper-cases bare identifiers, so a dev preview would show
     // the author `=BUDGETTOTAL` where their workbook says `=BudgetTotal`. Dev
     // preview claims subscriber fidelity; this is part of that claim.
-    crate::persistence::restamp_workbook_name_casing(&state, &effect);
+    crate::persistence::restamp_workbook_name_casing(state, &effect);
 
     // Dev preview = subscriber fidelity: presentation state, tables and
     // controls materialize exactly like a real pull (controls sanitized the
@@ -9135,12 +11022,37 @@ pub fn calp_dev_subscribe(
             .iter()
             .map(|p| (p.source_sheet_id, &p.sheet))
             .collect();
-        materialize_pulled_sheet_state(&state, &effect, &pairs, &dev_map, active)?;
+        materialize_pulled_sheet_state(state, &effect, &pairs, &dev_map, active)?;
     }
+    // THE PARTITION REPAIR, after the presentation state (every aligned vector
+    // is the right length) and before anything anchored by index is placed.
+    let dev_map = repair_dev_partition(
+        state,
+        &effect,
+        slicer_state,
+        timeline_state,
+        ribbon_filter_state,
+        dev_map,
+    )?;
     let mut dev_objects: Vec<calp::manifest::SubscribedObject> = Vec::new();
     let tables_pulled =
-        materialize_pulled_tables(&effect, &state, &result.tables, &dev_map, Some(&mut dev_objects))?;
-    materialize_dev_controls(&state, &effect, &result, &dev_map, &mut dev_objects)?;
+        materialize_pulled_tables(&effect, state, &result.tables, &dev_map, Some(&mut dev_objects))?;
+    materialize_dev_controls(state, &effect, &result, &dev_map, &mut dev_objects)?;
+    // The floating ranges whose object sheets the dev pull brought: without
+    // the rows those sheets were invisible orphans nothing could reach.
+    for (id, name) in materialize_pulled_floating_ranges(
+        &effect,
+        state,
+        &result.floating_ranges,
+        |sid| dev_map.get(&sid).copied(),
+    )? {
+        dev_objects.push(calp::manifest::SubscribedObject {
+            kind: "floatingRange".to_string(),
+            id,
+            name,
+            extra: std::collections::HashMap::new(),
+        });
+    }
 
     // Store the dev subscription (with the provenance ledger, so the Application
     // Explorer works for dev subscriptions too).
@@ -9154,6 +11066,9 @@ pub fn calp_dev_subscribe(
         let mut subs = state.subscriptions.write(&effect).map_err(|e| e.to_string())?;
         subs.subscriptions.push(subscription);
     }
+
+    // A backing sheet is never active, so nothing else installs its edges.
+    crate::floating_range::register_object_sheet_edges(state);
 
     Ok(PullResponse {
         package_name,
@@ -9226,12 +11141,34 @@ fn materialize_dev_controls(
 pub fn calp_dev_refresh(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    // Re-materializes the dev source over this workbook: same reasoning as
-    // `calp_dev_subscribe`.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let response = dev_refresh_inner(
+        &state,
+        &file_state,
+        &slicer_state,
+        &timeline_slicer_state,
+        &ribbon_filter_state,
+    )?;
+    crate::object_deps::announce_cascade(
+        window_app_handle(&window),
+        crate::object_deps::ObjectKind::Sheet,
+    );
+    Ok(response)
+}
+
+/// `calp_dev_refresh` without its window, so the dev path can be tested.
+pub(crate) fn dev_refresh_inner(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+) -> Result<PullResponse, String> {
     // Find the dev subscription.
     let (source_path, sub_index) = {
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
@@ -9250,21 +11187,39 @@ pub fn calp_dev_refresh(
     let now = chrono::Utc::now().to_rfc3339();
     let source = std::path::Path::new(&source_path);
 
-    // Determine which sheet names were originally requested (empty = all).
-    let sheet_names: Vec<String> = {
+    // Determine which sheet names were originally requested (empty = all), and
+    // the local ids this subscription already tracks.
+    let (sheet_names, tracked_ids): (Vec<String>, Vec<SheetId>) = {
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
-        subs.subscriptions[sub_index].sheets.iter()
-            .map(|s| s.local_name.clone())
-            .collect()
+        let sub = subs
+            .subscriptions
+            .get(sub_index)
+            .ok_or_else(|| "The dev subscription changed while refreshing -- please retry.".to_string())?;
+        (
+            sub.sheets.iter().map(|s| s.local_name.clone()).collect(),
+            sub.sheets.iter().map(|s| s.local_sheet_id).collect(),
+        )
     };
 
     let result = calp::dev_mode::pull_dev(source, &sheet_names)
         .map_err(|e| e.to_string())?;
 
+    // Re-materializes the dev source over this workbook: same reasoning as
+    // `calp_dev_subscribe`, and AFTER every step that can refuse (no dev
+    // subscription, an unreadable source) so a refusal leaves a clean workbook
+    // clean.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+
     let sheets_pulled = result.sheets.len();
     let package_name = format!("dev:{}", source_path);
 
     // Replace sheets already tracked by this subscription; append any new ones.
+    //
+    // MATCHED BY ID. A dev pull keeps the SOURCE's sheet ids and a dev
+    // subscribe materializes each sheet under exactly that id, so the id is the
+    // one stable key; the position-in-the-pull match this replaced wrote a
+    // grid over the wrong sheet the moment the pull's order and the ledger's
+    // disagreed (a floating range's backing sheet joins the pull at the end).
     let dev_map: std::collections::HashMap<SheetId, usize> = {
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
         let mut sheet_names_state = state.sheet_names.write(&effect).map_err(|e| e.to_string())?;
@@ -9272,15 +11227,9 @@ pub fn calp_dev_refresh(
         let mut shared_styles = state.style_registry.write(&effect).map_err(|e| e.to_string())?;
         let mut all_cw = state.all_column_widths.write(&effect).map_err(|e| e.to_string())?;
         let mut all_rh = state.all_row_heights.write(&effect).map_err(|e| e.to_string())?;
-        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
-        let sub = &subs.subscriptions[sub_index];
-
-        let old_sheet_ids: Vec<_> = sub.sheets.iter()
-            .map(|s| s.local_sheet_id)
-            .collect();
 
         let mut map = std::collections::HashMap::new();
-        for (i, pulled) in result.sheets.iter().enumerate() {
+        for pulled in &result.sheets {
             let (mut grid, local_styles) = pulled.sheet.to_grid();
 
             // Remap local style indices (cells AND row/column tiers) to the
@@ -9288,19 +11237,30 @@ pub fn calp_dev_refresh(
             let remap = shared_styles.merge_remap(&local_styles);
             grid.remap_style_indices(&remap);
 
-            if let Some(local_sid) = old_sheet_ids.get(i).copied() {
+            let existing = tracked_ids
+                .contains(&pulled.sheet.id)
+                .then(|| sheet_ids.iter().position(|id| *id == pulled.sheet.id))
+                .flatten();
+            if let Some(grid_idx) = existing {
                 // Replace the existing grid in-place.
-                if let Some(grid_idx) = sheet_ids.iter().position(|id| *id == local_sid) {
-                    grids[grid_idx] = grid;
-                    all_cw[grid_idx] = pulled.sheet.column_widths.clone();
-                    all_rh[grid_idx] = pulled.sheet.row_heights.clone();
-                    map.insert(pulled.source_sheet_id, grid_idx);
-                    crate::spill_restore::restore_spill_extents_for_sheet(
-                        state.inner(),
-                        grid_idx,
-                        &pulled.sheet,
-                    );
-                }
+                grids[grid_idx] = grid;
+                all_cw[grid_idx] = pulled.sheet.column_widths.clone();
+                all_rh[grid_idx] = pulled.sheet.row_heights.clone();
+                map.insert(pulled.source_sheet_id, grid_idx);
+                crate::spill_restore::restore_spill_extents_for_sheet(
+                    state,
+                    grid_idx,
+                    &pulled.sheet,
+                );
+            } else if sheet_ids.contains(&pulled.sheet.id) {
+                // The id is already a sheet here that this subscription does not
+                // track: never write over it, never add a second sheet under it.
+                crate::log_warn!(
+                    "CALP",
+                    "dev refresh: source sheet '{}' shares its id with a sheet this dev \
+                     subscription does not own -- skipped",
+                    pulled.name
+                );
             } else {
                 // New sheet added since last pull — append.
                 map.insert(pulled.source_sheet_id, grids.len());
@@ -9310,7 +11270,7 @@ pub fn calp_dev_refresh(
                 all_cw.push(pulled.sheet.column_widths.clone());
                 all_rh.push(pulled.sheet.row_heights.clone());
                 crate::spill_restore::restore_spill_extents_for_sheet(
-                    state.inner(),
+                    state,
                     grids.len() - 1,
                     &pulled.sheet,
                 );
@@ -9320,7 +11280,7 @@ pub fn calp_dev_refresh(
     };
 
     // §2t ON THE DISTRIBUTION PATH -- see `calp_pull`.
-    crate::persistence::restamp_workbook_name_casing(&state, &effect);
+    crate::persistence::restamp_workbook_name_casing(state, &effect);
 
     // Dev refresh mirrors the real refresh: presentation state resets to the
     // source's, this subscription's own tables are replaced with the new set,
@@ -9332,51 +11292,96 @@ pub fn calp_dev_refresh(
             .iter()
             .map(|p| (p.source_sheet_id, &p.sheet))
             .collect();
-        materialize_pulled_sheet_state(&state, &effect, &pairs, &dev_map, active)?;
+        materialize_pulled_sheet_state(state, &effect, &pairs, &dev_map, active)?;
     }
-    {
-        // Remove this dev subscription's ledger-owned tables, then re-add v2.
-        let owned: std::collections::HashSet<String> = {
-            let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
-            subs.subscriptions[sub_index]
-                .objects
-                .iter()
-                .filter(|o| o.kind == "table")
-                .map(|o| o.id.clone())
-                .collect()
+    // THE PARTITION REPAIR: a sheet this refresh appended sits behind the
+    // object tail until it runs (see `repair_dev_partition`).
+    let dev_map = repair_dev_partition(
+        state,
+        &effect,
+        slicer_state,
+        timeline_state,
+        ribbon_filter_state,
+        dev_map,
+    )?;
+    let (owned_tables, owned_ranges): (std::collections::HashSet<String>, std::collections::HashSet<String>) = {
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+        let owned = |kind: &str| -> std::collections::HashSet<String> {
+            subs.subscriptions
+                .get(sub_index)
+                .map(|sub| {
+                    sub.objects
+                        .iter()
+                        .filter(|o| o.kind == kind)
+                        .map(|o| o.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
         };
-        if !owned.is_empty() {
-            let mut tables = state.tables.write(&effect).map_err(|e| e.to_string())?;
-            let mut table_names = state.table_names.write(&effect).map_err(|e| e.to_string())?;
-            for sheet_tables in tables.values_mut() {
-                sheet_tables.retain(|id, t| {
-                    let keep = !owned.contains(&id.to_string());
-                    if !keep {
-                        table_names.remove(&t.name.to_uppercase());
-                    }
-                    keep
-                });
-            }
+        (owned("table"), owned("floatingRange"))
+    };
+    if !owned_tables.is_empty() {
+        // Remove this dev subscription's ledger-owned tables, then re-add v2.
+        let mut tables = state.tables.write(&effect).map_err(|e| e.to_string())?;
+        let mut table_names = state.table_names.write(&effect).map_err(|e| e.to_string())?;
+        for sheet_tables in tables.values_mut() {
+            sheet_tables.retain(|id, t| {
+                let keep = !owned_tables.contains(&id.to_string());
+                if !keep {
+                    table_names.remove(&t.name.to_uppercase());
+                }
+                keep
+            });
         }
     }
     let mut dev_objects: Vec<calp::manifest::SubscribedObject> = Vec::new();
     let tables_pulled =
-        materialize_pulled_tables(&effect, &state, &result.tables, &dev_map, Some(&mut dev_objects))?;
+        materialize_pulled_tables(&effect, state, &result.tables, &dev_map, Some(&mut dev_objects))?;
     {
         let refreshed: std::collections::HashSet<usize> = dev_map.values().copied().collect();
         let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
         controls.retain(|(sheet_idx, _, _), _| !refreshed.contains(sheet_idx));
     }
-    materialize_dev_controls(&state, &effect, &result, &dev_map, &mut dev_objects)?;
-
-    // Update the subscription timestamp + provenance ledger (a dev
-    // subscription only ever owns tables + control sheets, so wholesale
-    // replacement is accurate).
-    {
-        let mut subs = state.subscriptions.write(&effect).map_err(|e| e.to_string())?;
-        subs.subscriptions[sub_index].resolved_at = now;
-        subs.subscriptions[sub_index].objects = dev_objects;
+    materialize_dev_controls(state, &effect, &result, &dev_map, &mut dev_objects)?;
+    // Floating ranges: the same ledger-scoped REPLACE a real refresh runs.
+    for (id, name) in replace_refreshed_floating_ranges(
+        &effect,
+        state,
+        &owned_ranges,
+        &result.floating_ranges,
+        |sid| dev_map.get(&sid).copied(),
+    )? {
+        dev_objects.push(calp::manifest::SubscribedObject {
+            kind: "floatingRange".to_string(),
+            id,
+            name,
+            extra: std::collections::HashMap::new(),
+        });
     }
+
+    // Update the subscription timestamp, its sheet list and its provenance
+    // ledger. A dev subscription owns only tables, control sheets and floating
+    // ranges, so wholesale replacement of the ledger is accurate; and the sheet
+    // list is rebuilt from what this pull materialized (a dev pull keeps the
+    // source ids as the local ids), so a sheet the pull APPENDED -- a new
+    // floating range's backing sheet -- is tracked instead of re-appended by
+    // every later refresh.
+    {
+        let rebuilt = calp::dev_mode::make_dev_subscription(&source_path, &result, &now);
+        let mut subs = state.subscriptions.write(&effect).map_err(|e| e.to_string())?;
+        if let Some(sub) = subs.subscriptions.get_mut(sub_index) {
+            sub.resolved_at = now;
+            sub.objects = dev_objects;
+            sub.sheets = rebuilt
+                .sheets
+                .into_iter()
+                .filter(|s| dev_map.contains_key(&s.package_sheet_id))
+                .collect();
+        }
+    }
+
+    // A backing sheet is never active, so nothing else installs its edges.
+    crate::floating_range::register_object_sheet_edges(state);
 
     Ok(PullResponse {
         package_name,
@@ -14736,6 +16741,7 @@ mod writeback_rebuild_tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: Default::default(),
         }
@@ -16553,6 +18559,51 @@ pub fn calp_get_application_connection_skips(
         .map_err(|e| e.to_string())
 }
 
+/// A CARRIED canvas-pivot anchor's block, checked against THIS workbook: `None`
+/// when the whole 1024-column band of `destination`'s block is free of every
+/// OTHER generated region (`pivot` / `bi` / `report`) on `sheet_index`, else
+/// `Some` of a freshly allocated free block's anchor (or the allocator's
+/// refusal when the canvas is full).
+///
+/// A pulled or refreshed framed pivot keeps the publisher's anchor, which says
+/// nothing about the subscriber's canvas: one that already holds the
+/// subscriber's OWN pivots may have that block taken, and `check_pivot_overlap`
+/// tests the anchor CELL only -- a band collision would let two pivots write
+/// over each other's cells on a page nobody can see them on. The pivot's own
+/// region is not a collision (a refresh re-writes a pivot into its own block).
+///
+/// LOCKS: `protected_regions` alone for the check, released before the
+/// allocator takes it again. Callers may hold the grid locks (the pull path
+/// does, as `update_pivot_region` already requires) but never `protected_regions`.
+pub(crate) fn canvas_pivot_anchor_if_band_taken(
+    state: &AppState,
+    pivot_id: pivot_engine::PivotId,
+    sheet_index: usize,
+    destination: (u32, u32),
+) -> Option<Result<(u32, u32), String>> {
+    use crate::pivot::operations::CANVAS_PIVOT_BLOCK_COLS;
+    let first = (destination.1 / CANVAS_PIVOT_BLOCK_COLS) * CANVAS_PIVOT_BLOCK_COLS;
+    let last = first + (CANVAS_PIVOT_BLOCK_COLS - 1);
+    let taken = {
+        let regions = match state.protected_regions.lock() {
+            Ok(r) => r,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        regions.iter().any(|r| {
+            matches!(r.region_type.as_str(), "pivot" | "bi" | "report")
+                && r.sheet_index == sheet_index
+                && !(r.region_type == "pivot" && r.owner_id == pivot_id)
+                && r.start_col <= last
+                && r.end_col >= first
+        })
+    };
+    if taken {
+        Some(crate::pivot::operations::allocate_canvas_pivot_anchor(state, sheet_index))
+    } else {
+        None
+    }
+}
+
 /// Adopt a refreshed application's PIVOT definitions (owner decision, 2026-09-13).
 ///
 /// §2.z. `calp_refresh_apply` materialized twelve kinds out of the pull result
@@ -16601,10 +18652,11 @@ pub fn calp_get_application_connection_skips(
 ///    re-bind already builds from the live connections.
 ///
 /// 4. **The source sheet is resolved BY NAME, not by index.**
-///    `SavedPivotDefinition::source_sheet_index` is an index into the
-///    PUBLISHER's sheet list; the pull path can add `sheet_offset` because it
-///    appends contiguously, and refresh cannot, because it updates sheets in
-///    place. The name is already remapped by `sheet_rename_map`, and a miss
+///    `SavedPivotDefinition::source_sheet_index` is the source sheet's
+///    POSITION in the application; the pull path resolves it through where the
+///    i-th pulled sheet landed, and refresh cannot, because it updates sheets
+///    in place. The name is remapped through `sheet_names` (every application
+///    sheet's CURRENT local name, `prepare_refresh_payloads`), and a miss
 ///    degrades to an empty cache (visible, honest) rather than reading whatever
 ///    sheet happens to sit at that ordinal.
 ///
@@ -16614,6 +18666,20 @@ pub fn calp_get_application_connection_skips(
 ///    keyed by their own ids and never touched. A definition left behind would
 ///    keep rendering, and `calp_get_application_objects` would keep reporting
 ///    the application as providing a pivot it no longer ships.
+///
+/// A DESTINATION THE SUBSCRIBER DETACHED is skipped (`sheet_names`
+/// `blocked_destinations`) and is NOT withdrawn: that page is theirs now, and so
+/// is the pivot on it.
+///
+/// CANVAS PIVOTS (M6). A FRAMED definition lives only on a canvas and a
+/// frameless one never does; each is skipped loudly on the other kind. The frame
+/// is repaired on the way in (`CanvasFrame::sanitized`, the load rule). The
+/// framed anchor is the publisher's block, which on a canvas that already holds
+/// the subscriber's OWN pivots may be taken -- `check_pivot_overlap` would test
+/// the anchor cell only -- so a framed pivot whose 1024-column band collides with
+/// another generated region on that sheet is RE-ANCHORED to a free block
+/// (`allocate_canvas_pivot_anchor`) before it is written, in PHASE B, where the
+/// regions of the pivots this refresh already wrote are visible to the check.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_refreshed_pivots(
     effect: &crate::document_effect::DocumentEffect,
@@ -16622,7 +18688,7 @@ pub(crate) fn apply_refreshed_pivots(
     pivot_defs: &[persistence::SavedPivotDefinition],
     bi_pivot_metadata: &[serde_json::Value],
     ds_to_conn: &std::collections::HashMap<String, crate::bi::types::ConnectionId>,
-    sheet_rename_map: &std::collections::HashMap<String, String>,
+    sheet_names: &RefreshSheetNames,
     previously_provided: &std::collections::HashSet<String>,
     mut ledger: Option<&mut Vec<calp::manifest::SubscribedObject>>,
 ) {
@@ -16645,15 +18711,19 @@ pub(crate) fn apply_refreshed_pivots(
     }
     let mut planned: Vec<Planned> = Vec::new();
     let mut adopted: Vec<PivotId> = Vec::new();
+    // Pivots SKIPPED because their destination is a sheet the subscriber
+    // detached: never withdrawn below (the page, and the pivot on it, are
+    // theirs now).
+    let mut kept_on_detached: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     {
-        let sheet_names = match state.sheet_names.read() {
+        let workbook_names = match state.sheet_names.read() {
             Ok(sn) => sn.clone(),
             Err(_) => return,
         };
         // Each sheet's KIND, snapshotted alone (released before `grids`): a
-        // destination that resolves to a CANVAS is skipped exactly like one that
-        // does not resolve at all.
+        // destination of the wrong kind for the pivot is skipped exactly like
+        // one that does not resolve at all.
         let sheet_kinds: Vec<::persistence::SheetKind> = match state.sheet_kinds.read() {
             Ok(k) => k.clone(),
             Err(_) => return,
@@ -16672,19 +18742,36 @@ pub(crate) fn apply_refreshed_pivots(
                 }
             };
             let pivot_id = def.id;
+            // The LOAD-path repair for a carried frame: clamped, never refused.
+            def.canvas_frame = def.canvas_frame.map(|frame| frame.sanitized());
 
-            // Both anchors are sheet NAMES and both need the collision remap,
-            // or a v2-added sheet that was renamed on arrival would send the
-            // pivot to the subscriber's same-named sheet.
-            if let Some(ref dest) = def.destination_sheet {
-                if let Some(renamed) = sheet_rename_map.get(dest) {
-                    def.destination_sheet = Some(renamed.clone());
-                }
+            // A DETACHED destination: the subscriber took that sheet, so the
+            // application's pivot is not written onto it (see the header).
+            if def
+                .destination_sheet
+                .as_deref()
+                .is_some_and(|dest| sheet_names.is_blocked_destination(dest))
+            {
+                crate::log_warn!(
+                    "CALP",
+                    "refresh: pivot {} names destination sheet '{}', which this workbook detached \
+                     from the application -- skipped, and left as it is",
+                    pivot_id,
+                    def.destination_sheet.as_deref().unwrap_or("")
+                );
+                kept_on_detached.insert(pivot_id.to_string());
+                continue;
             }
-            if let Some(ref src) = def.source_sheet {
-                if let Some(renamed) = sheet_rename_map.get(src) {
-                    def.source_sheet = Some(renamed.clone());
-                }
+
+            // Both anchors are sheet NAMES -- the PUBLISHER's -- and both
+            // resolve through the name that sheet carries HERE, or a sheet that
+            // was renamed on arrival (or since, by the subscriber) would send
+            // the pivot to the subscriber's same-named sheet.
+            if let Some(local) = def.destination_sheet.as_deref().and_then(|d| sheet_names.local_name(d)) {
+                def.destination_sheet = Some(local.to_string());
+            }
+            if let Some(local) = def.source_sheet.as_deref().and_then(|s| sheet_names.local_name(s)) {
+                def.source_sheet = Some(local.to_string());
             }
             if saved.source_type == "bi" && def.source_range_display.is_none() {
                 def.source_range_display = Some("BI Model".to_string());
@@ -16695,7 +18782,7 @@ pub(crate) fn apply_refreshed_pivots(
             // updates no pivot definition, and an `.unwrap_or(0)` would write
             // the whole output over whatever the subscriber's first sheet is.
             let dest_name = def.destination_sheet.as_deref().unwrap_or("");
-            let Some(dest_sheet_idx) = sheet_names
+            let Some(dest_sheet_idx) = workbook_names
                 .iter()
                 .position(|n| n.eq_ignore_ascii_case(dest_name))
             else {
@@ -16708,12 +18795,25 @@ pub(crate) fn apply_refreshed_pivots(
                 );
                 continue;
             };
-            // A GRID pivot never materializes into a canvas's hidden grid.
-            if crate::sheets::is_canvas_sheet(&sheet_kinds, dest_sheet_idx) {
+            // THE KIND RULE, both halves: a GRID pivot never materializes into a
+            // canvas's hidden grid, and a FRAMED (canvas) pivot never anywhere
+            // but a canvas.
+            let on_canvas = crate::sheets::is_canvas_sheet(&sheet_kinds, dest_sheet_idx);
+            if on_canvas && def.canvas_frame.is_none() {
                 crate::log_warn!(
                     "CALP",
                     "refresh: pivot {} names destination sheet '{}', which is a canvas sheet \
                      here — a grid pivot is never written into a canvas, skipped",
+                    pivot_id,
+                    dest_name
+                );
+                continue;
+            }
+            if !on_canvas && def.canvas_frame.is_some() {
+                crate::log_warn!(
+                    "CALP",
+                    "refresh: pivot {} has a canvas frame and names destination sheet '{}', which \
+                     is a worksheet here — a canvas pivot lives only on a canvas, skipped",
                     pivot_id,
                     dest_name
                 );
@@ -16726,7 +18826,7 @@ pub(crate) fn apply_refreshed_pivots(
             let source_idx = def
                 .source_sheet
                 .as_deref()
-                .and_then(|n| sheet_names.iter().position(|s| s.eq_ignore_ascii_case(n)));
+                .and_then(|n| workbook_names.iter().position(|s| s.eq_ignore_ascii_case(n)));
             let mut cache = match source_idx.and_then(|i| grids.get(i)) {
                 Some(source_grid) => match build_cache_from_grid(
                     source_grid,
@@ -16755,12 +18855,13 @@ pub(crate) fn apply_refreshed_pivots(
     }
     // ---- every guard from PHASE A is dropped here ---------------------------
 
-    // Pivots this application provided before and does NOT ship in v2.
+    // Pivots this application provided before and does NOT ship in v2 -- never
+    // one kept on a detached sheet.
     let adopted_strs: std::collections::HashSet<String> =
         adopted.iter().map(|id| id.to_string()).collect();
     let withdrawn: Vec<String> = previously_provided
         .iter()
-        .filter(|id| !adopted_strs.contains(*id))
+        .filter(|id| !adopted_strs.contains(*id) && !kept_on_detached.contains(*id))
         .cloned()
         .collect();
 
@@ -16774,8 +18875,36 @@ pub(crate) fn apply_refreshed_pivots(
     // kinds) wrote nothing, so the region is NOT moved onto it. The definition
     // is still adopted below: the pivot exists, has no output, and a later
     // refresh or a delete settles it.
-    for p in &planned {
-        match update_pivot_in_grid(state, effect, p.def.id, p.dest_sheet_idx, p.def.destination, &p.view) {
+    for p in planned.iter_mut() {
+        if p.def.canvas_frame.is_some() {
+            // The publisher's block may be taken on THIS canvas (see the
+            // header). Checked here rather than in PHASE A so the regions of the
+            // pivots this loop has already written are part of the answer.
+            if let Some(anchor) =
+                canvas_pivot_anchor_if_band_taken(state, p.def.id, p.dest_sheet_idx, p.def.destination)
+            {
+                match anchor {
+                    Ok(free) => {
+                        crate::log_info!(
+                            "CALP",
+                            "refresh: canvas pivot {} re-anchored from {:?} to {:?}: its block is \
+                             taken on this canvas",
+                            p.def.id,
+                            p.def.destination,
+                            free
+                        );
+                        p.def.destination = free;
+                    }
+                    Err(refusal) => {
+                        crate::log_warn!("CALP", "refresh: canvas pivot {} not written: {}", p.def.id, refusal);
+                        continue;
+                    }
+                }
+            }
+        }
+        // `is_canvas_sheet` was decided in PHASE A from a snapshot; the funnel
+        // below re-checks the kind (and a framed pivot's block width) itself.
+        match update_pivot_in_grid(state, effect, p.def.id, p.dest_sheet_idx, p.def.destination, &p.view, p.def.canvas_frame.is_some()) {
             Ok(()) => update_pivot_region(state, p.def.id, p.dest_sheet_idx, p.def.destination, &p.view),
             Err(refusal) => crate::log_warn!("CALP", "refresh: pivot {} not written: {}", p.def.id, refusal),
         }
@@ -16899,13 +19028,31 @@ pub(crate) fn apply_refreshed_pivots(
 
 /// Restore pivot definitions from a pulled .calp application: deserialize, rebuild
 /// cache from source grid data, calculate the view, and write output cells.
+///
+/// CANVAS PIVOTS (M6) travel: a FRAMED definition is restored onto a canvas (and
+/// only onto one) with its frame repaired on the way in
+/// (`CanvasFrame::sanitized`), its view refused LOUDLY when wider than its block
+/// (`ensure_canvas_pivot_fits_block`), and its anchor re-allocated when its block
+/// is already taken on that canvas (`canvas_pivot_anchor_if_band_taken`). A
+/// frameless definition aimed at a canvas is skipped as before.
+///
+/// THE OUTPUT'S MERGES LAND. `write_pivot_to_grid` returns the merged header
+/// cells a pivot needs, and this path used to throw them away; they are
+/// collected and applied through `report::with_sheet_merges_mut` (the
+/// destination sheet's own merge set, or the mirror when it is active) AFTER the
+/// grid, pivot and style guards are dropped.
 pub(crate) fn restore_pulled_pivots(
     effect: &crate::document_effect::DocumentEffect,
     pivot_defs: &[persistence::SavedPivotDefinition],
     bi_pivot_metadata: &[serde_json::Value],
     state: &AppState,
     pivot_state: &crate::pivot::types::PivotState,
-    sheet_offset: usize,
+    // Where the i-th pulled sheet landed. A definition's `source_sheet_index`
+    // is the source sheet's POSITION in the application (publish canonicalizes
+    // it), so it resolves through this -- and a position no pulled sheet
+    // answers to resolves to nothing (an empty cache), never to some other
+    // sheet at that ordinal.
+    pulled_indices: &[usize],
     embedded_connection_ids: &std::collections::HashMap<String, crate::bi::types::ConnectionId>,
     sheet_rename_map: &std::collections::HashMap<String, String>,
 ) {
@@ -16960,6 +19107,11 @@ pub(crate) fn restore_pulled_pivots(
         Err(_) => return,
     };
 
+    // (destination sheet, the pivot's output box, the merges it needs) -- applied
+    // after every guard above is dropped.
+    let mut pending_merges: Vec<(usize, (u32, u32, u32, u32), Vec<crate::api_types::MergedRegion>)> =
+        Vec::new();
+
     for saved in pivot_defs {
         let mut def: PivotDefinition = match serde_json::from_value(saved.definition.clone()) {
             Ok(d) => d,
@@ -16970,6 +19122,8 @@ pub(crate) fn restore_pulled_pivots(
         };
 
         let pivot_id = def.id;
+        // The LOAD-path repair for a carried frame: clamped, never refused.
+        def.canvas_frame = def.canvas_frame.map(|frame| frame.sanitized());
 
         // The pivot anchors its output by sheet NAME. If collision resolution
         // renamed the pulled sheet ("Sheet1" -> "Sheet1 (2)"), rewrite the
@@ -16995,7 +19149,9 @@ pub(crate) fn restore_pulled_pivots(
 
         // Build cache — try grid data first (even for BI pivots, the application
         // includes a snapshot of the data), fall back to empty cache.
-        let source_sheet_idx = saved.source_sheet_index.map(|i| i + sheet_offset);
+        let source_sheet_idx = saved
+            .source_sheet_index
+            .and_then(|position| pulled_indices.get(position).copied());
         let (mut cache, _field_names) = if let Some(idx) = source_sheet_idx {
             if let Some(source_grid) = grids.get(idx) {
                 match build_cache_from_grid(
@@ -17046,9 +19202,14 @@ pub(crate) fn restore_pulled_pivots(
             );
             continue;
         };
-        // A GRID pivot never materializes into a canvas's hidden grid: no cells,
-        // no region, no definition -- the same skip as a name that misses.
-        if crate::sheets::is_canvas_sheet(&sheet_kinds, dest_sheet_idx) {
+        // THE KIND RULE, both halves, from the snapshot taken before `grids`
+        // (the same answer `ensure_canvas_destination` / `ensure_not_canvas`
+        // give, without taking `sheet_kinds` under the grid lock): a GRID pivot
+        // never materializes into a canvas's hidden grid, and a FRAMED pivot
+        // lives only on a canvas. Either miss is the same skip as a name that
+        // does not resolve: no cells, no region, no definition.
+        let on_canvas = crate::sheets::is_canvas_sheet(&sheet_kinds, dest_sheet_idx);
+        if on_canvas && def.canvas_frame.is_none() {
             crate::log_warn!(
                 "CALP",
                 "pulled pivot {} names destination sheet '{}', which is a canvas sheet — \
@@ -17058,15 +19219,50 @@ pub(crate) fn restore_pulled_pivots(
             );
             continue;
         }
+        if !on_canvas && def.canvas_frame.is_some() {
+            crate::log_warn!(
+                "CALP",
+                "pulled pivot {} has a canvas frame and names destination sheet '{}', which is a \
+                 worksheet — a canvas pivot lives only on a canvas, skipped",
+                pivot_id,
+                dest_sheet_name
+            );
+            continue;
+        }
+        if def.canvas_frame.is_some() {
+            // The carried anchor's block may already be taken on this canvas.
+            if let Some(anchor) =
+                canvas_pivot_anchor_if_band_taken(state, pivot_id, dest_sheet_idx, def.destination)
+            {
+                match anchor {
+                    Ok(free) => def.destination = free,
+                    Err(refusal) => {
+                        crate::log_warn!("CALP", "pulled canvas pivot {} skipped: {}", pivot_id, refusal);
+                        continue;
+                    }
+                }
+            }
+            // Never clipped, never spilled into the neighbouring block.
+            if let Err(refusal) =
+                crate::pivot::operations::ensure_canvas_pivot_fits_block(pivot_id, def.destination, &view)
+            {
+                crate::log_warn!("CALP", "pulled canvas pivot {} skipped: {}", pivot_id, refusal);
+                continue;
+            }
+        }
 
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
-            let _merged = write_pivot_to_grid(
+            let merges = write_pivot_to_grid(
                 dest_grid,
                 None, // no active_grid dual-write needed
                 &view,
                 def.destination,
                 &mut shared_styles,
             );
+            let (row, col) = def.destination;
+            let end_row = row + view.row_count.max(1) as u32 - 1;
+            let end_col = col + view.col_count.max(1) as u32 - 1;
+            pending_merges.push((dest_sheet_idx, (row, col, end_row, end_col), merges));
         }
 
         // Register the protected region so the frontend can discover this pivot
@@ -17074,6 +19270,25 @@ pub(crate) fn restore_pulled_pivots(
 
         // Store in PivotState
         pivot_tables.insert(pivot_id, (def, cache));
+    }
+
+    // EVERY GUARD DROPPED before the merge sets are touched:
+    // `with_sheet_merges_mut` takes `active_sheet` and a merge store itself.
+    drop(shared_styles);
+    drop(sheet_names);
+    drop(pivot_tables);
+    drop(grids);
+    for (dest_sheet_idx, (sr, sc, er, ec), merges) in pending_merges {
+        crate::report::with_sheet_merges_mut(state, effect, dest_sheet_idx, |merged| {
+            // A merge wholly inside the pivot's box was the old occupant's; the
+            // pivot's own replace it (the rule `update_pivot_in_grid` applies).
+            merged.retain(|m| {
+                !(m.start_row >= sr && m.end_row <= er && m.start_col >= sc && m.end_col <= ec)
+            });
+            for mr in merges {
+                merged.insert(mr);
+            }
+        });
     }
 
     // Restore BI pivot metadata, resolving connection_id from embedded data sources
@@ -19766,7 +21981,7 @@ pub(crate) const CALP_PUBLISH_COVERAGE: &[(&str, &str)] = &[
     ("slicers", "CARRIED: slicers.json, filtered to published sheets"),
     (
         "timeline_slicers",
-        "CARRIED: timeline_slicers.json. The timeline's EFFECT already travels as the 
+        "CARRIED: timeline_slicers.json, filtered to published sheets and to pivots the application carries. The timeline's EFFECT already travels as the 
          pivot's hidden_items/slicer_filters, so excluding the control while carrying 
          its filter would hand a subscriber a pivot pinned to the publisher's last 
          date range with no way to change it.",
@@ -19776,7 +21991,7 @@ pub(crate) const CALP_PUBLISH_COVERAGE: &[(&str, &str)] = &[
     ("notebooks", "CARRIED: notebooks/{id}.json — execution output stripped"),
     ("charts", "CARRIED: charts.json, sheet ids remapped on pull"),
     ("sparklines", "CARRIED: sparklines.json, sheet ids remapped on pull"),
-    ("floating_ranges", "EXCLUDED: 'floatingRanges' — the OBJECT rows do not distribute yet (v1 scope cut); the backing cell-store sheets DO travel (resolve_publish_sheet_indices auto-includes them with their host), so subscriber formulas referencing Float1!A1 stay live and the loss is the floating object's chrome, which compute_publish_report says"),
+    ("floating_ranges", "CARRIED: floating_ranges.json, the rows whose host AND backing sheet are published (resolve_publish_sheet_indices brings the backing sheet with its host); host and backing ids are bound to the subscriber's local sheets on pull"),
     ("named_ranges", "CARRIED: in the signed version manifest"),
     ("ribbon_filters", "CARRIED: ribbon_filters.json (workbook-scoped)"),
     ("pane_controls", "CARRIED: pane_controls.json (workbook-scoped)"),

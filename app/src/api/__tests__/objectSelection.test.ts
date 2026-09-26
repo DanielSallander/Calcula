@@ -139,3 +139,62 @@ describe("cycling order = paint order", () => {
     expect(order).toEqual(["k1", "k2", "c1", "c2"]);
   });
 });
+
+describe("cycling order = paint order, with a stacking order in force (M8)", () => {
+  it("follows z, not overlay priority -- the same order the renderer paints", async () => {
+    const { registerRegionStacking, stackedFloatingRegions } = await import("../gridOverlays");
+    cleanups.push(
+      registerGridOverlay({ type: "chart", render: () => {}, priority: 15 }),
+      registerGridOverlay({ type: "floating-control", render: () => {}, priority: 12 }),
+      registerObjectSelectionProvider(family(["chart"]).provider),
+      registerObjectSelectionProvider(family(["floating-control"]).provider),
+      registerRegionStacking((r) => ({ c1: 0, k1: 1 })[r.id]),
+    );
+    const regions = [region("k1", "floating-control"), region("c1", "chart"), region("k2", "floating-control")];
+    const order = selectableFloatingRegions(regions).map((r) => r.id);
+    // c1 (priority 15) placed under k1 (12); k2 has no place, so it is on top.
+    expect(order).toEqual(["c1", "k1", "k2"]);
+    expect(order).toEqual(stackedFloatingRegions(regions).map((r) => r.id));
+  });
+
+  it("ties in overlay priority break by REGISTRATION order, as the renderer walks them", () => {
+    cleanups.push(
+      registerGridOverlay({ type: "pivot-visual", render: () => {}, priority: 12 }),
+      registerGridOverlay({ type: "floating-control", render: () => {}, priority: 12 }),
+      registerObjectSelectionProvider(family(["pivot-visual"]).provider),
+      registerObjectSelectionProvider(family(["floating-control"]).provider),
+    );
+    // Published control first, box second: the renderer still paints every
+    // box (registered first) before every control.
+    const order = selectableFloatingRegions([region("k1", "floating-control"), region("p1", "pivot-visual")]).map((r) => r.id);
+    expect(order).toEqual(["p1", "k1"]);
+  });
+});
+
+describe("objectRefOf", () => {
+  it("dispatches to the owning provider's refOf", async () => {
+    const { objectRefOf } = await import("../objectSelection");
+    const charts = family(["chart"], { refOf: (r) => ({ kind: "chart", id: String(r.data?.chartId) }) });
+    cleanups.push(registerObjectSelectionProvider(charts.provider));
+    expect(objectRefOf({ ...region("c1", "chart"), data: { chartId: "7" } })).toEqual({ kind: "chart", id: "7" });
+  });
+
+  it("is null for an unowned type, a provider without refOf, or one that throws", async () => {
+    const { objectRefOf } = await import("../objectSelection");
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    cleanups.push(
+      registerObjectSelectionProvider(family(["plain"]).provider),
+      registerObjectSelectionProvider(
+        family(["bad"], {
+          refOf: () => {
+            throw new Error("boom");
+          },
+        }).provider,
+      ),
+    );
+    expect(objectRefOf(region("x", "unowned"))).toBeNull();
+    expect(objectRefOf(region("p", "plain"))).toBeNull();
+    expect(objectRefOf(region("b", "bad"))).toBeNull();
+    err.mockRestore();
+  });
+});

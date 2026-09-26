@@ -17,9 +17,11 @@
 //!      showing the old list — the same class of defect as the phantom tab.
 //!
 //! These are source-placement guards. What regressed here is the SHAPE of one
-//! very long command, and a behavioural test of it needs a signed workspace on
-//! disk and a Tauri `Window`; the ordering is what these pin, and each names the
-//! one-line change that makes it red.
+//! very long command; the ordering is what these pin, and each names the
+//! one-line change that makes it red. The command is now a thin wrapper over
+//! the window-free `apply_refresh_payloads`, which is where the resolution loop,
+//! the overlay and the announcement live -- and which the behavioural refresh
+//! tests in `calp_materialize_tests.rs` drive against a real signed workspace.
 
 /// The body of one function, comment-stripped.
 ///
@@ -71,9 +73,9 @@ fn at(hay: &str, needle: &str, what: &str) -> usize {
 /// line. Nothing fails to compile and no count changes — only the grid is wrong.
 #[test]
 fn the_resolution_loop_sits_between_the_rebase_and_the_overlay_snapshot() {
-    let body = body_of("pub fn calp_refresh_apply(");
+    let body = body_of("pub(crate) fn apply_refresh_payloads(");
     let rebase = at(&body, "calp::refresh::apply_refresh(", "the apply_refresh call");
-    let loop_at = at(&body, "for r in &resolutions", "the resolution loop");
+    let loop_at = at(&body, "for r in resolutions", "the resolution loop");
     let snapshot = at(&body, "let to_overlay", "the to_overlay snapshot");
 
     assert!(
@@ -98,7 +100,7 @@ fn the_resolution_loop_sits_between_the_rebase_and_the_overlay_snapshot() {
 /// It behaves identically today and stops tracking the pane's verb.
 #[test]
 fn resolution_goes_through_the_override_layers_own_verbs() {
-    let body = body_of("pub fn calp_refresh_apply(");
+    let body = body_of("pub(crate) fn apply_refresh_payloads(");
     assert!(
         body.contains("layer.accept_upstream("),
         "take-theirs stopped using OverrideLayer::accept_upstream"
@@ -119,8 +121,8 @@ fn resolution_goes_through_the_override_layers_own_verbs() {
 /// `state.override_layer.write(&effect)?.accept_upstream(...)`.
 #[test]
 fn the_resolution_loop_reuses_the_guard_it_is_already_holding() {
-    let body = body_of("pub fn calp_refresh_apply(");
-    let loop_start = at(&body, "for r in &resolutions", "the resolution loop");
+    let body = body_of("pub(crate) fn apply_refresh_payloads(");
+    let loop_start = at(&body, "for r in resolutions", "the resolution loop");
     let loop_end = at(&body, "let to_overlay", "the to_overlay snapshot");
     let section = &body[loop_start..loop_end];
     assert!(
@@ -227,6 +229,13 @@ fn refresh_apply_constructs_exactly_one_document_effect() {
     let body = body_of("pub fn calp_refresh_apply(");
     let n = body.matches("DocumentEffect::mutates(").count();
     assert_eq!(n, 1, "expected exactly one `mutates` arm, found {}", n);
+    // The orchestration the command hands its effect to must not mint another.
+    let helper = body_of("pub(crate) fn apply_refresh_payloads(");
+    assert_eq!(
+        helper.matches("DocumentEffect::mutates(").count(),
+        0,
+        "apply_refresh_payloads takes the command's effect; it must not construct its own"
+    );
 }
 
 /// A RESOLUTION RESOLVES A CONFLICT, and nothing else.
@@ -248,7 +257,7 @@ fn refresh_apply_constructs_exactly_one_document_effect() {
 /// SABOTAGE: delete the `if !was_conflict { continue; }` guard.
 #[test]
 fn a_resolution_only_acts_on_a_cell_this_refresh_actually_conflicted() {
-    let body = body_of("pub fn calp_refresh_apply(");
+    let body = body_of("pub(crate) fn apply_refresh_payloads(");
     let was_conflict = at(&body, "let was_conflict", "the conflict probe");
     let guard = at(&body, "if !was_conflict {", "the not-a-conflict guard");
     let take_theirs = at(&body, "ResolutionChoice::TakeTheirs =>", "the TakeTheirs arm");
@@ -277,7 +286,7 @@ fn a_resolution_only_acts_on_a_cell_this_refresh_actually_conflicted() {
 /// SABOTAGE: delete the `announce_cascade` call.
 #[test]
 fn a_refresh_announces_the_sheet_collection_it_changed() {
-    let body = body_of("pub fn calp_refresh_apply(");
+    let body = body_of("pub(crate) fn apply_refresh_payloads(");
     assert!(
         body.contains("announce_cascade("),
         "calp_refresh_apply appends sheets and announces nothing — the tab bar \
@@ -296,7 +305,7 @@ fn a_refresh_announces_the_sheet_collection_it_changed() {
 /// SABOTAGE: move the `announce_cascade` call above the recalc block.
 #[test]
 fn the_announcement_comes_after_the_recalculation() {
-    let body = body_of("pub fn calp_refresh_apply(");
+    let body = body_of("pub(crate) fn apply_refresh_payloads(");
     let recalc = at(
         &body,
         "crate::calculation::recalculate_sheet_values",

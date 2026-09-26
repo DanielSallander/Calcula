@@ -53,7 +53,10 @@ import {
   sheetIdCacheInvalidatingEvents,
 } from "../sheetIdMap";
 import { emitAppEvent, AppEvents } from "@api/events";
-import type { DataRangeRef } from "../../types";
+import type { ChartSpec, DataRangeRef } from "../../types";
+import { stampSpecSheetIds } from "../chartSheetRefs";
+import * as fs from "fs";
+import * as path from "path";
 
 type Sheet = { index: number; name: string; sheetId?: string; kind?: "worksheet" | "canvas"; visibility: "visible" };
 const sheet = (index: number, name: string, sheetId?: string, kind?: "worksheet" | "canvas"): Sheet => ({
@@ -237,5 +240,53 @@ describe("A1 strings keep their old rules", () => {
   it("an unqualified string means the ACTIVE sheet", async () => {
     h.gridState = { sheetContext: { activeSheetIndex: 1, activeSheetName: "Sheet2" } };
     expect((await resolveDataSource("A1:B5")).sheetIndex).toBe(1);
+  });
+});
+
+// ============================================================================
+// The id a PUBLISH stamps onto a ref whose index names no publisher sheet
+// ============================================================================
+//
+// `stamp_chart_spec_sheet_ids` (core/calp/src/chart_refs.rs) stamps an
+// index-only ref that no sheet of the publisher's workbook answers with
+// `UNRESOLVABLE_SHEET_ID`, instead of leaving it id-less. Id-less, the
+// subscriber's load migration stamped it from ITS sheet at that index, and a
+// chart that errored for its publisher silently charted the subscriber's own
+// sheet. The contract lives on this side: a non-empty id is "stamped" (the
+// migration leaves it alone) and an id no sheet carries is REFUSED (never a
+// fall back to the index). The constant is read from the Rust source, so the
+// two sides cannot drift apart.
+
+const CHART_REFS_RS = path.resolve(__dirname, "../../../../../core/calp/src/chart_refs.rs");
+
+/** The canonical uuid text of the Rust constant (`SheetId::from_bytes([0xff; 16])`). */
+function unresolvableSheetId(): string {
+  const src = fs.readFileSync(CHART_REFS_RS, "utf8");
+  const m = src.match(/pub const UNRESOLVABLE_SHEET_ID: SheetId = SheetId::from_bytes\(\[0x([0-9a-f]{2}); 16\]\);/);
+  if (!m) throw new Error("UNRESOLVABLE_SHEET_ID is no longer a repeated-byte constant in chart_refs.rs");
+  const hex = m[1].repeat(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+describe("a ref the publisher stamped UNRESOLVABLE", () => {
+  it("is read from the Rust constant, and it is not the nil id a default could produce", () => {
+    const id = unresolvableSheetId();
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(id).not.toBe("00000000-0000-0000-0000-000000000000");
+  });
+
+  it("is left alone by the load migration -- it counts as stamped", () => {
+    const spec = {
+      mark: "bar",
+      data: ref({ sheetIndex: 0, sheetId: unresolvableSheetId() }),
+    } as unknown as ChartSpec;
+    // An index -> id lookup that WOULD answer index 0 with the subscriber's sheet.
+    expect(stampSpecSheetIds(spec, () => "id-A")).toBe(spec);
+  });
+
+  it("is refused by the resolver even though its index names one of the subscriber's sheets", async () => {
+    // Index 0 is Sheet1 (id-A) here: exactly the sheet a fall back would chart.
+    const p = resolveRangeRefSheet(ref({ sheetIndex: 0, sheetId: unresolvableSheetId() }));
+    await expect(p).rejects.toBeInstanceOf(SourceSheetMissingError);
   });
 });

@@ -440,6 +440,52 @@ pub struct CreatePivotRequest {
     /// Optional: source table name (e.g. "Table1"). When set, the pivot
     /// dynamically resolves the table's current range on each refresh.
     pub source_table_name: Option<String>,
+    /// REQUIRED when the destination is a canvas sheet (refused otherwise) and
+    /// refused when it is a worksheet. On a canvas `destination_cell` is
+    /// ignored -- the backend allocates the hidden-grid anchor itself -- and
+    /// `source_sheet` must name a non-canvas sheet explicitly.
+    #[serde(default)]
+    pub canvas_frame: Option<CanvasFrameConfig>,
+}
+
+/// Wire mirror of `pivot_engine::CanvasFrame`: the designer-sized box a CANVAS
+/// pivot is shown in, in logical px on the canvas page. camelCase on the wire
+/// (`frozenHeaders`), snake_case in the persisted definition -- the same split
+/// as `LayoutConfig` vs `PivotLayout`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasFrameConfig {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// Keep the header rows/columns fixed while the body scrolls.
+    #[serde(default)]
+    pub frozen_headers: bool,
+}
+
+impl From<CanvasFrameConfig> for pivot_engine::CanvasFrame {
+    fn from(c: CanvasFrameConfig) -> Self {
+        pivot_engine::CanvasFrame {
+            x: c.x,
+            y: c.y,
+            width: c.width,
+            height: c.height,
+            frozen_headers: c.frozen_headers,
+        }
+    }
+}
+
+impl From<pivot_engine::CanvasFrame> for CanvasFrameConfig {
+    fn from(f: pivot_engine::CanvasFrame) -> Self {
+        CanvasFrameConfig {
+            x: f.x,
+            y: f.y,
+            width: f.width,
+            height: f.height,
+            frozen_headers: f.frozen_headers,
+        }
+    }
 }
 
 /// Field configuration for pivot updates
@@ -788,6 +834,10 @@ pub struct UpdatePivotPropertiesRequest {
     pub refresh_on_open: Option<bool>,
     /// Use custom sort lists
     pub use_custom_sort_lists: Option<bool>,
+    /// Move/resize a CANVAS pivot's box (undoable). Refused for a worksheet
+    /// pivot: a pivot never converts between grid and canvas.
+    #[serde(default)]
+    pub canvas_frame: Option<CanvasFrameConfig>,
 }
 
 /// Request to change a pivot table's source data range.
@@ -1293,6 +1343,9 @@ pub struct PivotRegionData {
     pub end_row: u32,
     pub end_col: u32,
     pub is_empty: bool,
+    /// Present only for a canvas pivot: the box its view is shown in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_frame: Option<CanvasFrameConfig>,
 }
 
 /// Response for field unique values query
@@ -1533,6 +1586,10 @@ pub struct CreatePivotFromBiModelRequest {
     pub name: Option<String>,
     /// The connection ID to use for this BI pivot.
     pub connection_id: crate::bi::types::ConnectionId,
+    /// Same rule as `CreatePivotRequest::canvas_frame`: required on a canvas
+    /// destination (whose anchor the backend allocates), refused on a worksheet.
+    #[serde(default)]
+    pub canvas_frame: Option<CanvasFrameConfig>,
 }
 
 /// Request to update field assignments on a BI-backed pivot table.

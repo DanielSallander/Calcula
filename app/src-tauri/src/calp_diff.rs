@@ -323,7 +323,7 @@ pub fn calp_diff_working_copy(
     // checked-out working copy needs no map — its ids ARE the package's.
     let sheet_id_map = subscription_sheet_map(&state, &package_name)?;
 
-    let diff = calp::diff::diff_sides(
+    let mut diff = calp::diff::diff_sides(
         &DiffSide::Published {
             transport: &base_registry,
             package: &package_name,
@@ -334,6 +334,13 @@ pub fn calp_diff_working_copy(
         &DiffOptions { sheet_id_map, ..DiffOptions::default() },
     )
     .map_err(|e| e.to_string())?;
+    // The working side cannot see the frontend's distributable objects, one
+    // input to the version stamp -- see the helper for when that line is real.
+    crate::calp_commands::reconcile_unknowable_min_app_version(
+        &mut diff,
+        &base_manifest,
+        &working_manifest,
+    );
 
     Ok(WorkingCopyDiff {
         package_name,

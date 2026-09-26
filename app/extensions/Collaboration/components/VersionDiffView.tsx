@@ -480,6 +480,8 @@ const DOMAIN_LABELS: Record<string, string> = {
   control: "Controls",
   paneControl: "Pane controls",
   slicer: "Slicers",
+  timelineSlicer: "Timeline slicers",
+  floatingRange: "Floating grids",
   ribbonFilter: "Ribbon filters",
   pivot: "Pivots",
   pivotLayout: "Pivot layouts",

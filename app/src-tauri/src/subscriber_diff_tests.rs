@@ -430,7 +430,12 @@ fn a_published_sheet_keeps_the_name_the_application_knows_it_by() {
 /// it would compare a restored name against a set of local ones and silently
 /// drop every pivot on a renamed sheet.
 ///
-/// SABOTAGE: move the `renamed_for_publish` block below `let published_names`.
+/// SABOTAGE: move the `renamed_for_publish` block below the
+/// `prune_unpublished_pivots` call.
+///
+/// The pruning itself lives in `prune_unpublished_pivots` (a pure function, so
+/// it can also be tested by behaviour -- `subscribed_sheet_tests`); this pins
+/// that the assembly calls it only AFTER the names were restored.
 #[test]
 fn the_name_restoration_precedes_everything_that_reads_a_sheet_name() {
     let body = body_of("fn assemble_publish_workbook(");
@@ -438,8 +443,8 @@ fn the_name_restoration_precedes_everything_that_reads_a_sheet_name() {
         .find("renamed_for_publish")
         .expect("the restoration is gone");
     let names = body
-        .find("let published_names")
-        .expect("the pivot-retention set is gone");
+        .find("prune_unpublished_pivots(")
+        .expect("the pivot pruning is no longer called from the assembly");
     assert!(
         restore < names,
         "the pivot-retention set is built from sheet names, so the restoration \
@@ -454,12 +459,12 @@ fn the_name_restoration_precedes_everything_that_reads_a_sheet_name() {
 /// SABOTAGE: delete the `destination_sheet` rewrite.
 #[test]
 fn a_pivot_is_repointed_at_the_published_sheet_name() {
-    let body = body_of("fn assemble_publish_workbook(");
+    let body = body_of("fn prune_unpublished_pivots(");
     let rewrite = body
         .find("renamed_for_publish.get(&local)")
         .expect("the pivot destination rewrite is gone");
     let check = body
-        .find("map_or(true, |name| published_names.contains")
+        .find("published_names.contains(&destination.to_ascii_lowercase())")
         .expect("the pivot retention check moved");
     assert!(
         rewrite < check,
@@ -476,13 +481,13 @@ fn a_pivot_is_repointed_at_the_published_sheet_name() {
 /// SABOTAGE: drop the `.to_ascii_lowercase()` from either side.
 #[test]
 fn the_pivot_retention_set_is_case_insensitive_like_every_other_name_compare() {
-    let body = body_of("fn assemble_publish_workbook(");
+    let body = body_of("fn prune_unpublished_pivots(");
     assert!(
         body.contains("s.name.to_ascii_lowercase()"),
         "the published-name set is case-sensitive again"
     );
     assert!(
-        body.contains("published_names.contains(&name.to_ascii_lowercase())"),
+        body.contains("published_names.contains(&destination.to_ascii_lowercase())"),
         "the lookup side is case-sensitive again — both halves have to agree"
     );
 }
@@ -571,4 +576,183 @@ fn only_workbook_scoped_names_are_filtered() {
         "a sheet-scoped name is now filtered against the workbook-scoped record, \
          so a name belonging to a published sheet is dropped with it"
     );
+}
+
+// ---------------------------------------------------------------------------
+// G. The push preview's manifest agrees with the push's (M5 review)
+// ---------------------------------------------------------------------------
+
+/// A version manifest carrying only the fields these checks read.
+fn manifest(kind: &str, min_app_version: &str, custom_objects: &[(&str, &str)]) -> calp::manifest::VersionManifest {
+    serde_json::from_value(serde_json::json!({
+        "formatVersion": 1,
+        "packageName": "sales",
+        "version": "1.0.0",
+        "kind": kind,
+        "publishedAt": "2026-09-25T00:00:00Z",
+        "minAppVersion": min_app_version,
+        "sheets": [],
+        "customObjects": custom_objects
+            .iter()
+            .map(|(kind, id)| serde_json::json!({
+                "kind": kind, "id": id, "payloadPath": format!("custom_objects/{kind}/{id}.json")
+            }))
+            .collect::<Vec<_>>(),
+    }))
+    .expect("a minimal version manifest")
+}
+
+/// The field-level diff of two manifests, in the shape `diff_sides` returns.
+fn manifest_only_diff(changes: &[(&str, &str, &str)]) -> calp::diff::VersionDiff {
+    serde_json::from_value(serde_json::json!({
+        "packageName": "sales",
+        "fromVersion": "1.0.0",
+        "toVersion": "0.0.0",
+        "artifacts": { "added": [], "removed": [], "changed": [], "spuriousHashChanges": 0, "unchangedCount": 0 },
+        "sheets": [],
+        "objects": [],
+        "manifestChanges": changes
+            .iter()
+            .map(|(field, before, after)| serde_json::json!({ "field": field, "before": before, "after": after }))
+            .collect::<Vec<_>>(),
+        "totals": { "objectsAdded": 0, "objectsRemoved": 0, "objectsModified": 0, "sheetsChanged": 0, "cellsChanged": 0, "cellsChangedExact": true },
+    }))
+    .expect("a minimal version diff")
+}
+
+/// THE PREVIEW STAMPS THE WAY THE PUSH STAMPS. `publish_into_for_preview`
+/// hard-coded `min_app_version: ""` and `kind: "report"`, so every canvas,
+/// floating-range or timeline application diffed as `minAppVersion <v> -> (none)`
+/// and every template as `kind template -> report` -- changes no push makes,
+/// which kept the push preview from ever saying "no differences".
+///
+/// Both commands go through ONE helper; the preview passes its caller's kind.
+///
+/// SABOTAGE: delete the `stamp_min_app_version(&mut request)` call from
+/// `publish_into_for_preview`.
+#[test]
+fn the_preview_and_the_push_share_one_version_stamp_and_the_kind() {
+    let preview = body_of("pub(crate) fn publish_into_for_preview(");
+    let publish = body_of("pub fn calp_publish(");
+    for (name, body) in [("publish_into_for_preview", &preview), ("calp_publish", &publish)] {
+        assert!(
+            body.contains("stamp_min_app_version(&mut request)"),
+            "{name} no longer applies the shared version stamp"
+        );
+        assert!(
+            !body.contains("carries_wave_content("),
+            "{name} grew its own copy of the stamp predicate"
+        );
+    }
+    assert!(
+        !preview.contains("kind: \"report\".to_string(),"),
+        "the preview hard-codes the kind again"
+    );
+    assert!(preview.contains("kind.to_string()"), "the preview must pass its caller's kind");
+}
+
+/// The shared stamp itself: wave content, model writebacks and custom objects
+/// each declare this app's version; a cells-only request stays unstamped.
+#[test]
+fn the_shared_stamp_declares_a_minimum_exactly_for_what_older_apps_drop() {
+    let mut wb = ::persistence::Workbook::default();
+    wb.sheets = vec![::persistence::Sheet::new("Page".to_string())];
+    fn request(wb: &::persistence::Workbook) -> calp::publish::PublishRequest<'_> {
+        calp::publish::PublishRequest {
+            workbook: wb,
+            package_name: "sales".to_string(),
+            version: calp::SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            mode: calp::PushMode::CreateNew,
+            change_summary: String::new(),
+            sheet_indices: vec![0],
+            now: "2026-09-25T00:00:00Z".to_string(),
+            published_by: "author".to_string(),
+            writeback_regions: None,
+            model_writebacks: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        }
+    }
+
+    let mut plain = request(&wb);
+    crate::calp_commands::stamp_min_app_version(&mut plain);
+    assert_eq!(plain.min_app_version, "", "a cells-only application stays pullable by older apps");
+
+    let mut with_object = request(&wb);
+    with_object.custom_objects.push(calp::publish::PublishCustomObject {
+        kind: "calcula.modelOverlay".to_string(),
+        id: "overlay".to_string(),
+        name: String::new(),
+        sheet_id: None,
+        payload: serde_json::json!({}),
+    });
+    crate::calp_commands::stamp_min_app_version(&mut with_object);
+    assert_eq!(with_object.min_app_version, env!("CARGO_PKG_VERSION"));
+
+    wb.sheets[0].kind = ::persistence::SheetKind::new_canvas();
+    let mut canvas = request(&wb);
+    crate::calp_commands::stamp_min_app_version(&mut canvas);
+    assert_eq!(canvas.min_app_version, env!("CARGO_PKG_VERSION"), "a canvas is wave content");
+}
+
+/// The one input to the stamp the preview cannot see is the FRONTEND's
+/// distributable objects, which `calp_publish` takes from its params. A base
+/// stamped by one of those diffs as `minAppVersion <v> -> (none)` although the
+/// push would stamp it again -- so that line is dropped exactly when the base
+/// carries a custom object the working side did not produce, and kept when the
+/// base's stamp came from content the working side can see and no longer has.
+///
+/// SABOTAGE: make `reconcile_unknowable_min_app_version` return immediately --
+/// the phantom line survives.
+#[test]
+fn an_unknowable_min_app_version_change_is_not_reported() {
+    let change = [("minAppVersion", "0.9.0", "")];
+
+    // The base carries a frontend object the preview could not produce.
+    let base = manifest("report", "0.9.0", &[("calcula.modelOverlay", "overlay"), ("cellType", "c1")]);
+    let working = manifest("report", "", &[("cellType", "c1")]);
+    let mut diff = manifest_only_diff(&change);
+    crate::calp_commands::reconcile_unknowable_min_app_version(&mut diff, &base, &working);
+    assert!(diff.manifest_changes.is_empty(), "{:?}", diff.manifest_changes);
+
+    // The base's stamp came from something the working side CAN see: real.
+    let base = manifest("report", "0.9.0", &[("cellType", "c1")]);
+    let mut diff = manifest_only_diff(&change);
+    crate::calp_commands::reconcile_unknowable_min_app_version(&mut diff, &base, &working);
+    assert_eq!(diff.manifest_changes.len(), 1, "a genuine drop of the stamp stays visible");
+
+    // Adding a stamp, or changing it, is never unknowable.
+    let base = manifest("report", "", &[("calcula.modelOverlay", "overlay")]);
+    let stamped = manifest("report", "1.0.0", &[]);
+    let mut diff = manifest_only_diff(&[("minAppVersion", "", "1.0.0")]);
+    crate::calp_commands::reconcile_unknowable_min_app_version(&mut diff, &base, &stamped);
+    assert_eq!(diff.manifest_changes.len(), 1);
+
+    // Other fields are never touched.
+    let base = manifest("template", "0.9.0", &[("calcula.modelOverlay", "overlay")]);
+    let mut diff = manifest_only_diff(&[("kind", "template", "report"), ("minAppVersion", "0.9.0", "")]);
+    crate::calp_commands::reconcile_unknowable_min_app_version(&mut diff, &base, &working);
+    assert_eq!(diff.manifest_changes.len(), 1);
+    assert_eq!(diff.manifest_changes[0].field, "kind");
+}
+
+/// Both preview diffs -- the push preview and the merge analysis -- reconcile.
+#[test]
+fn both_preview_diffs_reconcile_the_stamp() {
+    let diff_src = include_str!("calp_diff.rs");
+    let merge_src = include_str!("calp_merge.rs");
+    for (name, src) in [("calp_diff.rs", diff_src), ("calp_merge.rs", merge_src)] {
+        let code = strip_line_comments(src);
+        assert!(
+            code.contains("reconcile_unknowable_min_app_version("),
+            "{name}'s working-copy diff no longer reconciles the version stamp"
+        );
+    }
 }

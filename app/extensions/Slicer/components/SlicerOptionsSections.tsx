@@ -51,7 +51,7 @@ import { requestOverlayRedraw } from "@api/gridOverlays";
 import {
   getSlicerById,
   updateSlicerAsync,
-  updateSlicerPositionAsync,
+  commitSlicerGeometryAsync,
   deleteSlicerAsync,
 } from "../lib/slicerStore";
 import {
@@ -515,10 +515,12 @@ export function SlicerSizeSection(_props: PanelSectionProps): React.ReactElement
   const handleWidthBlur = async () => {
     const val = parseInt(widthStr, 10);
     if (!isNaN(val) && val >= 60) {
-      const posUpdates = slicers
+      // Every selected slicer resized as ONE undo step; a refusal (a
+      // protected sheet) reverts them all and is told once.
+      const writes = slicers
         .filter((s) => val !== Math.round(s.width))
-        .map((s) => updateSlicerPositionAsync(s.id, s.x, s.y, val, s.height));
-      await Promise.all(posUpdates);
+        .map((s) => ({ slicerId: s.id, x: s.x, y: s.y, width: val, height: s.height }));
+      await commitSlicerGeometryAsync(writes, writes.length > 1 ? "Resize Slicers" : "Resize Slicer");
       broadcastSelectedSlicers();
       requestOverlayRedraw();
     } else {
@@ -531,10 +533,10 @@ export function SlicerSizeSection(_props: PanelSectionProps): React.ReactElement
   const handleHeightBlur = async () => {
     const val = parseInt(heightStr, 10);
     if (!isNaN(val) && val >= 60) {
-      const posUpdates = slicers
+      const writes = slicers
         .filter((s) => val !== Math.round(s.height))
-        .map((s) => updateSlicerPositionAsync(s.id, s.x, s.y, s.width, val));
-      await Promise.all(posUpdates);
+        .map((s) => ({ slicerId: s.id, x: s.x, y: s.y, width: s.width, height: val }));
+      await commitSlicerGeometryAsync(writes, writes.length > 1 ? "Resize Slicers" : "Resize Slicer");
       broadcastSelectedSlicers();
       requestOverlayRedraw();
     } else {

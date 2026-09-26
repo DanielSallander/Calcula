@@ -94,6 +94,25 @@ export function resolveHeaderSizes(
 }
 
 /**
+ * The headings flag the painter actually applies. A CANVAS surface (a report
+ * page) never shows headings, whatever the sheet's stored flag says; any other
+ * surface shows them as stored.
+ *
+ * Every consumer that turns a pixel into a place -- the painter, the mouse
+ * layer's hit-testers, the E2E geometry helper -- must read the SAME answer: the
+ * mouse layer once took the stored config while the painter collapsed the
+ * gutters on a canvas, so every floating object's clickable rectangle sat one
+ * header width to the right and one header height below where it was drawn,
+ * and a press near an object's top edge landed on the empty page.
+ */
+export function paintedDisplayHeadings(
+  surface: string | undefined,
+  displayHeadings: boolean | undefined,
+): boolean | undefined {
+  return surface === "canvas" ? false : displayHeadings;
+}
+
+/**
  * The same rule applied to a whole {@link GridConfig}.
  *
  * Returns the SAME object when nothing changes, so a React memo keyed on it does

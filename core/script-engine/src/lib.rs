@@ -303,6 +303,37 @@ mod tests {
         }
     }
 
+    /// A canvas sheet (a report page with no cells) reports its kind on the
+    /// canonical Sheet object, so a script can tell it apart from a worksheet
+    /// before a cell write is refused there; a sheet the host did not describe
+    /// is a worksheet.
+    #[test]
+    fn a_sheet_reports_its_kind() {
+        let mut host = HostState::default();
+        host.sheet_kinds = vec!["canvas".to_string()];
+        let options = ScriptRunOptions {
+            host_state: host,
+            ..ScriptRunOptions::default()
+        };
+        let (result, _) = run("Calcula.log(Calcula.workbook.activeSheet().kind);", options);
+        match result {
+            ScriptResult::Success { output, .. } => {
+                assert_eq!(output.last().map(|i| i.to_text()).as_deref(), Some("canvas"))
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+        let (result, _) = run(
+            "Calcula.log(Calcula.workbook.activeSheet().kind);",
+            ScriptRunOptions::default(),
+        );
+        match result {
+            ScriptResult::Success { output, .. } => {
+                assert_eq!(output.last().map(|i| i.to_text()).as_deref(), Some("worksheet"))
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
     /// Workbook-property writes come back on the result so the host can persist
     /// them; they used to die with the discarded context clone.
     #[test]

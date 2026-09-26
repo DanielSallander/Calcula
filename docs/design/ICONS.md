@@ -180,7 +180,7 @@ never drift apart; the test checks identity with `toBe`.
 
 ---
 
-## 4. The vocabulary (170 keys, 2026-09-23)
+## 4. The vocabulary (177 keys, 2026-09-25)
 
 Recount from the source rather than trusting this list (it is what an add-in author reads, and it
 must be current). **Home** (`icons/home.tsx`, 38):
@@ -216,7 +216,7 @@ must be current). **Home** (`icons/home.tsx`, 38):
   Background
 - *Other:* Lightning
 
-**Generic** (`icons/generic.tsx`, 50):
+**Generic** (`icons/generic.tsx`, 57):
 
 - *Structure and navigation:* Group (the fallback section/launcher glyph), More, MoreHorizontal,
   Close, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Sidebar, Ribbon, Panel, Layout, Resize
@@ -226,6 +226,12 @@ must be current). **Home** (`icons/home.tsx`, 38):
 - *Things:* Settings, Text, Pointer, Keyboard, Image, Lock, Eye, Calendar, Clock, Script, Model,
   Controls, Database, Folder, AddIn (the puzzle piece: the host's fallback for an add-in icon token
   that names no key, and the Add-ins tab / Extensions rail glyph)
+- *Arrange (2026-09-25, the Canvas tab):* BringForward, SendBackward, BringToFront, SendToBack
+  (two or three overlapping squares, the ACCENT one being the object moved; a covered square is CUT
+  with a 1.2 gap, so front and back read by shape), AlignObjects (an accent edge with two objects
+  against it -- taller than the Align* text rows, which the Arrange menu reuses for its six
+  alignments), DistributeHorizontal, DistributeVertical (the accent object between two others with
+  equal 2.4 gaps)
 
 ---
 

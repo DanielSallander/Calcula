@@ -4,6 +4,12 @@
 // CONTEXT: Precedent Controls/Button/floatingSelection.ts. The two selections
 //          are deliberately separate: Delete clears CELLS while a local
 //          selection exists and deletes the OBJECT only when none does.
+//
+//          The OBJECT selection's mutations are selection chokepoints: each
+//          change is announced to the canvas-wide selection set
+//          (@api/objectSelection `notifyObjectSelectionChanged`).
+
+import { notifyObjectSelectionChanged } from "@api/objectSelection";
 
 // ============================================================================
 // Object selection
@@ -13,12 +19,16 @@ const selectedFrIds = new Set<string>();
 
 /** Replace the object selection with a single FR. */
 export function selectFloatingRange(frId: string): void {
+  if (selectedFrIds.size === 1 && selectedFrIds.has(frId)) return;
   selectedFrIds.clear();
   selectedFrIds.add(frId);
+  notifyObjectSelectionChanged();
 }
 
 export function deselectAllFloatingRanges(): void {
+  if (selectedFrIds.size === 0) return;
   selectedFrIds.clear();
+  notifyObjectSelectionChanged();
 }
 
 export function isFloatingRangeSelected(frId: string): boolean {
@@ -102,6 +112,8 @@ export function moveLocalSelection(
 
 /** Reset everything (document change, deactivate). */
 export function resetFrSelection(): void {
+  const had = selectedFrIds.size > 0;
   selectedFrIds.clear();
   localSelection = null;
+  if (had) notifyObjectSelectionChanged();
 }

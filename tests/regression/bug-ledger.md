@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 138 | Open: 4 | Triaged: 0 | Fixed: 134 | Other: 0
+Total: 156 | Open: 14 | Triaged: 0 | Fixed: 142 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1676,3 +1676,173 @@ NOTEBOOK REWIND INSTALLED A CHECKPOINT OVER A DIFFERENT SHEET STRUCTURE. noteboo
 BI QUERY RESULT BLOCKS ARE NEVER REMAPPED ON A SHEET MOVE OR DELETE. Each connection's active_queries entry stores the sheet_index its block was inserted on; nothing in sheets.rs (or anywhere) remaps it. After a move or delete, bi_refresh_connection clears and rewrites the block on WHICHEVER sheet inherited the index, overwriting that sheet's cells.
 
 **Repro:** Insert a BI query result on Sheet2, move Sheet2 to the front, Refresh the connection: the block is written onto the sheet now at index 1.
+
+## BUG-0139 `[fixed]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** paint-hit-agreement
+
+THE MOUSE LAYER HIT-TESTED AGAINST THE STORED HEADER GUTTERS WHILE THE PAINTER USED THE COLLAPSED ONES. Spreadsheet.tsx applies effectiveGridConfig (headings hidden -> gutters 0) to the config it paints with, but the mouse handlers are built in useSpreadsheet -> useSpreadsheetSelection -> useMouseSelection from the grid STATE and read state.config. On a canvas sheet (headings always hidden) every floating object's clickable rectangle sat one row-header width right and one column-header height below its paint, so a press near an object's top or left edge landed on the empty page; on a worksheet with View > Headings off, cell clicks, the fill handle and floating objects were off by the same amount.
+
+**Repro:** Canvas sheet with a pivot box at (64,64); click 8px below the box's top edge: the press is announced as a background press and the box is not selected. Found live by e2e/journeys/canvas.spec.ts #6.
+**Fix:** fixed
+
+## BUG-0140 `[fixed]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** pivot-destination-sheet
+
+A PIVOT'S MERGED CELLS WERE WRITTEN TO THE ACTIVE SHEET'S MERGE SET WHATEVER ITS DESTINATION. update_pivot_in_grid and both create doors inserted the pivot's merges into state.merged_regions (the active-sheet mirror), so refreshing or refiltering a pivot on another sheet merged cells on the sheet the user was looking at.
+
+**Repro:** Pivot with a multi-column row-label filter row on Sheet2; activate Sheet1; refilter it from a slicer: Sheet1 gains merged cells.
+**Fix:** fixed
+
+## BUG-0141 `[fixed]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** cross-sheet-recalc
+
+A PIVOT WRITE RECALCULATED ONLY THE ACTIVE SHEET. finalize_pivot_update (and the four commands that write through update_pivot_in_grid directly) ended with recalculate_sheet_formulas, which re-evaluates formulas on the active grid only; a formula on another sheet reading the pivot's output stayed stale after a refilter, field change or refresh.
+
+**Repro:** Pivot on Sheet2, =SUM(Sheet2!B:B) on Sheet1; refilter the pivot while Sheet2 is active: Sheet1 keeps the old total.
+**Fix:** fixed
+
+## BUG-0142 `[fixed]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** calp-refresh-sheet-identity
+
+A COLLABORATION REFRESH SENT A PULLED PIVOT ONTO THE SUBSCRIBER'S OWN SAME-NAMED SHEET. The refresh rename map covered only sheets NEW in this version, so a pivot on an already-tracked sheet that had been renamed on subscribe ('Data' -> 'Data (2)') matched the publisher's name 'Data' to the subscriber's OWN 'Data', built its cache from the subscriber's data and wrote its output over the subscriber's cells, leaving the old output on 'Data (2)'.
+
+**Repro:** Subscriber has 'Data'; subscribe to an application whose 'Data' holds a pivot; publisher pushes v2; Refresh: the subscriber's Data cells are overwritten.
+**Fix:** fixed
+
+## BUG-0143 `[fixed]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** dirty-flag
+
+DEV SUBSCRIBE / DEV REFRESH DIRTIED THE DOCUMENT BEFORE THE PULL COULD FAIL. Both dev commands constructed DocumentEffect::mutates before pull_dev, so a failed dev pull marked the workbook modified with nothing changed.
+
+**Repro:** Developer > dev subscribe to a folder that fails to pull: the title bar shows the unsaved asterisk.
+**Fix:** fixed
+
+## BUG-0144 `[fixed]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** ipc-read-cap
+
+A FLOATING RANGE LARGER THAN 100,000 CELLS NEVER PAINTED. The renderer read the whole window in one get_floating_range_cells call, which get_range_cells_typed refuses above MAX_TYPED_RANGE_CELLS = 100_000, so e.g. a 1000x101 window showed empty cells.
+
+**Repro:** Resize a floating range to 1000 rows x 101 columns: its cells stop painting.
+**Fix:** fixed
+
+## BUG-0145 `[fixed]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** getpivotdata-sheet
+
+GETPIVOTDATA IGNORES THE SHEET OF ITS PIVOT REFERENCE. lookup_pivot_data answers with the first pivot (HashMap order) whose rectangle contains the referenced cell on ANY sheet. Canvas pivot block 0 sits at A1 of the canvas's hidden grid, so it collides with a worksheet pivot at A1: =GETPIVOTDATA("Sum of X";Sheet1!A1) can answer from the canvas pivot.
+
+**Repro:** Pivot at Sheet1!A1 and a canvas pivot (block 0, A1); =GETPIVOTDATA("Sum of Units";Sheet1!A1) returns either pivot's total depending on hash order.
+**Fix:** fixed
+
+## BUG-0146 `[open]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** getpivotdata-fields
+
+GETPIVOTDATA WITH FIELD/ITEM PAIRS RETURNS #REF! EVEN WHEN FIRST ENTERED. =GETPIVOTDATA("Sum of Sales";E1;"Region";"North") gives #REF! in the backend test harness while the grand-total form gives the right number.
+
+**Repro:** Harness pivot with a Region row field; enter the field/item form of GETPIVOTDATA: #REF!.
+
+## BUG-0147 `[open]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** pivot-load
+
+restore_pivot_definitions RESOLVES THE DESTINATION BY EXACT NAME WITH unwrap_or(0) AND NEVER STORES THE VIEW. A case-only mismatch writes the pivot's region onto sheet 0, and GETPIVOTDATA answers #REF! after a load until something fetches the pivot's view.
+
+**Repro:** Save a workbook with =GETPIVOTDATA(..) on Sheet1 reading a pivot on Sheet2; reopen without visiting Sheet2: #REF!.
+
+## BUG-0148 `[open]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** undo-completeness
+
+UNDOING A PIVOT CREATE LEAVES ITS MERGED CELLS. apply_pivot_create_restore clears the cells and region but does not remove the merges the create wrote.
+
+**Repro:** Create a pivot whose layout merges a filter row; Ctrl+Z: the merged range remains.
+
+## BUG-0149 `[open]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** dialog-input-honoured
+
+THE WORKSHEET-MODE CREATE PIVOT DIALOG IGNORES A TYPED SHEET PREFIX. Typing 'Sheet2!A1:D9' as the source sends sourceSheet = the sheet that was active when the dialog opened, so the pivot is built from the wrong sheet's cells.
+
+**Repro:** On Sheet1, Insert > PivotTable, type Sheet2!A1:D9: the pivot summarises Sheet1!A1:D9.
+
+## BUG-0150 `[open]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** calp-preview-fidelity
+
+THE PUSH PREVIEW AND THE MERGE ANALYSIS CANNOT SEE THE FRONTEND'S DISTRIBUTABLE OBJECTS. custom_objects/... artifacts (model overlay, reports) are merged in by calp_publish from frontend params the preview and merge commands never receive, so they are reported as REMOVED in both. (The minAppVersion line this also caused is reconciled.)
+
+**Repro:** Publish an application with a model overlay; open the push preview: the overlay artifact is listed as removed.
+
+## BUG-0151 `[open]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** calp-collision-rename
+
+A COLLISION RENAME ON PULL DOES NOT REWRITE NAME-BOUND REFERENCES IN THE PULLED CONTENT. When a pulled 'Data' arrives as 'Data (2)', formulas on the pulled sheets (object/backing sheets included), named-range refers_to and chart string sources still say 'Data' and read the subscriber's OWN sheet.
+
+**Repro:** Subscriber has 'Data'; subscribe to an application whose 'Report' has =Data!A1: the pulled Report reads the subscriber's Data.
+
+## BUG-0152 `[open]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** calp-active-mirror
+
+SUSPECTED: restore_pulled_pivots WRITES grids ONLY. On checkout the first application sheet is active and its mirror is synced before the pivots are written, so a pulled pivot on the active sheet could be erased by the next recalculation copying the stale mirror back.
+
+**Repro:** Open Application for Editing where the first sheet holds a pivot; edit any cell: check whether the pivot's cells survive.
+
+## BUG-0153 `[open]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** calp-detach
+
+AFTER A SHEET IS DETACHED, (a) distributed object scripts bound to its controls are orphaned by the next refresh (the script swap replaces the package's set and rebinds through a map that excludes detached sheets), and (b) a sheet-scoped named range on it is upserted by refresh with sheet_index None and silently becomes workbook-scoped.
+
+**Repro:** (a) Detach a pulled sheet with a scripted button, Refresh: the button's script is gone. (b) Detach a sheet with a sheet-scoped name, Refresh: the name is workbook-scoped.
+
+## BUG-0154 `[open]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** sheet-name-unique
+
+THE DEV PULL HAS NO SHEET-NAME COLLISION RESOLUTION: pulling a source sheet named like an existing sheet yields two sheets with the same name.
+
+**Repro:** Dev subscribe to a source folder whose sheet is named Sheet1 into a workbook that has Sheet1.
+
+## BUG-0155 `[open]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** document-replaced-cache
+
+SUSPECTED: THE GRID CELL CACHE IS NOT INVALIDATED WHEN THE DOCUMENT IS REPLACED WITHOUT A RELOAD. GridCanvas keeps its fetched cells and needsFetch() finds the viewport covered, so after a no-reload document replacement (announceBackendStateReplaced: calp_checkout, and the E2E newFile helper) the previous document's cells can stay painted. File > New in the product reloads the window and is not affected.
+
+**Repro:** E2E: create a canvas pivot, call file-api newFile() without a reload: the new Sheet1 shows the pivot's cells although get_cells_in_rows returns none.
+
+## BUG-0156 `[fixed]`
+
+**Found:** 2026-09-25 (manual)
+**Oracle:** paint-hit-agreement
+
+CHART POINTER PATHS IGNORE ZOOM. The Charts extension's hover/tooltip (index.ts handleMouseMove) and context-menu lookup convert a pointer with clientX - rect.left / clientY - rect.top and never divide by the zoom, while chart geometry is in logical (unzoomed) page px. At any zoom other than 100% bar hover, tooltips, the sub-selection ladder's pending click and the right-click target resolve against the wrong point. Selecting the chart itself is unaffected (Core's press path divides by zoom).
+
+**Repro:** Zoom to 150%, hover a bar near the chart's right edge: the tooltip names a different bar, or none.
+**Fix:** fixed

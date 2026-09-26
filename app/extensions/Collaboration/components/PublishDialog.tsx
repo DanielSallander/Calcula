@@ -68,6 +68,7 @@ import {
 } from "@api/dialogLayout";
 import { pickWorkspaceFile, pickWorkspaceFolder } from "../lib/pickWorkspace";
 import { pushBlockingReason } from "../lib/pushReadiness";
+import { listedIndices } from "../lib/listedSheets";
 import { describePushLanding } from "../lib/environments";
 import { PublishReportView } from "./ApplicationExplorerPanel";
 
@@ -266,7 +267,8 @@ export function PublishDialog({ onClose, data }: DialogProps) {
         if (result.sheets) setAvailableSheets(result.sheets);
         if (result.defaultSheetIndices) {
           setDefaultIndices(result.defaultSheetIndices);
-          if (!selectionTouchedRef.current) setSheetSelection(new Set(result.defaultSheetIndices));
+          if (!selectionTouchedRef.current)
+            setSheetSelection(new Set(listedIndices(result.defaultSheetIndices, result.sheets)));
         }
         setReportFor(previewSignature());
         setStatus(null);
@@ -298,7 +300,10 @@ export function PublishDialog({ onClose, data }: DialogProps) {
           setDefaultIndices(result.defaultSheetIndices);
           // Only while the user has not chosen: re-seeding after a checkbox
           // moved would silently undo their choice on every target change.
-          if (!selectionTouchedRef.current) setSheetSelection(new Set(result.defaultSheetIndices));
+          // Only LISTED sheets: an index without a checkbox could never be
+          // unticked (see lib/listedSheets.ts).
+          if (!selectionTouchedRef.current)
+            setSheetSelection(new Set(listedIndices(result.defaultSheetIndices, result.sheets)));
         }
         setGates(result.gates ?? null);
       } catch {
@@ -436,7 +441,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
    */
   const selectedIndices = (): number[] => {
     if (availableSheets.length === 0) return [];
-    return Array.from(sheetSelection).sort((a, b) => a - b);
+    return listedIndices(sheetSelection, availableSheets);
   };
 
   // Publishing is the ONE flow with two legitimate gestures, and the second is
@@ -686,7 +691,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       version,
       changeSummary,
       pushed,
-      sheetsSelected: sheetSelection.size,
+      sheetsSelected: listedIndices(sheetSelection, availableSheets).length,
       sheetsAvailable: availableSheets.length,
       kind,
       nameAlreadyTaken: nameClash !== null,
@@ -1120,6 +1125,15 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                       }}
                     />
                     <span>{name}</span>
+                    {sheet.kind === "canvas" && (
+                      <span
+                        data-testid="publish-sheet-kind-canvas"
+                        title="A canvas sheet: a report page of charts, slicers, shapes and floating grids. Its objects travel with it."
+                        style={{ marginLeft: 6, fontSize: 11, opacity: 0.75 }}
+                      >
+                        (canvas)
+                      </span>
+                    )}
                     {/*
                       A subscribed sheet is somebody else's content. It is
                       unticked by default and says whose it is right here, so

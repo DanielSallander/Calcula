@@ -255,6 +255,12 @@ pub struct PublishResult {
     pub pane_controls_published: usize,
     /// Slicers on the published sheets (Wave A).
     pub slicers_published: usize,
+    /// Timeline slicers on the published sheets whose pivot the application
+    /// also carries (`timeline_slicers.json`).
+    pub timeline_slicers_published: usize,
+    /// Floating ranges whose host AND backing sheet are both published
+    /// (`floating_ranges.json`).
+    pub floating_ranges_published: usize,
     /// Ribbon filters carried by the application (workbook-scoped, Wave A).
     pub ribbon_filters_published: usize,
     /// Saved pivot layouts carried by the application (workbook-scoped, Wave A).
@@ -276,7 +282,10 @@ pub struct PublishResult {
 /// `"Data!A1:A10"` -> `Some("Data")`, `"'My Sheet'!A1"` -> `Some("My Sheet")`
 /// (quoted names unescape the doubled-quote convention), `"A1:A10"` -> `None`
 /// (no prefix — the reference is active-sheet-relative).
-fn reference_sheet_name(reference: &str) -> Option<String> {
+///
+/// Shared with `chart_refs`, so a chart's A1 string source and a dropdown's
+/// cell range are split by ONE parser.
+pub(crate) fn reference_sheet_name(reference: &str) -> Option<String> {
     let reference = reference.trim();
     if let Some(rest) = reference.strip_prefix('\'') {
         // Quoted sheet name: scan to the closing quote ('' escapes a quote),
@@ -353,6 +362,417 @@ pub fn dropdown_reference_warnings(workbook: &Workbook, sheet_indices: &[usize])
                 "Dropdown pane control \"{}\" reads its items from \"{}\" without a sheet prefix — on the subscriber it resolves against whichever sheet is active and may not find the intended data.",
                 control.name, reference
             )),
+        }
+    }
+    warnings
+}
+
+/// The sheet ids a publish of `sheet_indices` carries. Out-of-range indices are
+/// ignored (the preview path is tolerant; `publish` validates separately).
+fn published_sheet_id_set(
+    workbook: &Workbook,
+    sheet_indices: &[usize],
+) -> std::collections::HashSet<SheetId> {
+    sheet_indices
+        .iter()
+        .filter_map(|&idx| workbook.sheets.get(idx).map(|s| s.id))
+        .collect()
+}
+
+/// The workbook sheet with this stable id.
+fn sheet_by_id(workbook: &Workbook, id: SheetId) -> Option<&persistence::Sheet> {
+    workbook.sheets.iter().find(|s| s.id == id)
+}
+
+/// The workbook sheet with this name, case-insensitively (the lexer uppercases
+/// bare identifiers, so `Data` and `data` are one sheet to a formula).
+fn sheet_by_name<'a>(workbook: &'a Workbook, name: &str) -> Option<&'a persistence::Sheet> {
+    workbook
+        .sheets
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case(name))
+}
+
+/// A chart's name for a warning: the ChartDefinition envelope's `name`, else
+/// its id.
+fn chart_display_name(chart: &SavedChart) -> String {
+    serde_json::from_str::<serde_json::Value>(&chart.spec_json)
+        .ok()
+        .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| chart.id.to_string())
+}
+
+/// The named range a prefix-less chart source names, preferring one scoped to
+/// the chart's own sheet, then a workbook-scoped one, then any.
+fn chart_named_range<'a>(
+    workbook: &'a Workbook,
+    name: &str,
+    host: SheetId,
+) -> Option<&'a persistence::SavedNamedRange> {
+    let matching: Vec<&'a persistence::SavedNamedRange> = workbook
+        .named_ranges
+        .iter()
+        .filter(|nr| nr.name.eq_ignore_ascii_case(name))
+        .collect();
+    matching
+        .iter()
+        .find(|nr| nr.sheet_id == Some(host))
+        .or_else(|| matching.iter().find(|nr| nr.sheet_id.is_none()))
+        .or_else(|| matching.first())
+        .copied()
+}
+
+/// Disclosure-only chart-source check, the chart twin of
+/// [`dropdown_reference_warnings`]. A chart on a published sheet ships its spec
+/// with its data sources as they are; when a source names a sheet OUTSIDE the
+/// published selection, the subscriber's chart has nothing to read. Each such
+/// source warns once per chart, naming the chart, the sheet it sits on and the
+/// source sheet:
+///
+/// - a DataRangeRef by stable id or by index, and a sheet-qualified A1 string by
+///   name, resolve against this workbook's sheets;
+/// - a prefix-less string that names a named range follows that name to its
+///   sheet;
+/// - any other prefix-less string warns that it resolves against whichever
+///   sheet is active on the subscriber.
+///
+/// A source naming a sheet this workbook does not have at all by stable id is
+/// already broken for the author and is not repeated here. A source that names
+/// NO sheet by position (an index-only ref past the last sheet, or one stamped
+/// with [`crate::chart_refs::UNRESOLVABLE_SHEET_ID`] because of that) IS
+/// reported: it is the one shape a subscriber could otherwise bind to a sheet
+/// of its own.
+///
+/// A PIVOT source warns when the pivot is not among the carrier's
+/// `pivot_definitions` -- which, on the pruned publish carrier, is exactly a
+/// pivot that will not travel.
+///
+/// Computes from the carrier alone, so the app's publish PREVIEW derives the
+/// same warnings without writing anything.
+pub fn chart_source_warnings(workbook: &Workbook, sheet_indices: &[usize]) -> Vec<String> {
+    chart_source_warnings_with(workbook, sheet_indices, &[])
+}
+
+/// A pivot table a publish leaves behind because a sheet it needs -- its
+/// destination, or the grid sheet it reads -- is not in the selection.
+///
+/// The host prunes such pivots from the carrier BEFORE core sees it, so core
+/// cannot tell "left behind" from "never existed". The host hands this list
+/// back in so the warnings can name the sheet that kept the pivot home instead
+/// of guessing at a reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnpublishedPivot {
+    pub id: EntityId,
+    /// The pivot's display name (its `name`, else its id).
+    pub name: String,
+    /// The sheet that is not in the selection (the destination sheet when that
+    /// is missing, otherwise the grid source sheet), by its tab name.
+    pub missing_sheet: String,
+}
+
+/// [`chart_source_warnings`], naming the missing sheet of every pivot in
+/// `unpublished` that a published chart reads. With an empty list the two are
+/// identical.
+pub fn chart_source_warnings_with(
+    workbook: &Workbook,
+    sheet_indices: &[usize],
+    unpublished: &[UnpublishedPivot],
+) -> Vec<String> {
+    use crate::chart_refs::{chart_spec_sources, ChartSource, ChartSourceSheet, UNRESOLVABLE_SHEET_ID};
+
+    let published = published_sheet_id_set(workbook, sheet_indices);
+    let mut warnings: Vec<String> = Vec::new();
+    for chart in workbook.charts.iter().filter(|c| published.contains(&c.sheet_id)) {
+        let chart_name = chart_display_name(chart);
+        let host_name = sheet_by_id(workbook, chart.sheet_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        let mut reported: Vec<SheetId> = Vec::new();
+        let mut reported_pivots: Vec<String> = Vec::new();
+        let mut reported_no_sheet = false;
+        let no_sheet_warning = || {
+            format!(
+                "Chart \"{}\" on sheet \"{}\" reads a data range by sheet POSITION, and no sheet of this workbook is at that position — the chart's source names no sheet and will arrive broken. Choose a new data range for it (Select Data) before publishing.",
+                chart_name, host_name
+            )
+        };
+        for source in chart_spec_sources(&chart.spec_json) {
+            // (the sheet the source reads, how the source names it)
+            let (target, how) = match &source {
+                ChartSource::Sheet(ChartSourceSheet::Id(id)) if *id == UNRESOLVABLE_SHEET_ID => {
+                    if !reported_no_sheet {
+                        reported_no_sheet = true;
+                        warnings.push(no_sheet_warning());
+                    }
+                    continue;
+                }
+                ChartSource::Sheet(ChartSourceSheet::Id(id)) => {
+                    (sheet_by_id(workbook, *id), String::new())
+                }
+                ChartSource::Sheet(ChartSourceSheet::Index(i)) => match workbook.sheets.get(*i) {
+                    Some(sheet) => (Some(sheet), String::new()),
+                    None => {
+                        if !reported_no_sheet {
+                            reported_no_sheet = true;
+                            warnings.push(no_sheet_warning());
+                        }
+                        continue;
+                    }
+                },
+                ChartSource::Pivot(raw) => {
+                    let id = EntityId::parse(raw);
+                    let carried = id.is_some_and(|id| {
+                        workbook.pivot_definitions.iter().any(|p| p.id == id)
+                    });
+                    if carried || reported_pivots.contains(raw) {
+                        continue;
+                    }
+                    reported_pivots.push(raw.clone());
+                    match id.and_then(|id| unpublished.iter().find(|u| u.id == id)) {
+                        Some(left) => warnings.push(format!(
+                            "Chart \"{}\" on sheet \"{}\" reads pivot table \"{}\", which is not in this application because sheet \"{}\" is not in the published selection — the chart will arrive with no data. Publish \"{}\" too.",
+                            chart_name, host_name, left.name, left.missing_sheet, left.missing_sheet
+                        )),
+                        None => warnings.push(format!(
+                            "Chart \"{}\" on sheet \"{}\" reads a pivot table ({}) that is not in this application — the chart will arrive with no data. Publish the pivot table's sheet and the sheet it reads too.",
+                            chart_name, host_name, raw
+                        )),
+                    }
+                    continue;
+                }
+                ChartSource::Sheet(ChartSourceSheet::Name(name)) => (
+                    sheet_by_name(workbook, name),
+                    " by name".to_string(),
+                ),
+                ChartSource::Unqualified(text) => {
+                    match chart_named_range(workbook, text, chart.sheet_id) {
+                        Some(nr) => {
+                            let refers = nr.refers_to.trim().trim_start_matches('=');
+                            let target = match reference_sheet_name(refers) {
+                                Some(sheet_name) if !sheet_name.is_empty() => {
+                                    sheet_by_name(workbook, &sheet_name)
+                                }
+                                _ => nr.sheet_id.and_then(|id| sheet_by_id(workbook, id)),
+                            };
+                            (target, format!(" through the named range \"{}\"", nr.name))
+                        }
+                        None => {
+                            warnings.push(format!(
+                                "Chart \"{}\" on sheet \"{}\" reads its data from \"{}\" without a sheet prefix — on the subscriber it resolves against whichever sheet is active and may not find the intended data.",
+                                chart_name, host_name, text
+                            ));
+                            continue;
+                        }
+                    }
+                }
+            };
+            let Some(target) = target else { continue };
+            if published.contains(&target.id) || reported.contains(&target.id) {
+                continue;
+            }
+            reported.push(target.id);
+            warnings.push(format!(
+                "Chart \"{}\" on sheet \"{}\" reads its data{} from sheet \"{}\", which is not in the published selection — the chart will arrive showing that its source sheet no longer exists. Publish \"{}\" too, or point the chart at a published sheet.",
+                chart_name, host_name, how, target.name, target.name
+            ));
+        }
+    }
+    warnings
+}
+
+/// The sheet a pivot definition materializes on: its `destination_sheet`, by
+/// name (the same case-insensitive lookup the pull-side materializer uses, which
+/// SKIPS a pivot whose destination sheet did not arrive).
+fn pivot_destination_sheet<'a>(
+    workbook: &'a Workbook,
+    pivot: &persistence::SavedPivotDefinition,
+) -> Option<&'a persistence::Sheet> {
+    let name = pivot
+        .definition
+        .get("destination_sheet")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?;
+    sheet_by_name(workbook, name)
+}
+
+/// A pivot's name for a warning: the definition's `name`, else its id.
+fn pivot_display_name(pivot: &persistence::SavedPivotDefinition) -> String {
+    pivot
+        .definition
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| pivot.id.to_string())
+}
+
+/// Disclosure-only source check for the floating FILTER objects (slicers and
+/// timeline slicers), the twin of [`chart_source_warnings`]. A slicer or
+/// timeline on a published sheet travels, but the table or pivot it filters
+/// travels only with ITS sheet: a table ships only from a published sheet, and a
+/// pivot materializes on the subscriber only when its destination sheet arrived.
+/// When that sheet is not in the published selection the object arrives drawn
+/// and connected to nothing. Covers each object's own source and its report
+/// connections, once per source.
+///
+/// A timeline whose pivot is not among the workbook's pivot definitions is not
+/// published at all (`timeline_slicers.json` carries only timelines whose
+/// source travels), and says so.
+pub fn object_source_warnings(workbook: &Workbook, sheet_indices: &[usize]) -> Vec<String> {
+    object_source_warnings_with(workbook, sheet_indices, &[])
+}
+
+/// [`object_source_warnings`] over a carrier whose pivots were PRUNED to the
+/// selection: `unpublished` lists the pivots the host left behind and the sheet
+/// that kept each one home.
+///
+/// Without it a pruned pivot is indistinguishable from one the workbook never
+/// had, which silenced every slicer warning about a pivot source (the pivot was
+/// not found, so the slicer was skipped) and gave the timeline a false reason
+/// ("a pivot table this workbook no longer has" -- it has it; its sheet was
+/// just not ticked). A pivot in `unpublished` is reported by name with its
+/// missing sheet; one in neither list is treated as before. With an empty list
+/// the two functions are identical.
+pub fn object_source_warnings_with(
+    workbook: &Workbook,
+    sheet_indices: &[usize],
+    unpublished: &[UnpublishedPivot],
+) -> Vec<String> {
+    let published = published_sheet_id_set(workbook, sheet_indices);
+    let host_name = |id: SheetId| {
+        sheet_by_id(workbook, id)
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
+    };
+    let pivot_by_id = |id: EntityId| workbook.pivot_definitions.iter().find(|p| p.id == id);
+    let left_behind = |id: EntityId| unpublished.iter().find(|u| u.id == id);
+    let mut warnings: Vec<String> = Vec::new();
+
+    // Slicers, in the artifact's (id) order.
+    let mut slicers: Vec<&persistence::SavedSlicer> = workbook
+        .slicers
+        .iter()
+        .filter(|s| published.contains(&s.sheet_id))
+        .collect();
+    slicers.sort_by(|a, b| a.id.cmp(&b.id));
+    for slicer in slicers {
+        let mut sources: Vec<(&persistence::SavedSlicerSourceType, EntityId)> =
+            vec![(&slicer.source_type, slicer.cache_source_id)];
+        for connection in &slicer.connected_sources {
+            if !sources.iter().any(|(_, id)| *id == connection.source_id) {
+                sources.push((&connection.source_type, connection.source_id));
+            }
+        }
+        for (source_type, source_id) in sources {
+            let (what, target) = match source_type {
+                persistence::SavedSlicerSourceType::Table => {
+                    match workbook.tables.iter().find(|t| t.id == source_id) {
+                        Some(table) => (
+                            format!("table \"{}\"", table.name),
+                            sheet_by_id(workbook, table.sheet_id),
+                        ),
+                        None => continue,
+                    }
+                }
+                persistence::SavedSlicerSourceType::Pivot => match pivot_by_id(source_id) {
+                    Some(pivot) => (
+                        format!("pivot table \"{}\"", pivot_display_name(pivot)),
+                        pivot_destination_sheet(workbook, pivot),
+                    ),
+                    None => {
+                        if let Some(left) = left_behind(source_id) {
+                            warnings.push(format!(
+                                "Slicer \"{}\" on sheet \"{}\" filters pivot table \"{}\", which is not in this application because sheet \"{}\" is not in the published selection — the slicer will arrive connected to nothing. Publish \"{}\" too.",
+                                slicer.name,
+                                host_name(slicer.sheet_id),
+                                left.name,
+                                left.missing_sheet,
+                                left.missing_sheet
+                            ));
+                        }
+                        continue;
+                    }
+                },
+                // A BI slicer reads the application's embedded model, not a sheet.
+                persistence::SavedSlicerSourceType::BiConnection => continue,
+            };
+            let Some(target) = target else { continue };
+            if published.contains(&target.id) {
+                continue;
+            }
+            warnings.push(format!(
+                "Slicer \"{}\" on sheet \"{}\" filters {} on sheet \"{}\", which is not in the published selection — the slicer will arrive connected to nothing. Publish \"{}\" too.",
+                slicer.name,
+                host_name(slicer.sheet_id),
+                what,
+                target.name,
+                target.name
+            ));
+        }
+    }
+
+    // Timeline slicers, in the artifact's (id) order.
+    let mut timelines: Vec<&persistence::SavedTimelineSlicer> = workbook
+        .timeline_slicers
+        .iter()
+        .filter(|t| published.contains(&t.sheet_id))
+        .collect();
+    timelines.sort_by(|a, b| a.id.cmp(&b.id));
+    for timeline in timelines {
+        let Some(own) = pivot_by_id(timeline.source_id) else {
+            match left_behind(timeline.source_id) {
+                Some(left) => warnings.push(format!(
+                    "Timeline \"{}\" on sheet \"{}\" filters pivot table \"{}\", which is not in this application because sheet \"{}\" is not in the published selection, so the timeline is left out of the published application. Publish \"{}\" too.",
+                    timeline.name,
+                    host_name(timeline.sheet_id),
+                    left.name,
+                    left.missing_sheet,
+                    left.missing_sheet
+                )),
+                None => warnings.push(format!(
+                    "Timeline \"{}\" on sheet \"{}\" filters a pivot table this workbook no longer has, so the timeline is left out of the published application.",
+                    timeline.name,
+                    host_name(timeline.sheet_id)
+                )),
+            }
+            continue;
+        };
+        let mut pivots: Vec<&persistence::SavedPivotDefinition> = vec![own];
+        let mut reported_left: Vec<EntityId> = Vec::new();
+        for id in &timeline.connected_pivot_ids {
+            if let Some(p) = pivot_by_id(*id) {
+                if !pivots.iter().any(|q| q.id == p.id) {
+                    pivots.push(p);
+                }
+            } else if let Some(left) = left_behind(*id) {
+                if reported_left.contains(id) {
+                    continue;
+                }
+                reported_left.push(*id);
+                warnings.push(format!(
+                    "Timeline \"{}\" on sheet \"{}\" also filters pivot table \"{}\", which is not in this application because sheet \"{}\" is not in the published selection — that connection will arrive filtering nothing. Publish \"{}\" too.",
+                    timeline.name,
+                    host_name(timeline.sheet_id),
+                    left.name,
+                    left.missing_sheet,
+                    left.missing_sheet
+                ));
+            }
+        }
+        for pivot in pivots {
+            let Some(target) = pivot_destination_sheet(workbook, pivot) else { continue };
+            if published.contains(&target.id) {
+                continue;
+            }
+            warnings.push(format!(
+                "Timeline \"{}\" on sheet \"{}\" filters pivot table \"{}\" on sheet \"{}\", which is not in the published selection — the timeline will arrive connected to nothing. Publish \"{}\" too.",
+                timeline.name,
+                host_name(timeline.sheet_id),
+                pivot_display_name(pivot),
+                target.name,
+                target.name
+            ));
         }
     }
     warnings
@@ -445,8 +865,9 @@ pub fn macro_reference_warnings(
 }
 
 /// Whether the request carries any Wave A/B artifact the publish would
-/// actually write: slicers / opted-in comments / scenarios / outlines on the
-/// published sheets, ribbon filters / saved pivot layouts / extension data
+/// actually write: slicers / timeline slicers / floating ranges / opted-in
+/// comments / scenarios / outlines on the published sheets, a canvas sheet,
+/// ribbon filters / saved pivot layouts / extension data
 /// (workbook-scoped), or a non-default document theme. Apps that predate
 /// these artifacts pull such an application "successfully" while silently dropping
 /// them — so the publishing host stamps `PublishRequest::min_app_version`
@@ -512,6 +933,62 @@ pub fn carries_wave_content(request: &PublishRequest) -> bool {
             .sheet_indices
             .iter()
             .any(|&idx| wb.sheets.get(idx).is_some_and(|s| s.kind.is_canvas()))
+        // A FLOATING RANGE the publish WRITES. An older app ignores
+        // `floating_ranges.json` and keeps the backing sheet as an orphaned
+        // hidden "object" sheet: the grid the author placed on the page is
+        // simply gone, with nothing anywhere saying so. Asked through the
+        // writer's own predicate: a row whose backing sheet stays home is not
+        // written, and stamping for it refused a cells-only application.
+        || wb
+            .floating_ranges
+            .iter()
+            .any(|fr| floating_range_travels(fr, |id| published_sheet_ids.contains(id)))
+        // A TIMELINE SLICER the publish WRITES. Same failure: an older app
+        // drops `timeline_slicers.json` and the report arrives with its date
+        // filter missing and the pivot it drove showing every period. A
+        // timeline whose pivot does not travel is not written, so it does not
+        // stamp either.
+        || wb
+            .timeline_slicers
+            .iter()
+            .any(|t| timeline_slicer_travels(t, wb, |id| published_sheet_ids.contains(id)))
+}
+
+/// Whether a floating range travels with a publish: its host AND its backing
+/// sheet are both published -- without the host it has nowhere to draw, without
+/// the backing sheet nothing to show.
+///
+/// ONE rule for every place that asks: the `floating_ranges.json` writer, the
+/// minimum-app-version stamp ([`carries_wave_content`]) and the host's
+/// transparency report. They were three copies, and the stamp's copy checked
+/// only the host, so it declared a minimum version for a row the writer
+/// dropped.
+pub fn floating_range_travels(
+    fr: &persistence::SavedFloatingRange,
+    is_published: impl Fn(&SheetId) -> bool,
+) -> bool {
+    is_published(&fr.host_sheet_id) && is_published(&fr.backing_sheet_id)
+}
+
+/// Whether a timeline slicer travels with a publish: it sits on a published
+/// sheet AND the pivot it filters is in the carrier (`workbook.pivot_definitions`,
+/// already pruned to the selection by the host). A timeline bound to a pivot the
+/// application does not carry would arrive drawn and filtering nothing, so it
+/// stays home and [`object_source_warnings`] says so.
+///
+/// Shared by the `timeline_slicers.json` writer, [`carries_wave_content`] and
+/// the host's transparency report, for the reason [`floating_range_travels`]
+/// gives.
+pub fn timeline_slicer_travels(
+    timeline: &persistence::SavedTimelineSlicer,
+    workbook: &Workbook,
+    is_published: impl Fn(&SheetId) -> bool,
+) -> bool {
+    is_published(&timeline.sheet_id)
+        && workbook
+            .pivot_definitions
+            .iter()
+            .any(|p| p.id == timeline.source_id)
 }
 
 /// Publish selected sheets from a workbook to a local workspace.
@@ -548,6 +1025,13 @@ pub fn publish(
             sheet_id: sheet.id,
             name: sheet.name.clone(),
             description: String::new(),
+            // "canvas" for a canvas; empty (and so absent from the signed
+            // manifest bytes) for a worksheet.
+            kind: if sheet.kind.is_canvas() {
+                sheet.kind.wire_name().to_string()
+            } else {
+                String::new()
+            },
             extra: std::collections::HashMap::new(),
         }
     }).collect();
@@ -980,11 +1464,29 @@ pub fn publish(
 
     // Write charts on the published sheets, carried so subscribers see them
     // in-app (pull remaps each chart's sheet id to the new local sheet).
-    let published_charts: Vec<&SavedChart> = request
+    //
+    // Every coordinate data source leaves STAMPED with its sheet's stable id.
+    // A ref carrying only the publisher's `sheetIndex` (an MCP/script chart the
+    // frontend store never re-saved) would otherwise be stamped on the
+    // subscriber with whatever sheet sits at that index THERE -- and read the
+    // wrong sheet in silence. Here rather than only in the host's assembly so
+    // every publish route gets it; a spec with nothing to stamp keeps its bytes.
+    let workbook_sheet_ids: Vec<SheetId> =
+        request.workbook.sheets.iter().map(|s| s.id).collect();
+    let published_charts: Vec<SavedChart> = request
         .workbook
         .charts
         .iter()
         .filter(|c| published_sheet_ids.contains(&c.sheet_id))
+        .map(|c| {
+            let mut chart = c.clone();
+            if let Some(stamped) =
+                crate::chart_refs::stamp_chart_spec_sheet_ids(&c.spec_json, &workbook_sheet_ids)
+            {
+                chart.spec_json = stamped;
+            }
+            chart
+        })
         .collect();
     if !published_charts.is_empty() {
         registry.write_artifact(
@@ -1228,6 +1730,65 @@ pub fn publish(
         )?;
     }
 
+    // Write TIMELINE slicers on the published sheets -- the slicer shape
+    // (sheet-anchored, APPLICATION sheet ids, sorted by id for stable bytes),
+    // filtered once more: a timeline travels only when the pivot it filters
+    // travels too, the publish twin of the save path's pruning. A timeline
+    // bound to a pivot the application does not carry would arrive drawn and
+    // filtering nothing; `object_source_warnings` tells the publisher instead.
+    // The rule is `timeline_slicer_travels`, shared with the version stamp.
+    let published_timeline_slicers = {
+        let mut timelines: Vec<persistence::SavedTimelineSlicer> = request
+            .workbook
+            .timeline_slicers
+            .iter()
+            .filter(|t| {
+                timeline_slicer_travels(t, request.workbook, |id| published_sheet_ids.contains(id))
+            })
+            .cloned()
+            .collect();
+        timelines.sort_by(|a, b| a.id.cmp(&b.id));
+        timelines
+    };
+    if !published_timeline_slicers.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "timeline_slicers.json",
+            serde_json::to_string_pretty(&published_timeline_slicers)?.as_bytes(),
+        )?;
+    }
+
+    // Write FLOATING RANGE object rows. A floating range is two things: an
+    // ordinary sheet holding its cells (visibility "object", published like any
+    // other sheet) and this row binding the stable ids to geometry and the
+    // visible window. Before this artifact the backing sheet travelled and the
+    // row did not, so the subscriber got an orphaned hidden sheet and no grid
+    // on the page.
+    //
+    // A row travels only when BOTH its host and its backing sheet are
+    // published: without the host it has nowhere to draw, without the backing
+    // sheet it has nothing to show. Ids stay APPLICATION ids (the host remaps
+    // them, like slicers). Sorted by id, and the row's width/height maps
+    // serialize in key order, so identical content is identical bytes.
+    let published_floating_ranges = {
+        let mut rows: Vec<persistence::SavedFloatingRange> = request
+            .workbook
+            .floating_ranges
+            .iter()
+            .filter(|fr| floating_range_travels(fr, |id| published_sheet_ids.contains(id)))
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        rows
+    };
+    if !published_floating_ranges.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "floating_ranges.json",
+            serde_json::to_string_pretty(&published_floating_ranges)?.as_bytes(),
+        )?;
+    }
+
     // Write ribbon filters (Wave A) — WORKBOOK-scoped like pane controls, so
     // all of them travel. They are BI-only by design: each carries its stable
     // application data-source id, and pull re-binds connection ids to the freshly
@@ -1285,6 +1846,10 @@ pub fn publish(
     // artifact's (order, id) ordering, so the warnings match the
     // published_pane_controls written above).
     let mut warnings = dropdown_reference_warnings(request.workbook, &request.sheet_indices);
+    // The same disclosure for the objects whose DATA lives on another sheet:
+    // a chart's sources, and the table/pivot a slicer or timeline filters.
+    warnings.extend(chart_source_warnings(request.workbook, &request.sheet_indices));
+    warnings.extend(object_source_warnings(request.workbook, &request.sheet_indices));
 
     // Loud-failure guard for macro-linked buttons: warn the publisher when a
     // button links a recorded macro that this publish's (possibly narrowed)
@@ -1481,6 +2046,8 @@ pub fn publish(
         cell_behaviors_published: published_cell_behaviors.len(),
         pane_controls_published: published_pane_controls.len(),
         slicers_published: published_slicers.len(),
+        timeline_slicers_published: published_timeline_slicers.len(),
+        floating_ranges_published: published_floating_ranges.len(),
         ribbon_filters_published: published_ribbon_filters.len(),
         pivot_layouts_published: request.workbook.pivot_layouts.len(),
         extension_data_published: request.workbook.extension_data.len(),
@@ -2358,4 +2925,699 @@ mod tests {
         publish(reg, &request, prof)
     }
 
+    // ======================================================================
+    // Canvas objects through publish (M5): floating ranges, timelines, the
+    // sources of charts / slicers / timelines, and the manifest's sheet kind
+    // ======================================================================
+
+    fn object_request<'a>(
+        wb: &'a Workbook,
+        package: &str,
+        sheet_indices: Vec<usize>,
+    ) -> PublishRequest<'a> {
+        PublishRequest {
+            model_writebacks: None,
+            workbook: wb,
+            package_name: package.to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
+            sheet_indices,
+            now: "2026-09-25T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        }
+    }
+
+    fn new_entity() -> EntityId {
+        EntityId::from_bytes(identity::generate_uuid_v7())
+    }
+
+    fn floating_range(host: SheetId, backing: SheetId) -> persistence::SavedFloatingRange {
+        persistence::SavedFloatingRange {
+            id: new_entity(),
+            backing_sheet_id: backing,
+            host_sheet_id: host,
+            x: 40.0,
+            y: 60.0,
+            rotation: 0.0,
+            pin_to_grid: false,
+            row_count: 5,
+            col_count: 3,
+            col_widths: [(2u32, 90.0), (0, 120.0), (1, 75.5)].into_iter().collect(),
+            row_heights: [(4u32, 30.0)].into_iter().collect(),
+            show_title: true,
+            show_column_headers: false,
+            show_row_headers: true,
+        }
+    }
+
+    fn pivot_on(destination_sheet: &str, name: &str) -> persistence::SavedPivotDefinition {
+        persistence::SavedPivotDefinition {
+            id: new_entity(),
+            source_type: "grid".to_string(),
+            source_sheet_index: Some(1),
+            definition: serde_json::json!({ "name": name, "destination_sheet": destination_sheet }),
+        }
+    }
+
+    fn timeline(name: &str, sheet_id: SheetId, pivot: EntityId) -> persistence::SavedTimelineSlicer {
+        persistence::SavedTimelineSlicer {
+            id: new_entity(),
+            name: name.to_string(),
+            header_text: None,
+            sheet_id,
+            x: 10.0,
+            y: 20.0,
+            width: 300.0,
+            height: 120.0,
+            source_type: persistence::SavedTimelineSourceType::Pivot,
+            source_id: pivot,
+            field_name: "OrderDate".to_string(),
+            level: persistence::SavedTimelineLevel::Quarters,
+            selection_start: Some("2026-01-01".to_string()),
+            selection_end: None,
+            show_header: true,
+            show_level_selector: true,
+            show_scrollbar: false,
+            style_preset: "TimelineStyleLight1".to_string(),
+            connected_pivot_ids: Vec::new(),
+        }
+    }
+
+    fn slicer(
+        name: &str,
+        sheet_id: SheetId,
+        source_type: persistence::SavedSlicerSourceType,
+        source: EntityId,
+    ) -> persistence::SavedSlicer {
+        persistence::SavedSlicer {
+            id: new_entity(),
+            name: name.to_string(),
+            header_text: None,
+            sheet_id,
+            x: 0.0,
+            y: 0.0,
+            width: 180.0,
+            height: 220.0,
+            source_type,
+            cache_source_id: source,
+            field_name: "Region".to_string(),
+            selected_items: None,
+            show_header: true,
+            columns: 1,
+            style_preset: "SlicerStyleLight1".to_string(),
+            selection_mode: persistence::SavedSlicerSelectionMode::default(),
+            hide_no_data: false,
+            indicate_no_data: true,
+            sort_no_data_last: true,
+            force_selection: false,
+            show_select_all: false,
+            arrangement: persistence::SavedSlicerArrangement::default(),
+            rows: 0,
+            item_gap: 4.0,
+            autogrid: true,
+            item_padding: 0.0,
+            button_radius: 2.0,
+            computed_properties: Vec::new(),
+            connected_sources: Vec::new(),
+            filter_level: 1,
+        }
+    }
+
+    fn table_on(name: &str, sheet_id: SheetId) -> SavedTable {
+        SavedTable {
+            id: new_entity(),
+            name: name.to_string(),
+            sheet_id,
+            start_row: 0,
+            start_col: 0,
+            end_row: 9,
+            end_col: 2,
+            columns: Vec::new(),
+            style_options: persistence::SavedTableStyleOptions {
+                banded_rows: true,
+                banded_columns: false,
+                header_row: true,
+                total_row: false,
+                first_column: false,
+                last_column: false,
+                show_filter_button: true,
+            },
+            style_name: "TableStyleMedium2".to_string(),
+        }
+    }
+
+    /// A chart whose `spec_json` is the ChartDefinition ENVELOPE, as the
+    /// frontend store writes it.
+    fn chart_with(sheet_id: SheetId, name: &str, spec: serde_json::Value) -> SavedChart {
+        SavedChart {
+            id: new_entity(),
+            sheet_id,
+            spec_json: serde_json::json!({ "chartId": 1, "name": name, "sheetIndex": 0, "spec": spec })
+                .to_string(),
+        }
+    }
+
+    fn range_ref(sheet_index: usize, sheet_id: Option<SheetId>) -> serde_json::Value {
+        let mut r = serde_json::json!({
+            "sheetIndex": sheet_index, "startRow": 0, "startCol": 0, "endRow": 4, "endCol": 1
+        });
+        if let Some(id) = sheet_id {
+            r["sheetId"] = serde_json::Value::String(id.to_string());
+        }
+        r
+    }
+
+    #[test]
+    fn chart_source_warnings_computes_without_publishing() {
+        // The preview contract, chart edition: the SAME warnings a publish would
+        // emit, from the carrier alone.
+        let mut wb = make_test_workbook(); // "Dashboard"(0), "Data"(1)
+        let dash = wb.sheets[0].id;
+        let data = wb.sheets[1].id;
+        wb.named_ranges = vec![
+            persistence::SavedNamedRange {
+                name: "SalesData".to_string(),
+                refers_to: "=Data!$A$1:$B$5".to_string(),
+                sheet_id: None,
+                comment: None,
+                folder: None,
+            },
+            persistence::SavedNamedRange {
+                name: "Local".to_string(),
+                refers_to: "=Dashboard!$A$1".to_string(),
+                sheet_id: None,
+                comment: None,
+                folder: None,
+            },
+        ];
+        wb.charts = vec![
+            // By stable id AND (in a layer) by index, both on "Data": ONE warning.
+            chart_with(
+                dash,
+                "ById",
+                serde_json::json!({
+                    "data": range_ref(1, Some(data)),
+                    "layers": [ { "data": range_ref(1, None) } ]
+                }),
+            ),
+            chart_with(dash, "ByIndex", serde_json::json!({ "data": range_ref(1, None) })),
+            chart_with(
+                dash,
+                "ByName",
+                serde_json::json!({ "transform": [ { "type": "lookup", "from": "'Data'!A1:B9" } ] }),
+            ),
+            chart_with(dash, "ByNamedRange", serde_json::json!({ "data": "SalesData" })),
+            chart_with(dash, "Unqualified", serde_json::json!({ "data": "A1:B3" })),
+            // Reads only the published sheet (by id, and via a name): silent.
+            chart_with(
+                dash,
+                "OnPublished",
+                serde_json::json!({
+                    "data": range_ref(0, Some(dash)),
+                    "layers": [ { "data": "Local" } ]
+                }),
+            ),
+            // A chart that does not ship is never warned about.
+            chart_with(data, "OnUnpublished", serde_json::json!({ "data": "Nowhere!A1" })),
+            // A sheet this workbook does not have is the author's problem already.
+            chart_with(dash, "GhostSheet", serde_json::json!({ "data": "Ghost!A1:A2" })),
+        ];
+
+        let warnings = chart_source_warnings(&wb, &[0]);
+        assert_eq!(warnings.len(), 5, "warnings: {warnings:#?}");
+        let joined = warnings.join("\n");
+        assert_eq!(
+            warnings.iter().filter(|w| w.contains("\"ById\"")).count(),
+            1,
+            "one chart, one missing sheet, one warning: {joined}"
+        );
+        for chart in ["ById", "ByIndex", "ByName", "ByNamedRange"] {
+            let line = warnings
+                .iter()
+                .find(|w| w.contains(&format!("\"{chart}\"")))
+                .unwrap_or_else(|| panic!("{chart} must warn: {joined}"));
+            assert!(line.contains("on sheet \"Dashboard\""), "{line}");
+            assert!(line.contains("from sheet \"Data\""), "{line}");
+            assert!(line.contains("source sheet no longer exists"), "{line}");
+        }
+        assert!(joined.contains("by name"), "{joined}");
+        assert!(joined.contains("named range \"SalesData\""), "{joined}");
+        assert!(
+            joined.contains("\"Unqualified\"") && joined.contains("without a sheet prefix"),
+            "{joined}"
+        );
+        for silent in ["OnPublished", "OnUnpublished", "GhostSheet"] {
+            assert!(!joined.contains(&format!("\"{silent}\"")), "{silent}: {joined}");
+        }
+
+        // Covering selection: only the selection-independent prefix-less one stays.
+        let covered = chart_source_warnings(&wb, &[0, 1]);
+        assert_eq!(covered.len(), 1, "{covered:#?}");
+        assert!(covered[0].contains("\"Unqualified\""), "{covered:?}");
+        // Out-of-range indices are tolerated, as in the dropdown twin.
+        assert_eq!(chart_source_warnings(&wb, &[0, 99]).len(), 5);
+    }
+
+    #[test]
+    fn publish_warns_about_chart_sources_and_stamps_index_only_refs() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook();
+        let dash = wb.sheets[0].id;
+        let data = wb.sheets[1].id;
+        let indexed = chart_with(dash, "Indexed", serde_json::json!({ "data": range_ref(1, None) }));
+        let plain = SavedChart {
+            id: new_entity(),
+            sheet_id: dash,
+            spec_json: "{\"kind\":\"bar\"}".to_string(),
+        };
+        wb.charts = vec![indexed.clone(), plain.clone()];
+
+        let result = publish(&reg, &object_request(&wb, "stamped", vec![0]), prof.path()).unwrap();
+        assert_eq!(result.charts_published, 2);
+        assert_eq!(result.warnings.len(), 1, "{:#?}", result.warnings);
+        assert!(result.warnings[0].contains("\"Indexed\""), "{:?}", result.warnings);
+
+        let bytes = reg.read_artifact("stamped", "1.0.0", "charts.json").unwrap().unwrap();
+        let shipped: Vec<SavedChart> = serde_json::from_slice(&bytes).unwrap();
+        let shipped_indexed = shipped.iter().find(|c| c.id == indexed.id).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&shipped_indexed.spec_json).unwrap();
+        assert_eq!(
+            v["spec"]["data"]["sheetId"],
+            data.to_string(),
+            "an index-only ref must leave the publisher stamped with its sheet's id"
+        );
+        assert_eq!(v["spec"]["data"]["sheetIndex"], 1);
+        let shipped_plain = shipped.iter().find(|c| c.id == plain.id).unwrap();
+        assert_eq!(shipped_plain.spec_json, plain.spec_json, "nothing to stamp keeps its bytes");
+    }
+
+    #[test]
+    fn object_source_warnings_computes_without_publishing() {
+        let mut wb = make_test_workbook(); // "Dashboard"(0), "Data"(1)
+        let dash = wb.sheets[0].id;
+        let data = wb.sheets[1].id;
+        let orders = table_on("Orders", data);
+        let revenue = pivot_on("Data", "Revenue by Month");
+        let local = pivot_on("dashboard", "Local Pivot"); // case differs on purpose
+        wb.tables = vec![orders.clone()];
+        wb.pivot_definitions = vec![revenue.clone(), local.clone()];
+
+        let mut connected = slicer(
+            "Connected",
+            dash,
+            persistence::SavedSlicerSourceType::Pivot,
+            local.id,
+        );
+        connected.connected_sources = vec![persistence::SavedSlicerConnection {
+            source_type: persistence::SavedSlicerSourceType::Pivot,
+            source_id: revenue.id,
+        }];
+        wb.slicers = vec![
+            slicer("ByTable", dash, persistence::SavedSlicerSourceType::Table, orders.id),
+            slicer("ByPivot", dash, persistence::SavedSlicerSourceType::Pivot, revenue.id),
+            slicer("Local", dash, persistence::SavedSlicerSourceType::Pivot, local.id),
+            slicer("Bi", dash, persistence::SavedSlicerSourceType::BiConnection, new_entity()),
+            slicer("OffSheet", data, persistence::SavedSlicerSourceType::Table, orders.id),
+            connected,
+        ];
+        wb.timeline_slicers = vec![
+            timeline("Dates", dash, revenue.id),
+            timeline("LocalDates", dash, local.id),
+            timeline("Orphan", dash, new_entity()),
+            timeline("OffSheetDates", data, revenue.id),
+        ];
+
+        let warnings = object_source_warnings(&wb, &[0]);
+        let joined = warnings.join("\n");
+        assert_eq!(warnings.len(), 5, "warnings: {warnings:#?}");
+        let line = |name: &str| {
+            warnings
+                .iter()
+                .find(|w| w.contains(&format!("\"{name}\"")))
+                .unwrap_or_else(|| panic!("{name} must warn: {joined}"))
+                .clone()
+        };
+        let by_table = line("ByTable");
+        assert!(by_table.contains("table \"Orders\"") && by_table.contains("sheet \"Data\""), "{by_table}");
+        assert!(by_table.contains("connected to nothing"), "{by_table}");
+        assert!(line("ByPivot").contains("pivot table \"Revenue by Month\""), "{joined}");
+        assert!(line("Connected").contains("\"Revenue by Month\""), "a report connection counts too: {joined}");
+        let dates = line("Dates");
+        assert!(dates.starts_with("Timeline") && dates.contains("sheet \"Data\""), "{dates}");
+        assert!(line("Orphan").contains("left out of the published application"), "{joined}");
+        for silent in ["\"Local\"", "\"Bi\"", "\"OffSheet\"", "\"LocalDates\"", "\"OffSheetDates\""] {
+            assert!(!joined.contains(silent), "{silent}: {joined}");
+        }
+
+        // Covering selection: only the timeline whose pivot is gone remains.
+        let covered = object_source_warnings(&wb, &[0, 1]);
+        assert_eq!(covered.len(), 1, "{covered:#?}");
+        assert!(covered[0].contains("\"Orphan\""), "{covered:?}");
+    }
+
+    /// The host PRUNES a pivot whose sheet or source sheet is not published
+    /// before core sees the carrier, so core alone cannot tell "left behind"
+    /// from "never existed": the slicer that filters it went silent and the
+    /// timeline blamed a pivot "this workbook no longer has". Given the host's
+    /// list, each line names the pivot and the sheet that kept it home.
+    ///
+    /// SABOTAGE: drop the `left_behind` branch from the slicer arm -- the
+    /// slicer goes silent again and the count assertion fails.
+    #[test]
+    fn object_warnings_name_the_sheet_that_kept_a_pruned_pivot_home() {
+        let mut wb = make_test_workbook(); // "Dashboard"(0), "Data"(1)
+        let dash = wb.sheets[0].id;
+        let carried = pivot_on("Dashboard", "Carried");
+        let pruned = new_entity();
+        let second_pruned = new_entity();
+        wb.pivot_definitions = vec![carried.clone()]; // `pruned` was taken out by the host
+        wb.slicers = vec![slicer(
+            "ByPrunedPivot",
+            dash,
+            persistence::SavedSlicerSourceType::Pivot,
+            pruned,
+        )];
+        let mut mixed = timeline("Mixed", dash, carried.id);
+        mixed.connected_pivot_ids = vec![carried.id, second_pruned, second_pruned];
+        wb.timeline_slicers = vec![timeline("Dates", dash, pruned), mixed];
+        let unpublished = vec![
+            UnpublishedPivot {
+                id: pruned,
+                name: "Revenue".to_string(),
+                missing_sheet: "Sales Data".to_string(),
+            },
+            UnpublishedPivot {
+                id: second_pruned,
+                name: "Costs".to_string(),
+                missing_sheet: "Ledger".to_string(),
+            },
+        ];
+
+        // Blind (what core alone can say): the slicer is silent, the timeline
+        // blames a pivot the workbook "no longer has".
+        let blind = object_source_warnings(&wb, &[0]);
+        assert_eq!(blind.len(), 1, "{blind:#?}");
+        assert!(blind[0].contains("no longer has"), "{blind:?}");
+
+        let named = object_source_warnings_with(&wb, &[0], &unpublished);
+        let joined = named.join("\n");
+        assert_eq!(named.len(), 3, "{named:#?}");
+        let slicer_line = named.iter().find(|w| w.contains("\"ByPrunedPivot\"")).expect(&joined);
+        assert!(
+            slicer_line.contains("pivot table \"Revenue\"")
+                && slicer_line.contains("sheet \"Sales Data\" is not in the published selection")
+                && slicer_line.contains("connected to nothing"),
+            "{slicer_line}"
+        );
+        let dates = named.iter().find(|w| w.contains("\"Dates\"")).expect(&joined);
+        assert!(!dates.contains("no longer has"), "the false reason is gone: {dates}");
+        assert!(
+            dates.contains("\"Revenue\"") && dates.contains("\"Sales Data\"") && dates.contains("left out"),
+            "{dates}"
+        );
+        let mixed_line = named.iter().find(|w| w.contains("\"Mixed\"")).expect(&joined);
+        assert!(
+            mixed_line.contains("\"Costs\"") && mixed_line.contains("\"Ledger\""),
+            "a pruned CONNECTED pivot is named once: {mixed_line}"
+        );
+
+        // An empty list IS the blind function.
+        assert_eq!(object_source_warnings_with(&wb, &[0], &[]), blind);
+    }
+
+    /// A PIVOT chart travels only if its pivot does. On the pruned carrier a
+    /// pivot that is not among `pivot_definitions` will not travel, and the
+    /// chart would arrive with no data -- said once per chart, by name when the
+    /// host says which sheet kept the pivot home.
+    ///
+    /// SABOTAGE: make the `ChartSource::Pivot` arm `continue` without a
+    /// warning -- the "Stranded" assertion fails.
+    #[test]
+    fn a_pivot_chart_whose_pivot_does_not_travel_warns() {
+        let mut wb = make_test_workbook();
+        let dash = wb.sheets[0].id;
+        let carried = pivot_on("Dashboard", "Carried");
+        let pruned = new_entity();
+        wb.pivot_definitions = vec![carried.clone()];
+        let pivot_source = |id: EntityId| serde_json::json!({ "type": "pivot", "pivotId": id.to_string() });
+        wb.charts = vec![
+            chart_with(dash, "Travels", serde_json::json!({ "data": pivot_source(carried.id) })),
+            chart_with(
+                dash,
+                "Stranded",
+                serde_json::json!({
+                    "data": pivot_source(pruned),
+                    "layers": [ { "data": pivot_source(pruned) } ]
+                }),
+            ),
+        ];
+
+        let blind = chart_source_warnings(&wb, &[0]);
+        assert_eq!(blind.len(), 1, "{blind:#?}");
+        assert!(blind[0].contains("\"Stranded\"") && blind[0].contains("no data"), "{blind:?}");
+
+        let named = chart_source_warnings_with(
+            &wb,
+            &[0],
+            &[UnpublishedPivot {
+                id: pruned,
+                name: "Revenue".to_string(),
+                missing_sheet: "Data".to_string(),
+            }],
+        );
+        assert_eq!(named.len(), 1, "{named:#?}");
+        assert!(
+            named[0].contains("pivot table \"Revenue\"")
+                && named[0].contains("sheet \"Data\" is not in the published selection"),
+            "{named:?}"
+        );
+    }
+
+    /// An index-only ref past the last sheet names NO sheet. It used to ship
+    /// unstamped and silent, and the subscriber's load migration bound it to
+    /// whatever sheet of theirs sat at that position. It now leaves stamped
+    /// with an id no sheet answers, and the author is told the chart will
+    /// arrive broken -- both before stamping (`Index`) and after (the id).
+    ///
+    /// SABOTAGE: restore `(workbook.sheets.get(*i), String::new())` for the
+    /// `Index` arm -- the unstamped chart goes silent.
+    #[test]
+    fn a_chart_source_naming_no_sheet_by_position_warns_and_ships_unresolvable() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let mut wb = make_test_workbook(); // two sheets
+        let dash = wb.sheets[0].id;
+        let lost = chart_with(dash, "Lost", serde_json::json!({ "data": range_ref(7, None) }));
+        let already = chart_with(
+            dash,
+            "AlreadyStamped",
+            serde_json::json!({
+                "data": range_ref(7, Some(crate::chart_refs::UNRESOLVABLE_SHEET_ID)),
+                "layers": [ { "data": range_ref(9, None) } ]
+            }),
+        );
+        wb.charts = vec![lost.clone(), already];
+
+        let warnings = chart_source_warnings(&wb, &[0, 1]);
+        assert_eq!(warnings.len(), 2, "one line per chart: {warnings:#?}");
+        for w in &warnings {
+            assert!(w.contains("names no sheet") && w.contains("arrive broken"), "{w}");
+        }
+
+        let result = publish(&reg, &object_request(&wb, "lost", vec![0, 1]), prof.path()).unwrap();
+        assert_eq!(result.warnings.len(), 2, "{:#?}", result.warnings);
+        let bytes = reg.read_artifact("lost", "1.0.0", "charts.json").unwrap().unwrap();
+        let shipped: Vec<SavedChart> = serde_json::from_slice(&bytes).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&shipped.iter().find(|c| c.id == lost.id).unwrap().spec_json).unwrap();
+        assert_eq!(
+            v["spec"]["data"]["sheetId"],
+            crate::chart_refs::UNRESOLVABLE_SHEET_ID.to_string(),
+            "never id-less: the subscriber must not stamp it from ITS sheet 7"
+        );
+    }
+
+    #[test]
+    fn publish_writes_floating_ranges_and_timelines_for_published_sheets_only() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook(); // "Dashboard"(0), "Data"(1)
+        let mut float1 = persistence::Sheet::new("Float1".to_string());
+        float1.visibility = "object".to_string();
+        let mut float2 = persistence::Sheet::new("Float2".to_string());
+        float2.visibility = "object".to_string();
+        wb.sheets.push(float1); // 2
+        wb.sheets.push(float2); // 3
+        let dash = wb.sheets[0].id;
+        let data = wb.sheets[1].id;
+        let f1 = wb.sheets[2].id;
+        let f2 = wb.sheets[3].id;
+
+        let carried = floating_range(dash, f1);
+        wb.floating_ranges = vec![
+            floating_range(dash, f2), // backing sheet not published: stays home
+            carried.clone(),
+            floating_range(data, f1), // host not published: stays home
+        ];
+        let pivot = pivot_on("Dashboard", "P");
+        wb.pivot_definitions = vec![pivot.clone()];
+        let kept = timeline("Carried", dash, pivot.id);
+        wb.timeline_slicers = vec![
+            timeline("NoPivot", dash, new_entity()),
+            kept.clone(),
+            timeline("OffSheet", data, pivot.id),
+        ];
+
+        let result =
+            publish(&reg, &object_request(&wb, "objects", vec![0, 2]), prof.path()).unwrap();
+        assert_eq!(result.floating_ranges_published, 1);
+        assert_eq!(result.timeline_slicers_published, 1);
+        assert!(
+            result.warnings.iter().any(|w| w.contains("\"NoPivot\"")),
+            "a timeline left out of the publish must say so: {:#?}",
+            result.warnings
+        );
+
+        let ver = reg.get_version_manifest("objects", "1.0.0").unwrap();
+        assert!(ver.artifact_checksums.contains_key("floating_ranges.json"));
+        assert!(ver.artifact_checksums.contains_key("timeline_slicers.json"));
+
+        let fr_bytes = reg.read_artifact("objects", "1.0.0", "floating_ranges.json").unwrap().unwrap();
+        let rows: Vec<persistence::SavedFloatingRange> = serde_json::from_slice(&fr_bytes).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, carried.id);
+        assert_eq!(rows[0].host_sheet_id, dash, "application ids, unremapped");
+        assert_eq!(rows[0].backing_sheet_id, f1);
+        assert_eq!(rows[0].col_widths, carried.col_widths);
+        assert!(!rows[0].show_column_headers);
+        // The width map serializes in KEY order, whatever the HashMap's order.
+        let text = String::from_utf8(fr_bytes).unwrap();
+        let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} in {text}"));
+        assert!(at("\"0\": 120.0") < at("\"1\": 75.5") && at("\"1\": 75.5") < at("\"2\": 90.0"), "{text}");
+
+        let tl_bytes = reg.read_artifact("objects", "1.0.0", "timeline_slicers.json").unwrap().unwrap();
+        let timelines: Vec<persistence::SavedTimelineSlicer> = serde_json::from_slice(&tl_bytes).unwrap();
+        assert_eq!(timelines.len(), 1);
+        assert_eq!(timelines[0].id, kept.id);
+        assert_eq!(timelines[0].source_id, pivot.id);
+        assert_eq!(timelines[0].level, persistence::SavedTimelineLevel::Quarters);
+    }
+
+    #[test]
+    fn a_workbook_without_canvas_objects_writes_neither_artifact() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let wb = make_test_workbook();
+        let result = publish(&reg, &object_request(&wb, "plain", vec![0, 1]), prof.path()).unwrap();
+        assert_eq!(result.floating_ranges_published, 0);
+        assert_eq!(result.timeline_slicers_published, 0);
+        assert!(reg.read_artifact("plain", "1.0.0", "floating_ranges.json").unwrap().is_none());
+        assert!(reg.read_artifact("plain", "1.0.0", "timeline_slicers.json").unwrap().is_none());
+    }
+
+    #[test]
+    fn floating_ranges_and_timelines_on_published_sheets_are_wave_content() {
+        let mut wb = make_test_workbook();
+        let dash = wb.sheets[0].id;
+        let data = wb.sheets[1].id;
+        assert!(!carries_wave_content(&object_request(&wb, "w", vec![0, 1])), "precondition");
+
+        wb.floating_ranges = vec![floating_range(dash, data)];
+        assert!(
+            carries_wave_content(&object_request(&wb, "w", vec![0, 1])),
+            "a floating range hosted on a published sheet needs a minimum app version"
+        );
+        assert!(
+            !carries_wave_content(&object_request(&wb, "w", vec![1])),
+            "one hosted on a sheet this publish leaves home does not"
+        );
+        assert!(
+            !carries_wave_content(&object_request(&wb, "w", vec![0])),
+            "nor one whose BACKING sheet stays home: the writer does not write that row, \
+             so it must not stamp a minimum version for it either"
+        );
+
+        // A timeline stamps only when the writer WRITES it: on a published sheet
+        // AND filtering a pivot the carrier holds.
+        let mut wb2 = make_test_workbook();
+        let dash2 = wb2.sheets[0].id;
+        let pivot = pivot_on("Dashboard", "P");
+        wb2.timeline_slicers = vec![timeline("Dates", dash2, pivot.id)];
+        assert!(
+            !carries_wave_content(&object_request(&wb2, "w", vec![0])),
+            "a timeline whose pivot does not travel is not written, so it is not wave content"
+        );
+        wb2.pivot_definitions = vec![pivot];
+        assert!(carries_wave_content(&object_request(&wb2, "w", vec![0])));
+        assert!(!carries_wave_content(&object_request(&wb2, "w", vec![1])));
+    }
+
+    /// ONE rule decides whether a floating range or a timeline travels, and the
+    /// writer, the version stamp and (host-side) the report all ask it. The
+    /// stamp's own copy checked the host only / the sheet only, and stamped a
+    /// minimum version for rows the writer dropped.
+    #[test]
+    fn the_writer_and_the_stamp_agree_on_what_travels() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let mut wb = make_test_workbook(); // "Dashboard"(0), "Data"(1)
+        let mut float = persistence::Sheet::new("Float".to_string());
+        float.visibility = "object".to_string();
+        wb.sheets.push(float); // 2
+        let (dash, backing) = (wb.sheets[0].id, wb.sheets[2].id);
+        wb.floating_ranges = vec![floating_range(dash, backing)];
+        wb.timeline_slicers = vec![timeline("NoPivot", dash, new_entity())];
+
+        for (package, indices) in [("half", vec![0usize]), ("whole", vec![0, 2])] {
+            let request = object_request(&wb, package, indices);
+            let stamps = carries_wave_content(&request);
+            let result = publish(&reg, &request, prof.path()).unwrap();
+            let writes = result.floating_ranges_published + result.timeline_slicers_published > 0;
+            assert_eq!(stamps, writes, "{package}: the stamp must follow what the writer wrote");
+        }
+    }
+
+    #[test]
+    fn the_manifest_names_a_canvas_and_says_nothing_for_a_worksheet() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let mut wb = make_test_workbook();
+        wb.sheets[0].kind = persistence::SheetKind::new_canvas();
+
+        publish(&reg, &object_request(&wb, "kinds", vec![0, 1]), prof.path()).unwrap();
+
+        let ver = reg.get_version_manifest("kinds", "1.0.0").unwrap();
+        assert_eq!(ver.sheets[0].kind, "canvas");
+        assert_eq!(ver.sheets[1].kind, "");
+        // The signed BYTES: a worksheet entry carries no `kind` key at all, so a
+        // worksheet-only manifest is byte-identical to one from before the field.
+        let raw = reg
+            .read_artifact("kinds", "1.0.0", crate::integrity::VERSION_MANIFEST_FILE)
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(v["sheets"][0]["kind"], "canvas");
+        assert!(v["sheets"][1].get("kind").is_none(), "{}", v["sheets"][1]);
+        assert!(ver.sheets[0].extra.is_empty(), "kind must not spill into `extra`");
+    }
 }

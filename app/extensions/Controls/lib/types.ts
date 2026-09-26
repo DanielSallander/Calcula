@@ -33,6 +33,28 @@ export interface ControlEntry {
   metadata: ControlMetadata;
 }
 
+/**
+ * One floating control's new geometry for `set_control_geometry` (mirrors Rust
+ * `ControlGeometryChange` in api_types.rs). The control is addressed by its
+ * anchor and must already exist. The backend stores the values exactly as the
+ * old per-property `persistFloatingPosition` did (it is now
+ * `persistFloatingGeometry`, one batch) -- the static properties x / y / width
+ * / height (and offsetX / offsetY for a pinned control) as
+ * `String(Math.round(v))` -- so pass the unrounded numbers. The offsets travel
+ * together: pass both (pinned control) or neither.
+ */
+export interface ControlGeometryChange {
+  sheetIndex: number;
+  row: number;
+  col: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  offsetX?: number;
+  offsetY?: number;
+}
+
 // ============================================================================
 // Button Property Definitions
 // ============================================================================

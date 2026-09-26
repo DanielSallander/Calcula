@@ -4,7 +4,6 @@
 import { getGridStateSnapshot } from "@api/state";
 import { showDialog } from "@api";
 import {
-  getAllTimelines,
   getTimelineById,
   deleteTimelineAsync,
   updateTimelineSelectionAsync,
@@ -13,6 +12,7 @@ import {
   isTimelineSelected,
   selectTimeline,
 } from "./selectionHandler";
+import { timelineAtCanvasPoint } from "../lib/timelineCanvasGeometry";
 import { TIMELINE_SETTINGS_DIALOG_ID } from "../manifest";
 
 let activeMenuElement: HTMLDivElement | null = null;
@@ -38,37 +38,20 @@ export function handleTimelineContextMenu(
   const canvasX = (e.clientX - rect.left) / zoom;
   const canvasY = (e.clientY - rect.top) / zoom;
 
-  const activeSheet = gridState.sheetContext.activeSheetIndex;
-  const timelines = getAllTimelines().filter(
-    (t) => t.sheetIndex === activeSheet,
-  );
-  const scrollX = gridState.viewport.scrollX;
-  const scrollY = gridState.viewport.scrollY;
-  const headerWidth = gridState.config.rowHeaderWidth;
-  const headerHeight = gridState.config.colHeaderHeight;
+  // The PAINTED gutters, and the topmost object decides: a timeline covered by
+  // another object is not what the user right-clicked (that object's own menu
+  // answers).
+  const tl = timelineAtCanvasPoint(canvasX, canvasY);
+  if (!tl) return;
 
-  for (let i = timelines.length - 1; i >= 0; i--) {
-    const tl = timelines[i];
-    const bx = tl.x - scrollX + headerWidth;
-    const by = tl.y - scrollY + headerHeight;
+  e.preventDefault();
+  e.stopPropagation();
 
-    if (
-      canvasX >= bx &&
-      canvasX <= bx + tl.width &&
-      canvasY >= by &&
-      canvasY <= by + tl.height
-    ) {
-      e.preventDefault();
-      e.stopPropagation();
-
-      if (!isTimelineSelected(tl.id)) {
-        selectTimeline(tl.id, false);
-      }
-
-      showContextMenu(e.clientX, e.clientY, tl.id);
-      return;
-    }
+  if (!isTimelineSelected(tl.id)) {
+    selectTimeline(tl.id, false);
   }
+
+  showContextMenu(e.clientX, e.clientY, tl.id);
 }
 
 export function closeTimelineContextMenu(): void {

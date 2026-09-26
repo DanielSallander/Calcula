@@ -14,17 +14,19 @@ import {
   registerObjectSelectionProvider,
   type ObjectSelectionProvider,
 } from "@api/objectSelection";
+import { canvasObjectRef } from "@api/canvasSheet";
 import {
   deselectSlicer,
   isSlicerSelected,
   selectSlicer,
 } from "../handlers/selectionHandler";
+import { getSlicerById } from "./slicerStore";
 
 /** The `GridRegion.type` slicers publish (see slicerStore.syncSlicerRegions). */
 export const SLICER_REGION_TYPE = "slicer";
 
 /** The slicer id a published region carries, or null. */
-function slicerIdOf(region: GridRegion): string | null {
+export function slicerIdOf(region: GridRegion): string | null {
   const id = region.data?.slicerId;
   return typeof id === "string" && id.length > 0 ? id : null;
 }
@@ -51,6 +53,32 @@ export function createSlicerSelectionProvider(): ObjectSelectionProvider {
     deselectAll(): void {
       // No-op (and no repaint) when nothing is selected.
       deselectSlicer();
+    },
+
+    refOf(region: GridRegion) {
+      const id = slicerIdOf(region);
+      return id === null ? null : canvasObjectRef("slicer", id);
+    },
+
+    // The slicer family holds several (the Ctrl+click set), so a canvas
+    // multi-selection keeps every slicer in it -- its ribbon edits them all
+    // and its own drag co-moves them. `selectSlicer(id, true)` TOGGLES, so it
+    // is only called when the answer is a change.
+    addToSelection(region: GridRegion): void {
+      const id = slicerIdOf(region);
+      if (id === null || isSlicerSelected(id)) return;
+      selectSlicer(id, true);
+    },
+
+    removeFromSelection(region: GridRegion): void {
+      const id = slicerIdOf(region);
+      if (id === null || !isSlicerSelected(id)) return;
+      selectSlicer(id, true);
+    },
+
+    labelOf(region: GridRegion): string | null {
+      const id = slicerIdOf(region);
+      return id === null ? null : getSlicerById(id)?.name ?? null;
     },
   };
 }

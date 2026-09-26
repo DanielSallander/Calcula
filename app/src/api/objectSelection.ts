@@ -1,7 +1,8 @@
 //! FILENAME: app/src/api/objectSelection.ts
 // PURPOSE: The OBJECT SELECTION seam: select, deselect and ask about floating
-//          objects (charts, slicers, timelines, controls, floating ranges)
-//          without going through a mouse press.
+//          objects (charts, slicers, timelines, controls, floating ranges,
+//          canvas pivot boxes) without going through a mouse press -- and, on a
+//          canvas, the ONE selection SET that spans every family.
 // CONTEXT: Until now the only way an object became selected was Core's
 //          `floatingObject:selected` event, and every family treats that event
 //          as "a left mouse press landed here": Controls RUNS a button's script
@@ -17,11 +18,44 @@
 //          callers say WHAT). `selectObject` deselects every OTHER family
 //          first, so a chart and a slicer can never both be selected by it.
 //          Seams point one way: this module imports nothing from extensions.
+//
+// THE SELECTION SET (M8). A canvas selects SEVERAL objects across families
+//          (Ctrl/Shift+click, the marquee), and arrange commands act on all of
+//          them. The set is the union of two things:
+//            - what each FAMILY holds in its own selection (the provider's
+//              `isSelected`) -- the family paints its own chrome, shows its
+//              contextual tab and co-moves its own members;
+//            - what the SET holds because the family cannot: Chart, Floating
+//              Range and the pivot box are single-select, so a second chart in
+//              the set is "set-held" (`getSetHeldObjectRegions`), and its
+//              chrome is painted by the canvas, not by Charts.
+//          Every family that has members holds at least one of them itself
+//          (the set routes the rest through `addToSelection` where the family
+//          has it, and holds them otherwise). The set is read in PAINT order.
+//
+//          Families announce every change of their own selection through
+//          `notifyObjectSelectionChanged()` at their selection chokepoints, so
+//          the set reflects a selection made by a mouse press inside a family.
+//
+// PRESS PARITY. On a canvas, Core calls `noteObjectPress` BEFORE it dispatches
+//          `floatingObject:selected`: a plain press on an object that is not in
+//          a multi-selection deselects every OTHER family (today only the pivot
+//          box did that, so a chart and a slicer could both be "selected"); a
+//          Ctrl/Shift press keeps the rest of the set; a plain press on a member
+//          of a multi-selection keeps the set until mouseup (the user may be
+//          starting a group drag) and narrows to that object only if nothing
+//          moved -- the rule Slicer already follows for its own multi-select.
+//          Worksheets are untouched: Core gates the call on the canvas surface.
 
-import { getGridRegions, getOverlayRegistration, type GridRegion } from "./gridOverlays";
+import { getGridRegions, stackedFloatingRegions, type GridRegion } from "./gridOverlays";
+import type { CanvasObjectRef } from "./lib";
 
-/** Keys an INNER selection can claim (a chart's series, a floating range's cell). */
-export type ObjectSelectionKey = "Tab" | "Escape";
+/**
+ * Keys an INNER selection can claim (a chart's series, a floating range's
+ * cell). "Arrow" stands for all four arrow keys, with or without Shift -- the
+ * canvas nudge asks it before moving the selected objects.
+ */
+export type ObjectSelectionKey = "Tab" | "Escape" | "Arrow";
 
 export interface ObjectSelectionProvider {
   /** The `GridRegion.type` values this provider owns. */
@@ -42,6 +76,31 @@ export interface ObjectSelectionProvider {
    * selected cell owns Tab and Escape (they move / clear the inner cell).
    */
   ownsKey?(key: ObjectSelectionKey): boolean;
+  /**
+   * The object's stable IDENTITY -- `{ kind, id }` in the convention of
+   * `CANVAS_OBJECT_KINDS` (@api/canvasSheet) -- or null when the region does
+   * not name one of this family's objects. This is how a canvas's layout
+   * (zOrder, locked) refers to the object across reloads; a region id is a
+   * paint handle, not an identity.
+   */
+  refOf?(region: GridRegion): CanvasObjectRef | null;
+  /**
+   * ADD the object behind `region` to this family's own selection, keeping
+   * what it already holds -- present only on families that can hold several
+   * (Controls, Slicer, Timeline). Same no-click contract as `select`. A family
+   * without it holds one object; the selection set holds its other members.
+   */
+  addToSelection?(region: GridRegion): void;
+  /**
+   * Remove the object behind `region` from this family's own selection,
+   * keeping the rest. Present only alongside `addToSelection`.
+   */
+  removeFromSelection?(region: GridRegion): void;
+  /**
+   * What the Name Box calls this object ("Sales by Region", "Slicer_Region",
+   * "Button"), or null when it has no name to show.
+   */
+  labelOf?(region: GridRegion): string | null;
 }
 
 const providers = new Map<string, ObjectSelectionProvider>();
@@ -73,35 +132,151 @@ function guarded<T>(what: string, fn: () => T, fallback: T): T {
   }
 }
 
+// ============================================================================
+// Set state
+// ============================================================================
+
+/** Region ids of members the SET holds because their family does not. */
+const heldIds = new Set<string>();
+/** The member pressed / added / named primary last. */
+let primaryId: string | null = null;
+/**
+ * The members a press gesture must not lose while the pressed family runs its
+ * own click handler (which may drop them: a single-select family replaces its
+ * one object, the pivot box deselects itself on any other family's press).
+ * While set, `notifyObjectSelectionChanged` moves every dropped one into the
+ * set. Region objects from the pre-press snapshot: providers answer
+ * `isSelected` from the ids in `region.data`, which a re-publication keeps.
+ */
+let retained: readonly GridRegion[] | null = null;
+
+const changeListeners = new Set<() => void>();
+let batchDepth = 0;
+let pendingNotify = false;
+let emitting = false;
+
+/** Whether the object's own family holds it. */
+function familyHolds(region: GridRegion): boolean {
+  const p = providers.get(region.type);
+  return !!p && guarded("isSelected", () => p.isSelected(region), false);
+}
+
+/** Whether the family behind `p` holds any of the live `regions`. */
+function familyHoldsAny(p: ObjectSelectionProvider, regions: readonly GridRegion[]): boolean {
+  return regions.some((r) => providers.get(r.type) === p && familyHolds(r));
+}
+
+function isMember(region: GridRegion): boolean {
+  return heldIds.has(region.id) || familyHolds(region);
+}
+
+function emit(): void {
+  if (emitting) {
+    pendingNotify = true;
+    return;
+  }
+  emitting = true;
+  try {
+    // A listener that changes the selection re-announces; bounded so a
+    // listener that always does cannot spin the frame.
+    for (let pass = 0; pass < 5; pass++) {
+      pendingNotify = false;
+      for (const l of Array.from(changeListeners)) {
+        try {
+          l();
+        } catch (err) {
+          console.error("[objectSelection] change listener threw:", err);
+        }
+      }
+      if (!pendingNotify) break;
+    }
+  } finally {
+    emitting = false;
+    pendingNotify = false;
+  }
+}
+
+function markChanged(): void {
+  if (batchDepth > 0) {
+    pendingNotify = true;
+    return;
+  }
+  emit();
+}
+
+/** Run `fn` announcing at most ONE change, at the end. */
+function batch<T>(fn: () => T): T {
+  batchDepth++;
+  try {
+    return fn();
+  } finally {
+    batchDepth--;
+    if (batchDepth === 0 && pendingNotify && !emitting) emit();
+  }
+}
+
+/** While a press gesture decides: dropped members are kept by the set. */
+function keepRetained(): void {
+  if (!retained) return;
+  for (const r of retained) {
+    if (!heldIds.has(r.id) && !familyHolds(r)) heldIds.add(r.id);
+  }
+}
+
+// ============================================================================
+// Single-object API (keyboard, scripts)
+// ============================================================================
+
 /** Whether some provider owns this region's type. */
 export function canSelectObject(region: GridRegion): boolean {
   return providers.has(region.type);
 }
 
 /**
- * Select the object behind `region`, deselecting every other family first.
- * Returns false (and changes nothing) when no provider owns its type.
+ * Select the object behind `region` -- and ONLY it: every other family is
+ * deselected first and the set drops what it held. Returns false (and changes
+ * nothing) when no provider owns its type.
  */
 export function selectObject(region: GridRegion): boolean {
   const owner = providers.get(region.type);
   if (!owner) return false;
-  for (const p of distinctProviders()) {
-    if (p !== owner) guarded("deselectAll", () => p.deselectAll(), undefined);
-  }
-  guarded("select", () => owner.select(region), undefined);
+  batch(() => {
+    settlePress();
+    heldIds.clear();
+    for (const p of distinctProviders()) {
+      if (p !== owner) guarded("deselectAll", () => p.deselectAll(), undefined);
+    }
+    guarded("select", () => owner.select(region), undefined);
+    primaryId = region.id;
+    markChanged();
+  });
   return true;
 }
 
-/** Deselect every object in every family. */
-export function deselectAllObjects(): void {
-  for (const p of distinctProviders()) guarded("deselectAll", () => p.deselectAll(), undefined);
+/** Deselect every object in every family, and empty the set. */
+export function clearObjectSelection(): void {
+  batch(() => {
+    settlePress();
+    heldIds.clear();
+    primaryId = null;
+    for (const p of distinctProviders()) guarded("deselectAll", () => p.deselectAll(), undefined);
+    markChanged();
+  });
 }
 
-/** The first region in `regions` whose object is selected, or null. */
+/** Deselect every object in every family (the historical name of {@link clearObjectSelection}). */
+export function deselectAllObjects(): void {
+  clearObjectSelection();
+}
+
+/**
+ * The first region in `regions` whose object is selected -- by its family or
+ * by the set -- or null.
+ */
 export function getSelectedObjectRegion(regions: readonly GridRegion[]): GridRegion | null {
   for (const r of regions) {
-    const p = providers.get(r.type);
-    if (p && guarded("isSelected", () => p.isSelected(r), false)) return r;
+    if (!providers.has(r.type)) continue;
+    if (isMember(r)) return r;
   }
   return null;
 }
@@ -112,25 +287,371 @@ export function objectOwnsKey(key: ObjectSelectionKey): boolean {
 }
 
 /**
- * The floating regions currently published, in PAINT order (bottom first):
- * by overlay priority, then publication order -- the order the renderer
- * stacks them in. `regions` defaults to the live list; only floating regions
- * whose type has a selection provider are returned (what cannot be selected
- * cannot be cycled to).
+ * The stable identity of the object behind `region` (see
+ * `ObjectSelectionProvider.refOf`), or null when no provider owns its type,
+ * the provider cannot name one, or it threw.
  */
-export function selectableFloatingRegions(regions: readonly GridRegion[] = getGridRegions()): GridRegion[] {
-  return regions
-    .map((r, i) => ({ r, i }))
-    .filter(({ r }) => !!r.floating && providers.has(r.type))
-    .sort((a, b) => {
-      const pa = getOverlayRegistration(a.r.type)?.priority ?? 0;
-      const pb = getOverlayRegistration(b.r.type)?.priority ?? 0;
-      return pa - pb || a.i - b.i;
-    })
-    .map(({ r }) => r);
+export function objectRefOf(region: GridRegion): CanvasObjectRef | null {
+  const p = providers.get(region.type);
+  if (!p?.refOf) return null;
+  return guarded("refOf", () => p.refOf!(region) ?? null, null);
 }
 
-/** Test hook: forget every provider. */
+/**
+ * What the object behind `region` is called (see
+ * `ObjectSelectionProvider.labelOf`); null when nobody can say, or an empty
+ * name.
+ */
+export function objectLabelOf(region: GridRegion): string | null {
+  const p = providers.get(region.type);
+  if (!p?.labelOf) return null;
+  const label = guarded("labelOf", () => p.labelOf!(region) ?? null, null);
+  return typeof label === "string" && label.trim() !== "" ? label : null;
+}
+
+/**
+ * The floating regions currently published, in PAINT order (bottom first) --
+ * `stackedFloatingRegions` (@api/gridOverlays), the order the renderer stacks
+ * them in: by overlay priority then publication order, or by the stacking
+ * order when one is in force. `regions` defaults to the live list; only
+ * floating regions whose type has a selection provider are returned (what
+ * cannot be selected cannot be cycled to).
+ */
+export function selectableFloatingRegions(regions: readonly GridRegion[] = getGridRegions()): GridRegion[] {
+  return stackedFloatingRegions(regions).filter((r) => providers.has(r.type));
+}
+
+// ============================================================================
+// The selection SET (canvas multi-selection)
+// ============================================================================
+
+/**
+ * Every selected object -- held by its family or by the set -- in PAINT
+ * order (bottom first). `regions` defaults to the live list.
+ */
+export function getSelectedObjectRegions(regions: readonly GridRegion[] = getGridRegions()): GridRegion[] {
+  return selectableFloatingRegions(regions).filter(isMember);
+}
+
+/**
+ * The members the SET holds and their family does not show -- the ones whose
+ * selection chrome the canvas paints. Paint order.
+ */
+export function getSetHeldObjectRegions(regions: readonly GridRegion[] = getGridRegions()): GridRegion[] {
+  return selectableFloatingRegions(regions).filter((r) => heldIds.has(r.id) && !familyHolds(r));
+}
+
+/** Whether the object behind `region` is in the selection (family or set). */
+export function isObjectInSelection(region: GridRegion): boolean {
+  return providers.has(region.type) && isMember(region);
+}
+
+/**
+ * The PRIMARY member: the one pressed, added or named primary last, while it
+ * is still selected; otherwise the topmost member. Null when nothing is.
+ */
+export function getPrimaryObjectRegion(regions: readonly GridRegion[] = getGridRegions()): GridRegion | null {
+  const members = getSelectedObjectRegions(regions);
+  return members.find((r) => r.id === primaryId) ?? members[members.length - 1] ?? null;
+}
+
+/**
+ * Make `regions` THE selection. Each family with members selects one through
+ * its provider's `select` (the `primary` when it is that family's, else its
+ * first member) and takes the rest through `addToSelection` where it has it;
+ * the set holds the others. Every family with no member is deselected. Types
+ * no provider owns are ignored; `primary` defaults to the last member.
+ */
+export function setObjectSelectionSet(regions: readonly GridRegion[], primary?: GridRegion | null): void {
+  const members: GridRegion[] = [];
+  const seen = new Set<string>();
+  for (const r of regions) {
+    if (!providers.has(r.type) || seen.has(r.id)) continue;
+    seen.add(r.id);
+    members.push(r);
+  }
+  const lead =
+    primary && members.some((m) => m.id === primary.id) ? primary : members[members.length - 1] ?? null;
+
+  batch(() => {
+    settlePress();
+    heldIds.clear();
+    const byProvider = new Map<ObjectSelectionProvider, GridRegion[]>();
+    for (const m of members) {
+      const p = providers.get(m.type)!;
+      const list = byProvider.get(p);
+      if (list) list.push(m);
+      else byProvider.set(p, [m]);
+    }
+    for (const p of distinctProviders()) {
+      if (!byProvider.has(p)) guarded("deselectAll", () => p.deselectAll(), undefined);
+    }
+    for (const [p, list] of byProvider) {
+      const head = lead && list.some((m) => m.id === lead.id) ? lead : list[0];
+      guarded("select", () => p.select(head), undefined);
+      for (const m of list) {
+        if (m.id === head.id) continue;
+        if (p.addToSelection) guarded("addToSelection", () => p.addToSelection!(m), undefined);
+        else heldIds.add(m.id);
+      }
+    }
+    primaryId = lead?.id ?? null;
+    markChanged();
+  });
+}
+
+/**
+ * Add the object behind `region` to the selection, keeping every other
+ * member, and make it the primary. Its family selects it when the family holds
+ * nothing yet, adds it when the family can hold several, and otherwise the set
+ * holds it. Returns false when no provider owns its type.
+ */
+export function addToObjectSelection(region: GridRegion): boolean {
+  const p = providers.get(region.type);
+  if (!p) return false;
+  batch(() => {
+    settlePress();
+    if (!isMember(region)) {
+      if (!familyHoldsAny(p, getGridRegions())) {
+        guarded("select", () => p.select(region), undefined);
+      } else if (p.addToSelection) {
+        guarded("addToSelection", () => p.addToSelection!(region), undefined);
+      } else {
+        heldIds.add(region.id);
+      }
+    }
+    primaryId = region.id;
+    markChanged();
+  });
+  return true;
+}
+
+/**
+ * Take the object behind `region` out of the selection, keeping the rest. A
+ * single-select family that loses its one object takes another member it has
+ * in the set, if any, so its contextual UI keeps addressing a selected object.
+ */
+export function removeFromObjectSelection(region: GridRegion): void {
+  batch(() => {
+    settlePress();
+    heldIds.delete(region.id);
+    const p = providers.get(region.type);
+    if (p && familyHolds(region)) {
+      if (p.removeFromSelection) {
+        guarded("removeFromSelection", () => p.removeFromSelection!(region), undefined);
+      } else {
+        const next = [...getSetHeldObjectRegions()]
+          .reverse()
+          .find((r) => providers.get(r.type) === p && r.id !== region.id);
+        if (next) {
+          guarded("select", () => p.select(next), undefined);
+          heldIds.delete(next.id);
+        } else {
+          guarded("deselectAll", () => p.deselectAll(), undefined);
+        }
+      }
+    }
+    if (primaryId === region.id) primaryId = null;
+    markChanged();
+  });
+}
+
+/**
+ * Forget what the SET holds, leaving every family's own selection alone. The
+ * canvas calls it when the active sheet changes: the set's members belong to
+ * the page they were chosen on, and each family already clears its own.
+ */
+export function clearSetHeldObjects(): void {
+  if (heldIds.size === 0) return;
+  batch(() => {
+    heldIds.clear();
+    markChanged();
+  });
+}
+
+/**
+ * Subscribe to selection changes -- a family's own, and the set's. The
+ * listener reads the state back (`getSelectedObjectRegions` and friends).
+ * Returns the unsubscribe.
+ */
+export function onObjectSelectionChanged(listener: () => void): () => void {
+  changeListeners.add(listener);
+  return () => {
+    changeListeners.delete(listener);
+  };
+}
+
+/**
+ * Announce that a family's selection changed. Families call it at their
+ * selection chokepoints (select / deselect), so the set -- and everything
+ * that follows it: the canvas chrome, the Name Box label -- reflects a
+ * selection a mouse press made inside the family.
+ */
+export function notifyObjectSelectionChanged(): void {
+  keepRetained();
+  markChanged();
+}
+
+// ============================================================================
+// Press parity (Core calls this on a canvas)
+// ============================================================================
+
+/** The modifiers of a press, as Core saw them. */
+export interface ObjectPressModifiers {
+  ctrlKey?: boolean;
+  shiftKey?: boolean;
+}
+
+type PressMode = "keep" | "add" | "toggle";
+
+interface PressGesture {
+  region: GridRegion;
+  mode: PressMode;
+  moved: boolean;
+  released: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+  detach: () => void;
+}
+
+let press: PressGesture | null = null;
+
+/**
+ * Core's hook for a LEFT press on a floating object on a CANVAS, called
+ * BEFORE `floatingObject:selected` is dispatched (so the pressed family's own
+ * handler still decides what the press means inside the family):
+ *
+ *   - plain press, object not in a multi-selection: every OTHER family is
+ *     deselected and the set drops what it held -- one object selected;
+ *   - Ctrl/Shift press on an object NOT in the set: the rest stays (members a
+ *     family drops while handling the press are kept by the set);
+ *   - Ctrl/Shift press on a member: that member leaves the set at mouseup;
+ *   - plain press on a member of a multi-selection: the set is kept for a
+ *     possible group drag, and narrowed to that object at mouseup only if the
+ *     object did not move.
+ */
+export function noteObjectPress(region: GridRegion, mods: ObjectPressModifiers = {}): void {
+  settlePress();
+  const additive = mods.ctrlKey === true || mods.shiftKey === true;
+  const before = getSelectedObjectRegions();
+  const wasMember = before.some((r) => r.id === region.id);
+
+  if (!additive && !(wasMember && before.length > 1)) {
+    const owner = providers.get(region.type);
+    batch(() => {
+      heldIds.clear();
+      for (const p of distinctProviders()) {
+        if (p !== owner) guarded("deselectAll", () => p.deselectAll(), undefined);
+      }
+      primaryId = region.id;
+      markChanged();
+    });
+    return;
+  }
+
+  const mode: PressMode = !additive ? "keep" : wasMember ? "toggle" : "add";
+  retained = mode === "toggle" ? before.filter((r) => r.id !== region.id) : before;
+  if (mode !== "toggle") primaryId = region.id;
+  armPress(region, mode);
+}
+
+function armPress(region: GridRegion, mode: PressMode): void {
+  const gesture: PressGesture = { region, mode, moved: false, released: false, timer: null, detach: () => {} };
+  const onMoved = (e: Event): void => {
+    const d = (e as CustomEvent<{ regionId?: unknown }>).detail;
+    if (d?.regionId === region.id) gesture.moved = true;
+  };
+  // SESSION-SCOPED: bound by the press, removed at its mouseup (or when the
+  // next press settles a gesture whose mouseup never arrived). The finish is
+  // deferred one task so it runs AFTER every other mouseup listener -- Core's
+  // own, which dispatches the moveComplete this gesture is waiting to hear,
+  // is re-bound after a press begins a drag and so runs after this one.
+  const onUp = (): void => {
+    window.removeEventListener("mouseup", onUp);
+    gesture.released = true;
+    gesture.timer = setTimeout(() => finishPress(gesture), 0);
+  };
+  gesture.detach = () => {
+    window.removeEventListener("mouseup", onUp);
+    window.removeEventListener("floatingObject:moveComplete", onMoved);
+    if (gesture.timer !== null) clearTimeout(gesture.timer);
+  };
+  window.addEventListener("mouseup", onUp);
+  window.addEventListener("floatingObject:moveComplete", onMoved);
+  press = gesture;
+}
+
+/**
+ * End the pending press gesture: finish it now when its mouseup already
+ * arrived (a fast next press can beat the deferred finish), forget it when
+ * the mouseup never came.
+ */
+function settlePress(): void {
+  const g = press;
+  if (!g) return;
+  if (g.released) {
+    finishPress(g);
+    return;
+  }
+  g.detach();
+  press = null;
+  retained = null;
+}
+
+function liveRegion(region: GridRegion): GridRegion {
+  return getGridRegions().find((r) => r.id === region.id) ?? region;
+}
+
+function finishPress(g: PressGesture): void {
+  if (press !== g) return;
+  g.detach();
+  press = null;
+  const kept = retained ?? [];
+  retained = null;
+  batch(() => {
+    if (g.mode === "keep" && !g.moved) {
+      const target = liveRegion(g.region);
+      setObjectSelectionSet([target], target);
+      return;
+    }
+    restoreMembers(kept);
+    if (g.mode === "toggle") removeFromObjectSelection(liveRegion(g.region));
+    markChanged();
+  });
+}
+
+/**
+ * Hand the members a gesture kept back to their families where a family can
+ * hold them (it holds nothing, or it can hold several); the set holds the
+ * rest. Runs after the gesture, outside every family's own handler.
+ */
+function restoreMembers(kept: readonly GridRegion[]): void {
+  const live = getGridRegions();
+  for (const r of kept) {
+    if (familyHolds(r)) {
+      heldIds.delete(r.id);
+      continue;
+    }
+    const p = providers.get(r.type);
+    if (!p) continue;
+    if (!familyHoldsAny(p, live)) {
+      guarded("select", () => p.select(r), undefined);
+    } else if (p.addToSelection) {
+      guarded("addToSelection", () => p.addToSelection!(r), undefined);
+    }
+    if (familyHolds(r)) heldIds.delete(r.id);
+    else heldIds.add(r.id);
+  }
+}
+
+/** Test hook: forget every provider and all selection-set state. */
 export function resetObjectSelectionProviders(): void {
   providers.clear();
+  if (press) press.detach();
+  press = null;
+  retained = null;
+  heldIds.clear();
+  primaryId = null;
+  batchDepth = 0;
+  pendingNotify = false;
+  emitting = false;
 }

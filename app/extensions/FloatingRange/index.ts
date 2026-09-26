@@ -3,8 +3,9 @@
 //          REAL range of cells (hidden backing sheet), referenced like a sheet
 //          (=Float1!A1). Registers the overlay, the floatingObject:* handlers,
 //          the capture-phase keyboard, Insert/context menus, the properties
-//          dialog, the @api/floatingRangeService provider, and the document
-//          lifecycle (open/new/sheet-switch/undo re-sync).
+//          dialog, the @api/floatingRangeService provider, the overflow-scroll
+//          wheel target (M7: content past the window scrolls; lib/frView.ts),
+//          and the document lifecycle (open/new/sheet-switch/undo re-sync).
 // CONTEXT: Store per Charts/lib/chartStore.ts; interaction per Controls; cell
 //          paint per shapeRenderer's async cache. Overlay priority 13 — above
 //          Controls (12), below Charts (15).
@@ -24,11 +25,13 @@ import {
 import { getActiveSheet } from "@api/lib";
 import {
   requestOverlayRedraw,
+  topFloatingRegionAt,
   type OverlayHitTestContext,
 } from "@api/gridOverlays";
 import { confirmAsync, promptAsync } from "@api/dialogs";
 import { getDesignMode, onDesignModeChange } from "@api/designMode";
-import { getGridStateSnapshot, rowHeaderGutter, colHeaderGutter } from "@api/grid";
+import { getGridStateSnapshot } from "@api/grid";
+import { registerObjectWheelTarget } from "../_shared/lib/objectWheelScroll";
 import {
   isGlobalFormulaMode,
   getGlobalIsEditing,
@@ -66,6 +69,15 @@ import {
   flushPendingFloatingRangeSaves,
   type FloatingRangeEntry,
 } from "./lib/floatingRangeStore";
+import {
+  frameCanvasBounds,
+  clientToCanvas,
+  frameAtCanvasPoint,
+} from "./lib/frCanvasGeometry";
+import { getFrView, ensureFrCellVisible, createFrWheelTarget } from "./lib/frView";
+import { pruneFrScrolls } from "./lib/frScroll";
+import { invalidateAllFrExtents } from "./lib/frExtent";
+import { readFrCells } from "./lib/frCellReads";
 import {
   localCellFromPoint,
   frameWidth,
@@ -118,7 +130,9 @@ import {
   destroyFrEditor,
 } from "./editor/frEditor";
 import { buildQualifiedRef } from "./lib/frRefs";
-import { registerFloatingRangeObjectSelection } from "./lib/frObjectSelection";
+import { registerFloatingRangeObjectSelection, frIdOf } from "./lib/frObjectSelection";
+import { registerObjectGeometryProvider } from "@api/objectGeometry";
+import { createFloatingRangeGeometryProvider } from "./lib/frGeometry";
 import {
   buildFrContextMenu,
   type FrContextMenuHandlers,
@@ -155,64 +169,15 @@ let edgeResizeActive = false;
 // ============================================================================
 // Geometry helpers
 // ============================================================================
+//
+// Where the frame is on the canvas (frameCanvasBounds / clientToCanvas /
+// frameAtCanvasPoint) lives in lib/frCanvasGeometry.ts, with the gutters Core
+// PAINTED -- on a canvas sheet they are 0 whatever the stored config says.
+// Which CELL a point is over is always asked through the live view
+// (lib/frView.ts), so a scrolled range answers the scrolled cell.
 
-/** Frame's logical canvas bounds from live grid state (headings-gutter aware —
- *  never `?? 50`). Null when grid state is not initialized. */
-function frameCanvasBounds(
-  entry: FloatingRangeEntry,
-): { x: number; y: number; width: number; height: number } | null {
-  const state = getGridStateSnapshot();
-  if (!state) return null;
-  const rhw = rowHeaderGutter(state.config);
-  const chh = colHeaderGutter(state.config);
-  return {
-    x: rhw + entry.x - state.viewport.scrollX,
-    y: chh + entry.y - state.viewport.scrollY,
-    width: frameWidth(entry),
-    height: frameHeight(entry),
-  };
-}
-
-/** Client (mouse) coordinates -> zoom-corrected logical canvas coordinates —
- *  the same basis Core hands claimsBodyDrag/bodyDragStart. */
-function clientToCanvas(clientX: number, clientY: number): { x: number; y: number } | null {
-  const layer = document.querySelector("[data-grid-canvas-layer]");
-  if (!layer) return null;
-  const rect = layer.getBoundingClientRect();
-  const zoom = getGridStateSnapshot()?.zoom ?? 1;
-  return { x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom };
-}
-
-/**
- * The floating range whose FRAME contains a logical-canvas point, or null.
- * Active sheet only (that is what publishes regions), last one first so the
- * topmost of two overlapping frames wins — the same order Core's own
- * `findFloatingRegionAt` walks.
- */
-function frameAtCanvasPoint(
-  canvasX: number,
-  canvasY: number,
-): FloatingRangeEntry | null {
-  const active = getAllFloatingRanges().filter(
-    (e) => e.sheetIndex === getFrActiveSheetIndex(),
-  );
-  for (let i = active.length - 1; i >= 0; i--) {
-    const entry = active[i];
-    const b = frameCanvasBounds(entry);
-    if (!b) continue;
-    if (
-      canvasX >= b.x &&
-      canvasX <= b.x + b.width &&
-      canvasY >= b.y &&
-      canvasY <= b.y + b.height
-    ) {
-      return entry;
-    }
-  }
-  return null;
-}
-
-/** Clamp a frame-relative point into the cells area and resolve its cell. */
+/** Clamp a frame-relative point into the cells area and resolve its cell, at
+ *  the range's current scroll. */
 function clampedCellFromFramePoint(
   entry: FloatingRangeEntry,
   dx: number,
@@ -222,7 +187,7 @@ function clampedCellFromFramePoint(
   const minY = frCellsTop(entry);
   const cx = Math.min(Math.max(dx, minX), frameWidth(entry) - 0.01);
   const cy = Math.min(Math.max(dy, minY), frameHeight(entry) - 0.01);
-  const hit = localCellFromPoint(entry, cx, cy);
+  const hit = localCellFromPoint(entry, cx, cy, getFrView(entry));
   if (hit.zone === "cells") return { row: hit.row, col: hit.col };
   return { row: 0, col: 0 };
 }
@@ -357,29 +322,56 @@ async function confirmAndDeleteFr(frId: string): Promise<void> {
   }
 }
 
-/** Clear the CONTENT of the local selection (only cells that actually hold
- *  something — the read bounds the write batch). Undoable per cell. */
+/**
+ * Clear the CONTENT of the local selection (only cells that actually hold
+ * something — the read bounds the write batch). Undoable per cell.
+ *
+ * The selection is clamped to the CONTENT extent (M7), not the window, so a
+ * cleared cell can be one only scrolling shows. The read is banded (a whole
+ * column over a 1000-row extent is past the backend's one-read limit), and a
+ * cell the backend REFUSES does not stop the others: each is tried, and the
+ * refusals are reported once, visibly -- a Delete that silently left cells
+ * behind would look like it worked.
+ */
 async function clearLocalSelectionCells(frId: string): Promise<void> {
   const entry = getFloatingRangeById(frId);
   const sel = getLocalSelection();
   if (!entry || !sel || sel.frId !== frId) return;
+  const view = getFrView(entry);
   const rect = localSelectionRect(sel);
-  const maxRow = Math.min(rect.maxRow, entry.rows - 1);
-  const maxCol = Math.min(rect.maxCol, entry.cols - 1);
+  const maxRow = Math.min(rect.maxRow, view.rows - 1);
+  const maxCol = Math.min(rect.maxCol, view.cols - 1);
+  let failed = 0;
+  let firstError: unknown = null;
   try {
-    const cells = await getFloatingRangeCells(
-      frId,
-      rect.minRow,
-      rect.minCol,
-      maxRow,
-      maxCol,
-    );
+    const cells = await readFrCells(frId, {
+      startRow: rect.minRow,
+      startCol: rect.minCol,
+      endRow: maxRow,
+      endCol: maxCol,
+    });
     for (const cell of cells) {
       if (cell.type === "empty" && !cell.formula) continue;
-      await updateFloatingRangeCell(frId, cell.row, cell.col, "");
+      try {
+        await updateFloatingRangeCell(frId, cell.row, cell.col, "");
+      } catch (err) {
+        failed++;
+        if (firstError === null) firstError = err;
+      }
     }
   } catch (err) {
-    console.error("[FloatingRange] Clear cells failed:", err);
+    failed++;
+    if (firstError === null) firstError = err;
+  }
+  if (failed > 0) {
+    console.error("[FloatingRange] Clear cells failed:", firstError);
+    const reason = firstError instanceof Error ? firstError.message : String(firstError);
+    showToast(
+      failed === 1
+        ? `A cell could not be cleared: ${reason}`
+        : `${failed} cells could not be cleared: ${reason}`,
+      { type: "error" },
+    );
   }
   invalidateFrCache(frId);
   requestOverlayRedraw();
@@ -557,7 +549,9 @@ function claimsBodyDrag(ctx: OverlayHitTestContext): boolean {
 
   const dx = ctx.canvasX - ctx.floatingCanvasBounds.x;
   const dy = ctx.canvasY - ctx.floatingCanvasBounds.y;
-  const hit = localCellFromPoint(entry, dx, dy);
+  // At the range's scroll: a click (or a reference pick) on a scrolled cell
+  // means THAT cell, not the window cell that used to sit there.
+  const hit = localCellFromPoint(entry, dx, dy, getFrView(entry));
 
   // Formula-reference picking (M7): a click on an FR cell while ANY editor
   // expects a reference inserts "Name!A1" instead of selecting/moving. The
@@ -660,7 +654,7 @@ export function handleFrDoubleClick(ctx: OverlayHitTestContext): boolean {
 
   const dx = ctx.canvasX - ctx.floatingCanvasBounds.x;
   const dy = ctx.canvasY - ctx.floatingCanvasBounds.y;
-  const hit = localCellFromPoint(entry, dx, dy);
+  const hit = localCellFromPoint(entry, dx, dy, getFrView(entry));
   if (hit.zone !== "cells") return false;
 
   setLocalSelection({
@@ -670,6 +664,9 @@ export function handleFrDoubleClick(ctx: OverlayHitTestContext): boolean {
     endRow: hit.row,
     endCol: hit.col,
   });
+  // A cell only partly scrolled into view is brought fully in before its
+  // editor opens over it (the editor is clipped to the viewport otherwise).
+  ensureFrCellVisible(entry, hit.row, hit.col);
   openFrEditor(frId, hit.row, hit.col, null);
   return true;
 }
@@ -818,10 +815,12 @@ function setupFloatingObjectEvents(): void {
 
     const dx = (detail.canvasX as number) - bounds.x;
     const dy = (detail.canvasY as number) - bounds.y;
-    const hit = localCellFromPoint(entry, dx, dy);
+    const view = getFrView(entry);
+    const hit = localCellFromPoint(entry, dx, dy, view);
     if (hit.zone === "outside" || hit.zone === "title") return;
 
-    // Zone -> initial local selection.
+    // Zone -> initial local selection. A header selects the whole row/column
+    // of the CONTENT extent, not just the window's part of it.
     let anchorRow = 0;
     let anchorCol = 0;
     let endRow = 0;
@@ -832,11 +831,11 @@ function setupFloatingObjectEvents(): void {
     } else if (hit.zone === "rowHeader") {
       anchorRow = endRow = hit.row;
       anchorCol = 0;
-      endCol = entry.cols - 1;
+      endCol = view.cols - 1;
     } else if (hit.zone === "colHeader") {
       anchorCol = endCol = hit.col;
       anchorRow = 0;
-      endRow = entry.rows - 1;
+      endRow = view.rows - 1;
     }
 
     // A double-click is NOT inferred here any more. It arrives as a real
@@ -885,7 +884,8 @@ function setupFloatingObjectEvents(): void {
 // textarea handles its keys — the input/textarea guard skips it here)
 // ============================================================================
 
-function handleFrKeyDown(e: KeyboardEvent): void {
+/** Exported for the unit tier (the extent-wide navigation + reveal, M7). */
+export function handleFrKeyDown(e: KeyboardEvent): void {
   // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
   // field, a shape's declared hit rectangle -- is not this extension's.
   // The tag list below cannot see a <select> or a <button>; the claim can.
@@ -914,37 +914,41 @@ function handleFrKeyDown(e: KeyboardEvent): void {
       e.preventDefault();
       e.stopPropagation();
     };
+    // Navigation spans the CONTENT extent, not just the window (M7): a cell
+    // past the window's edge is one arrow press away, and the move scrolls it
+    // into view. The moving end is the one kept visible (Shift extends it).
+    const view = getFrView(entry);
+    const move = (dRow: number, dCol: number, extend: boolean) => {
+      moveLocalSelection(dRow, dCol, extend, view.rows, view.cols);
+      const moved = getLocalSelection();
+      if (moved) ensureFrCellVisible(entry, moved.endRow, moved.endCol);
+      requestOverlayRedraw();
+    };
 
     switch (e.key) {
       case "ArrowUp":
         swallow();
-        moveLocalSelection(-1, 0, e.shiftKey, entry.rows, entry.cols);
-        requestOverlayRedraw();
+        move(-1, 0, e.shiftKey);
         return;
       case "ArrowDown":
         swallow();
-        moveLocalSelection(1, 0, e.shiftKey, entry.rows, entry.cols);
-        requestOverlayRedraw();
+        move(1, 0, e.shiftKey);
         return;
       case "ArrowLeft":
         swallow();
-        moveLocalSelection(0, -1, e.shiftKey, entry.rows, entry.cols);
-        requestOverlayRedraw();
+        move(0, -1, e.shiftKey);
         return;
       case "ArrowRight":
         swallow();
-        moveLocalSelection(0, 1, e.shiftKey, entry.rows, entry.cols);
-        requestOverlayRedraw();
+        move(0, 1, e.shiftKey);
         return;
       case "Enter":
         swallow();
-        moveLocalSelection(e.shiftKey ? -1 : 1, 0, false, entry.rows, entry.cols);
-        requestOverlayRedraw();
+        move(e.shiftKey ? -1 : 1, 0, false);
         return;
       case "Tab":
         swallow();
-        moveLocalSelection(0, e.shiftKey ? -1 : 1, false, entry.rows, entry.cols);
-        requestOverlayRedraw();
+        move(0, e.shiftKey ? -1 : 1, false);
         return;
       case "Escape":
         swallow();
@@ -954,6 +958,8 @@ function handleFrKeyDown(e: KeyboardEvent): void {
         return;
       case "F2":
         swallow();
+        // The editor opens over the active cell, so that cell must be in view.
+        ensureFrCellVisible(entry, sel.anchorRow, sel.anchorCol);
         openFrEditor(sel.frId, sel.anchorRow, sel.anchorCol, null);
         return;
       case "Delete":
@@ -966,6 +972,7 @@ function handleFrKeyDown(e: KeyboardEvent): void {
         // Type-to-edit: a printable character opens the editor seeded with it.
         if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
           swallow();
+          ensureFrCellVisible(entry, sel.anchorRow, sel.anchorCol);
           openFrEditor(sel.frId, sel.anchorRow, sel.anchorCol, e.key);
         }
         return;
@@ -1000,12 +1007,22 @@ function activate(context: ExtensionContext): void {
     }),
   );
 
+  // 1a. Overflow scroll (M7): a wheel over a range whose content reaches past
+  //     its window scrolls the cell area. Through the SHARED helper's one
+  //     capture-phase listener (no listener of our own); a range with no
+  //     overflow on the wheeled axis lets the wheel through to the page.
+  cleanupFns.push(registerObjectWheelTarget(createFrWheelTarget()));
+
   // 1b. Keyboard / programmatic selection (@api/objectSelection). A canvas
   //     sheet's Tab cycling selects ranges through this, and asks `ownsKey`
   //     first: while a range has an inner cell selection, Tab and Escape are
   //     handleFrKeyDown's (below), and a second window-capture listener cannot
   //     stop this one from also seeing the key.
   cleanupFns.push(registerFloatingRangeObjectSelection());
+
+  // 1c. Geometry without a pointer gesture (@api/objectGeometry): the canvas's
+  //     align, distribute, nudge and group drag -- position only.
+  cleanupFns.push(registerObjectGeometryProvider(createFloatingRangeGeometryProvider()));
 
   // 2. floatingObject:* wiring.
   setupFloatingObjectEvents();
@@ -1126,7 +1143,15 @@ function activate(context: ExtensionContext): void {
 
     const point = clientToCanvas(e.clientX, e.clientY);
     if (!point) return;
-    const entry = frameAtCanvasPoint(point.x, point.y);
+    // THE TOPMOST OBJECT DECIDES (@api/gridOverlays). Another object painted
+    // over the frame here owns this right-click -- the frame's own lookup sees
+    // only floating ranges and would open this menu for a range the user
+    // cannot see under a chart or a slicer. A range on top is THE range, in
+    // the canvas's stacking order.
+    const top = topFloatingRegionAt(point.x, point.y);
+    if (top && top.type !== FLOATING_RANGE_REGION_TYPE) return;
+    const topId = top ? frIdOf(top) : null;
+    const entry = (topId ? getFloatingRangeById(topId) : null) ?? frameAtCanvasPoint(point.x, point.y);
     if (!entry) return;
 
     // preventDefault ALSO satisfies Core's `defaultPrevented` check, so the
@@ -1258,6 +1283,10 @@ function activate(context: ExtensionContext): void {
         // Store holds ALL sheets (Charts model) — a switch only re-filters.
         // Host/backing indexes may have shifted (sheet add/delete), so re-read.
         await loadFloatingRangesFromBackend();
+        // The content extents were read by backing-sheet INDEX (frExtent.ts),
+        // so they are re-read too; each stays in force until its re-read
+        // lands. The session scroll is untouched -- a switch keeps it.
+        invalidateAllFrExtents();
         syncFloatingRangeRegions();
         requestOverlayRedraw();
       })
@@ -1281,6 +1310,9 @@ function activate(context: ExtensionContext): void {
         if (selectedId && !live.has(selectedId)) deselectAllFloatingRanges();
         const sel = getLocalSelection();
         if (sel && !live.has(sel.frId)) clearLocalSelection();
+        // The session scroll is KEPT for every range that survived the reload
+        // (an undo of a move must not jump the content back to the top).
+        pruneFrScrolls(live);
         invalidateAllFrCaches();
         syncFloatingRangeRegions();
         requestOverlayRedraw();
@@ -1292,6 +1324,9 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(
     context.events.on(AppEvents.FLOATING_RANGES_CHANGED, reloadForBackendChange),
   );
+  // An application pull, refresh or detach can add, move or remove floating
+  // ranges (they travel in the .calp as floating_ranges.json): re-read.
+  cleanupFns.push(context.events.on(AppEvents.PACKAGE_UPDATED, reloadForBackendChange));
 
   // 10. Repaint triggers (plan §2, enumerated).
   // Exact + free: a change on an FR's BACKING sheet stales exactly that FR.

@@ -22,6 +22,7 @@ export {
   LAYOUT_PAGE_MARGIN,
   GRID_SCROLLBAR_GUTTER_PX,
   pageScrollExtent,
+  isRegionLocked,
 } from "../core/lib/layoutSurface";
 
 export type {

@@ -227,3 +227,102 @@ fn a_cascade_records_its_timelines_BEFORE_the_caller_records_the_pivot() {
          at it. Got: {kinds:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// M8 arrange: moving a timeline JOINS an open transaction
+// ---------------------------------------------------------------------------
+
+fn move_timeline(
+    state: &crate::AppState,
+    timelines: &TimelineSlicerState,
+    file: &crate::persistence::FileState,
+    id: identity::EntityId,
+    frame: (f64, f64, f64, f64),
+) -> Result<(), String> {
+    crate::timeline_slicer::commands::update_timeline_position_core(
+        state, timelines, file, id, frame.0, frame.1, frame.2, frame.3,
+    )
+}
+
+fn timeline_frame(timelines: &TimelineSlicerState, id: identity::EntityId) -> (f64, f64, f64, f64) {
+    let t = &timelines.timelines.read().unwrap()[&id];
+    (t.x, t.y, t.width, t.height)
+}
+
+#[test]
+fn moving_a_timeline_inside_an_open_transaction_joins_it_instead_of_committing_it() {
+    // `update_timeline_position` ran an unconditional begin/commit pair. `begin`
+    // is a no-op while a transaction is open, but `commit` is NOT: it closed the
+    // CALLER'S arrange transaction halfway through, so everything the arrange
+    // did after the timeline landed in a second Ctrl+Z step.
+    let state = crate::create_app_state();
+    let file = crate::persistence::FileState::default();
+    let timelines = TimelineSlicerState::new();
+    let tl = timeline("Dates", identity::EntityId::from_bytes(identity::generate_uuid_v7()));
+    let id = tl.id;
+    timelines.timelines.write(&load_effect()).unwrap().insert(id, tl);
+
+    state.undo_stack.lock().unwrap().begin_transaction("Align left");
+    move_timeline(&state, &timelines, &file, id, (100.0, 200.0, 350.0, 100.0)).unwrap();
+    {
+        let stack = state.undo_stack.lock().unwrap();
+        assert!(
+            stack.has_open_transaction(),
+            "moving the timeline committed the caller's outer transaction"
+        );
+        assert_eq!(stack.undo_depth(), 0, "nothing may land on the stack before the caller commits");
+    }
+    state.undo_stack.lock().unwrap().commit_transaction();
+    assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), 1, "the arrange is one step");
+}
+
+#[test]
+fn moving_a_timeline_alone_is_one_step_and_a_refusal_or_no_op_is_clean() {
+    let state = crate::create_app_state();
+    let file = crate::persistence::FileState::default();
+    let timelines = TimelineSlicerState::new();
+    let tl = timeline("Dates", identity::EntityId::from_bytes(identity::generate_uuid_v7()));
+    let id = tl.id;
+    timelines.timelines.write(&load_effect()).unwrap().insert(id, tl);
+    let depth = || state.undo_stack.lock().unwrap().undo_depth();
+
+    // An unknown id used to be looked up AFTER `mutates` had set the dirty
+    // flag, so a refused move still marked the document modified.
+    let unknown = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+    assert!(move_timeline(&state, &timelines, &file, unknown, (1.0, 2.0, 3.0, 4.0)).is_err());
+    move_timeline(&state, &timelines, &file, id, (10.0, 20.0, 350.0, 100.0)).expect("the same frame is not an error");
+    assert!(!file.is_dirty(), "a refusal or a no-op leaves the document clean");
+    assert_eq!(depth(), 0, "and records nothing");
+
+    // Alone: its own one-shot transaction, exactly one step, and the step's
+    // payload is the PRE-edit object, so the real restore puts the box back.
+    move_timeline(&state, &timelines, &file, id, (100.0, 200.0, 400.0, 120.0)).unwrap();
+    assert!(file.is_dirty());
+    assert_eq!(depth(), 1, "a timeline move on its own is exactly ONE undo step");
+    let tx = state.undo_stack.lock().unwrap().pop_undo().unwrap();
+    assert_eq!(tx.description, "Move timeline slicer");
+    let data = tx
+        .changes
+        .iter()
+        .find_map(|c| match c {
+            engine::CellChange::CustomRestore { kind, data } if kind == "timeline_slicer" => Some(data.clone()),
+            _ => None,
+        })
+        .expect("the move recorded a timeline_slicer restore");
+    let mut inverse = engine::Transaction::new("undo");
+    crate::undo_commands::testing::apply_timeline_restore(&timelines, &load_effect(), &data, &mut inverse);
+    assert_eq!(timeline_frame(&timelines, id), (10.0, 20.0, 350.0, 100.0), "the restore puts the box back");
+
+    // The chart move's gate: a protected sheet that does not allow editing
+    // objects refuses the move, before the effect.
+    crate::document_effect::mark_saved(&file);
+    state.sheet_protection.write(&crate::document_effect::test_seed_effect()).unwrap().insert(
+        0,
+        crate::protection::SheetProtection { protected: true, ..Default::default() },
+    );
+    let refused = move_timeline(&state, &timelines, &file, id, (5.0, 5.0, 350.0, 100.0));
+    assert!(refused.is_err_and(|e| e.contains("protected")), "a protected sheet refuses the move");
+    assert_eq!(timeline_frame(&timelines, id), (10.0, 20.0, 350.0, 100.0));
+    assert!(!file.is_dirty());
+    assert_eq!(depth(), 0);
+}

@@ -5,6 +5,7 @@
 //! and the publish/pull workflows.
 
 pub mod audit;
+pub mod chart_refs;
 pub mod checkout;
 pub mod compat;
 pub mod diff;

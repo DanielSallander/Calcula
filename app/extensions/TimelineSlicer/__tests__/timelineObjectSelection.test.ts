@@ -126,3 +126,58 @@ describe("keyboard selection of a timeline", () => {
     expect(unregisterPanel).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("refOf: the timeline's canvas identity (M8)", () => {
+  it("is { kind: 'timelineSlicer', id: timelineId }, and reaches objectRefOf through the seam", async () => {
+    const { objectRefOf } = await import("@api/objectSelection");
+    expect(createTimelineSelectionProvider().refOf?.(region("t1"))).toEqual({ kind: "timelineSlicer", id: "t1" });
+    const off = registerTimelineObjectSelection();
+    expect(objectRefOf(region("t2"))).toEqual({ kind: "timelineSlicer", id: "t2" });
+    off();
+  });
+
+  it("is null for a region that carries no timeline id", () => {
+    expect(createTimelineSelectionProvider().refOf?.({ ...region("t1"), data: {} })).toBeNull();
+  });
+});
+
+describe("the canvas selection set (M8)", () => {
+  it("every timeline selection chokepoint announces the change to the set", async () => {
+    const { onObjectSelectionChanged } = await import("@api/objectSelection");
+    const { selectTimeline, deselectTimeline, dropTimelineFromSelection } = await import("../handlers/selectionHandler");
+    const seen = vi.fn();
+    const off = onObjectSelectionChanged(seen);
+    selectTimeline("t1");
+    expect(seen).toHaveBeenCalledTimes(1);
+    selectTimeline("t2", true);
+    expect(seen).toHaveBeenCalledTimes(2);
+    dropTimelineFromSelection("t2");
+    expect(seen).toHaveBeenCalledTimes(3);
+    seen.mockClear();
+    deselectTimeline();
+    expect(seen).toHaveBeenCalled();
+    seen.mockClear();
+    deselectTimeline();
+    expect(seen).not.toHaveBeenCalled();
+    off();
+  });
+
+  it("the family holds several: addToSelection / removeFromSelection change ONE timeline, never toggle blindly", () => {
+    const p = createTimelineSelectionProvider();
+    p.select(region("t1"));
+    p.addToSelection!(region("t2"));
+    p.addToSelection!(region("t2"));
+    expect([...getSelectedTimelineIds()].sort()).toEqual(["t1", "t2"]);
+    p.removeFromSelection!(region("t1"));
+    p.removeFromSelection!(region("t1"));
+    expect([...getSelectedTimelineIds()]).toEqual(["t2"]);
+    expect(peekPendingTimelineClick()).toBeNull();
+    expect(domSelected).toHaveLength(0);
+  });
+
+  it("labelOf is the timeline's name (the Name Box label)", () => {
+    const p = createTimelineSelectionProvider();
+    expect(p.labelOf!(region("t1"))).toBe("t1");
+    expect(p.labelOf!(region("gone"))).toBeNull();
+  });
+});

@@ -81,6 +81,12 @@ pub struct HostState {
     pub reference_style: String,
     /// Per-sheet visibility: "visible", "hidden", or "veryHidden".
     pub sheet_visibility: Vec<String>,
+    /// Per-sheet kind: "worksheet" or "canvas" (a report page of floating
+    /// objects with no cells). A sheet past the end of the list is a worksheet.
+    /// A script reads it as `Sheet.kind` so it can tell a canvas apart BEFORE
+    /// a cell write is refused there.
+    #[serde(default)]
+    pub sheet_kinds: Vec<String>,
     /// Workbook-level document properties (title, author, ...).
     pub workbook_properties: HashMap<String, String>,
     /// Named cell-style names available in the workbook.
@@ -113,6 +119,7 @@ impl Default for HostState {
             zoom: 100.0,
             reference_style: "A1".to_string(),
             sheet_visibility: Vec::new(),
+            sheet_kinds: Vec::new(),
             workbook_properties: HashMap::new(),
             named_style_names: Vec::new(),
             iteration_enabled: false,

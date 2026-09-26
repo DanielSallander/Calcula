@@ -11,6 +11,7 @@ import {
   FLOATING_RANGE_MAX_ROWS,
   FLOATING_RANGE_MAX_COLS,
 } from "@api/floatingRanges";
+import { firstEndingAfter, lastStartingBefore } from "../../_shared/lib/offsetSearch";
 
 // ============================================================================
 // Frame chrome constants
@@ -75,14 +76,18 @@ export function frRowHeight(entry: FloatingRangeEntry, row: number): number {
 // Derived content + frame sizes
 // ============================================================================
 
-/** Total width of the cell area (sum of column widths for the window). */
+/**
+ * Total width of the cell area (sum of column widths for the window). Since M7
+ * this is the cell VIEWPORT: the content behind it may be wider (see FrView).
+ */
 export function contentWidth(entry: FloatingRangeEntry): number {
   let w = 0;
   for (let c = 0; c < entry.cols; c++) w += frColWidth(entry, c);
   return w;
 }
 
-/** Total height of the cell area (sum of row heights for the window). */
+/** Total height of the cell area (sum of row heights for the window) -- the
+ *  cell VIEWPORT's height; the content behind it may be taller. */
 export function contentHeight(entry: FloatingRangeEntry): number {
   let h = 0;
   for (let r = 0; r < entry.rows; r++) h += frRowHeight(entry, r);
@@ -114,19 +119,170 @@ export function frameSizeForCounts(
 }
 
 // ============================================================================
+// The view: content extent + scroll (M7)
+// ============================================================================
+//
+// The frame is the WINDOW, and its cell area is a VIEWPORT onto the backing
+// sheet's content, which can be larger: a window shrink hides cells without
+// deleting them, and a formula can spill past the window. A view says how far
+// the content reaches (`rows` x `cols`, at least the window) and where the
+// viewport sits in it (the scroll origin, in content px). The chrome does not
+// scroll: the title bar stays, and the local column letters / row numbers are
+// sticky strips that show the SCROLLED labels.
+//
+// Every geometry function below takes an optional view and defaults to the
+// unscrolled window (`windowView`), which is exactly the pre-M7 geometry, so a
+// caller that has no scroll to offer keeps its old answers.
+
+export interface FrView {
+  /** Scroll origin of the cell area, content px (0 = unscrolled). */
+  scrollLeft: number;
+  scrollTop: number;
+  /** Content extent the cell area scrolls through (>= the window). */
+  rows: number;
+  cols: number;
+}
+
+/** The unscrolled window: the view every pre-M7 caller implicitly had. */
+export function windowView(entry: FloatingRangeEntry): FrView {
+  return { scrollLeft: 0, scrollTop: 0, rows: entry.rows, cols: entry.cols };
+}
+
+/**
+ * Column prefix sums: `[c]` = left edge of column c in content px,
+ * `[count]` = total width. Summed in index order, so over the window it lands
+ * on exactly `contentWidth(entry)` -- the max scroll of an extent that equals
+ * the window is then exactly 0, not a floating-point sliver.
+ */
+export function frColOffsets(entry: FloatingRangeEntry, count: number): Float64Array {
+  const n = Math.max(0, Math.trunc(count));
+  const out = new Float64Array(n + 1);
+  for (let c = 0; c < n; c++) out[c + 1] = out[c] + frColWidth(entry, c);
+  return out;
+}
+
+/** Row prefix sums (see frColOffsets). */
+export function frRowOffsets(entry: FloatingRangeEntry, count: number): Float64Array {
+  const n = Math.max(0, Math.trunc(count));
+  const out = new Float64Array(n + 1);
+  for (let r = 0; r < n; r++) out[r + 1] = out[r] + frRowHeight(entry, r);
+  return out;
+}
+
+/** How far the cell area can scroll over an extent of `rows` x `cols`. */
+export function frMaxScroll(
+  entry: FloatingRangeEntry,
+  rows: number,
+  cols: number,
+): { maxLeft: number; maxTop: number } {
+  const colOff = frColOffsets(entry, cols);
+  const rowOff = frRowOffsets(entry, rows);
+  return {
+    maxLeft: Math.max(0, Math.ceil(colOff[colOff.length - 1] - contentWidth(entry))),
+    maxTop: Math.max(0, Math.ceil(rowOff[rowOff.length - 1] - contentHeight(entry))),
+  };
+}
+
+/** Clamp a scroll origin into [0, max] for an extent (a shrink can lower max). */
+export function clampFrScrollTo(
+  entry: FloatingRangeEntry,
+  rows: number,
+  cols: number,
+  left: number,
+  top: number,
+): { left: number; top: number } {
+  const { maxLeft, maxTop } = frMaxScroll(entry, rows, cols);
+  const clamp = (v: number, max: number) => (Number.isFinite(v) ? Math.min(Math.max(0, v), max) : 0);
+  return { left: clamp(left, maxLeft), top: clamp(top, maxTop) };
+}
+
+/** A rectangle of local cells, inclusive; empty when end < start. */
+export interface FrCellRange {
+  startRow: number;
+  endRow: number;
+  startCol: number;
+  endCol: number;
+}
+
+/**
+ * The rows/cols of the extent that show through the cell viewport, optionally
+ * narrowed to a sub-rectangle of it (`clip`, viewport-local px -- the part of
+ * the viewport that is actually on the canvas). A cell is included when any
+ * of it is visible. Empty (end < start) when nothing is.
+ */
+export function frVisibleRange(
+  entry: FloatingRangeEntry,
+  view: FrView,
+  clip?: { x0: number; y0: number; x1: number; y1: number },
+): FrCellRange {
+  const vpW = contentWidth(entry);
+  const vpH = contentHeight(entry);
+  const x0 = Math.max(0, clip?.x0 ?? 0);
+  const y0 = Math.max(0, clip?.y0 ?? 0);
+  const x1 = Math.min(vpW, clip?.x1 ?? vpW);
+  const y1 = Math.min(vpH, clip?.y1 ?? vpH);
+  if (x1 <= x0 || y1 <= y0) return { startRow: 0, endRow: -1, startCol: 0, endCol: -1 };
+  const colOff = frColOffsets(entry, view.cols);
+  const rowOff = frRowOffsets(entry, view.rows);
+  return {
+    startCol: firstEndingAfter(colOff, 0, view.cols, view.scrollLeft + x0),
+    endCol: lastStartingBefore(colOff, 0, view.cols, view.scrollLeft + x1),
+    startRow: firstEndingAfter(rowOff, 0, view.rows, view.scrollTop + y0),
+    endRow: lastStartingBefore(rowOff, 0, view.rows, view.scrollTop + y1),
+  };
+}
+
+/**
+ * The scroll origin that brings local cell (row, col) fully into the cell
+ * viewport, moving as little as possible (Excel's rule). A cell bigger than the
+ * viewport shows its top-left corner. Clamped to the extent's max.
+ */
+export function frScrollToReveal(
+  entry: FloatingRangeEntry,
+  view: FrView,
+  row: number,
+  col: number,
+): { left: number; top: number } {
+  const colOff = frColOffsets(entry, view.cols);
+  const rowOff = frRowOffsets(entry, view.rows);
+  const c = Math.max(0, Math.min(view.cols - 1, Math.trunc(col)));
+  const r = Math.max(0, Math.min(view.rows - 1, Math.trunc(row)));
+  const vpW = contentWidth(entry);
+  const vpH = contentHeight(entry);
+
+  let left = view.scrollLeft;
+  if (colOff[c + 1] > left + vpW) left = colOff[c + 1] - vpW;
+  if (colOff[c] < left) left = colOff[c];
+  let top = view.scrollTop;
+  if (rowOff[r + 1] > top + vpH) top = rowOff[r + 1] - vpH;
+  if (rowOff[r] < top) top = rowOff[r];
+
+  return clampFrScrollTo(entry, view.rows, view.cols, left, top);
+}
+
+// ============================================================================
 // Local cell geometry
 // ============================================================================
 
-/** Top-left of a local cell, relative to the FRAME origin (logical px). */
+/**
+ * Top-left of a local cell, relative to the FRAME origin (logical px), at the
+ * view's scroll (default: unscrolled). A scrolled-away cell answers a point
+ * outside the cell viewport; callers that paint or position against it clip.
+ */
 export function localCellOrigin(
   entry: FloatingRangeEntry,
   row: number,
   col: number,
+  view?: FrView,
 ): { x: number; y: number } {
   let x = frRowHdrW(entry);
   for (let c = 0; c < col; c++) x += frColWidth(entry, c);
   let y = frCellsTop(entry);
   for (let r = 0; r < row; r++) y += frRowHeight(entry, r);
+  if (view) {
+    x -= view.scrollLeft;
+    y -= view.scrollTop;
+  }
   return { x, y };
 }
 
@@ -139,8 +295,11 @@ export type FrHitZone =
   | { zone: "cells"; row: number; col: number };
 
 /**
- * Map a frame-relative point to a zone + local cell. A linear walk — fine at
- * v1 scale (windows are bounded at 1000 x 256 and typically tiny).
+ * Map a frame-relative point to a zone + local cell, at the view's scroll
+ * (default: the unscrolled window). The cell viewport is the window's size
+ * whatever the view, so a point inside the frame is always over a VISIBLE
+ * cell; the view decides which one. The sticky headers answer the scrolled
+ * index too: the letter strip's column is the column under it.
  *
  * A hidden strip must yield NO zone of its own, and it does so structurally:
  * with `frTitleH` at 0 the `dy < titleH` test can never pass, with `frColHdrH`
@@ -151,6 +310,7 @@ export function localCellFromPoint(
   entry: FloatingRangeEntry,
   dx: number,
   dy: number,
+  view: FrView = windowView(entry),
 ): FrHitZone {
   if (dx < 0 || dy < 0 || dx > frameWidth(entry) || dy > frameHeight(entry)) {
     return { zone: "outside" };
@@ -159,41 +319,29 @@ export function localCellFromPoint(
   const cellsTop = frCellsTop(entry);
   if (dy < titleH) return { zone: "title" };
 
-  // Column from x (points in the local row-header gutter clamp to col 0's edge).
+  const colOff = frColOffsets(entry, view.cols);
+  const rowOff = frRowOffsets(entry, view.rows);
+  // The index under a content coordinate, clamped to the last one when the
+  // point is past the end (the viewport's far edge is inclusive).
+  const colAt = (x: number) => Math.min(view.cols - 1, firstEndingAfter(colOff, 0, view.cols, x));
+  const rowAt = (y: number) => Math.min(view.rows - 1, firstEndingAfter(rowOff, 0, view.rows, y));
+
+  // Column from x (points in the local row-header gutter have no column).
   const colX = dx - frRowHdrW(entry);
-  let col = 0;
-  if (colX >= 0) {
-    let acc = 0;
-    for (let c = 0; c < entry.cols; c++) {
-      acc += frColWidth(entry, c);
-      if (colX < acc) {
-        col = c;
-        break;
-      }
-      col = c; // clamp to the last column when past the end
-    }
-  }
+  const col = colX >= 0 ? colAt(colX + view.scrollLeft) : 0;
 
   if (dy < cellsTop) {
     // Top-left corner box. With no title bar there is nothing to grab there,
-    // so it reads as the row-header gutter it sits above rather than as a
-    // move zone that does not exist.
-    if (colX < 0) return entry.showTitle ? { zone: "title" } : { zone: "rowHeader", row: 0 };
+    // so it reads as the row-header gutter it sits above -- the top VISIBLE
+    // row's gutter -- rather than as a move zone that does not exist.
+    if (colX < 0) {
+      return entry.showTitle ? { zone: "title" } : { zone: "rowHeader", row: rowAt(view.scrollTop) };
+    }
     return { zone: "colHeader", col };
   }
 
   // Row from y.
-  const rowY = dy - cellsTop;
-  let row = 0;
-  let acc = 0;
-  for (let r = 0; r < entry.rows; r++) {
-    acc += frRowHeight(entry, r);
-    if (rowY < acc) {
-      row = r;
-      break;
-    }
-    row = r; // clamp to the last row when past the end
-  }
+  const row = rowAt(dy - cellsTop + view.scrollTop);
 
   if (colX < 0) return { zone: "rowHeader", row };
   return { zone: "cells", row, col };
@@ -298,6 +446,17 @@ export function edgeMovesOrigin(edge: FrEdge): boolean {
  * them (and their widths are kept), so scaling only the visible ones would
  * leave the hidden columns at their old size — and the object would visibly
  * skew the moment the window grew back.
+ *
+ * Deliberately NOT the scrollable content extent (M7). An edge drag scales the
+ * object's OWN cells -- the window it is sized by, plus any size it once gave a
+ * column -- and the frame size derives from the window alone, so the drag
+ * already does everything the user can see it do. Materialising a width for
+ * every default-width column the content happens to reach (up to 256 columns
+ * and 1000 rows) would write that many overrides into the document on one
+ * gesture, for cells the object never sized. The cost is that a column
+ * scrolled into view from beyond the window keeps its old width after a
+ * scale; that is the same "scaling acts on the window" rule, not a skew of
+ * sizes the object owns.
  */
 export function trackedColIndices(entry: FloatingRangeEntry): number[] {
   const seen = new Set<number>();

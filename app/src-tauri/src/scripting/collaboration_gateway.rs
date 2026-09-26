@@ -995,6 +995,7 @@ fn dispatch(
                 ribbon_filter_state.clone(),
                 pane_control_state.clone(),
                 slicer_state.clone(),
+                timeline_slicer_state.clone(),
                 params,
                 window.clone(),
             )
@@ -1037,6 +1038,7 @@ fn dispatch(
                 ribbon_filter_state.clone(),
                 pane_control_state.clone(),
                 slicer_state.clone(),
+                timeline_slicer_state.clone(),
                 // NO RESOLUTIONS. A script has no conflict dialog to answer
                 // with, so it gets the default a refresh has always had: every
                 // local value kept, every conflict left flagged for the person
@@ -1499,6 +1501,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: Default::default(),
         };
@@ -1515,6 +1518,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: Default::default(),
         };

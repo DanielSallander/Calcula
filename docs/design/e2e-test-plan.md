@@ -1016,6 +1016,7 @@ proves rather than left as prose:
 | Undo / recalc correctness | `undo-enablement`, `structural-recalc`, `pivot-undo-fidelity`, `sheet-tab-state-undo`, `computed-property-restore`, `cascade-announcement-live`, `spill-delete`, `calc-progress-deadlock` |
 | Formula + parity | `formula-roundtrip`, `owner-decisions`, `parity-21c`, `live-parity-proofs`, `remaining-correctness`, `correctness-cluster`, `census-followon` |
 | Objects / persistence | `floating-range`, `sparkline-persistence`, `shapes-hometab`, `report-store`, `subscription-restore` |
+| Canvas sheets | `canvas` — #1 the + caret adds a canvas, #2 a canvas chart repaints from Sheet1, #3 snap in the persisted position, #4 save/reopen, #5 publish/pull of a canvas, #6 the canvas pivot box (see `docs/design/canvas-sheets.md` §8) |
 | Security / ingress | `image-ingress` (Insert > Image through the real native dialog), `consent-refusal` |
 | Scripting | `macro-model-recording` |
 

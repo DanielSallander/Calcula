@@ -436,7 +436,7 @@ fn a_stale_pivot_destination_never_redirects_onto_another_worksheet() {
     // nothing anywhere: not into the canvas, not over Sheet1's source data.
     let effect = crate::document_effect::test_seed_effect();
     let refused = crate::pivot::operations::update_pivot_in_grid(
-        &wb.state, &effect, pivot_id, resolved, (3, 3), &one_cell_view(pivot_id),
+        &wb.state, &effect, pivot_id, resolved, (3, 3), &one_cell_view(pivot_id), false,
     );
     assert_refused_as_canvas(refused, "update_pivot_in_grid");
     assert_eq!(cell_count(&wb, canvas), 0, "the canvas grid stays empty");
@@ -539,12 +539,12 @@ fn a_grid_pivot_never_materializes_into_a_canvas() {
     let view = one_cell_view(pivot_id);
     let effect = crate::document_effect::test_seed_effect();
 
-    crate::pivot::operations::update_pivot_in_grid(&wb.state, &effect, pivot_id, 0, (3, 3), &view)
+    crate::pivot::operations::update_pivot_in_grid(&wb.state, &effect, pivot_id, 0, (3, 3), &view, false)
         .expect("positive control: a worksheet destination is written");
     assert!(cell_count(&wb, 0) > 0, "positive control: the view writes into a worksheet");
 
     assert_refused_as_canvas(
-        crate::pivot::operations::update_pivot_in_grid(&wb.state, &effect, pivot_id, canvas, (3, 3), &view),
+        crate::pivot::operations::update_pivot_in_grid(&wb.state, &effect, pivot_id, canvas, (3, 3), &view, false),
         "update_pivot_in_grid",
     );
     assert_eq!(cell_count(&wb, canvas), 0, "the canvas grid stays empty");
@@ -584,31 +584,41 @@ fn a_refused_pivot_write_leaves_the_region_on_its_real_sheet() {
 
 /// The pre-effect half of #2: `pivot_write` / `pivot_mutation_token` run this
 /// before they mint the command's `DocumentEffect`, so a pivot command aimed at
-/// a canvas refuses with the document still clean. (The two helpers are private
-/// to the command module; the census below pins that they call this first.)
+/// a destination of the wrong kind refuses with the document still clean. (The
+/// two helpers are private to the command module; the census below pins that
+/// they call this first.) Both halves of the M6 rule: a frameless pivot is
+/// refused on a canvas, a framed one on a worksheet -- and each is accepted
+/// where it belongs.
 #[test]
-fn a_pivot_command_aimed_at_a_canvas_is_refused_before_its_effect() {
+fn a_pivot_command_aimed_at_the_wrong_kind_of_sheet_is_refused_before_its_effect() {
     let wb = Workbook::new(1);
     let canvas = add_canvas(&wb).active_index;
     let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
     let seed = crate::document_effect::test_seed_effect();
     let (on_canvas, on_sheet) = (new_pivot_id(), new_pivot_id());
+    let (framed_on_canvas, framed_on_sheet) = (new_pivot_id(), new_pivot_id());
     {
         let mut tables = wb.pivots.pivot_tables.write(&seed).unwrap();
-        for (id, dest) in [(on_canvas, canvas_name.as_str()), (on_sheet, "Sheet1")] {
+        for (id, dest, framed) in [
+            (on_canvas, canvas_name.as_str(), false),
+            (on_sheet, "Sheet1", false),
+            (framed_on_canvas, canvas_name.as_str(), true),
+            (framed_on_sheet, "Sheet1", true),
+        ] {
             let mut d = pivot_engine::PivotDefinition::new(id, (0, 0), (0, 0));
             d.destination_sheet = Some(dest.to_string());
+            if framed {
+                d.canvas_frame = Some(test_frame());
+            }
             tables.insert(id, (d, pivot_engine::PivotCache::new(id, 0)));
         }
     }
-    assert_refused_as_canvas(
-        crate::pivot::operations::ensure_pivot_destination_is_grid(&wb.state, &wb.pivots, on_canvas),
-        "ensure_pivot_destination_is_grid",
-    );
-    crate::pivot::operations::ensure_pivot_destination_is_grid(&wb.state, &wb.pivots, on_sheet)
-        .expect("a worksheet destination passes");
-    crate::pivot::operations::ensure_pivot_destination_is_grid(&wb.state, &wb.pivots, new_pivot_id())
-        .expect("an unknown pivot is the existence check's refusal, not this one's");
+    let gate = |id| crate::pivot::operations::ensure_pivot_destination_writable(&wb.state, &wb.pivots, id);
+    assert_refused_as_canvas(gate(on_canvas), "ensure_pivot_destination_writable (frameless on a canvas)");
+    gate(on_sheet).expect("a frameless pivot on a worksheet passes");
+    gate(framed_on_canvas).expect("a framed pivot on a canvas passes");
+    assert_refused_as_canvas(gate(framed_on_sheet), "ensure_pivot_destination_writable (framed on a worksheet)");
+    gate(new_pivot_id()).expect("an unknown pivot is the existence check's refusal, not this one's");
 }
 
 fn saved_pivot(id: pivot_engine::PivotId, dest: &str) -> persistence::SavedPivotDefinition {
@@ -641,7 +651,7 @@ fn a_pulled_pivot_aimed_at_a_canvas_is_skipped() {
         &[],
         &wb.state,
         &wb.pivots,
-        0,
+        &[],
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
     );
@@ -673,7 +683,7 @@ fn a_refreshed_pivot_aimed_at_a_canvas_is_skipped() {
         &[saved_pivot(to_canvas, &canvas_name), saved_pivot(to_sheet, "Sheet1")],
         &[],
         &std::collections::HashMap::new(),
-        &std::collections::HashMap::new(),
+        &crate::calp_commands::RefreshSheetNames::default(),
         &std::collections::HashSet::new(),
         None,
     );
@@ -682,6 +692,935 @@ fn a_refreshed_pivot_aimed_at_a_canvas_is_skipped() {
     assert!(!tables.contains_key(&to_canvas), "the canvas pivot is skipped");
     assert!(crate::pivot::operations::get_pivot_region(&wb.state, to_canvas).is_none());
     assert_eq!(cell_count(&wb, canvas), 0);
+}
+
+/// A FRAMED definition as an application carries it: Region on rows, Sum of
+/// Sales in values over Sheet1!A1:B4 (source position 0 in the application),
+/// output anchored at `destination` on `dest`, with `frame`.
+fn saved_framed_pivot(
+    id: pivot_engine::PivotId,
+    dest: &str,
+    destination: (u32, u32),
+    frame: pivot_engine::CanvasFrame,
+) -> persistence::SavedPivotDefinition {
+    use pivot_engine::{AggregationType, PivotField, ValueField};
+    let mut d = pivot_engine::PivotDefinition::new(id, (0, 0), (3, 1));
+    d.source_has_headers = true;
+    d.source_sheet = Some("Sheet1".to_string());
+    d.destination_sheet = Some(dest.to_string());
+    d.destination = destination;
+    d.row_fields.push(PivotField::new(0, "Region".to_string()));
+    d.value_fields.push(ValueField::new(1, "Sales".to_string(), AggregationType::Sum));
+    d.canvas_frame = Some(frame);
+    persistence::SavedPivotDefinition {
+        id,
+        source_type: "grid".to_string(),
+        source_sheet_index: Some(0),
+        definition: serde_json::to_value(&d).unwrap(),
+    }
+}
+
+/// M6 FOLLOW-UP, the PULL half: a FRAMED pivot travels onto a pulled canvas --
+/// written into the canvas's hidden grid, its region on the canvas, its frame
+/// kept (and REPAIRED: a carried negative origin is clamped, the load rule) --
+/// while a framed definition aimed at a WORKSHEET is skipped. The frameless half
+/// stays pinned by `a_pulled_pivot_aimed_at_a_canvas_is_skipped`.
+///
+/// SABOTAGE: restore the unconditional canvas skip in `restore_pulled_pivots`.
+#[test]
+fn a_framed_pulled_pivot_is_restored_onto_the_canvas_with_its_frame() {
+    let wb = Workbook::new(1);
+    seed_sales(&wb);
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+    wb.switch_to(0);
+    let sheet1_cells = cell_count(&wb, 0);
+    let (framed, framed_on_sheet) = (new_pivot_id(), new_pivot_id());
+    let carried = pivot_engine::CanvasFrame { x: -12.0, ..test_frame() };
+    let effect = crate::document_effect::test_seed_effect();
+    // A stale merge INSIDE the box the pivot is about to own: the pivot's
+    // merge set replaces it, on the CANVAS's own merge store (it is not the
+    // active sheet) -- which the pull path never touched before.
+    let stale = crate::api_types::MergedRegion { start_row: 1, start_col: 0, end_row: 2, end_col: 1 };
+    wb.state.all_merged_regions.write(&effect).unwrap()[canvas].insert(stale.clone());
+
+    crate::calp_commands::restore_pulled_pivots(
+        &effect,
+        &[
+            saved_framed_pivot(framed, &canvas_name, (0, 0), carried),
+            saved_framed_pivot(framed_on_sheet, "Sheet1", (0, 0), test_frame()),
+        ],
+        &[],
+        &wb.state,
+        &wb.pivots,
+        &[0],
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    );
+
+    let def = stored_definition(&wb, framed);
+    assert_eq!(def.canvas_frame, Some(pivot_engine::CanvasFrame { x: 0.0, ..test_frame() }), "kept, and repaired");
+    let region = crate::pivot::operations::get_pivot_region(&wb.state, framed).expect("a region on the canvas");
+    assert_eq!(region.sheet_index, canvas);
+    assert_eq!(cell_value(&wb, canvas, 1, 1), Some(engine::CellValue::Number(15.0)), "North = 10 + 5, in the canvas grid");
+    assert!(
+        !wb.pivots.pivot_tables.read().unwrap().contains_key(&framed_on_sheet),
+        "a framed pivot aimed at a worksheet is skipped"
+    );
+    assert_eq!(cell_count(&wb, 0), sheet1_cells, "the worksheet is untouched");
+    assert!(
+        !wb.state.all_merged_regions.read().unwrap()[canvas].contains(&stale),
+        "the pivot's merges are applied to its sheet: a merge inside its box does not survive"
+    );
+}
+
+/// M6 FOLLOW-UP, the REFRESH half, and the anchor a refresh cannot trust: a
+/// framed pivot is ADOPTED onto a canvas that already holds the subscriber's
+/// OWN pivot in the carried anchor's block. `check_pivot_overlap` tests the
+/// anchor cell only; the band check re-anchors the refreshed pivot to a free
+/// block, so neither pivot writes over the other.
+///
+/// SABOTAGE: restore the unconditional canvas skip in `apply_refreshed_pivots`
+/// (nothing adopted), or drop the `canvas_pivot_anchor_if_band_taken` call (the
+/// refreshed pivot lands in block 0 over the local one).
+#[test]
+fn a_framed_refreshed_pivot_is_adopted_and_re_anchored_off_a_taken_block() {
+    use crate::pivot::operations::CANVAS_PIVOT_BLOCK_COLS;
+    let wb = Workbook::new(1);
+    seed_sales(&wb);
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+    // The subscriber's OWN canvas pivot, in block 0.
+    let local = create(&wb, create_request(canvas, Some(0), Some(test_frame_config()))).unwrap().pivot_id;
+    assert_eq!(crate::pivot::operations::get_pivot_region(&wb.state, local).unwrap().start_col, 0);
+    wb.switch_to(0);
+
+    let refreshed = new_pivot_id();
+    let effect = crate::document_effect::test_seed_effect();
+    crate::calp_commands::apply_refreshed_pivots(
+        &effect,
+        &wb.state,
+        &wb.pivots,
+        &[saved_framed_pivot(refreshed, &canvas_name, (0, 0), test_frame())],
+        &[],
+        &std::collections::HashMap::new(),
+        &crate::calp_commands::RefreshSheetNames::default(),
+        &std::collections::HashSet::new(),
+        None,
+    );
+
+    let def = stored_definition(&wb, refreshed);
+    assert_eq!(def.canvas_frame, Some(test_frame()), "adopted with its frame");
+    assert_eq!(def.destination, (0, CANVAS_PIVOT_BLOCK_COLS), "re-anchored to the first FREE block");
+    let region = crate::pivot::operations::get_pivot_region(&wb.state, refreshed).unwrap();
+    assert_eq!((region.sheet_index, region.start_col), (canvas, CANVAS_PIVOT_BLOCK_COLS));
+    assert_eq!(
+        cell_value(&wb, canvas, 1, CANVAS_PIVOT_BLOCK_COLS + 1),
+        Some(engine::CellValue::Number(15.0)),
+        "the refreshed pivot's output is in its own block"
+    );
+    let local_region = crate::pivot::operations::get_pivot_region(&wb.state, local).unwrap();
+    assert_eq!(local_region.start_col, 0, "the local pivot keeps its block");
+    assert_eq!(cell_value(&wb, canvas, 1, 1), Some(engine::CellValue::Number(15.0)), "and its cells");
+}
+
+// ---------------------------------------------------------------------------
+// M6: a canvas pivot is a REAL pivot in the canvas's hidden grid
+// ---------------------------------------------------------------------------
+
+fn test_frame() -> pivot_engine::CanvasFrame {
+    pivot_engine::CanvasFrame { x: 40.0, y: 60.0, width: 320.0, height: 200.0, frozen_headers: false }
+}
+
+fn test_frame_config() -> crate::pivot::types::CanvasFrameConfig {
+    test_frame().into()
+}
+
+fn recalc_states(wb: &Workbook) -> crate::pivot::operations::PivotRecalcStates<'_> {
+    crate::pivot::operations::PivotRecalcStates { pane: &wb.pane, ribbon: &wb.filters, user_files: &wb.files }
+}
+
+/// A definition put straight into the store, as a create would leave it.
+fn insert_pivot(
+    wb: &Workbook,
+    dest_sheet: &str,
+    destination: (u32, u32),
+    frame: Option<pivot_engine::CanvasFrame>,
+) -> pivot_engine::PivotId {
+    let id = new_pivot_id();
+    let mut def = pivot_engine::PivotDefinition::new(id, (0, 0), (0, 0));
+    def.destination_sheet = Some(dest_sheet.to_string());
+    def.destination = destination;
+    def.canvas_frame = frame;
+    wb.pivots
+        .pivot_tables
+        .write(&crate::document_effect::test_seed_effect())
+        .unwrap()
+        .insert(id, (def, pivot_engine::PivotCache::new(id, 0)));
+    id
+}
+
+fn stored_definition(wb: &Workbook, id: pivot_engine::PivotId) -> pivot_engine::PivotDefinition {
+    wb.pivots.pivot_tables.read().unwrap()[&id].0.clone()
+}
+
+fn data_row(view_row: usize) -> pivot_engine::PivotRowDescriptor {
+    pivot_engine::PivotRowDescriptor {
+        view_row,
+        row_type: pivot_engine::PivotRowType::Data,
+        depth: 0,
+        visible: true,
+        parent_index: None,
+        children_indices: Vec::new(),
+        group_values: Vec::new(),
+    }
+}
+
+/// One row whose first cell spans two columns: the write produces one merge.
+fn merged_view(pivot_id: pivot_engine::PivotId) -> pivot_engine::PivotView {
+    let mut view = pivot_engine::PivotView::new(pivot_id);
+    let mut spanning = pivot_engine::PivotViewCell::data(1.0);
+    spanning.col_span = 2;
+    view.add_row(vec![spanning, pivot_engine::PivotViewCell::blank()], data_row(0));
+    view
+}
+
+/// Region | Sales on Sheet1 (the ACTIVE sheet when called), three data rows.
+fn seed_sales(wb: &Workbook) {
+    for (r, c, v) in [
+        (0, 0, "Region"),
+        (0, 1, "Sales"),
+        (1, 0, "North"),
+        (1, 1, "10"),
+        (2, 0, "South"),
+        (2, 1, "20"),
+        (3, 0, "North"),
+        (3, 1, "5"),
+    ] {
+        wb.set(r, c, v);
+    }
+}
+
+trait WithDestination {
+    fn with_destination(self, cell: &str) -> Self;
+}
+
+impl WithDestination for crate::pivot::types::CreatePivotRequest {
+    fn with_destination(mut self, cell: &str) -> Self {
+        self.destination_cell = cell.to_string();
+        self
+    }
+}
+
+fn create_request(
+    dest_sheet: usize,
+    source_sheet: Option<usize>,
+    frame: Option<crate::pivot::types::CanvasFrameConfig>,
+) -> crate::pivot::types::CreatePivotRequest {
+    crate::pivot::types::CreatePivotRequest {
+        source_range: "A1:B4".to_string(),
+        // Ignored on a canvas: the allocator owns the anchor.
+        destination_cell: "D5".to_string(),
+        source_sheet,
+        destination_sheet: Some(dest_sheet),
+        has_headers: Some(true),
+        name: None,
+        source_table_name: None,
+        canvas_frame: frame,
+    }
+}
+
+/// The real create door, with Region on rows and Sum of Sales in values.
+fn create(
+    wb: &Workbook,
+    request: crate::pivot::types::CreatePivotRequest,
+) -> Result<crate::pivot::types::PivotViewResponse, String> {
+    crate::pivot::commands::create_pivot_core(
+        &wb.state,
+        &wb.file,
+        &wb.pivots,
+        recalc_states(wb),
+        request,
+        vec!["Region".to_string()],
+        vec![("Sales".to_string(), pivot_engine::AggregationType::Sum)],
+    )
+}
+
+fn pivot_count(wb: &Workbook) -> usize {
+    wb.pivots.pivot_tables.read().unwrap().len()
+}
+
+/// THE M6 SHAPE, end to end through the real create door: a framed pivot on a
+/// canvas writes its output into the CANVAS's hidden grid, at the allocator's
+/// anchor (not the requested cell), registers its protected region on the
+/// canvas's index, and carries its frame into what is saved.
+#[test]
+fn a_framed_pivot_lands_in_the_canvas_grid_with_its_region_and_frame() {
+    let wb = Workbook::new(1);
+    seed_sales(&wb);
+    let sheet1_cells = cell_count(&wb, 0);
+    let canvas = add_canvas(&wb).active_index;
+    assert_eq!(*wb.state.active_sheet.read().unwrap(), canvas, "inserted from the canvas, as the Canvas tab does");
+
+    let response = create(&wb, create_request(canvas, Some(0), Some(test_frame_config())))
+        .expect("a framed pivot on a canvas is created");
+    let id = response.pivot_id;
+
+    let region = crate::pivot::operations::get_pivot_region(&wb.state, id).expect("a region is registered");
+    assert_eq!(region.sheet_index, canvas, "the region is keyed to the canvas index");
+    assert_eq!((region.start_row, region.start_col), (0, 0), "the allocator's anchor, not the requested D5");
+    assert!(cell_count(&wb, canvas) > 0, "the pivot's output is in the canvas's hidden grid");
+    assert_eq!(cell_value(&wb, canvas, 1, 1), Some(engine::CellValue::Number(15.0)), "North = 10 + 5");
+    assert_eq!(cell_count(&wb, 0), sheet1_cells, "the source sheet is untouched");
+
+    let def = stored_definition(&wb, id);
+    assert_eq!(def.canvas_frame, Some(test_frame()));
+    assert_eq!(def.destination, (0, 0));
+    assert_eq!(def.source_sheet.as_deref(), Some("Sheet1"));
+
+    // Persisted: the frame rides the opaque definition JSON into the file.
+    let mut saved = ::persistence::Workbook::new();
+    crate::persistence::collect_pivot_definitions(&wb.pivots, &wb.state, &mut saved);
+    let entry = saved.pivot_definitions.iter().find(|p| p.id == id).expect("the pivot is saved");
+    let frame: pivot_engine::CanvasFrame =
+        serde_json::from_value(entry.definition["canvas_frame"].clone()).expect("the saved definition carries its frame");
+    assert_eq!(frame, test_frame());
+}
+
+/// Two pivots on one canvas never share cells: each owns a 1024-column block,
+/// whole bands are checked (not just the anchor cell), a region on ANOTHER
+/// sheet blocks nothing, and the seventeenth is refused -- before the effect.
+#[test]
+fn canvas_pivots_get_disjoint_blocks_and_the_seventeenth_is_refused() {
+    use crate::pivot::operations::{allocate_canvas_pivot_anchor, update_pivot_region, CANVAS_PIVOT_BLOCK_COLS};
+    let wb = Workbook::new(1);
+    seed_sales(&wb);
+    let canvas = add_canvas(&wb).active_index;
+
+    let first = create(&wb, create_request(canvas, Some(0), Some(test_frame_config()))).unwrap().pivot_id;
+    let second = create(&wb, create_request(canvas, Some(0), Some(test_frame_config()))).unwrap().pivot_id;
+    let r1 = crate::pivot::operations::get_pivot_region(&wb.state, first).unwrap();
+    let r2 = crate::pivot::operations::get_pivot_region(&wb.state, second).unwrap();
+    assert_eq!((r1.start_row, r1.start_col), (0, 0));
+    assert_eq!((r2.start_row, r2.start_col), (0, CANVAS_PIVOT_BLOCK_COLS), "the second pivot gets the next block");
+    assert!(r1.end_col < r2.start_col, "the two rectangles are disjoint");
+    assert_eq!(
+        cell_value(&wb, canvas, 1, CANVAS_PIVOT_BLOCK_COLS + 1),
+        Some(engine::CellValue::Number(15.0)),
+        "the second pivot's output is in its own block"
+    );
+
+    // A region reaching INTO a band takes it, even though its anchor is in the
+    // band before: whole bands, not anchor cells.
+    let straddler = new_pivot_id();
+    let mut wide = pivot_engine::PivotView::new(straddler);
+    wide.add_row((0..40).map(|_| pivot_engine::PivotViewCell::data(1.0)).collect(), data_row(0));
+    update_pivot_region(&wb.state, straddler, canvas, (0, 3 * CANVAS_PIVOT_BLOCK_COLS - 10), &wide);
+    // A region on ANOTHER sheet blocks nothing here.
+    update_pivot_region(&wb.state, new_pivot_id(), 0, (0, 4 * CANVAS_PIVOT_BLOCK_COLS), &one_cell_view(new_pivot_id()));
+    assert_eq!(
+        allocate_canvas_pivot_anchor(&wb.state, canvas).unwrap(),
+        (0, 4 * CANVAS_PIVOT_BLOCK_COLS),
+        "blocks 2 and 3 are both reached by the straddling region; block 4 is free on THIS sheet"
+    );
+
+    // Fill every remaining block; the next allocation is refused.
+    for block in 4..crate::pivot::operations::CANVAS_PIVOT_MAX_BLOCKS {
+        let id = new_pivot_id();
+        update_pivot_region(&wb.state, id, canvas, (0, block * CANVAS_PIVOT_BLOCK_COLS), &one_cell_view(id));
+    }
+    let full = allocate_canvas_pivot_anchor(&wb.state, canvas).expect_err("sixteen blocks are all taken");
+    assert!(full.contains("maximum of 16"), "{full}");
+
+    // Through the door: refused with the document clean and nothing added.
+    crate::document_effect::mark_saved(&wb.file);
+    let before = (pivot_count(&wb), cell_count(&wb, canvas));
+    let refused = create(&wb, create_request(canvas, Some(0), Some(test_frame_config())));
+    assert!(refused.is_err_and(|e| e.contains("maximum of 16")));
+    assert_eq!((pivot_count(&wb), cell_count(&wb, canvas)), before, "the refusal created and wrote nothing");
+    assert!(!wb.file.is_dirty(), "a refused create leaves the document clean");
+}
+
+/// Both halves of the rule at the create door, each refused before the effect
+/// and each writing nothing: a frameless pivot on a canvas (including the MCP
+/// shape, which has no frame to give), a framed pivot on a worksheet, a canvas
+/// pivot with no explicit source (the default would be the empty canvas) or a
+/// canvas source, and an invalid frame.
+#[test]
+fn the_create_door_refuses_a_pivot_of_the_wrong_kind_and_writes_nothing() {
+    let wb = Workbook::new(1);
+    seed_sales(&wb);
+    let sheet1_cells = cell_count(&wb, 0);
+    let canvas = add_canvas(&wb).active_index;
+    crate::document_effect::mark_saved(&wb.file);
+
+    let invalid = crate::pivot::types::CanvasFrameConfig { width: 1.0, ..test_frame_config() };
+    for (what, request) in [
+        ("a frameless pivot on a canvas", create_request(canvas, Some(0), None)),
+        ("a framed pivot on a worksheet", create_request(0, Some(0), Some(test_frame_config()))),
+        ("a canvas pivot with the default (canvas) source", create_request(canvas, None, Some(test_frame_config()))),
+        ("a canvas pivot over a canvas source", create_request(canvas, Some(canvas), Some(test_frame_config()))),
+        ("an invalid frame", create_request(canvas, Some(0), Some(invalid))),
+    ] {
+        match create(&wb, request) {
+            Ok(r) => panic!("{what}: must be refused, got pivot {}", r.pivot_id),
+            Err(e) => assert!(e.contains("canvas"), "{what}: the refusal must name the canvas rule, got: {e}"),
+        }
+        assert_eq!(pivot_count(&wb), 0, "{what}: no pivot was created");
+        assert_eq!(cell_count(&wb, canvas), 0, "{what}: the canvas grid stays empty");
+        assert_eq!(cell_count(&wb, 0), sheet1_cells, "{what}: the worksheet is untouched");
+        assert!(!wb.file.is_dirty(), "{what}: a refusal must not dirty the document");
+    }
+
+    // Positive control: the same door, the right kind, succeeds.
+    create(&wb, create_request(canvas, Some(0), Some(test_frame_config()))).expect("positive control");
+    assert_eq!(pivot_count(&wb), 1);
+}
+
+/// The write funnel's half of the rule: a FRAMED pivot never materializes into
+/// a worksheet, and a canvas pivot wider than its block is refused LOUDLY --
+/// never clipped, never spilled into the next pivot's block.
+#[test]
+fn the_write_funnel_refuses_a_framed_pivot_off_a_canvas_and_one_wider_than_its_block() {
+    use crate::pivot::operations::{ensure_canvas_pivot_fits_block, update_pivot_in_grid, CANVAS_PIVOT_BLOCK_COLS};
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb).active_index;
+    wb.switch_to(0);
+    let effect = crate::document_effect::test_seed_effect();
+    let id = new_pivot_id();
+
+    assert_refused_as_canvas(
+        update_pivot_in_grid(&wb.state, &effect, id, 0, (0, 0), &one_cell_view(id), true),
+        "update_pivot_in_grid (framed, worksheet)",
+    );
+    assert_eq!(cell_count(&wb, 0), 0, "nothing was written into the worksheet");
+
+    let mut wide = pivot_engine::PivotView::new(id);
+    let too_wide = CANVAS_PIVOT_BLOCK_COLS as usize + 1;
+    wide.add_row((0..too_wide).map(|_| pivot_engine::PivotViewCell::data(1.0)).collect(), data_row(0));
+    let refusal = update_pivot_in_grid(&wb.state, &effect, id, canvas, (0, 0), &wide, true)
+        .expect_err("a view wider than its block is refused");
+    assert!(refusal.contains("1025 columns wide") && refusal.contains("1024"), "{refusal}");
+    assert_eq!(cell_count(&wb, canvas), 0, "the refusal wrote nothing -- not even the part that fits");
+
+    // Exactly one block wide fits; so does the same width in a later block.
+    let mut exact = pivot_engine::PivotView::new(id);
+    exact.add_row((0..CANVAS_PIVOT_BLOCK_COLS).map(|_| pivot_engine::PivotViewCell::data(1.0)).collect(), data_row(0));
+    ensure_canvas_pivot_fits_block(id, (0, 0), &exact).expect("a full block fits");
+    ensure_canvas_pivot_fits_block(id, (0, 5 * CANVAS_PIVOT_BLOCK_COLS), &exact).expect("in any block");
+    assert!(ensure_canvas_pivot_fits_block(id, (0, 1), &exact).is_err(), "an anchor off the block start leaves less room");
+
+    // Positive control: a framed pivot that fits IS written into the canvas.
+    update_pivot_in_grid(&wb.state, &effect, id, canvas, (0, 0), &one_cell_view(id), true)
+        .expect("a framed pivot that fits is written into its canvas");
+    assert_eq!(cell_value(&wb, canvas, 0, 0), Some(engine::CellValue::Number(42.0)));
+}
+
+/// PRE-EXISTING DEFECT (a), fixed here: merges went to the ACTIVE sheet's
+/// mirror (`merged_regions`) whatever the destination. A canvas pivot
+/// refiltered while Sheet1 is active put its merge on Sheet1 -- merging cells
+/// there that the pivot never wrote -- and left the canvas unmerged.
+#[test]
+fn merges_of_a_canvas_pivot_written_while_sheet1_is_active_land_in_the_canvas_set() {
+    use crate::api_types::MergedRegion;
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+    wb.switch_to(0);
+    let id = insert_pivot(&wb, &canvas_name, (0, 0), Some(test_frame()));
+    let effect = crate::document_effect::test_seed_effect();
+
+    crate::pivot::operations::finalize_pivot_update(&wb.state, &effect, &wb.pivots, id, canvas, (0, 0), &merged_view(id), None)
+        .expect("a framed pivot is written into its canvas");
+
+    let merge = MergedRegion { start_row: 0, start_col: 0, end_row: 0, end_col: 1 };
+    let canvas_set = |wb: &Workbook| {
+        wb.state.all_merged_regions.read().unwrap().get(canvas).cloned().unwrap_or_default()
+    };
+    assert!(
+        !wb.state.merged_regions.read().unwrap().contains(&merge),
+        "the canvas pivot's merge landed on Sheet1, the ACTIVE sheet, instead of its own"
+    );
+    assert!(canvas_set(&wb).contains(&merge), "the merge belongs to the canvas's set");
+
+    // Re-finalized with no spanning cell: the old merge is removed from the
+    // CANVAS's set (the retain goes to the same set as the insert).
+    crate::pivot::operations::finalize_pivot_update(&wb.state, &effect, &wb.pivots, id, canvas, (0, 0), &one_cell_view(id), None)
+        .unwrap();
+    assert!(!canvas_set(&wb).contains(&merge), "the stale merge is cleared from the canvas's set");
+}
+
+/// PRE-EXISTING DEFECT (b), fixed here: every pivot write ended in
+/// `recalculate_sheet_formulas`, the ACTIVE sheet only. With the user ON the
+/// canvas (the slicer next to the pivot), Sheet1's `=<canvas>!A1*2` kept its
+/// old value. The write now seeds the shared cascade (active-sheet branch).
+#[test]
+fn a_formula_reading_canvas_pivot_output_updates_while_the_canvas_is_active() {
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+    wb.switch_to(0);
+    wb.set(0, 0, &format!("={}!A1*2", canvas_name));
+    assert_eq!(wb.number(0, 0, 0), 0.0, "precondition: the canvas cell is empty");
+    let id = insert_pivot(&wb, &canvas_name, (0, 0), Some(test_frame()));
+    wb.switch_to(canvas);
+    let effect = crate::document_effect::test_seed_effect();
+    crate::pivot::operations::finalize_pivot_update(
+        &wb.state, &effect, &wb.pivots, id, canvas, (0, 0), &one_cell_view(id), Some(recalc_states(&wb)),
+    )
+    .unwrap();
+    assert_eq!(
+        wb.number(0, 0, 0),
+        84.0,
+        "Sheet1 reads the canvas pivot's output, and the write left it stale (canvas active)"
+    );
+}
+
+/// The same defect's OFF-SHEET branch: a third sheet is active, so the pivot's
+/// destination is off-sheet AND so is its reader. The old pass recalculated
+/// Sheet2 only; the write now reaches Sheet1 through the dependent-sheet
+/// closure of `recalc_after_off_sheet_write`.
+#[test]
+fn a_formula_reading_canvas_pivot_output_updates_while_a_third_sheet_is_active() {
+    let wb = Workbook::new(2);
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+    wb.switch_to(0);
+    wb.set(0, 0, &format!("={}!A1*2", canvas_name));
+    assert_eq!(wb.number(0, 0, 0), 0.0, "precondition: the canvas cell is empty");
+    let id = insert_pivot(&wb, &canvas_name, (0, 0), Some(test_frame()));
+    wb.switch_to(1);
+    let effect = crate::document_effect::test_seed_effect();
+    crate::pivot::operations::finalize_pivot_update(
+        &wb.state, &effect, &wb.pivots, id, canvas, (0, 0), &one_cell_view(id), Some(recalc_states(&wb)),
+    )
+    .unwrap();
+    assert_eq!(
+        wb.number(0, 0, 0),
+        84.0,
+        "Sheet1 reads the canvas pivot's output, and the write left it stale (Sheet2 active)"
+    );
+}
+
+/// The cascade the pivot write now seeds evaluates WITHOUT the GETPIVOTDATA
+/// lookup (`reevaluate_formula_cell` wires none). A GETPIVOTDATA on another
+/// sheet that reads a pivot on the ACTIVE sheet is reached by that cascade, and
+/// must not come out of it as #REF! -- the pass must end on the pivot's number.
+#[test]
+fn a_cross_sheet_getpivotdata_survives_a_write_to_a_pivot_on_the_active_sheet() {
+    let wb = Workbook::new(2);
+    seed_sales(&wb);
+    let response = create(&wb, create_request(0, Some(0), None).with_destination("E1"))
+        .expect("a worksheet pivot on Sheet1");
+    let id = response.pivot_id;
+    wb.switch_to(1);
+    // `;` -- the harness's default locale separates arguments with it. The
+    // grand-total form (the field/item form answers #REF! on ENTRY today,
+    // before any of this, so it cannot tell this defect apart).
+    wb.set(0, 0, "=GETPIVOTDATA(\"Sum of Sales\";Sheet1!E1)");
+    assert_eq!(wb.value(1, 0, 0), engine::CellValue::Number(35.0), "precondition: the lookup works on entry");
+    wb.switch_to(0);
+
+    // Re-render the pivot where it is, as a refresh or refilter does.
+    let (def, view) = {
+        let mut tables = wb.pivots.pivot_tables.write(&crate::document_effect::test_seed_effect()).unwrap();
+        let (def, cache) = tables.get_mut(&id).unwrap();
+        let view = crate::pivot::operations::safe_calculate_pivot(def, cache);
+        (def.clone(), view)
+    };
+    wb.pivots.views.lock().unwrap().insert(id, view.clone());
+    let effect = crate::document_effect::test_seed_effect();
+    crate::pivot::operations::finalize_pivot_update(
+        &wb.state, &effect, &wb.pivots, id, 0, def.destination, &view, Some(recalc_states(&wb)),
+    )
+    .unwrap();
+    assert_eq!(
+        wb.value(1, 0, 0),
+        engine::CellValue::Number(35.0),
+        "Sheet2's GETPIVOTDATA came out of the pivot write as something other than the pivot's number"
+    );
+}
+
+/// BUG-0145: GETPIVOTDATA identified a pivot by its CELL only, and every
+/// canvas's first pivot sits at A1 of the canvas's hidden grid -- so a
+/// worksheet pivot at A1 and a canvas pivot answered for each other, whichever
+/// a hash map listed first. Two pivots at the same address on different
+/// sheets must each answer their own total, qualified or not. (Before the fix
+/// at least one of the three assertions fails whatever the hash order: all
+/// three lookups returned the same pivot.)
+#[test]
+fn getpivotdata_answers_from_the_pivot_on_the_referenced_sheet_not_any_pivot_at_that_cell() {
+    let wb = Workbook::new(3);
+    seed_sales(&wb); // Sheet1: total 35
+    wb.switch_to(1);
+    for (r, c, v) in [
+        (0, 0, "Region"),
+        (0, 1, "Sales"),
+        (1, 0, "North"),
+        (1, 1, "100"),
+        (2, 0, "South"),
+        (2, 1, "200"),
+        (3, 0, "North"),
+        (3, 1, "300"),
+    ] {
+        wb.set(r, c, v); // Sheet2: total 600
+    }
+    wb.switch_to(2);
+    create(&wb, create_request(2, Some(0), None).with_destination("A1"))
+        .expect("a worksheet pivot at Sheet3!A1 over Sheet1's data");
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+    let framed = create(&wb, create_request(canvas, Some(1), Some(test_frame_config())))
+        .expect("a canvas pivot over Sheet2's data");
+    assert_eq!(
+        crate::pivot::operations::get_pivot_region(&wb.state, framed.pivot_id).map(|r| (r.start_row, r.start_col)),
+        Some((0, 0)),
+        "precondition: the canvas pivot's block sits at A1, the same cell as Sheet3's pivot"
+    );
+
+    wb.switch_to(0);
+    wb.set(10, 0, "=GETPIVOTDATA(\"Sum of Sales\";Sheet3!A1)");
+    wb.set(11, 0, &format!("=GETPIVOTDATA(\"Sum of Sales\";'{canvas_name}'!A1)"));
+    assert_eq!(wb.value(0, 10, 0), engine::CellValue::Number(35.0), "Sheet3!A1 is Sheet3's pivot");
+    assert_eq!(wb.value(0, 11, 0), engine::CellValue::Number(600.0), "the canvas's A1 is the canvas pivot");
+
+    // Unqualified: the formula's own sheet.
+    wb.switch_to(2);
+    wb.set(20, 0, "=GETPIVOTDATA(\"Sum of Sales\";A1)");
+    assert_eq!(wb.value(2, 20, 0), engine::CellValue::Number(35.0), "an unqualified A1 is the formula's own sheet");
+}
+
+/// The frame is moved through `update_pivot_properties`: refused, with the
+/// document clean, for a worksheet pivot (no grid <-> canvas conversion) and
+/// for an invalid frame; applied and UNDOABLE for a canvas pivot.
+#[test]
+fn a_canvas_pivot_frame_moves_undoably_and_a_worksheet_pivot_refuses_one() {
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+    let framed = insert_pivot(&wb, &canvas_name, (0, 0), Some(test_frame()));
+    let unframed = insert_pivot(&wb, "Sheet1", (5, 5), None);
+    let request = |id, frame| crate::pivot::types::UpdatePivotPropertiesRequest {
+        pivot_id: id,
+        name: None,
+        allow_multiple_filters_per_field: None,
+        enable_data_value_editing: None,
+        refresh_on_open: None,
+        use_custom_sort_lists: None,
+        canvas_frame: Some(frame),
+    };
+    let update = |r| crate::pivot::commands::update_pivot_properties_core(&wb.state, &wb.file, &wb.pivots, r);
+    crate::document_effect::mark_saved(&wb.file);
+    let depth = || wb.state.undo_stack.lock().unwrap().undo_depth();
+    let depth_before = depth();
+
+    let refused = update(request(unframed, test_frame_config()));
+    assert!(refused.is_err_and(|e| e.contains("canvas")), "a worksheet pivot never gets a frame");
+    assert_eq!(stored_definition(&wb, unframed).canvas_frame, None);
+    let bad = crate::pivot::types::CanvasFrameConfig { x: -5.0, ..test_frame_config() };
+    assert!(update(request(framed, bad)).is_err(), "an invalid frame is refused, not clamped");
+    assert_eq!(stored_definition(&wb, framed).canvas_frame, Some(test_frame()));
+    assert!(!wb.file.is_dirty(), "the refusals left the document clean");
+    assert_eq!(depth(), depth_before, "and recorded nothing");
+
+    let moved = pivot_engine::CanvasFrame { x: 200.0, y: 10.0, width: 500.0, height: 260.0, frozen_headers: true };
+    update(request(framed, moved.into())).expect("a canvas pivot's frame moves");
+    assert_eq!(stored_definition(&wb, framed).canvas_frame, Some(moved));
+    assert!(wb.file.is_dirty(), "moving the box is a document change");
+    assert_eq!(wb.state.undo_stack.lock().unwrap().undo_description(), Some("Move pivot"));
+
+    // Saving the SAME frame again adds no Ctrl+Z step.
+    update(request(framed, moved.into())).unwrap();
+    assert_eq!(depth(), depth_before + 1, "a no-op frame save records nothing");
+
+    // Ctrl+Z puts the box back, through the real restore.
+    let transaction = wb.state.undo_stack.lock().unwrap().pop_undo().unwrap();
+    crate::undo_commands::apply_changes(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.slicer, &wb.filters, &wb.pane, &wb.timelines, transaction, true,
+    );
+    assert_eq!(stored_definition(&wb, framed).canvas_frame, Some(test_frame()), "undo moves the box back");
+}
+
+// ---------------------------------------------------------------------------
+// M8 arrange: ONE Ctrl+Z for a cross-family arrange
+// ---------------------------------------------------------------------------
+
+fn frame_request(
+    id: pivot_engine::PivotId,
+    frame: pivot_engine::CanvasFrame,
+) -> crate::pivot::types::UpdatePivotPropertiesRequest {
+    crate::pivot::types::UpdatePivotPropertiesRequest {
+        pivot_id: id,
+        name: None,
+        allow_multiple_filters_per_field: None,
+        enable_data_value_editing: None,
+        refresh_on_open: None,
+        use_custom_sort_lists: None,
+        canvas_frame: Some(frame.into()),
+    }
+}
+
+fn undo_depth(wb: &Workbook) -> usize {
+    wb.state.undo_stack.lock().unwrap().undo_depth()
+}
+
+fn transaction_open(wb: &Workbook) -> bool {
+    wb.state.undo_stack.lock().unwrap().has_open_transaction()
+}
+
+/// `record_pivot_definition_undo` ran an unconditional begin/commit pair, and
+/// `commit` closes WHATEVER is open -- so moving a pivot box inside an arrange
+/// committed the arrange's own transaction early.
+#[test]
+fn a_canvas_pivot_frame_move_joins_an_open_transaction() {
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+    let framed = insert_pivot(&wb, &canvas_name, (0, 0), Some(test_frame()));
+    let depth_before = undo_depth(&wb);
+
+    wb.state.undo_stack.lock().unwrap().begin_transaction("Align left");
+    let moved = pivot_engine::CanvasFrame { x: 300.0, ..test_frame() };
+    crate::pivot::commands::update_pivot_properties_core(&wb.state, &wb.file, &wb.pivots, frame_request(framed, moved))
+        .expect("a canvas pivot's frame moves");
+    assert!(transaction_open(&wb), "moving the pivot box committed the caller's outer transaction");
+    assert_eq!(undo_depth(&wb), depth_before, "nothing may land on the stack before the caller commits");
+    wb.state.undo_stack.lock().unwrap().commit_transaction();
+    assert_eq!(undo_depth(&wb), depth_before + 1);
+}
+
+fn canvas_timeline(sheet_index: usize) -> crate::timeline_slicer::TimelineSlicer {
+    crate::timeline_slicer::TimelineSlicer {
+        id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+        name: "Order Date".to_string(),
+        header_text: None,
+        sheet_index,
+        x: 10.0,
+        y: 20.0,
+        width: 350.0,
+        height: 100.0,
+        source_type: crate::timeline_slicer::TimelineSourceType::Pivot,
+        source_id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+        field_name: "OrderDate".to_string(),
+        level: crate::timeline_slicer::TimelineLevel::Months,
+        selection_start: None,
+        selection_end: None,
+        show_header: true,
+        show_level_selector: true,
+        show_scrollbar: true,
+        style_preset: "TimelineStyleLight1".to_string(),
+        connected_pivot_ids: vec![],
+    }
+}
+
+fn canvas_slicer(sheet_index: usize) -> crate::slicer::Slicer {
+    let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+    serde_json::from_value(serde_json::json!({
+        "id": id.to_string(),
+        "name": "Region",
+        "sheetIndex": sheet_index,
+        "x": 10.0, "y": 300.0, "width": 180.0, "height": 240.0,
+        "sourceType": "pivot",
+        "cacheSourceId": id.to_string(),
+        "fieldName": "Region",
+        "selectedItems": null,
+        "showHeader": true,
+        "columns": 1,
+        "stylePreset": "SlicerStyleLight1",
+        "connectedSources": []
+    }))
+    .expect("slicer from json")
+}
+
+fn canvas_shape() -> crate::controls::ControlMetadata {
+    let mut properties = std::collections::HashMap::new();
+    for (name, value) in [("x", "600"), ("y", "40"), ("width", "80"), ("height", "28"), ("pinToGrid", "false")] {
+        properties.insert(
+            name.to_string(),
+            crate::controls::ControlPropertyValue { value_type: "static".to_string(), value: value.to_string() },
+        );
+    }
+    crate::controls::ControlMetadata { control_type: "shape".to_string(), properties }
+}
+
+/// THE M8 CONTRACT. An arrange (Align Left here) moves a slicer, a timeline, a
+/// control and a canvas pivot box inside ONE `begin_undo_transaction`: every
+/// recorder must JOIN it, so the stack gains exactly one entry, and ONE Ctrl+Z
+/// through the real restore path puts all four back (and one redo moves all
+/// four again). Each recorder on its own still records exactly one step.
+#[test]
+fn a_cross_family_arrange_is_one_undo_step_and_one_ctrl_z_restores_all_four() {
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+
+    let slicer = canvas_slicer(canvas);
+    let slicer_id = slicer.id;
+    wb.slicer.slicers.write(&crate::document_effect::test_seed_effect()).unwrap().insert(slicer_id, slicer);
+    let timeline = canvas_timeline(canvas);
+    let timeline_id = timeline.id;
+    wb.timelines.timelines.write(&crate::document_effect::test_seed_effect()).unwrap().insert(timeline_id, timeline);
+    let control = (canvas, 1, 1);
+    wb.state.controls.write(&crate::document_effect::test_seed_effect()).unwrap().insert(control, canvas_shape());
+    let pivot = insert_pivot(&wb, &canvas_name, (0, 0), Some(test_frame()));
+
+    let slicer_frame = || {
+        let s = &wb.slicer.slicers.read().unwrap()[&slicer_id];
+        (s.x, s.y, s.width, s.height)
+    };
+    let timeline_frame = || {
+        let t = &wb.timelines.timelines.read().unwrap()[&timeline_id];
+        (t.x, t.y, t.width, t.height)
+    };
+    let control_x = || wb.state.controls.read().unwrap()[&control].properties["x"].value.clone();
+    let pivot_frame = || stored_definition(&wb, pivot).canvas_frame.expect("a canvas pivot keeps its frame");
+    let before = (slicer_frame(), timeline_frame(), control_x(), pivot_frame());
+
+    // Align Left to x = 5, all four families, one transaction.
+    let move_all = |x: f64| {
+        crate::slicer::commands::update_slicer_position_core(&wb.state, &wb.file, &wb.slicer, slicer_id, x, 300.0, 180.0, 240.0)
+            .expect("the slicer moves");
+        assert!(transaction_open(&wb), "the SLICER move committed the arrange's transaction early");
+        crate::timeline_slicer::commands::update_timeline_position_core(
+            &wb.state, &wb.timelines, &wb.file, timeline_id, x, 20.0, 350.0, 100.0,
+        )
+        .expect("the timeline moves");
+        assert!(transaction_open(&wb), "the TIMELINE move committed the arrange's transaction early");
+        let change = crate::api_types::ControlGeometryChange {
+            sheet_index: control.0,
+            row: control.1,
+            col: control.2,
+            x,
+            y: 40.0,
+            width: 80.0,
+            height: 28.0,
+            offset_x: None,
+            offset_y: None,
+        };
+        assert_eq!(crate::controls::set_control_geometry_core(&wb.state, &wb.file, &[change]), Ok(1));
+        assert!(transaction_open(&wb), "the CONTROL batch committed the arrange's transaction early");
+        crate::pivot::commands::update_pivot_properties_core(
+            &wb.state,
+            &wb.file,
+            &wb.pivots,
+            frame_request(pivot, pivot_engine::CanvasFrame { x, ..test_frame() }),
+        )
+        .expect("the pivot box moves");
+        assert!(transaction_open(&wb), "the PIVOT BOX move committed the arrange's transaction early");
+    };
+
+    let depth_before = undo_depth(&wb);
+    wb.state.undo_stack.lock().unwrap().begin_transaction("Align left");
+    move_all(5.0);
+    assert!(transaction_open(&wb), "a family committed the arrange's transaction early");
+    assert_eq!(undo_depth(&wb), depth_before, "nothing landed before the arrange committed");
+    wb.state.undo_stack.lock().unwrap().commit_transaction();
+    assert_eq!(undo_depth(&wb), depth_before + 1, "the whole arrange is ONE undo step");
+    let moved = (slicer_frame(), timeline_frame(), control_x(), pivot_frame());
+    assert_eq!(moved.0.0, 5.0);
+    assert_eq!(moved.1.0, 5.0);
+    assert_eq!(moved.2, "5");
+    assert_eq!(moved.3.x, 5.0);
+
+    // ONE Ctrl+Z, through the real restore path.
+    let transaction = wb.state.undo_stack.lock().unwrap().pop_undo().expect("the arrange is on the stack");
+    crate::undo_commands::apply_changes(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.slicer, &wb.filters, &wb.pane, &wb.timelines, transaction, true,
+    );
+    assert_eq!(
+        (slicer_frame(), timeline_frame(), control_x(), pivot_frame()),
+        before,
+        "one Ctrl+Z must put ALL FOUR back"
+    );
+    assert_eq!(undo_depth(&wb), depth_before);
+
+    // ONE redo moves all four again.
+    let redo = wb.state.undo_stack.lock().unwrap().pop_redo().expect("the arrange is redoable");
+    crate::undo_commands::apply_changes(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.slicer, &wb.filters, &wb.pane, &wb.timelines, redo, false,
+    );
+    assert_eq!((slicer_frame(), timeline_frame(), control_x(), pivot_frame()), moved, "one redo re-applies all four");
+
+    // Each recorder ALONE: exactly one step apiece, no outer transaction needed.
+    let depth = undo_depth(&wb);
+    crate::slicer::commands::update_slicer_position_core(&wb.state, &wb.file, &wb.slicer, slicer_id, 40.0, 300.0, 180.0, 240.0)
+        .unwrap();
+    assert_eq!(undo_depth(&wb), depth + 1, "a slicer move alone is one step");
+    crate::timeline_slicer::commands::update_timeline_position_core(
+        &wb.state, &wb.timelines, &wb.file, timeline_id, 40.0, 20.0, 350.0, 100.0,
+    )
+    .unwrap();
+    assert_eq!(undo_depth(&wb), depth + 2, "a timeline move alone is one step");
+    let change = crate::api_types::ControlGeometryChange {
+        sheet_index: control.0,
+        row: control.1,
+        col: control.2,
+        x: 40.0,
+        y: 40.0,
+        width: 80.0,
+        height: 28.0,
+        offset_x: None,
+        offset_y: None,
+    };
+    crate::controls::set_control_geometry_core(&wb.state, &wb.file, &[change]).unwrap();
+    assert_eq!(undo_depth(&wb), depth + 3, "a control batch alone is one step");
+    crate::pivot::commands::update_pivot_properties_core(
+        &wb.state,
+        &wb.file,
+        &wb.pivots,
+        frame_request(pivot, pivot_engine::CanvasFrame { x: 40.0, ..test_frame() }),
+    )
+    .unwrap();
+    assert_eq!(undo_depth(&wb), depth + 4, "a pivot box move alone is one step");
+    assert!(!transaction_open(&wb), "no recorder left a transaction open");
+}
+
+/// `relocate_pivot` (Tauri-only, so its ordering is pinned by the census) runs
+/// this before its token: a canvas pivot's cells belong to its block.
+#[test]
+fn relocating_a_canvas_pivot_is_refused() {
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+    let framed = insert_pivot(&wb, &canvas_name, (0, 0), Some(test_frame()));
+    let unframed = insert_pivot(&wb, "Sheet1", (5, 5), None);
+    assert_refused_as_canvas(
+        crate::pivot::operations::ensure_pivot_not_framed(&wb.pivots, framed, "move the cells of"),
+        "relocate_pivot",
+    );
+    crate::pivot::operations::ensure_pivot_not_framed(&wb.pivots, unframed, "move the cells of")
+        .expect("a worksheet pivot may be relocated");
+}
+
+/// The wire contract the frontend codes against (`CanvasFrameConfig` in
+/// app/src/api/pivotTypes.ts): camelCase, `frozenHeaders` optional on the way
+/// in, and a region without a frame carries no `canvasFrame` key at all.
+#[test]
+fn the_canvas_frame_wire_shape_is_camel_case_and_optional() {
+    let config: crate::pivot::types::CanvasFrameConfig =
+        serde_json::from_str(r#"{"x":1,"y":2,"width":300,"height":200}"#).unwrap();
+    assert!(!config.frozen_headers);
+    let json = serde_json::to_value(crate::pivot::types::CanvasFrameConfig { frozen_headers: true, ..config }).unwrap();
+    assert_eq!(json["frozenHeaders"], serde_json::json!(true));
+
+    let region = |frame| crate::pivot::types::PivotRegionData {
+        pivot_id: new_pivot_id(),
+        name: "P".to_string(),
+        start_row: 0,
+        start_col: 0,
+        end_row: 1,
+        end_col: 1,
+        is_empty: false,
+        canvas_frame: frame,
+    };
+    let bare = serde_json::to_value(region(None)).unwrap();
+    assert!(bare.get("canvasFrame").is_none(), "a worksheet pivot's region has no canvasFrame key: {bare}");
+    let framed = serde_json::to_value(region(Some(test_frame_config()))).unwrap();
+    assert_eq!(framed["canvasFrame"]["width"], serde_json::json!(320.0));
+
+    let request: crate::pivot::types::CreatePivotRequest =
+        serde_json::from_str(r#"{"sourceRange":"A1:B4","destinationCell":"A1"}"#).unwrap();
+    assert!(request.canvas_frame.is_none(), "an old request without canvasFrame still deserializes");
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,6 +1946,43 @@ fn set_canvas_layout_applies_a_patch_and_refuses_worksheets_and_bad_values_clean
     assert!(!wb.file.is_dirty(), "a refused patch leaves the document clean");
 }
 
+/// M8 hygiene: `zOrder` / `locked` used to be stored VERBATIM. An edit now
+/// trims and dedupes them (first occurrence wins -- it is the one that
+/// paints; `locked` is a set) and refuses an over-cap list or a blank ref,
+/// before the effect.
+#[test]
+fn set_canvas_layout_dedupes_the_ref_lists_and_refuses_bad_ones_cleanly() {
+    use persistence::{CanvasObjectRef, CANVAS_MAX_OBJECT_REFS};
+    let obj = |kind: &str, id: &str| CanvasObjectRef { kind: kind.to_string(), id: id.to_string() };
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb).active_index;
+
+    let patch = crate::api_types::CanvasLayoutPatch {
+        z_order: Some(vec![obj("chart", "1"), obj("slicer", "2"), obj(" chart", "1 "), obj("pivot", "3")]),
+        locked: Some(vec![obj("slicer", "2"), obj("slicer", "2")]),
+        ..Default::default()
+    };
+    let changed = crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, Some(canvas), &patch)
+        .expect("duplicates are normalized, not refused");
+    assert_eq!(changed.layout.z_order, vec![obj("chart", "1"), obj("slicer", "2"), obj("pivot", "3")]);
+    assert_eq!(changed.layout.locked, vec![obj("slicer", "2")]);
+
+    crate::document_effect::mark_saved(&wb.file);
+    let before = kinds(&wb);
+    let over_cap = (0..=CANVAS_MAX_OBJECT_REFS).map(|i| obj("chart", &i.to_string())).collect();
+    for (label, bad) in [
+        ("an over-cap zOrder", crate::api_types::CanvasLayoutPatch { z_order: Some(over_cap), ..Default::default() }),
+        ("a blank ref", crate::api_types::CanvasLayoutPatch { locked: Some(vec![obj("chart", " ")]), ..Default::default() }),
+    ] {
+        assert!(
+            crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, Some(canvas), &bad).is_err(),
+            "{label} must be refused"
+        );
+    }
+    assert_eq!(kinds(&wb), before, "a refused patch changes nothing");
+    assert!(!wb.file.is_dirty(), "a refused patch leaves the document clean");
+}
+
 // ---------------------------------------------------------------------------
 // 5. Wiring census: the doors no shared helper fronts
 // ---------------------------------------------------------------------------
@@ -1090,14 +2066,30 @@ fn every_canvas_write_door_is_wired_and_ordered() {
         (SHEETS, "sheets.rs", "pub(crate) fn copy_sheet_impl(", "is_canvas_sheet", Some(EFFECT)),
         (REPORT, "report.rs", "pub async fn create_report(", "ensure_not_canvas_in_state", Some(EFFECT)),
         (REPORT, "report.rs", "pub fn restore_report(", "ensure_not_canvas_in_state", Some(EFFECT)),
-        (PIVOT, "pivot/commands.rs", "pub fn create_pivot_inner(", "ensure_not_canvas_in_state", Some(EFFECT)),
+        (PIVOT, "pivot/commands.rs", "pub(crate) fn create_pivot_core(", "ensure_not_canvas_in_state", Some(EFFECT)),
         (PIVOT, "pivot/commands.rs", "pub async fn create_pivot_from_bi_model(", "ensure_not_canvas_in_state", Some(EFFECT)),
+        // M6: the CANVAS half of both create doors -- the frame is required and
+        // the anchor allocated before the effect; the grid door also refuses a
+        // view wider than its block before anything is written.
+        (PIVOT, "pivot/commands.rs", "pub(crate) fn create_pivot_core(", "canvas_create_frame(", Some(EFFECT)),
+        (PIVOT, "pivot/commands.rs", "pub(crate) fn create_pivot_core(", "allocate_canvas_pivot_anchor(", Some(EFFECT)),
+        (PIVOT, "pivot/commands.rs", "pub(crate) fn create_pivot_core(", "ensure_canvas_pivot_fits_block(", Some(EFFECT)),
+        (PIVOT, "pivot/commands.rs", "pub async fn create_pivot_from_bi_model(", "canvas_create_frame(", Some(EFFECT)),
+        (PIVOT, "pivot/commands.rs", "pub async fn create_pivot_from_bi_model(", "allocate_canvas_pivot_anchor(", Some(EFFECT)),
         (PIVOT_OPS, "pivot/operations.rs", "pub(crate) fn update_pivot_in_grid(", "ensure_not_canvas_in_state", Some("state.grid.write")),
-        (PIVOT_OPS, "pivot/operations.rs", "pub(crate) fn ensure_pivot_destination_is_grid(", "ensure_not_canvas_in_state", None),
+        (PIVOT_OPS, "pivot/operations.rs", "pub(crate) fn update_pivot_in_grid(", "ensure_canvas_destination(", Some("state.grid.write")),
+        (PIVOT_OPS, "pivot/operations.rs", "pub(crate) fn update_pivot_in_grid(", "ensure_canvas_pivot_fits_block(", Some("state.grid.write")),
+        (PIVOT_OPS, "pivot/operations.rs", "pub(crate) fn ensure_pivot_destination_writable(", "ensure_not_canvas_in_state", None),
+        (PIVOT_OPS, "pivot/operations.rs", "pub(crate) fn ensure_pivot_destination_writable(", "ensure_canvas_destination(", None),
         // The two refusal-first helpers every grid-writing pivot command mints
-        // its effect through: the canvas refusal comes before the effect.
-        (PIVOT, "pivot/commands.rs", "fn pivot_write<", "ensure_pivot_destination_is_grid", Some(EFFECT)),
-        (PIVOT, "pivot/commands.rs", "fn pivot_mutation_token(", "ensure_pivot_destination_is_grid", Some(EFFECT)),
+        // its effect through: the kind refusal comes before the effect.
+        (PIVOT, "pivot/commands.rs", "fn pivot_write<", "ensure_pivot_destination_writable", Some(EFFECT)),
+        (PIVOT, "pivot/commands.rs", "fn pivot_mutation_token(", "ensure_pivot_destination_writable", Some(EFFECT)),
+        // A canvas pivot's anchor is the allocator's: relocating it is refused
+        // before the token that mints the effect; its BOX is moved through
+        // update_pivot_properties, whose frame refusals also precede the effect.
+        (PIVOT, "pivot/commands.rs", "pub fn relocate_pivot(", "ensure_pivot_not_framed(", Some("pivot_mutation_token(")),
+        (PIVOT, "pivot/commands.rs", "pub(crate) fn update_pivot_properties_core(", "frame.validate()", Some("pivot_write_definition_only(")),
         // The pull materializer writes through `write_pivot_to_grid` directly:
         // the kinds are snapshotted before `grids`, and checked before the write.
         (CALP, "calp_commands.rs", "pub(crate) fn restore_pulled_pivots(", "state.sheet_kinds.read", Some("state.grids.write")),
@@ -1156,7 +2148,9 @@ fn every_canvas_write_door_is_wired_and_ordered() {
     // able to reach a pivot stranded on a canvas.
     for (helper, owner) in [
         ("pivot_exists_token(&", "pub fn delete_pivot_table("),
-        ("pivot_write_definition_only(&", "pub fn update_pivot_properties("),
+        // Every CALL (`(`), whatever its arguments; the definition is spelled
+        // `pivot_write_definition_only<'a>(` and is not counted.
+        ("pivot_write_definition_only(", "pub(crate) fn update_pivot_properties_core("),
     ] {
         assert_eq!(PIVOT.matches(helper).count(), 1, "pivot/commands.rs: `{helper}` must have exactly one caller");
         assert!(body_of(PIVOT, owner).contains(helper), "pivot/commands.rs: `{helper}` belongs to `{owner}`");

@@ -13,11 +13,15 @@ export { getCellFromPixel } from "../core/lib/gridRenderer";
 // must offset by the same gutters the renderer used, or it lands one header
 // away from the cells — and it must read them through these accessors rather
 // than `config.rowHeaderWidth || 50`, because `||` cannot tell a collapsed
-// gutter (View > Headings off, a legal 0) from a missing one.
+// gutter (View > Headings off, a legal 0) from a missing one. A CANVAS surface
+// paints no headings whatever the stored flag says, so a hit box or a bound in
+// canvas pixels resolves the flag through paintedDisplayHeadings(surface, flag)
+// before resolveHeaderSizes -- the raw config is one gutter off on a canvas.
 export {
   rowHeaderGutter,
   colHeaderGutter,
   resolveHeaderSizes,
+  paintedDisplayHeadings,
   effectiveGridConfig,
   FALLBACK_ROW_HEADER_WIDTH,
   FALLBACK_COL_HEADER_HEIGHT,

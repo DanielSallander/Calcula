@@ -539,17 +539,22 @@ pub(crate) fn update_floating_range_cell_inner(
     invariant: Option<bool>,
 ) -> Result<Vec<usize>, String> {
     let range = find_row(state, id)?;
-    // The window is object policy: the UI and the script surface address only
-    // visible cells. (Out-of-window cells remain REAL cells that formulas can
-    // read — this bounds the write door, not the address space.)
-    if row >= range.row_count || col >= range.col_count {
+    let backing_index = sheet_index_of(state, range.backing_sheet_id)
+        .ok_or_else(|| "Floating range backing sheet is missing".to_string())?;
+    // The write door is the CONTENT EXTENT: the window, grown to the cells the
+    // backing sheet already holds. The reader scrolls over exactly this extent
+    // (a shrink hides cells, it never deletes them, and a formula can spill
+    // past the window), so a cell they can scroll to and select is a cell they
+    // can edit. A cell beyond both the window and every stored cell is still
+    // refused -- the extent bounds the write door, not the address space
+    // formulas read.
+    let (extent_rows, extent_cols) = floating_range_write_extent(state, &range, backing_index);
+    if row >= extent_rows || col >= extent_cols {
         return Err(format!(
-            "Cell ({row},{col}) is outside the floating range's {}x{} window",
+            "Cell ({row},{col}) is outside the floating range's {}x{} window and beyond its content",
             range.row_count, range.col_count
         ));
     }
-    let backing_index = sheet_index_of(state, range.backing_sheet_id)
-        .ok_or_else(|| "Floating range backing sheet is missing".to_string())?;
     crate::commands::data::update_cell_on_sheets_inner(
         state,
         file_state,
@@ -564,6 +569,33 @@ pub(crate) fn update_floating_range_cell_inner(
         invariant,
         Some(true),
     )
+}
+
+/// The rows and columns a floating range may WRITE: its window grown to the
+/// used range of its backing sheet, capped at the window maxima. Reads the
+/// backing grid alone (a backing sheet is never the active sheet; if it ever
+/// were, the active mirror is the live copy and is read instead).
+pub(crate) fn floating_range_write_extent(
+    state: &AppState,
+    range: &FloatingRange,
+    backing_index: usize,
+) -> (u32, u32) {
+    let active = state.active_sheet.read().map(|a| *a).unwrap_or(usize::MAX);
+    let used = if backing_index == active {
+        state.grid.read().ok().and_then(|g| engine::navigation::used_range(&g))
+    } else {
+        state
+            .grids
+            .read()
+            .ok()
+            .and_then(|g| g.get(backing_index).and_then(engine::navigation::used_range))
+    };
+    let (mut rows, mut cols) = (range.row_count, range.col_count);
+    if let Some((_, _, end_row, end_col)) = used {
+        rows = rows.max(end_row.saturating_add(1));
+        cols = cols.max(end_col.saturating_add(1));
+    }
+    (rows.min(MAX_FLOATING_RANGE_ROWS), cols.min(MAX_FLOATING_RANGE_COLS))
 }
 
 /// Rename a floating range — through the SHEET rename machinery (validation,

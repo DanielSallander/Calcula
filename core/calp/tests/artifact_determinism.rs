@@ -27,27 +27,45 @@ use calp::version::SemVer;
 use engine::cell::Cell;
 use persistence::{SavedCell, Sheet, Workbook};
 
-/// Sheet ids to build both workbooks with.
+/// Ids to build both workbooks with: the sheets, plus the floating range, the
+/// pivot and the timeline that ride on them.
 ///
 /// Identity has to be held constant for this comparison to be about
 /// SERIALIZATION: a freshly-built `Sheet` mints a new `SheetId`, and two
 /// workbooks with different ids write to different artifact PATHS, which is
 /// correct behaviour rather than a determinism failure.
-fn fixed_sheet_ids() -> Vec<identity::SheetId> {
-    (0..3)
-        .map(|_| identity::SheetId::from_bytes(identity::generate_uuid_v7()))
-        .collect()
+struct FixedIds {
+    sheets: Vec<identity::SheetId>,
+    floating_range: identity::EntityId,
+    pivot: identity::EntityId,
+    timeline: identity::EntityId,
+}
+
+fn fixed_ids() -> FixedIds {
+    let entity = || identity::EntityId::from_bytes(identity::generate_uuid_v7());
+    FixedIds {
+        sheets: (0..3)
+            .map(|_| identity::SheetId::from_bytes(identity::generate_uuid_v7()))
+            .collect(),
+        floating_range: entity(),
+        pivot: entity(),
+        timeline: entity(),
+    }
 }
 
 /// A workbook exercising the collections whose order is not guaranteed:
-/// hidden rows/cols (both effective and user-hidden), on several sheets.
+/// hidden rows/cols (both effective and user-hidden), on several sheets, and a
+/// floating range whose per-column widths and per-row heights are hash maps.
+/// It also carries a timeline slicer, so both canvas-object artifacts
+/// (`floating_ranges.json`, `timeline_slicers.json`) are under the test.
 ///
 /// Every call builds the hash sets FRESH. That matters: Rust seeds each
 /// `HashSet`'s hasher per instance, so two separately-constructed sets holding
 /// the same numbers can iterate in different orders — while a CLONE keeps the
 /// original's seed and would iterate identically, making a clone-based test
 /// vacuous for exactly the thing being tested.
-fn workbook_with_unordered_collections(ids: &[identity::SheetId]) -> Workbook {
+fn workbook_with_unordered_collections(fixed: &FixedIds) -> Workbook {
+    let ids = &fixed.sheets;
     let mut wb = Workbook::default();
     // ASSIGN, never push: a default Workbook already carries a blank sheet with
     // a freshly minted id, and appending after it would publish that sheet —
@@ -72,6 +90,57 @@ fn workbook_with_unordered_collections(ids: &[identity::SheetId]) -> Workbook {
         sheet.user_hidden_cols = [3u32].into_iter().collect();
         wb.sheets.push(sheet);
     }
+    // "Notes" doubles as the floating range's backing sheet.
+    wb.sheets[2].visibility = "object".to_string();
+    // A FRESH map per call, with enough keys that two hasher seeds all but
+    // never agree on an order (see the note above on per-instance seeds).
+    wb.floating_ranges = vec![persistence::SavedFloatingRange {
+        id: fixed.floating_range,
+        backing_sheet_id: ids[2],
+        host_sheet_id: ids[0],
+        x: 120.0,
+        y: 64.0,
+        rotation: 0.0,
+        pin_to_grid: false,
+        row_count: 12,
+        col_count: 9,
+        col_widths: [(8u32, 55.0), (3, 90.0), (0, 140.0), (6, 61.5), (1, 72.0), (5, 80.0), (2, 100.0), (7, 47.25), (4, 66.0)]
+            .into_iter()
+            .collect(),
+        row_heights: [(11u32, 30.0), (0, 26.0), (7, 22.0), (3, 40.0), (9, 18.0)]
+            .into_iter()
+            .collect(),
+        show_title: true,
+        show_column_headers: false,
+        show_row_headers: true,
+    }];
+    wb.pivot_definitions = vec![persistence::SavedPivotDefinition {
+        id: fixed.pivot,
+        source_type: "grid".to_string(),
+        source_sheet_index: Some(1),
+        definition: serde_json::json!({ "name": "ByMonth", "destination_sheet": "Data" }),
+    }];
+    wb.timeline_slicers = vec![persistence::SavedTimelineSlicer {
+        id: fixed.timeline,
+        name: "Dates".to_string(),
+        header_text: None,
+        sheet_id: ids[0],
+        x: 10.0,
+        y: 400.0,
+        width: 500.0,
+        height: 120.0,
+        source_type: persistence::SavedTimelineSourceType::Pivot,
+        source_id: fixed.pivot,
+        field_name: "When".to_string(),
+        level: persistence::SavedTimelineLevel::Months,
+        selection_start: None,
+        selection_end: None,
+        show_header: true,
+        show_level_selector: true,
+        show_scrollbar: true,
+        style_preset: "TimelineStyleLight1".to_string(),
+        connected_pivot_ids: vec![fixed.pivot],
+    }];
     wb
 }
 
@@ -133,7 +202,7 @@ fn publishing_identical_content_twice_produces_identical_bytes() {
     // identity. Building them separately is the point (see the builder's note on
     // per-instance hasher seeds); fixing the ids is what makes the comparison
     // about serialization rather than about identity.
-    let ids = fixed_sheet_ids();
+    let ids = fixed_ids();
     let a = workbook_with_unordered_collections(&ids);
     let b = workbook_with_unordered_collections(&ids);
 
@@ -149,6 +218,11 @@ fn publishing_identical_content_twice_produces_identical_bytes() {
 
     let v1 = artifacts_of(&reg, "det", "1.0.0");
     let v2 = artifacts_of(&reg, "det", "1.0.1");
+    // The canvas-object artifacts are really under the test, not skipped for
+    // want of content.
+    for rel in ["floating_ranges.json", "timeline_slicers.json"] {
+        assert!(v1.contains_key(rel), "the fixture must publish {rel}");
+    }
 
     assert_eq!(
         v1.keys().collect::<Vec<_>>(),
@@ -174,7 +248,7 @@ fn identical_content_dedups_to_one_blob_per_artifact() {
     let prof = TempDir::new().unwrap();
     let reg = LocalWorkspace::open(dir.path()).unwrap();
 
-    let ids = fixed_sheet_ids();
+    let ids = fixed_ids();
     let a = workbook_with_unordered_collections(&ids);
     let b = workbook_with_unordered_collections(&ids);
     publish_at(&reg, prof.path(), &a, "det", SemVer::new(1, 0, 0), PushMode::CreateNew);
@@ -214,7 +288,7 @@ fn a_real_change_still_changes_the_bytes() {
     let prof = TempDir::new().unwrap();
     let reg = LocalWorkspace::open(dir.path()).unwrap();
 
-    let ids = fixed_sheet_ids();
+    let ids = fixed_ids();
     let a = workbook_with_unordered_collections(&ids);
     let mut b = workbook_with_unordered_collections(&ids);
     b.sheets[0]

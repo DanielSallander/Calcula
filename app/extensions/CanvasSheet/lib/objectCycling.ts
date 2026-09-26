@@ -1,7 +1,8 @@
 //! FILENAME: app/extensions/CanvasSheet/lib/objectCycling.ts
 // PURPOSE: The keyboard on a canvas: Tab / Shift+Tab step through the page's
-//          objects in paint order, Escape deselects, and a press on the empty
-//          page deselects everything.
+//          objects in paint order (selecting ONE object, whatever was
+//          multi-selected), and Escape clears the whole selection set. (A press
+//          on the empty page is the marquee's: lib/marquee.ts.)
 // CONTEXT: A canvas has no cells, so the grid keyboard is off there (Core) and
 //          every family's usual "deselect when the cell selection changes"
 //          never fires. These bindings give the canvas its own object keyboard
@@ -36,9 +37,6 @@ export const CANVAS_NEXT_OBJECT_COMMAND = "canvasSheet.nextObject";
 export const CANVAS_PREVIOUS_OBJECT_COMMAND = "canvasSheet.previousObject";
 export const CANVAS_DESELECT_OBJECT_COMMAND = "canvasSheet.deselectObject";
 
-/** The event Core dispatches when a canvas press lands on no object. */
-export const BACKGROUND_POINTER_DOWN_EVENT = "floatingObject:backgroundPointerDown";
-
 function onCanvas(): boolean {
   return getGridStateSnapshot()?.surface === "canvas";
 }
@@ -72,6 +70,10 @@ export function tabApplies(): boolean {
   return onCanvas() && isGridFocused() && selectableFloatingRegions().length > 0 && !objectOwnsKey("Tab");
 }
 
+/**
+ * Escape applies while ANYTHING is selected -- held by a family or by the
+ * selection set (a second chart in a multi-selection) -- and clears it all.
+ */
 export function escapeApplies(): boolean {
   return (
     onCanvas() &&
@@ -81,19 +83,7 @@ export function escapeApplies(): boolean {
   );
 }
 
-/**
- * A press on the empty page deselects everything -- the same as clicking an
- * empty cell does on a worksheet. A secondary press, or one with Shift/Ctrl
- * (the marquee and additive gestures, M8), leaves the selection alone.
- */
-export function handleBackgroundPointerDown(e: Event): void {
-  if (!onCanvas()) return;
-  const d = (e as CustomEvent<{ button?: number; shiftKey?: boolean; ctrlKey?: boolean }>).detail ?? {};
-  if (d.button === 2 || d.shiftKey || d.ctrlKey) return;
-  deselectAllObjects();
-}
-
-/** Register the commands, the three guarded bindings and the background listener. */
+/** Register the commands and the three guarded bindings. */
 export function installCanvasObjectKeyboard(extensionId: string): Array<() => void> {
   const cleanups: Array<() => void> = [];
   CommandRegistry.register(CANVAS_NEXT_OBJECT_COMMAND, () => {
@@ -137,8 +127,5 @@ export function installCanvasObjectKeyboard(extensionId: string): Array<() => vo
       escapeApplies,
     ),
   );
-
-  window.addEventListener(BACKGROUND_POINTER_DOWN_EVENT, handleBackgroundPointerDown);
-  cleanups.push(() => window.removeEventListener(BACKGROUND_POINTER_DOWN_EVENT, handleBackgroundPointerDown));
   return cleanups;
 }

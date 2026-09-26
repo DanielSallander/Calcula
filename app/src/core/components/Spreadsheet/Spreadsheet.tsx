@@ -61,7 +61,7 @@ import type { GridMenuContext } from "../../lib/gridCommands";
 // Styles
 import * as S from "./Spreadsheet.styles";
 import { alertAsync } from "../../lib/dialogs";
-import { rowHeaderGutter, colHeaderGutter, effectiveGridConfig } from "../../lib/gridRenderer/layout/headerVisibility";
+import { rowHeaderGutter, colHeaderGutter, effectiveGridConfig, paintedDisplayHeadings } from "../../lib/gridRenderer/layout/headerVisibility";
 
 const SCROLLBAR_SIZE = GRID_SCROLLBAR_GUTTER_PX;
 const SPLIT_BAR_SIZE = 4;
@@ -146,7 +146,7 @@ function SpreadsheetContent({
   // be a header-width off from where a click lands.
   const isCanvasSurface = surface === "canvas";
   const displayGridlines = isCanvasSurface ? false : gridState.displayGridlines;
-  const displayHeadings = isCanvasSurface ? false : gridState.displayHeadings;
+  const displayHeadings = paintedDisplayHeadings(surface, gridState.displayHeadings);
 
   // THE config every consumer below sees: the stored one with the header rule
   // applied. `View > Headings` off collapses both gutters to zero, and the

@@ -17,6 +17,13 @@
 //          Units: every number is LOGICAL px, the units of GridRegion.floating,
 //          so the grid and the objects it positions can never disagree about
 //          scale (zoom and devicePixelRatio are applied later, by the painter).
+//
+//          LOCK. A surface may lock individual objects (a canvas's
+//          `layout.locked`). Core treats a locked object exactly like one whose
+//          family set `movable: false` and `resizable: false`: a press still
+//          SELECTS it, no drag moves it and no handle resizes it.
+
+import type { GridRegion } from "../../api/gridOverlays";
 
 /** What Core needs to know about the layout of one sheet's floating objects. */
 export interface LayoutSurface {
@@ -38,6 +45,27 @@ export interface LayoutSurface {
    * still selects -- but no drag changes their geometry.
    */
   editable: boolean;
+  /**
+   * Whether the object behind `region` is LOCKED on this surface: selectable,
+   * but neither movable nor resizable. Optional; absent = nothing is locked.
+   * Asked from inside a press, so it must be cheap and synchronous.
+   */
+  isLocked?(region: GridRegion): boolean;
+}
+
+/**
+ * Whether `surface` locks the object behind `region`. A lock answer that
+ * throws counts as "not locked" (logged): a broken provider must not be able
+ * to freeze every object on the page.
+ */
+export function isRegionLocked(surface: LayoutSurface | null, region: GridRegion): boolean {
+  if (!surface?.isLocked) return false;
+  try {
+    return surface.isLocked(region) === true;
+  } catch (err) {
+    console.error("[layoutSurface] isLocked threw; treating the object as unlocked:", err);
+    return false;
+  }
 }
 
 /**

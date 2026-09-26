@@ -45,13 +45,16 @@ import {
   getAllTimelines,
   createTimelineAsync,
   deleteTimelineAsync,
-  updateTimelinePositionAsync,
+  commitTimelineGeometryAsync,
   updateTimelineSelectionAsync,
   getCachedTimelineData,
   updateCachedTimelinePosition,
   updateCachedTimelineBounds,
   refreshTimelineData,
+  type TimelineGeometryWrite,
 } from "./lib/timelineSlicerStore";
+import { registerObjectGeometryProvider } from "@api/objectGeometry";
+import { createTimelineGeometryProvider } from "./lib/timelineGeometry";
 
 import {
   renderTimelineSlicer,
@@ -73,6 +76,7 @@ import {
   takePendingTimelineClick,
 } from "./lib/timelinePendingClick";
 import { registerTimelineObjectSelection } from "./lib/timelineObjectSelection";
+import { timelineAtCanvasPoint, timelineCanvasBounds } from "./lib/timelineCanvasGeometry";
 
 // ============================================================================
 // Module State
@@ -154,6 +158,14 @@ function activate(context: ExtensionContext): void {
   // below, which arms a pending click the next mouseup anywhere would complete.
   cleanupFunctions.push(registerTimelineObjectSelection());
 
+  // Move / resize timelines WITHOUT a pointer gesture (@api/objectGeometry):
+  // the canvas's align, distribute, nudge and group drag.
+  cleanupFunctions.push(
+    registerObjectGeometryProvider(
+      createTimelineGeometryProvider({ afterCommit: () => broadcastSelectedTimelines() }),
+    ),
+  );
+
   // -----------------------------------------------------------------------
   // Floating object events (selection, move, resize)
   // -----------------------------------------------------------------------
@@ -210,11 +222,15 @@ function activate(context: ExtensionContext): void {
     const primaryId = detail.data?.timelineId as string;
     if (primaryId == null) return;
 
+    // Every timeline this drag moved, persisted as ONE undo step (a canvas
+    // group drag's open transaction is joined). A refusal (a protected sheet)
+    // puts them back where the workbook has them and says so once.
+    const writes: TimelineGeometryWrite[] = [];
     const primaryStart = dragStartPositions?.get(primaryId);
     if (!primaryStart) {
       const tl = getTimelineById(primaryId);
       if (tl) {
-        updateTimelinePositionAsync(primaryId, detail.x, detail.y, tl.width, tl.height).catch(console.error);
+        writes.push({ timelineId: primaryId, x: detail.x, y: detail.y, width: tl.width, height: tl.height });
       }
     } else {
       const dx = detail.x - primaryStart.x;
@@ -225,11 +241,14 @@ function activate(context: ExtensionContext): void {
         if (!tl) continue;
         const newX = Math.max(0, startPos.x + dx);
         const newY = Math.max(0, startPos.y + dy);
-        updateTimelinePositionAsync(id, newX, newY, tl.width, tl.height).catch(console.error);
+        writes.push({ timelineId: id, x: newX, y: newY, width: tl.width, height: tl.height });
       }
     }
 
     dragStartPositions = null;
+    void commitTimelineGeometryAsync(writes, writes.length > 1 ? "Move Timelines" : "Move Timeline").then(() => {
+      broadcastSelectedTimelines();
+    });
     broadcastSelectedTimelines();
   };
   window.addEventListener("floatingObject:moveComplete", handleMoveComplete);
@@ -287,7 +306,10 @@ function activate(context: ExtensionContext): void {
     const timelineId = detail.data?.timelineId as string;
     if (timelineId == null) return;
 
-    updateTimelinePositionAsync(timelineId, detail.x, detail.y, detail.width, detail.height).catch(console.error);
+    void commitTimelineGeometryAsync(
+      [{ timelineId, x: detail.x, y: detail.y, width: detail.width, height: detail.height }],
+      "Resize Timeline",
+    );
   };
   window.addEventListener("floatingObject:resizeComplete", handleResizeComplete);
   cleanupFunctions.push(() => {
@@ -359,16 +381,9 @@ function activate(context: ExtensionContext): void {
     const data = getCachedTimelineData(periodDragState.timelineId);
     if (!data || data.periods.length === 0) return;
 
-    const scrollX = gridState.viewport.scrollX;
-    const headerWidth = gridState.config.rowHeaderWidth;
-    const scrollY = gridState.viewport.scrollY;
-    const headerHeight = gridState.config.colHeaderHeight;
-    const bounds = {
-      x: tl.x - scrollX + headerWidth,
-      y: tl.y - scrollY + headerHeight,
-      width: tl.width,
-      height: tl.height,
-    };
+    // The gutters Core PAINTED (lib/timelineCanvasGeometry.ts).
+    const bounds = timelineCanvasBounds(tl);
+    if (!bounds) return;
 
     const hit = getTimelineHitDetail(canvasX, (e.clientY - rect.top) / zoom, bounds, periodDragState.timelineId);
     if (hit?.type === "period" && hit.periodIndex != null) {
@@ -435,36 +450,22 @@ function activate(context: ExtensionContext): void {
     const canvasX = (e.clientX - rect.left) / zoom;
     const canvasY = (e.clientY - rect.top) / zoom;
 
-    const activeSheet = gridState.sheetContext.activeSheetIndex;
-    const timelines = getAllTimelines().filter((t) => t.sheetIndex === activeSheet);
-    const scrollX = gridState.viewport.scrollX;
-    const scrollY = gridState.viewport.scrollY;
-    const headerWidth = gridState.config.rowHeaderWidth;
-    const headerHeight = gridState.config.colHeaderHeight;
+    // The PAINTED gutters, and the topmost object decides: a timeline covered
+    // by another object does not scroll behind it.
+    const tl = timelineAtCanvasPoint(canvasX, canvasY);
+    if (!tl) return;
 
-    for (let i = timelines.length - 1; i >= 0; i--) {
-      const tl = timelines[i];
-      const bx = tl.x - scrollX + headerWidth;
-      const by = tl.y - scrollY + headerHeight;
+    const maxScroll = getMaxScrollOffset(tl.id);
+    if (maxScroll <= 0) return;
 
-      if (
-        canvasX >= bx && canvasX <= bx + tl.width &&
-        canvasY >= by && canvasY <= by + tl.height
-      ) {
-        const maxScroll = getMaxScrollOffset(tl.id);
-        if (maxScroll <= 0) return;
+    e.preventDefault();
+    e.stopPropagation();
 
-        e.preventDefault();
-        e.stopPropagation();
-
-        const current = getScrollOffset(tl.id);
-        // Use deltaX for horizontal scroll, fall back to deltaY
-        const delta = e.deltaX !== 0 ? e.deltaX : e.deltaY;
-        setScrollOffset(tl.id, current + delta);
-        requestOverlayRedraw();
-        return;
-      }
-    }
+    const current = getScrollOffset(tl.id);
+    // Use deltaX for horizontal scroll, fall back to deltaY
+    const delta = e.deltaX !== 0 ? e.deltaX : e.deltaY;
+    setScrollOffset(tl.id, current + delta);
+    requestOverlayRedraw();
   };
   window.addEventListener("wheel", handleWheel, { capture: true, passive: false });
   cleanupFunctions.push(() => {
@@ -485,6 +486,13 @@ function activate(context: ExtensionContext): void {
 
   cleanupFunctions.push(
     context.events.on(AppEvents.SHEET_CHANGED, () => {
+      refreshCache().catch(console.error);
+    }),
+  );
+  // An application pull, refresh or detach can add or replace timelines
+  // (they travel in the .calp as timeline_slicers.json): re-read.
+  cleanupFunctions.push(
+    context.events.on(AppEvents.PACKAGE_UPDATED, () => {
       refreshCache().catch(console.error);
     }),
   );
@@ -616,20 +624,10 @@ function handleTimelineClickAt(
   const tl = getTimelineById(timelineId);
   if (!tl) return;
 
-  const gridState = getGridStateSnapshot();
-  if (!gridState) return;
-
-  const scrollX = gridState.viewport.scrollX;
-  const scrollY = gridState.viewport.scrollY;
-  const headerWidth = gridState.config.rowHeaderWidth;
-  const headerHeight = gridState.config.colHeaderHeight;
-
-  const bounds = {
-    x: tl.x - scrollX + headerWidth,
-    y: tl.y - scrollY + headerHeight,
-    width: tl.width,
-    height: tl.height,
-  };
+  // Timeline sheet-space position -> canvas space, with the gutters Core
+  // PAINTED (a canvas shows none; the stored config still says 22 x 20).
+  const bounds = timelineCanvasBounds(tl);
+  if (!bounds) return;
 
   const hit = getTimelineHitDetail(canvasX, canvasY, bounds, timelineId);
   if (!hit) return;

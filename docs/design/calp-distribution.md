@@ -1273,3 +1273,16 @@ at each command.
   left inline; see "The legacy-application contract" above. Only POLICY-refused
   payloads stay inline, and those already passed the byte cap. The general
   artifact gap is unaffected by that fix, which is why this item stays open.)*
+
+## Canvas sheets and the objects on them (2026-09-25)
+
+A canvas sheet (a report page of floating objects; `docs/design/canvas-sheets.md`) travels as an
+ordinary sheet whose `PublishedSheetMetadata.kind` carries the canvas layout, and every object on it
+travels as a typed artifact: `floating_ranges.json` (host AND backing sheet ids remapped on pull),
+`timeline_slicers.json`, charts with their data-source sheet ids remapped to the subscriber's sheets
+on subscribe and refresh (`core/calp/src/chart_refs.rs`; never on checkout), and pivot definitions
+carrying their canvas frame. After every pull `restore_partition_invariant` restores the user-sheet
+prefix / object-sheet tail. Publish selection follows what objects need (a chart's source sheet, a
+pivot's destination and source, a floating range's host and backing sheet) but never drags in a
+SUBSCRIBED sheet or an unclaimed object sheet; detach claims the objects on the detached sheet. The
+subscribed canvas is read-only until detached. Details and the tests: `canvas-sheets.md` section 4.

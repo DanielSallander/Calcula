@@ -119,6 +119,10 @@ interface NotebookSheet {
   readonly index: number;
   /** Sheet name (tab label). */
   readonly name: string;
+  /** "worksheet", or "canvas" for a canvas sheet: a report page of floating
+   *  objects that has NO cells -- a cell write aimed at it is refused. Check it
+   *  before writing to a sheet you did not create. */
+  readonly kind: "worksheet" | "canvas";
   /** A range on THIS sheet by A1 address. A "Sheet!" prefix (quoted or bare)
    *  is RESOLVED, never dropped: naming this sheet stays here, naming another
    *  EXISTING sheet rebinds the returned range to that sheet, and an unknown

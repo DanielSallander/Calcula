@@ -60,6 +60,91 @@ struct RenderSheet {
     /// Inclusive used range (max row / max col), already trimmed of empty
     /// trailing rows/cols. `None` when the sheet has no content at all.
     used: Option<(u32, u32)>,
+    /// Set for a CANVAS sheet: its page and what floats on it. A canvas renders
+    /// as this labelled summary and NEVER as a table -- its grid is a hidden
+    /// implementation detail, not content.
+    canvas: Option<CanvasSummary>,
+}
+
+/// What an HTML export can say about a canvas page without drawing it.
+struct CanvasSummary {
+    page_width: u32,
+    page_height: u32,
+    charts: usize,
+    /// Slicers plus timeline slicers.
+    filters: usize,
+    /// Cell-anchored controls: shapes, pictures, text boxes, buttons.
+    controls: usize,
+    floating_grids: usize,
+}
+
+/// Per-APPLICATION-sheet object counts, read once from the object artifacts.
+#[derive(Default)]
+struct ObjectCounts {
+    charts: HashMap<identity::SheetId, usize>,
+    filters: HashMap<identity::SheetId, usize>,
+    controls: HashMap<identity::SheetId, usize>,
+    floating_grids: HashMap<identity::SheetId, usize>,
+}
+
+impl ObjectCounts {
+    fn read(
+        registry: &dyn WorkspaceTransport,
+        package: &str,
+        version: &str,
+    ) -> Result<Self, CalpError> {
+        fn rows<T: serde::de::DeserializeOwned>(
+            registry: &dyn WorkspaceTransport,
+            package: &str,
+            version: &str,
+            rel: &str,
+        ) -> Result<Vec<T>, CalpError> {
+            Ok(match registry.read_artifact(package, version, rel)? {
+                Some(bytes) => serde_json::from_slice(&bytes)?,
+                None => Vec::new(),
+            })
+        }
+        let mut counts = ObjectCounts::default();
+        for c in rows::<persistence::SavedChart>(registry, package, version, "charts.json")? {
+            *counts.charts.entry(c.sheet_id).or_default() += 1;
+        }
+        for s in rows::<persistence::SavedSlicer>(registry, package, version, "slicers.json")? {
+            *counts.filters.entry(s.sheet_id).or_default() += 1;
+        }
+        for t in rows::<persistence::SavedTimelineSlicer>(
+            registry,
+            package,
+            version,
+            "timeline_slicers.json",
+        )? {
+            *counts.filters.entry(t.sheet_id).or_default() += 1;
+        }
+        for sc in rows::<persistence::SavedSheetControls>(registry, package, version, "controls.json")? {
+            let n = sc.controls.as_array().map_or(0, |entries| entries.len());
+            *counts.controls.entry(sc.sheet_id).or_default() += n;
+        }
+        for fr in rows::<persistence::SavedFloatingRange>(
+            registry,
+            package,
+            version,
+            "floating_ranges.json",
+        )? {
+            *counts.floating_grids.entry(fr.host_sheet_id).or_default() += 1;
+        }
+        Ok(counts)
+    }
+
+    fn summary_for(&self, sheet_id: identity::SheetId, layout: &persistence::CanvasLayout) -> CanvasSummary {
+        let get = |m: &HashMap<identity::SheetId, usize>| m.get(&sheet_id).copied().unwrap_or(0);
+        CanvasSummary {
+            page_width: layout.page_width,
+            page_height: layout.page_height,
+            charts: get(&self.charts),
+            filters: get(&self.filters),
+            controls: get(&self.controls),
+            floating_grids: get(&self.floating_grids),
+        }
+    }
 }
 
 // Default grid metrics (px) when the layout omits a row/column dimension.
@@ -82,6 +167,8 @@ pub fn render_application_html(
 
     // Read + resolve every visible sheet from the manifest, mirroring pull.rs.
     let mut sheets: Vec<RenderSheet> = Vec::new();
+    // The object artifacts, read once and only when some sheet is a canvas.
+    let mut object_counts: Option<ObjectCounts> = None;
     for pub_sheet in &manifest.sheets {
         let sheet_prefix = format!("sheets/{}", pub_sheet.sheet_id);
 
@@ -93,6 +180,29 @@ pub fn render_application_html(
                 None => PublishedSheetMetadata::default(),
             };
         if is_hidden_visibility(&metadata.visibility) {
+            continue;
+        }
+
+        // A CANVAS renders as a labelled summary of its page and objects. Its
+        // grid is never read, so no cell that ended up in it can be rendered
+        // as though it were report content.
+        if let Some(layout) = metadata.kind.canvas_layout() {
+            if object_counts.is_none() {
+                object_counts = Some(ObjectCounts::read(registry, package, version)?);
+            }
+            let canvas = object_counts
+                .as_ref()
+                .map(|counts| counts.summary_for(pub_sheet.sheet_id, layout));
+            sheets.push(RenderSheet {
+                name: pub_sheet.name.clone(),
+                cells: HashMap::new(),
+                styles: vec![CellStyle::new()],
+                column_widths: HashMap::new(),
+                row_heights: HashMap::new(),
+                metadata,
+                used: None,
+                canvas,
+            });
             continue;
         }
 
@@ -148,6 +258,7 @@ pub fn render_application_html(
             row_heights,
             metadata,
             used,
+            canvas: None,
         });
     }
 
@@ -156,9 +267,13 @@ pub fn render_application_html(
 
 /// A sheet visibility is "hidden" or "veryHidden" (case-insensitive) when it
 /// must be omitted from the report.
+/// Whether a published sheet is left out of the HTML report. Hidden and very
+/// hidden sheets are, and so is an OBJECT sheet (visibility "object"): the
+/// backing store of a floating range, which the reader never sees as a tab --
+/// rendered as its own section it would read as a stray extra sheet.
 fn is_hidden_visibility(visibility: &str) -> bool {
     let v = visibility.to_ascii_lowercase();
-    v == "hidden" || v == "veryhidden"
+    v == "hidden" || v == "veryhidden" || v == "object"
 }
 
 /// Compute the inclusive used range (max row, max col) over cells that actually
@@ -285,7 +400,49 @@ fn build_viewer_body(out: &mut String, sheets: &[RenderSheet]) {
 // Sheet table rendering
 // ===========================================================================
 
+/// A canvas page as a labelled summary: its page size and a count per object
+/// family. HTML export draws no floating object on any sheet, so a canvas --
+/// which is nothing BUT floating objects -- says what is on it instead of
+/// claiming to be empty.
+fn render_canvas_summary(out: &mut String, canvas: &CanvasSummary) {
+    out.push_str("<div class=\"calp-canvas\">\n");
+    let _ = write!(
+        out,
+        "<p class=\"calp-canvas-label\">Canvas page, {} &times; {} px</p>\n",
+        canvas.page_width, canvas.page_height
+    );
+    let families: [(usize, &str, &str); 4] = [
+        (canvas.charts, "chart", "charts"),
+        (canvas.filters, "slicer or timeline", "slicers and timelines"),
+        (canvas.controls, "shape, picture or button", "shapes, pictures and buttons"),
+        (canvas.floating_grids, "floating grid", "floating grids"),
+    ];
+    let present: Vec<String> = families
+        .iter()
+        .filter(|(n, _, _)| *n > 0)
+        .map(|(n, one, many)| format!("{} {}", n, if *n == 1 { one } else { many }))
+        .collect();
+    if present.is_empty() {
+        out.push_str("<p class=\"calp-empty\">No objects on this page.</p>\n");
+    } else {
+        out.push_str("<ul class=\"calp-canvas-objects\">\n");
+        for line in &present {
+            let _ = write!(out, "<li>{}</li>\n", escape_html(line));
+        }
+        out.push_str("</ul>\n");
+    }
+    out.push_str(
+        "<p class=\"calp-empty\">Canvas objects are not drawn in an HTML export; open the application in Calcula to see the page.</p>\n",
+    );
+    out.push_str("</div>\n");
+}
+
 fn render_sheet_table(out: &mut String, sheet: &RenderSheet) {
+    // Before the used-range check: a canvas is never a table, empty or not.
+    if let Some(canvas) = &sheet.canvas {
+        render_canvas_summary(out, canvas);
+        return;
+    }
     let (max_row, max_col) = match sheet.used {
         Some(rc) => rc,
         None => {
@@ -678,6 +835,9 @@ body {
 .calp-meta { color: #555; font-size: 13px; }
 .calp-sheet h2 { font-size: 17px; margin: 18px 0 8px 0; }
 .calp-empty { color: #888; font-style: italic; }
+.calp-canvas { border: 1px dashed #c8c8c8; padding: 12px 16px; margin-bottom: 12px; }
+.calp-canvas-label { margin: 0 0 6px 0; font-weight: bold; }
+.calp-canvas-objects { margin: 0 0 6px 0; }
 table.calp-grid {
   border-collapse: collapse;
   table-layout: fixed;
@@ -714,6 +874,9 @@ body {
 .calp-report-header h1 { margin: 0 0 4px 0; font-size: 22px; }
 .calp-meta { color: #555; font-size: 13px; }
 .calp-empty { color: #888; font-style: italic; }
+.calp-canvas { border: 1px dashed #c8c8c8; padding: 12px 16px; margin-bottom: 12px; }
+.calp-canvas-label { margin: 0 0 6px 0; font-weight: bold; }
+.calp-canvas-objects { margin: 0 0 6px 0; }
 .calp-tabs {
   display: flex;
   flex-wrap: wrap;
@@ -1023,6 +1186,13 @@ mod tests {
     }
 
     #[test]
+    fn object_sheets_are_never_rendered_as_report_sheets() {
+        assert!(is_hidden_visibility("object"), "a floating range's backing sheet is not a report sheet");
+        assert!(is_hidden_visibility("veryHidden"));
+        assert!(!is_hidden_visibility("visible"));
+    }
+
+    #[test]
     fn empty_sheet_renders_placeholder() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
@@ -1062,5 +1232,186 @@ mod tests {
         )
         .unwrap();
         assert!(html.contains("(empty sheet)"), "empty sheet placeholder");
+    }
+
+    /// A canvas has no cells by design, so the old path called it "(empty
+    /// sheet)" -- a report page full of charts described as blank. It now says
+    /// what is on the page, and its hidden grid is never rendered as a table.
+    #[test]
+    fn canvas_sheet_renders_labelled_object_summary_not_empty_placeholder() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+
+        let mut canvas = Sheet::new("Overview".to_string());
+        let mut layout = persistence::CanvasLayout::default();
+        layout.page_preset = "4:3".to_string();
+        layout.page_width = 960;
+        layout.page_height = 720;
+        canvas.kind = persistence::SheetKind::Canvas(layout);
+        // Something in the canvas's HIDDEN grid must never surface as content.
+        canvas.cells.insert(
+            (0, 0),
+            SavedCell::from_cell(&Cell::new_text("HIDDEN-GRID-CELL".to_string())),
+        );
+        let data = Sheet::new("Data".to_string());
+        let mut backing = Sheet::new("Float1".to_string());
+        backing.visibility = "object".to_string();
+        let (canvas_id, data_id, backing_id) = (canvas.id, data.id, backing.id);
+
+        let entity = || identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let mut wb = Workbook::default();
+        wb.sheets = vec![canvas, data, backing];
+        wb.charts = vec![
+            persistence::SavedChart { id: entity(), sheet_id: canvas_id, spec_json: "{}".to_string() },
+            persistence::SavedChart { id: entity(), sheet_id: canvas_id, spec_json: "{}".to_string() },
+            // On ANOTHER sheet: not counted on the canvas.
+            persistence::SavedChart { id: entity(), sheet_id: data_id, spec_json: "{}".to_string() },
+        ];
+        let pivot = persistence::SavedPivotDefinition {
+            id: entity(),
+            source_type: "grid".to_string(),
+            source_sheet_index: Some(1),
+            definition: serde_json::json!({ "name": "P", "destination_sheet": "Data" }),
+        };
+        wb.pivot_definitions = vec![pivot.clone()];
+        wb.timeline_slicers = vec![persistence::SavedTimelineSlicer {
+            id: entity(),
+            name: "Dates".to_string(),
+            header_text: None,
+            sheet_id: canvas_id,
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 100.0,
+            source_type: persistence::SavedTimelineSourceType::Pivot,
+            source_id: pivot.id,
+            field_name: "When".to_string(),
+            level: persistence::SavedTimelineLevel::Months,
+            selection_start: None,
+            selection_end: None,
+            show_header: true,
+            show_level_selector: true,
+            show_scrollbar: true,
+            style_preset: "TimelineStyleLight1".to_string(),
+            connected_pivot_ids: Vec::new(),
+        }];
+        let control = |row: u32| {
+            serde_json::json!({
+                "row": row, "col": 0, "controlType": "shape",
+                "properties": { "pinToGrid": { "valueType": "static", "value": "false" } }
+            })
+        };
+        wb.controls = vec![persistence::SavedSheetControls {
+            sheet_id: canvas_id,
+            controls: serde_json::json!([control(0), control(1), control(2)]),
+        }];
+        wb.floating_ranges = vec![persistence::SavedFloatingRange {
+            id: entity(),
+            backing_sheet_id: backing_id,
+            host_sheet_id: canvas_id,
+            x: 10.0,
+            y: 10.0,
+            rotation: 0.0,
+            pin_to_grid: false,
+            row_count: 3,
+            col_count: 3,
+            col_widths: HashMap::new(),
+            row_heights: HashMap::new(),
+            show_title: true,
+            show_column_headers: true,
+            show_row_headers: true,
+        }];
+
+        let request = PublishRequest {
+            model_writebacks: None,
+            workbook: &wb,
+            package_name: "canvas-report".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
+            sheet_indices: vec![0, 1, 2],
+            now: "2026-09-25T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        publish::publish(&reg, &request, prof.path()).unwrap();
+
+        for mode in [HtmlExportMode::Static, HtmlExportMode::Viewer] {
+            let html =
+                render_application_html(&reg, "canvas-report", "1.0.0", &HtmlExportOptions { mode })
+                    .unwrap();
+            let start = html.find("Canvas page").expect("the canvas is labelled as a canvas");
+            let section = &html[start..];
+            assert!(section.starts_with("Canvas page, 960 &times; 720 px"), "{section}");
+            assert!(section.contains("<li>2 charts</li>"), "{section}");
+            assert!(section.contains("<li>1 slicer or timeline</li>"), "{section}");
+            assert!(section.contains("<li>3 shapes, pictures and buttons</li>"), "{section}");
+            assert!(section.contains("<li>1 floating grid</li>"), "{section}");
+            assert!(section.contains("open the application in Calcula"), "{section}");
+            assert!(!html.contains("HIDDEN-GRID-CELL"), "a canvas's grid is never rendered");
+            let block = &section[..section.find("</div>").expect("the summary block closes")];
+            assert!(!block.contains("(empty sheet)"), "the canvas is not called empty: {block}");
+            assert!(!block.contains("<table"), "the canvas is never a table: {block}");
+            assert_eq!(html.matches("Canvas page").count(), 1, "one canvas, one summary");
+            if mode == HtmlExportMode::Static {
+                assert!(
+                    html.contains("<h2>Overview</h2>\n<div class=\"calp-canvas\">"),
+                    "the canvas's heading is followed by its summary"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_canvas_with_no_objects_says_so() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let mut canvas = Sheet::new("Blank page".to_string());
+        canvas.kind = persistence::SheetKind::new_canvas();
+        let mut wb = Workbook::default();
+        wb.sheets = vec![canvas];
+        let request = PublishRequest {
+            model_writebacks: None,
+            workbook: &wb,
+            package_name: "blank-canvas".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
+            sheet_indices: vec![0],
+            now: "2026-09-25T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        publish::publish(&reg, &request, prof.path()).unwrap();
+        let html = render_application_html(
+            &reg,
+            "blank-canvas",
+            "1.0.0",
+            &HtmlExportOptions { mode: HtmlExportMode::Static },
+        )
+        .unwrap();
+        assert!(html.contains("Canvas page, 1280 &times; 720 px"), "{html}");
+        assert!(html.contains("No objects on this page."), "{html}");
+        assert!(!html.contains("(empty sheet)"));
     }
 }

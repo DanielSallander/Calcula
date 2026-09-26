@@ -11,9 +11,27 @@
 //              grid layer at the bottom of the stack,
 //            - the contextual "Canvas" RIBBON TAB,
 //            - the canvas KEYBOARD: Tab / Shift+Tab step through the objects,
-//              Escape and a press on the empty page deselect (through the
-//              object-selection seam, never a synthetic mouse press),
-//            - the store that keeps all three in step with the backend.
+//              Escape deselects (through the object-selection seam, never a
+//              synthetic mouse press),
+//            - the MARQUEE: a press on the empty page deselects, and a drag
+//              from there selects every object the band touches, across
+//              families (lib/marquee.ts),
+//            - the SELECTION CHROME of the members the canvas-wide selection
+//              set holds on a single-select family's behalf (a second chart),
+//              painted in the families' own frame style (lib/selectionChrome.ts),
+//            - the Name Box LABEL of the selection: the object's name, or "N
+//              objects" (lib/objectLabel.ts),
+//            - the STACKING RESOLVER: an object's z on the active canvas is its
+//              ref's index in the layout's zOrder (lib/canvasStacking.ts), so
+//              Core paints and hit-tests in the order the page saved,
+//            - ARRANGE: bring forward / send backward (lib/zOrderStore.ts,
+//              also the page's @api/objectStacking service), align and
+//              distribute (lib/arrange.ts), lock (lib/canvasLocks.ts, asked by
+//              Core through the layout surface), the cross-family GROUP DRAG
+//              (lib/groupDrag.ts) and the arrow-key NUDGE (lib/objectNudge.ts)
+//              -- every multi-object move through @api/objectGeometry, as ONE
+//              undo step,
+//            - the store that keeps all of it in step with the backend.
 //
 //          Core already knows the active sheet's SURFACE (it refuses cell
 //          selection, editing and cell painting on a canvas), and the backend
@@ -29,6 +47,8 @@
 import type { ExtensionContext, ExtensionModule } from "@api/contract";
 import { AppEvents, onAppEvent, registerGridLayer, requestOverlayRedraw } from "@api";
 import { notifyLayoutSurfaceChanged, registerLayoutSurfaceProvider } from "@api/layoutSurface";
+import { registerRegionStacking } from "@api/gridOverlays";
+import { clearSetHeldObjects, onObjectSelectionChanged } from "@api/objectSelection";
 import {
   getCanvasSheetSnapshot,
   refreshCanvasProvenance,
@@ -40,6 +60,14 @@ import { canvasLayoutSurfaceProvider } from "./lib/layoutSurfaceProvider";
 import { paintCanvasPage } from "./lib/pagePainter";
 import { resetCanvasTab, syncCanvasTab } from "./lib/canvasTab";
 import { installCanvasObjectKeyboard } from "./lib/objectCycling";
+import { canvasRegionZ, resetCanvasStacking } from "./lib/canvasStacking";
+import { CANVAS_MARQUEE_LAYER_ID, installCanvasMarquee, paintMarquee } from "./lib/marquee";
+import { CANVAS_SELECTION_CHROME_LAYER_ID, paintSelectionChrome } from "./lib/selectionChrome";
+import { installCanvasObjectLabel, publishCanvasObjectLabel } from "./lib/objectLabel";
+import { registerObjectStackingService } from "@api/objectStacking";
+import { canvasStackingService } from "./lib/stackingService";
+import { installCanvasGroupDrag } from "./lib/groupDrag";
+import { installCanvasObjectNudge } from "./lib/objectNudge";
 
 /** The id of the page layer; one per app. */
 export const CANVAS_PAGE_LAYER_ID = "canvas-sheet-page";
@@ -49,6 +77,11 @@ const cleanupFns: (() => void)[] = [];
 function activate(_context: ExtensionContext): void {
   // Core asks this for every floating-object gesture; a worksheet answers null.
   cleanupFns.push(registerLayoutSurfaceProvider(canvasLayoutSurfaceProvider));
+
+  // Core's one z-order (paint AND every hit test) takes an object's z from its
+  // position in the active canvas's zOrder; a worksheet has no opinion.
+  cleanupFns.push(registerRegionStacking(canvasRegionZ));
+  cleanupFns.push(() => resetCanvasStacking());
 
   // The page, painted beneath every object.
   cleanupFns.push(
@@ -60,13 +93,50 @@ function activate(_context: ExtensionContext): void {
     }),
   );
 
+  // Above every object: the frames of the selection set's set-held members
+  // (a second chart, a second floating range), then the marquee band.
+  cleanupFns.push(
+    registerGridLayer({
+      id: CANVAS_SELECTION_CHROME_LAYER_ID,
+      anchor: "over-selection",
+      priority: 0,
+      paint: (context) => paintSelectionChrome(context),
+    }),
+  );
+  cleanupFns.push(
+    registerGridLayer({
+      id: CANVAS_MARQUEE_LAYER_ID,
+      anchor: "over-selection",
+      priority: 1,
+      paint: (context) => paintMarquee(context),
+    }),
+  );
+  cleanupFns.push(...installCanvasMarquee());
+
+  // The set's own changes (a member held for a single-select family) repaint
+  // the chrome; a family's own changes already repaint its objects.
+  cleanupFns.push(onObjectSelectionChanged(() => requestOverlayRedraw()));
+  cleanupFns.push(...installCanvasObjectLabel());
+
   // Every store change: the tab follows the active sheet's kind, Core re-reads
-  // the surface (snap, page extent), and the page repaints.
+  // the surface (snap, page extent), and the page repaints -- and with it the
+  // objects, in the zOrder the store now holds. This is the redraw a
+  // CANVAS_LAYOUT_CHANGED gets: the event re-reads the layout below and the
+  // redraw follows the refreshed store (a redraw on the bare event would
+  // repaint the OLD order). A change of ACTIVE sheet also drops what the
+  // selection set held on the page being left (each family clears its own).
+  let lastActiveIndex = getCanvasSheetSnapshot().activeIndex;
   cleanupFns.push(
     subscribeCanvasSheets(() => {
-      syncCanvasTab(getCanvasSheetSnapshot().active !== null);
+      const snapshot = getCanvasSheetSnapshot();
+      if (snapshot.activeIndex !== lastActiveIndex) {
+        lastActiveIndex = snapshot.activeIndex;
+        clearSetHeldObjects();
+      }
+      syncCanvasTab(snapshot.active !== null);
       notifyLayoutSurfaceChanged();
       requestOverlayRedraw();
+      publishCanvasObjectLabel();
     }),
   );
 
@@ -96,6 +166,15 @@ function activate(_context: ExtensionContext): void {
   }
 
   cleanupFns.push(...installCanvasObjectKeyboard(extension.manifest.id));
+
+  // ARRANGE. A family's own restack command (Controls' "Order" submenu) asks
+  // the page first: on a canvas the layout's zOrder is THE order.
+  cleanupFns.push(registerObjectStackingService(canvasStackingService));
+  // Dragging one member of a multi-selection moves the others -- across
+  // families -- as ONE undo step (lib/groupDrag.ts).
+  cleanupFns.push(...installCanvasGroupDrag());
+  // The arrow keys nudge the selection; a burst is one undo step.
+  cleanupFns.push(...installCanvasObjectNudge(extension.manifest.id));
 
   cleanupFns.push(() => resetCanvasTab());
   cleanupFns.push(() => resetCanvasSheetStore());

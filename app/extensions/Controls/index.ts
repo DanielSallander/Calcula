@@ -170,7 +170,15 @@ import {
   orphanMacroDiagnosis,
   macroRunnerUnavailableDiagnosis,
 } from "./lib/buttonClickDiagnosis";
-import { setControlMetadata, getControlMetadata, getAllControls, setControlProperty } from "./lib/controlApi";
+import {
+  setControlMetadata,
+  getControlMetadata,
+  getAllControls,
+  setControlProperty,
+  setControlGeometry,
+} from "./lib/controlApi";
+import { registerObjectGeometryProvider, joinUndoTransaction } from "@api/objectGeometry";
+import { controlGeometryChangesOf, createControlGeometryProvider } from "./lib/controlGeometry";
 import { withControlAnchor, requestedSize } from "./lib/controlAnchors";
 import { registerControlObjectSelection } from "./lib/controlObjectSelection";
 import { controlsBackend } from "./lib/controlsBackend";
@@ -232,6 +240,8 @@ function parseOnGridControlInstanceId(
 
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
+/** Re-read the controls from the backend (set in activate). */
+let reloadControlsAfterRefusal: (() => Promise<void>) | null = null;
 
 /** Reference to the design mode menu item for toggling its checked state. */
 let designModeMenuItem: { checked?: boolean } | null = null;
@@ -494,6 +504,24 @@ function activate(context: ExtensionContext): void {
   //     else.
   cleanupFns.push(registerControlObjectSelection());
 
+  // 0e. GEOMETRY without a pointer gesture (@api/objectGeometry): the canvas's
+  //     align, distribute, nudge and group drag. One `set_control_geometry`
+  //     batch per commit; a refused batch puts the controls back.
+  cleanupFns.push(
+    registerObjectGeometryProvider(
+      createControlGeometryProvider({
+        cellOrigin: cellOriginPixels,
+        invalidate: (controlId) => {
+          invalidateFloatingButtonCache(controlId);
+          invalidateShapeCache(controlId);
+          invalidateImageCache(controlId);
+        },
+        refresh: () => emitAppEvent(AppEvents.GRID_REFRESH),
+        afterPersist: (controlIds) => announceMetadataRefresh(controlIds),
+      }),
+    ),
+  );
+
   // 1. Register button cell decoration for rendering (embedded buttons)
   const unregDecoration = context.grid.decorations.register("button", drawButton, 10);
   cleanupFns.push(unregDecoration);
@@ -635,7 +663,7 @@ function activate(context: ExtensionContext): void {
     // offsets so the relationship survives a reload.
     if (d.pinned) {
       recalcPinnedOffset(id, cellOriginPixels);
-      void persistFloatingPosition(id);
+      void persistFloatingGeometry([id]);
     }
   };
   window.addEventListener("controls:pin-changed", onPinChanged);
@@ -1087,7 +1115,7 @@ function activate(context: ExtensionContext): void {
   // luck, decides which read wins). Unlike `reloadForSheetChange` this does NOT
   // early-return when the sheet index is unchanged — the sheet is exactly what
   // has not changed here; the store's CONTENTS have.
-  const reloadForBackendChange = () => {
+  const reloadForBackendChange = (): Promise<void> => {
     documentReloadQueue = documentReloadQueue.then(async () => {
       if (loadedSheetIndex !== null) removeFloatingControlsForSheet(loadedSheetIndex);
       deselectFloatingControl();
@@ -1104,8 +1132,15 @@ function activate(context: ExtensionContext): void {
     }).catch((err) => {
       console.error("[Controls] Backend-change reload failed:", err);
     });
+    return documentReloadQueue;
   };
   cleanupFns.push(context.events.on(AppEvents.CONTROLS_CHANGED, reloadForBackendChange));
+  // A refused geometry batch (persistFloatingGeometry) re-reads the store the
+  // same way: the controls go back to where the workbook has them.
+  reloadControlsAfterRefusal = () => reloadForBackendChange();
+  cleanupFns.push(() => {
+    reloadControlsAfterRefusal = null;
+  });
 
   // -----------------------------------------------------------------------
   // 20. Context menus for floating controls
@@ -2516,13 +2551,8 @@ function setupFloatingObjectEvents(): void {
 
     syncFloatingControlRegions();
 
-    // Persist positions for all moved controls
-    persistFloatingPosition(controlId);
-    for (const otherId of idsToMove) {
-      if (otherId !== controlId) {
-        persistFloatingPosition(otherId);
-      }
-    }
+    // Persist every moved control in ONE batch (one undo step).
+    void persistFloatingGeometry([controlId, ...Array.from(idsToMove).filter((id) => id !== controlId)]);
 
     emitAppEvent(AppEvents.GRID_REFRESH);
   };
@@ -2581,6 +2611,8 @@ function setupFloatingObjectEvents(): void {
 
     const controlId = detail.regionId as string;
     const groupId = getGroupForControl(controlId);
+    // Every control this resize changed: persisted as ONE batch below.
+    const resizedIds: string[] = [];
 
     if (groupId) {
       const oldCtrl = getFloatingControl(controlId);
@@ -2608,7 +2640,7 @@ function setupFloatingObjectEvents(): void {
           invalidateFloatingButtonCache(memberId);
           invalidateShapeCache(memberId);
           invalidateImageCache(memberId);
-          persistFloatingPosition(memberId);
+          resizedIds.push(memberId);
         }
       }
     }
@@ -2618,38 +2650,57 @@ function setupFloatingObjectEvents(): void {
     invalidateFloatingButtonCache(controlId);
     invalidateShapeCache(controlId);
     invalidateImageCache(controlId);
-    // Persist the new size to metadata
-    persistFloatingPosition(controlId);
+    // Persist the new geometry of the control and its group in ONE batch.
+    void persistFloatingGeometry([controlId, ...resizedIds]);
     emitAppEvent(AppEvents.GRID_REFRESH);
   };
   window.addEventListener("floatingObject:resizeComplete", handleResizeComplete);
   cleanupFns.push(() => window.removeEventListener("floatingObject:resizeComplete", handleResizeComplete));
 }
 
-/**
- * Persist a floating control's current position to backend metadata.
- */
-async function persistFloatingPosition(controlId: string): Promise<void> {
-  const ctrl = getFloatingControl(controlId);
-  if (!ctrl) return;
-
-  const { setControlProperty } = await import("./lib/controlApi");
-  await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "x", "static", String(Math.round(ctrl.x)));
-  await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "y", "static", String(Math.round(ctrl.y)));
-  await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "width", "static", String(Math.round(ctrl.width)));
-  await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "height", "static", String(Math.round(ctrl.height)));
-  // A pinned control's geometry is anchorOrigin + offset; persisting only the
-  // pixel position regressed the offsets to zero on reload, snapping the
-  // control onto its anchor's corner.
-  if (ctrl.pinToGrid === true) {
-    await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "offsetX", "static", String(Math.round(ctrl.offsetX ?? 0)));
-    await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "offsetY", "static", String(Math.round(ctrl.offsetY ?? 0)));
+/** Tell the Properties pane to re-read the metadata of these controls. */
+function announceMetadataRefresh(controlIds: readonly string[]): void {
+  for (const id of controlIds) {
+    const ctrl = getFloatingControl(id);
+    if (!ctrl) continue;
+    window.dispatchEvent(new CustomEvent("controls:metadata-refresh", {
+      detail: { row: ctrl.row, col: ctrl.col },
+    }));
   }
+}
 
-  // Notify PropertiesPane to re-read metadata (e.g., after drag-resize)
-  window.dispatchEvent(new CustomEvent("controls:metadata-refresh", {
-    detail: { row: ctrl.row, col: ctrl.col },
-  }));
+/**
+ * Persist the CURRENT geometry of every control of one gesture as ONE
+ * `set_control_geometry` batch: one backend call, one undo record (a drag of
+ * three co-selected controls is one Ctrl+Z, and a canvas group drag's open
+ * transaction is joined so the whole gesture stays one step), atomic. It used
+ * to be four to six `set_control_property` calls PER CONTROL, none undoable.
+ *
+ * The batch carries x / y / width / height and, for a pinned control, both
+ * offsets -- persisting only the pixel position regressed the offsets to zero
+ * on reload, snapping the control onto its anchor's corner.
+ *
+ * A refused batch (a protected sheet that disallows editing objects) wrote
+ * nothing: the controls are re-read from the backend -- they go back where the
+ * workbook has them -- and the user is told ONCE. Resolves true when it landed.
+ */
+async function persistFloatingGeometry(controlIds: readonly string[]): Promise<boolean> {
+  const changes = controlGeometryChangesOf(controlIds);
+  if (changes.length === 0) return true;
+  try {
+    await joinUndoTransaction(() => setControlGeometry(changes));
+  } catch (err) {
+    console.error("[Controls] The backend refused the control geometry batch:", err);
+    await reloadControlsAfterRefusal?.();
+    const what = changes.length === 1 ? "The control" : `${changes.length} controls`;
+    showToast(
+      `${what} could not be moved: ${err instanceof Error ? err.message : String(err)}`,
+      { type: "error", duration: 8000 },
+    );
+    return false;
+  }
+  announceMetadataRefresh(controlIds);
+  return true;
 }
 
 /**

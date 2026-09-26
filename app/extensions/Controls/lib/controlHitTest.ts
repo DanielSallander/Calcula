@@ -13,10 +13,11 @@
 
 import {
   getGridRegions,
+  floatingHitOrder,
   type GridRegion,
   type OverlayHitTestContext,
 } from "@api/gridOverlays";
-import { getGridStateSnapshot, rowHeaderGutter, colHeaderGutter } from "@api/grid";
+import { getGridStateSnapshot, resolveHeaderSizes, paintedDisplayHeadings } from "@api/grid";
 import { hitTestFloatingShape } from "../Shape/shapeRenderer";
 import { hitTestFloatingImage } from "../Image/imageRenderer";
 import { hitTestFloatingButton } from "../Button/floatingRenderer";
@@ -59,9 +60,10 @@ function clientToCanvas(
 
 /**
  * The canvas bounds of a floating region — the same arithmetic Core's
- * `getFloatingCanvasBounds` does, read through the sanctioned gutter accessors
- * rather than `config.rowHeaderWidth || 50`, because `||` cannot tell a
- * collapsed gutter (View > Headings off, a legal 0) from a missing one.
+ * `getFloatingCanvasBounds` does, with the gutters Core PAINTED: a canvas
+ * never shows headings (and View > Headings off collapses them) while the
+ * stored config still carries 22 x 20, so the raw config put the hit box one
+ * gutter right of and below the painted control (the BUG-0139 class).
  */
 function floatingCanvasBounds(
   region: GridRegion,
@@ -69,9 +71,13 @@ function floatingCanvasBounds(
   if (!region.floating) return null;
   const state = getGridStateSnapshot();
   if (!state) return null;
+  const { rowHeaderWidth, colHeaderHeight } = resolveHeaderSizes(
+    state.config,
+    paintedDisplayHeadings(state.surface, state.displayHeadings),
+  );
   return {
-    x: rowHeaderGutter(state.config) + region.floating.x - state.viewport.scrollX,
-    y: colHeaderGutter(state.config) + region.floating.y - state.viewport.scrollY,
+    x: rowHeaderWidth + region.floating.x - state.viewport.scrollX,
+    y: colHeaderHeight + region.floating.y - state.viewport.scrollY,
     width: region.floating.width,
     height: region.floating.height,
   };
@@ -80,12 +86,12 @@ function floatingCanvasBounds(
 /**
  * The topmost floating CONTROL region under a client point, or null.
  *
- * Walked back to front so the control painted last (highest z-order) wins —
- * the same order Core's `findFloatingRegionAt` uses, so the object the menu
- * opens for is the object the user sees on top.
- *
- * Only `floating-control` regions are considered: charts, slicers and floating
- * ranges publish their own region types and own their own menus.
+ * Walks `floatingHitOrder` (@api/gridOverlays) — topmost first, the same order
+ * Core's `findFloatingRegionAt` uses — so the object the menu opens for is the
+ * object the user sees on top. Controls are tested with their own precise
+ * hit test (a shape is not its rectangle); an object of ANOTHER family whose
+ * rectangle covers the point stops the walk, because a control underneath it
+ * is not what the user right-clicked (that family owns its own menu).
  */
 export function floatingControlRegionAtClientPoint(
   clientX: number,
@@ -94,12 +100,18 @@ export function floatingControlRegionAtClientPoint(
   const point = clientToCanvas(clientX, clientY);
   if (!point) return null;
 
-  const regions = getGridRegions();
-  for (let i = regions.length - 1; i >= 0; i--) {
-    const region = regions[i];
-    if (region.type !== FLOATING_CONTROL_REGION_TYPE) continue;
+  for (const region of floatingHitOrder(getGridRegions())) {
     const bounds = floatingCanvasBounds(region);
     if (!bounds) continue;
+    if (region.type !== FLOATING_CONTROL_REGION_TYPE) {
+      const covers =
+        point.x >= bounds.x &&
+        point.x <= bounds.x + bounds.width &&
+        point.y >= bounds.y &&
+        point.y <= bounds.y + bounds.height;
+      if (covers) return null;
+      continue;
+    }
     const hit = hitTestFloatingControl({
       region,
       canvasX: point.x,

@@ -100,6 +100,7 @@ impl Fixture {
             &self.pivots,
             &self.filters,
             &self.panes,
+            &crate::persistence::UserFilesState::default(),
             &mutating(),
             data,
             &mut inverse,

@@ -501,6 +501,172 @@ pub fn remove_control_metadata(
     removed
 }
 
+// ============================================================================
+// Geometry batch (move / resize / arrange)
+// ============================================================================
+
+/// Encode a geometry number the way the Controls extension always has:
+/// `String(Math.round(v))`. `Math.round` rounds half toward +infinity, which is
+/// `floor(v + 0.5)` -- NOT Rust's `f64::round` (half away from zero), which
+/// would store `-3` where the extension stores `-2` for `-2.5`. The `i64`
+/// conversion also turns JavaScript's `-0` into `"0"`, as `String(-0)` does.
+fn geometry_value(v: f64) -> String {
+    format!("{}", (v + 0.5).floor() as i64)
+}
+
+/// Validate a geometry batch and turn each change into the property writes it
+/// stands for, in the extension's spelling (`x`, `y`, `width`, `height`, and
+/// `offsetX`/`offsetY` for a pinned control). Pure: every refusal here happens
+/// before any lock is taken or any effect is minted.
+fn encode_geometry_changes(
+    changes: &[crate::api_types::ControlGeometryChange],
+) -> Result<Vec<(ControlKey, Vec<(&'static str, String)>)>, String> {
+    let mut seen: HashSet<ControlKey> = HashSet::new();
+    let mut out = Vec::with_capacity(changes.len());
+    for change in changes {
+        let key = (change.sheet_index, change.row, change.col);
+        let at = format!("sheet {} r{}c{}", change.sheet_index, change.row, change.col);
+        if !seen.insert(key) {
+            return Err(format!(
+                "Control at {} appears twice in one geometry batch; send one change per control.",
+                at
+            ));
+        }
+        let mut numbers = vec![
+            ("x", change.x),
+            ("y", change.y),
+            ("width", change.width),
+            ("height", change.height),
+        ];
+        match (change.offset_x, change.offset_y) {
+            (None, None) => {}
+            (Some(ox), Some(oy)) => {
+                numbers.push(("offsetX", ox));
+                numbers.push(("offsetY", oy));
+            }
+            _ => {
+                return Err(format!(
+                    "Control at {}: offsetX and offsetY travel together; the batch named only one.",
+                    at
+                ))
+            }
+        }
+        let mut writes = Vec::with_capacity(numbers.len());
+        for (name, value) in numbers {
+            if !value.is_finite() {
+                return Err(format!("Control at {}: {} is not a finite number.", at, name));
+            }
+            writes.push((name, geometry_value(value)));
+        }
+        // A size that rounds to zero paints NOTHING while the backend reports
+        // success -- the invisible-control failure the Seam Rule was written for.
+        for (name, value) in [("width", change.width), ("height", change.height)] {
+            if (value + 0.5).floor() < 1.0 {
+                return Err(format!(
+                    "Control at {}: {} {} is smaller than 1 px.",
+                    at, name, value
+                ));
+            }
+        }
+        out.push((key, writes));
+    }
+    Ok(out)
+}
+
+/// Move and/or resize SEVERAL floating controls as ONE undoable step.
+///
+/// The Controls extension persisted a move as four to six `set_control_property`
+/// calls per control -- none of them undoable, so dragging a shape or a button
+/// was invisible to Ctrl+Z, and a group move of N controls was up to 6N
+/// independent backend writes. This is the batch: one snapshot of the store,
+/// one write, ONE `record_controls_undo(previous, "Move control")`, which joins
+/// a transaction the caller already has open (a cross-family arrange stays one
+/// Ctrl+Z).
+///
+/// Refused, BEFORE the effect and with nothing written: a malformed change
+/// (non-finite value, size under 1 px, a lone offset, the same control twice),
+/// a protected sheet whose options do not allow editing objects, and any change
+/// naming a control that does not exist -- the batch never creates one, and one
+/// unknown anchor refuses the whole batch rather than moving the others.
+/// Values already stored exactly as requested are skipped; a batch that
+/// changes nothing leaves the document clean and records no undo step.
+///
+/// Returns how many controls actually changed.
+#[tauri::command]
+pub fn set_control_geometry(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    changes: Vec<crate::api_types::ControlGeometryChange>,
+) -> Result<usize, String> {
+    set_control_geometry_core(&state, &file_state, &changes)
+}
+
+/// [`set_control_geometry`] over plain references, for the unit tier.
+pub(crate) fn set_control_geometry_core(
+    state: &AppState,
+    file_state: &FileState,
+    changes: &[crate::api_types::ControlGeometryChange],
+) -> Result<usize, String> {
+    let encoded = encode_geometry_changes(changes)?;
+    if encoded.is_empty() {
+        return Ok(0);
+    }
+
+    // `editObjects` on every sheet the batch touches, before any lock or effect.
+    let mut sheets: Vec<usize> = encoded.iter().map(|((sheet, _, _), _)| *sheet).collect();
+    sheets.sort_unstable();
+    sheets.dedup();
+    for sheet in sheets {
+        crate::protection::check_sheet_action(state, sheet, "editObjects", "move or resize a control")?;
+    }
+
+    // Resolve, decide and write under ONE hold of the store (`lock_pending`),
+    // so the snapshot that becomes the undo payload is exactly what the write
+    // replaces and no other command can slip in between.
+    let pending = state.controls.lock_pending().map_err(|e| e.to_string())?;
+    if let Some(((sheet, row, col), _)) = encoded.iter().find(|(key, _)| !pending.contains_key(key)) {
+        return Err(format!(
+            "No control at sheet {} r{}c{}; nothing in the batch was moved.",
+            sheet, row, col
+        ));
+    }
+    let changed: Vec<&(ControlKey, Vec<(&'static str, String)>)> = encoded
+        .iter()
+        .filter(|(key, writes)| {
+            let meta = &pending[key];
+            writes.iter().any(|(name, value)| {
+                meta.properties
+                    .get(*name)
+                    .map_or(true, |p| p.value_type != "static" || p.value != *value)
+            })
+        })
+        .collect();
+    if changed.is_empty() {
+        return Ok(0);
+    }
+    let previous: Vec<(ControlKey, ControlMetadata)> =
+        pending.iter().map(|(k, v)| (*k, v.clone())).collect();
+
+    // Control metadata is persisted (`workbook.controls`).
+    let effect = DocumentEffect::mutates(file_state);
+    {
+        let mut controls = pending.authorize(&effect);
+        for (key, writes) in &changed {
+            if let Some(meta) = controls.get_mut(key) {
+                for (name, value) in writes {
+                    meta.properties.insert(
+                        (*name).to_string(),
+                        ControlPropertyValue { value_type: "static".to_string(), value: value.clone() },
+                    );
+                }
+            }
+        }
+    }
+    // The store guard is dropped before the undo stack is taken (never both).
+    crate::undo_commands::record_controls_undo(state, previous, "Move control");
+    Ok(changed.len())
+}
+
 /// A button that links a macro, located for a human-readable deletion warning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

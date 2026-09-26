@@ -765,7 +765,9 @@ export function SubscribeDialog({ onClose }: DialogProps) {
             <strong>Sheets ({inspection.sheets.length})</strong>
             {inspection.sheets.map((s, i) => (
               <div key={i} style={{ marginLeft: 8 }}>
-                {s.name}{s.description ? ` — ${s.description}` : ""}
+                {s.name}
+                {s.kind === "canvas" ? " (canvas)" : ""}
+                {s.description ? ` — ${s.description}` : ""}
               </div>
             ))}
           </div>

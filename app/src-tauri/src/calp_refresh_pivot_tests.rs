@@ -112,6 +112,11 @@ fn effect() -> DocumentEffect {
     test_seed_effect()
 }
 
+/// No name translation at all: every publisher name resolves as itself.
+fn no_names() -> crate::calp_commands::RefreshSheetNames {
+    crate::calp_commands::RefreshSheetNames::default()
+}
+
 #[test]
 fn a_v2_pivot_reaches_the_subscriber() {
     // THE DEFECT ITSELF. Before §2.z nothing read `pull_result.pivot_definitions`
@@ -129,7 +134,7 @@ fn a_v2_pivot_reaches_the_subscriber() {
         &defs,
         &[],
         &HashMap::new(),
-        &HashMap::new(),
+        &no_names(),
         &HashSet::new(),
         Some(&mut ledger),
     );
@@ -165,7 +170,7 @@ fn a_pivot_the_publisher_DELETED_in_v2_is_withdrawn() {
         &[saved_pivot(gone, "Report", (0, 0)), saved_pivot(kept, "Report", (20, 0))],
         &[],
         &HashMap::new(),
-        &HashMap::new(),
+        &no_names(),
         &HashSet::new(),
         None,
     );
@@ -180,7 +185,7 @@ fn a_pivot_the_publisher_DELETED_in_v2_is_withdrawn() {
         &[saved_pivot(kept, "Report", (20, 0))],
         &[],
         &HashMap::new(),
-        &HashMap::new(),
+        &no_names(),
         &previously,
         None,
     );
@@ -212,7 +217,7 @@ fn only_this_applications_pivots_are_withdrawn() {
         &[saved_pivot(theirs, "Report", (0, 0)), saved_pivot(mine, "Report", (20, 0))],
         &[],
         &HashMap::new(),
-        &HashMap::new(),
+        &no_names(),
         &HashSet::new(),
         None,
     );
@@ -226,7 +231,7 @@ fn only_this_applications_pivots_are_withdrawn() {
         &[],
         &[],
         &HashMap::new(),
-        &HashMap::new(),
+        &no_names(),
         &previously,
         None,
     );
@@ -260,8 +265,8 @@ fn a_renamed_sheet_does_not_send_the_pivot_to_the_subscribers_own() {
     }
     let pivot_state = PivotState::new();
     let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
-    let mut rename = HashMap::new();
-    rename.insert("Report".to_string(), "Report (2)".to_string());
+    let mut rename = no_names();
+    rename.local_names.insert("Report".to_string(), "Report (2)".to_string());
 
     crate::calp_commands::apply_refreshed_pivots(
         &effect(),
@@ -286,6 +291,63 @@ fn a_renamed_sheet_does_not_send_the_pivot_to_the_subscribers_own() {
     );
 }
 
+/// A pivot aimed at a sheet the subscriber DETACHED is neither re-adopted nor
+/// withdrawn: the page and the pivot on it are the subscriber's now. Adopting
+/// would write the publisher's v2 over a sheet upstream no longer speaks for;
+/// withdrawing (it is in the prior ledger) would CLEAR its cells.
+///
+/// SABOTAGE: drop the `is_blocked_destination` skip, or the
+/// `kept_on_detached` exclusion from `withdrawn`.
+#[test]
+fn a_pivot_on_a_detached_sheet_is_neither_adopted_nor_withdrawn() {
+    let state = two_sheet_state();
+    let pivot_state = PivotState::new();
+    let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+
+    // v1 put the pivot on "Report", and the ledger says it was ours.
+    crate::calp_commands::apply_refreshed_pivots(
+        &effect(),
+        &state,
+        &pivot_state,
+        &[saved_pivot(id, "Report", (0, 0))],
+        &[],
+        &HashMap::new(),
+        &no_names(),
+        &HashSet::new(),
+        None,
+    );
+    let written = state.grids.read().unwrap()[1].cells.len();
+    assert!(written > 0, "precondition: v1 wrote the pivot's output");
+
+    // The subscriber detaches "Report"; v2 re-lays the pivot out.
+    let mut names = no_names();
+    names.local_names.insert("Report".to_string(), "Report".to_string());
+    names.blocked_destinations.insert("Report".to_string());
+    let previously: HashSet<String> = [id.to_string()].into_iter().collect();
+    let mut ledger = Vec::new();
+    crate::calp_commands::apply_refreshed_pivots(
+        &effect(),
+        &state,
+        &pivot_state,
+        &[saved_pivot(id, "Report", (10, 5))],
+        &[],
+        &HashMap::new(),
+        &names,
+        &previously,
+        Some(&mut ledger),
+    );
+
+    let tables = pivot_state.pivot_tables.read().unwrap();
+    let (def, _) = tables.get(&id).expect("the detached sheet's pivot was withdrawn -- its cells cleared");
+    assert_eq!(def.destination, (0, 0), "v2 was written over the detached sheet's pivot");
+    assert_eq!(
+        state.grids.read().unwrap()[1].cells.len(),
+        written,
+        "the detached sheet's cells changed"
+    );
+    assert!(ledger.is_empty(), "a pivot the subscriber now owns is not ledgered back to the application");
+}
+
 #[test]
 fn a_destination_this_workbook_does_not_have_is_skipped_not_written_to_sheet_zero() {
     // The `.unwrap_or(0)` trap, which on the pull path once wrote a pivot's
@@ -301,7 +363,7 @@ fn a_destination_this_workbook_does_not_have_is_skipped_not_written_to_sheet_zer
         &[saved_pivot(id, "A Sheet That Is Not Here", (0, 0))],
         &[],
         &HashMap::new(),
-        &HashMap::new(),
+        &no_names(),
         &HashSet::new(),
         None,
     );
@@ -401,15 +463,21 @@ fn the_refresh_path_captures_sheet_names_before_the_collision_pass() {
     // the publisher's pivot to the subscriber's OWN same-named sheet and write
     // over it. The pull path has always captured these; the refresh path did
     // not, and the first draft of this fix reused the post-collision names.
+    // (The BEHAVIOUR is pinned by the refresh-orchestration tests in
+    // calp_materialize_tests.rs; this keeps the ordering visible at the source.)
     let src = calp_commands_code();
-    let capture = src.find("let mut sheet_rename_maps");
-    let collide = src.find("calp::pull::resolve_sheet_name_collisions(\n                &mut payload.pull_result.sheets");
-    assert!(capture.is_some(), "the refresh path no longer builds a sheet rename map at all");
+    let start = src
+        .find("pub(crate) fn prepare_refresh_payloads(")
+        .expect("the refresh path no longer resolves its sheet names in prepare_refresh_payloads");
+    let body = &src[start..];
+    let capture = body.find("let original_names");
+    let collide = body.find("calp::pull::resolve_sheet_name_collisions(");
+    assert!(capture.is_some(), "the refresh path no longer captures the publisher's names at all");
     if let (Some(c), Some(r)) = (capture, collide) {
         assert!(
             c < r,
-            "the rename map is built AFTER the collision pass, so it maps \
-             resolved names to themselves and the remap is a no-op",
+            "the publisher's names are captured AFTER the collision pass, so the map \
+             sends resolved names to themselves and the remap is a no-op",
         );
     }
 }

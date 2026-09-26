@@ -739,6 +739,102 @@ pub struct PivotDefinition {
     /// that form a hierarchy with a specific ragged behavior.
     #[serde(default)]
     pub hierarchy_configs: Vec<HierarchyConfig>,
+
+    /// Present only for a CANVAS pivot: the designer-sized box its view is
+    /// shown in on the canvas page. The pivot itself is real -- its output is
+    /// written into the canvas's hidden grid, so formulas, slicers and charts
+    /// read it like any other pivot -- and this frame is where the windowed,
+    /// scrolling view of that output sits. `None` for a worksheet pivot, and
+    /// then the key is not written at all, so a worksheet pivot's definition
+    /// serializes exactly as it did before canvases existed.
+    ///
+    /// A pivot never converts between the two: the host refuses a frame on a
+    /// worksheet destination and a frameless pivot on a canvas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_frame: Option<CanvasFrame>,
+}
+
+// ============================================================================
+// CANVAS FRAME
+// ============================================================================
+
+/// Smallest edge a canvas pivot's frame may have, in logical px. Below this a
+/// box cannot show a single cell and cannot be grabbed to resize it back.
+pub const CANVAS_FRAME_MIN_EDGE_PX: f64 = 40.0;
+/// Largest edge a canvas pivot's frame may have, in logical px.
+pub const CANVAS_FRAME_MAX_EDGE_PX: f64 = 20_000.0;
+/// Size a load path gives a frame whose saved width/height is not a number.
+pub const CANVAS_FRAME_DEFAULT_WIDTH_PX: f64 = 480.0;
+/// See [`CANVAS_FRAME_DEFAULT_WIDTH_PX`].
+pub const CANVAS_FRAME_DEFAULT_HEIGHT_PX: f64 = 320.0;
+
+/// The box a canvas pivot is shown in: its top-left corner and size in
+/// LOGICAL px on the canvas page (the same units as every other floating
+/// object on a canvas), plus whether the header rows/columns stay fixed while
+/// the body scrolls. Snake_case on disk like the rest of this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CanvasFrame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// Keep the header rows/columns fixed while the body scrolls.
+    #[serde(default)]
+    pub frozen_headers: bool,
+}
+
+impl CanvasFrame {
+    /// The LOAD-path repair: a frame read from a file is clamped into range
+    /// rather than refused, because refusing would drop the whole pivot over a
+    /// cosmetic value. A non-finite origin becomes 0 and a negative one 0; a
+    /// non-finite size becomes the default size; a size is clamped to
+    /// `CANVAS_FRAME_MIN_EDGE_PX..=CANVAS_FRAME_MAX_EDGE_PX`.
+    ///
+    /// Edits do NOT go through this: [`CanvasFrame::validate`] refuses a bad
+    /// frame instead, so a caller is told its value was wrong rather than
+    /// having it silently moved.
+    pub fn sanitized(self) -> CanvasFrame {
+        let origin = |v: f64| if v.is_finite() { v.max(0.0) } else { 0.0 };
+        let edge = |v: f64, default: f64| {
+            let v = if v.is_finite() { v } else { default };
+            v.clamp(CANVAS_FRAME_MIN_EDGE_PX, CANVAS_FRAME_MAX_EDGE_PX)
+        };
+        CanvasFrame {
+            x: origin(self.x),
+            y: origin(self.y),
+            width: edge(self.width, CANVAS_FRAME_DEFAULT_WIDTH_PX),
+            height: edge(self.height, CANVAS_FRAME_DEFAULT_HEIGHT_PX),
+            frozen_headers: self.frozen_headers,
+        }
+    }
+
+    /// The EDIT-path check: `Err` naming the first bad value, never a repair.
+    /// Every number must be finite, the origin must not be negative, and each
+    /// edge must lie in `CANVAS_FRAME_MIN_EDGE_PX..=CANVAS_FRAME_MAX_EDGE_PX`
+    /// (the same range [`CanvasFrame::sanitized`] clamps a loaded frame into,
+    /// so a frame accepted here survives a save and reopen unchanged).
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, v) in [("x", self.x), ("y", self.y), ("width", self.width), ("height", self.height)] {
+            if !v.is_finite() {
+                return Err(format!("Invalid canvas pivot frame: {} is not a finite number ({})", name, v));
+            }
+        }
+        if self.x < 0.0 || self.y < 0.0 {
+            return Err(format!(
+                "Invalid canvas pivot frame: the origin ({}, {}) must not be negative",
+                self.x, self.y
+            ));
+        }
+        for (name, v) in [("width", self.width), ("height", self.height)] {
+            if !(CANVAS_FRAME_MIN_EDGE_PX..=CANVAS_FRAME_MAX_EDGE_PX).contains(&v) {
+                return Err(format!(
+                    "Invalid canvas pivot frame: {} {} px is outside {}..={} px",
+                    name, v, CANVAS_FRAME_MIN_EDGE_PX, CANVAS_FRAME_MAX_EDGE_PX
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -819,6 +915,7 @@ impl PivotDefinition {
             calculated_items: Vec::new(),
             value_column_order: Vec::new(),
             hierarchy_configs: Vec::new(),
+            canvas_frame: None,
         }
     }
     
@@ -930,5 +1027,112 @@ mod engine_filter_tests {
             (1, 1),
         );
         assert!(def.engine_filters.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod canvas_frame_tests {
+    use super::*;
+
+    fn definition() -> PivotDefinition {
+        PivotDefinition::new(
+            identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            (0, 0),
+            (4, 2),
+        )
+    }
+
+    fn frame() -> CanvasFrame {
+        CanvasFrame { x: 32.0, y: 48.0, width: 400.0, height: 240.0, frozen_headers: true }
+    }
+
+    /// A worksheet pivot writes NO `canvas_frame` key: every definition in
+    /// every `.cala` / `.calp` that predates canvases is byte-identical after
+    /// this field exists (the `.calp` artifact-determinism test depends on it).
+    #[test]
+    fn a_frameless_definition_writes_no_canvas_frame_key() {
+        let value = serde_json::to_value(definition()).unwrap();
+        assert!(
+            !value.as_object().unwrap().contains_key("canvas_frame"),
+            "a worksheet pivot must not grow a canvas_frame key: {value}"
+        );
+        // ...and a definition saved without the key reads back frameless.
+        let back: PivotDefinition = serde_json::from_value(value).unwrap();
+        assert_eq!(back.canvas_frame, None);
+    }
+
+    /// A canvas pivot's frame survives the opaque-JSON round trip `.cala` and
+    /// `.calp` both put the definition through, snake_case like its siblings.
+    #[test]
+    fn a_framed_definition_round_trips_its_frame() {
+        let mut def = definition();
+        def.canvas_frame = Some(frame());
+        let value = serde_json::to_value(&def).unwrap();
+        let saved = value.get("canvas_frame").expect("the frame is written");
+        assert_eq!(saved.get("frozen_headers"), Some(&serde_json::json!(true)));
+        let back: PivotDefinition = serde_json::from_value(value).unwrap();
+        assert_eq!(back.canvas_frame, Some(frame()));
+
+        // `frozen_headers` is optional on the way in.
+        let bare: CanvasFrame =
+            serde_json::from_str(r#"{"x":1,"y":2,"width":300,"height":200}"#).unwrap();
+        assert!(!bare.frozen_headers);
+    }
+
+    /// The LOAD path clamps: a hostile or damaged frame is repaired into range,
+    /// never allowed to drop the pivot it belongs to.
+    #[test]
+    fn sanitized_clamps_every_value_into_range() {
+        let wild = CanvasFrame {
+            x: -10.0,
+            y: f64::NAN,
+            width: 1.0,
+            height: 1.0e9,
+            frozen_headers: true,
+        };
+        let s = wild.sanitized();
+        assert_eq!((s.x, s.y), (0.0, 0.0), "negative and non-finite origins become 0");
+        assert_eq!(s.width, CANVAS_FRAME_MIN_EDGE_PX);
+        assert_eq!(s.height, CANVAS_FRAME_MAX_EDGE_PX);
+        assert!(s.frozen_headers, "the flag is carried unchanged");
+
+        let infinite = CanvasFrame {
+            x: f64::INFINITY,
+            y: 5.0,
+            width: f64::NAN,
+            height: f64::NEG_INFINITY,
+            frozen_headers: false,
+        }
+        .sanitized();
+        assert_eq!(infinite.x, 0.0);
+        assert_eq!(infinite.y, 5.0);
+        assert_eq!(infinite.width, CANVAS_FRAME_DEFAULT_WIDTH_PX);
+        assert_eq!(infinite.height, CANVAS_FRAME_DEFAULT_HEIGHT_PX);
+
+        assert_eq!(frame().sanitized(), frame(), "a valid frame is left exactly as it was");
+        assert!(wild.sanitized().validate().is_ok(), "whatever sanitized returns, validate accepts");
+    }
+
+    /// The EDIT path refuses instead of repairing, and names what was wrong.
+    #[test]
+    fn validate_refuses_what_sanitized_would_repair() {
+        assert!(frame().validate().is_ok());
+        let bad = |f: CanvasFrame, what: &str| {
+            let e = f.validate().expect_err(what);
+            assert!(e.contains("canvas pivot frame"), "{what}: {e}");
+        };
+        bad(CanvasFrame { x: f64::NAN, ..frame() }, "a non-finite x");
+        bad(CanvasFrame { height: f64::INFINITY, ..frame() }, "a non-finite height");
+        bad(CanvasFrame { x: -1.0, ..frame() }, "a negative x");
+        bad(CanvasFrame { y: -0.5, ..frame() }, "a negative y");
+        bad(CanvasFrame { width: CANVAS_FRAME_MIN_EDGE_PX - 1.0, ..frame() }, "a width below the minimum");
+        bad(CanvasFrame { height: 0.0, ..frame() }, "a zero height");
+        bad(CanvasFrame { width: CANVAS_FRAME_MAX_EDGE_PX + 1.0, ..frame() }, "a width above the maximum");
+        assert!(
+            CanvasFrame { width: CANVAS_FRAME_MIN_EDGE_PX, height: CANVAS_FRAME_MAX_EDGE_PX, ..frame() }
+                .validate()
+                .is_ok(),
+            "both bounds are inclusive"
+        );
     }
 }

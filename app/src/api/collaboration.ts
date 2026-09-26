@@ -135,6 +135,11 @@ export interface PublishPreviewSheet {
   subscribedTo: string;
   /** Whether a DEFAULT publish would include it. */
   defaultSelected: boolean;
+  /**
+   * The sheet's kind: "worksheet" or "canvas" (a report page of objects).
+   * Optional so a frontend against an older backend degrades to "worksheet".
+   */
+  kind?: "worksheet" | "canvas";
 }
 
 /** Suggested next versions, computed from the workspace head. */
@@ -836,6 +841,8 @@ export interface VersionInfo {
 export interface SheetInfo {
   name: string;
   description: string;
+  /** "canvas" for a canvas sheet (a report page of objects); absent or "" for a worksheet. */
+  kind?: string;
 }
 
 export interface SubscriptionManifest {

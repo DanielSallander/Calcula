@@ -1152,6 +1152,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         }
@@ -1513,6 +1514,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
@@ -1525,6 +1527,7 @@ mod tests {
             named_ranges: Vec::new(),
             controls: Vec::new(),
             media: std::collections::HashMap::new(),
+            floating_ranges: Vec::new(),
         };
         let made = crate::dev_mode::make_dev_subscription("C:/w/book.cala", &pulled, "now");
         assert_eq!(made.environment, None);
@@ -1576,6 +1579,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
@@ -1656,6 +1660,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
@@ -1690,6 +1695,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
@@ -1723,6 +1729,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
@@ -1749,6 +1756,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
@@ -1782,6 +1790,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
@@ -1871,6 +1880,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
@@ -1883,6 +1893,130 @@ mod tests {
         assert_eq!(controls[0].config["max"], 100.0, "updated config replaces v1's");
         assert_eq!(controls[1].id, checkbox_id, "control ADDED in v1.1 arrives");
         assert_eq!(controls[1].name, "Show details");
+    }
+
+    #[test]
+    fn refresh_pull_carries_the_new_versions_floating_ranges_and_timelines() {
+        // v1 ships a floating range; v1.1 MOVES it and adds a timeline. The
+        // refresh payload is a pull result like any other, so it must carry the
+        // v1.1 rows -- with APPLICATION sheet ids, because refresh keeps the OLD
+        // local ids and only the host's materializer knows them.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+
+        let mut wb = make_workbook(); // "Sheet1"
+        let mut backing = persistence::Sheet::new("Float1".to_string());
+        backing.visibility = "object".to_string();
+        wb.sheets.push(backing);
+        let host = wb.sheets[0].id;
+        let backing_id = wb.sheets[1].id;
+        let fr_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let pivot = persistence::SavedPivotDefinition {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            source_type: "grid".to_string(),
+            source_sheet_index: Some(0),
+            definition: serde_json::json!({ "name": "P", "destination_sheet": "Sheet1" }),
+        };
+        let timeline_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+
+        for (version, x, with_timeline) in [
+            (SemVer::new(1, 0, 0), 10.0, false),
+            (SemVer::new(1, 1, 0), 200.0, true),
+        ] {
+            wb.floating_ranges = vec![persistence::SavedFloatingRange {
+                id: fr_id,
+                backing_sheet_id: backing_id,
+                host_sheet_id: host,
+                x,
+                y: 20.0,
+                rotation: 0.0,
+                pin_to_grid: false,
+                row_count: 3,
+                col_count: 3,
+                col_widths: HashMap::new(),
+                row_heights: HashMap::new(),
+                show_title: true,
+                show_column_headers: true,
+                show_row_headers: true,
+            }];
+            wb.pivot_definitions = vec![pivot.clone()];
+            wb.timeline_slicers = if with_timeline {
+                vec![persistence::SavedTimelineSlicer {
+                    id: timeline_id,
+                    name: "Dates".to_string(),
+                    header_text: None,
+                    sheet_id: host,
+                    x: 0.0,
+                    y: 300.0,
+                    width: 400.0,
+                    height: 120.0,
+                    source_type: persistence::SavedTimelineSourceType::Pivot,
+                    source_id: pivot.id,
+                    field_name: "When".to_string(),
+                    level: persistence::SavedTimelineLevel::Months,
+                    selection_start: None,
+                    selection_end: None,
+                    show_header: true,
+                    show_level_selector: true,
+                    show_scrollbar: true,
+                    style_preset: "TimelineStyleLight1".to_string(),
+                    connected_pivot_ids: Vec::new(),
+                }]
+            } else {
+                Vec::new()
+            };
+            let request = PublishRequest {
+                model_writebacks: None,
+                workbook: &wb,
+                package_name: "fr-refresh".to_string(),
+                version,
+                kind: "report".to_string(),
+                mode: crate::publish::test_mode_for(&reg, "fr-refresh"),
+                change_summary: "test push".to_string(),
+                sheet_indices: vec![0, 1],
+                now: "2026-01-01T00:00:00Z".to_string(),
+                published_by: "tester".to_string(),
+                writeback_regions: None,
+                object_scripts: None,
+                module_scripts: None,
+                notebooks: None,
+                data_sources: Vec::new(),
+                excluded_regions: Vec::new(),
+                custom_objects: Vec::new(),
+                include_comments: false,
+                min_app_version: String::new(),
+            };
+            publish::publish(&reg, &request, prof.path()).unwrap();
+        }
+
+        let sub = Subscription {
+            package_name: "fr-refresh".to_string(),
+            registry_url: String::new(),
+            version_pin: "^1.0.0".to_string(),
+            resolved_version: "1.0.0".to_string(),
+            resolved_at: "2026-01-01T00:00:00Z".to_string(),
+            sheets: Vec::new(),
+            environment: None,
+            data_source_configs: Vec::new(),
+            objects: Vec::new(),
+            detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        };
+
+        let payloads = pull_all_updates(&reg, &[sub], &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse, None).unwrap();
+        assert_eq!(payloads.len(), 1);
+        let pulled = &payloads[0].pull_result;
+        assert_eq!(pulled.floating_ranges.len(), 1);
+        assert_eq!(pulled.floating_ranges[0].id, fr_id);
+        assert_eq!(pulled.floating_ranges[0].x, 200.0, "the MOVED position arrives");
+        assert_eq!(pulled.floating_ranges[0].host_sheet_id, host, "application ids");
+        assert_eq!(pulled.floating_ranges[0].backing_sheet_id, backing_id);
+        assert_eq!(pulled.timeline_slicers.len(), 1, "the timeline ADDED in v1.1 arrives");
+        assert_eq!(pulled.timeline_slicers[0].id, timeline_id);
+        assert_eq!(pulled.timeline_slicers[0].sheet_id, host);
     }
 
     #[test]
@@ -1902,6 +2036,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         }];
@@ -2076,6 +2211,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         }];
@@ -2203,6 +2339,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         }

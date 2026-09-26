@@ -9,13 +9,20 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 Re-audited against source. The **design is intact and shipped**; the counts had drifted and one
 resolved-asymmetry paragraph named two symbols that no longer exist.
 
-| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | Recounted (2026-09-10) | How counted |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | **806** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
-| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | **845** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
-| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | **108** | unique names in `PRIVILEGED_BACKEND_COMMANDS` |
-| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | **698** | 806 − 108 |
-| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | **339** | exported functions/consts in `backend.ts` |
+| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | 09-10 | Recounted (2026-09-25) | How counted |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | 806 | **809** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
+| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | 845 | **849** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
+| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | 108 | **107** | unique quoted names inside `PRIVILEGED_BACKEND_COMMANDS` (`app/src/api/backendCommands.ts`), comments stripped line-wise |
+| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | 698 | **702** | 809 − 107 |
+| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | 339 | **340** | exported functions/consts in `backend.ts` (lines starting `export async function` / `export function` / `export const`) |
+
+The 2026-09-25 column is the canvas-sheet programme: `sheets::set_canvas_layout` (the canvas page's
+layout, gated `editObjects`) and `controls::set_control_geometry` (one undo step for a batch of
+control moves). The committed tree before `set_control_geometry` already registered 808, so the 09-10
+figure was one behind by the time the canvas work began. The privileged count reads **107** on BOTH the
+committed tree and the working tree with the parse named in the row; the 09-10 column's 108 does not
+reproduce and no entry was removed by this work -- recount before trusting either figure.
 
 The 2026-09-10 column is the on-board runtime (2.AI.10 Step 3): six `ai_builtin_*` commands, all
 six denylisted under a new `localRuntime` capability — a child process on the user's machine and a

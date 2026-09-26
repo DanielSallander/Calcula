@@ -161,3 +161,61 @@ describe("through the seam", () => {
     expect(selectObject(region("c9"))).toBe(false);
   });
 });
+
+describe("refOf: the chart's canvas identity (M8)", () => {
+  it("is { kind: 'chart', id: chartId }, and reaches objectRefOf through the seam", async () => {
+    const { objectRefOf } = await import("@api/objectSelection");
+    const provider = createChartObjectSelectionProvider(deps);
+    expect(provider.refOf?.(region("c7"))).toEqual({ kind: "chart", id: "c7" });
+    const off = registerObjectSelectionProvider(provider);
+    expect(objectRefOf(region("c7"))).toEqual({ kind: "chart", id: "c7" });
+    off();
+    expect(objectRefOf(region("c7"))).toBeNull();
+  });
+
+  it("is null for a region that carries no chart id", () => {
+    const provider = createChartObjectSelectionProvider(deps);
+    expect(provider.refOf?.({ ...region("x"), data: {} })).toBeNull();
+  });
+});
+
+describe("the canvas selection set (M8)", () => {
+  it("selectChart / deselectChart -- the chart's chokepoints -- announce a CHANGE to the set, and only a change", async () => {
+    const { onObjectSelectionChanged } = await import("@api/objectSelection");
+    const { deselectChart } = await import("../../handlers/selectionHandler");
+    const seen = vi.fn();
+    const off = onObjectSelectionChanged(seen);
+    selectChart("c1");
+    expect(seen).toHaveBeenCalledTimes(1);
+    selectChart("c1"); // already selected: the pending-click route, no change
+    expect(seen).toHaveBeenCalledTimes(1);
+    selectChart("c2");
+    expect(seen).toHaveBeenCalledTimes(2);
+    deselectChart();
+    expect(seen).toHaveBeenCalledTimes(3);
+    deselectChart();
+    expect(seen).toHaveBeenCalledTimes(3);
+    off();
+  });
+
+  it("labelOf is the name the chart region is published with", () => {
+    const p = createChartObjectSelectionProvider(deps);
+    expect(p.labelOf!({ ...region("c1"), data: { chartId: "c1", name: "Sales by Region" } })).toBe("Sales by Region");
+    expect(p.labelOf!(region("c1"))).toBeNull();
+  });
+
+  it("is single-select: it offers no addToSelection, so the SET holds a second chart", async () => {
+    const { addToObjectSelection, getSetHeldObjectRegions, getSelectedObjectRegions } = await import("@api/objectSelection");
+    const { setGridRegions } = await import("@api/gridOverlays");
+    const p = createChartObjectSelectionProvider(deps);
+    expect(p.addToSelection).toBeUndefined();
+    registerObjectSelectionProvider(p);
+    setGridRegions([region("c1"), region("c2")]);
+    addToObjectSelection(region("c1"));
+    addToObjectSelection(region("c2"));
+    expect(getCurrentChartId()).toBe("c1");
+    expect(getSetHeldObjectRegions().map((r) => r.id)).toEqual(["chart-c2"]);
+    expect(getSelectedObjectRegions()).toHaveLength(2);
+    setGridRegions([]);
+  });
+});

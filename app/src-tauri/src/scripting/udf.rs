@@ -294,11 +294,12 @@ pub fn collect_udf_calls(
     // scratch evaluation sees the same external context.
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
-    let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
         crate::pivot::operations::lookup_pivot_data(
             &pivot_tables,
             &pivot_views,
             data_field,
+            pivot_sheet,
             pivot_row,
             pivot_col,
             pairs,

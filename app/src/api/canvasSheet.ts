@@ -10,7 +10,49 @@
 //          the Rust source by `canvasSheetConstantsDrift.test.ts`, which reads
 //          lib.rs at test time: the direction is Rust -> TypeScript.
 
-import type { CanvasLayout, CanvasLayoutPatch } from "./lib";
+import type { CanvasLayout, CanvasLayoutPatch, CanvasObjectRef } from "./lib";
+
+/**
+ * The `CanvasObjectRef.kind` of every floating-object family -- THE list; no
+ * other file spells these. A ref names an object by its family's kind and the
+ * family's own stable entity id:
+ *
+ * | kind             | id                                            |
+ * |------------------|-----------------------------------------------|
+ * | "chart"          | the chart id                                  |
+ * | "slicer"         | the slicer id                                 |
+ * | "timelineSlicer" | the timeline id                               |
+ * | "floatingRange"  | the floating range id                         |
+ * | "pivot"          | the pivot id (a canvas pivot box)             |
+ * | "control"        | the control's anchor, `${row}:${col}`         |
+ *
+ * A control has no entity id of its own: it is keyed by its anchor cell, and
+ * its region id also embeds the sheet INDEX, which shifts when sheets are
+ * reordered -- so its ref is the anchor alone (the ref already lives inside
+ * one canvas's layout). Each family's `@api/objectSelection` provider answers
+ * `refOf(region)` in this shape.
+ */
+export const CANVAS_OBJECT_KINDS = [
+  "chart",
+  "slicer",
+  "timelineSlicer",
+  "floatingRange",
+  "pivot",
+  "control",
+] as const;
+
+/** One of {@link CANVAS_OBJECT_KINDS}. */
+export type CanvasObjectKind = (typeof CANVAS_OBJECT_KINDS)[number];
+
+/** Build a ref; the kind is checked against the one list at compile time. */
+export function canvasObjectRef(kind: CanvasObjectKind, id: string): CanvasObjectRef {
+  return { kind, id };
+}
+
+/** A ref as one string (`kind:id`), for map keys and equality. */
+export function canvasObjectRefKey(ref: CanvasObjectRef): string {
+  return `${ref.kind}:${ref.id}`;
+}
 
 /** Default page width in logical px (Power BI's 16:9 page). */
 export const CANVAS_DEFAULT_PAGE_WIDTH = 1280;

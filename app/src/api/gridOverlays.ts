@@ -3,6 +3,18 @@
 // CONTEXT: Allows extensions to register rectangular region overlays on the grid,
 // with rendering, hit-testing, and lifecycle events. The Core renderer calls
 // this generic API without knowing about any specific extension (e.g., pivot).
+//
+// STACKING. There is ONE answer to "which floating object is on top", and it
+// lives here: `stackedFloatingRegions` (paint order, bottom first) and
+// `floatingHitOrder` (topmost first). The renderer's above-selection pass, the
+// body press, the resize-handle scan, the keyboard object cycler, the object
+// wheel and every family's right-click lookup read it, so what paints on top
+// is what a press, a wheel or a menu reaches. Without any effective z the two
+// orders are exactly the ones those callers always used (paint: overlay
+// priority then publication order; hit: reverse publication order). A region
+// gets a z from `GridRegion.z` or from the one stacking resolver an extension
+// registers (a canvas sheet maps its layout's zOrder); in that "z-mode" the
+// hit order is the exact reverse of the paint order.
 
 import type { GridConfig, Viewport, DimensionOverrides } from "./types";
 import {
@@ -13,6 +25,8 @@ import {
   calculateRowY,
   createDimensionGetterFromMap,
 } from "./dimensions";
+import { getGridStateSnapshot } from "../core/state/GridContext";
+import { resolveHeaderSizes, paintedDisplayHeadings } from "../core/lib/gridRenderer/layout/headerVisibility";
 
 // ============================================================================
 // Region Definition
@@ -37,6 +51,15 @@ export interface GridRegion {
    * The startRow/startCol/endRow/endCol fields are ignored for floating overlays.
    */
   floating?: { x: number; y: number; width: number; height: number };
+  /**
+   * Stacking position of a FLOATING region: higher paints later (on top) and is
+   * hit first. Optional; when absent the registered stacking resolver may
+   * supply one (see `registerRegionStacking`). Floating regions WITHOUT an
+   * effective z paint above every region that has one -- a newly inserted
+   * object appears on top until something places it. Ignored on cell-anchored
+   * regions.
+   */
+  z?: number;
 }
 
 // ============================================================================
@@ -308,6 +331,213 @@ export function hitTestOverlays(
   }
 
   return null;
+}
+
+// ============================================================================
+// Stacking (z-order)
+// ============================================================================
+
+/**
+ * Supplies a floating region's stacking position when the region itself
+ * carries none. Return undefined for "no opinion" (the region then paints above
+ * every region that has a z). Must be cheap and pure: it is asked during paint
+ * and on every pointer move.
+ */
+export type RegionStackingResolver = (region: GridRegion) => number | undefined;
+
+let stackingResolver: RegionStackingResolver | null = null;
+
+/**
+ * Register THE stacking resolver. Last registration wins (like the other Core
+ * seams); the cleanup removes only what is still this resolver, so a stale
+ * cleanup cannot remove a newer one.
+ */
+export function registerRegionStacking(resolver: RegionStackingResolver): () => void {
+  stackingResolver = resolver;
+  return () => {
+    if (stackingResolver === resolver) stackingResolver = null;
+  };
+}
+
+function finiteOrUndefined(z: unknown): number | undefined {
+  return typeof z === "number" && Number.isFinite(z) ? z : undefined;
+}
+
+/**
+ * A region's effective stacking position: its own `z`, else the resolver's
+ * answer, else undefined. A resolver that throws is treated as having no
+ * opinion (logged), so one bad resolver cannot break paint or the mouse.
+ */
+export function effectiveZ(region: GridRegion): number | undefined {
+  const own = finiteOrUndefined(region.z);
+  if (own !== undefined) return own;
+  if (!stackingResolver) return undefined;
+  try {
+    return finiteOrUndefined(stackingResolver(region));
+  } catch (err) {
+    console.error("[gridOverlays] stacking resolver threw:", err);
+    return undefined;
+  }
+}
+
+/**
+ * Whether a stacking order is in force for `regions`: some FLOATING region has
+ * an effective z. Without one, every ordering below is exactly the historical
+ * one.
+ */
+export function hasStackingOrder(regions: readonly GridRegion[] = gridRegions): boolean {
+  if (!stackingResolver && !regions.some((r) => r.z !== undefined)) return false;
+  return regions.some((r) => !!r.floating && effectiveZ(r) !== undefined);
+}
+
+/**
+ * Each registered type's position in the renderer's paint sequence:
+ * below-selection renderers first, then the rest, each by priority with
+ * registration order breaking ties -- exactly the order `renderGrid` walks.
+ */
+function paintRanks(): { rank: Map<string, number>; below: Set<string> } {
+  const sorted = getOverlayRenderers();
+  const belowList = sorted.filter((r) => r.renderBelowSelection === true);
+  const aboveList = sorted.filter((r) => r.renderBelowSelection !== true);
+  const rank = new Map<string, number>();
+  [...belowList, ...aboveList].forEach((r, i) => rank.set(r.type, i));
+  return { rank, below: new Set(belowList.map((r) => r.type)) };
+}
+
+/**
+ * The FLOATING regions of `regions` in PAINT order, bottom first.
+ *
+ * Without a stacking order: the renderer's order -- overlay priority (with
+ * below-selection renderers first and registration order on ties), then
+ * publication order. With one (z-mode): below-selection renderers still first
+ * (that pass is not re-ordered), then regions WITH an effective z by ascending
+ * z, then regions WITHOUT one (a new object is on top); ties by the same
+ * renderer order, then publication order. A type with no registered renderer
+ * is not painted at all and sorts first.
+ */
+export function stackedFloatingRegions(regions: readonly GridRegion[] = gridRegions): GridRegion[] {
+  const zMode = hasStackingOrder(regions);
+  const { rank, below } = paintRanks();
+  return regions
+    .map((region, index) => ({
+      region,
+      index,
+      layer: below.has(region.type) ? 0 : 1,
+      rank: rank.get(region.type) ?? -1,
+      z: zMode ? effectiveZ(region) : undefined,
+    }))
+    .filter((e) => !!e.region.floating)
+    .sort((a, b) => {
+      if (a.layer !== b.layer) return a.layer - b.layer;
+      if (zMode) {
+        const aNone = a.z === undefined ? 1 : 0;
+        const bNone = b.z === undefined ? 1 : 0;
+        if (aNone !== bNone) return aNone - bNone;
+        if (a.z !== undefined && b.z !== undefined && a.z !== b.z) return a.z - b.z;
+      }
+      return a.rank - b.rank || a.index - b.index;
+    })
+    .map((e) => e.region);
+}
+
+/**
+ * The FLOATING regions of `regions` in HIT order, topmost first -- the order
+ * every "what is under the pointer" question must walk.
+ *
+ * Without a stacking order: reverse publication order (what Core's press has
+ * always used). With one: the exact reverse of `stackedFloatingRegions`, so
+ * the object painted on top is the object a press reaches.
+ */
+export function floatingHitOrder(regions: readonly GridRegion[] = gridRegions): GridRegion[] {
+  if (hasStackingOrder(regions)) return stackedFloatingRegions(regions).reverse();
+  const out: GridRegion[] = [];
+  for (let i = regions.length - 1; i >= 0; i--) {
+    if (regions[i].floating) out.push(regions[i]);
+  }
+  return out;
+}
+
+/** Where floating regions sit on the canvas: the PAINTED gutters and the scroll. */
+export interface FloatingHitGeometry {
+  rowHeaderWidth: number;
+  colHeaderHeight: number;
+  scrollX: number;
+  scrollY: number;
+}
+
+/**
+ * The live geometry of the active sheet, with the gutters the renderer PAINTED
+ * (a canvas never shows headings, whatever the stored config says). Null
+ * before the grid is mounted.
+ */
+export function currentFloatingHitGeometry(): FloatingHitGeometry | null {
+  const s = getGridStateSnapshot();
+  if (!s) return null;
+  const { rowHeaderWidth, colHeaderHeight } = resolveHeaderSizes(
+    s.config,
+    paintedDisplayHeadings(s.surface, s.displayHeadings),
+  );
+  return { rowHeaderWidth, colHeaderHeight, scrollX: s.viewport.scrollX, scrollY: s.viewport.scrollY };
+}
+
+/**
+ * The topmost FLOATING region whose rectangle contains the logical
+ * (zoom-corrected) canvas point, walking `floatingHitOrder`. Plain bounds only
+ * (the same test Core's press starts from). `geo` defaults to the live painted
+ * geometry and `regions` to the published list. Null when no floating region
+ * is there, or before the grid is mounted.
+ *
+ * A family's own right-click / wheel lookup asks this before claiming a point,
+ * so an object covered by another cannot open its menu (or scroll) from behind.
+ */
+export function topFloatingRegionAt(
+  canvasX: number,
+  canvasY: number,
+  geo: FloatingHitGeometry | null = currentFloatingHitGeometry(),
+  regions: readonly GridRegion[] = gridRegions,
+): GridRegion | null {
+  if (!geo) return null;
+  for (const r of floatingHitOrder(regions)) {
+    const f = r.floating!;
+    const x = geo.rowHeaderWidth + f.x - geo.scrollX;
+    const y = geo.colHeaderHeight + f.y - geo.scrollY;
+    if (canvasX >= x && canvasX <= x + f.width && canvasY >= y && canvasY <= y + f.height) {
+      return r;
+    }
+  }
+  return null;
+}
+
+/**
+ * `topFloatingRegionAt` for a CLIENT (mouse event) point: converted to the
+ * logical canvas basis the way Core's own mouse handling does (relative to the
+ * grid area, divided by the zoom). Null outside the grid area or before mount.
+ */
+export function topFloatingRegionAtClient(clientX: number, clientY: number): GridRegion | null {
+  if (typeof document === "undefined") return null;
+  const area = document.querySelector("[data-grid-area]");
+  if (!area) return null;
+  const rect = area.getBoundingClientRect();
+  if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+    return null;
+  }
+  const zoom = getGridStateSnapshot()?.zoom || 1;
+  return topFloatingRegionAt((clientX - rect.left) / zoom, (clientY - rect.top) / zoom);
+}
+
+/**
+ * True when a floating object that `isMine` does NOT accept is the topmost one
+ * at the client point -- the one question every family's right-click and wheel
+ * handler asks before claiming the gesture. False when nothing floating is
+ * there (the family's own lookup then decides, exactly as before).
+ */
+export function isOccludedAtClientPoint(
+  clientX: number,
+  clientY: number,
+  isMine: (region: GridRegion) => boolean,
+): boolean {
+  const top = topFloatingRegionAtClient(clientX, clientY);
+  return top !== null && !isMine(top);
 }
 
 // ============================================================================

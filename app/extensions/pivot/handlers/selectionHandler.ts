@@ -4,6 +4,7 @@
 // When they select outside, we hide it.
 
 import { pivot } from "@api/pivot";
+import type { PivotRegionInfo } from "@api/pivot";
 import {
   openTaskPane,
   closeTaskPane,
@@ -15,6 +16,8 @@ import {
   emitAppEvent,
 } from "@api";
 import type { LayoutConfig, AggregationType } from "@api";
+import { requestOverlayRedraw } from "@api/gridOverlays";
+import { notifyObjectSelectionChanged } from "@api/objectSelection";
 import {
   PIVOT_PANE_ID,
   PivotDesignPanelDefinition,
@@ -41,6 +44,16 @@ let activePivotId: string | null = null;
 export function getActivePivotId(): string | null {
   return activePivotId;
 }
+
+/**
+ * The canvas pivot box (the floating `pivot-visual` object) that is SELECTED,
+ * or null. A canvas has no cell selection, so this -- not a cursor inside a
+ * region -- is what makes a canvas pivot the active one.
+ */
+let selectedVisualPivotId: string | null = null;
+
+/** The pivot whose pane the visual route last opened (a repeat press reloads nothing). */
+let paneOpenedForVisual: string | null = null;
 
 /** Flag to prevent closing the pane right after a pivot is created (regions not yet cached). */
 let justCreatedPivot = false;
@@ -105,9 +118,16 @@ export function updateCachedRegions(regions: PivotRegionData[]): void {
  * family exists because this teardown lived in one reconciliation path and
  * not the other.
  */
-function deselectPivotContext(): void {
+export function deselectPivotContext(): void {
   lastCheckedSelection = null;
   activePivotId = null;
+  const hadVisual = selectedVisualPivotId !== null;
+  if (hadVisual) {
+    selectedVisualPivotId = null;
+    // The selection frame is painted by the box itself.
+    requestOverlayRedraw();
+  }
+  paneOpenedForVisual = null;
   if (analyzeTabRegistered) {
     unregisterPanel(PIVOT_ANALYZE_TAB_ID);
     analyzeTabRegistered = false;
@@ -118,6 +138,9 @@ function deselectPivotContext(): void {
   }
   removeTaskPaneContextKey("pivot");
   closeTaskPane(PIVOT_PANE_ID);
+  // A canvas pivot box left the selection: the canvas-wide selection set
+  // (@api/objectSelection) follows every family's own selection.
+  if (hadVisual) notifyObjectSelectionChanged();
 }
 
 /**
@@ -343,6 +366,8 @@ export function handleSelectionChange(
     }
     lastCheckedSelection = { row, col };
     activePivotId = null;
+    selectedVisualPivotId = null;
+    paneOpenedForVisual = null;
     removeTaskPaneContextKey("pivot");
     closeTaskPane(PIVOT_PANE_ID);
     // Hide the contextual pivot ribbon panels
@@ -359,6 +384,8 @@ export function handleSelectionChange(
 
   // Cell IS in a pivot region - set context key and active pivot ID
   activePivotId = localPivotRegion.pivotId;
+  selectedVisualPivotId = null;
+  paneOpenedForVisual = null;
   addTaskPaneContextKey("pivot");
   // Show the contextual pivot ribbon panels
   if (!analyzeTabRegistered) {
@@ -419,151 +446,7 @@ async function checkPivotAtSelection(
     console.log(`[PERF][pivot-sel] checkPivotAtSelection(${row},${col}) getAtCell=${(performance.now() - t0).toFixed(1)}ms found=${!!pivotInfo}`);
 
     if (pivotInfo) {
-      // Convert source fields from backend format
-      const sourceFields: SourceField[] = pivotInfo.sourceFields.map((field) => ({
-        index: field.index,
-        name: field.name,
-        isNumeric: field.isNumeric,
-      }));
-
-      const config = pivotInfo.fieldConfiguration;
-
-      const isBiPivot = !!pivotInfo.biModel;
-
-      if (isBiPivot) {
-        console.log(`[CALP-DIAG] checkPivotAtSelection: BI pivot detected, pivotId=${pivotInfo.pivotId}, connectionId=${pivotInfo.biModel?.connectionId}, tables=${pivotInfo.biModel?.tables?.length}, measures=${pivotInfo.biModel?.measures?.length}`);
-        console.log(`[CALP-DIAG]   row_fields=${config.rowFields.length} [${config.rowFields.map(f => f.name).join(', ')}]`);
-        console.log(`[CALP-DIAG]   col_fields=${config.columnFields.length} [${config.columnFields.map(f => f.name).join(', ')}]`);
-        console.log(`[CALP-DIAG]   val_fields=${config.valueFields.length} [${config.valueFields.map(f => f.name).join(', ')}]`);
-        console.log(`[CALP-DIAG]   sourceFields=${pivotInfo.sourceFields.length}`);
-      }
-
-      // For BI pivots, use sourceIndex = -1 so the frontend consistently
-      // uses name-based references (not cache column indices)
-      const biIdx = isBiPivot ? -1 : undefined;
-
-      // Reconstitute hierarchy fields: replace individual level fields with
-      // a single hierarchy ZoneField using the "Table.__hierarchy__.Name" convention.
-      const hierarchyConfigs = config.hierarchyConfigs || [];
-
-      const reconstitute = (
-        fields: typeof config.rowFields,
-        isRow: boolean,
-      ): ZoneField[] => {
-        const result: ZoneField[] = [];
-        const skipIndices = new Set<number>();
-
-        // Mark indices covered by hierarchies and emit a single hierarchy field
-        for (const hc of hierarchyConfigs) {
-          if (hc.isRow !== isRow) continue;
-          for (let i = hc.fieldStart; i < hc.fieldStart + hc.fieldCount; i++) {
-            skipIndices.add(i);
-          }
-          // Find the table from the first level field
-          const firstField = fields[hc.fieldStart];
-          if (firstField) {
-            const table = firstField.name.includes('.')
-              ? splitBiFieldKey(firstField.name, pivotInfo.biModel?.tables.map((t) => t.name)).table
-              : '';
-            result.push({
-              sourceIndex: -3,
-              name: `${table}.__hierarchy__.${hc.name}`,
-              isNumeric: false,
-              customName: `${table}.__hierarchy__.${hc.name}`,
-            });
-          }
-        }
-
-        // Add non-hierarchy fields
-        for (let i = 0; i < fields.length; i++) {
-          if (skipIndices.has(i)) continue;
-          const f = fields[i];
-          result.push({
-            sourceIndex: biIdx ?? f.sourceIndex,
-            name: f.name,
-            isNumeric: f.isNumeric,
-            customName: isBiPivot ? f.name : undefined,
-            isLookup: f.isLookup || false,
-          });
-        }
-        return result;
-      };
-
-      // hiddenItems ride along on row/column chips too (a placed calculation
-      // group's item subset lives there like a field filter).
-      const initialRows: ZoneField[] = isBiPivot && hierarchyConfigs.length > 0
-        ? reconstitute(config.rowFields, true)
-        : config.rowFields.map((f) => ({
-            sourceIndex: biIdx ?? f.sourceIndex,
-            name: f.name,
-            isNumeric: f.isNumeric,
-            customName: isBiPivot ? f.name : undefined,
-            isLookup: f.isLookup || false,
-            hiddenItems: f.hiddenItems,
-          }));
-
-      const initialColumns: ZoneField[] = isBiPivot && hierarchyConfigs.length > 0
-        ? reconstitute(config.columnFields, false)
-        : config.columnFields.map((f) => ({
-            sourceIndex: biIdx ?? f.sourceIndex,
-            name: f.name,
-            isNumeric: f.isNumeric,
-            customName: isBiPivot ? f.name : undefined,
-            isLookup: f.isLookup || false,
-            hiddenItems: f.hiddenItems,
-          }));
-
-      const initialValues: ZoneField[] = config.valueFields.map((f) => ({
-        sourceIndex: biIdx ?? f.sourceIndex,
-        name: f.name,
-        isNumeric: f.isNumeric,
-        aggregation: f.aggregation as AggregationType | undefined,
-        customName: f.customName ?? (isBiPivot ? f.name : undefined),
-      }));
-
-      const initialFilters: ZoneField[] = config.filterFields.map((f) => ({
-        sourceIndex: biIdx ?? f.sourceIndex,
-        name: f.name,
-        isNumeric: f.isNumeric,
-        customName: isBiPivot ? f.name : undefined,
-        isLookup: f.isLookup || false,
-        hiddenItems: f.hiddenItems,
-      }));
-
-      const initialLayout: LayoutConfig = {
-        showRowGrandTotals: config.layout.showRowGrandTotals,
-        showColumnGrandTotals: config.layout.showColumnGrandTotals,
-        reportLayout: config.layout.reportLayout,
-        repeatRowLabels: config.layout.repeatRowLabels,
-        showEmptyRows: config.layout.showEmptyRows,
-        showEmptyCols: config.layout.showEmptyCols,
-        valuesPosition: config.layout.valuesPosition,
-      };
-
-      const paneData: PivotEditorViewData = {
-        pivotId: pivotInfo.pivotId,
-        sourceFields,
-        initialRows,
-        initialColumns,
-        initialValues,
-        initialFilters,
-        initialLayout,
-        initialCalculatedFields: config.calculatedFields,
-        biModel: pivotInfo.biModel,
-        sourceTableName: pivotInfo.sourceTableName,
-      };
-
-      openTaskPane(PIVOT_PANE_ID, paneData as unknown as Record<string, unknown>);
-
-      // Notify ribbon tabs after a short delay to ensure they've mounted
-      // (ribbon tab registration happens synchronously, but React needs
-      // a tick to render the component and subscribe to events).
-      setTimeout(() => {
-        emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, {
-          pivotId: pivotInfo.pivotId,
-          layout: paneData.initialLayout,
-        });
-      }, 50);
+      showPivotPane(pivotInfo);
     } else {
       closeTaskPane(PIVOT_PANE_ID);
       emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, { pivotId: null, layout: {} });
@@ -573,6 +456,256 @@ async function checkPivotAtSelection(
   } finally {
     checkInProgress = false;
   }
+}
+
+/**
+ * Build the field-list pane data from the backend's pivot info. Shared by the
+ * cell route (a cursor inside a worksheet pivot) and the object route (a
+ * selected canvas pivot box).
+ */
+export function buildPivotPaneData(pivotInfo: PivotRegionInfo): PivotEditorViewData {
+  // Convert source fields from backend format
+  const sourceFields: SourceField[] = pivotInfo.sourceFields.map((field) => ({
+    index: field.index,
+    name: field.name,
+    isNumeric: field.isNumeric,
+  }));
+
+  const config = pivotInfo.fieldConfiguration;
+
+  const isBiPivot = !!pivotInfo.biModel;
+
+  if (isBiPivot) {
+    console.log(`[CALP-DIAG] checkPivotAtSelection: BI pivot detected, pivotId=${pivotInfo.pivotId}, connectionId=${pivotInfo.biModel?.connectionId}, tables=${pivotInfo.biModel?.tables?.length}, measures=${pivotInfo.biModel?.measures?.length}`);
+    console.log(`[CALP-DIAG]   row_fields=${config.rowFields.length} [${config.rowFields.map(f => f.name).join(', ')}]`);
+    console.log(`[CALP-DIAG]   col_fields=${config.columnFields.length} [${config.columnFields.map(f => f.name).join(', ')}]`);
+    console.log(`[CALP-DIAG]   val_fields=${config.valueFields.length} [${config.valueFields.map(f => f.name).join(', ')}]`);
+    console.log(`[CALP-DIAG]   sourceFields=${pivotInfo.sourceFields.length}`);
+  }
+
+  // For BI pivots, use sourceIndex = -1 so the frontend consistently
+  // uses name-based references (not cache column indices)
+  const biIdx = isBiPivot ? -1 : undefined;
+
+  // Reconstitute hierarchy fields: replace individual level fields with
+  // a single hierarchy ZoneField using the "Table.__hierarchy__.Name" convention.
+  const hierarchyConfigs = config.hierarchyConfigs || [];
+
+  const reconstitute = (
+    fields: typeof config.rowFields,
+    isRow: boolean,
+  ): ZoneField[] => {
+    const result: ZoneField[] = [];
+    const skipIndices = new Set<number>();
+
+    // Mark indices covered by hierarchies and emit a single hierarchy field
+    for (const hc of hierarchyConfigs) {
+      if (hc.isRow !== isRow) continue;
+      for (let i = hc.fieldStart; i < hc.fieldStart + hc.fieldCount; i++) {
+        skipIndices.add(i);
+      }
+      // Find the table from the first level field
+      const firstField = fields[hc.fieldStart];
+      if (firstField) {
+        const table = firstField.name.includes('.')
+          ? splitBiFieldKey(firstField.name, pivotInfo.biModel?.tables.map((t) => t.name)).table
+          : '';
+        result.push({
+          sourceIndex: -3,
+          name: `${table}.__hierarchy__.${hc.name}`,
+          isNumeric: false,
+          customName: `${table}.__hierarchy__.${hc.name}`,
+        });
+      }
+    }
+
+    // Add non-hierarchy fields
+    for (let i = 0; i < fields.length; i++) {
+      if (skipIndices.has(i)) continue;
+      const f = fields[i];
+      result.push({
+        sourceIndex: biIdx ?? f.sourceIndex,
+        name: f.name,
+        isNumeric: f.isNumeric,
+        customName: isBiPivot ? f.name : undefined,
+        isLookup: f.isLookup || false,
+      });
+    }
+    return result;
+  };
+
+  // hiddenItems ride along on row/column chips too (a placed calculation
+  // group's item subset lives there like a field filter).
+  const initialRows: ZoneField[] = isBiPivot && hierarchyConfigs.length > 0
+    ? reconstitute(config.rowFields, true)
+    : config.rowFields.map((f) => ({
+        sourceIndex: biIdx ?? f.sourceIndex,
+        name: f.name,
+        isNumeric: f.isNumeric,
+        customName: isBiPivot ? f.name : undefined,
+        isLookup: f.isLookup || false,
+        hiddenItems: f.hiddenItems,
+      }));
+
+  const initialColumns: ZoneField[] = isBiPivot && hierarchyConfigs.length > 0
+    ? reconstitute(config.columnFields, false)
+    : config.columnFields.map((f) => ({
+        sourceIndex: biIdx ?? f.sourceIndex,
+        name: f.name,
+        isNumeric: f.isNumeric,
+        customName: isBiPivot ? f.name : undefined,
+        isLookup: f.isLookup || false,
+        hiddenItems: f.hiddenItems,
+      }));
+
+  const initialValues: ZoneField[] = config.valueFields.map((f) => ({
+    sourceIndex: biIdx ?? f.sourceIndex,
+    name: f.name,
+    isNumeric: f.isNumeric,
+    aggregation: f.aggregation as AggregationType | undefined,
+    customName: f.customName ?? (isBiPivot ? f.name : undefined),
+  }));
+
+  const initialFilters: ZoneField[] = config.filterFields.map((f) => ({
+    sourceIndex: biIdx ?? f.sourceIndex,
+    name: f.name,
+    isNumeric: f.isNumeric,
+    customName: isBiPivot ? f.name : undefined,
+    isLookup: f.isLookup || false,
+    hiddenItems: f.hiddenItems,
+  }));
+
+  const initialLayout: LayoutConfig = {
+    showRowGrandTotals: config.layout.showRowGrandTotals,
+    showColumnGrandTotals: config.layout.showColumnGrandTotals,
+    reportLayout: config.layout.reportLayout,
+    repeatRowLabels: config.layout.repeatRowLabels,
+    showEmptyRows: config.layout.showEmptyRows,
+    showEmptyCols: config.layout.showEmptyCols,
+    valuesPosition: config.layout.valuesPosition,
+  };
+
+  const paneData: PivotEditorViewData = {
+    pivotId: pivotInfo.pivotId,
+    sourceFields,
+    initialRows,
+    initialColumns,
+    initialValues,
+    initialFilters,
+    initialLayout,
+    initialCalculatedFields: config.calculatedFields,
+    biModel: pivotInfo.biModel,
+    sourceTableName: pivotInfo.sourceTableName,
+  };
+
+  return paneData;
+}
+
+/** Open the field-list pane for `pivotInfo` and tell the ribbon tabs which pivot is active. */
+function showPivotPane(pivotInfo: PivotRegionInfo): void {
+  const paneData = buildPivotPaneData(pivotInfo);
+  openTaskPane(PIVOT_PANE_ID, paneData as unknown as Record<string, unknown>);
+
+  // Notify ribbon tabs after a short delay to ensure they've mounted
+  // (ribbon tab registration happens synchronously, but React needs
+  // a tick to render the component and subscribe to events).
+  setTimeout(() => {
+    emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, {
+      pivotId: pivotInfo.pivotId,
+      layout: paneData.initialLayout,
+    });
+  }, 50);
+}
+
+// ---------------------------------------------------------------------------
+// Canvas pivot boxes (the object route)
+// ---------------------------------------------------------------------------
+
+/** Whether the canvas pivot box of `pivotId` is the selected object. */
+export function isPivotVisualSelected(pivotId: string): boolean {
+  return selectedVisualPivotId !== null && selectedVisualPivotId === pivotId;
+}
+
+/** The selected canvas pivot box's pivot id, or null. */
+export function getSelectedVisualPivotId(): string | null {
+  return selectedVisualPivotId;
+}
+
+/**
+ * Select a canvas pivot box: it becomes the ACTIVE pivot (the Analyze/Design
+ * tabs address it, the "pivot" pane context key is set) exactly as a cursor
+ * inside a worksheet pivot makes it -- a canvas has no cell selection, so
+ * `handleSelectionChange` never runs there.
+ *
+ * `openPane`: a mouse press opens the field-list pane (unless the user closed
+ * it by hand, which the cell route honours too); a keyboard selection (Tab on
+ * the canvas) does not -- `select` in the object-selection seam means select
+ * and nothing else. `force` reloads the pane even when this box already had it.
+ */
+export function selectPivotVisual(
+  pivotId: string,
+  opts: { openPane: boolean; force?: boolean },
+): void {
+  const wasSelected = selectedVisualPivotId === pivotId;
+  selectedVisualPivotId = pivotId;
+  activePivotId = pivotId;
+  lastCheckedSelection = null;
+  addTaskPaneContextKey("pivot");
+  ensureDesignTabRegistered();
+  if (!wasSelected) {
+    requestOverlayRedraw();
+    // The pivot box's selection chokepoint for the canvas-wide set.
+    notifyObjectSelectionChanged();
+  }
+
+  const manuallyClosed = getTaskPaneManuallyClosed().includes(PIVOT_PANE_ID);
+  // A pane already showing ANOTHER box's fields follows the selection even on
+  // a keyboard step: that is keeping an open pane truthful, not opening one.
+  const paneShowsAnotherBox = paneOpenedForVisual !== null && paneOpenedForVisual !== pivotId;
+  if ((opts.openPane || paneShowsAnotherBox) && !manuallyClosed) {
+    if (paneOpenedForVisual === pivotId && wasSelected && !opts.force) return;
+    const region = cachedRegions.find((r) => r.pivotId === pivotId);
+    if (region) {
+      paneOpenedForVisual = pivotId;
+      void openPaneForVisual(pivotId, region.startRow, region.startCol);
+      return;
+    }
+  }
+
+  if (!wasSelected || opts.force) {
+    // Tell the ribbon tabs the active pivot even without the pane (the same
+    // thing the cell route does when the pane was closed by hand).
+    setTimeout(() => {
+      if (selectedVisualPivotId !== pivotId) return;
+      emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, { pivotId, layout: {} });
+    }, 50);
+  }
+}
+
+/**
+ * Load the pane for a canvas pivot. The backend resolves `getAtCell` on the
+ * ACTIVE sheet, which is the canvas, so the hidden-grid anchor addresses it.
+ */
+async function openPaneForVisual(pivotId: string, anchorRow: number, anchorCol: number): Promise<void> {
+  try {
+    const pivotInfo = await pivot.getAtCell(anchorRow, anchorCol);
+    // The user may have selected something else while the fetch was in flight.
+    if (selectedVisualPivotId !== pivotId) return;
+    if (pivotInfo) {
+      showPivotPane(pivotInfo);
+    } else {
+      paneOpenedForVisual = null;
+    }
+  } catch (error) {
+    paneOpenedForVisual = null;
+    console.error("[Pivot Extension] Failed to load the canvas pivot's field list:", error);
+  }
+}
+
+/** Deselect the canvas pivot box (no-op when none is selected). */
+export function deselectPivotVisual(): void {
+  if (selectedVisualPivotId === null) return;
+  deselectPivotContext();
 }
 
 // ---------------------------------------------------------------------------
@@ -590,6 +723,11 @@ export function forceRecheck(): void {
   checkInProgress = false;
   if (savedSelection) {
     handleSelectionChange({ endRow: savedSelection.row, endCol: savedSelection.col });
+    return;
+  }
+  // On a canvas there is no cell to re-check: re-open from the selected box.
+  if (selectedVisualPivotId !== null) {
+    selectPivotVisual(selectedVisualPivotId, { openPane: true, force: true });
   }
 }
 
@@ -606,6 +744,9 @@ export function resetSelectionHandlerState(): void {
   justCreatedPivot = false;
   lastCheckedSelection = null;
   checkInProgress = false;
+  activePivotId = null;
+  selectedVisualPivotId = null;
+  paneOpenedForVisual = null;
   if (debounceTimer !== null) {
     clearTimeout(debounceTimer);
     debounceTimer = null;

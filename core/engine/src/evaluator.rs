@@ -1131,7 +1131,7 @@ pub struct Evaluator<'a> {
     /// Optional pivot data lookup for GETPIVOTDATA function.
     /// Args: (data_field_name, pivot_cell_row, pivot_cell_col, field_item_pairs: Vec<(field_name, item_value)>)
     /// Returns: the aggregated value, or None if not found.
-    pivot_data_fn: Option<&'a dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    pivot_data_fn: Option<&'a dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>>,
     /// Optional writeback data lookup for GATHER functions.
     /// Takes a region_id and returns pre-fetched submission data.
     gather_fn: Option<&'a dyn Fn(&str) -> GatherRegionData>,
@@ -1368,7 +1368,7 @@ impl<'a> Evaluator<'a> {
     /// Sets the pivot data lookup closure for GETPIVOTDATA function.
     pub fn set_pivot_data_fn(
         &mut self,
-        f: &'a dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>,
+        f: &'a dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>,
     ) {
         self.pivot_data_fn = Some(f);
     }
@@ -10781,12 +10781,25 @@ impl<'a> Evaluator<'a> {
         };
 
         // Evaluate pivot_table reference - must be a cell ref
-        // Parser stores rows as 1-based, convert to 0-based for lookup
-        let (pivot_row, pivot_col) = match &args[1] {
-            Expression::CellRef { row, col, .. } => {
+        // Parser stores rows as 1-based, convert to 0-based for lookup.
+        //
+        // The pivot is identified by its SHEET as well as its cell: two pivots
+        // can share an address on different sheets (every canvas sheet's first
+        // pivot sits at A1 of the canvas's hidden grid), and a lookup by cell
+        // alone answered from whichever pivot a hash map listed first. An
+        // unqualified reference names the formula's own sheet; with no
+        // multi-sheet context there is no sheet to name, and any pivot at the
+        // cell answers, as before.
+        let (pivot_sheet, pivot_row, pivot_col) = match &args[1] {
+            Expression::CellRef { sheet, row, col, .. } => {
+                let sheet_name = match (sheet, &self.multi_sheet) {
+                    (Some(name), _) => Some(name.clone()),
+                    (None, Some(ctx)) => Some(ctx.current_sheet.clone()),
+                    (None, None) => None,
+                };
                 let r = row.saturating_sub(1);
                 let c = col_to_index(col) as u32;
-                (r, c)
+                (sheet_name, r, c)
             }
             _ => {
                 return EvalResult::Error(CellError::Ref);
@@ -10815,7 +10828,7 @@ impl<'a> Evaluator<'a> {
             .collect();
 
         // Call the pivot data lookup
-        match pivot_fn(&data_field, pivot_row, pivot_col, &pair_refs) {
+        match pivot_fn(&data_field, pivot_sheet.as_deref(), pivot_row, pivot_col, &pair_refs) {
             Some(value) => EvalResult::Number(value),
             None => EvalResult::Error(CellError::Ref),
         }

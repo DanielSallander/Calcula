@@ -543,7 +543,7 @@ fn remap_indexed_map<V>(
 /// Returns `None` when the string is not a derived control id (leave it alone),
 /// `Some(None)` when its sheet was deleted (the binding is now orphaned), and
 /// `Some(Some(new_id))` with the renumbered sheet otherwise.
-fn remap_control_instance_id(
+pub(crate) fn remap_control_instance_id(
     id: &str,
     remap: &impl Fn(usize) -> Option<usize>,
 ) -> Option<Option<String>> {
@@ -740,6 +740,291 @@ pub(crate) fn remap_tables_store(
             tables.insert(new_index, sheet_tables);
         }
     }
+}
+
+/// Re-key the NOTE and HYPERLINK stores through `remap`, re-stamping the
+/// `sheet_index` each payload carries.
+///
+/// Both are `sheet_index -> (row, col) -> T` maps that `remap_sheet_keyed_stores`
+/// has never reached. Kept separate (and used only by
+/// `restore_partition_invariant`) because the structural sheet commands have
+/// their own history with these two stores; widening the shared remap would
+/// change what a move or delete does to them in the same breath.
+fn remap_note_and_hyperlink_stores(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    remap: &impl Fn(usize) -> Option<usize>,
+) {
+    {
+        let mut notes = state.notes.write(effect).unwrap();
+        remap_indexed_map(&mut notes, remap);
+        for (index, sheet_notes) in notes.iter_mut() {
+            for note in sheet_notes.values_mut() {
+                note.sheet_index = *index;
+            }
+        }
+    }
+    {
+        let mut hyperlinks = state.hyperlinks.write(effect).unwrap();
+        remap_indexed_map(&mut hyperlinks, remap);
+        for (index, sheet_links) in hyperlinks.iter_mut() {
+            for link in sheet_links.values_mut() {
+                link.sheet_index = *index;
+            }
+        }
+    }
+}
+
+/// The rotations that make user sheets a contiguous PREFIX again, planned from
+/// the visibility vector alone.
+///
+/// Each `(from, to)` is one `rotate_element(v, from, to)` with `from > to`: the
+/// next user sheet found past the first object slot moves down to that slot and
+/// the object sheets in between shift up by one. Applied in order, the result is
+/// a STABLE partition -- user sheets keep their relative order, and so do the
+/// object sheets. Empty when the sheets are already partitioned.
+pub(crate) fn partition_rotations(sheet_visibility: &[String], count: usize) -> Vec<(usize, usize)> {
+    let mut is_user: Vec<bool> = (0..count).map(|i| is_user_sheet(sheet_visibility, i)).collect();
+    let mut rotations: Vec<(usize, usize)> = Vec::new();
+    // `next_user_slot` is where the next user sheet belongs: every slot below it
+    // already holds a user sheet.
+    let mut next_user_slot = 0usize;
+    for j in 0..count {
+        if !is_user[j] {
+            continue;
+        }
+        if j != next_user_slot {
+            rotations.push((j, next_user_slot));
+            rotate_element(&mut is_user, j, next_user_slot);
+        }
+        next_user_slot += 1;
+    }
+    rotations
+}
+
+/// RESTORE THE PARTITION INVARIANT: user sheets a contiguous prefix, object-backed
+/// sheets (`OBJECT_SHEET_VISIBILITY`) at the tail.
+///
+/// `add_sheet_inner`'s rotation branch keeps the invariant for ONE appended
+/// sheet. A `.calp` pull appends a whole block at once -- and the block lands
+/// AFTER any object tail the workbook already has (a floating range of the
+/// subscriber's own, or the application's own from an earlier version on every
+/// refresh that adds a sheet), so the pulled user sheets would sit between object
+/// sheets. This is the same rotation, generalized: every sheet-aligned vector
+/// is rotated exactly as `add_sheet_inner` rotates it, and then the
+/// sheet-index-keyed stores are re-keyed through the resulting old -> new map
+/// (`remap_sheet_keyed_stores`, `remap_tables_store`, and the note/hyperlink
+/// stores that remap misses), together with `active_sheet`.
+///
+/// Returns `Some(old_to_new)` -- `old_to_new[old_index] == new_index` for every
+/// sheet -- when anything moved, and `None` when the sheets were already
+/// partitioned (nothing is locked for writing in that case beyond the planning
+/// read, and nothing changes).
+///
+/// THE OBJECTS THAT NAME THEIR SHEET BY AN INDEX FIELD FOLLOW TOO: charts,
+/// slicers, timelines, sparklines, ribbon filters' connected sheets (through
+/// `object_deps::cascade_sheet_removed`, the walk `move_sheet` and
+/// `delete_sheet` use), reports (`remap_report_sheets`) and every protected
+/// region. The remap is TOTAL -- a rotation deletes nothing -- so for an object
+/// on a sheet that did not move this is a no-op, and for one that did it is the
+/// re-anchor.
+///
+/// It used to rest on a precondition instead ("call it before anything anchored
+/// by index exists on a moved sheet"), and the precondition does not hold for
+/// every caller: a REFRESH writes the publisher's visibility onto sheets it
+/// already had before this runs, so a v2 that turns one of them into an object
+/// sheet (or back) moves EXISTING user sheets -- and their charts, slicers and
+/// timelines, created by earlier versions, were left on whichever sheet
+/// inherited the old index. Refusing there instead would fail a refresh half
+/// way through its writes, so the helper re-anchors rather than refuses.
+///
+/// Callers must hold NO AppState lock. Lock order is `add_sheet_inner`'s:
+/// `grids`, then `sheet_names`, then everything else -- the object stores
+/// last, under the held sheet locks, exactly as `move_sheet` takes them.
+pub(crate) fn restore_partition_invariant(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+) -> Result<Option<Vec<usize>>, String> {
+    // A read-only plan first, so an already-partitioned workbook takes no write
+    // lock at all. Re-planned under the write locks below, which is the answer
+    // that is acted on.
+    {
+        let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+        let sheet_visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
+        if partition_rotations(&sheet_visibility, sheet_names.len()).is_empty() {
+            return Ok(None);
+        }
+    }
+
+    let old_to_new = {
+        // CANONICAL LOCK ORDER: `grids`, then `sheet_names`, then everything else
+        // (`add_sheet_inner`'s order, minus the `grid` mirror this never touches).
+        let mut grids = state.grids.write(effect).map_err(|e| e.to_string())?;
+        let mut sheet_names = state.sheet_names.write(effect).map_err(|e| e.to_string())?;
+        let mut active_sheet = state.active_sheet.write(effect).map_err(|e| e.to_string())?;
+        let mut freeze_configs = state.freeze_configs.write(effect).map_err(|e| e.to_string())?;
+        let mut tab_colors = state.tab_colors.write(effect).map_err(|e| e.to_string())?;
+        let mut sheet_visibility = state.sheet_visibility.write(effect).map_err(|e| e.to_string())?;
+        let mut all_column_widths = state.all_column_widths.write(effect).map_err(|e| e.to_string())?;
+        let mut all_row_heights = state.all_row_heights.write(effect).map_err(|e| e.to_string())?;
+
+        let count = sheet_names.len();
+        let rotations = partition_rotations(&sheet_visibility, count);
+        if rotations.is_empty() {
+            return Ok(None);
+        }
+
+        // PAD BEFORE ROTATING, with `append_sheet_stores`' defaults: a vector shorter
+        // than the sheet list would make `rotate_element` slice out of range, and a
+        // blind rotation of a short vector would move a DIFFERENT sheet's value.
+        ensure_vec_len_with(&mut grids, count, engine::grid::Grid::new);
+        ensure_vec_len(&mut freeze_configs, count);
+        ensure_tab_color_len(&mut tab_colors, count);
+        ensure_visibility_len(&mut sheet_visibility, count);
+        ensure_vec_len(&mut all_column_widths, count);
+        ensure_vec_len(&mut all_row_heights, count);
+
+        for &(from, to) in &rotations {
+            rotate_element(&mut *sheet_names, from, to);
+            rotate_element(&mut *grids, from, to);
+            rotate_element(&mut *freeze_configs, from, to);
+            rotate_element(&mut *tab_colors, from, to);
+            rotate_element(&mut *sheet_visibility, from, to);
+            rotate_element(&mut *all_column_widths, from, to);
+            rotate_element(&mut *all_row_heights, from, to);
+        }
+        {
+            let mut split_configs = state.split_configs.write(effect).map_err(|e| e.to_string())?;
+            ensure_vec_len(&mut split_configs, count);
+            for &(from, to) in &rotations {
+                rotate_element(&mut *split_configs, from, to);
+            }
+        }
+        {
+            let mut scroll_areas = state.scroll_areas.lock().map_err(|e| e.to_string())?;
+            ensure_vec_len(&mut scroll_areas, count);
+            for &(from, to) in &rotations {
+                rotate_element(&mut *scroll_areas, from, to);
+            }
+        }
+        {
+            let mut sheet_zooms = state.sheet_zooms.write(effect).map_err(|e| e.to_string())?;
+            ensure_vec_len_with(&mut sheet_zooms, count, || persistence::DEFAULT_SHEET_ZOOM_PERCENT);
+            for &(from, to) in &rotations {
+                rotate_element(&mut *sheet_zooms, from, to);
+            }
+        }
+        {
+            let mut page_setups = state.page_setups.write(effect).map_err(|e| e.to_string())?;
+            ensure_vec_len(&mut page_setups, count);
+            for &(from, to) in &rotations {
+                rotate_element(&mut *page_setups, from, to);
+            }
+        }
+        {
+            let mut sheet_ids = state.sheet_ids.write(effect).map_err(|e| e.to_string())?;
+            ensure_vec_len_with(&mut sheet_ids, count, || {
+                identity::SheetId::from_bytes(identity::generate_uuid_v7())
+            });
+            for &(from, to) in &rotations {
+                rotate_element(&mut *sheet_ids, from, to);
+            }
+        }
+        {
+            let mut gridlines = state.show_gridlines.write(effect).map_err(|e| e.to_string())?;
+            ensure_vec_len_with(&mut gridlines, count, || true);
+            for &(from, to) in &rotations {
+                rotate_element(&mut *gridlines, from, to);
+            }
+        }
+        {
+            let mut display_flags = state.sheet_display_flags.write(effect).map_err(|e| e.to_string())?;
+            ensure_vec_len(&mut display_flags, count);
+            for &(from, to) in &rotations {
+                rotate_element(&mut *display_flags, from, to);
+            }
+        }
+        {
+            let mut sheet_kinds = state.sheet_kinds.write(effect).map_err(|e| e.to_string())?;
+            ensure_vec_len(&mut sheet_kinds, count);
+            for &(from, to) in &rotations {
+                rotate_element(&mut *sheet_kinds, from, to);
+            }
+        }
+        {
+            let mut all_merged = state.all_merged_regions.write(effect).map_err(|e| e.to_string())?;
+            ensure_vec_len(&mut all_merged, count);
+            for &(from, to) in &rotations {
+                rotate_element(&mut *all_merged, from, to);
+            }
+        }
+        for &(from, to) in &rotations {
+            crate::commands::dimensions::rotate_user_hidden_sheet(state, effect, from, to, count);
+        }
+
+        // The composite permutation, by replaying the same rotations over the
+        // identity: `order[new] == old`.
+        let mut order: Vec<usize> = (0..count).collect();
+        for &(from, to) in &rotations {
+            rotate_element(&mut order, from, to);
+        }
+        let mut old_to_new = vec![0usize; count];
+        for (new_index, &old_index) in order.iter().enumerate() {
+            old_to_new[old_index] = new_index;
+        }
+
+        // The active sheet follows its sheet. (The `grid` mirror and the other
+        // active-sheet mirrors describe that same sheet, so they stay as they are.)
+        if let Some(&new_active) = old_to_new.get(*active_sheet) {
+            *active_sheet = new_active;
+        }
+
+        // Re-key the sheet-index-keyed stores under the held sheet locks, exactly
+        // as `add_sheet_inner` does: its cross-sheet dependency edges and spill maps
+        // above all, then tables, then the note/hyperlink stores that remap misses.
+        let remap = |i: usize| -> Option<usize> { Some(old_to_new.get(i).copied().unwrap_or(i)) };
+        remap_sheet_keyed_stores(state, effect, remap);
+        remap_tables_store(state, effect, remap);
+        remap_note_and_hyperlink_stores(state, effect, &remap);
+
+        // The index-FIELD objects, through the same total remap (see the header).
+        // Every protected region moves with its sheet -- pivot, BI and report
+        // alike: a region is WHERE generated output sits, and a region left on
+        // the old index would guard a different sheet's cells.
+        {
+            let mut regions = state.protected_regions.lock().map_err(|e| e.to_string())?;
+            for region in regions.iter_mut() {
+                if let Some(new_index) = remap(region.sheet_index) {
+                    region.sheet_index = new_index;
+                }
+            }
+        }
+        crate::report::remap_report_sheets(state, effect, remap);
+        crate::object_deps::cascade_sheet_removed(
+            state,
+            slicer_state,
+            timeline_state,
+            ribbon_filter_state,
+            effect,
+            &remap,
+        );
+
+        old_to_new
+    }; // every sheet lock released here
+
+    // THE ROTATION IS A STRUCTURAL CHANGE (BUG-0005). It renumbered the object
+    // sheets it moved, and a queued undo entry names its sheet by INDEX -- a
+    // floating-range cell edit recorded on the old backing index would undo
+    // onto whichever sheet holds that index now. Excel's answer, and so this
+    // crate's: a change to the workbook's structure ends the undo history.
+    // Taken with every lock above released (the canonical order puts
+    // `undo_stack` before the grid locks), and only when something moved.
+    invalidate_undo_history_for_sheet_structure(state, "restore the sheet partition");
+
+    Ok(Some(old_to_new))
 }
 
 /// Re-key the two cross-sheet dependency maps after sheet indices are
@@ -3871,25 +4156,49 @@ mod sheet_zoom_tests {
     const SHEETS_SRC: &str = include_str!("sheets.rs");
 
     /// Return the body of a `pub fn NAME(` in this file, up to the next
-    /// top-level `pub fn`.
+    /// top-level `pub fn`. A `pub(crate) fn NAME(` (the partition helper, which
+    /// is no command) ends at its OWN closing brace instead: the next `pub fn`
+    /// after it is a long way off, and a span that swallowed a neighbour's
+    /// rotation would let the census pass over a helper that rotates nothing.
     fn function_body(name: &str) -> &'static str {
         let needle = format!("pub fn {name}(");
+        if let Some(start) = SHEETS_SRC.find(&needle) {
+            let rest = &SHEETS_SRC[start + needle.len()..];
+            return match rest.find("\npub fn ") {
+                Some(end) => &rest[..end],
+                None => rest,
+            };
+        }
+        let needle = format!("pub(crate) fn {name}(");
         let start = SHEETS_SRC
             .find(&needle)
             .unwrap_or_else(|| panic!("sheets.rs no longer defines `pub fn {name}(`"));
         let rest = &SHEETS_SRC[start + needle.len()..];
-        match rest.find("\npub fn ") {
+        match rest.find("\n}\n") {
             Some(end) => &rest[..end],
             None => rest,
         }
     }
+
+    /// The lifecycle sites that must keep every per-sheet vector aligned. The
+    /// fifth is not a command: `restore_partition_invariant` rotates the whole
+    /// sheet list when a `.calp` pull lands a block behind an object tail, and
+    /// a vector it forgot would pair every moved sheet with its neighbour's
+    /// value.
+    const LIFECYCLE_OPS: [&str; 5] = [
+        "add_sheet",
+        "delete_sheet",
+        "move_sheet",
+        "copy_sheet",
+        "restore_partition_invariant",
+    ];
 
     /// Every sheet lifecycle operation must maintain `sheet_zooms` alongside
     /// the split configs it sits next to. Adding a sheet and forgetting this is
     /// how sheet 3 ends up rendering at sheet 2's zoom.
     #[test]
     fn every_sheet_lifecycle_op_maintains_the_zoom_vector() {
-        for op in ["add_sheet", "delete_sheet", "move_sheet", "copy_sheet"] {
+        for op in LIFECYCLE_OPS {
             let body = function_body(op);
             assert!(
                 body.contains("split_configs"),
@@ -3921,7 +4230,9 @@ mod sheet_zoom_tests {
     /// deleted.
     fn maintaining_statement(store: &str, op: &str) -> String {
         match op {
-            "add_sheet" | "move_sheet" => format!("rotate_element(&mut *{store}"),
+            "add_sheet" | "move_sheet" | "restore_partition_invariant" => {
+                format!("rotate_element(&mut *{store}")
+            }
             "delete_sheet" => format!("{store}.remove("),
             "copy_sheet" => format!("{store}.insert("),
             other => panic!("no maintaining statement known for `{other}`"),
@@ -3946,7 +4257,7 @@ mod sheet_zoom_tests {
     /// cells appear under its objects) -- on the sheet NEXT to the one changed.
     #[test]
     fn every_sheet_lifecycle_op_maintains_the_sheet_kinds_vector() {
-        for op in ["add_sheet", "delete_sheet", "move_sheet", "copy_sheet"] {
+        for op in LIFECYCLE_OPS {
             assert_maintains(function_body(op), "sheet_kinds", op).unwrap();
         }
     }
@@ -3956,8 +4267,50 @@ mod sheet_zoom_tests {
     /// neighbour's page setup, and nothing failed.
     #[test]
     fn every_sheet_lifecycle_op_maintains_the_page_setups_vector() {
-        for op in ["add_sheet", "delete_sheet", "move_sheet", "copy_sheet"] {
+        for op in LIFECYCLE_OPS {
             assert_maintains(function_body(op), "page_setups", op).unwrap();
+        }
+    }
+
+    /// Every vector `add_sheet`'s partition branch rotates, the pull-side
+    /// partition helper rotates too -- DERIVED from `add_sheet`'s own body, so a
+    /// sixteenth aligned vector added there cannot be forgotten here. The two
+    /// are one rule applied to one sheet and to a block.
+    #[test]
+    fn the_partition_helper_rotates_every_vector_add_sheet_rotates() {
+        let add = code_lines(function_body("add_sheet"));
+        let helper = code_lines(function_body("restore_partition_invariant"));
+        let mut rotated: Vec<String> = Vec::new();
+        for piece in add.split("rotate_element(&mut *").skip(1) {
+            let name: String = piece
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() && !rotated.contains(&name) {
+                rotated.push(name);
+            }
+        }
+        assert!(
+            rotated.len() >= 16,
+            "the parse no longer sees add_sheet's rotations (found {rotated:?}) -- \
+             this census would pass over nothing"
+        );
+        let missing: Vec<&String> = rotated
+            .iter()
+            .filter(|name| !helper.contains(&format!("rotate_element(&mut *{name}")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "restore_partition_invariant does not rotate {missing:?}, which add_sheet \
+             does -- a pull behind an object tail would pair every moved sheet with \
+             its neighbour's value"
+        );
+        assert!(
+            helper.contains("rotate_user_hidden_sheet(") && add.contains("rotate_user_hidden_sheet("),
+            "the user-hidden row/column vectors rotate through their own helper, in both"
+        );
+        for rekey in ["remap_sheet_keyed_stores(", "remap_tables_store(", "remap_note_and_hyperlink_stores("] {
+            assert!(helper.contains(rekey), "restore_partition_invariant must call {rekey}");
         }
     }
 
@@ -3978,7 +4331,7 @@ mod sheet_zoom_tests {
     /// (e.g. formulas visible on the wrong sheet).
     #[test]
     fn every_sheet_lifecycle_op_maintains_the_display_flags_vector() {
-        for op in ["add_sheet", "delete_sheet", "move_sheet", "copy_sheet"] {
+        for op in LIFECYCLE_OPS {
             let body = function_body(op);
             assert!(
                 body.contains("show_gridlines"),

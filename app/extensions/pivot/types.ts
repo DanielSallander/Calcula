@@ -4,10 +4,10 @@
 
 import type { LayoutConfig, AggregationType } from "@api";
 import type { CalculatedFieldDef } from "./components/types";
-import type { BiPivotModelInfo, ShowValuesAs } from "@api/pivot";
+import type { BiPivotModelInfo, ShowValuesAs, CanvasFrameConfig } from "@api/pivot";
 
 // Re-export types from API that the extension uses
-export type { LayoutConfig, AggregationType, BiPivotModelInfo, ShowValuesAs };
+export type { LayoutConfig, AggregationType, BiPivotModelInfo, ShowValuesAs, CanvasFrameConfig };
 
 /**
  * Source field from the pivot table's data source.
@@ -64,4 +64,6 @@ export interface PivotRegionData {
   endRow: number;
   endCol: number;
   isEmpty: boolean;
+  /** Present only for a canvas pivot: the box its view is shown in. */
+  canvasFrame?: CanvasFrameConfig;
 }

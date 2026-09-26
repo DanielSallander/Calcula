@@ -13,6 +13,8 @@ import * as api from "./slicer-api";
 import { SlicerEvents } from "./slicerEvents";
 import { ensureBiFieldInPivotCache } from "./slicerFilterBridge";
 import { emitAppEvent, AppEvents } from "@api/events";
+import { runInUndoTransaction } from "@api/objectGeometry";
+import { showToast } from "@api/notifications";
 
 // ============================================================================
 // Module-level cache
@@ -123,6 +125,73 @@ export async function updateSlicerPositionAsync(
   } catch (err) {
     console.error("[Slicer] Failed to update position:", err);
   }
+}
+
+// ============================================================================
+// Geometry batches (co-move, the Size fields, the canvas's arrange / nudge)
+// ============================================================================
+
+/** One slicer's new geometry. */
+export interface SlicerGeometryWrite {
+  slicerId: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Write several slicers' geometry. The cache moves at once (the slicers are
+ * painted where the user put them while the writes are in flight), then each
+ * write is sent IN ORDER -- `update_slicer_position` records undo joining an
+ * open transaction, so the caller decides the step. Resolves the refusal
+ * reasons: empty when every write landed. On any refusal the cache is re-read
+ * from the backend, so what the canvas paints is what the workbook holds (a
+ * moved-looking slicer the backend refused is a lie).
+ */
+export async function writeSlicerGeometryAsync(writes: readonly SlicerGeometryWrite[]): Promise<string[]> {
+  for (const w of writes) {
+    const slicer = cachedSlicers.find((s) => s.id === w.slicerId);
+    if (!slicer) continue;
+    slicer.x = w.x;
+    slicer.y = w.y;
+    slicer.width = w.width;
+    slicer.height = w.height;
+  }
+  syncSlicerRegions();
+  const reasons: string[] = [];
+  for (const w of writes) {
+    try {
+      await api.updateSlicerPosition(w.slicerId, w.x, w.y, w.width, w.height);
+    } catch (err) {
+      console.error(`[Slicer] The backend refused the geometry of slicer ${w.slicerId}:`, err);
+      reasons.push(describeError(err));
+    }
+  }
+  if (reasons.length > 0) await refreshCache();
+  return reasons;
+}
+
+/**
+ * {@link writeSlicerGeometryAsync} as ONE undo step labelled `label` (joining
+ * the open frontend transaction when there is one -- a canvas group drag), and
+ * a refusal told in ONE toast. Resolves true when every write landed.
+ */
+export async function commitSlicerGeometryAsync(
+  writes: readonly SlicerGeometryWrite[],
+  label: string,
+): Promise<boolean> {
+  if (writes.length === 0) return true;
+  const reasons = await runInUndoTransaction(label, () => writeSlicerGeometryAsync(writes));
+  if (reasons.length === 0) return true;
+  const what = writes.length === 1 ? "The slicer" : "The slicers";
+  const unique = Array.from(new Set(reasons.filter((r) => r !== "")));
+  showToast(`${what} could not be moved. ${unique.join(" ")}`.trim(), { type: "error", duration: 8000 });
+  return false;
 }
 
 export async function updateSlicerSelectionAsync(

@@ -56,6 +56,7 @@ import { hasCellDecorations, applyCellDecorations } from "../../../api/cellDecor
 import { hasCellTypes, getCellTypeAt, renderCellTypeCell } from "../../../api/cellTypes";
 import { hasGridLayers, paintGridLayers, type GridLayerAnchor, type GridLayerContext } from "../../../api/gridLayers";
 import type { CellDecorationContext } from "../../../api/cellDecorations";
+import { effectiveZ, hasStackingOrder } from "../../../api/gridOverlays";
 
 // ============================================================================
 // Post-Header Overlay Types
@@ -90,6 +91,8 @@ export interface GridRegion {
   data?: Record<string, unknown>;
   /** Pixel-based positioning for free-floating overlays. */
   floating?: { x: number; y: number; width: number; height: number };
+  /** Stacking position of a floating region (see @api/gridOverlays `GridRegion.z`). */
+  z?: number;
 }
 
 /** Context passed to overlay render functions during grid paint. */
@@ -1108,11 +1111,42 @@ export function renderGrid(
     drawDeferredCellDecorations(deferredCellDecorations);
   }
 
-  // Render above-selection overlays (e.g., charts)
-  for (const renderer of aboveSelectionRenderers) {
-    const matchingRegions = surfaceRegions.filter(r => r.type === renderer.type);
-    for (const region of matchingRegions) {
-      renderOverlayRegion(renderer, region);
+  // Render above-selection overlays (e.g., charts).
+  //
+  // Without a stacking order: renderer by renderer (priority ascending), each
+  // renderer's regions in publication order -- the historical order.
+  //
+  // With one (some floating region has an effective z, e.g. a canvas sheet's
+  // zOrder), the FLOATING regions paint in stacking order instead: regions with
+  // a z by ascending z, then regions without one (a new object is on top), ties
+  // in the historical order (the sort is stable over pairs built in that
+  // order). This is `stackedFloatingRegions` (@api/gridOverlays) applied to the
+  // pairs, and every hit test walks its exact reverse. Cell-anchored regions
+  // keep their historical order and paint first: z orders floating objects.
+  if (hasStackingOrder(surfaceRegions)) {
+    const cellPairs: Array<{ renderer: OverlayRegistration; region: GridRegion }> = [];
+    const floatingPairs: Array<{ renderer: OverlayRegistration; region: GridRegion; z: number | undefined }> = [];
+    for (const renderer of aboveSelectionRenderers) {
+      for (const region of surfaceRegions) {
+        if (region.type !== renderer.type) continue;
+        if (region.floating) floatingPairs.push({ renderer, region, z: effectiveZ(region) });
+        else cellPairs.push({ renderer, region });
+      }
+    }
+    floatingPairs.sort((a, b) => {
+      const aNone = a.z === undefined ? 1 : 0;
+      const bNone = b.z === undefined ? 1 : 0;
+      if (aNone !== bNone) return aNone - bNone;
+      return a.z !== undefined && b.z !== undefined ? a.z - b.z : 0;
+    });
+    for (const p of cellPairs) renderOverlayRegion(p.renderer, p.region);
+    for (const p of floatingPairs) renderOverlayRegion(p.renderer, p.region);
+  } else {
+    for (const renderer of aboveSelectionRenderers) {
+      const matchingRegions = surfaceRegions.filter(r => r.type === renderer.type);
+      for (const region of matchingRegions) {
+        renderOverlayRegion(renderer, region);
+      }
     }
   }
 

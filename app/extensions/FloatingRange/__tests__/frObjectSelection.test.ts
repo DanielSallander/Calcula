@@ -153,3 +153,55 @@ describe("select / deselect", () => {
     expect(p.isSelected(region("fr-missing"))).toBe(false);
   });
 });
+
+describe("refOf: the floating range's canvas identity (M8)", () => {
+  it("is { kind: 'floatingRange', id: frId }, and reaches objectRefOf through the seam", async () => {
+    const { objectRefOf } = await import("@api/objectSelection");
+    expect(createFloatingRangeSelectionProvider().refOf?.(region("fr-a"))).toEqual({
+      kind: "floatingRange",
+      id: "fr-a",
+    });
+    const off = registerFloatingRangeObjectSelection();
+    expect(objectRefOf(region("fr-b"))).toEqual({ kind: "floatingRange", id: "fr-b" });
+    off();
+  });
+
+  it("is null for a region that carries no range id", () => {
+    expect(createFloatingRangeSelectionProvider().refOf?.({ ...region("fr-a"), data: {} })).toBeNull();
+  });
+});
+
+describe("the canvas selection set (M8)", () => {
+  it("owns the ARROWS too while a cell inside the range is selected (they move the inner cell)", () => {
+    const p = createFloatingRangeSelectionProvider();
+    p.select(region("fr-a"));
+    expect(p.ownsKey!("Arrow")).toBe(false);
+    innerCell("fr-a");
+    expect(p.ownsKey!("Arrow")).toBe(true);
+  });
+
+  it("every object-selection chokepoint announces a CHANGE to the set, and only a change", async () => {
+    const { onObjectSelectionChanged } = await import("@api/objectSelection");
+    const sel = await import("../lib/frSelection");
+    let seen = 0;
+    const off = onObjectSelectionChanged(() => {
+      seen += 1;
+    });
+    sel.selectFloatingRange("fr-a");
+    sel.selectFloatingRange("fr-a"); // already the selection
+    sel.selectFloatingRange("fr-b");
+    sel.deselectAllFloatingRanges();
+    sel.deselectAllFloatingRanges(); // nothing selected
+    sel.selectFloatingRange("fr-a");
+    sel.resetFrSelection();
+    // select a, select b, deselect, select a, reset: five changes.
+    expect(seen).toBe(5);
+    off();
+  });
+
+  it("labelOf is the range's published name", () => {
+    const p = createFloatingRangeSelectionProvider();
+    expect(p.labelOf!({ ...region("fr-a"), data: { frId: "fr-a", name: "Budget" } })).toBe("Budget");
+    expect(p.labelOf!(region("fr-a"))).toBeNull();
+  });
+});

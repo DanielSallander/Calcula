@@ -2439,6 +2439,37 @@ pub struct ChartEntry {
 }
 
 // ============================================================================
+// Floating Control Geometry (batch move/resize)
+// ============================================================================
+
+/// One floating control's new geometry, for `set_control_geometry`. A control
+/// is addressed by its ANCHOR `(sheet_index, row, col)` -- the key of the
+/// control store -- and must already exist; the batch never creates one.
+///
+/// The values are stored as the Controls extension has always stored them
+/// (`persistFloatingPosition`): the static properties `x`, `y`, `width`,
+/// `height` and, for a control pinned to the grid, `offsetX` / `offsetY`, each
+/// as the decimal string of the value rounded like JavaScript's `Math.round`.
+/// The offsets are optional and travel together: a pinned control's geometry
+/// is its anchor origin plus the offset, so persisting only the pixel position
+/// snapped it onto the anchor's corner on reload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlGeometryChange {
+    pub sheet_index: usize,
+    pub row: u32,
+    pub col: u32,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_y: Option<f64>,
+}
+
+// ============================================================================
 // Sparkline Entry (opaque JSON persistence)
 // ============================================================================
 
@@ -2686,11 +2717,15 @@ impl CanvasLayoutPatch {
         if let Some(v) = &self.background {
             layout.background = v.trim().to_string();
         }
+        // The stacking and lock lists are NORMALIZED (trimmed, duplicates
+        // dropped keeping the first occurrence -- the one that paints) and then
+        // validated, so an over-cap list or a blank ref is REFUSED rather than
+        // stored verbatim as it used to be.
         if let Some(v) = &self.z_order {
-            layout.z_order = v.clone();
+            layout.z_order = ::persistence::normalize_canvas_object_refs(v);
         }
         if let Some(v) = &self.locked {
-            layout.locked = v.clone();
+            layout.locked = ::persistence::normalize_canvas_object_refs(v);
         }
         layout.validate()?;
         Ok(layout)

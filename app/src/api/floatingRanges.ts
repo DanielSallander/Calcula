@@ -52,7 +52,11 @@ export interface FloatingRangeInfo {
   showRowHeaders: boolean;
   /** The FR's name — lives in the SHARED sheet namespace (=Name!A1 works). */
   name: string;
-  /** Live index of the backing sheet (for event filtering ONLY, never addressing). */
+  /** Live index of the backing sheet. For event filtering and for ONE read-only
+   *  query -- the used-range read that sizes a range's scrollable content extent
+   *  (FloatingRange/lib/frExtent.ts) -- never for addressing a cell: reads and
+   *  writes are id-addressed. A momentarily stale index can therefore only
+   *  mis-size the scroll range, never show or write the wrong cells. */
   backingSheetIndex: number;
   /** Live index of the host sheet (for region filtering by active sheet). */
   hostSheetIndex: number;

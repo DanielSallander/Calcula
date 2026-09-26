@@ -757,3 +757,99 @@ fn a_script_change_and_a_cell_edit_do_not_collide() {
     let reversed = calp::merge::analyze(&yours, &theirs);
     assert_eq!(reversed.verdict, calp::merge::MergeVerdict::CanMerge);
 }
+
+/// A floating range whose object row moved between versions, plus a timeline
+/// added in the second version. Both families have their own artifacts now, so
+/// both must be named in the diff by their own domain -- never fall through to
+/// the "artifact" catch-all ("Other application files").
+#[test]
+fn a_moved_floating_range_and_an_added_timeline_are_reported_by_domain() {
+    let f = Fixture::new();
+    let entity = || identity::EntityId::from_bytes(identity::generate_uuid_v7());
+    let fr_id = entity();
+    let pivot_id = entity();
+    let timeline_id = entity();
+    let floating_at = |x: f64, host: identity::SheetId, backing: identity::SheetId| {
+        persistence::SavedFloatingRange {
+            id: fr_id,
+            backing_sheet_id: backing,
+            host_sheet_id: host,
+            x,
+            y: 32.0,
+            rotation: 0.0,
+            pin_to_grid: false,
+            row_count: 5,
+            col_count: 2,
+            col_widths: [(0u32, 110.0), (1, 70.0), (2, 90.0)].into_iter().collect(),
+            row_heights: HashMap::new(),
+            show_title: true,
+            show_column_headers: true,
+            show_row_headers: true,
+        }
+    };
+    let pivot = persistence::SavedPivotDefinition {
+        id: pivot_id,
+        source_type: "grid".to_string(),
+        source_sheet_index: Some(1),
+        definition: serde_json::json!({ "name": "ByMonth", "destination_sheet": "Dashboard" }),
+    };
+
+    // v1: the "Data" sheet doubles as the floating range's backing sheet
+    // (publish_version ships both sheets).
+    let mut wb = base_workbook();
+    let (host, backing) = (wb.sheets[0].id, wb.sheets[1].id);
+    wb.floating_ranges = vec![floating_at(10.0, host, backing)];
+    wb.pivot_definitions = vec![pivot.clone()];
+    f.publish(&wb, SemVer::new(1, 0, 0), PushMode::CreateNew);
+
+    // v1.1: the SAME range, moved; and a timeline that did not exist before.
+    let mut v2 = base_workbook();
+    v2.sheets[0].id = host;
+    v2.sheets[1].id = backing;
+    v2.floating_ranges = vec![floating_at(250.0, host, backing)];
+    v2.pivot_definitions = vec![pivot];
+    v2.timeline_slicers = vec![persistence::SavedTimelineSlicer {
+        id: timeline_id,
+        name: "Dates".to_string(),
+        header_text: None,
+        sheet_id: host,
+        x: 0.0,
+        y: 300.0,
+        width: 400.0,
+        height: 110.0,
+        source_type: persistence::SavedTimelineSourceType::Pivot,
+        source_id: pivot_id,
+        field_name: "When".to_string(),
+        level: persistence::SavedTimelineLevel::Months,
+        selection_start: None,
+        selection_end: None,
+        show_header: true,
+        show_level_selector: true,
+        show_scrollbar: true,
+        style_preset: "TimelineStyleLight1".to_string(),
+        connected_pivot_ids: Vec::new(),
+    }];
+    f.publish(
+        &v2,
+        SemVer::new(1, 1, 0),
+        PushMode::Update { expected_base: SemVer::new(1, 0, 0) },
+    );
+
+    let diff = f.diff("1.0.0", "1.1.0");
+    let moved: Vec<_> = diff.objects.iter().filter(|o| o.domain == "floatingRange").collect();
+    assert_eq!(moved.len(), 1, "one range, one row: {:#?}", diff.objects);
+    assert_eq!(moved[0].change, "modified");
+    assert_eq!(moved[0].id, fr_id.to_string(), "keyed by the range's stable id");
+    assert_eq!(moved[0].artifact_path.as_deref(), Some("floating_ranges.json"));
+
+    let added: Vec<_> = diff.objects.iter().filter(|o| o.domain == "timelineSlicer").collect();
+    assert_eq!(added.len(), 1, "{:#?}", diff.objects);
+    assert_eq!(added[0].change, "added");
+    assert_eq!(added[0].name, "Dates");
+
+    assert!(
+        !diff.objects.iter().any(|o| o.domain == "artifact"),
+        "nothing may fall through to the catch-all: {:#?}",
+        diff.objects
+    );
+}

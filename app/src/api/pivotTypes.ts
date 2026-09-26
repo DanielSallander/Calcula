@@ -99,6 +99,22 @@ export type ReportLayout = "compact" | "outline" | "tabular";
 /** Where to place multiple value fields */
 export type ValuesPosition = "columns" | "rows";
 
+/**
+ * The designer-sized box a CANVAS pivot is shown in (logical px on the canvas
+ * page). A canvas pivot is a real pivot written into the canvas's hidden grid;
+ * the frame is where its windowed, scrolling view sits. Absent on a worksheet
+ * pivot. Persisted with the definition (`canvas_frame`), so it travels in
+ * .cala and .calp unchanged.
+ */
+export interface CanvasFrameConfig {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Keep the header rows/columns fixed while the body scrolls. */
+  frozenHeaders?: boolean;
+}
+
 /** Request to create a new pivot table */
 export interface CreatePivotRequest {
   /** Source range in A1 notation (e.g., "A1:D100") */
@@ -115,6 +131,13 @@ export interface CreatePivotRequest {
   name?: string;
   /** Optional: source table name (for table-backed pivots) */
   sourceTableName?: string;
+  /**
+   * REQUIRED when the destination is a canvas sheet (refused otherwise), and
+   * refused when it is a worksheet. On a canvas `destinationCell` is ignored:
+   * the backend allocates the hidden-grid anchor itself, and `sourceSheet`
+   * must name a non-canvas sheet explicitly.
+   */
+  canvasFrame?: CanvasFrameConfig;
 }
 
 /** Field configuration for row/column areas */
@@ -588,6 +611,8 @@ export interface CreatePivotFromBiModelRequest {
   name?: string;
   /** The connection ID to use for this BI pivot. */
   connectionId: string;
+  /** Same rule as `CreatePivotRequest.canvasFrame`. */
+  canvasFrame?: CanvasFrameConfig;
 }
 
 /** Request to update BI pivot field assignments */
@@ -637,6 +662,8 @@ export interface PivotRegionData {
   endRow: number;
   endCol: number;
   isEmpty: boolean;
+  /** Present only for a canvas pivot: the box its view is shown in. */
+  canvasFrame?: CanvasFrameConfig;
 }
 
 /** Result of resolving a pivot cell into GETPIVOTDATA formula arguments. */
@@ -873,6 +900,11 @@ export interface UpdatePivotPropertiesRequest {
   enableDataValueEditing?: boolean;
   refreshOnOpen?: boolean;
   useCustomSortLists?: boolean;
+  /**
+   * Move/resize a CANVAS pivot's box (undoable). Refused for a worksheet pivot:
+   * a pivot never converts between grid and canvas.
+   */
+  canvasFrame?: CanvasFrameConfig;
 }
 
 /** Request to change pivot data source range */

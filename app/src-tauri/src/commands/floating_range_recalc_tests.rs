@@ -164,7 +164,7 @@ fn writes_outside_the_window_are_refused_but_cells_beyond_it_still_feed_formulas
         &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters,
         info.range.id, 1, 0, "1".to_string(), None,
     )
-    .expect_err("row 1 is outside a 1x1 window");
+    .expect_err("row 1 is outside a 1x1 window over an empty sheet");
 
     // Grow, write B2, shrink back — the cell stays real and feeds formulas.
     grow(&wb, info.range.id, 2, 2);
@@ -176,6 +176,32 @@ fn writes_outside_the_window_are_refused_but_cells_beyond_it_still_feed_formulas
         9.0,
         "shrinking the window must hide, never delete"
     );
+}
+
+#[test]
+fn a_hidden_cell_the_reader_can_scroll_to_can_be_edited_but_nothing_beyond_the_content() {
+    // M7: a floating range scrolls over its CONTENT extent (the window grown to
+    // the backing sheet's used range), so the write door must be that extent:
+    // a cell hidden by a shrink is reachable by the wheel and must be editable.
+    let wb = Workbook::new(1);
+    let info = create(&wb, "Float1");
+    grow(&wb, info.range.id, 3, 3);
+    set_fr(&wb, info.range.id, 2, 2, "5");
+    grow(&wb, info.range.id, 1, 1);
+
+    // Inside the content extent (3x3) but outside the 1x1 window: accepted.
+    set_fr(&wb, info.range.id, 1, 1, "7");
+    wb.set(0, 0, "=Float1!B2");
+    assert_eq!(number(&wb, 0, 0, 0), 7.0, "a scrolled-to hidden cell is writable");
+
+    // Beyond both the window and every stored cell: refused, nothing written.
+    let refused = crate::floating_range::update_floating_range_cell_inner(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.pane, &wb.filters,
+        info.range.id, 3, 0, "1".to_string(), None,
+    );
+    assert!(refused.is_err(), "row 3 is beyond a 3x3 content extent: {refused:?}");
+    wb.set(0, 1, "=Float1!A4");
+    assert_eq!(number(&wb, 0, 0, 1), 0.0, "the refused write left nothing behind");
 }
 
 // ---------------------------------------------------------------------------

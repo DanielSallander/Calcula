@@ -3,7 +3,7 @@
 // CONTEXT: Uses the API facade (src/api/backend.ts) for sandboxed backend access.
 
 import { controlsBackend } from "./controlsBackend";
-import type { ControlMetadata, ControlEntry } from "./types";
+import type { ControlMetadata, ControlEntry, ControlGeometryChange } from "./types";
 
 // ============================================================================
 // Control Metadata CRUD
@@ -69,6 +69,22 @@ export async function removeControlMetadata(
     row,
     col,
   });
+}
+
+/**
+ * Move and/or resize several floating controls as ONE undoable step ("Move
+ * control"), joining an undo transaction that is already open -- so a
+ * cross-family arrange wrapped in begin/commit stays one Ctrl+Z. Replaces the
+ * 4-6 non-undoable `set_control_property` calls per control that a move used
+ * to cost. The whole batch is refused, with nothing written, if any change is
+ * malformed, names a control that does not exist, or targets a protected sheet
+ * that does not allow editing objects. Resolves to how many controls actually
+ * changed (0 = nothing to do: no dirty flag, no undo step).
+ */
+export async function setControlGeometry(
+  changes: ControlGeometryChange[],
+): Promise<number> {
+  return controlsBackend.invoke<number>("set_control_geometry", { changes });
 }
 
 /** Get all controls for a specific sheet. */

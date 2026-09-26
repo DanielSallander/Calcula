@@ -3555,7 +3555,7 @@ pub fn evaluate_formula_with_pivot(
     eval_ctx: engine::EvalContext,
     style_registry: Option<&engine::StyleRegistry>,
     user_files: &HashMap<String, Vec<u8>>,
-    pivot_data_fn: Option<&dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>>,
     gather_fn: Option<&dyn Fn(&str) -> engine::GatherRegionData>,
 ) -> CellValue {
     evaluate_formula_raw_with_files_and_pivot(
@@ -3615,7 +3615,7 @@ pub fn evaluate_formula_raw_with_files_and_pivot(
     eval_ctx: engine::EvalContext,
     style_registry: Option<&engine::StyleRegistry>,
     user_files: &HashMap<String, Vec<u8>>,
-    pivot_data_fn: Option<&dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    pivot_data_fn: Option<&dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>>,
     gather_fn: Option<&dyn Fn(&str) -> engine::GatherRegionData>,
     udf_fn: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
 ) -> EvalResult {
@@ -5601,6 +5601,7 @@ pub fn run() {
             controls::set_control_property,
             controls::set_control_metadata,
             controls::remove_control_metadata,
+            controls::set_control_geometry,
             controls::get_all_controls,
             controls::list_controls_referencing_macro,
             controls::resolve_control_properties,

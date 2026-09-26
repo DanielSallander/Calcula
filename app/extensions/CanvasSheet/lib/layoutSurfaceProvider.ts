@@ -16,9 +16,15 @@
 //          would leave the charts on a new canvas immovable while the same
 //          chart on a worksheet moves freely. (Floating ranges still follow
 //          design mode through their own region data, as they do everywhere.)
+//
+//          LOCKED. An object whose ref is in the layout's `locked` list is
+//          selectable but neither movable nor resizable (lib/canvasLocks.ts);
+//          Core asks through `isLocked`.
 
 import type { LayoutSurface, LayoutSurfaceProvider } from "@api/layoutSurface";
+import type { GridRegion } from "@api/gridOverlays";
 import { canvasAt, isSubscribedCanvas } from "./canvasSheetStore";
+import { isLockedOnLayout } from "./canvasLocks";
 
 /** The layout surface of sheet `index`, or null for a worksheet. Pure over the store. */
 export function canvasLayoutSurface(index: number): LayoutSurface | null {
@@ -31,6 +37,7 @@ export function canvasLayoutSurface(index: number): LayoutSurface | null {
     showGrid: layout.showGrid,
     page: { width: layout.pageWidth, height: layout.pageHeight },
     editable: !isSubscribedCanvas(index),
+    isLocked: (region: GridRegion) => isLockedOnLayout(layout, region),
   };
 }
 

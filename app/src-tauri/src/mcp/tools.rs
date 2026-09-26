@@ -1059,6 +1059,9 @@ pub fn create_pivot(
         has_headers: Some(has_headers),
         name: name.map(|s| s.to_string()),
         source_table_name: None,
+        // The MCP tool has no frame parameter yet, so a canvas destination is
+        // refused by the create door with a message that says a frame is needed.
+        canvas_frame: None,
     };
 
     let response = crate::pivot::commands::create_pivot_inner(

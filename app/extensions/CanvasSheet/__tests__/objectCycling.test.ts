@@ -2,7 +2,8 @@
 // PURPOSE: The canvas keyboard: Tab / Shift+Tab step through the page's
 //          objects in paint order and wrap; the guards keep the keys away from
 //          worksheets, from an empty canvas and from an inner selection that
-//          owns the key; a plain press on the empty page deselects everything.
+//          owns the key. (A press on the empty page is the marquee's since M8:
+//          __tests__/marquee.test.ts pins what it does.)
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -19,11 +20,9 @@ vi.mock("@api/keybindings", async (importOriginal) => ({
 
 import {
   escapeApplies,
-  handleBackgroundPointerDown,
   stepCanvasObject,
   stepObject,
   tabApplies,
-  BACKGROUND_POINTER_DOWN_EVENT,
 } from "../lib/objectCycling";
 import {
   registerObjectSelectionProvider,
@@ -119,26 +118,15 @@ describe("the guards", () => {
   });
 });
 
-describe("a press on the empty page", () => {
-  const press = (detail: Record<string, unknown>) =>
-    new CustomEvent(BACKGROUND_POINTER_DOWN_EVENT, { detail });
-
-  it("a plain left press deselects everything", () => {
+describe("Tab from a multi-selection", () => {
+  it("steps to ONE object and drops the rest of the set", async () => {
+    const { addToObjectSelection, getSelectedObjectRegions } = await import("@api/objectSelection");
+    const a = region("a"), b = region("b"), c = region("c");
+    setGridRegions([a, b, c]);
     selected = "a";
-    handleBackgroundPointerDown(press({ button: 0 }));
-    expect(selected).toBeNull();
-  });
-  it("a right press, or one with Shift/Ctrl, leaves the selection alone", () => {
-    selected = "a";
-    handleBackgroundPointerDown(press({ button: 2 }));
-    handleBackgroundPointerDown(press({ button: 0, shiftKey: true }));
-    handleBackgroundPointerDown(press({ button: 0, ctrlKey: true }));
-    expect(selected).toBe("a");
-  });
-  it("does nothing on a worksheet", () => {
-    selected = "a";
-    surface = "grid";
-    handleBackgroundPointerDown(press({ button: 0 }));
-    expect(selected).toBe("a");
+    addToObjectSelection(b); // the chart double holds one: b is held by the set
+    expect(getSelectedObjectRegions().map((r) => r.id)).toEqual(["a", "b"]);
+    stepCanvasObject(1);
+    expect(getSelectedObjectRegions().map((r) => r.id)).toEqual(["b"]);
   });
 });

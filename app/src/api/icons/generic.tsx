@@ -782,6 +782,104 @@ function Success({ size }: RibbonIconProps): React.ReactElement {
 }
 
 // ============================================================================
+// Arrange: stacking order, alignment and distribution of objects
+// ============================================================================
+//
+// Two squares that overlap. The ACCENT one is the object the command moves;
+// where one square covers another, the covered one is CUT (a 1.2 gap around the
+// one on top), so the drawing says which is in front by shape, not by paint
+// order -- a translucent SOFT square laid over another would read as a darker
+// knot, and the accent must keep a pixel of background from every grey. Every
+// straight edge is on the 1.2 grid (whole pixels at 20px).
+
+/** The bottom-right square with the top-left 15.6 x 15.6 cut away: what is
+ *  left of a 9.6..21.6 square behind a 2.4..14.4 one, with the 1.2 gap. */
+const LOWER_RIGHT_L =
+  "M15.6 9.6H19.2a2.4 2.4 0 0 1 2.4 2.4V19.2a2.4 2.4 0 0 1-2.4 2.4H12a2.4 2.4 0 0 1-2.4-2.4V15.6H15.6Z";
+
+/** Bring Forward: the accent square, whole, in front of one grey square. */
+function BringForward({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <path d={LOWER_RIGHT_L} fill={SOFT} />
+      <rect x="2.4" y="2.4" width="12" height="12" rx="2.4" fill={ACCENT} />
+    </IconFrame>
+  );
+}
+
+/** Send Backward: the accent square behind one grey square (only its
+ *  uncovered L shows). The mirror of Bring Forward. */
+function SendBackward({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <rect x="2.4" y="2.4" width="12" height="12" rx="2.4" fill={SOFT} />
+      <path d={LOWER_RIGHT_L} fill={ACCENT} />
+    </IconFrame>
+  );
+}
+
+/** Bring to Front: the accent square, whole, in front of TWO grey squares
+ *  (their corners show top-left and bottom-right, 3.6 wide arms). */
+function BringToFront({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <path d="M4.8 2.4H12V6H6V12H4.8a2.4 2.4 0 0 1-2.4-2.4V4.8a2.4 2.4 0 0 1 2.4-2.4Z" fill={SOFT} />
+      <path d="M18 12H19.2a2.4 2.4 0 0 1 2.4 2.4V19.2a2.4 2.4 0 0 1-2.4 2.4H12V18H18Z" fill={SOFT} />
+      <rect x="7.2" y="7.2" width="9.6" height="9.6" rx="2.4" fill={ACCENT} />
+    </IconFrame>
+  );
+}
+
+/** Send to Back: two grey squares, whole, in front of the accent one -- only
+ *  its two uncovered corners show between them. */
+function SendToBack({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <rect x="2.4" y="2.4" width="9.6" height="9.6" rx="2.4" fill={SOFT} />
+      <rect x="12" y="12" width="9.6" height="9.6" rx="2.4" fill={SOFT} />
+      <rect x="13.2" y="6" width="4.8" height="4.8" rx="1.4" fill={ACCENT} />
+      <rect x="6" y="13.2" width="4.8" height="4.8" rx="1.4" fill={ACCENT} />
+    </IconFrame>
+  );
+}
+
+/** Align objects: an accent edge with two grey objects of different widths
+ *  lined up against it (a 1.2 gap). Taller than the text-alignment rows, so
+ *  the two read as objects rather than lines of text. */
+function AlignObjects({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <rect x="2.4" y="2.4" width="2.4" height="19.2" rx="1.2" fill={ACCENT} />
+      <rect x="6" y="3.6" width="15.6" height="6" rx="2.4" fill={SOFT} />
+      <rect x="6" y="14.4" width="9.6" height="6" rx="2.4" fill={SOFT} />
+    </IconFrame>
+  );
+}
+
+/** Distribute horizontally: the two outer objects stay, the accent one sits
+ *  between them with EQUAL gaps (2.4 each). */
+function DistributeHorizontal({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <rect x="2.4" y="2.4" width="4.8" height="19.2" rx="2.4" fill={SOFT} />
+      <rect x="9.6" y="6" width="4.8" height="12" rx="2.4" fill={ACCENT} />
+      <rect x="16.8" y="2.4" width="4.8" height="19.2" rx="2.4" fill={SOFT} />
+    </IconFrame>
+  );
+}
+
+/** Distribute vertically: Distribute horizontally, turned a quarter. */
+function DistributeVertical({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <rect x="2.4" y="2.4" width="19.2" height="4.8" rx="2.4" fill={SOFT} />
+      <rect x="6" y="9.6" width="12" height="4.8" rx="2.4" fill={ACCENT} />
+      <rect x="2.4" y="16.8" width="19.2" height="4.8" rx="2.4" fill={SOFT} />
+    </IconFrame>
+  );
+}
+
+// ============================================================================
 // Group export
 // ============================================================================
 
@@ -839,6 +937,13 @@ export const GENERIC_ICONS = {
   Folder,
   Save,
   AddIn,
+  BringForward,
+  SendBackward,
+  BringToFront,
+  SendToBack,
+  AlignObjects,
+  DistributeHorizontal,
+  DistributeVertical,
 } as const;
 /* eslint-enable @typescript-eslint/naming-convention */
 

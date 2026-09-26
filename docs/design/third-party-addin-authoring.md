@@ -907,7 +907,7 @@ renamed or removed, so a token that resolves today resolves in every later build
 example add-in's `"Percent"` (`docs/examples/addin-tax-tools/tax-tools.js`) is one of the 34 keys
 frozen since before this redesign.
 
-### 8.3 The token vocabulary (170 keys, 2026-09-23)
+### 8.3 The token vocabulary (177 keys, 2026-09-25)
 
 Authoritative list and drawing rules: `docs/design/ICONS.md` §4. By family:
 
@@ -931,6 +931,7 @@ Authoritative list and drawing rules: `docs/design/ICONS.md` §4. By family:
 | **Status** | Info, Warn, Error, Success |
 | **Structure** | Group, More, MoreHorizontal, Close, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Sidebar, Ribbon, Panel, Layout, Resize |
 | **Things** | Settings, Text, Pointer, Keyboard, Image, Lock, Eye, Calendar, Clock, Script, Model, Controls, Database, Folder, AddIn |
+| **Arrange** | BringForward, SendBackward, BringToFront, SendToBack, AlignObjects, DistributeHorizontal, DistributeVertical |
 
 Tokens are case-sensitive PascalCase: `"Refresh"` resolves, `"refresh"` falls back to the generic
 glyph. Pick the icon for what the button DOES (a verb) or the object it acts on, and prefer a verb

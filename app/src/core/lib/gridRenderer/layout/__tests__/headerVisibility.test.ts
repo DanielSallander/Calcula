@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import {
   resolveHeaderSizes,
   effectiveGridConfig,
+  paintedDisplayHeadings,
   rowHeaderGutter,
   colHeaderGutter,
   FALLBACK_ROW_HEADER_WIDTH,
@@ -402,5 +403,54 @@ describe("Spreadsheet applies the header rule once, on the way to its consumers"
     // `config: rawConfig` is the only way the stored config is taken out.
     expect(src).toMatch(/config: rawConfig,/);
     expect(src).not.toMatch(/^\s{4}config,\s*$/m);
+  });
+
+  it("takes the headings flag from paintedDisplayHeadings (a canvas never shows headings)", () => {
+    const src = read(SPREADSHEET);
+    expect(src).toContain("paintedDisplayHeadings(surface, gridState.displayHeadings)");
+  });
+});
+
+// ===========================================================================
+// THE MOUSE LAYER -- the handlers do NOT come from Spreadsheet's `config`
+// line: they are built in useSpreadsheet -> useSpreadsheetSelection ->
+// useMouseSelection from the grid STATE. That path read the stored config, so
+// on a canvas every floating object's clickable rectangle sat one header away
+// from its paint (a press near a pivot box's top edge landed on the empty page).
+// ===========================================================================
+
+describe("the mouse layer hit-tests against the painted gutters", () => {
+  const SELECTION = "../../../../components/Spreadsheet/useSpreadsheetSelection.ts";
+  const code = () =>
+    read(SELECTION)
+      .split("\n")
+      .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+      .join("\n");
+
+  it("derives its config through the painter's rule", () => {
+    expect(code()).toMatch(
+      /const config = useMemo\(\s*\(\) => effectiveGridConfig\(storedConfig, paintedDisplayHeadings\(state\.surface, state\.displayHeadings\)\)/,
+    );
+  });
+
+  it("never reads the stored config for a hit test", () => {
+    expect(code()).not.toContain("state.config");
+    expect(code()).toMatch(/config: storedConfig,/);
+  });
+});
+
+describe("paintedDisplayHeadings", () => {
+  it("a canvas never shows headings; any other surface shows them as stored", () => {
+    expect(paintedDisplayHeadings("canvas", true)).toBe(false);
+    expect(paintedDisplayHeadings("canvas", undefined)).toBe(false);
+    expect(paintedDisplayHeadings("grid", true)).toBe(true);
+    expect(paintedDisplayHeadings("grid", false)).toBe(false);
+    expect(paintedDisplayHeadings(undefined, undefined)).toBe(undefined);
+  });
+
+  it("collapses the gutters the mouse layer hit-tests with on a canvas", () => {
+    const stored = { rowHeaderWidth: 22, colHeaderHeight: 20 } as unknown as Parameters<typeof effectiveGridConfig>[0];
+    const hit = effectiveGridConfig(stored, paintedDisplayHeadings("canvas", true));
+    expect([hit.rowHeaderWidth, hit.colHeaderHeight]).toEqual([0, 0]);
   });
 });

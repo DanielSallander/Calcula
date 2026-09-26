@@ -260,9 +260,22 @@ pub fn update_slicer(
     Ok(slicer.clone())
 }
 
-/// Update slicer position and size (called after drag/resize).
+/// Update slicer position and size (called after drag/resize, and by a
+/// cross-family arrange).
+///
+/// UNDOABLE, and a MEMBER of an open transaction: it records the existing
+/// full-struct "slicer" restore through the guarded join, so an arrange that
+/// moves a slicer, a chart and a timeline inside one `begin_undo_transaction`
+/// is one Ctrl+Z. It used to record nothing -- dragging a slicer was invisible
+/// to undo, which skipped straight past it to the user's previous action.
+///
+/// Gated like a chart move (`editObjects`), and the effect is minted only after
+/// every refusal (unknown id, protected sheet) and only when a value actually
+/// changes, so a refused or no-op call leaves the document clean and the undo
+/// stack untouched.
 #[tauri::command]
 pub fn update_slicer_position(
+    state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
@@ -271,16 +284,47 @@ pub fn update_slicer_position(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut slicers = slicer_state.slicers.write(&effect).unwrap();
-    let slicer = slicers
-        .get_mut(&slicer_id)
-        .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+    update_slicer_position_core(&state, &file_state, &slicer_state, slicer_id, x, y, width, height)
+}
 
-    slicer.x = x;
-    slicer.y = y;
-    slicer.width = width;
-    slicer.height = height;
+/// [`update_slicer_position`] over plain references, for the unit tier.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_slicer_position_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    slicer_state: &SlicerState,
+    slicer_id: identity::EntityId,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    // Resolve, gate and decide under ONE hold of the store (`lock_pending`),
+    // so the pre-edit clone that becomes the undo payload is exactly what the
+    // write replaces. The protection read is a leaf lock taken under it.
+    let pending = slicer_state.slicers.lock_pending().map_err(|e| e.to_string())?;
+    let before = pending
+        .get(&slicer_id)
+        .cloned()
+        .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+    crate::protection::check_sheet_action(state, before.sheet_index, "editObjects", "move or resize a slicer")?;
+    if before.x == x && before.y == y && before.width == width && before.height == height {
+        // Nothing moved: no dirty flag, no Ctrl+Z step that restores itself.
+        return Ok(());
+    }
+
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    {
+        let mut slicers = pending.authorize(&effect);
+        if let Some(slicer) = slicers.get_mut(&slicer_id) {
+            slicer.x = x;
+            slicer.y = y;
+            slicer.width = width;
+            slicer.height = height;
+        }
+    }
+    // The store guard is dropped before the undo stack is taken (never both).
+    crate::undo_commands::record_slicer_undo(state, slicer_id, before, "Move slicer");
     Ok(())
 }
 

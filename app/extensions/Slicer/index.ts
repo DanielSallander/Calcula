@@ -51,13 +51,16 @@ import {
   getAllSlicers,
   createSlicerAsync,
   deleteSlicerAsync,
-  updateSlicerPositionAsync,
+  commitSlicerGeometryAsync,
   updateSlicerSelectionAsync,
   getCachedItems,
   updateCachedSlicerPosition,
   updateCachedSlicerBounds,
   refreshSlicerItems,
+  type SlicerGeometryWrite,
 } from "./lib/slicerStore";
+import { registerObjectGeometryProvider } from "@api/objectGeometry";
+import { createSlicerGeometryProvider } from "./lib/slicerGeometry";
 
 import {
   renderSlicer,
@@ -78,6 +81,7 @@ import {
   takePendingSlicerClick,
 } from "./lib/slicerPendingClick";
 import { registerSlicerObjectSelection } from "./lib/slicerObjectSelection";
+import { slicerAtCanvasPoint, slicerCanvasBounds } from "./lib/slicerCanvasGeometry";
 
 // ============================================================================
 // Module State
@@ -182,6 +186,12 @@ function activate(context: ExtensionContext): void {
   // below, which arms a pending click the next mouseup anywhere would complete.
   cleanupFunctions.push(registerSlicerObjectSelection());
 
+  // Move / resize slicers WITHOUT a pointer gesture (@api/objectGeometry): the
+  // canvas's align, distribute, nudge and group drag.
+  cleanupFunctions.push(
+    registerObjectGeometryProvider(createSlicerGeometryProvider({ afterCommit: () => broadcastSelectedSlicers() })),
+  );
+
   // -----------------------------------------------------------------------
   // Floating object events (selection, move, resize)
   // -----------------------------------------------------------------------
@@ -249,13 +259,18 @@ function activate(context: ExtensionContext): void {
     const primaryId = detail.data?.slicerId as string;
     if (primaryId == null) return;
 
+    // Every slicer this drag moved, persisted as ONE undo step (a canvas group
+    // drag's open transaction is joined, so the whole gesture stays one step).
+    // A refusal (a protected sheet) puts the slicers back where the workbook
+    // has them and says so once -- never a moved-looking slicer the backend
+    // refused.
+    const writes: SlicerGeometryWrite[] = [];
     const primaryStart = dragStartPositions?.get(primaryId);
     if (!primaryStart) {
       // Single slicer move (not multi-selected)
       const slicer = getSlicerById(primaryId);
       if (slicer) {
-        updateSlicerPositionAsync(primaryId, detail.x, detail.y, slicer.width, slicer.height)
-          .catch(console.error);
+        writes.push({ slicerId: primaryId, x: detail.x, y: detail.y, width: slicer.width, height: slicer.height });
       }
     } else {
       // Multi-move: compute delta from primary slicer and apply to all selected
@@ -267,12 +282,15 @@ function activate(context: ExtensionContext): void {
         if (!slicer) continue;
         const newX = Math.max(0, startPos.x + dx);
         const newY = Math.max(0, startPos.y + dy);
-        updateSlicerPositionAsync(id, newX, newY, slicer.width, slicer.height)
-          .catch(console.error);
+        writes.push({ slicerId: id, x: newX, y: newY, width: slicer.width, height: slicer.height });
       }
     }
 
     dragStartPositions = null;
+    void commitSlicerGeometryAsync(writes, writes.length > 1 ? "Move Slicers" : "Move Slicer").then(() => {
+      // Re-broadcast so the ribbon tab picks up final (or reverted) positions
+      broadcastSelectedSlicers();
+    });
     // Re-broadcast so the ribbon tab picks up final positions
     broadcastSelectedSlicers();
   };
@@ -339,13 +357,10 @@ function activate(context: ExtensionContext): void {
     const slicerId = detail.data?.slicerId as string;
     if (slicerId == null) return;
 
-    updateSlicerPositionAsync(
-      slicerId,
-      detail.x,
-      detail.y,
-      detail.width,
-      detail.height,
-    ).catch(console.error);
+    void commitSlicerGeometryAsync(
+      [{ slicerId, x: detail.x, y: detail.y, width: detail.width, height: detail.height }],
+      "Resize Slicer",
+    );
   };
   window.addEventListener("floatingObject:resizeComplete", handleResizeComplete);
   cleanupFunctions.push(() => {
@@ -429,35 +444,21 @@ function activate(context: ExtensionContext): void {
     const canvasX = (e.clientX - rect.left) / zoom;
     const canvasY = (e.clientY - rect.top) / zoom;
 
-    const activeSheet = gridState.sheetContext.activeSheetIndex;
-    const slicers = getAllSlicers().filter((s) => s.sheetIndex === activeSheet);
-    const scrollX = gridState.viewport.scrollX;
-    const scrollY = gridState.viewport.scrollY;
-    const headerWidth = gridState.config.rowHeaderWidth;
-    const headerHeight = gridState.config.colHeaderHeight;
+    // The PAINTED gutters, and the topmost object decides: a slicer covered by
+    // another object does not scroll behind it (lib/slicerCanvasGeometry.ts).
+    const slicer = slicerAtCanvasPoint(canvasX, canvasY);
+    if (!slicer) return;
 
-    for (let i = slicers.length - 1; i >= 0; i--) {
-      const slicer = slicers[i];
-      const bx = slicer.x - scrollX + headerWidth;
-      const by = slicer.y - scrollY + headerHeight;
+    // Only scroll if the slicer has overflowing content
+    const maxScroll = getMaxScrollOffset(slicer.id);
+    if (maxScroll <= 0) return;
 
-      if (
-        canvasX >= bx && canvasX <= bx + slicer.width &&
-        canvasY >= by && canvasY <= by + slicer.height
-      ) {
-        // Only scroll if the slicer has overflowing content
-        const maxScroll = getMaxScrollOffset(slicer.id);
-        if (maxScroll <= 0) return;
+    e.preventDefault();
+    e.stopPropagation();
 
-        e.preventDefault();
-        e.stopPropagation();
-
-        const current = getScrollOffset(slicer.id);
-        setScrollOffset(slicer.id, current + e.deltaY);
-        requestOverlayRedraw();
-        return;
-      }
-    }
+    const current = getScrollOffset(slicer.id);
+    setScrollOffset(slicer.id, current + e.deltaY);
+    requestOverlayRedraw();
   };
   // Use capture phase so we intercept before the grid scrolls
   window.addEventListener("wheel", handleWheel, { capture: true, passive: false });
@@ -635,22 +636,10 @@ function handleSlicerClickAt(
   const slicer = getSlicerById(slicerId);
   if (!slicer) return;
 
-  // Get scroll offset and header sizes from the grid state snapshot
-  const gridState = getGridStateSnapshot();
-  if (!gridState) return;
-
-  const scrollX = gridState.viewport.scrollX;
-  const scrollY = gridState.viewport.scrollY;
-  const headerWidth = gridState.config.rowHeaderWidth;
-  const headerHeight = gridState.config.colHeaderHeight;
-
-  // Convert slicer sheet-space position to canvas-space
-  const bounds = {
-    x: slicer.x - scrollX + headerWidth,
-    y: slicer.y - scrollY + headerHeight,
-    width: slicer.width,
-    height: slicer.height,
-  };
+  // Slicer sheet-space position -> canvas space, with the gutters Core
+  // PAINTED (a canvas shows none; the stored config still says 22 x 20).
+  const bounds = slicerCanvasBounds(slicer);
+  if (!bounds) return;
 
   const hit = getSlicerHitDetail(canvasX, canvasY, bounds, slicerId);
   if (!hit) return;

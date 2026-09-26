@@ -14,17 +14,19 @@ import {
   registerObjectSelectionProvider,
   type ObjectSelectionProvider,
 } from "@api/objectSelection";
+import { canvasObjectRef } from "@api/canvasSheet";
 import {
   deselectTimeline,
   isTimelineSelected,
   selectTimeline,
 } from "../handlers/selectionHandler";
+import { getTimelineById } from "./timelineSlicerStore";
 
 /** The `GridRegion.type` timelines publish (see timelineSlicerStore). */
 export const TIMELINE_REGION_TYPE = "timeline-slicer";
 
 /** The timeline id a published region carries, or null. */
-function timelineIdOf(region: GridRegion): string | null {
+export function timelineIdOf(region: GridRegion): string | null {
   const id = region.data?.timelineId;
   return typeof id === "string" && id.length > 0 ? id : null;
 }
@@ -51,6 +53,31 @@ export function createTimelineSelectionProvider(): ObjectSelectionProvider {
     deselectAll(): void {
       // No-op (and no repaint) when nothing is selected.
       deselectTimeline();
+    },
+
+    refOf(region: GridRegion) {
+      const id = timelineIdOf(region);
+      return id === null ? null : canvasObjectRef("timelineSlicer", id);
+    },
+
+    // The timeline family holds several (its Ctrl+click set), so a canvas
+    // multi-selection keeps every timeline in it. `selectTimeline(id, true)`
+    // TOGGLES, so it is only called when the answer is a change.
+    addToSelection(region: GridRegion): void {
+      const id = timelineIdOf(region);
+      if (id === null || isTimelineSelected(id)) return;
+      selectTimeline(id, true);
+    },
+
+    removeFromSelection(region: GridRegion): void {
+      const id = timelineIdOf(region);
+      if (id === null || !isTimelineSelected(id)) return;
+      selectTimeline(id, true);
+    },
+
+    labelOf(region: GridRegion): string | null {
+      const id = timelineIdOf(region);
+      return id === null ? null : getTimelineById(id)?.name ?? null;
     },
   };
 }

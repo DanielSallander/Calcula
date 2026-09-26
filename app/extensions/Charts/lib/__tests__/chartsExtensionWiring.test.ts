@@ -120,4 +120,19 @@ describe("the chart context menu does not steal a right-click that is not the ch
     expect(clip).toBeLessThan(body.indexOf("findChartAtCanvasPos("));
     expect(clip).toBeLessThan(body.indexOf("hover?.chartId"));
   });
+
+  it("refuses a right-click where ANOTHER object is on top, before the bounds lookup AND the hover fallback", () => {
+    // `findChartAtCanvasPos` sees only charts, so a chart under a slicer (or a
+    // shape, or a floating grid) answered the right-click through it: the
+    // Chart menu opened for an object the user did not click, alongside the
+    // covering object's own. Core's one stacking order decides (M8), and the
+    // hover fallback must not rescue a refused point either.
+    const body = contextMenuSource();
+    const occluded = body.indexOf("isOccludedAtClientPoint(e.clientX, e.clientY,");
+    expect(occluded, "the chart menu never asks what is on top").toBeGreaterThan(-1);
+    expect(body.slice(occluded, occluded + 200)).toContain('r.type === "chart"');
+    expect(body.slice(occluded, occluded + 300)).toContain("setChartRightClickTarget(null);");
+    expect(occluded).toBeLessThan(body.indexOf("findChartAtCanvasPos("));
+    expect(occluded).toBeLessThan(body.indexOf("hover?.chartId"));
+  });
 });

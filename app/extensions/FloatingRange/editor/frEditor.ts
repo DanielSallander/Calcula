@@ -18,7 +18,7 @@ import {
   overlayGetColHeaderHeight,
   requestOverlayRedraw,
 } from "@api/gridOverlays";
-import { isFormulaExpectingReference } from "@api";
+import { isFormulaExpectingReference, showToast } from "@api";
 import {
   AutocompleteEvents,
   isFormulaAutocompleteVisible,
@@ -39,10 +39,16 @@ import {
   localCellOrigin,
   frColWidth,
   frRowHeight,
+  frRowHdrW,
+  frCellsTop,
+  contentWidth,
+  contentHeight,
+  type FrView,
 } from "../lib/frDimensions";
 import { getLocalSelection, moveLocalSelection } from "../lib/frSelection";
 import { invalidateFrCache } from "../rendering/frRenderer";
 import { buildQualifiedRef } from "../lib/frRefs";
+import { getFrView, ensureFrCellVisible } from "../lib/frView";
 
 // ============================================================================
 // State
@@ -192,6 +198,9 @@ export function openFrEditor(
 
   el.value = initialValue ?? "";
   el.style.display = "block";
+  // A clip left by the previous session's last layout must not trim this one
+  // for the frame before its own layout runs.
+  el.style.clipPath = "";
   el.focus();
   el.setSelectionRange(el.value.length, el.value.length);
 
@@ -291,7 +300,15 @@ export async function commitFrEditor(
   try {
     await updateFloatingRangeCell(st.frId, st.row, st.col, value);
   } catch (err) {
+    // The editor is already gone, so a refused write must not vanish into the
+    // console: the user typed a value and is owed a reason it did not stick.
+    // (Until the backend's write gate follows the content extent, a cell the
+    // user scrolled to beyond the window is one such refusal.)
     console.error("[FloatingRange] Cell commit failed:", err);
+    showToast(
+      `The value could not be written: ${err instanceof Error ? err.message : String(err)}`,
+      { type: "error" },
+    );
   }
   invalidateFrCache(st.frId);
   requestOverlayRedraw();
@@ -307,7 +324,12 @@ export async function commitFrEditor(
           : move === "right"
             ? [0, 1]
             : [0, -1];
-    moveLocalSelection(delta[0], delta[1], false, entry.rows, entry.cols);
+    // Navigation spans the CONTENT extent (M7), and the cell it lands on is
+    // scrolled into view.
+    const view = getFrView(entry);
+    moveLocalSelection(delta[0], delta[1], false, view.rows, view.cols);
+    const moved = getLocalSelection();
+    if (moved) ensureFrCellVisible(entry, moved.endRow, moved.endCol);
     requestOverlayRedraw();
   }
   // A NEW editor session may have opened while the write was in flight
@@ -437,22 +459,53 @@ function handleBlur(): void {
 // ============================================================================
 
 /**
+ * The part of a cell rect that is actually visible: the cell clipped to the
+ * FR's cell VIEWPORT (M7 -- a scrolled cell can sit partly or wholly behind the
+ * sticky headers or past the frame) and to the grid's own cell area. Returned
+ * as insets from each side of the cell, or null when nothing of it shows.
+ * Pure; exported for tests.
+ */
+export function frEditorVisibleInsets(
+  cell: { x: number; y: number; width: number; height: number },
+  viewport: { x: number; y: number; width: number; height: number },
+  gridArea: { x: number; y: number; width: number; height: number },
+): { top: number; right: number; bottom: number; left: number } | null {
+  const left = Math.max(cell.x, viewport.x, gridArea.x);
+  const top = Math.max(cell.y, viewport.y, gridArea.y);
+  const right = Math.min(cell.x + cell.width, viewport.x + viewport.width, gridArea.x + gridArea.width);
+  const bottom = Math.min(cell.y + cell.height, viewport.y + viewport.height, gridArea.y + gridArea.height);
+  if (right <= left || bottom <= top) return null;
+  return {
+    top: top - cell.y,
+    right: cell.x + cell.width - right,
+    bottom: cell.y + cell.height - bottom,
+    left: left - cell.x,
+  };
+}
+
+/**
  * Reposition the textarea over its cell. Called by renderFloatingRange EVERY
  * overlay render frame for the FR that hosts the open editor — logical px from
- * the frame origin, multiplied by zoom for the DOM (InlineEditor precedent),
- * hidden when clipped behind the grid headers or off-canvas. Allocation-light:
- * a handful of style writes per frame.
+ * the frame origin, multiplied by zoom for the DOM (InlineEditor precedent).
+ *
+ * The editor FOLLOWS ITS CELL through a scroll (`view`, the same live view the
+ * frame was painted with), is HIDDEN once the cell has left the FR's cell
+ * viewport (or the grid's cell area) entirely, and is CLIPPED to what still
+ * shows while it is partly out, so a half-scrolled editor never paints over
+ * the frame's sticky headers or outside the frame. Allocation-light: a handful
+ * of style writes per frame.
  */
 export function layoutFrEditorForFrame(
   entry: FloatingRangeEntry,
   frameCanvasX: number,
   frameCanvasY: number,
   overlayCtx: OverlayRenderContext,
+  view?: FrView,
 ): void {
   const st = editorState;
   if (!st || st.frId !== entry.id || !textarea) return;
 
-  const origin = localCellOrigin(entry, st.row, st.col);
+  const origin = localCellOrigin(entry, st.row, st.col, view);
   const cellX = frameCanvasX + origin.x;
   const cellY = frameCanvasY + origin.y;
   const cellW = frColWidth(entry, st.col);
@@ -461,13 +514,23 @@ export function layoutFrEditorForFrame(
   const rowHeaderWidth = overlayGetRowHeaderWidth(overlayCtx);
   const colHeaderHeight = overlayGetColHeaderHeight(overlayCtx);
 
-  const visible =
-    cellX + cellW > rowHeaderWidth &&
-    cellY + cellH > colHeaderHeight &&
-    cellX < overlayCtx.canvasWidth &&
-    cellY < overlayCtx.canvasHeight;
+  const insets = frEditorVisibleInsets(
+    { x: cellX, y: cellY, width: cellW, height: cellH },
+    {
+      x: frameCanvasX + frRowHdrW(entry),
+      y: frameCanvasY + frCellsTop(entry),
+      width: contentWidth(entry),
+      height: contentHeight(entry),
+    },
+    {
+      x: rowHeaderWidth,
+      y: colHeaderHeight,
+      width: overlayCtx.canvasWidth - rowHeaderWidth,
+      height: overlayCtx.canvasHeight - colHeaderHeight,
+    },
+  );
 
-  if (!visible) {
+  if (!insets) {
     textarea.style.display = "none";
     return;
   }
@@ -479,4 +542,8 @@ export function layoutFrEditorForFrame(
   textarea.style.width = `${cellW * zoom}px`;
   textarea.style.height = `${cellH * zoom}px`;
   textarea.style.fontSize = `${11 * zoom}px`;
+  const clipped = insets.top > 0 || insets.right > 0 || insets.bottom > 0 || insets.left > 0;
+  textarea.style.clipPath = clipped
+    ? `inset(${insets.top * zoom}px ${insets.right * zoom}px ${insets.bottom * zoom}px ${insets.left * zoom}px)`
+    : "";
 }

@@ -123,6 +123,19 @@ pub struct PullResult {
     /// local sheet and drops slicers whose sheet wasn't pulled. Empty for
     /// applications published before slicers were carried.
     pub slicers: Vec<SavedSlicer>,
+    /// Timeline slicers carried by the application. `sheet_id` is the
+    /// APPLICATION sheet id (un-remapped, like slicers) and `source_id` the
+    /// application pivot's id; only rows whose sheet was pulled are kept. Empty
+    /// for applications published before timelines travelled.
+    pub timeline_slicers: Vec<persistence::SavedTimelineSlicer>,
+    /// Floating range OBJECT rows carried by the application. `host_sheet_id`
+    /// and `backing_sheet_id` are both APPLICATION sheet ids (un-remapped):
+    /// refresh keeps the OLD local ids rather than the fresh ones this pull
+    /// mints, so only the host's materializer knows the final local sheets.
+    /// Only rows whose host AND backing sheet were both pulled are kept; the
+    /// backing sheet itself arrives in `sheets` with visibility "object".
+    /// Empty for applications published before floating ranges travelled.
+    pub floating_ranges: Vec<persistence::SavedFloatingRange>,
     /// Ribbon filters carried by the application (Wave A). WORKBOOK-scoped; each
     /// carries the publisher's connection uuid plus its stable application
     /// data-source id — the Tauri layer re-binds connection ids onto the
@@ -243,6 +256,46 @@ pub fn resolve_sheet_name_collisions(
         taken_lower.insert(resolved.to_lowercase());
         taken.push(resolved);
     }
+}
+
+/// The visibility value that marks a sheet as a floating range's OBJECT-backed
+/// cell store (the host's `sheets::OBJECT_SHEET_VISIBILITY`).
+pub const OBJECT_SHEET_VISIBILITY: &str = "object";
+
+/// Is this pulled floating-range row STRUCTURALLY sound against the sheets the
+/// pull carries (`visibility_of`: application sheet id -> that sheet's pulled
+/// visibility)?
+///
+/// Three conditions, and each one is a way a malformed row does real damage:
+///
+/// - host and backing are both carried -- a row naming a sheet the caller does
+///   not have can render nothing and address nothing;
+/// - `backing != host` -- a range whose cells ARE its host would edit the sheet
+///   it floats on;
+/// - the backing sheet arrived as an OBJECT sheet and the host as a USER sheet.
+///   The host re-asserts the object marker from the row store after
+///   materializing, so a row naming a VISIBLE sheet as its backing would turn a
+///   tab the subscriber can see into an invisible object sheet -- after the
+///   partition repair, i.e. sitting in the middle of the user prefix -- and a
+///   row hosted on an object sheet floats on a page nobody can open.
+///
+/// A row failing any of them is dropped here, so it never reaches the host. The
+/// host checks the same rule again against the LOCAL sheets it resolved to
+/// (`materialize_pulled_floating_ranges`), because refresh resolves some ids
+/// through sheets this pull did not carry.
+pub fn floating_range_row_is_well_formed(
+    row: &persistence::SavedFloatingRange,
+    visibility_of: &HashMap<SheetId, &str>,
+) -> bool {
+    let (Some(host), Some(backing)) = (
+        visibility_of.get(&row.host_sheet_id),
+        visibility_of.get(&row.backing_sheet_id),
+    ) else {
+        return false;
+    };
+    row.host_sheet_id != row.backing_sheet_id
+        && *backing == OBJECT_SHEET_VISIBILITY
+        && *host != OBJECT_SHEET_VISIBILITY
 }
 
 /// Resolve a verified version manifest's data sources to on-disk artifact
@@ -745,6 +798,39 @@ pub fn pull_with_options(
             Some(bytes) => serde_json::from_slice(&bytes)?,
             None => Vec::new(),
         };
+
+    // Timeline slicers and floating-range object rows: APPLICATION sheet ids,
+    // NOT remapped here (see the `PullResult` fields). Filtered to the sheets
+    // this pull actually materializes, so a row can never name a sheet the
+    // caller does not have: a floating range needs BOTH its host and its
+    // backing sheet. Absent in older applications -> empty.
+    let pulled_package_sheet_ids: std::collections::HashSet<SheetId> =
+        pulled_sheets.iter().map(|p| p.package_sheet_id).collect();
+    let pulled_timeline_slicers: Vec<persistence::SavedTimelineSlicer> =
+        match registry.read_artifact(pkg, ver, "timeline_slicers.json")? {
+            Some(bytes) => {
+                let rows: Vec<persistence::SavedTimelineSlicer> = serde_json::from_slice(&bytes)?;
+                rows.into_iter()
+                    .filter(|t| pulled_package_sheet_ids.contains(&t.sheet_id))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+    let pulled_floating_ranges: Vec<persistence::SavedFloatingRange> =
+        match registry.read_artifact(pkg, ver, "floating_ranges.json")? {
+            Some(bytes) => {
+                let rows: Vec<persistence::SavedFloatingRange> = serde_json::from_slice(&bytes)?;
+                // The pulled sheets' own visibility, as the metadata carried it.
+                let visibility_of: HashMap<SheetId, &str> = pulled_sheets
+                    .iter()
+                    .map(|p| (p.package_sheet_id, p.sheet.visibility.as_str()))
+                    .collect();
+                rows.into_iter()
+                    .filter(|fr| floating_range_row_is_well_formed(fr, &visibility_of))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
     let pulled_ribbon_filters: Vec<SavedRibbonFilter> =
         match registry.read_artifact(pkg, ver, "ribbon_filters.json")? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
@@ -884,6 +970,7 @@ pub fn pull_with_options(
         // landed vs was skipped on collision).
         objects: Vec::new(),
         detached_sheets: Vec::new(),
+        detached_local_sheets: Vec::new(),
         upstream_removed_sheets: Vec::new(),
         extra: HashMap::new(),
     };
@@ -977,6 +1064,8 @@ pub fn pull_with_options(
         pane_controls: pulled_pane_controls,
         custom_objects: pulled_custom_objects,
         slicers: pulled_slicers,
+        timeline_slicers: pulled_timeline_slicers,
+        floating_ranges: pulled_floating_ranges,
         ribbon_filters: pulled_ribbon_filters,
         pivot_layouts: pulled_pivot_layouts,
         theme: pulled_theme,
@@ -1880,6 +1969,274 @@ mod tests {
         assert_eq!(s.connected_sources[0].source_id, connected_pivot_id);
     }
 
+    fn publish_objects_req<'a>(
+        wb: &'a persistence::Workbook,
+        package: &str,
+        sheet_indices: Vec<usize>,
+    ) -> PublishRequest<'a> {
+        PublishRequest {
+            model_writebacks: None,
+            workbook: wb,
+            package_name: package.to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
+            sheet_indices,
+            now: "2026-09-25T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        }
+    }
+
+    fn pull_v1(reg: &LocalWorkspace, dir: &TempDir, prof: &TempDir, package: &str) -> PullResult {
+        let pull_req = PullRequest {
+            package_name: package.to_string(),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
+            now: "2026-09-25T01:00:00Z".to_string(),
+        };
+        pull(reg, &pull_req, &scope_of(dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap()
+    }
+
+    #[test]
+    fn pull_carries_floating_ranges_whose_host_and_backing_both_travel() {
+        // Before this artifact the BACKING sheet travelled and the object row
+        // did not: the subscriber got an orphaned hidden "object" sheet and no
+        // grid on the page. The row now travels with APPLICATION ids (the host
+        // remaps them, as it does for slicers), and only when both of its
+        // sheets did.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook(); // "Dashboard"(0), "Data"(1)
+        let mut backing = Sheet::new("Float1".to_string());
+        backing.visibility = "object".to_string();
+        backing
+            .cells
+            .insert((0, 0), SavedCell::from_cell(&engine::cell::Cell::new_number(7.0)));
+        wb.sheets.push(backing); // 2
+        let host_id = wb.sheets[0].id;
+        let backing_id = wb.sheets[2].id;
+        let fr_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        wb.floating_ranges = vec![persistence::SavedFloatingRange {
+            id: fr_id,
+            backing_sheet_id: backing_id,
+            host_sheet_id: host_id,
+            x: 120.0,
+            y: 48.0,
+            rotation: 0.0,
+            pin_to_grid: false,
+            row_count: 4,
+            col_count: 2,
+            col_widths: [(1u32, 96.0), (0, 140.0), (3, 50.0)].into_iter().collect(),
+            row_heights: [(0u32, 28.0)].into_iter().collect(),
+            show_title: false,
+            show_column_headers: true,
+            show_row_headers: false,
+        }];
+
+        let result = publish::publish(&reg, &publish_objects_req(&wb, "fr-pkg", vec![0, 2]), prof.path()).unwrap();
+        assert_eq!(result.floating_ranges_published, 1);
+        let ver = reg.get_version_manifest("fr-pkg", "1.0.0").unwrap();
+        assert!(ver.artifact_checksums.contains_key("floating_ranges.json"));
+
+        let pulled = pull_v1(&reg, &dir, &prof, "fr-pkg");
+        assert_eq!(pulled.floating_ranges.len(), 1);
+        let fr = &pulled.floating_ranges[0];
+        assert_eq!(fr.id, fr_id);
+        let pulled_ids: Vec<SheetId> = pulled.sheets.iter().map(|p| p.package_sheet_id).collect();
+        assert!(pulled_ids.contains(&fr.host_sheet_id), "host id is a pulled application sheet id");
+        assert!(pulled_ids.contains(&fr.backing_sheet_id), "backing id is a pulled application sheet id");
+        assert_eq!(fr.host_sheet_id, host_id, "APPLICATION ids, not remapped by pull");
+        assert_eq!(fr.backing_sheet_id, backing_id);
+        assert_eq!((fr.x, fr.y, fr.row_count, fr.col_count), (120.0, 48.0, 4, 2));
+        assert_eq!(fr.col_widths.get(&0), Some(&140.0));
+        assert_eq!(fr.col_widths.len(), 3);
+        assert!(!fr.show_title && fr.show_column_headers && !fr.show_row_headers);
+
+        // Its backing sheet arrived as a hidden OBJECT sheet, cells and all.
+        let backing_sheet = pulled
+            .sheets
+            .iter()
+            .find(|p| p.package_sheet_id == backing_id)
+            .expect("the backing sheet travels with its row");
+        assert_eq!(backing_sheet.sheet.visibility, "object");
+        assert!(backing_sheet.sheet.cells.contains_key(&(0, 0)));
+    }
+
+    #[test]
+    fn a_floating_range_without_its_backing_sheet_does_not_travel() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let mut wb = make_test_workbook();
+        let host_id = wb.sheets[0].id;
+        let unpublished_backing = wb.sheets[1].id;
+        wb.floating_ranges = vec![persistence::SavedFloatingRange {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            backing_sheet_id: unpublished_backing,
+            host_sheet_id: host_id,
+            x: 0.0,
+            y: 0.0,
+            rotation: 0.0,
+            pin_to_grid: false,
+            row_count: 1,
+            col_count: 1,
+            col_widths: HashMap::new(),
+            row_heights: HashMap::new(),
+            show_title: true,
+            show_column_headers: true,
+            show_row_headers: true,
+        }];
+        let result = publish::publish(&reg, &publish_objects_req(&wb, "fr-half", vec![0]), prof.path()).unwrap();
+        assert_eq!(result.floating_ranges_published, 0);
+        assert!(reg.read_artifact("fr-half", "1.0.0", "floating_ranges.json").unwrap().is_none());
+        assert!(pull_v1(&reg, &dir, &prof, "fr-half").floating_ranges.is_empty());
+    }
+
+    /// A pulled floating-range row is admitted only when it is STRUCTURALLY
+    /// sound: its backing sheet arrived as an OBJECT sheet, its host as a user
+    /// sheet, and the two differ. Presence alone let a row name a VISIBLE sheet
+    /// as its backing -- and the host re-asserts the object marker from the row
+    /// store, so the subscriber's visible "Data" tab would vanish into an
+    /// object sheet, after the partition repair, in the middle of the tab strip.
+    ///
+    /// SABOTAGE: reduce `floating_range_row_is_well_formed` to the two
+    /// presence checks.
+    #[test]
+    fn a_structurally_malformed_floating_range_row_is_dropped_at_pull() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let mut wb = make_test_workbook(); // "Dashboard"(0), "Data"(1)
+        let mut backing = Sheet::new("Float1".to_string());
+        backing.visibility = OBJECT_SHEET_VISIBILITY.to_string();
+        wb.sheets.push(backing); // 2
+        let mut second_backing = Sheet::new("Float2".to_string());
+        second_backing.visibility = OBJECT_SHEET_VISIBILITY.to_string();
+        wb.sheets.push(second_backing); // 3
+        let (dashboard, data, float1, float2) =
+            (wb.sheets[0].id, wb.sheets[1].id, wb.sheets[2].id, wb.sheets[3].id);
+        let row = |host: SheetId, backing: SheetId| persistence::SavedFloatingRange {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            backing_sheet_id: backing,
+            host_sheet_id: host,
+            x: 0.0,
+            y: 0.0,
+            rotation: 0.0,
+            pin_to_grid: false,
+            row_count: 1,
+            col_count: 1,
+            col_widths: HashMap::new(),
+            row_heights: HashMap::new(),
+            show_title: true,
+            show_column_headers: true,
+            show_row_headers: true,
+        };
+        let good = row(dashboard, float1);
+        let visible_backing = row(dashboard, data);
+        let self_backed = row(float1, float1);
+        let hosted_on_an_object_sheet = row(float1, float2);
+        wb.floating_ranges = vec![
+            good.clone(),
+            visible_backing.clone(),
+            self_backed.clone(),
+            hosted_on_an_object_sheet.clone(),
+        ];
+        let published =
+            publish::publish(&reg, &publish_objects_req(&wb, "fr-shape", vec![0, 1, 2, 3]), prof.path())
+                .unwrap();
+        assert_eq!(
+            published.floating_ranges_published, 4,
+            "precondition: publish ships the malformed rows (it filters by presence \
+             only), so the pull is what has to refuse them"
+        );
+
+        let pulled = pull_v1(&reg, &dir, &prof, "fr-shape");
+        let ids: Vec<identity::EntityId> = pulled.floating_ranges.iter().map(|fr| fr.id).collect();
+        assert_eq!(ids, vec![good.id], "only the well-formed row is admitted: {ids:?}");
+        assert!(!ids.contains(&visible_backing.id), "a VISIBLE backing sheet is refused");
+        assert!(!ids.contains(&self_backed.id), "a range backed by its own host is refused");
+        assert!(
+            !ids.contains(&hosted_on_an_object_sheet.id),
+            "a range floating on an object sheet is refused"
+        );
+    }
+
+    #[test]
+    fn pull_carries_timeline_slicers_filtered_to_published_sheets() {
+        // Timelines were claimed CARRIED and were not: core/calp had no
+        // reference to them at all. A timeline on a published sheet whose pivot
+        // travels now arrives with its APPLICATION sheet id, like a slicer.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook();
+        let published_sheet = wb.sheets[0].id;
+        let unpublished_sheet = wb.sheets[1].id;
+        let pivot = persistence::SavedPivotDefinition {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            source_type: "grid".to_string(),
+            source_sheet_index: Some(0),
+            definition: serde_json::json!({ "name": "ByMonth", "destination_sheet": "Dashboard" }),
+        };
+        let timeline = |name: &str, sheet_id: SheetId| persistence::SavedTimelineSlicer {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: name.to_string(),
+            header_text: Some("Order date".to_string()),
+            sheet_id,
+            x: 30.0,
+            y: 400.0,
+            width: 520.0,
+            height: 130.0,
+            source_type: persistence::SavedTimelineSourceType::Pivot,
+            source_id: pivot.id,
+            field_name: "OrderDate".to_string(),
+            level: persistence::SavedTimelineLevel::Days,
+            selection_start: Some("2026-02-01".to_string()),
+            selection_end: Some("2026-02-28".to_string()),
+            show_header: true,
+            show_level_selector: false,
+            show_scrollbar: true,
+            style_preset: "TimelineStyleDark1".to_string(),
+            connected_pivot_ids: vec![pivot.id],
+        };
+        let travelling = timeline("Dates", published_sheet);
+        let travelling_id = travelling.id;
+        wb.pivot_definitions = vec![pivot.clone()];
+        wb.timeline_slicers = vec![timeline("Hidden", unpublished_sheet), travelling];
+
+        let result = publish::publish(&reg, &publish_objects_req(&wb, "tl-pkg", vec![0]), prof.path()).unwrap();
+        assert_eq!(result.timeline_slicers_published, 1);
+        let ver = reg.get_version_manifest("tl-pkg", "1.0.0").unwrap();
+        assert!(ver.artifact_checksums.contains_key("timeline_slicers.json"));
+
+        let pulled = pull_v1(&reg, &dir, &prof, "tl-pkg");
+        assert_eq!(pulled.timeline_slicers.len(), 1, "only the published sheet's timeline travels");
+        let t = &pulled.timeline_slicers[0];
+        assert_eq!(t.id, travelling_id);
+        assert_eq!(t.name, "Dates");
+        assert_eq!(t.sheet_id, published_sheet, "APPLICATION sheet id, like slicers");
+        assert_eq!(t.source_id, pivot.id);
+        assert_eq!(t.level, persistence::SavedTimelineLevel::Days);
+        assert_eq!(t.selection_start.as_deref(), Some("2026-02-01"));
+        assert_eq!(t.selection_end.as_deref(), Some("2026-02-28"));
+        assert_eq!(t.connected_pivot_ids, vec![pivot.id]);
+        assert!(!t.show_level_selector);
+        // ...and the pivot it filters travels beside it.
+        assert!(pulled.pivot_definitions.iter().any(|p| p.id == pivot.id));
+    }
+
     #[test]
     fn min_app_version_stamped_for_wave_content_and_empty_otherwise() {
         // Compatibility contract: an application carrying Wave A/B artifacts must
@@ -2405,9 +2762,15 @@ mod tests {
         assert!(reg.read_artifact("test-pkg", "1.0.0", "ribbon_filters.json").unwrap().is_none());
         assert!(reg.read_artifact("test-pkg", "1.0.0", "pivot_layouts.json").unwrap().is_none());
         assert!(reg.read_artifact("test-pkg", "1.0.0", "extension_data.json").unwrap().is_none());
+        // Nor the canvas-object artifacts: an application from before they
+        // travelled (or one with no such objects) pulls them empty, no error.
+        assert!(reg.read_artifact("test-pkg", "1.0.0", "floating_ranges.json").unwrap().is_none());
+        assert!(reg.read_artifact("test-pkg", "1.0.0", "timeline_slicers.json").unwrap().is_none());
 
         let result = pull(&reg, &make_pull_request(), &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert!(result.slicers.is_empty());
+        assert!(result.floating_ranges.is_empty());
+        assert!(result.timeline_slicers.is_empty());
         assert!(result.ribbon_filters.is_empty());
         assert!(result.pivot_layouts.is_empty());
         assert!(result.extension_data.is_empty());
@@ -2824,11 +3187,22 @@ mod tests {
             .insert((0, 0), SavedCell::from_cell(&engine::cell::Cell::new_number(1.0)));
         let pkg_sheet_id = sheet.id;
         let chart_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        // The spec carries a DataRangeRef naming its source sheet by the
+        // APPLICATION id, in both the chart's own data and a layer. Without one,
+        // this test could not see a remap wrongly added to pull.rs: pull serves
+        // subscribe, checkout AND refresh, and refresh throws away the fresh ids
+        // pull mints -- so only the host's materializer may rewrite a spec.
+        let spec_json = format!(
+            "{{\"chartId\":1,\"name\":\"Revenue\",\"sheetIndex\":0,\"spec\":{{\"kind\":\"bar\",\
+             \"data\":{{\"sheetIndex\":0,\"sheetId\":\"{id}\",\"startRow\":0,\"startCol\":0,\"endRow\":4,\"endCol\":1}},\
+             \"layers\":[{{\"data\":{{\"sheetIndex\":0,\"sheetId\":\"{id}\",\"startRow\":0,\"startCol\":2,\"endRow\":4,\"endCol\":2}}}}]}}}}",
+            id = pkg_sheet_id
+        );
         let mut wb = persistence::Workbook::default();
         wb.charts.push(SavedChart {
             id: chart_id,
             sheet_id: pkg_sheet_id,
-            spec_json: "{\"kind\":\"bar\"}".to_string(),
+            spec_json: spec_json.clone(),
         });
         wb.sheets = vec![sheet];
 
@@ -2867,10 +3241,18 @@ mod tests {
         assert_eq!(result.charts.len(), 1);
         let chart = &result.charts[0];
         assert_eq!(chart.id, chart_id);
-        assert_eq!(chart.spec_json, "{\"kind\":\"bar\"}");
         let local_sheet_id = result.sheets[0].sheet.id;
         assert_eq!(chart.sheet_id, local_sheet_id);
         assert_ne!(chart.sheet_id, pkg_sheet_id);
+        // The spec is the publisher's bytes, VERBATIM: its refs still name the
+        // application sheet, though the chart itself moved to the local one.
+        assert_eq!(chart.spec_json, spec_json, "pull must never rewrite a chart spec");
+        assert!(chart.spec_json.contains(&pkg_sheet_id.to_string()));
+        assert!(!chart.spec_json.contains(&local_sheet_id.to_string()));
+        assert_eq!(
+            crate::chart_refs::chart_spec_source_sheets(&chart.spec_json),
+            vec![crate::chart_refs::ChartSourceSheet::Id(pkg_sheet_id)]
+        );
     }
 
     #[test]

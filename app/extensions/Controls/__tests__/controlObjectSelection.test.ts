@@ -202,3 +202,84 @@ describe("the provider's selection semantics", () => {
     expect(getSelectedFloatingControls().size).toBe(0);
   });
 });
+
+describe("refOf: a control's canvas identity is its ANCHOR (M8)", () => {
+  it("is { kind: 'control', id: 'row:col' } from the region's anchor data", () => {
+    const p = createControlSelectionProvider();
+    const r: GridRegion = { ...region(SHAPE, "shape"), data: { sheetIndex: 4, row: 3, col: 3, controlType: "shape" } };
+    expect(p.refOf?.(r)).toEqual({ kind: "control", id: "3:3" });
+  });
+
+  it("never embeds the sheet INDEX (it shifts when sheets are reordered)", () => {
+    const p = createControlSelectionProvider();
+    const onSheet0: GridRegion = { ...region("control-0-7-2", "button"), data: { sheetIndex: 0, row: 7, col: 2 } };
+    const onSheet5: GridRegion = { ...region("control-5-7-2", "button"), data: { sheetIndex: 5, row: 7, col: 2 } };
+    expect(p.refOf?.(onSheet0)).toEqual(p.refOf?.(onSheet5));
+  });
+
+  it("falls back to the id's own parser when the region carries no anchor data", () => {
+    const p = createControlSelectionProvider();
+    expect(p.refOf?.({ ...region("control-2-9-4", "button"), data: {} })).toEqual({ kind: "control", id: "9:4" });
+    expect(p.refOf?.({ ...region("not-a-control", "button"), data: {} })).toBeNull();
+  });
+
+  it("reaches objectRefOf through the seam", async () => {
+    const { objectRefOf } = await import("@api/objectSelection");
+    const off = registerControlObjectSelection();
+    expect(objectRefOf(region(BUTTON, "button"))).toEqual({ kind: "control", id: "1:1" });
+    off();
+  });
+});
+
+describe("the canvas selection set (M8)", () => {
+  it("every control selection chokepoint announces the change to the set", async () => {
+    const { onObjectSelectionChanged } = await import("@api/objectSelection");
+    const sel = await import("../Button/floatingSelection");
+    const seen = vi.fn();
+    const off = onObjectSelectionChanged(seen);
+    sel.selectFloatingControl(BUTTON);
+    sel.toggleFloatingControlSelection(SHAPE);
+    sel.selectFloatingControls([PIC_A, PIC_B]);
+    sel.addFloatingControlsToSelection([BUTTON]);
+    sel.removeFloatingControlsFromSelection([BUTTON]);
+    sel.deselectFloatingControl();
+    expect(seen).toHaveBeenCalledTimes(6);
+    // Nothing to change: no announcement.
+    sel.deselectFloatingControl();
+    sel.removeFloatingControlsFromSelection([BUTTON]);
+    expect(seen).toHaveBeenCalledTimes(6);
+    off();
+  });
+
+  it("the family holds several: addToSelection keeps the rest, removeFromSelection takes one out", async () => {
+    const p = createControlSelectionProvider();
+    p.select(region(BUTTON, "button"));
+    p.addToSelection!(region(SHAPE, "shape"));
+    expect(new Set(getSelectedFloatingControls())).toEqual(new Set([BUTTON, SHAPE]));
+    p.removeFromSelection!(region(BUTTON, "button"));
+    expect([...getSelectedFloatingControls()]).toEqual([SHAPE]);
+    await settle();
+    // Still no click, no pane: the no-click contract holds for add/remove too.
+    expect(emitted.map((e) => e.name)).not.toContain("button:clicked");
+    expect(openTaskPane).not.toHaveBeenCalled();
+    expect(domSelected).toHaveLength(0);
+  });
+
+  it("a grouped control joins and leaves together with its group", () => {
+    groupControls([PIC_A, PIC_B]);
+    const p = createControlSelectionProvider();
+    p.select(region(BUTTON, "button"));
+    p.addToSelection!(region(PIC_A, "image"));
+    expect(new Set(getSelectedFloatingControls())).toEqual(new Set([BUTTON, PIC_A, PIC_B]));
+    p.removeFromSelection!(region(PIC_B, "image"));
+    expect([...getSelectedFloatingControls()]).toEqual([BUTTON]);
+  });
+
+  it("labelOf names the control's kind", () => {
+    const p = createControlSelectionProvider();
+    expect(p.labelOf!(region(BUTTON, "button"))).toBe("Button");
+    expect(p.labelOf!(region(SHAPE, "shape"))).toBe("Shape");
+    expect(p.labelOf!(region(PIC_A, "image"))).toBe("Picture");
+    expect(p.labelOf!({ ...region(BUTTON, "button"), data: {} })).toBeNull();
+  });
+});

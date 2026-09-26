@@ -1,13 +1,13 @@
 //! FILENAME: app/extensions/CanvasSheet/lib/insertOnCanvas.ts
-// PURPOSE: The Canvas tab's INSERT group: put a chart, a slicer, a timeline, a
-//          floating grid, a text box, a shape, a picture or a button on the
-//          active canvas, at a sensible place.
+// PURPOSE: The Canvas tab's INSERT group: put a chart, a pivot table, a slicer,
+//          a timeline, a floating grid, a text box, a shape, a picture or a
+//          button on the active canvas, at a sensible place.
 // CONTEXT: Every object is created by the extension that OWNS it, through its
 //          feature-neutral @api seam (the Seam Rule): this module says WHAT and
 //          WHERE, never how -- no recipe keys, no backend calls, no geometry
-//          walk. Dialog-driven families (chart, slicer, timeline) receive the
-//          placement through their dialog's data; the others through their
-//          provider's request.
+//          walk. Dialog-driven families (chart, pivot, slicer, timeline)
+//          receive the placement through their dialog's data; the others
+//          through their provider's request.
 //
 //          WHERE. A new object lands centred in what the user is looking at,
 //          on the snap grid when snap is on, kept on the page, and each further
@@ -29,6 +29,9 @@ import { canvasLayoutSurface } from "./layoutSurfaceProvider";
 /** Default sizes, in logical px, for each kind of object. */
 export const INSERT_SIZES = {
   chart: { width: 480, height: 300 },
+  // The pivot's FRAME: the box its view is shown in. A pivot is usually
+  // bigger than its box -- the overflow scrolls inside it.
+  pivot: { width: 480, height: 320 },
   slicer: { width: 180, height: 240 },
   timeline: { width: 360, height: 120 },
   textBox: { width: 240, height: 64 },
@@ -54,13 +57,33 @@ export function resetInsertCascade(): void {
   cascade = { key: "", step: 0 };
 }
 
+/** How a default rect treats a page smaller than the object. */
+export interface InsertRectOptions {
+  /**
+   * Shrink the object to the page when the page is smaller than it. For an
+   * object whose content scrolls inside its box (a pivot), a smaller box loses
+   * nothing; for the others a page-sized box would squash them, so they keep
+   * their size and pin to the page's top-left corner.
+   */
+  fitPage?: boolean;
+}
+
 /**
  * The rect a new object of `size` gets on sheet `view.sheetIndex`: centred in
  * the view, stepped by the cascade, snapped when snap is on, kept on the page.
  * Pure over its inputs plus the layout surface; exported for tests.
  */
-export function defaultInsertRect(view: InsertView, size: { width: number; height: number }): LayoutRect {
+export function defaultInsertRect(
+  view: InsertView,
+  requested: { width: number; height: number },
+  options: InsertRectOptions = {},
+): LayoutRect {
   const surface = canvasLayoutSurface(view.sheetIndex);
+  const page = surface?.page ?? null;
+  const size =
+    options.fitPage && page
+      ? { width: Math.min(requested.width, page.width), height: Math.min(requested.height, page.height) }
+      : requested;
   const pitch = surface?.gridSize && surface.gridSize > 0 ? surface.gridSize : 16;
   const key = `${view.sheetIndex}:${Math.round(view.scrollX)}:${Math.round(view.scrollY)}`;
   if (cascade.key !== key) cascade = { key, step: 0 };
@@ -74,7 +97,7 @@ export function defaultInsertRect(view: InsertView, size: { width: number; heigh
     y = snapValue(y, pitch);
   }
   const rect = { x: Math.max(0, x), y: Math.max(0, y), width: size.width, height: size.height };
-  return clampMoveToPage(rect, surface?.page ?? null);
+  return clampMoveToPage(rect, page);
 }
 
 /** The live view of the active sheet, or null when there is no grid yet. */
@@ -91,10 +114,13 @@ export function currentInsertView(): InsertView | null {
   };
 }
 
-function placeFor(size: { width: number; height: number }): (LayoutRect & { sheetIndex: number }) | null {
+function placeFor(
+  size: { width: number; height: number },
+  options?: InsertRectOptions,
+): (LayoutRect & { sheetIndex: number }) | null {
   const view = currentInsertView();
   if (!view) return null;
-  return { sheetIndex: view.sheetIndex, ...defaultInsertRect(view, size) };
+  return { sheetIndex: view.sheetIndex, ...defaultInsertRect(view, size, options) };
 }
 
 async function refusal(what: string, err: unknown): Promise<void> {
@@ -105,6 +131,7 @@ async function refusal(what: string, err: unknown): Promise<void> {
 
 export type CanvasInsertKind =
   | "chart"
+  | "pivot"
   | "slicer"
   | "timeline"
   | "floatingGrid"
@@ -122,6 +149,16 @@ export async function insertOnCanvas(kind: CanvasInsertKind): Promise<void> {
       // The chart dialog takes its data range WITH its sheet (a canvas has no
       // cells), and must not guess a range from the canvas's empty selection.
       showDialog("chart:createDialog", { placement: place, suppressAutoRange: true });
+      return;
+    }
+    case "pivot": {
+      // A canvas pivot is a REAL pivot, written into the canvas's hidden grid
+      // and shown inside this box (its frame); the Pivot extension's create
+      // dialog owns everything else -- the source (a range with its sheet, a
+      // table or a data model), the anchor, and what happens after.
+      const place = placeFor(INSERT_SIZES.pivot, { fitPage: true });
+      if (!place) return;
+      showDialog("pivot:createDialog", { placement: place });
       return;
     }
     case "slicer": {

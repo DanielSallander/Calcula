@@ -33,6 +33,7 @@ import {
 import { isKeyClaimed } from "@api/pointerClaims";
 import { isGridFocused } from "@api/keybindings";
 import { setSelectedChartCue } from "@api/chartCues";
+import { notifyObjectSelectionChanged } from "@api/objectSelection";
 import { isTextEntryTarget } from "../lib/overlayKeys";
 import type {
   ChartElementId,
@@ -167,6 +168,9 @@ export function selectChart(chartId: string): void {
       // different section set (bar -> pie drops the Layout cluster).
       refreshDesignPanelSections();
     }
+    // The canvas-wide selection set (@api/objectSelection) follows every
+    // family's own selection; this is the chart's chokepoint.
+    notifyObjectSelectionChanged();
   }
   // If already selected, the pending click mechanism in index.ts
   // will handle advancing the sub-selection after mouseup.
@@ -196,6 +200,7 @@ export function deselectChart(): void {
       designTabRegistered = false;
       designSectionIds = "";
     }
+    notifyObjectSelectionChanged();
   }
 }
 

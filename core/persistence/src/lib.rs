@@ -483,9 +483,16 @@ pub struct SavedFloatingRange {
     pub row_count: u32,
     pub col_count: u32,
     /// Per-column/per-row size overrides in logical pixels.
-    #[serde(default)]
+    ///
+    /// Written in ASCENDING KEY ORDER (`serialize_sorted_u32_map`). A
+    /// `HashMap` iterates in a per-instance order, so the same row published
+    /// twice produced two different `floating_ranges.json` files: a new blob in
+    /// the content-addressed store and a "modified" row in a version diff that
+    /// nobody made. The in-memory type stays a `HashMap` -- only the bytes are
+    /// ordered, the `PublishedSheetMetadata` rule.
+    #[serde(default, serialize_with = "serialize_sorted_u32_map")]
     pub col_widths: HashMap<u32, f64>,
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_sorted_u32_map")]
     pub row_heights: HashMap<u32, f64>,
     /// Frame chrome visibility: the name/title bar, the object's own column
     /// letters, the object's own row numbers. Default TRUE — a file written
@@ -503,6 +510,16 @@ pub struct SavedFloatingRange {
     pub show_column_headers: bool,
     #[serde(default = "default_true")]
     pub show_row_headers: bool,
+}
+
+/// Serialize a `u32 -> f64` map in ascending key order, so identical content
+/// always produces identical bytes (see `SavedFloatingRange::col_widths`).
+fn serialize_sorted_u32_map<S: serde::Serializer>(
+    map: &HashMap<u32, f64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let sorted: std::collections::BTreeMap<&u32, &f64> = map.iter().collect();
+    sorted.serialize(serializer)
 }
 
 /// A sparkline entry persisted in the workbook.
@@ -862,6 +879,14 @@ pub const CANVAS_PAGE_PRESETS: &[(&str, u32, u32)] = &[
 ];
 /// The preset id meaning "the width/height fields are authoritative".
 pub const CANVAS_CUSTOM_PAGE_PRESET: &str = "custom";
+/// The most refs a canvas's `z_order` may hold -- and, separately, its `locked`
+/// list. Far above any page a person would build, and low enough that a list
+/// arriving from a file, a package or a script cannot grow without bound.
+pub const CANVAS_MAX_OBJECT_REFS: usize = 4096;
+/// The longest `kind` or `id` a [`CanvasObjectRef`] may carry, in characters.
+/// Ids are entity UUIDs or `row:col` anchors, so this is generous; it exists
+/// so the ref COUNT cap is a real bound on the list's size.
+pub const CANVAS_MAX_OBJECT_REF_CHARS: usize = 256;
 
 /// What kind of surface a sheet is.
 ///
@@ -934,6 +959,105 @@ pub struct CanvasObjectRef {
     pub id: String,
 }
 
+impl CanvasObjectRef {
+    /// Why this ref may not be stored, or None when it may: a blank `kind` or
+    /// `id`, one with surrounding whitespace (it would never match the
+    /// family's own spelling, so the entry would silently do nothing), or one
+    /// over [`CANVAS_MAX_OBJECT_REF_CHARS`].
+    pub fn problem(&self) -> Option<String> {
+        for (field, value) in [("kind", &self.kind), ("id", &self.id)] {
+            if value.trim().is_empty() {
+                return Some(format!("a ref has an empty {}", field));
+            }
+            if value.trim() != value.as_str() {
+                return Some(format!("the ref {} '{}' has surrounding whitespace", field, value));
+            }
+            if value.chars().count() > CANVAS_MAX_OBJECT_REF_CHARS {
+                return Some(format!(
+                    "a ref {} is {} characters; the limit is {}",
+                    field,
+                    value.chars().count(),
+                    CANVAS_MAX_OBJECT_REF_CHARS
+                ));
+            }
+        }
+        None
+    }
+}
+
+/// `refs` with every `kind`/`id` TRIMMED and every duplicate dropped, keeping
+/// each ref's FIRST occurrence -- for `z_order` the first position is the one
+/// that paints, and for `locked`, which is a set, order is immaterial. Blank
+/// and over-long refs are kept: an edit REFUSES them ([`CanvasLayout::validate`])
+/// and a load DROPS them ([`CanvasLayout::sanitized`]), and that choice is the
+/// caller's, not this function's.
+pub fn normalize_canvas_object_refs(refs: &[CanvasObjectRef]) -> Vec<CanvasObjectRef> {
+    let mut seen: HashSet<CanvasObjectRef> = HashSet::with_capacity(refs.len());
+    let mut out = Vec::with_capacity(refs.len());
+    for r in refs {
+        let trimmed = CanvasObjectRef { kind: r.kind.trim().to_string(), id: r.id.trim().to_string() };
+        if seen.insert(trimmed.clone()) {
+            out.push(trimmed);
+        }
+    }
+    out
+}
+
+/// Refuse a stacking/lock list that a VALID layout cannot carry: over the
+/// count cap, a bad ref, or the same ref twice.
+fn validate_object_refs(name: &str, refs: &[CanvasObjectRef]) -> Result<(), String> {
+    if refs.len() > CANVAS_MAX_OBJECT_REFS {
+        return Err(format!(
+            "Canvas {} has {} entries; the limit is {}.",
+            name,
+            refs.len(),
+            CANVAS_MAX_OBJECT_REFS
+        ));
+    }
+    let mut seen: HashSet<&CanvasObjectRef> = HashSet::with_capacity(refs.len());
+    for r in refs {
+        if let Some(why) = r.problem() {
+            return Err(format!("Canvas {}: {}.", name, why));
+        }
+        if !seen.insert(r) {
+            return Err(format!(
+                "Canvas {} names {{kind: '{}', id: '{}'}} twice.",
+                name, r.kind, r.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Repair a stacking/lock list that arrived from outside: trim, drop bad refs,
+/// drop duplicates (first occurrence wins), cap. One line per kind of repair.
+fn sanitize_object_refs(name: &str, refs: Vec<CanvasObjectRef>) -> (Vec<CanvasObjectRef>, Vec<String>) {
+    let mut repairs = Vec::new();
+    let before = refs.len();
+    let untrimmed = refs
+        .iter()
+        .filter(|r| r.kind.trim() != r.kind.as_str() || r.id.trim() != r.id.as_str())
+        .count();
+    let normalized = normalize_canvas_object_refs(&refs);
+    let duplicates = before - normalized.len();
+    let mut kept: Vec<CanvasObjectRef> = normalized.into_iter().filter(|r| r.problem().is_none()).collect();
+    let bad = before - duplicates - kept.len();
+    if untrimmed > 0 {
+        repairs.push(format!("{}: {} ref(s) trimmed", name, untrimmed));
+    }
+    if duplicates > 0 {
+        repairs.push(format!("{}: {} duplicate ref(s) dropped", name, duplicates));
+    }
+    if bad > 0 {
+        repairs.push(format!("{}: {} blank or over-long ref(s) dropped", name, bad));
+    }
+    if kept.len() > CANVAS_MAX_OBJECT_REFS {
+        repairs.push(format!("{}: {} refs -> {}", name, kept.len(), CANVAS_MAX_OBJECT_REFS));
+        kept.truncate(CANVAS_MAX_OBJECT_REFS);
+    }
+    (kept, repairs)
+}
+
 /// The layout of a canvas sheet: its page, its snap grid, its background and
 /// the stacking/lock state of the objects on it. All sizes are LOGICAL px, the
 /// same units as a floating object's `x/y/width/height`, so the snap grid and
@@ -955,11 +1079,16 @@ pub struct CanvasLayout {
     pub page_height: u32,
     /// Page background as a CSS hex colour; empty means the theme's default.
     pub background: String,
-    /// Paint order of the canvas's objects, bottom first. Objects missing from
-    /// the list paint below every listed one, in their family's own order.
+    /// Paint order of the canvas's objects, bottom first. Objects MISSING from
+    /// the list paint ABOVE every listed one, in their family's own order -- so
+    /// a newly inserted object appears on top without a layout write, and the
+    /// list only ever has to name objects someone has explicitly restacked.
+    /// No duplicates, at most [`CANVAS_MAX_OBJECT_REFS`] entries (an edit that
+    /// breaks either is refused; a load or pull is repaired).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub z_order: Vec<CanvasObjectRef>,
-    /// Objects the designer locked against move/resize.
+    /// Objects the designer locked against move/resize. A SET: duplicates are
+    /// dropped and order carries no meaning. Capped like `z_order`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub locked: Vec<CanvasObjectRef>,
 }
@@ -1028,6 +1157,8 @@ impl CanvasLayout {
                 self.background
             ));
         }
+        validate_object_refs("stacking order (zOrder)", &self.z_order)?;
+        validate_object_refs("lock list (locked)", &self.locked)?;
         Ok(())
     }
 
@@ -1039,7 +1170,10 @@ impl CanvasLayout {
     /// * an unknown preset id (a newer build's `"a4"`) becomes `custom` at the
     ///   exact size the file carries, as does a known preset whose size does
     ///   not match it;
-    /// * a background that is not a CSS hex colour becomes the theme default.
+    /// * a background that is not a CSS hex colour becomes the theme default;
+    /// * `z_order` and `locked` are trimmed, lose blank or over-long refs and
+    ///   duplicates (the FIRST occurrence is kept), and are cut to
+    ///   [`CANVAS_MAX_OBJECT_REFS`].
     ///
     /// The result always passes [`CanvasLayout::validate`].
     pub fn sanitized(mut self) -> (CanvasLayout, Vec<String>) {
@@ -1081,6 +1215,12 @@ impl CanvasLayout {
             repairs.push(format!("background '{}' -> theme default", self.background));
             self.background.clear();
         }
+        let (z_order, z_repairs) = sanitize_object_refs("zOrder", std::mem::take(&mut self.z_order));
+        self.z_order = z_order;
+        repairs.extend(z_repairs);
+        let (locked, lock_repairs) = sanitize_object_refs("locked", std::mem::take(&mut self.locked));
+        self.locked = locked;
+        repairs.extend(lock_repairs);
         (self, repairs)
     }
 
@@ -2266,6 +2406,79 @@ mod sheet_kind_tests {
         let (fixed, _) = mismatched.sanitized();
         assert_eq!((fixed.page_preset.as_str(), fixed.page_width), (CANVAS_CUSTOM_PAGE_PRESET, 1000));
         fixed.validate().unwrap();
+    }
+
+    fn obj(kind: &str, id: &str) -> CanvasObjectRef {
+        CanvasObjectRef { kind: kind.to_string(), id: id.to_string() }
+    }
+
+    fn distinct_refs(n: usize) -> Vec<CanvasObjectRef> {
+        (0..n).map(|i| obj("chart", &i.to_string())).collect()
+    }
+
+    /// M8 hygiene: the stacking and lock lists used to be applied VERBATIM --
+    /// no cap, no dedupe, no check on the strings. An EDIT (validate) refuses
+    /// each bad shape; exactly the cap is still fine.
+    #[test]
+    fn an_edit_refuses_an_over_cap_blank_or_duplicated_ref_list() {
+        let with_z = |z: Vec<CanvasObjectRef>| CanvasLayout { z_order: z, ..CanvasLayout::default() };
+        let with_locked = |l: Vec<CanvasObjectRef>| CanvasLayout { locked: l, ..CanvasLayout::default() };
+        with_z(distinct_refs(CANVAS_MAX_OBJECT_REFS)).validate().expect("exactly the cap is allowed");
+        with_locked(distinct_refs(CANVAS_MAX_OBJECT_REFS)).validate().expect("exactly the cap is allowed");
+
+        let long = "x".repeat(CANVAS_MAX_OBJECT_REF_CHARS + 1);
+        let cases: Vec<(&str, CanvasLayout)> = vec![
+            ("zOrder over the cap", with_z(distinct_refs(CANVAS_MAX_OBJECT_REFS + 1))),
+            ("locked over the cap", with_locked(distinct_refs(CANVAS_MAX_OBJECT_REFS + 1))),
+            ("empty kind", with_z(vec![obj("", "7")])),
+            ("blank id", with_z(vec![obj("chart", "   ")])),
+            ("untrimmed kind", with_locked(vec![obj(" chart", "7")])),
+            ("over-long id", with_z(vec![obj("chart", &long)])),
+            ("duplicate in zOrder", with_z(vec![obj("chart", "7"), obj("slicer", "7"), obj("chart", "7")])),
+            ("duplicate in locked", with_locked(vec![obj("chart", "7"), obj("chart", "7")])),
+        ];
+        for (label, layout) in cases {
+            assert!(layout.validate().is_err(), "{label} must be refused");
+        }
+    }
+
+    #[test]
+    fn normalizing_trims_and_keeps_each_refs_first_occurrence() {
+        let got = normalize_canvas_object_refs(&[
+            obj("chart", "1"),
+            obj("slicer", "2"),
+            obj(" chart ", "1"),
+            obj("pivot", "3"),
+            obj("slicer", "2"),
+        ]);
+        assert_eq!(
+            got,
+            vec![obj("chart", "1"), obj("slicer", "2"), obj("pivot", "3")],
+            "the FIRST position is the one that paints; later repeats are dropped"
+        );
+    }
+
+    /// A LOAD or PULL repairs the lists instead of refusing the file: trimmed,
+    /// bad refs and duplicates dropped (first occurrence wins), then capped --
+    /// and the result validates.
+    #[test]
+    fn sanitizing_repairs_the_ref_lists_and_the_result_validates() {
+        let mut z = vec![obj(" chart ", "7"), obj("", "gone"), obj("slicer", "2"), obj("chart", "7")];
+        z.extend((0..CANVAS_MAX_OBJECT_REFS + 10).map(|i| obj("control", &format!("0:{i}"))));
+        let layout = CanvasLayout {
+            z_order: z,
+            locked: vec![obj("chart", "7"), obj("chart", "7"), obj("pivot", "   ")],
+            ..CanvasLayout::default()
+        };
+        assert!(layout.validate().is_err());
+        let (fixed, repairs) = layout.sanitized();
+        fixed.validate().expect("a sanitized layout always validates");
+        assert_eq!(fixed.z_order.len(), CANVAS_MAX_OBJECT_REFS);
+        assert_eq!(&fixed.z_order[..2], &[obj("chart", "7"), obj("slicer", "2")], "first occurrences, in order");
+        assert_eq!(fixed.locked, vec![obj("chart", "7")]);
+        for needle in ["zOrder: 1 ref(s) trimmed", "zOrder: 1 duplicate", "zOrder: 1 blank", "refs -> 4096", "locked: 1 duplicate", "locked: 1 blank"] {
+            assert!(repairs.iter().any(|r| r.contains(needle)), "no repair line containing {needle:?}: {repairs:?}");
+        }
     }
 
     #[test]

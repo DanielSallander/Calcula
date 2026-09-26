@@ -219,7 +219,19 @@ pub fn update_timeline_slicer(
     Ok(result)
 }
 
-/// Update timeline slicer position and size.
+/// Update timeline slicer position and size (drag/resize, and a cross-family
+/// arrange).
+///
+/// A MEMBER of an open transaction: the undo entry goes through the guarded
+/// join, so an arrange that wraps this in `begin_undo_transaction` stays ONE
+/// Ctrl+Z. It used to run an unconditional `begin`/`commit` pair, and since
+/// `begin` is a no-op while a transaction is open but `commit` is not, it
+/// committed the CALLER'S outer transaction halfway through the arrange.
+///
+/// Gated like a chart or slicer move (`editObjects`). The effect is minted only
+/// after every refusal (unknown id, protected sheet) and only when a value
+/// actually changes -- the id lookup used to run AFTER `mutates`, so an unknown
+/// id dirtied the document it then refused to change.
 #[tauri::command]
 pub fn update_timeline_position(
     state: State<crate::AppState>,
@@ -231,44 +243,51 @@ pub fn update_timeline_position(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    // The id lookup can still REFUSE, so the effect is minted only after it
-    // resolves — see `delete_timeline_slicer` for the same shape.
+    update_timeline_position_core(&state, &timeline_state, &file_state, timeline_id, x, y, width, height)
+}
+
+/// [`update_timeline_position`] over plain references, for the unit tier.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_timeline_position_core(
+    state: &crate::AppState,
+    timeline_state: &TimelineSlicerState,
+    file_state: &crate::persistence::FileState,
+    timeline_id: identity::EntityId,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    // Resolve, gate and decide under one hold of the store, so the pre-edit
+    // clone that becomes the undo payload is exactly what the write replaces.
     let pending = timeline_state
         .timelines
         .lock_pending()
         .map_err(|e| e.to_string())?;
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut timelines = pending.authorize(&effect);
-    let tl = timelines
-        .get_mut(&timeline_id)
+    let pre_edit = pending
+        .get(&timeline_id)
+        .cloned()
         .ok_or_else(|| format!("Timeline slicer {} not found", timeline_id))?;
-    let pre_edit = tl.clone();
-
-    tl.x = x;
-    tl.y = y;
-    tl.width = width;
-    tl.height = height;
-    drop(timelines);
-
-    // The PRE-EDIT clone, captured above before any field was written. Undo of
-    // an update is "put the old object back", so the whole object is recorded.
-    {
-        #[derive(serde::Serialize)]
-        struct TimelineSnapshot {
-            timeline_id: identity::EntityId,
-            previous: TimelineSlicer,
-        }
-        let data = serde_json::to_vec(&TimelineSnapshot {
-            timeline_id: timeline_id,
-            previous: pre_edit,
-        })
-        .unwrap_or_default();
-        let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Move timeline slicer");
-        undo_stack.record_custom_restore("timeline_slicer".to_string(), data, "Move timeline slicer");
-        undo_stack.commit_transaction();
+    crate::protection::check_sheet_action(state, pre_edit.sheet_index, "editObjects", "move or resize a timeline")?;
+    if pre_edit.x == x && pre_edit.y == y && pre_edit.width == width && pre_edit.height == height {
+        // Nothing moved: no dirty flag, no Ctrl+Z step that restores itself.
+        return Ok(());
     }
 
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    {
+        let mut timelines = pending.authorize(&effect);
+        if let Some(tl) = timelines.get_mut(&timeline_id) {
+            tl.x = x;
+            tl.y = y;
+            tl.width = width;
+            tl.height = height;
+        }
+    }
+
+    // Undo of an update is "put the old object back", so the whole pre-edit
+    // object is recorded -- after the store guard drops (never both held).
+    crate::undo_commands::record_timeline_undo(state, timeline_id, pre_edit, "Move timeline slicer");
     Ok(())
 }
 

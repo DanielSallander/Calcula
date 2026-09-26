@@ -39,7 +39,8 @@ const mockDeleteSlicer = vi.fn(async (..._a: unknown[]) => undefined);
 vi.mock("../../lib/slicerStore", () => ({
   getSlicerById: () => undefined,
   updateSlicerAsync: (...a: unknown[]) => mockUpdateSlicer(...a),
-  updateSlicerPositionAsync: (...a: unknown[]) => mockUpdatePosition(...a),
+  // The Size fields write every selected slicer as ONE undo step (M8 C2).
+  commitSlicerGeometryAsync: (...a: unknown[]) => mockUpdatePosition(...a),
   deleteSlicerAsync: (...a: unknown[]) => mockDeleteSlicer(...a),
 }));
 
@@ -427,6 +428,8 @@ describe("Slicer Options sections — behaviour", () => {
       width.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
       await Promise.resolve();
     });
-    expect(mockUpdatePosition.mock.calls).toEqual([["s-1", 10, 10, 200, 240]]);
+    expect(mockUpdatePosition.mock.calls).toEqual([
+      [[{ slicerId: "s-1", x: 10, y: 10, width: 200, height: 240 }], "Resize Slicer"],
+    ]);
   });
 });

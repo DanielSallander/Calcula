@@ -2283,6 +2283,162 @@ mod xlsx_loss_census {
         );
     }
 
+    /// The plain `<name>.json` artifacts a CARRIED verdict names. Path-shaped
+    /// tokens (`tables/{id}.json`, `pivot_definitions/bi_metadata.json`) are
+    /// per-object families written under a formatted path, not a literal, and
+    /// are left to their own tests.
+    fn carried_json_artifacts(reason: &str) -> Vec<String> {
+        reason
+            .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '{' | '}')))
+            .filter(|token| token.ends_with(".json"))
+            .filter(|token| {
+                token
+                    .trim_end_matches(".json")
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            })
+            .filter(|token| token.len() > ".json".len())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// EVERY CARRIED ARTIFACT IS WRITTEN AND READ. A CARRIED verdict is a claim
+    /// about two other files, and nothing checked it: `timeline_slicers` said
+    /// "CARRIED: timeline_slicers.json" for as long as `core/calp` contained no
+    /// reference to timelines at all -- publish never wrote the file and pull
+    /// never read it, while this table told everyone it travelled.
+    ///
+    /// Each plain `<name>.json` a CARRIED verdict names must appear as the
+    /// literal `"<name>.json"` in the PRODUCTION text of BOTH
+    /// `core/calp/src/publish.rs` (written) and `core/calp/src/pull.rs` (read).
+    ///
+    /// Production text only: both files' test modules name every one of these
+    /// artifacts, so a census over the whole file stayed green with the real
+    /// `write_artifact` or `read_artifact` deleted -- exactly the "CARRIED but
+    /// never written or read" case it exists to catch.
+    #[test]
+    fn every_carried_json_artifact_is_written_and_read() {
+        let calp_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/calp/src");
+        let publish_full = std::fs::read_to_string(calp_src.join("publish.rs"))
+            .expect("cannot read core/calp/src/publish.rs");
+        let pull_full = std::fs::read_to_string(calp_src.join("pull.rs"))
+            .expect("cannot read core/calp/src/pull.rs");
+        let publish_prod = production_text(&publish_full);
+        let pull_prod = production_text(&pull_full);
+        let (publish_src, pull_src) = (publish_prod.as_str(), pull_prod.as_str());
+
+        let (checked, unbacked) = unbacked_carried_artifacts(publish_src, pull_src);
+        // The census has to be looking at the entries that started it.
+        for must_see in ["timeline_slicers.json", "floating_ranges.json", "charts.json"] {
+            assert!(
+                checked.iter().any(|a| a == must_see),
+                "the artifact parse no longer sees {must_see} -- this census would pass over nothing"
+            );
+        }
+        // Its detector fires: an artifact nobody writes is reported.
+        let fake = carried_json_artifacts("CARRIED: an_artifact_nobody_writes.json, and more");
+        assert_eq!(fake, vec!["an_artifact_nobody_writes.json".to_string()]);
+        assert!(!publish_src.contains("\"an_artifact_nobody_writes.json\""));
+        // Path-shaped families are not mistaken for literals.
+        assert!(carried_json_artifacts("CARRIED: tables/{id}.json and sheets/{id}/{data,layout}.json").is_empty());
+
+        // ITS DETECTOR FIRES ON THE REGRESSION IT WAS WRITTEN FOR. Delete the
+        // production write (resp. read) -- every occurrence of the literal ahead
+        // of the file's main `mod tests`, found by a marker search independent
+        // of `production_text` -- and run the census's own cut and detector over
+        // the sabotaged FILE. The test code still names the artifact, which is
+        // exactly what kept the old whole-file scan green.
+        let remove_production_literal = |full: &str, literal: &str| -> String {
+            let tests_at = full.find("\nmod tests {").expect("the file's main test module");
+            format!("{}{}", full[..tests_at].replace(literal, "\"x\""), &full[tests_at..])
+        };
+        for (artifact, side) in [("floating_ranges.json", "WRITTEN"), ("timeline_slicers.json", "READ")] {
+            let literal = format!("\"{artifact}\"");
+            let full = if side == "WRITTEN" { publish_full.as_str() } else { pull_full.as_str() };
+            let sabotaged = remove_production_literal(full, &literal);
+            assert!(
+                sabotaged.contains(&literal),
+                "precondition: the TEST code names {artifact} too, so a whole-file scan is blind"
+            );
+            let sabotaged_production = production_text(&sabotaged);
+            let (_, found) = if side == "WRITTEN" {
+                unbacked_carried_artifacts(&sabotaged_production, pull_src)
+            } else {
+                unbacked_carried_artifacts(publish_src, &sabotaged_production)
+            };
+            assert!(
+                found.iter().any(|u| u.contains(artifact) && u.contains(side)),
+                "removing the production literal {artifact} must be reported as never {side}: {found:?}"
+            );
+        }
+
+        // The test modules really are gone (the main one and pull.rs's smaller
+        // one), and only they: publish.rs gates a single test HELPER near its
+        // top, and treating that gate as the start of test code would drop the
+        // rest of the file.
+        for (file, full, prod) in [("publish.rs", &publish_full, publish_src), ("pull.rs", &pull_full, pull_src)] {
+            assert!(full.contains("\nmod tests {"), "{file}: precondition -- it has a test module");
+            assert!(!prod.contains("\nmod tests {"), "{file}: its test module survived the strip");
+        }
+        assert!(!pull_src.contains("mod sheet_name_collision_tests"));
+        assert!(
+            publish_src.contains("fn test_mode_for(") && publish_src.contains("pub fn publish("),
+            "a gated single item is not a test module: the strip must keep what follows it"
+        );
+        assert!(pull_src.contains("pub fn pull("));
+
+        assert!(
+            unbacked.is_empty(),
+            "these CARRIED verdicts are not true -- the artifact they name is not both \
+             written and read:\n  {}",
+            unbacked.join("\n  ")
+        );
+    }
+
+    /// The CARRIED artifacts the census checked, and every one of them that the
+    /// given publish / pull text does not name as a literal.
+    fn unbacked_carried_artifacts(publish_src: &str, pull_src: &str) -> (Vec<String>, Vec<String>) {
+        let mut checked: Vec<String> = Vec::new();
+        let mut unbacked: Vec<String> = Vec::new();
+        for (field, reason) in crate::calp_commands::CALP_PUBLISH_COVERAGE {
+            if !reason.starts_with("CARRIED") {
+                continue;
+            }
+            for artifact in carried_json_artifacts(reason) {
+                let literal = format!("\"{}\"", artifact);
+                if !publish_src.contains(&literal) {
+                    unbacked.push(format!("{}: {} is never WRITTEN by core publish", field, artifact));
+                }
+                if !pull_src.contains(&literal) {
+                    unbacked.push(format!("{}: {} is never READ by core pull", field, artifact));
+                }
+                checked.push(artifact);
+            }
+        }
+        (checked, unbacked)
+    }
+
+    /// A Rust source file with every top-level test MODULE blanked out -- the
+    /// census's own `strip_test_modules`, the rule the function census already
+    /// reads production code with, rather than a second definition of it. A
+    /// `#[cfg(test)]` that gates a single item (publish.rs's test helper near
+    /// its top) is not a module and stays, and so does everything after it.
+    fn production_text(src: &str) -> String {
+        super::strip_test_modules(src).join("\n")
+    }
+
+    /// The strip keeps production code on both sides of a test module and of a
+    /// gated single item, and drops every test module's text.
+    #[test]
+    fn the_production_text_drops_test_modules_only() {
+        let src = "fn a() {}\n#[cfg(test)]\nfn helper() {}\nfn b() { \"x.json\" }\n\n#[cfg(test)]\nmod small {\n    \"y.json\"\n}\nfn c() {}\n#[cfg(test)]\nmod tests {\n    \"x.json\"\n}\n";
+        let prod = production_text(src);
+        assert!(prod.contains("fn helper()") && prod.contains("fn b()") && prod.contains("fn c()"), "{prod}");
+        assert!(!prod.contains("mod small") && !prod.contains("mod tests"), "{prod}");
+        assert!(!prod.contains("y.json"), "{prod}");
+        assert_eq!(prod.matches("x.json").count(), 1, "only the production literal: {prod}");
+    }
+
     /// The publish census must be able to SEE an uncovered field, and the
     /// EXCLUDED-verdict check must be able to see an unbacked claim.
     #[test]

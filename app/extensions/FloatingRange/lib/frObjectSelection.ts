@@ -21,6 +21,7 @@ import {
   type ObjectSelectionProvider,
 } from "@api/objectSelection";
 import { requestOverlayRedraw } from "@api/gridOverlays";
+import { canvasObjectRef } from "@api/canvasSheet";
 import { FLOATING_RANGE_REGION_TYPE, getFloatingRangeById } from "./floatingRangeStore";
 import {
   clearLocalSelection,
@@ -32,7 +33,7 @@ import {
 } from "./frSelection";
 
 /** The floating-range id a published region carries, or null. */
-function frIdOf(region: GridRegion): string | null {
+export function frIdOf(region: GridRegion): string | null {
   const id = region.data?.frId;
   return typeof id === "string" && id.length > 0 ? id : null;
 }
@@ -68,12 +69,23 @@ export function createFloatingRangeSelectionProvider(): ObjectSelectionProvider 
     },
 
     ownsKey(key: ObjectSelectionKey): boolean {
-      // Tab moves the inner cell and Escape drops the inner selection — both
-      // only while an inner selection exists (handleFrKeyDown). Without one,
-      // the range has no use for either key.
-      if (key !== "Tab" && key !== "Escape") return false;
+      // Tab moves the inner cell, the arrows move (or Shift-extend) it, and
+      // Escape drops the inner selection — all only while an inner selection
+      // exists (handleFrKeyDown). Without one, the range has no use for them.
+      if (key !== "Tab" && key !== "Escape" && key !== "Arrow") return false;
       const local = getLocalSelection();
       return local !== null && getFloatingRangeById(local.frId) !== null;
+    },
+
+    refOf(region: GridRegion) {
+      const id = frIdOf(region);
+      return id === null ? null : canvasObjectRef("floatingRange", id);
+    },
+
+    // The name the range is published with (syncFloatingRangeRegions).
+    labelOf(region: GridRegion): string | null {
+      const name = region.data?.name;
+      return typeof name === "string" && name !== "" ? name : null;
     },
   };
 }

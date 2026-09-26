@@ -26,12 +26,21 @@ import {
   registerObjectSelectionProvider,
   type ObjectSelectionProvider,
 } from "@api/objectSelection";
+import { canvasObjectRef } from "@api/canvasSheet";
+import type { CanvasObjectRef } from "@api";
 import { FLOATING_CONTROL_REGION_TYPE } from "./controlHitTest";
-import { getFloatingControl, getGroupForControl, getGroupMembers } from "./floatingStore";
 import {
+  getFloatingControl,
+  getGroupForControl,
+  getGroupMembers,
+  parseFloatingControlId,
+} from "./floatingStore";
+import {
+  addFloatingControlsToSelection,
   deselectFloatingControl,
   getSelectedControlCount,
   isFloatingControlSelected,
+  removeFloatingControlsFromSelection,
   selectFloatingControl,
   selectFloatingControls,
 } from "../Button/floatingSelection";
@@ -48,6 +57,48 @@ export function selectControlWithGroup(controlId: string): void {
   } else {
     selectFloatingControl(controlId);
   }
+}
+
+/**
+ * A control's canvas identity: kind "control", id = its ANCHOR `${row}:${col}`.
+ * Not the region id -- that embeds the sheet INDEX, which shifts when sheets
+ * are reordered, while a control's anchor is how the backend keys it. The
+ * published region data carries the anchor; the id's own parser is the
+ * fallback for a region published without it.
+ */
+export function controlRefOf(region: GridRegion): CanvasObjectRef | null {
+  const row = region.data?.row;
+  const col = region.data?.col;
+  if (typeof row === "number" && typeof col === "number") {
+    return canvasObjectRef("control", `${row}:${col}`);
+  }
+  const anchor = parseFloatingControlId(region.id);
+  return anchor ? canvasObjectRef("control", `${anchor.row}:${anchor.col}`) : null;
+}
+
+/** `controlId` and, when it is grouped, every member of its group. */
+function withGroup(controlId: string): string[] {
+  const groupId = getGroupForControl(controlId);
+  return groupId ? getGroupMembers(groupId) : [controlId];
+}
+
+/** The generic word the Name Box shows for a control of `controlType`. */
+const CONTROL_TYPE_LABELS: ReadonlyMap<string, string> = new Map([
+  ["button", "Button"],
+  ["shape", "Shape"],
+  ["image", "Picture"],
+]);
+
+/**
+ * What the Name Box calls a control. A control's user-given name lives in its
+ * backend metadata, which is read asynchronously and is not cached here, so
+ * the label is the control's KIND ("Button", "Shape", "Picture") -- a truthful
+ * answer to "what is selected" that needs no round trip.
+ */
+export function controlLabelOf(region: GridRegion): string | null {
+  const type = region.data?.controlType;
+  if (typeof type !== "string" || type === "") return null;
+  return CONTROL_TYPE_LABELS.get(type) ?? type.charAt(0).toUpperCase() + type.slice(1);
 }
 
 /** The provider object (exported for tests; register it through
@@ -75,6 +126,26 @@ export function createControlSelectionProvider(): ObjectSelectionProvider {
       deselectFloatingControl();
       emitAppEvent(AppEvents.GRID_REFRESH);
     },
+
+    refOf: controlRefOf,
+
+    // Controls hold several (the Ctrl+click set), so a canvas multi-selection
+    // keeps every control in it -- and the Controls drag co-moves them. A
+    // grouped control joins and leaves together with its group, the rule
+    // `select` follows.
+    addToSelection(region: GridRegion): void {
+      if (!getFloatingControl(region.id) || isFloatingControlSelected(region.id)) return;
+      addFloatingControlsToSelection(withGroup(region.id));
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    },
+
+    removeFromSelection(region: GridRegion): void {
+      if (!isFloatingControlSelected(region.id)) return;
+      removeFloatingControlsFromSelection(withGroup(region.id));
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    },
+
+    labelOf: controlLabelOf,
   };
 }
 

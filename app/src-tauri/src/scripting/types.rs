@@ -142,6 +142,12 @@ pub fn build_host_state(
     if let Ok(visibility) = state.sheet_visibility.read() {
         host.sheet_visibility = visibility.clone();
     }
+    if let Ok(kinds) = state.sheet_kinds.read() {
+        host.sheet_kinds = kinds
+            .iter()
+            .map(|k| if k.is_canvas() { "canvas" } else { "worksheet" }.to_string())
+            .collect();
+    }
     if let Ok(props) = state.workbook_properties.read() {
         // The typed document-properties struct flattened to the string map the
         // engine exposes; keys match the camelCase IPC field names.

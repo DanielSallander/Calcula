@@ -2884,6 +2884,58 @@ export type {
   ChartSelectionTarget,
 } from "./chartSelection";
 
+// What the selected floating OBJECT(S) are called ("Slicer_Region", "3
+// objects"). Written by the canvas from the object-selection set, read by the
+// shell's Name Box -- the chartSelection shape, for every other family.
+export {
+  EMPTY_OBJECT_LABEL,
+  publishObjectLabel,
+  getObjectLabel,
+  onObjectLabelChanged,
+  resetObjectLabelRegistry,
+} from "./objectSelectionLabel";
+
+export type { ObjectLabel, ObjectLabelSnapshot } from "./objectSelectionLabel";
+
+// Move floating objects of EVERY family without a pointer gesture -- the
+// canvas's align / distribute / nudge / group drag -- as ONE undo step, and the
+// frontend-owned undo transaction a family's own persist joins.
+export {
+  registerObjectGeometryProvider,
+  hasObjectGeometryProvider,
+  getObjectGeometryProvider,
+  canMoveObject,
+  canResizeObject,
+  familyCoMovesOwnSelection,
+  previewObjectGeometry,
+  commitObjectGeometry,
+  flushObjectGeometry,
+  resetObjectGeometryProviders,
+  openUndoTransaction,
+  runInUndoTransaction,
+  joinUndoTransaction,
+  isUndoTransactionOpen,
+} from "./objectGeometry";
+
+export type {
+  ObjectRect,
+  ObjectGeometryChange,
+  ObjectGeometryProvider,
+  ObjectGeometryOutcome,
+  UndoTransactionHandle,
+} from "./objectGeometry";
+
+// Restack floating objects (bring forward / send backward / to front / to
+// back) through whoever owns the page's paint order -- a canvas sheet's
+// layout -- so a family's own session-only order never competes with it.
+export {
+  registerObjectStackingService,
+  getObjectStackingService,
+  resetObjectStackingService,
+} from "./objectStacking";
+
+export type { ObjectStackingCommand, ObjectStackingService } from "./objectStacking";
+
 // Transient "points of interest" cues drawn over a chart (never in its spec).
 // Insights sets them; Charts paints them at composite time.
 export {

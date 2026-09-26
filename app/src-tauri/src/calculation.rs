@@ -148,7 +148,7 @@ fn evaluate_single_formula(
     active_sheet: usize,
     styles: &engine::StyleRegistry,
     user_files: &std::collections::HashMap<String, Vec<u8>>,
-    pivot_data_fn: &dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>,
+    pivot_data_fn: &dyn Fn(&str, Option<&str>, u32, u32, &[(&str, &str)]) -> Option<f64>,
     gather_fn: &dyn Fn(&str) -> engine::GatherRegionData,
     name_tables: crate::name_resolution::NameTables<'_>,
     row_heights: &std::collections::HashMap<u32, f64>,
@@ -1118,11 +1118,12 @@ pub(crate) fn run_calculation_pass(
     // Build pivot data lookup closure for GETPIVOTDATA
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
-    let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
         crate::pivot::operations::lookup_pivot_data(
             &pivot_tables,
             &pivot_views,
             data_field,
+            pivot_sheet,
             pivot_row,
             pivot_col,
             pairs,
@@ -1843,11 +1844,12 @@ pub(crate) fn recalculate_sheet_values(
 
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let pivot_views = pivot_state.views.lock().unwrap();
-    let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+    let pivot_data_fn = |data_field: &str, pivot_sheet: Option<&str>, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
         crate::pivot::operations::lookup_pivot_data(
             &pivot_tables,
             &pivot_views,
             data_field,
+            pivot_sheet,
             pivot_row,
             pivot_col,
             pairs,

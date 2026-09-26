@@ -72,6 +72,7 @@ import { registerKeybinding, isGridFocused } from "@api/keybindings";
 import {
   removeGridRegionsByType,
   requestOverlayRedraw,
+  isOccludedAtClientPoint,
   type OverlayRenderContext,
 } from "@api/gridOverlays";
 import { emitAppEvent } from "@api/events";
@@ -244,8 +245,19 @@ import { peekRangeRefSheetIndex, resolveDataSource } from "./lib/dataSourceResol
 import { installSheetIdCacheInvalidation } from "./lib/sheetIdMap";
 import { chartIntersectsChanges } from "./lib/chartInvalidation";
 import { writeParamValueToCell } from "./lib/chartParamWriteBack";
-import { createChartObjectSelectionProvider } from "./lib/chartObjectSelection";
+import {
+  createChartObjectSelectionProvider,
+  pressArmsPendingChartClick,
+} from "./lib/chartObjectSelection";
 import { registerObjectSelectionProvider } from "@api/objectSelection";
+import { registerObjectGeometryProvider } from "@api/objectGeometry";
+import { createChartGeometryProvider } from "./lib/chartGeometry";
+import {
+  chartCanvasToClient,
+  clientToChartCanvas,
+  currentGridZoom,
+  insideChartCanvas,
+} from "./lib/chartPointer";
 import { clearAllWidgetValues, getWidgetValue, setWidgetValue, nextWidgetValue } from "./handlers/chartWidgetValues";
 import { hitTestWidgetControls, isInWidgetArea } from "./rendering/paramWidgets";
 import { onAppEvent } from "@api/events";
@@ -509,6 +521,25 @@ function activate(context: ExtensionContext): void {
     registerObjectSelectionProvider(
       createChartObjectSelectionProvider({
         emitSelection: () => void emitChartSelectionEvent(),
+        invalidateChart: (chartId) => invalidateChartCache(chartId),
+        refresh: () => {
+          requestOverlayRedraw();
+          context.events.emit(AppEvents.GRID_REFRESH);
+        },
+        // A chart carrying insight cues keeps plain Left/Right for its cue
+        // step at chart level, so a canvas nudge must not take them.
+        cueCountOf: (chartId) => getChartOverlay(chartId).cues.length,
+      }),
+    ),
+  );
+
+  // Move / resize a chart WITHOUT a pointer gesture (@api/objectGeometry): the
+  // canvas's align, distribute, nudge and group drag. Preview writes nothing;
+  // commit lands the store's debounced save and reports a refusal to the
+  // caller (one toast for the whole arrange) instead of a chart dialog.
+  cleanupFunctions.push(
+    registerObjectGeometryProvider(
+      createChartGeometryProvider({
         invalidateChart: (chartId) => invalidateChartCache(chartId),
         refresh: () => {
           requestOverlayRedraw();
@@ -1133,7 +1164,14 @@ function activate(context: ExtensionContext): void {
     if (isChartSelected(chartId)) {
       // Chart is already selected: set pending click for deferred sub-selection.
       // The actual sub-selection advance happens on mouseup (if not a drag).
-      setPendingClick(chartId, lastCanvasX, lastCanvasY);
+      // EXCEPT on a canvas when the chart is one of several selected objects
+      // (or the press is Ctrl/Shift): that press narrows (or toggles) the
+      // multi-selection, and must not ALSO step the ladder to series level.
+      if (pressArmsPendingChartClick(detail)) {
+        setPendingClick(chartId, lastCanvasX, lastCanvasY);
+      } else {
+        clearPendingClick();
+      }
     } else {
       // First click: select the chart (Level 1)
       selectChart(chartId);
@@ -1322,9 +1360,10 @@ function activate(context: ExtensionContext): void {
 
     const rect = gridContainer.getBoundingClientRect();
 
-    // Convert to canvas-relative coordinates
-    const canvasX = e.clientX - rect.left;
-    const canvasY = e.clientY - rect.top;
+    // Convert to LOGICAL canvas coordinates: relative to the grid, divided by
+    // the zoom -- chart geometry is unzoomed (BUG-0156, lib/chartPointer.ts).
+    const zoom = currentGridZoom();
+    const { x: canvasX, y: canvasY } = clientToChartCanvas(e.clientX, e.clientY, rect, zoom);
 
     // Store last position for use in click handler
     lastCanvasX = canvasX;
@@ -1349,7 +1388,7 @@ function activate(context: ExtensionContext): void {
     }
 
     // Skip if mouse is outside the grid container
-    if (canvasX < 0 || canvasY < 0 || canvasX > rect.width || canvasY > rect.height) {
+    if (!insideChartCanvas({ x: canvasX, y: canvasY }, rect, zoom)) {
       handleChartMouseLeave();
       return;
     }
@@ -1626,8 +1665,8 @@ function activate(context: ExtensionContext): void {
     let canvasY = 0;
     if (gridContainer) {
       const rect = gridContainer.getBoundingClientRect();
-      canvasX = e.clientX - rect.left;
-      canvasY = e.clientY - rect.top;
+      // Logical (unzoomed) canvas px, like every chart geometry (BUG-0156).
+      ({ x: canvasX, y: canvasY } = clientToChartCanvas(e.clientX, e.clientY, rect));
       // CLIPPED TO THE GRID. `findChartAtCanvasPos` tests the chart's REGION,
       // which is not clipped to the visible canvas: a chart wider than the grid
       // — routinely, once the Chart Format task pane narrows it — still matches
@@ -1643,6 +1682,16 @@ function activate(context: ExtensionContext): void {
         // Outside the grid box entirely — and the hover fallback below must not
         // rescue it either, because hover is rAF-throttled and keeps whatever
         // the pointer was last over INSIDE the grid.
+        setChartRightClickTarget(null);
+        return;
+      }
+      // THE TOPMOST OBJECT DECIDES. Another family's object painted over the
+      // chart at this point (a slicer, a shape, a floating grid) owns the
+      // right-click: resolving the chart underneath by its bounds -- or by the
+      // hover fallback below -- opened the Chart menu for an object the user
+      // did not click, and with the other family's menu too, two at once.
+      // Core's one stacking order answers (@api/gridOverlays).
+      if (isOccludedAtClientPoint(e.clientX, e.clientY, (r) => r.type === "chart")) {
         setChartRightClickTarget(null);
         return;
       }
@@ -2884,8 +2933,8 @@ function handlePivotFieldButtonClick(
     gridContainer = document.querySelector("canvas")?.parentElement ?? null;
   }
   const rect = gridContainer?.getBoundingClientRect();
-  const screenX = (rect?.left ?? 0) + canvasX;
-  const screenY = (rect?.top ?? 0) + canvasY;
+  // canvasX/Y are LOGICAL px (BUG-0156): scale back by the zoom for the screen.
+  const { x: screenX, y: screenY } = chartCanvasToClient(canvasX, canvasY, rect);
 
   if (button.field.area === "filter") {
     // Filter fields use the value filter dropdown (shows unique values with checkboxes).
@@ -2943,8 +2992,8 @@ function handleQuickAccessButtonClick(
     gridContainer = document.querySelector("canvas")?.parentElement ?? null;
   }
   const rect = gridContainer?.getBoundingClientRect();
-  const screenX = (rect?.left ?? 0) + canvasX;
-  const screenY = (rect?.top ?? 0) + canvasY;
+  // canvasX/Y are LOGICAL px (BUG-0156): scale back by the zoom for the screen.
+  const { x: screenX, y: screenY } = chartCanvasToClient(canvasX, canvasY, rect);
 
   const popup = togglePopup(chartId, buttonType, screenX, screenY);
 

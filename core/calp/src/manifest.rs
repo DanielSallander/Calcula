@@ -316,6 +316,13 @@ pub struct PublishedSheet {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// The sheet's kind as a wire name: `"canvas"` for a canvas, EMPTY for an
+    /// ordinary worksheet, so a worksheet's manifest entry is byte-identical to
+    /// one written before this field existed. Display-only (version listings,
+    /// inspection): the authority is `sheets/{id}/metadata.json`'s `kind`,
+    /// which carries the layout too. Inside the signed manifest.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -652,6 +659,22 @@ pub struct Subscription {
     /// `extra`'s flatten preserves it verbatim across a save anyway.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detached_sheets: Vec<SheetId>,
+    /// The LOCAL sheet each detached application sheet still lives under.
+    ///
+    /// A PARALLEL list to `detached_sheets` rather than a change of that list's
+    /// shape: `detached_sheets` is the refresh gate ("upstream no longer speaks
+    /// for this sheet") and every reader of it asks only that. This one answers
+    /// the other question a refresh has about a detached sheet -- where do the
+    /// application's OTHER objects that READ it now find it? A chart on a still-
+    /// subscribed sheet whose data source is the detached sheet arrives naming
+    /// the PUBLISHER's sheet id, and without this it was left pointing at a
+    /// sheet that exists nowhere in the workbook.
+    ///
+    /// READING ONLY. Nothing is ever PLACED through this map: a detached sheet is
+    /// the subscriber's, and an application object landing on it is exactly what
+    /// detaching exists to stop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detached_local_sheets: Vec<DetachedSheet>,
     /// Sheets the UPSTREAM version dropped while this workbook kept them.
     ///
     /// A SEPARATE LIST FROM `detached_sheets`, and the separation is the whole
@@ -750,6 +773,17 @@ pub struct SubscribedSheet {
     pub local_sheet_id: SheetId,
     /// The sheet's name in the local workbook (may differ from application name).
     pub local_name: String,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// Where a DETACHED application sheet lives in the local workbook
+/// (`Subscription::detached_local_sheets`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetachedSheet {
+    pub package_sheet_id: SheetId,
+    pub local_sheet_id: SheetId,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }

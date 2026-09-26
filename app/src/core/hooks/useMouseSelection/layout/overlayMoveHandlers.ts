@@ -9,9 +9,15 @@
 //          the cell double-click interceptors are asked about a CELL.
 
 import type { GridConfig, Viewport } from "../../../types";
-import { getGridRegions, getOverlayRegistration, type GridRegion } from "../../../../api/gridOverlays";
+import {
+  getGridRegions,
+  getOverlayRegistration,
+  floatingHitOrder,
+  type GridRegion,
+} from "../../../../api/gridOverlays";
+import { noteObjectPress } from "../../../../api/objectSelection";
 import { isPointerClaimed } from "../../../lib/pointerClaims";
-import { getLayoutSurface, applySurfaceToMove } from "../../../lib/layoutSurface";
+import { getLayoutSurface, applySurfaceToMove, isRegionLocked } from "../../../lib/layoutSurface";
 import { getGridStateSnapshot } from "../../../state/GridContext";
 
 /** The layout surface of the sheet being edited (null = unconstrained). */
@@ -114,6 +120,10 @@ function getFloatingCanvasBounds(
  * position (zoom-corrected canvas coordinates — the same basis
  * checkOverlayBody uses). Plain bounds test only; extended hitTest areas
  * (e.g. quick-access buttons outside the rect) are not consulted.
+ *
+ * Walks `floatingHitOrder` (@api/gridOverlays): topmost first, the exact
+ * reverse of the paint order when a stacking order is in force, reverse
+ * publication order otherwise.
  */
 export function findFloatingRegionAt(
   mouseX: number,
@@ -121,10 +131,8 @@ export function findFloatingRegionAt(
   config: GridConfig,
   viewport: Viewport,
 ): GridRegion | null {
-  const regions = getGridRegions();
-  // Reverse so topmost floating overlays are tested first
-  for (let i = regions.length - 1; i >= 0; i--) {
-    const bounds = getFloatingCanvasBounds(regions[i], config, viewport);
+  for (const region of floatingHitOrder(getGridRegions())) {
+    const bounds = getFloatingCanvasBounds(region, config, viewport);
     if (!bounds) continue;
     if (
       mouseX >= bounds.x &&
@@ -132,7 +140,7 @@ export function findFloatingRegionAt(
       mouseY >= bounds.y &&
       mouseY <= bounds.y + bounds.height
     ) {
-      return regions[i];
+      return region;
     }
   }
   return null;
@@ -166,10 +174,9 @@ export function createOverlayMoveHandlers(
     mouseX: number,
     mouseY: number,
   ): { region: GridRegion; cursor: string | null } | null => {
-    const regions = getGridRegions();
-    // Check in reverse so topmost floating overlays are tested first
-    for (let i = regions.length - 1; i >= 0; i--) {
-      const region = regions[i];
+    // Topmost first (`floatingHitOrder`): the object painted on top is the one
+    // a press reaches.
+    for (const region of floatingHitOrder(getGridRegions())) {
       const bounds = getFloatingCanvasBounds(region, config, viewport);
       if (!bounds) continue;
 
@@ -272,6 +279,20 @@ export function createOverlayMoveHandlers(
     const region = hit.region;
     event.preventDefault();
 
+    // PRESS PARITY ON A CANVAS. Every family reads this dispatch in its own
+    // way, and only the pivot box ever deselected on ANOTHER family's press,
+    // so a chart and a slicer could both be selected by two plain clicks. The
+    // object-selection seam decides what the press means for the canvas-wide
+    // selection set BEFORE the families hear it: a plain press selects one
+    // object (other families deselected), Ctrl/Shift adds or removes, and a
+    // plain press on a member of a multi-selection keeps the set for a group
+    // drag, narrowing at mouseup. It never dispatches anything itself -- the
+    // press below stays the families' one click signal. A worksheet keeps its
+    // historical behaviour: the call is gated on the canvas surface.
+    if (getGridStateSnapshot()?.surface === "canvas") {
+      noteObjectPress(region, { ctrlKey: event.ctrlKey, shiftKey: event.shiftKey });
+    }
+
     // Notify extensions that a floating overlay was selected (always)
     window.dispatchEvent(new CustomEvent("floatingObject:selected", {
       detail: {
@@ -279,6 +300,7 @@ export function createOverlayMoveHandlers(
         regionType: region.type,
         data: region.data,
         ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
       },
     }));
 
@@ -306,8 +328,11 @@ export function createOverlayMoveHandlers(
       }
     }
 
-    // Only start a move drag if the region is movable (extensions set this via data)
-    if (region.data?.movable === false) {
+    // Only start a move drag if the region is movable (extensions set this via
+    // data) and the layout surface does not LOCK it. A locked object behaves
+    // exactly like an immovable one: the press above selected it, no drag moves
+    // it.
+    if (region.data?.movable === false || isRegionLocked(activeLayoutSurface(), region)) {
       return true; // consumed the click, but no drag
     }
 

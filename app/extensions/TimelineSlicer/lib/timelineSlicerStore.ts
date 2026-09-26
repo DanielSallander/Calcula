@@ -16,6 +16,8 @@ import {
 import { getGridStateSnapshot } from "@api/state";
 import * as api from "./timeline-slicer-api";
 import { TimelineSlicerEvents } from "./timelineSlicerEvents";
+import { runInUndoTransaction } from "@api/objectGeometry";
+import { showToast } from "@api/notifications";
 
 // ============================================================================
 // Module-level cache
@@ -132,6 +134,72 @@ export async function updateTimelinePositionAsync(
   } catch (err) {
     console.error("[TimelineSlicer] Failed to update position:", err);
   }
+}
+
+// ============================================================================
+// Geometry batches (co-move, the canvas's arrange / nudge)
+// ============================================================================
+
+/** One timeline's new geometry. */
+export interface TimelineGeometryWrite {
+  timelineId: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Write several timelines' geometry. The cache moves at once, then each write
+ * is sent IN ORDER -- `update_timeline_position` records undo joining an open
+ * transaction, so the caller decides the step. Resolves the refusal reasons:
+ * empty when every write landed. On any refusal the cache is re-read from the
+ * backend, so what the canvas paints is what the workbook holds.
+ */
+export async function writeTimelineGeometryAsync(writes: readonly TimelineGeometryWrite[]): Promise<string[]> {
+  for (const w of writes) {
+    const tl = cachedTimelines.find((t) => t.id === w.timelineId);
+    if (!tl) continue;
+    tl.x = w.x;
+    tl.y = w.y;
+    tl.width = w.width;
+    tl.height = w.height;
+  }
+  syncTimelineRegions();
+  const reasons: string[] = [];
+  for (const w of writes) {
+    try {
+      await api.updateTimelinePosition(w.timelineId, w.x, w.y, w.width, w.height);
+    } catch (err) {
+      console.error(`[TimelineSlicer] The backend refused the geometry of timeline ${w.timelineId}:`, err);
+      reasons.push(describeError(err));
+    }
+  }
+  if (reasons.length > 0) await refreshCache();
+  return reasons;
+}
+
+/**
+ * {@link writeTimelineGeometryAsync} as ONE undo step labelled `label`
+ * (joining the open frontend transaction when there is one -- a canvas group
+ * drag), and a refusal told in ONE toast. Resolves true when every write
+ * landed.
+ */
+export async function commitTimelineGeometryAsync(
+  writes: readonly TimelineGeometryWrite[],
+  label: string,
+): Promise<boolean> {
+  if (writes.length === 0) return true;
+  const reasons = await runInUndoTransaction(label, () => writeTimelineGeometryAsync(writes));
+  if (reasons.length === 0) return true;
+  const what = writes.length === 1 ? "The timeline" : "The timelines";
+  const unique = Array.from(new Set(reasons.filter((r) => r !== "")));
+  showToast(`${what} could not be moved. ${unique.join(" ")}`.trim(), { type: "error", duration: 8000 });
+  return false;
 }
 
 export async function updateTimelineSelectionAsync(

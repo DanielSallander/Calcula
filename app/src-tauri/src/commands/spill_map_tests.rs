@@ -1346,7 +1346,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("calp_commands.rs", "write_override_value", "the raw write; its one caller apply_override_value_to_grid releases orphaned claims on the written sheet"),
         ("calp_commands.rs", "calp_revert_override", "writes only through apply_override_value_to_grid, which releases orphaned claims on the sheet it wrote"),
         ("calp_commands.rs", "calp_accept_upstream", "as calp_revert_override"),
-        ("calp_commands.rs", "calp_refresh_apply", "as calp_revert_override"),
+        ("calp_commands.rs", "apply_refresh_payloads", "the body of calp_refresh_apply (extracted so it can be driven without a window): its override writes go through apply_override_value_to_grid, as calp_revert_override's do, and every whole-grid replacement is followed by restore_spill_extents_for_sheet, which sweeps that index's claims before installing the incoming sheet's extents"),
         ("scripting/commands.rs", "parse_script_formula_writes", "builds a detached grid; apply_script_modified_grids_core recalculates"),
         ("calp_merge.rs", "overlay_their_cells", "builds a DETACHED copy of the grids with the intervening version's cells laid over it; it mutates nothing in AppState and hands the result to apply_script_modified_grids, which diffs, records undo and recalculates — the same arrangement parse_script_formula_writes has"),
         ("calp_commands.rs", "calp_hold_back_cells", "the same arrangement as overlay_their_cells above: a DETACHED clone of the grids with the base version's cells laid over the unticked positions, handed to apply_script_modified_grids, which owns the spill map for the write. Nothing in AppState is mutated here"),
@@ -1359,7 +1359,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("undo_commands.rs", "apply_script_grid_cells_restore", "reports its sheet; apply_changes cascades"),
         ("undo_commands.rs", "apply_sheet_structural_restore", "reports its sheet; apply_changes cascades"),
         // -- Writes a region no dynamic array can be inside --------------------
-        ("pivot/commands.rs", "create_pivot_inner", "a pivot's output region is protected against every content write, so no spill ORIGIN can be inside it"),
+        ("pivot/commands.rs", "create_pivot_core", "a pivot's output region is protected against every content write, so no spill ORIGIN can be inside it (create_pivot_inner is now its State-handle wrapper)"),
         ("pivot/commands.rs", "delete_pivot_table", "clears the same protected region"),
         ("pivot/commands.rs", "undo_pivot_overwrite", "restores cells the pivot displaced, inside the same protected region"),
         ("pivot/commands.rs", "drill_through_to_sheet", "writes a freshly created sheet, which can hold no pre-existing spill"),

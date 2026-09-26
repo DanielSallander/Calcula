@@ -4,7 +4,6 @@
 //          DOM-based context menu with slicer-specific options.
 
 import {
-  getAllSlicers,
   getSlicerById,
   updateSlicerSelectionAsync,
   updateSlicerAsync,
@@ -15,6 +14,7 @@ import { getGridStateSnapshot } from "@api/state";
 import { showDialog } from "@api";
 import { emitAppEvent } from "@api/events";
 import { SLICER_SETTINGS_DIALOG_ID, SLICER_COMPUTED_PROPS_DIALOG_ID, SLICER_CONNECTIONS_DIALOG_ID } from "../manifest";
+import { slicerAtCanvasPoint } from "../lib/slicerCanvasGeometry";
 
 // ============================================================================
 // State
@@ -76,42 +76,19 @@ export function closeSlicerContextMenu(): void {
 // Hit Testing
 // ============================================================================
 
+/**
+ * The slicer a right-click at this logical canvas point is on, or null.
+ * `slicerAtCanvasPoint` uses the PAINTED gutters and refuses a point where
+ * another object is on top -- this listener stops immediate propagation, so
+ * claiming a covered slicer would also have starved the covering object's own
+ * menu.
+ */
 function hitTestSlicerAt(
   canvasX: number,
   canvasY: number,
 ): { slicerId: string } | null {
-  const slicers = getAllSlicers();
-  const gridState = getGridStateSnapshot();
-  if (!gridState) return null;
-
-  const scrollX = gridState.viewport.scrollX;
-  const scrollY = gridState.viewport.scrollY;
-  const headerWidth = gridState.config.rowHeaderWidth;
-  const headerHeight = gridState.config.colHeaderHeight;
-  const activeSheet = gridState.sheetContext.activeSheetIndex;
-
-  // Check slicers in reverse (topmost first), only on the active sheet
-  for (let i = slicers.length - 1; i >= 0; i--) {
-    const slicer = slicers[i];
-    if (slicer.sheetIndex !== activeSheet) continue;
-    const bounds = {
-      x: slicer.x - scrollX + headerWidth,
-      y: slicer.y - scrollY + headerHeight,
-      width: slicer.width,
-      height: slicer.height,
-    };
-
-    if (
-      canvasX >= bounds.x &&
-      canvasX <= bounds.x + bounds.width &&
-      canvasY >= bounds.y &&
-      canvasY <= bounds.y + bounds.height
-    ) {
-      return { slicerId: slicer.id };
-    }
-  }
-
-  return null;
+  const slicer = slicerAtCanvasPoint(canvasX, canvasY);
+  return slicer ? { slicerId: slicer.id } : null;
 }
 
 // ============================================================================

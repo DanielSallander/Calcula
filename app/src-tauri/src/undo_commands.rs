@@ -1155,7 +1155,7 @@ pub(crate) fn apply_changes(
                     Some(spec) => {
                         (spec.restore)(
                             state, pivot_state, slicer_state, ribbon_filter_state,
-                            pane_control_state, timeline_state, &effect, kind, data, &mut inverse_transaction,
+                            pane_control_state, timeline_state, user_files_state, &effect, kind, data, &mut inverse_transaction,
                             &mut report,
                         );
                         domains.extend(spec.domains);
@@ -1200,7 +1200,7 @@ pub(crate) fn apply_changes(
             Some(spec) => {
                 (spec.restore)(
                     state, pivot_state, slicer_state, ribbon_filter_state,
-                    pane_control_state, timeline_state, &effect, &kind, &data, &mut inverse_transaction,
+                    pane_control_state, timeline_state, user_files_state, &effect, &kind, &data, &mut inverse_transaction,
                     &mut report,
                 );
                 domains.extend(spec.domains);
@@ -1569,6 +1569,7 @@ type RestoreFn = fn(
     &RibbonFilterState,
     &PaneControlState,
     &crate::timeline_slicer::TimelineSlicerState,
+    &UserFilesState,
     &crate::document_effect::DocumentEffect,
     &str,
     &[u8],
@@ -1589,35 +1590,35 @@ struct RestoreSpec {
 }
 
 // --- Adapters: forward the uniform signature to each concrete restore fn. ----
-fn r_comment(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_comment_restore(s, e, d, inv); }
-fn r_note(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_note_restore(s, e, d, inv); }
-fn r_hyperlink(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_hyperlink_restore(s, e, d, inv); }
-fn r_default_dim(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_default_dimension_restore(s, e, k, d, inv); }
-fn r_pivot_definition(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_definition_restore(s, p, rf, pc, e, d, inv); }
-fn r_pivot_create(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_create_restore(s, p, d, inv, e); }
-fn r_pivot_delete(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_delete_restore(s, p, rf, pc, d, inv, e); }
-fn r_slicer(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_slicer_restore(sl, e, d, inv); }
-fn r_slicer_create(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_slicer_create_restore(sl, e, d, inv); }
-fn r_slicer_delete(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_slicer_delete_restore(sl, e, d, inv); }
-fn r_timeline(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_timeline_restore(tl, e, d, inv); }
-fn r_timeline_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_timeline_create_restore(tl, e, d, inv); }
-fn r_timeline_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_timeline_delete_restore(tl, e, d, inv); }
-fn r_ribbon_filter(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_ribbon_filter_restore(rf, e, d, inv); }
-fn r_ribbon_filter_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_ribbon_filter_create_restore(rf, e, d, inv); }
-fn r_ribbon_filter_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_ribbon_filter_delete_restore(rf, e, d, inv); }
-fn r_pane_control(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pane_control_restore(pc, d, inv); }
-fn r_pane_control_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pane_control_create_restore(pc, d, inv); }
-fn r_pane_control_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pane_control_delete_restore(pc, d, inv); }
-fn r_object_swap(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_object_swap_restore(s, e, k, d, inv, rp); }
-fn r_script_grid_cells(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_script_grid_cells_restore(s, e, d, inv, rp); }
-fn r_sheet_merge_regions(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_sheet_merge_regions_restore(s, e, d, inv, rp); }
-fn r_sheet_structural(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_sheet_structural_restore(s, e, d, inv, rp); }
-fn r_report_restore(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_report_restore(s, e, d, inv, rp); }
-fn r_calp_reset(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_calp_reset_restore(s, e, d, inv, rp); }
-fn r_outline(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_outline_restore(s, e, d, inv); }
-fn r_user_hidden(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_user_hidden_restore(s, e, d, inv); }
-fn r_pivot_col_widths(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_col_widths_restore(s, e, d, inv); }
-fn r_sheet_tab_state(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_sheet_tab_state_restore(s, e, d, inv); }
+fn r_comment(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_comment_restore(s, e, d, inv); }
+fn r_note(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_note_restore(s, e, d, inv); }
+fn r_hyperlink(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_hyperlink_restore(s, e, d, inv); }
+fn r_default_dim(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_default_dimension_restore(s, e, k, d, inv); }
+fn r_pivot_definition(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_definition_restore(s, p, rf, pc, uf, e, d, inv); }
+fn r_pivot_create(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_create_restore(s, p, d, inv, e); }
+fn r_pivot_delete(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_delete_restore(s, p, rf, pc, uf, d, inv, e); }
+fn r_slicer(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_slicer_restore(sl, e, d, inv); }
+fn r_slicer_create(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_slicer_create_restore(sl, e, d, inv); }
+fn r_slicer_delete(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_slicer_delete_restore(sl, e, d, inv); }
+fn r_timeline(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_timeline_restore(tl, e, d, inv); }
+fn r_timeline_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_timeline_create_restore(tl, e, d, inv); }
+fn r_timeline_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_timeline_delete_restore(tl, e, d, inv); }
+fn r_ribbon_filter(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_ribbon_filter_restore(rf, e, d, inv); }
+fn r_ribbon_filter_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_ribbon_filter_create_restore(rf, e, d, inv); }
+fn r_ribbon_filter_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_ribbon_filter_delete_restore(rf, e, d, inv); }
+fn r_pane_control(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pane_control_restore(pc, d, inv); }
+fn r_pane_control_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pane_control_create_restore(pc, d, inv); }
+fn r_pane_control_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, _e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pane_control_delete_restore(pc, d, inv); }
+fn r_object_swap(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_object_swap_restore(s, e, k, d, inv, rp); }
+fn r_script_grid_cells(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_script_grid_cells_restore(s, e, d, inv, rp); }
+fn r_sheet_merge_regions(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_sheet_merge_regions_restore(s, e, d, inv, rp); }
+fn r_sheet_structural(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_sheet_structural_restore(s, e, d, inv, rp); }
+fn r_report_restore(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_report_restore(s, e, d, inv, rp); }
+fn r_calp_reset(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { apply_calp_reset_restore(s, e, d, inv, rp); }
+fn r_outline(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_outline_restore(s, e, d, inv); }
+fn r_user_hidden(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_user_hidden_restore(s, e, d, inv); }
+fn r_pivot_col_widths(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_col_widths_restore(s, e, d, inv); }
+fn r_sheet_tab_state(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_sheet_tab_state_restore(s, e, d, inv); }
 
 /// The kind → spec table, built once.
 static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(|| {
@@ -2919,6 +2920,7 @@ fn apply_pivot_definition_restore(
     pivot_state: &PivotState,
     ribbon_filter_state: &RibbonFilterState,
     pane_control_state: &PaneControlState,
+    user_files_state: &UserFilesState,
     effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
@@ -2976,7 +2978,7 @@ fn apply_pivot_definition_restore(
         // Rewrite the grid. A refusal (the destination is a canvas) wrote
         // nothing and did not move the region; the undo still restores the
         // definition, so the log says why the grid did not follow.
-        if let Err(refusal) = finalize_pivot_update(state, effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((pane_control_state, ribbon_filter_state))) {
+        if let Err(refusal) = finalize_pivot_update(state, effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: pane_control_state, ribbon: ribbon_filter_state, user_files: user_files_state })) {
             crate::log_warn!("UNDO", "pivot {} definition restored but not re-rendered: {}", pivot_id, refusal);
         }
 
@@ -3094,6 +3096,7 @@ fn apply_pivot_delete_restore(
     pivot_state: &PivotState,
     ribbon_filter_state: &RibbonFilterState,
     pane_control_state: &PaneControlState,
+    user_files_state: &UserFilesState,
     data: &[u8],
     inverse_transaction: &mut Transaction,
     effect: &crate::document_effect::DocumentEffect,
@@ -3136,7 +3139,7 @@ fn apply_pivot_delete_restore(
 
     // Write to grid. A refusal (the destination is a canvas) wrote nothing and
     // registered no region; the pivot is back and can be deleted or re-aimed.
-    if let Err(refusal) = finalize_pivot_update(state, effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((pane_control_state, ribbon_filter_state))) {
+    if let Err(refusal) = finalize_pivot_update(state, effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: pane_control_state, ribbon: ribbon_filter_state, user_files: user_files_state })) {
         crate::log_warn!("UNDO", "pivot {} restored but not re-rendered: {}", pivot_id, refusal);
     }
 }
@@ -4647,16 +4650,74 @@ fn apply_object_swap_restore(
 // has one open.
 // ============================================================================
 
-fn record_object_undo(state: &AppState, kind: &str, data: Vec<u8>, description: &str) {
+/// THE GUARDED JOIN. Record `restores` as ONE undo step: when the caller
+/// already has a transaction open (`begin_undo_transaction`, a macro, a
+/// cross-family arrange), the entries JOIN it and nothing is committed here;
+/// otherwise this opens its own one-shot transaction and commits it.
+///
+/// Why not a plain `begin_transaction` / `commit_transaction` pair: `begin` is
+/// a no-op while a transaction is open, but `commit` is NOT -- it commits
+/// whatever is open. An unconditional pair therefore commits the CALLER'S
+/// outer transaction halfway through, and an arrange that moved a slicer, a
+/// timeline and a pivot box became as many Ctrl+Z steps as there were
+/// families that committed early.
+///
+/// Every entry is recorded under ONE acquisition of the stack lock, so a
+/// concurrent command cannot open its own transaction between two of them and
+/// split what the user sees as one action. An empty list records nothing.
+///
+/// Every recorder in the crate that is not deliberately a boundary of its own
+/// goes through here (directly, or via `record_object_undo`).
+pub(crate) fn record_restores_joining_open_transaction(
+    state: &AppState,
+    description: &str,
+    restores: Vec<(&str, Vec<u8>)>,
+) {
+    if restores.is_empty() {
+        return;
+    }
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let opened = !undo_stack.has_open_transaction();
     if opened {
         undo_stack.begin_transaction(description.to_string());
     }
-    undo_stack.record_custom_restore(kind.to_string(), data, description);
+    for (kind, data) in restores {
+        undo_stack.record_custom_restore(kind.to_string(), data, description);
+    }
     if opened {
         undo_stack.commit_transaction();
     }
+}
+
+fn record_object_undo(state: &AppState, kind: &str, data: Vec<u8>, description: &str) {
+    record_restores_joining_open_transaction(state, description, vec![(kind, data)]);
+}
+
+/// Record a slicer's PRE-edit state through the existing full-struct "slicer"
+/// restore (`apply_slicer_restore`, Slicer domain -> `slicers:refresh`),
+/// joining an open transaction. The payload is built HERE, from the same
+/// `SlicerSnapshot` the restore reads back, so the two cannot drift apart.
+pub(crate) fn record_slicer_undo(
+    state: &AppState,
+    slicer_id: identity::EntityId,
+    previous: Slicer,
+    description: &str,
+) {
+    let data = serde_json::to_vec(&SlicerSnapshot { slicer_id, previous }).unwrap_or_default();
+    record_restores_joining_open_transaction(state, description, vec![("slicer", data)]);
+}
+
+/// Record a timeline slicer's PRE-edit state through the existing full-struct
+/// "timeline_slicer" restore, joining an open transaction. Built from the
+/// restore's own `TimelineSnapshot`, like [`record_slicer_undo`].
+pub(crate) fn record_timeline_undo(
+    state: &AppState,
+    timeline_id: identity::EntityId,
+    previous: crate::timeline_slicer::TimelineSlicer,
+    description: &str,
+) {
+    let data = serde_json::to_vec(&TimelineSnapshot { timeline_id, previous }).unwrap_or_default();
+    record_restores_joining_open_transaction(state, description, vec![("timeline_slicer", data)]);
 }
 
 pub(crate) fn record_chart_undo(

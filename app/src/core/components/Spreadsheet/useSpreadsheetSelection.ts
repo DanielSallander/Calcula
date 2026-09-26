@@ -3,7 +3,7 @@
 // CONTEXT: Coordinates global selection hooks with local canvas events.
 // Includes fill handle and clipboard support with marching ants.
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import {
   useSelection,
   useMouseSelection,
@@ -43,6 +43,7 @@ import {
 import type { UndoResult } from "../../lib/tauri-api";
 import type { FormattingOptions } from "../../types";
 import { measureOptimalColumnWidth, measureOptimalRowHeight } from "../../lib/gridRenderer";
+import { effectiveGridConfig, paintedDisplayHeadings } from "../../lib/gridRenderer/layout/headerVisibility";
 import { getActiveGridTheme } from "../../theme/skinLoader";
 import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
 import { checkCellDoubleClickInterceptors } from "../../lib/cellDoubleClickInterceptors";
@@ -93,7 +94,17 @@ export function useSpreadsheetSelection({
   onCommitBeforeSelect
 }: UseSpreadsheetSelectionProps) {
   const [selectedCellContent, setSelectedCellContent] = useState<string>("");
-  const { viewport, config, selection, dimensions, formulaReferences, sheetContext, freezeConfig, splitConfig, splitViewport } = state;
+  const { viewport, config: storedConfig, selection, dimensions, formulaReferences, sheetContext, freezeConfig, splitConfig, splitViewport } = state;
+  // THE MOUSE LAYER HIT-TESTS AGAINST THE GUTTERS THE PAINTER DRAWS. Every
+  // pixel -> place question below (cell under the pointer, fill handle,
+  // floating-object body and resize handles) takes this config, never the
+  // stored one: with the headings hidden -- always, on a canvas -- the painter
+  // collapses both gutters to 0, and the stored 22/20 put every hit rectangle
+  // one header away from what is on screen.
+  const config = useMemo(
+    () => effectiveGridConfig(storedConfig, paintedDisplayHeadings(state.surface, state.displayHeadings)),
+    [storedConfig, state.surface, state.displayHeadings],
+  );
 
   // Compute effective freeze config: when split is active, use split config as freeze config
   const hasSplit = splitConfig &&
@@ -169,7 +180,7 @@ export function useSpreadsheetSelection({
     autoFillToEdge,
   } = useFillHandle({
     containerRef,
-    config: state.config,
+    config,
   });
 
   const pendingRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1134,7 +1145,7 @@ export function useSpreadsheetSelection({
       // the one the click actually selected, and acted on it. Every other
       // caller of this function already passes them; this one did not.
       const { getCellFromPixel } = await import("../../lib/gridRenderer");
-      const clickedCell = getCellFromPixel(mouseX, mouseY, state.config, state.viewport, state.dimensions, {
+      const clickedCell = getCellFromPixel(mouseX, mouseY, config, state.viewport, state.dimensions, {
         freezeConfig: effectiveFreezeConfig,
         splitBarSize: effectiveSplitBarSize,
         splitViewport: effectiveSplitViewport,
@@ -1181,7 +1192,7 @@ export function useSpreadsheetSelection({
         baseHandleMouseUp();
       }
     },
-    [baseHandleMouseDown, baseHandleMouseUp, isOverFillHandle, startFillDrag, isOverFloatingOverlay, isEditing, state.config, state.viewport, state.dimensions, state.zoom, effectiveFreezeConfig, effectiveSplitBarSize, effectiveSplitViewport]
+    [baseHandleMouseDown, baseHandleMouseUp, isOverFillHandle, startFillDrag, isOverFloatingOverlay, isEditing, config, state.viewport, state.dimensions, state.zoom, effectiveFreezeConfig, effectiveSplitBarSize, effectiveSplitViewport]
   );
 
   const handleMouseMove = useCallback(

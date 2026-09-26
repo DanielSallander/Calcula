@@ -2566,7 +2566,7 @@ layer lingers with grayscale text.
 | **A user accent is only checked against white.** Settings > Appearance warns when a picked accent is under 3:1 on white, but the accent also paints the icons on the DARK cluster, where #b91c1c is 2.18:1 and #2563eb 2.73:1 (measured 2026-09-24). Measure against the active skin's `--ribbon-cluster-bg` as well. Not built. | `app/extensions/Settings/components/AppearancePage.tsx:171,654` (`contrastOnWhite`) |
 | **CLOSED the same day: the placement residue.** `panel-placement.spec` restored the Animation panel with `setPlacement("sidebar")`, which leaves an explicit `{animation.timeline: "sidebar"}` that the journey residue guard reads as a reconfigured app (seen only when journeys follow the functional specs). `panelRegistry.resetPlacement` now drops the override (unit-tested), and both placement specs clean up through it; the guard passes after them. | `app/src/shell/registries/panelRegistry.ts` (`resetPlacement`) |
 
-### 2.af Canvas sheets (report pages) — M1–M4 built 2026-09-25; what is open
+### 2.af Canvas sheets (report pages) — M1–M9 built 2026-09-25; what is open
 
 **Built.** A sheet can be a CANVAS: no cells, floating objects on a fixed page with a snap grid (the
 Power BI report canvas). Kind authority `AppState.sheet_kinds` + `persistence::SheetKind`
@@ -2584,9 +2584,38 @@ EDITABLE unless it is SUBSCRIBED from an application; Design Mode is not part of
 session-only and starts off, so gating on it left a new canvas's charts immovable while the same chart
 on a worksheet moved freely).
 
+**Built since (2026-09-25, same day).** M5 Collaboration carriage: `floating_ranges.json` and
+`timeline_slicers.json` written and read, chart data-source sheet ids remapped on subscribe and refresh
+(`core/calp/src/chart_refs.rs`), the user-sheet/object-sheet partition repaired after every pull
+(`restore_partition_invariant`, which now also re-anchors index-keyed objects), publish selection
+following pivots, charts, filters and floating ranges to the sheets they need, detach claiming the
+objects on the detached sheet; an adversarial review's 23 confirmed findings fixed (one filed:
+BUG-0151). M6 the canvas PIVOT: a real pivot in the canvas's hidden grid (`PivotDefinition.canvas_frame`,
+anchors allocated in 1024-column blocks, at most 16 per canvas, `allocate_canvas_pivot_anchor` in
+`app/src-tauri/src/pivot/operations.rs`), shown as a `pivot-visual` floating box that scrolls, painted
+under a clip with no offscreen buffer (`app/extensions/Pivot/lib/pivotVisualOverlay.ts`), created from
+the Canvas tab, the Create PivotTable dialog in canvas mode and the "PivotTable from Model" flows
+(`app/extensions/_shared/lib/canvasPivotFrame.ts`); a pivot write now cascades to readers on other
+sheets (BUG-0141) and writes its merges to its own sheet (BUG-0140); GETPIVOTDATA matches the
+referenced sheet (BUG-0145). M7 floating-grid overflow scroll: session-only scroll in a side map
+(`app/extensions/FloatingRange/lib/frScroll.ts`), content extent = the window grown to the backing
+sheet's used range, the backend write door widened to the same extent
+(`floating_range_write_extent`, `app/src-tauri/src/floating_range.rs`). The mouse layer now hit-tests
+against the PAINTED header gutters (BUG-0139, `useSpreadsheetSelection.ts`). Proved live:
+`app/e2e/journeys/canvas.spec.ts` #1–#6 and `floating-range.spec.ts`, 15/15. M8 arrange (one z-order for
+paint and every hit test, the cross-family selection set + marquee, align / distribute / bring-send /
+lock through the `@api/objectGeometry` seam as ONE undo step, group drag, arrow-key nudge, the Name
+Box object label) and M9 (QuickJS `Sheet.kind`, `docs/design/canvas-sheets.md`, the command recount)
+followed the same day; `canvas.spec.ts` #7 proves arrange live (16/16 with floating-range).
+
 | item | verified at |
 |---|---|
-| **M5–M9 not built.** Collaboration carriage of every canvas object (`floating_ranges.json`, `timeline_slicers.json` actually written and read, chart `spec.data` sheet ids remapped at the two chart materializers, the partition rotation after a pull, the kind in the version listing and the HTML export); the canvas PIVOT in the hidden grid with a scrolling box (M6 — until then a grid pivot aimed at a canvas is refused before its effect); floating-grid overflow scroll (M7); arrange / z-order / lock (M8); the AI summary section, QuickJS `Sheet.kind`, `docs/design/canvas-sheets.md` (M9). | plan `i-want-to-introduce-wiggly-wozniak.md` (owner's plans folder), `app/src-tauri/src/pivot/operations.rs` (`ensure_pivot_destination_is_grid`) |
+| **M8 and M9 built (2026-09-25); what arrange leaves open.** Delete / copy / duplicate of a MULTI-selection act only on what each family holds itself, so a set-held member (a second chart) is not deleted; no group RESIZE; z-order and lock are not undoable (`set_canvas_layout` records no undo, decision D1); when Controls, Slicer or Timeline LEAD a drag, their own co-moved members are clamped at 0 only (not snapped or page-clamped); separate arrow presses are separate undo steps (a held key is one); floating grids take part in arrange and nudge only in design mode (their `data.movable`). | `app/extensions/Charts/index.ts` (`ext.charts.deleteSelection`), `app/extensions/Slicer/index.ts` / `app/extensions/TimelineSlicer/index.ts` (moveComplete), `app/extensions/CanvasSheet/lib/objectNudge.ts` |
+| **BUG-0156 (open): chart hover, tooltip and context-menu lookups ignore zoom**, so they resolve the wrong point at any zoom other than 100%. | `app/extensions/Charts/index.ts` (`handleMouseMove`, context menu) |
+| **A pivot box on a canvas has no right-click menu** (the pivot menu is cell-interceptor based; it would need a capture-phase `contextmenu` listener like Slicer's). | `app/extensions/Pivot/lib/pivotVisualOverlay.ts` |
+| **Floating grid (M7) follow-ups:** the script provider's `getCells` still reads the whole window in one call (refused above 100,000 cells); no auto-scroll while drag-selecting past the viewport edge; a page-mode wheel overshoots by the frame chrome (clamped); edge-handle scaling acts on the window plus existing overrides, so a default-width column scrolled into view from beyond the window keeps its width after a scale. | `app/src/api/scriptHost/host.ts` (`floatingRangeGetCells`), `app/extensions/FloatingRange/lib/frView.ts`, `app/extensions/FloatingRange/lib/frDimensions.ts` (`trackedColIndices`) |
+| **Collaboration follow-ups filed from the M5 review:** collision renames do not rewrite name-bound references in pulled content (BUG-0151); the push preview and merge analysis cannot see frontend distributable objects (BUG-0150); a pulled pivot on the checkout's active sheet may be erased by the next recalculation (BUG-0152, suspected); detached-sheet scripts and sheet-scoped names (BUG-0153); dev pull name collisions (BUG-0154). | `tests/regression/bug-ledger.json` |
+| **Pivot follow-ups filed from M6:** field/item GETPIVOTDATA answers #REF! on entry (BUG-0146); a load resolves a pivot's destination by exact name with a sheet-0 fallback and stores no view, so GETPIVOTDATA is #REF! after open until the view is fetched (BUG-0147); undoing a pivot create leaves its merges (BUG-0148); the worksheet-mode Create dialog ignores a typed `Sheet2!` prefix (BUG-0149). | `app/src-tauri/src/pivot/operations.rs` (`lookup_pivot_data`), `app/src-tauri/src/persistence.rs` (`restore_pivot_definitions`) |
 | **BUG-0138 (open): a BI query result block's sheet index is never remapped** on a sheet move or delete, so Refresh writes the block onto whichever sheet inherited the index. A block that now names a CANVAS is skipped loudly; the worksheet case is unchanged. | `app/src-tauri/src/bi/commands.rs` (`bi_refresh_connection`) |
 | **Notebook rewind still installs a checkpoint by POSITION** when the sheet count is unchanged but the order is not (a move between the checkpoint and the rewind). A count change is refused and a canvas slot always keeps its live grid. | `app/src-tauri/src/scripting/notebook_commands.rs` (`notebook_rewind_internal`) |
 | **Lock-order risk older than canvases:** `delete_sheet_impl` holds `sheet_names` / `active_sheet` while taking `pivot_tables`, and the pivot destination resolver reads those two under `pivot_tables`. Documented as KNOWN OPEN in the resolver's LOCKS comment; fixing it means restructuring the delete's guarded block. | `app/src-tauri/src/pivot/operations.rs` (`resolve_dest_sheet_index`), `app/src-tauri/src/sheets.rs` (`delete_sheet_impl`) |

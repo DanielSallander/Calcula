@@ -118,6 +118,107 @@ describe("api/index.ts chart seam re-exports", () => {
 });
 
 // ============================================================================
+// index.ts — the OBJECT label registry (M8) is reachable from the BARREL
+// ============================================================================
+// The Name Box's label for a selected slicer / timeline / floating range /
+// pivot box / control, and "N objects" for a canvas multi-selection. Written by
+// the canvas extension, read by the shell -- so it must be barrel-visible, and
+// the barrel's copy must be the module's copy (one registry, not two).
+
+describe("api/index.ts object label re-exports", () => {
+  it("re-exports the object label registry", async () => {
+    const mod = (await import("../index")) as Record<string, unknown>;
+    for (const fn of ["publishObjectLabel", "getObjectLabel", "onObjectLabelChanged", "resetObjectLabelRegistry"]) {
+      expect(typeof mod[fn]).toBe("function");
+    }
+    expect(mod.EMPTY_OBJECT_LABEL).toEqual({ source: null, text: "", count: 0 });
+  });
+
+  it("the barrel's copy IS the module's copy", async () => {
+    const barrel = (await import("../index")) as Record<string, unknown>;
+    const direct = await import("../objectSelectionLabel");
+    expect(barrel.publishObjectLabel).toBe(direct.publishObjectLabel);
+    expect(barrel.getObjectLabel).toBe(direct.getObjectLabel);
+    expect(barrel.onObjectLabelChanged).toBe(direct.onObjectLabelChanged);
+  });
+});
+
+// ============================================================================
+// objectGeometry.ts / objectStacking.ts — the ARRANGE seams (M8) are reachable
+// from the BARREL, and the barrel's copy is the module's copy
+// ============================================================================
+// The canvas's align / distribute / nudge / group drag move objects of every
+// family through ONE provider registry and ONE frontend-owned undo transaction;
+// a second copy of either (a re-implementation behind the barrel) would let a
+// family's persist join a transaction the canvas never commits.
+
+describe("api/index.ts object geometry + stacking re-exports", () => {
+  it("re-exports the geometry seam and the undo-transaction helpers", async () => {
+    const mod = (await import("../index")) as Record<string, unknown>;
+    for (const fn of [
+      "registerObjectGeometryProvider",
+      "hasObjectGeometryProvider",
+      "getObjectGeometryProvider",
+      "canMoveObject",
+      "canResizeObject",
+      "familyCoMovesOwnSelection",
+      "previewObjectGeometry",
+      "commitObjectGeometry",
+      "flushObjectGeometry",
+      "resetObjectGeometryProviders",
+      "openUndoTransaction",
+      "runInUndoTransaction",
+      "joinUndoTransaction",
+      "isUndoTransactionOpen",
+      "registerObjectStackingService",
+      "getObjectStackingService",
+      "resetObjectStackingService",
+    ]) {
+      expect(typeof mod[fn]).toBe("function");
+    }
+  });
+
+  it("the barrel's copy IS the module's copy", async () => {
+    const barrel = (await import("../index")) as Record<string, unknown>;
+    const geometry = await import("../objectGeometry");
+    const stacking = await import("../objectStacking");
+    expect(barrel.commitObjectGeometry).toBe(geometry.commitObjectGeometry);
+    expect(barrel.registerObjectGeometryProvider).toBe(geometry.registerObjectGeometryProvider);
+    expect(barrel.openUndoTransaction).toBe(geometry.openUndoTransaction);
+    expect(barrel.runInUndoTransaction).toBe(geometry.runInUndoTransaction);
+    expect(barrel.registerObjectStackingService).toBe(stacking.registerObjectStackingService);
+    expect(barrel.getObjectStackingService).toBe(stacking.getObjectStackingService);
+  });
+});
+
+// ============================================================================
+// objectSelection.ts — the canvas SELECTION SET (M8) the arrange commands use
+// ============================================================================
+
+describe("api/objectSelection.ts selection-set surface", () => {
+  it("exports the set API", async () => {
+    const mod = (await import("../objectSelection")) as Record<string, unknown>;
+    for (const fn of [
+      "getSelectedObjectRegions",
+      "getSetHeldObjectRegions",
+      "getPrimaryObjectRegion",
+      "isObjectInSelection",
+      "setObjectSelectionSet",
+      "addToObjectSelection",
+      "removeFromObjectSelection",
+      "clearObjectSelection",
+      "clearSetHeldObjects",
+      "onObjectSelectionChanged",
+      "notifyObjectSelectionChanged",
+      "noteObjectPress",
+      "objectLabelOf",
+    ]) {
+      expect(typeof mod[fn]).toBe("function");
+    }
+  });
+});
+
+// ============================================================================
 // keybindings.ts — the FACADE mirrors the FUNCTION it fronts
 // ============================================================================
 //

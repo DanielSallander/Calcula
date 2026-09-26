@@ -1402,47 +1402,49 @@ pub(crate) fn restore_timeline_slicers(
         let Some(sheet_index) = sheet_id_to_index(workbook, st.sheet_id) else {
             continue;
         };
-        timelines.insert(
-            st.id,
-            crate::timeline_slicer::TimelineSlicer {
-                id: st.id,
-                name: st.name.clone(),
-                header_text: st.header_text.clone(),
-                sheet_index,
-                x: st.x,
-                y: st.y,
-                width: st.width,
-                height: st.height,
-                source_type: match st.source_type {
-                    persistence::SavedTimelineSourceType::Pivot => {
-                        crate::timeline_slicer::TimelineSourceType::Pivot
-                    }
-                },
-                source_id: st.source_id,
-                field_name: st.field_name.clone(),
-                level: match st.level {
-                    persistence::SavedTimelineLevel::Years => {
-                        crate::timeline_slicer::TimelineLevel::Years
-                    }
-                    persistence::SavedTimelineLevel::Quarters => {
-                        crate::timeline_slicer::TimelineLevel::Quarters
-                    }
-                    persistence::SavedTimelineLevel::Months => {
-                        crate::timeline_slicer::TimelineLevel::Months
-                    }
-                    persistence::SavedTimelineLevel::Days => {
-                        crate::timeline_slicer::TimelineLevel::Days
-                    }
-                },
-                selection_start: st.selection_start.clone(),
-                selection_end: st.selection_end.clone(),
-                show_header: st.show_header,
-                show_level_selector: st.show_level_selector,
-                show_scrollbar: st.show_scrollbar,
-                style_preset: st.style_preset.clone(),
-                connected_pivot_ids: st.connected_pivot_ids.clone(),
-            },
-        );
+        timelines.insert(st.id, saved_timeline_to_timeline_at(st, sheet_index));
+    }
+}
+
+/// One saved timeline as a live one on `sheet_index` -- the conversion the
+/// `.cala` load and the `.calp` materializer share, so a pulled timeline and a
+/// loaded one are the same object. A timeline carries no computed properties,
+/// so there is nothing to sanitize on the distribution path.
+pub(crate) fn saved_timeline_to_timeline_at(
+    st: &persistence::SavedTimelineSlicer,
+    sheet_index: usize,
+) -> crate::timeline_slicer::TimelineSlicer {
+    crate::timeline_slicer::TimelineSlicer {
+        id: st.id,
+        name: st.name.clone(),
+        header_text: st.header_text.clone(),
+        sheet_index,
+        x: st.x,
+        y: st.y,
+        width: st.width,
+        height: st.height,
+        source_type: match st.source_type {
+            persistence::SavedTimelineSourceType::Pivot => {
+                crate::timeline_slicer::TimelineSourceType::Pivot
+            }
+        },
+        source_id: st.source_id,
+        field_name: st.field_name.clone(),
+        level: match st.level {
+            persistence::SavedTimelineLevel::Years => crate::timeline_slicer::TimelineLevel::Years,
+            persistence::SavedTimelineLevel::Quarters => {
+                crate::timeline_slicer::TimelineLevel::Quarters
+            }
+            persistence::SavedTimelineLevel::Months => crate::timeline_slicer::TimelineLevel::Months,
+            persistence::SavedTimelineLevel::Days => crate::timeline_slicer::TimelineLevel::Days,
+        },
+        selection_start: st.selection_start.clone(),
+        selection_end: st.selection_end.clone(),
+        show_header: st.show_header,
+        show_level_selector: st.show_level_selector,
+        show_scrollbar: st.show_scrollbar,
+        style_preset: st.style_preset.clone(),
+        connected_pivot_ids: st.connected_pivot_ids.clone(),
     }
 }
 
@@ -2038,6 +2040,65 @@ pub(crate) fn collect_floating_ranges_for_save(
     saved
 }
 
+/// One saved floating range as a live row, ids exactly as saved -- the
+/// conversion the `.cala` load and the `.calp` materializer share (the
+/// materializer then rewrites both sheet ids to the LOCAL sheets they landed
+/// on).
+///
+/// THE LOAD REPAIR, which is a CLAMP and never a refusal: the edit path
+/// (`floating_range::update_floating_range_inner`) refuses an out-of-range value
+/// so its caller hears about it, but a row read from a file or a pulled
+/// application has no caller to tell, and dropping the whole object over one
+/// bad number loses the user's cells. So the window counts are clamped into
+/// `1..=MAX_FLOATING_RANGE_ROWS` / `1..=MAX_FLOATING_RANGE_COLS` (a single
+/// pulled row with `row_count: u32::MAX` would otherwise ask the renderer and
+/// every whole-range fetch for four billion rows), a width/height override
+/// whose index is past the cap or whose size is non-finite or outside the
+/// per-cell bounds is DROPPED -- the column simply falls back to the default
+/// size, `validate_size_map`'s rule applied as a filter -- and a non-finite or
+/// negative origin is moved to 0.
+pub(crate) fn saved_floating_range_to_row(
+    s: &persistence::SavedFloatingRange,
+) -> crate::api_types::FloatingRange {
+    use crate::floating_range::{
+        MAX_FLOATING_RANGE_COLS, MAX_FLOATING_RANGE_COL_W, MAX_FLOATING_RANGE_ROWS,
+        MAX_FLOATING_RANGE_ROW_H, MIN_FLOATING_RANGE_COL_W, MIN_FLOATING_RANGE_ROW_H,
+    };
+    let origin = |v: f64| if v.is_finite() { v.max(0.0) } else { 0.0 };
+    let sizes = |map: &std::collections::HashMap<u32, f64>, cap: u32, min: f64, max: f64| {
+        map.iter()
+            .filter(|(index, size)| **index < cap && size.is_finite() && **size >= min && **size <= max)
+            .map(|(index, size)| (*index, *size))
+            .collect::<std::collections::HashMap<u32, f64>>()
+    };
+    crate::api_types::FloatingRange {
+        id: s.id,
+        backing_sheet_id: s.backing_sheet_id,
+        host_sheet_id: s.host_sheet_id,
+        x: origin(s.x),
+        y: origin(s.y),
+        rotation: s.rotation,
+        pin_to_grid: s.pin_to_grid,
+        row_count: s.row_count.clamp(1, MAX_FLOATING_RANGE_ROWS),
+        col_count: s.col_count.clamp(1, MAX_FLOATING_RANGE_COLS),
+        col_widths: sizes(
+            &s.col_widths,
+            MAX_FLOATING_RANGE_COLS,
+            MIN_FLOATING_RANGE_COL_W,
+            MAX_FLOATING_RANGE_COL_W,
+        ),
+        row_heights: sizes(
+            &s.row_heights,
+            MAX_FLOATING_RANGE_ROWS,
+            MIN_FLOATING_RANGE_ROW_H,
+            MAX_FLOATING_RANGE_ROW_H,
+        ),
+        show_title: s.show_title,
+        show_column_headers: s.show_column_headers,
+        show_row_headers: s.show_row_headers,
+    }
+}
+
 /// Restore floating range rows, with LOAD REPAIR: a row whose backing or host
 /// sheet is missing from the file is dropped (logged — it can render nothing
 /// and address nothing), and an object-visibility sheet no row claims is
@@ -2072,22 +2133,7 @@ pub(crate) fn restore_floating_ranges(
             );
             continue;
         }
-        rows.push(crate::api_types::FloatingRange {
-            id: s.id,
-            backing_sheet_id: s.backing_sheet_id,
-            host_sheet_id: s.host_sheet_id,
-            x: s.x,
-            y: s.y,
-            rotation: s.rotation,
-            pin_to_grid: s.pin_to_grid,
-            row_count: s.row_count.max(1),
-            col_count: s.col_count.max(1),
-            col_widths: s.col_widths.clone(),
-            row_heights: s.row_heights.clone(),
-            show_title: s.show_title,
-            show_column_headers: s.show_column_headers,
-            show_row_headers: s.show_row_headers,
-        });
+        rows.push(saved_floating_range_to_row(s));
     }
     // Orphan sweep (log only — see the doc comment).
     let claimed: std::collections::HashSet<identity::SheetId> =
@@ -2248,13 +2294,16 @@ fn restore_pivot_definitions(
 
     for saved in &workbook.pivot_definitions {
         // Deserialize the PivotDefinition from opaque JSON
-        let def: PivotDefinition = match serde_json::from_value(saved.definition.clone()) {
+        let mut def: PivotDefinition = match serde_json::from_value(saved.definition.clone()) {
             Ok(d) => d,
             Err(e) => {
                 crate::log_warn!("PIVOT", "Failed to deserialize pivot definition {}: {}", saved.id, e);
                 continue;
             }
         };
+        // A canvas pivot's frame is CLAMPED into range on load, never refused:
+        // a damaged box must not cost the user the pivot behind it.
+        def.canvas_frame = def.canvas_frame.map(pivot_engine::CanvasFrame::sanitized);
 
         let pivot_id = def.id;
 
@@ -5881,6 +5930,7 @@ mod collaboration_user_file_restore_tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            detached_local_sheets: Vec::new(),
             upstream_removed_sheets: Vec::new(),
             extra: Default::default(),
         }

@@ -9,6 +9,7 @@ import {
 import { registerPanel, unregisterPanel } from "@api/ui";
 import { getSlicerById } from "../lib/slicerStore";
 import { requestOverlayRedraw } from "@api/gridOverlays";
+import { notifyObjectSelectionChanged } from "@api/objectSelection";
 import { SLICER_OPTIONS_TAB_ID, SlicerOptionsPanelDefinition } from "../manifest";
 import { SlicerEvents } from "../lib/slicerEvents";
 import type { Slicer } from "../lib/slicerTypes";
@@ -63,6 +64,9 @@ export function selectSlicer(slicerId: string, additive = false): void {
 
   // Redraw to show/update selection borders
   requestOverlayRedraw();
+  // The canvas-wide selection set (@api/objectSelection) follows every
+  // family's own selection; these functions are the slicer's chokepoints.
+  notifyObjectSelectionChanged();
 }
 
 /**
@@ -98,6 +102,7 @@ export function deselectSlicer(): void {
 
     // Redraw to remove selection borders
     requestOverlayRedraw();
+    notifyObjectSelectionChanged();
   }
 }
 
@@ -126,6 +131,7 @@ export function dropSlicerFromSelection(slicerId: string): void {
   }
   broadcastSelectedSlicers();
   requestOverlayRedraw();
+  notifyObjectSelectionChanged();
 }
 
 /**

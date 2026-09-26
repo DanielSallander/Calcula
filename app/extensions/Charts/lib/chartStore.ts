@@ -280,7 +280,7 @@ function chartAsPersisted(chart: ChartDefinition): ChartDefinition {
 // raw reason for debugging.
 
 /** One refused backend write, collected so a batch can be reported in one message. */
-interface ChartPersistFailure {
+export interface ChartPersistFailure {
   chartId: string;
   chartName: string;
   /** Which backend write was refused. */
@@ -495,7 +495,10 @@ function scheduleSave(chartId: string, reason: "edit" | "sheetIdStamp" = "edit")
   }
   dirtyChartIds.add(chartId);
   if (saveTimer !== null) clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(flushDirtyCharts, 300);
+  saveTimer = window.setTimeout(() => {
+    saveTimer = null;
+    void runFlush(true);
+  }, 300);
 }
 
 /** Index -> sheet id from the resolver's CACHED sheet list (synchronous; may miss). */
@@ -516,16 +519,37 @@ function stampChartFromCache(chart: ChartDefinition): void {
 }
 
 /**
+ * The flush that is running (or resolved). Flushes are SERIALISED through it:
+ * a manual flush that finds nothing dirty still waits for a timer-driven one
+ * whose writes are in flight, so "flushed" always means "landed" -- the canvas's
+ * one-undo-step arrange and group drag commit their transaction only after it.
+ */
+let flushInFlight: Promise<unknown> = Promise.resolve();
+
+/** Run a flush after any flush already in flight. */
+function runFlush(report: boolean): Promise<ChartPersistFailure[]> {
+  const run = flushInFlight.then(() => flushDirtyCharts(report));
+  flushInFlight = run.catch(() => undefined);
+  return run;
+}
+
+/**
  * Flush all dirty charts to the backend.
  * Called automatically after the debounce delay, or can be called
  * manually (e.g., before file save) via `flushPendingChartSaves()`.
+ *
+ * `report` false: refusals are still rolled back (and the regions re-synced),
+ * but NOT put in front of the user -- the caller reports them (the object-
+ * geometry seam shows one toast for a whole arrange). The failures are
+ * returned either way.
  */
-async function flushDirtyCharts(): Promise<void> {
+async function flushDirtyCharts(report = true): Promise<ChartPersistFailure[]> {
   const ids = Array.from(dirtyChartIds);
   const stampOnly = new Set(ids.filter((id) => stampOnlyChartIds.has(id)));
   for (const id of ids) stampOnlyChartIds.delete(id);
   dirtyChartIds.clear();
-  saveTimer = null;
+  // The timer is the CALLER's to clear (a serialised flush can start after a
+  // newer save was scheduled, and must not forget that newer timer).
   const failures: ChartPersistFailure[] = [];
   for (const id of ids) {
     const chart = getChartById(id);
@@ -567,20 +591,64 @@ async function flushDirtyCharts(): Promise<void> {
     }
   }
   // One flush, one message, however many charts were refused.
-  await reportChartPersistFailures(failures);
+  if (report) {
+    await reportChartPersistFailures(failures);
+  } else if (failures.length > 0) {
+    for (const failure of failures) {
+      console.error(
+        `[Charts] Backend refused ${failure.operation} for chart "${failure.chartName}" ` +
+          `(${failure.chartId}): ${failure.reason} -- in-memory state ${failure.outcome}`,
+      );
+    }
+    // The rolled-back store is what the canvas must paint.
+    syncChartRegions();
+  }
+  return failures;
 }
 
 /**
  * Public API: flush any pending debounced chart saves immediately.
  * Call this before file save or app close to avoid losing changes.
+ * Also waits for a flush already in flight.
  */
-export function flushPendingChartSaves(): Promise<void> {
+export async function flushPendingChartSaves(): Promise<void> {
   if (saveTimer !== null) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
-  if (dirtyChartIds.size === 0) return Promise.resolve();
-  return flushDirtyCharts();
+  if (dirtyChartIds.size === 0) {
+    await flushInFlight;
+    return;
+  }
+  await runFlush(true);
+}
+
+/**
+ * Tell the user about refused chart writes the store's usual way (one dialog
+ * for the batch, every one logged). For a caller that flushed quietly and
+ * found failures that are not its own to report.
+ */
+export function reportChartFailures(failures: ChartPersistFailure[]): Promise<void> {
+  return reportChartPersistFailures(failures);
+}
+
+/**
+ * Flush pending chart saves WITHOUT telling the user about refusals: they are
+ * rolled back to the last persisted version (and the regions re-synced), and
+ * RETURNED so the caller can report them its own way. The object-geometry
+ * provider's commit uses this, so an arrange that a protected sheet refuses
+ * produces one toast for every family rather than a chart dialog beside it.
+ */
+export async function flushPendingChartSavesQuietly(): Promise<ChartPersistFailure[]> {
+  if (saveTimer !== null) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  if (dirtyChartIds.size === 0) {
+    await flushInFlight;
+    return [];
+  }
+  return runFlush(false);
 }
 
 // ============================================================================
@@ -1058,6 +1126,27 @@ export function updateChartPlacement(
 }
 
 /**
+ * Show a chart at a new position/size WITHOUT persisting it: the in-memory
+ * definition changes and nothing is scheduled -- no write, no undo entry, no
+ * dirty flag. The canvas's nudge previews every keystroke of a burst this way
+ * and commits once through `updateChartPlacement` + a flush; a preview that
+ * scheduled saves would land a debounced write mid-burst, outside the burst's
+ * one undo step. Returns false when no chart has that id.
+ */
+export function previewChartPlacement(
+  chartId: string,
+  rect: { x: number; y: number; width: number; height: number },
+): boolean {
+  const chart = charts.find((c) => c.chartId === chartId);
+  if (!chart) return false;
+  chart.x = rect.x;
+  chart.y = rect.y;
+  chart.width = rect.width;
+  chart.height = rect.height;
+  return true;
+}
+
+/**
  * Set the active sheet index. Charts on other sheets will be hidden.
  */
 export function setActiveSheetIndex(sheetIndex: number): void {
@@ -1082,6 +1171,7 @@ export function resetChartStore(): void {
   }
   dirtyChartIds.clear();
   stampOnlyChartIds.clear();
+  flushInFlight = Promise.resolve();
   // The store is going away; there is nothing left to restore a preview onto.
   activePreview = null;
   charts = [];

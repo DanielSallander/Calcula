@@ -392,7 +392,7 @@ fn diff_working_copy_against_base(
         .map_err(|e| e.to_string())?;
     let artifacts = memory.artifacts_of(&ctx.package_name, &working_str);
 
-    calp::diff::diff_sides(
+    let mut diff = calp::diff::diff_sides(
         &DiffSide::Published {
             transport: &base_registry,
             package: &ctx.package_name,
@@ -402,7 +402,15 @@ fn diff_working_copy_against_base(
         &DiffSide::InMemory { manifest: &working_manifest, artifacts: &artifacts },
         &merge_diff_options(HashMap::new()),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    // A `minAppVersion` change the working side cannot know to be real is not a
+    // piece "you" touched, and must not collide with the head's.
+    crate::calp_commands::reconcile_unknowable_min_app_version(
+        &mut diff,
+        &base_manifest,
+        &working_manifest,
+    );
+    Ok(diff)
 }
 
 /// Copy the current grids and lay the head's cell changes over them.

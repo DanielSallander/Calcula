@@ -3,13 +3,9 @@
 import type {
   PivotViewResponse,
   PivotCellData,
+  PivotRowData,
 } from '../lib/pivot-api';
 import { getCellDisplayValue } from '../lib/pivot-api';
-import {
-  buildFreezePaneConfig,
-  calculateColumnXWithFreeze,
-  calculateRowYWithFreeze,
-} from '@api/dimensions';
 import type { PivotInteractiveBounds } from '@api/pivotTypes';
 
 // =============================================================================
@@ -155,6 +151,35 @@ export interface PivotRenderOptions {
   hoveredFilterFieldIndex?: number | null;
   hoveredIconKey?: string | null;
   hoveredHeaderFilterKey?: string | null;
+  /**
+   * Clear the whole `canvasWidth x canvasHeight` rect first. Default true (a
+   * caller that owns its canvas, e.g. PivotGrid). A caller painting INTO a
+   * shared canvas -- the canvas-page pivot box, drawn under a clip + translate
+   * over the page background -- passes false: a clear there would punch a
+   * transparent hole through the page and through any object beneath the box.
+   */
+  clear?: boolean;
+  /**
+   * Total number of view rows. Default `pivotView.rows.length`. A WINDOWED view
+   * carries cells for its first window only, so its caller passes
+   * `totalRowCount` together with `getRow`.
+   */
+  rowCount?: number;
+  /**
+   * Row accessor. Default `pivotView.rows[i]`. A windowed view reads the cell
+   * window cache; `null` means "not fetched yet" -- the row is painted as a
+   * placeholder and reported through `onMissingRows`.
+   */
+  getRow?: (rowIndex: number) => PivotRowData | null;
+  /** Called once per render with the first and last painted row index whose cells were missing. */
+  onMissingRows?: (firstRow: number, lastRow: number) => void;
+  /**
+   * Precomputed prefix sums of `rowHeights` (`offsets[i]` = top of row i with
+   * no freeze and no scroll; length >= rowCount + 1). Optional: a caller that
+   * already holds them (the canvas box caches them per view) saves an O(rows)
+   * pass per frame; otherwise they are built here.
+   */
+  rowOffsets?: ArrayLike<number>;
 }
 
 export interface PivotRenderResult {
@@ -695,6 +720,42 @@ export function drawPivotCell(
 // MAIN RENDER FUNCTION
 // =============================================================================
 
+/**
+ * Prefix sums over an axis: `offsets[i]` is the start of index i when nothing
+ * is frozen or scrolled; `offsets[count]` is the total extent. A size missing
+ * from `sizes` falls back to `defaultSize` (`??`, the rule
+ * `createDimensionGetterFromArray` uses, so a legal 0 -- a hidden row -- stays 0).
+ */
+export function buildAxisOffsets(
+  sizes: ArrayLike<number>,
+  count: number,
+  defaultSize: number
+): Float64Array {
+  const n = Math.max(0, count);
+  const offsets = new Float64Array(n + 1);
+  for (let i = 0; i < n; i++) {
+    offsets[i + 1] = offsets[i] + (sizes[i] ?? defaultSize);
+  }
+  return offsets;
+}
+
+/** Axis-aligned rect in the render's local coordinates. */
+interface QuadrantClip {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function centerInside(
+  b: { x: number; y: number; width: number; height: number },
+  clip: QuadrantClip
+): boolean {
+  const cx = b.x + b.width / 2;
+  const cy = b.y + b.height / 2;
+  return cx >= clip.x && cx <= clip.x + clip.width && cy >= clip.y && cy <= clip.y + clip.height;
+}
+
 export function renderPivotView(
   ctx: CanvasRenderingContext2D,
   pivotView: PivotViewResponse,
@@ -725,47 +786,51 @@ export function renderPivotView(
     hoveredHeaderFilterKey,
   } = options;
 
-  // Clear canvas
-  ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+  const rowCount = options.rowCount ?? pivotView.rows.length;
+  const getRow = options.getRow ?? ((i: number): PivotRowData | null => pivotView.rows[i] ?? null);
 
-  // Build dimension configuration using shared utility
-  const positionConfig = buildFreezePaneConfig({
-    colWidths,
-    rowHeights,
-    defaultCellWidth: DEFAULT_PIVOT_CELL_WIDTH,
-    defaultCellHeight: DEFAULT_PIVOT_CELL_HEIGHT,
-    scrollX: scrollLeft,
-    scrollY: scrollTop,
-    frozenColCount,
-    frozenRowCount,
-  });
+  // Clear canvas (a caller drawing into a SHARED canvas opts out, see `clear`)
+  if (options.clear !== false) {
+    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+  }
 
-  // Extract pre-calculated frozen dimensions for clipping regions
-  const { frozenWidth, frozenHeight } = positionConfig;
+  // Positions come from prefix sums, not from a walk from index 0 per cell:
+  // the old per-cell `calculateRowYWithFreeze` was O(row) for every cell, which
+  // is fine for a 30-row pane and slow for a box scrolled deep into a windowed
+  // pivot. The arithmetic is the same freeze rule: a frozen index sits at its
+  // unscrolled offset, every other index at its offset minus the scroll (the
+  // frozen extent is exactly `offsets[frozenCount]`).
+  const rowOffsetCount = Math.max(rowCount, endRow + 1, frozenRowCount);
+  const rowOffsets: ArrayLike<number> =
+    options.rowOffsets && options.rowOffsets.length >= rowOffsetCount + 1
+      ? options.rowOffsets
+      : buildAxisOffsets(rowHeights, rowOffsetCount, DEFAULT_PIVOT_CELL_HEIGHT);
+  const colOffsetCount = Math.max(colWidths.length, endCol + 1, frozenColCount);
+  const colOffsets = buildAxisOffsets(colWidths, colOffsetCount, DEFAULT_PIVOT_CELL_WIDTH);
 
-  // Helper to get Y position for a row using shared utility
-  const getRowY = (rowIndex: number): number => {
-    return calculateRowYWithFreeze(rowIndex, positionConfig);
-  };
+  const frozenWidth = colOffsets[frozenColCount] ?? 0;
+  const frozenHeight = rowOffsets[frozenRowCount] ?? 0;
 
-  // Helper to get X position for a column using shared utility
-  const getColX = (colIndex: number): number => {
-    return calculateColumnXWithFreeze(colIndex, positionConfig);
-  };
+  const getRowY = (rowIndex: number): number =>
+    rowIndex < frozenRowCount ? rowOffsets[rowIndex] : rowOffsets[rowIndex] - scrollTop;
+  const getColX = (colIndex: number): number =>
+    colIndex < frozenColCount ? colOffsets[colIndex] : colOffsets[colIndex] - scrollLeft;
 
   // Pre-compute whether each zone has active filters
   const rowHasActiveFilter = pivotView.rowFieldSummaries?.some(f => f.hasActiveFilter) ?? false;
   const colHasActiveFilter = pivotView.columnFieldSummaries?.some(f => f.hasActiveFilter) ?? false;
 
-  // Render cells in four quadrants:
-  // 1. Frozen corner (top-left)
-  // 2. Frozen top (scrolls horizontally)
-  // 3. Frozen left (scrolls vertically)
-  // 4. Main area (scrolls both ways)
+  let firstMissingRow = -1;
+  let lastMissingRow = -1;
 
-  const renderCell = (rowIndex: number, colIndex: number): void => {
-    if (rowIndex >= pivotView.rows.length) return;
-    const row = pivotView.rows[rowIndex];
+  type DeferredCell = { row: PivotRowData; rowIndex: number; colIndex: number };
+
+  const renderCell = (
+    row: PivotRowData,
+    rowIndex: number,
+    colIndex: number,
+    clip: QuadrantClip
+  ): void => {
     if (colIndex >= row.cells.length) return;
     const cell = row.cells[colIndex];
 
@@ -826,88 +891,127 @@ export function renderPivotView(
       }
     );
 
-    // Store interactive bounds
-    if (cellResult.iconBounds) {
+    // Store interactive bounds -- only for chrome that is actually VISIBLE in
+    // this quadrant. A body row scrolled up under the frozen header band is
+    // still painted (and clipped away); recording its +/- there would let a
+    // click on the header land on a row the user cannot see.
+    if (cellResult.iconBounds && centerInside(cellResult.iconBounds, clip)) {
       interactiveBounds.expandCollapseIcons.set(cellKey, cellResult.iconBounds);
     }
 
-    if (cellResult.filterButtonBounds) {
+    if (cellResult.filterButtonBounds && centerInside(cellResult.filterButtonBounds, clip)) {
       const filterKey = `filter-${cell.filterFieldIndex}`;
       interactiveBounds.filterButtons.set(filterKey, cellResult.filterButtonBounds);
     }
 
-    if (cellResult.headerFilterBounds) {
+    if (cellResult.headerFilterBounds && centerInside(cellResult.headerFilterBounds, clip)) {
       interactiveBounds.headerFilterButtons.set(cellKey, cellResult.headerFilterBounds);
     }
   };
 
-  // Render main scrollable area first (bottom-right)
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(frozenWidth, frozenHeight, canvasWidth - frozenWidth, canvasHeight - frozenHeight);
-  ctx.clip();
+  /**
+   * Paint one quadrant: rows [r0, r1] x columns [c0, c1], clipped to `clip`.
+   * Hidden rows (visible === false, or a 0 height) are skipped; a row whose
+   * cells are not fetched yet is painted as a placeholder band and reported;
+   * FilterDropdown cells are drawn LAST so a combo spanning several columns
+   * sits on top of its neighbours (the rule the worksheet overlay follows).
+   */
+  const renderQuadrant = (
+    clip: QuadrantClip,
+    r0: number,
+    r1: number,
+    c0: number,
+    c1: number
+  ): void => {
+    if (clip.width <= 0 || clip.height <= 0 || r1 < r0 || c1 < c0) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(clip.x, clip.y, clip.width, clip.height);
+    ctx.clip();
 
-  for (let r = Math.max(startRow, frozenRowCount); r <= endRow && r < pivotView.rows.length; r++) {
-    for (let c = Math.max(startCol, frozenColCount); c <= endCol; c++) {
-      renderCell(r, c);
+    const deferred: DeferredCell[] = [];
+    for (let r = r0; r <= r1 && r < rowCount; r++) {
+      if (rowHeights[r] === 0) continue;
+      const row = getRow(r);
+      if (!row || !row.cells) {
+        // Not fetched yet (windowed): a neutral band where the row will be.
+        if (firstMissingRow < 0 || r < firstMissingRow) firstMissingRow = r;
+        if (r > lastMissingRow) lastMissingRow = r;
+        const y = getRowY(r);
+        const x = getColX(c0);
+        const right = getColX(c1) + (colWidths[c1] || DEFAULT_PIVOT_CELL_WIDTH);
+        ctx.fillStyle = '#f8f8f8';
+        ctx.fillRect(x, y, right - x, rowHeights[r] || DEFAULT_PIVOT_CELL_HEIGHT);
+        continue;
+      }
+      if (row.visible === false) continue;
+      for (let c = c0; c <= c1; c++) {
+        const cell = row.cells[c];
+        if (cell && cell.cellType === 'FilterDropdown') {
+          deferred.push({ row, rowIndex: r, colIndex: c });
+          continue;
+        }
+        renderCell(row, r, c, clip);
+      }
     }
-  }
-  ctx.restore();
+    for (const d of deferred) {
+      renderCell(d.row, d.rowIndex, d.colIndex, clip);
+    }
+    ctx.restore();
+  };
 
-  // Render frozen left column (scrolls vertically)
+  // Render cells in four quadrants:
+  // 1. Main area (scrolls both ways) -- first, so frozen bands paint over it
+  // 2. Frozen left (scrolls vertically)
+  // 3. Frozen top (scrolls horizontally)
+  // 4. Frozen corner (top-left, never scrolls)
+  const bodyRowStart = Math.max(startRow, frozenRowCount);
+  const bodyColStart = Math.max(startCol, frozenColCount);
+
+  renderQuadrant(
+    { x: frozenWidth, y: frozenHeight, width: canvasWidth - frozenWidth, height: canvasHeight - frozenHeight },
+    bodyRowStart, endRow, bodyColStart, endCol
+  );
+
   if (frozenColCount > 0) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, frozenHeight, frozenWidth, canvasHeight - frozenHeight);
-    ctx.clip();
-
-    for (let r = Math.max(startRow, frozenRowCount); r <= endRow && r < pivotView.rows.length; r++) {
-      for (let c = 0; c < frozenColCount; c++) {
-        renderCell(r, c);
-      }
-    }
-    ctx.restore();
+    renderQuadrant(
+      { x: 0, y: frozenHeight, width: frozenWidth, height: canvasHeight - frozenHeight },
+      bodyRowStart, endRow, 0, frozenColCount - 1
+    );
   }
 
-  // Render frozen top rows (scrolls horizontally)
   if (frozenRowCount > 0) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(frozenWidth, 0, canvasWidth - frozenWidth, frozenHeight);
-    ctx.clip();
-
-    for (let r = 0; r < frozenRowCount && r < pivotView.rows.length; r++) {
-      for (let c = Math.max(startCol, frozenColCount); c <= endCol; c++) {
-        renderCell(r, c);
-      }
-    }
-    ctx.restore();
+    renderQuadrant(
+      { x: frozenWidth, y: 0, width: canvasWidth - frozenWidth, height: frozenHeight },
+      0, Math.min(frozenRowCount, rowCount) - 1, bodyColStart, endCol
+    );
   }
 
-  // Render frozen corner (top-left, never scrolls)
   if (frozenRowCount > 0 && frozenColCount > 0) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, frozenWidth, frozenHeight);
-    ctx.clip();
-
-    for (let r = 0; r < frozenRowCount && r < pivotView.rows.length; r++) {
-      for (let c = 0; c < frozenColCount; c++) {
-        renderCell(r, c);
-      }
-    }
-    ctx.restore();
+    renderQuadrant(
+      { x: 0, y: 0, width: frozenWidth, height: frozenHeight },
+      0, Math.min(frozenRowCount, rowCount) - 1, 0, frozenColCount - 1
+    );
   }
 
-  // Draw separator lines between frozen and scrollable areas
-  // (drawn last so they overlay cell content at the boundaries)
+  if (firstMissingRow >= 0 && options.onMissingRows) {
+    options.onMissingRows(firstMissingRow, lastMissingRow);
+  }
+
+  // Draw separator lines between frozen and scrollable areas (drawn last so
+  // they overlay cell content at the boundaries). They stop at the content's
+  // far edge: a view smaller than its box must not draw rules across the
+  // empty part of the box.
+  const contentBottom = Math.min(canvasHeight, (rowOffsets[rowCount] ?? 0) - scrollTop);
+  const contentRight = Math.min(canvasWidth, (colOffsets[colWidths.length] ?? 0) - scrollLeft);
+
   if (frozenColCount > 0 && frozenWidth > 0) {
     ctx.save();
     ctx.strokeStyle = theme.borderColor;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(Math.floor(frozenWidth) + 0.5, 0);
-    ctx.lineTo(Math.floor(frozenWidth) + 0.5, canvasHeight);
+    ctx.lineTo(Math.floor(frozenWidth) + 0.5, Math.max(frozenHeight, contentBottom));
     ctx.stroke();
     ctx.restore();
   }
@@ -918,7 +1022,7 @@ export function renderPivotView(
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(0, Math.floor(frozenHeight) - 0.5);
-    ctx.lineTo(canvasWidth, Math.floor(frozenHeight) - 0.5);
+    ctx.lineTo(Math.max(frozenWidth, contentRight), Math.floor(frozenHeight) - 0.5);
     ctx.stroke();
     ctx.restore();
   }

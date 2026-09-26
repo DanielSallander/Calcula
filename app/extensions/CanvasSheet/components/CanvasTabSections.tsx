@@ -1,6 +1,8 @@
 //! FILENAME: app/extensions/CanvasSheet/components/CanvasTabSections.tsx
 // PURPOSE: The contextual "Canvas" ribbon tab: shown while a canvas sheet is
-//          active, it holds the snap grid, the page and the view controls.
+//          active, it holds Insert, Arrange (stacking order, align /
+//          distribute, lock -- ./CanvasArrangeSection.tsx), the snap grid, the
+//          page and the view controls.
 // CONTEXT: Composed from @api/layout primitives only (no CSS, no colours), so
 //          it follows every skin and renders in the band, a launcher flyout or
 //          the sidebar from one tree. Every section fills the band's 61px box in
@@ -57,6 +59,8 @@ import {
   showActiveCanvasAtActualSize,
 } from "../lib/canvasActions";
 import { CommitNumberField } from "./CommitNumberField";
+import { CanvasArrangeSection } from "./CanvasArrangeSection";
+import { SUBSCRIBED_NOTE } from "../lib/canvasNotes";
 import { insertOnCanvas, type CanvasInsertKind } from "../lib/insertOnCanvas";
 
 export const CANVAS_TAB_ID = "canvas-sheet-tab";
@@ -74,10 +78,6 @@ function useDesignMode(): boolean {
   return on;
 }
 
-/** Why a control is disabled on a subscribed canvas, shown as its tooltip. */
-const SUBSCRIBED_NOTE =
-  "This canvas comes from an application, so its layout is the publisher's. Detach the sheet to change it.";
-
 // ============================================================================
 // Section: Insert -- every object a canvas can hold, placed on the page
 // ============================================================================
@@ -91,6 +91,7 @@ interface InsertItem {
 
 const INSERT_ITEMS: readonly InsertItem[] = [
   { kind: "chart", label: "Chart", tooltip: "Insert a chart of data on another sheet (type the range with its sheet, e.g. Sheet1!A1:B10)", icon: <RibbonIcon.ChartColumn size={HERO_ICON_SIZE} /> },
+  { kind: "pivot", label: "PivotTable", tooltip: "Insert a pivot table of a worksheet range, a table or a data model, shown in a box on the page whose overflow scrolls", icon: <RibbonIcon.Pivot size={HERO_ICON_SIZE} /> },
   { kind: "slicer", label: "Slicer", tooltip: "Insert a slicer that filters a table or a pivot table", icon: <RibbonIcon.Slicer size={HERO_ICON_SIZE} /> },
   { kind: "timeline", label: "Timeline", tooltip: "Insert a timeline that filters a pivot table by date", icon: <RibbonIcon.Timeline size={HERO_ICON_SIZE} /> },
   { kind: "floatingGrid", label: "Floating Grid", tooltip: "Insert a small grid of cells that floats on the page", icon: <RibbonIcon.Table size={HERO_ICON_SIZE} /> },
@@ -304,9 +305,18 @@ export const CanvasPanelDefinition: PanelDefinition = {
       label: "Insert",
       icon: <RibbonIcon.Plus size={ICON_SIZE_MD} />,
       component: CanvasInsertSection,
-      // Eight heroes: the widest section, so it is the one that folds into a
+      // Nine heroes: the widest section, so it is the one that folds into a
       // launcher first when the window is narrow -- the snap controls stay.
       collapsePriority: 2,
+    },
+    {
+      id: "canvas-tab.arrange",
+      label: "Arrange",
+      icon: <RibbonIcon.BringForward size={ICON_SIZE_MD} />,
+      component: CanvasArrangeSection,
+      // Four heroes (three menus and a toggle): one tall row.
+      ribbonPresentation: "inline",
+      collapsePriority: 3,
     },
     {
       id: "canvas-tab.snap",

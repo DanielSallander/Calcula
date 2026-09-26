@@ -128,3 +128,58 @@ describe("keyboard selection of a slicer", () => {
     expect(unregisterPanel).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("refOf: the slicer's canvas identity (M8)", () => {
+  it("is { kind: 'slicer', id: slicerId }, and reaches objectRefOf through the seam", async () => {
+    const { objectRefOf } = await import("@api/objectSelection");
+    expect(createSlicerSelectionProvider().refOf?.(region("s1"))).toEqual({ kind: "slicer", id: "s1" });
+    const off = registerSlicerObjectSelection();
+    expect(objectRefOf(region("s2"))).toEqual({ kind: "slicer", id: "s2" });
+    off();
+  });
+
+  it("is null for a region that carries no slicer id", () => {
+    expect(createSlicerSelectionProvider().refOf?.({ ...region("s1"), data: {} })).toBeNull();
+  });
+});
+
+describe("the canvas selection set (M8)", () => {
+  it("every slicer selection chokepoint announces the change to the set", async () => {
+    const { onObjectSelectionChanged } = await import("@api/objectSelection");
+    const { selectSlicer, deselectSlicer, dropSlicerFromSelection } = await import("../handlers/selectionHandler");
+    const seen = vi.fn();
+    const off = onObjectSelectionChanged(seen);
+    selectSlicer("s1");
+    expect(seen).toHaveBeenCalledTimes(1);
+    selectSlicer("s2", true);
+    expect(seen).toHaveBeenCalledTimes(2);
+    dropSlicerFromSelection("s2");
+    expect(seen).toHaveBeenCalledTimes(3);
+    seen.mockClear();
+    deselectSlicer();
+    expect(seen).toHaveBeenCalled();
+    seen.mockClear();
+    deselectSlicer(); // nothing selected: no change, no announcement
+    expect(seen).not.toHaveBeenCalled();
+    off();
+  });
+
+  it("the family holds several: addToSelection / removeFromSelection change ONE slicer, never toggle blindly", () => {
+    const p = createSlicerSelectionProvider();
+    p.select(region("s1"));
+    p.addToSelection!(region("s2"));
+    p.addToSelection!(region("s2")); // already in: must not toggle it out
+    expect([...getSelectedSlicerIds()].sort()).toEqual(["s1", "s2"]);
+    p.removeFromSelection!(region("s1"));
+    p.removeFromSelection!(region("s1")); // already out: must not toggle it back
+    expect([...getSelectedSlicerIds()]).toEqual(["s2"]);
+    expect(peekPendingSlicerClick()).toBeNull();
+    expect(domSelected).toHaveLength(0);
+  });
+
+  it("labelOf is the slicer's name (the Name Box label)", () => {
+    const p = createSlicerSelectionProvider();
+    expect(p.labelOf!(region("s1"))).toBe("s1");
+    expect(p.labelOf!(region("gone"))).toBeNull();
+  });
+});
