@@ -424,6 +424,35 @@ export function frEdgeHandleAt(
   return null;
 }
 
+// ============================================================================
+// Border grab band — the move handle of a range with no title bar
+// ============================================================================
+
+/**
+ * Width of the band just INSIDE the frame edge that moves a range whose title
+ * bar is hidden (owner decision 2026-09-27; Excel's text box moves by its
+ * border the same way). It costs this many pixels of the edge cells as a
+ * click target, which is why it is thin.
+ */
+export const FR_BORDER_GRAB = 4;
+
+/**
+ * Whether a frame-relative point is in the border grab band: inside the frame
+ * and within `FR_BORDER_GRAB` of any of its four edges. Outside the frame is
+ * never the band (a near-miss must not start a move from outside the object).
+ */
+export function frBorderGrabAt(entry: FloatingRangeEntry, dx: number, dy: number): boolean {
+  const w = frameWidth(entry);
+  const h = frameHeight(entry);
+  if (dx < 0 || dy < 0 || dx > w || dy > h) return false;
+  return (
+    dx < FR_BORDER_GRAB ||
+    dy < FR_BORDER_GRAB ||
+    dx > w - FR_BORDER_GRAB ||
+    dy > h - FR_BORDER_GRAB
+  );
+}
+
 /** Vertical edges stretch columns; horizontal edges stretch rows. */
 export function edgeAxis(edge: FrEdge): "cols" | "rows" {
   return edge === "left" || edge === "right" ? "cols" : "rows";
@@ -500,6 +529,35 @@ export function clampScaleFactor(
   const hi = max / largest;
   if (lo > hi) return 1;
   return Math.min(Math.max(desired, lo), hi);
+}
+
+/**
+ * The largest scale an edge drag may apply without the frame crossing
+ * `maxFrameExtent` along the dragged axis (the page border on a canvas, or the
+ * sheet origin for a left/top edge, whose opposite edge must stay put).
+ *
+ * `baseFrameExtent` is the frame's extent on that axis at the drag's start and
+ * `baseContentExtent` its cell area's (the part the scale multiplies). A frame
+ * ALREADY past the limit (a page made smaller, a script's placement) is not
+ * pulled back: it may shrink, never grow (cap 1) -- the rule Core's
+ * `clampResizeToPage` applies to a fixed edge already off the page.
+ *
+ * `trackedCount` is how many sizes the scale rounds (`scaledColWidths` /
+ * `scaledRowHeights` round each to 1/100 px, up to half a hundredth each), so
+ * the cap leaves room for that rounding and the frame never lands a fraction
+ * of a pixel past the page.
+ */
+export function maxScaleWithin(
+  baseFrameExtent: number,
+  baseContentExtent: number,
+  maxFrameExtent: number,
+  trackedCount: number,
+): number {
+  if (!(baseContentExtent > 0) || !Number.isFinite(maxFrameExtent)) return Infinity;
+  const chrome = baseFrameExtent - baseContentExtent;
+  const roomForContent = maxFrameExtent - chrome - 0.005 * Math.max(0, trackedCount);
+  if (roomForContent < baseContentExtent) return 1;
+  return roomForContent / baseContentExtent;
 }
 
 /**
@@ -585,5 +643,25 @@ export function bestCountsForSize(
     }
   }
 
+  return { rows, cols };
+}
+
+/**
+ * Step whole counts DOWN until the frame they derive fits `maxWidth` x
+ * `maxHeight` (never below 1). `bestCountsForSize` rounds to the NEAREST
+ * count, so it can overshoot the dragged rect by up to half a track; where the
+ * rect was clamped -- to a canvas page, or at the sheet origin for a left/top
+ * drag whose opposite edge must stay put -- that half track would push the
+ * frame past the clamp. An unbounded axis passes `Infinity` and is untouched.
+ */
+export function fitCountsWithin(
+  entry: FloatingRangeEntry,
+  counts: { rows: number; cols: number },
+  maxWidth: number,
+  maxHeight: number,
+): { rows: number; cols: number } {
+  let { rows, cols } = counts;
+  while (cols > 1 && frameSizeForCounts(entry, rows, cols).width > maxWidth) cols--;
+  while (rows > 1 && frameSizeForCounts(entry, rows, cols).height > maxHeight) rows--;
   return { rows, cols };
 }

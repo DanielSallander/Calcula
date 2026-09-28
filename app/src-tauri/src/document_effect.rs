@@ -290,6 +290,16 @@ pub enum CleanReason {
     /// `is_modified = false` themselves as their last act; a store write inside them
     /// must not fight that. Dirtying here would make every freshly-opened workbook
     /// prompt to save.
+    ///
+    /// ALSO the one step of the load path that the FRONTEND issues after those
+    /// commands return: the chart store's post-load sheet-id stamp (`update_chart`
+    /// with `sheetIdStamp: "afterLoad"`, chart_commands.rs
+    /// `record_chart_sheet_id_stamp`), which names each loaded data range's sheet
+    /// by id as well as by the index the file already holds. It is a separate
+    /// command only because the sheet list it reads is the frontend's; the backend
+    /// verifies it restates the loaded index and nothing else, and the next open
+    /// re-derives it from the same file. The same stamp after a chart CREATE is
+    /// not loading and uses `mutates` (`"afterCreate"`).
     LoadingFromDisk,
 
     /// Navigation: which sheet the user is LOOKING at. `active_sheet` is persisted and

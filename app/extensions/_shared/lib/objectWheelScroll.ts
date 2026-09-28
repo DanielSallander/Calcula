@@ -32,7 +32,7 @@
 
 import type { GridRegion } from "@api/gridOverlays";
 import {
-  getGridRegions,
+  getLiveGridRegions,
   requestOverlayRedraw,
   topFloatingRegionAt as topStackedFloatingRegionAt,
 } from "@api/gridOverlays";
@@ -180,7 +180,10 @@ export function handleObjectWheel(e: WheelEvent): boolean {
     return false;
   }
 
-  const region = topFloatingRegionAt(getGridRegions(), canvasX, canvasY, hit.geo);
+  // LIVE regions: while a formula picks a reference on another sheet, the
+  // published objects are not on screen, and a wheel there must scroll the
+  // sheet, not an invisible floating grid of the edit's sheet.
+  const region = topFloatingRegionAt(getLiveGridRegions(), canvasX, canvasY, hit.geo);
   if (!region) return false;
   const target = targets.get(region.type);
   if (!target) return false;

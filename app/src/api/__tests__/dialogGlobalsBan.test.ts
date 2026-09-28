@@ -162,3 +162,110 @@ describe("the dialog-globals ban", () => {
     expect(dialogErrors(neighbour).length).toBeGreaterThan(0);
   });
 });
+
+// ============================================================================
+// The same class through the plugin's front door: ask / confirm / message
+// imported straight from @tauri-apps/plugin-dialog
+// ============================================================================
+// Found in fix round 3: Pivot imported `ask` for its overwrite prompt; when the
+// dialog could not be shown `ask` THREW, every caller skipped
+// `undo_pivot_overwrite`, and the user's cells stayed overwritten unasked. The
+// globals ban could not see it -- it is an import, not a global.
+
+const PLUGIN_RULES = new Set(["@typescript-eslint/no-restricted-imports", "no-restricted-syntax"]);
+
+function pluginImportErrors(result: ESLint.LintResult): string[] {
+  return result.messages
+    .filter((m) => m.ruleId !== null && PLUGIN_RULES.has(m.ruleId) && m.message.includes("plugin-dialog"))
+    .map((m) => `${m.line}:${m.ruleId}`);
+}
+
+describe("the plugin-dialog question ban", () => {
+  beforeAll(async () => {
+    await lint("src/core/lib/__warmup2__.ts", "export const warm = 2;\n");
+  }, 300_000);
+
+  // Every way to take a question function from the plugin.
+  const IMPORT_SHAPES: [name: string, code: string][] = [
+    ["named ask", `import { ask } from "@tauri-apps/plugin-dialog";\nexport const f = ask;\n`],
+    ["named confirm", `import { confirm } from "@tauri-apps/plugin-dialog";\nexport const f = confirm;\n`],
+    ["named message", `import { message } from "@tauri-apps/plugin-dialog";\nexport const f = message;\n`],
+    ["aliased ask", `import { ask as tauriAsk } from "@tauri-apps/plugin-dialog";\nexport const f = tauriAsk;\n`],
+    ["ask beside an allowed save", `import { save, ask } from "@tauri-apps/plugin-dialog";\nexport const f = [save, ask];\n`],
+    ["namespace import", `import * as dialog from "@tauri-apps/plugin-dialog";\nexport const f = dialog.ask;\n`],
+    ["re-export", `export { ask } from "@tauri-apps/plugin-dialog";\n`],
+    [
+      "dynamic import",
+      `export async function f() {\n  const { ask } = await import("@tauri-apps/plugin-dialog");\n  return ask("q");\n}\n`,
+    ],
+    // A backtick specifier is a TemplateLiteral, which has no `value`, so the
+    // quoted-string selector never saw it (round-4 review: it linted clean).
+    [
+      "dynamic import with a backtick specifier",
+      "export async function f() {\n  const { ask } = await import(`@tauri-apps/plugin-dialog`);\n  return ask(\"q\");\n}\n",
+    ],
+    [
+      "dynamic import with an interpolated backtick specifier",
+      "const v = \"\";\nexport async function f() {\n  const { ask } = await import(`@tauri-apps/plugin-dialog${v}`);\n  return ask(\"q\");\n}\n",
+    ],
+  ];
+
+  // One path per kind of file, including a Model Editor file and a redesigned
+  // chrome file: both set their own no-restricted-syntax, which would replace
+  // the dialog block's selector there if the selector were not repeated.
+  const PATHS = [
+    "src/shell/__synthetic__.tsx",
+    "src/core/hooks/__synthetic__.ts",
+    "src/api/__synthetic__.ts",
+    "extensions/Pivot/lib/__synthetic__.ts",
+    "extensions/ModelEditor/components/__synthetic__.tsx",
+    "extensions/Settings/components/__synthetic__.tsx",
+  ];
+
+  for (const relPath of PATHS) {
+    it.each(IMPORT_SHAPES)(`rejects %s in ${relPath}`, async (_name, code) => {
+      const result = await lint(relPath, code);
+      expect(pluginImportErrors(result).length, JSON.stringify(result.messages)).toBeGreaterThan(0);
+    });
+  }
+
+  it("names the sanctioned replacement in the message", async () => {
+    const result = await lint("extensions/Pivot/lib/__synthetic__.ts", IMPORT_SHAPES[0][1]);
+    const message = result.messages.find((m) => PLUGIN_RULES.has(m.ruleId ?? ""))?.message ?? "";
+    expect(message).toContain("confirmAsync");
+    expect(message).toContain("@api/dialogs");
+    expect(message).toContain("AWAIT");
+  });
+
+  it("ACCEPTS the file pickers: open and save stay allowed", async () => {
+    const result = await lint(
+      "extensions/Print/__synthetic__.ts",
+      `import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";\nexport const f = [open, saveDialog];\n`,
+    );
+    expect(pluginImportErrors(result)).toEqual([]);
+  });
+
+  it("ACCEPTS a backtick dynamic import of any OTHER module (the template selector is about the plugin only)", async () => {
+    const result = await lint(
+      "extensions/Pivot/lib/__synthetic__.ts",
+      "export async function f() {\n  return import(`@tauri-apps/api/path`);\n}\n",
+    );
+    expect(result.messages.filter((m) => m.ruleId === "no-restricted-syntax")).toEqual([]);
+  });
+
+  it("exempts ONLY the wrapper module that implements confirmAsync / alertAsync", async () => {
+    const source = `import { confirm as tauriConfirm, message as tauriMessage } from "@tauri-apps/plugin-dialog";\nexport const f = [tauriConfirm, tauriMessage];\n`;
+    expect(pluginImportErrors(await lint("src/core/lib/dialogs.ts", source))).toEqual([]);
+    // Its @api re-export and its neighbours get no such licence.
+    expect(pluginImportErrors(await lint("src/api/dialogs.ts", source)).length).toBeGreaterThan(0);
+    expect(pluginImportErrors(await lint("src/core/lib/dialogsHelper.ts", source)).length).toBeGreaterThan(0);
+  });
+
+  it("does not police TEST files, which mock the plugin", async () => {
+    const result = await lint(
+      "extensions/Pivot/lib/__tests__/__synthetic__.test.ts",
+      `import { ask } from "@tauri-apps/plugin-dialog";\nexport const f = ask;\n`,
+    );
+    expect(pluginImportErrors(result)).toEqual([]);
+  });
+});

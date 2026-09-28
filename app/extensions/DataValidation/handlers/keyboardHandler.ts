@@ -7,6 +7,7 @@
 import { getCurrentSelection, getOpenDropdownCell } from "../lib/validationStore";
 import { closeDropdown, toggleDropdownFromKeyboard } from "./dropdownHandler";
 import { isKeyClaimed } from "@api";
+import { isEditKeystroke } from "@api/editing";
 
 let keydownHandler: ((e: KeyboardEvent) => void) | null = null;
 
@@ -33,16 +34,12 @@ export function handleKeyDown(e: KeyboardEvent): void {
   if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
   if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
 
-  // Never steal keys from a text entry (cell editor, dialog field, ...).
-  const active = document.activeElement;
-  if (
-    active &&
-    (active.tagName === "INPUT" ||
-      active.tagName === "TEXTAREA" ||
-      (active as HTMLElement).isContentEditable)
-  ) {
-    return;
-  }
+  // Never steal keys from a text entry (cell editor, dialog field, ...) or
+  // from any cell edit in progress. The tag list this replaced could not see a
+  // floating grid's live cell edit PARKED with the keyboard on the grid
+  // container, where Alt+Down would open the list on Core's hidden cell and a
+  // pick would write into it.
+  if (isEditKeystroke(e)) return;
 
   const sel = getCurrentSelection();
   if (!sel) return;

@@ -75,6 +75,21 @@ pub struct SlicerConnection {
 // ============================================================================
 
 /// A slicer definition — a visual filter control for Tables or PivotTables.
+///
+/// A MODEL slicer (`source_type == BiConnection`) reads its items from a
+/// Calcula model connection instead of a pivot cache, and its fields mean:
+/// - `cache_source_id` = the BI connection id (not a pivot);
+/// - `field_name` = the model column as a "Table.Column" key (split with
+///   `split_bi_field_key`, never on the first or last dot — table names can
+///   contain dots);
+/// - `connected_sources` = exactly `[{BiConnection, <connection id>}]`, which
+///   means PAGE scope: the slicer filters every BI pivot of that connection
+///   whose destination is `sheet_index` (worksheet or canvas alike), resolved
+///   at apply time so pivots added later are covered too. It is not an
+///   editable Report Connections list;
+/// - `data_source_id` = the stable package data-source id of a package
+///   connection, so the slicer re-binds after reload / re-pull (package
+///   connections mint a fresh uuid every time; local ones keep theirs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Slicer {
@@ -155,6 +170,27 @@ pub struct Slicer {
     /// its level. Validated to 1..=9 at the command boundary.
     #[serde(default = "default_filter_level")]
     pub filter_level: u8,
+    /// MODEL slicers on a package-pulled connection only: the stable package
+    /// data-source id (see the struct doc). None for pivot/table slicers and
+    /// for model slicers on a local connection, whose id is already stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_source_id: Option<String>,
+}
+
+impl Slicer {
+    /// True for a MODEL slicer (sourced straight from a BI connection).
+    pub fn is_model_slicer(&self) -> bool {
+        self.source_type == SlicerSourceType::BiConnection
+    }
+
+    /// The one Report Connections list a model slicer may carry: its own
+    /// connection, meaning "every BI pivot of it on my page".
+    pub fn model_slicer_connections(connection_id: identity::EntityId) -> Vec<SlicerConnection> {
+        vec![SlicerConnection {
+            source_type: SlicerSourceType::BiConnection,
+            source_id: connection_id,
+        }]
+    }
 }
 
 fn default_true() -> bool {

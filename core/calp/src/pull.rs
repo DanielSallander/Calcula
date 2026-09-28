@@ -1888,6 +1888,7 @@ mod tests {
             item_padding: 2.0,
             button_radius: 2.0,
             filter_level: 1,
+            data_source_id: None,
             computed_properties: Vec::new(),
             connected_sources: vec![persistence::SavedSlicerConnection {
                 source_type: persistence::SavedSlicerSourceType::Pivot,

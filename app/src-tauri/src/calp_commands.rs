@@ -4032,7 +4032,7 @@ fn sanitize_distributed_slicers(
 /// install; routing through the shared installer anyway means this path cannot
 /// become the second copy of the "restored, listed in the dialog, and dead"
 /// defect if that ever changes.
-fn materialize_pulled_slicers(
+pub(crate) fn materialize_pulled_slicers(
     effect: &crate::document_effect::DocumentEffect,
     state: &AppState,
     slicer_state: &crate::slicer::SlicerState,
@@ -4065,7 +4065,17 @@ fn materialize_pulled_slicers(
         if slicers.contains_key(&saved.id) {
             continue; // subscriber already has this slicer (id collision)
         }
-        let slicer = crate::persistence::saved_slicer_to_slicer_at(saved, sheet_index);
+        let mut slicer = crate::persistence::saved_slicer_to_slicer_at(saved, sheet_index);
+        // A MODEL slicer carries the effective application data-source id
+        // (its stamped one, else the publisher's connection uuid -- which IS
+        // the application ds id when the publisher authored on a local
+        // connection), exactly as a pulled ribbon filter is stamped. Unlike
+        // the ribbon filter it is NOT dropped when that id is not embedded:
+        // the re-bind keeps a string fallback on `cache_source_id`
+        // (`remap_slicer_bi_connections`).
+        if slicer.is_model_slicer() && slicer.data_source_id.is_none() {
+            slicer.data_source_id = Some(slicer.cache_source_id.to_string());
+        }
         let slicer_id = slicer.id;
         applied.push((slicer.id.to_string(), slicer.name.clone()));
         crate::slicer::computed::install_restored_computed_properties(
@@ -4580,7 +4590,7 @@ fn materialize_pulled_ribbon_filters(
 /// slicer's `cache_source_id` / biConnection report connections carry the
 /// PUBLISHER's connection uuid — which at publish time IS the stable application
 /// data-source id, so a string match against the ds map re-binds it.
-fn remap_slicer_bi_connections(
+pub(crate) fn remap_slicer_bi_connections(
     effect: &crate::document_effect::DocumentEffect,
     slicer_state: &crate::slicer::SlicerState,
     ds_to_conn: &std::collections::HashMap<String, crate::bi::types::ConnectionId>,
@@ -4593,8 +4603,33 @@ fn remap_slicer_bi_connections(
     };
     for slicer in slicers.values_mut() {
         if matches!(slicer.source_type, crate::slicer::SlicerSourceType::BiConnection) {
-            if let Some(conn_id) = ds_to_conn.get(&slicer.cache_source_id.to_string()) {
-                slicer.cache_source_id = *conn_id;
+            let old_conn = slicer.cache_source_id;
+            // The stable data-source id FIRST: on a reload the live uuid in
+            // `cache_source_id` is the previous session's and matches nothing.
+            // The string fallback stays -- NOT the ribbon filter's skip -- for
+            // a slicer authored in a working copy, whose stamped id is the
+            // original package id while publish keyed the application's data
+            // source by the working copy's connection uuid.
+            let matched = slicer
+                .data_source_id
+                .as_deref()
+                .and_then(|ds| ds_to_conn.get(ds).map(|c| (ds.to_string(), *c)))
+                .or_else(|| {
+                    let key = old_conn.to_string();
+                    ds_to_conn.get(&key).map(|c| (key, *c))
+                });
+            if let Some((ds_key, conn_id)) = matched {
+                slicer.cache_source_id = conn_id;
+                // Self-heal: remember the key that WORKED, so the next reload
+                // re-binds by it too.
+                slicer.data_source_id = Some(ds_key);
+                for source in slicer.connected_sources.iter_mut() {
+                    if matches!(source.source_type, crate::slicer::SlicerSourceType::BiConnection)
+                        && source.source_id == old_conn
+                    {
+                        source.source_id = conn_id;
+                    }
+                }
             }
         }
         for source in slicer.connected_sources.iter_mut() {

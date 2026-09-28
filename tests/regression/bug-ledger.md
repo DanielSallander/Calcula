@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 156 | Open: 14 | Triaged: 0 | Fixed: 142 | Other: 0
+Total: 205 | Open: 26 | Triaged: 0 | Fixed: 179 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1846,3 +1846,481 @@ CHART POINTER PATHS IGNORE ZOOM. The Charts extension's hover/tooltip (index.ts 
 
 **Repro:** Zoom to 150%, hover a bar near the chart's right edge: the tooltip names a different bar, or none.
 **Fix:** fixed
+
+## BUG-0157 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** object-geometry-editable
+
+A FLOATING GRID COULD NOT BE MOVED WITHOUT DESIGN MODE (owner finding 1). Its store published `movable` from Design Mode, which is session-only and starts off, so a floating grid inserted on a canvas (or a worksheet) could not be dragged at all, while a chart beside it moved freely.
+
+**Repro:** Canvas tab > Insert > Floating grid; drag its title bar: nothing moves.
+**Fix:** fixed
+
+## BUG-0158 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** external-edit-session
+
+EDITING A FLOATING-GRID CELL ENDED WHEN ANOTHER SHEET TAB WAS CLICKED (owner finding 2, design D1). The in-cell editor blurred and committed or cancelled in a race, so a formula could not reference another sheet by pointing, and a half-typed plain value could be lost.
+
+**Repro:** Double-click a floating-grid cell, type '=', click the Sheet1 tab: the editor closes and Sheet1 opens in plain navigation.
+**Fix:** fixed
+
+## BUG-0159 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** formula-bar-target
+
+A SELECTED FLOATING-GRID CELL WAS INVISIBLE TO THE FORMULA BAR AND NAME BOX (owner finding 3, design D2). The bar showed nothing on a canvas; on a WORKSHEET it showed -- and an edit in the bar WROTE -- Core's last active cell, hidden behind the floating grid.
+
+**Repro:** Select a floating-grid cell holding =Sheet1!E2: the bar is blank (canvas) or shows another cell (worksheet); type in the bar and press Enter on a worksheet: the hidden grid cell changes.
+**Fix:** fixed
+
+## BUG-0160 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** sheet-name-casing
+
+THE OFF-SHEET WRITE DOOR NEVER RESTAMPED THE WORKBOOK'S CAPITALISATION. update_cell_on_sheets_inner stored the lexer's uppercase spelling, so every off-sheet write (a floating grid's cells, a script writing another sheet, a grouped-sheet edit) showed =SHEET1!E2 in the formula bar. Evaluation was unaffected.
+
+**Repro:** Type =Sheet1!E2 into a floating-grid cell and select it: the bar shows =SHEET1!E2.
+**Fix:** fixed
+
+## BUG-0161 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** slicer-source-model
+
+INSERT SLICERS OFFERED NO CALCULA MODEL (owner finding 4). A workbook whose pivots come from a model showed 'No Tables or PivotTables found in this workbook', so a slicer could not filter model pivots at all.
+
+**Repro:** Create a model connection and a BI pivot on a canvas; Canvas tab > Insert > Slicer.
+**Fix:** fixed
+
+## BUG-0162 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** pivot-overwrite-self
+
+A REOPENED MODEL PIVOT COUNTED ITS OWN OUTPUT AS FOREIGN DATA. restore_pivot_definitions registered a BI pivot's protected region from its empty-cache view, so the first refresh after open saw its own cells as user data and raised the native 'A PivotTable report will overwrite existing data' prompt (a hung E2E run; a needless prompt for users).
+
+**Repro:** BI pivot, save, File > New, reopen, reconnect the source, Refresh: the overwrite prompt appears.
+**Fix:** fixed
+
+## BUG-0163 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** slicer-delete-filter
+
+DELETING A SLICER LEFT ITS FILTER APPLIED. Pivots stayed filtered by a slicer that no longer existed (pivot and model slicers), and a table slicer's AutoFilter column stayed filtered, with nothing on screen explaining the missing rows.
+
+**Repro:** Filter a pivot with a slicer, delete the slicer: the pivot stays filtered.
+**Fix:** fixed
+
+## BUG-0164 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** sheet-delete-slicer-filter
+
+DELETING THE SHEET A SLICER LIVES ON LEFT ITS MASK ON PIVOTS ELSEWHERE, an invisible filter nothing in the UI could clear.
+
+**Repro:** Slicer on Sheet2 filtering a pivot on Sheet1; delete Sheet2: the pivot stays filtered.
+**Fix:** fixed
+
+## BUG-0165 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** table-slicer-hidden-rows
+
+A TABLE SLICER CLICK NEVER REFRESHED THE GRID'S HIDDEN ROWS. The bridge called get_auto_filter / set_column_filter_values / clear_column_criteria directly and emitted only GRID_REFRESH, which repaints but does not reload hidden rows.
+
+**Repro:** Table slicer: click an item; the table's rows do not collapse until something else reloads the view.
+**Fix:** fixed
+
+## BUG-0166 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** filter-value-spelling
+
+A LEVEL-1 SLICER OR RIBBON FILTER ON A BOOLEAN OR DECIMAL MODEL COLUMN EMPTIED EVERY PIVOT IT REACHED. The model spells values 'true' / '12.55' and the pivot cache 'TRUE' / its own decimal text, so the computed hidden list held every value.
+
+**Repro:** Ribbon filter or slicer on a boolean model column, select 'true': the pivot shows nothing.
+**Fix:** fixed
+
+## BUG-0167 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** bi-model-snapshot
+
+FILTERS WERE CHECKED AGAINST THE PIVOT'S CREATION-TIME MODEL SNAPSHOT, so a column added to the model after the pivot was created could not be filtered (ribbon filter and slicer both refused).
+
+**Repro:** Create a BI pivot, add a column to the model, filter on it: refused.
+**Fix:** fixed
+
+## BUG-0168 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** model-table-identity
+
+A FILTER ON ONE MODEL TABLE'S COLUMN FILTERED ANOTHER TABLE'S SAME-NAMED COLUMN. Pivot filters were identified by bare cache name and attributed to the first table owning it, so Products.name and Customers.name collided (a pivot could come back empty, or a filter became a silent no-op).
+
+**Repro:** Model with Products.name and Customers.name; slicer on Products.name: Customers.name is filtered instead.
+**Fix:** fixed
+
+## BUG-0169 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** pinned-filter-undo
+
+UNDOING A PINNED (LEVEL 2+) FILTER RESTORED THE WRONG STATE. apply_pivot_filter_core mutated the definition in place and the re-query then recorded that POST-pin definition, so Ctrl+Z showed every region while the slicer said East, or kept pin [West] (saved to .cala) while the view showed East.
+
+**Repro:** Level-2 slicer on East, click West, Ctrl+Z, Refresh All: the pivot shows West while the slicer shows East.
+**Fix:** fixed
+
+## BUG-0170 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** lock-order
+
+PIVOT COMMANDS COULD DEADLOCK AGAINST THE F9 CALCULATION PASS. calculate_now holds grid, grids and sheet_names and then takes pivot_tables, while about 29 pivot commands (apply/clear filter, update_bi_pivot_fields, toggle group, delete, change source, undo restore) held pivot_tables and then read sheet_names; get_pivot_source_data held pivot_tables while taking grids (a two-party deadlock, Persisted::read is exclusive); refresh_pivot_cache held table_names while taking tables; show_report_filter_pages held pivot_tables while taking the grids and sheet_names write locks.
+
+**Repro:** Traced; deterministic lock-order tests park one side and prove the other side blocks.
+**Fix:** fixed
+
+## BUG-0171 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** lock-order
+
+SIX AUTOFILTER COMMANDS TOOK THE AUTOFILTER LOCK BEFORE GRIDS, the reverse of the canonical order apply_auto_filter_inner documents (clear_column_criteria_inner, reapply_auto_filter_inner, set_column_filter_values_inner, set_column_custom_filter_inner, set_column_top_bottom_filter_inner, set_column_dynamic_filter_inner), so a header filter could deadlock against apply_auto_filter or a table-slicer delete.
+
+**Repro:** Traced; autofilter_lock_order_tests::every_autofilter_command_takes_grids_before_auto_filters.
+**Fix:** fixed
+
+## BUG-0172 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** drill-through-source-sheet
+
+A GRID PIVOT'S DRILL-THROUGH LISTED SHEET 0'S ROWS whatever its source sheet, so 'Show Details' on a pivot built from Sheet2 showed Sheet1's data.
+
+**Repro:** Pivot over Sheet2 data; double-click a value: the new sheet lists Sheet1's rows.
+**Fix:** fixed
+
+## BUG-0173 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** dialog-fail-open
+
+THE PIVOT OVERWRITE PROMPT FAILED OPEN. pivot-api.ts imported the dialog plugin's ask directly; when the dialog could not open it threw, every caller skipped undo_pivot_overwrite, and the user's overwritten cells stayed overwritten without being asked. The dialog-globals lint ban did not cover plugin imports.
+
+**Repro:** Make ask throw (no window) during a refresh that overwrites cells: the overwrite stands.
+**Fix:** fixed
+
+## BUG-0174 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** pivot-zone-replace
+
+A ONE-FIELD PIVOT UPDATE CLEARED EVERY OTHER FILTER IN ITS ZONE. The Subtotal toggle, the report-filter dropdown and Field Settings sent update_pivot_fields with a partial zone (or a zone without hidden items), and the backend replaces the whole zone.
+
+**Repro:** Range pivot with two filtered row fields; toggle Subtotal on one: both filters are gone.
+**Fix:** fixed
+
+## BUG-0175 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** calc-group-subset
+
+A CALCULATION-GROUP CHIP LOST ITS ITEM SUBSET on the first field-list edit after a hierarchy was placed (the seeding path dropped hiddenItems) and when dragged between zones.
+
+**Repro:** Place a calculation group with two items unticked and a hierarchy; make any field-list edit: every item returns.
+**Fix:** fixed
+
+## BUG-0176 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** protection-gate-parity
+
+FLOATING-RANGE GEOMETRY, CREATE, RENAME AND DELETE IGNORED THE HOST SHEET'S 'EDIT OBJECTS' PROTECTION, and a refused or no-op patch still marked the document modified.
+
+**Repro:** Protect a sheet without Edit objects; drag or resize its floating range: it moves and the title bar shows unsaved.
+**Fix:** fixed
+
+## BUG-0177 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** fr-wrong-cell
+
+KEYS AND GRID COMMANDS ACTED ON CORE'S HIDDEN CELL WHILE A FLOATING-GRID CELL WAS SELECTED. Delete, Ctrl+V/X/D/R, Ctrl+K/T/E, font toggles, number formats, fill, merge and clear formatting went to the worksheet cell Core still had selected behind the floating grid, a write the user could not see.
+
+**Repro:** Worksheet with A1 selected; select a floating-grid cell; press Ctrl+B: A1 turns bold.
+**Fix:** fixed
+
+## BUG-0178 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** canvas-bar-focus
+
+FOCUSING THE FORMULA BAR ON A CANVAS WITH NOTHING SELECTED LEFT globalIsEditing TRUE (design D3), which killed the floating-grid and grid keyboards until the next edit.
+
+**Repro:** Canvas, nothing selected, click the formula bar, click a floating-grid cell, type: nothing happens.
+**Fix:** fixed
+
+## BUG-0179 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** dialog-input-honoured
+
+ENTER BEFORE A FLOATING-GRID CELL'S CONTENT LOADED WROTE '' OVER THE CELL (design D4): the editor opened with an empty buffer and an untouched Enter committed it.
+
+**Repro:** Double-click a floating-grid cell holding a value and press Enter immediately: the value is gone.
+**Fix:** fixed
+
+## BUG-0180 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** paint-hit-agreement
+
+IN FORMULA POINT MODE THE SOURCE SHEET'S FLOATING OBJECTS PAINTED ON, AND CAUGHT CLICKS ON, THE SHEET BEING POINTED AT (design D5): a reference click could land on an invisible chart or floating grid of the sheet the edit started on.
+
+**Repro:** Start a formula on Sheet2 (which has a chart), click the Sheet1 tab, click where the chart sits on Sheet2: the click is swallowed.
+**Fix:** fixed
+
+## BUG-0181 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** name-box-target
+
+THE NAME BOX DEFINED A NAME OVER CORE'S HIDDEN SELECTION while an object or floating-grid cell was shown (design D6).
+
+**Repro:** Select a floating-grid cell, type a new name in the Name Box: the name refers to the worksheet cell behind it.
+**Fix:** fixed
+
+## BUG-0182 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** modified-delete-clears
+
+DELETE AND BACKSPACE WITH A MODIFIER CLEARED THE SELECTION (Shift/Ctrl+Delete, Ctrl/Shift/Alt+Backspace). Excel clears on the bare key only (Ctrl+Backspace shows the active cell, Shift+Backspace collapses the selection).
+
+**Repro:** Select A1:B2 with values, press Ctrl+Backspace: the cells are cleared.
+**Fix:** fixed
+
+## BUG-0183 `[open]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** keybinding-dead
+
+CTRL+SHIFT+B (TOGGLE BOOKMARK) DOES NOTHING. The registry's ext.bookmarks.toggle points at the unregistered command bookmarks.toggle; the dispatcher matches it in the capture phase and stops propagation, so CellBookmarks' own bubble-phase listener never runs.
+
+**Repro:** Select a cell, press Ctrl+Shift+B: no bookmark.
+
+## BUG-0184 `[open]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** pivot-field-rebuild
+
+TRACED, NOT RUN: update_pivot_fields rebuilds every field it is sent through PivotField::new and keeps only collapse state, so any field-list edit on a RANGE pivot resets sort order, grouping, subtotals and show-all-items on the fields it sends; it also reads an absent hidden-items list as CLEAR, so a filter changed elsewhere within one IPC round trip of a field-list edit is reverted.
+
+**Repro:** Range pivot, sort a row field descending, drag another field into Columns: the sort is back to ascending (expected per the trace).
+
+## BUG-0185 `[open]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** fr-wrong-cell
+
+RIBBON AND MENU FORMATTING ACT ON CORE'S HIDDEN CELL WHILE A FLOATING-GRID CELL IS SELECTED (Home tab font/fill/number/alignment/styles, Format Cells, Format menu, mini toolbar, Format Painter, Paste Special, Conditional Formatting). There is no single choke point; each door reads Core's selection itself.
+
+**Repro:** Worksheet with A1 selected; select a floating-grid cell; click Bold on the Home tab: A1 turns bold.
+
+## BUG-0186 `[open]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** external-edit-session
+
+TWO SELECTIONS CAN STAY VISIBLE AFTER A GRID HEADER OR RIGHT PRESS: re-clicking an already-selected row/column header, or right-pressing inside Core's hidden selection, does not drop a floating grid's selection (only cell presses announce onGridCellPressed), so the grid context menu opens on Core's cell while the floating grid still shows its own.
+
+**Repro:** Select a floating-grid cell on a worksheet whose A1 is selected; right-click A1: the grid menu opens, the floating-grid cell stays selected.
+
+## BUG-0187 `[open]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** undo-completeness
+
+A SLICER CLICK'S UNDO TRANSACTION STAYS OPEN ACROSS THE MODEL RE-QUERY, so an unrelated edit made during a slow click joins the click's Ctrl+Z step, and a Ctrl+Z pressed mid-click loses redo. User clicks are queued (so two clicks never merge); the window remains for other edits and for script setSelectedItems.
+
+**Repro:** Slow model; click a slicer item and immediately type into a cell; Ctrl+Z undoes both.
+
+## BUG-0188 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** lock-order
+
+FOUR MORE LOCK-ORDER INVERSIONS, found once the crate census could see lock_pending(), guards named inside string literals, and chains or lets split over lines: (1) undo apply_changes took undo_stack before the grid locks, the reverse of about 40 cell writers including the MCP formatting tool that runs off the main thread (a Ctrl+Z overlapping it could deadlock); (2) rename_sheet_inner held sheet_names, freeze_configs, tab_colors and sheet_visibility while taking grids and grid, the reverse of F9; (3) apply_names_to_formulas held named_ranges while taking grid; (4) drill_through_to_sheet took bi_metadata before pivot_tables, the reverse of apply_pivot_filter. And the save path (collect_pivot_definitions, reached from save_file, AutoRecover and publish) took pivot_tables then sheet_names, so a save or AutoRecover overlapping F9 could hang the app.
+
+**Repro:** Traced; deterministic lock-order tests park one side and prove the other side stays reachable.
+**Fix:** fixed
+
+## BUG-0189 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** sheet-keyed-store-remap
+
+DRILL-THROUGH AND SHOW REPORT FILTER PAGES CREATED SHEETS BEHIND THE ADD PATH'S BACK. They pushed only sheet_names and grids, so the new sheets had no id, kind, visibility, freeze, tab colour or row/column size entries; a column width set on the drilled-from sheet was LOST on save; with a floating range present the new sheet landed after the object sheets (breaking the user-sheets-first partition); workbook-structure protection was skipped; the undo history was not ended (a floating-range step could replay onto the new sheet) and the drill-through never rebuilt the dependency maps for the sheet it switched to.
+
+**Repro:** Set column C's width on Sheet1, drill through a pivot value, save and reopen: Sheet1's width is gone; per-sheet store lengths disagree with the sheet count.
+**Fix:** fixed
+
+## BUG-0190 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** dirty-flag
+
+THREE REFUSALS MARKED THE DOCUMENT MODIFIED: a refused pinned (level 2+) filter apply (invalid level, no selection, not a BI pivot, unknown field, a column two tables share) built its effect before the refusals; add_sheet refused a duplicate name after minting the effect; and Show Report Filter Pages could mark the document changed while silently dropping a page whose cleaned name was still illegal (sanitize_sheet_name trimmed once, so ' 'x became 'x).
+
+**Repro:** Apply a level-2 filter with no selection to a pivot in a saved workbook: the title shows unsaved.
+**Fix:** fixed
+
+## BUG-0191 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** keybinding-edit-context
+
+SHORTCUTS ACTED ON THE SELECTION DURING A CELL EDIT. Ctrl+T, Ctrl+Shift+L, Ctrl+E, Ctrl+K, Ctrl+Shift+B, Alt+Shift+Arrow, Ctrl+Alt+M and Alt+; were 'always' bindings; the AutoFilter, Grouping and Format Painter listeners had no edit check; and the dispatcher could not see Core's own PARKED cross-sheet edit (the edit flag lived inside the useEditing hook module), so during '=SUM(' parked on Sheet2, Delete cleared Sheet2's cell and Ctrl+T created a table there. In the in-cell editor, Ctrl+V pasted over the selected cells instead of into the text.
+
+**Repro:** Type =SUM( in Sheet1!A1, click the Sheet2 tab, press Delete: Sheet2's active cell is cleared.
+**Fix:** fixed
+
+## BUG-0192 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** dialog-fail-open
+
+THE DIALOG BAN DID NOT COVER THE DIALOG PLUGIN. ask / confirm / message imported straight from @tauri-apps/plugin-dialog bypassed the fail-closed wrappers (Pivot's overwrite prompt, six clipboard prompts in useClipboard, the close prompt).
+
+**Repro:** Import ask from @tauri-apps/plugin-dialog in an extension: lint:boundaries passes.
+**Fix:** fixed
+
+## BUG-0193 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** undo-completeness
+
+A PLAIN (LEVEL-1) PIVOT FILTER THAT GREW A PIVOT OVER USER CELLS OVERWROTE THEM WITH NO UNDO STEP, and the header dropdown's Cancel called undo_pivot_overwrite, which popped the TOP undo entry unconditionally: it discarded the user's previous, unrelated step, restored nothing, and left the cells overwritten. Undo-redo-undo of a pivot restore also lost the cells, and undoing a slicer delete whose clear grew a pivot left them overwritten.
+
+**Repro:** Type X in a cell; filter a worksheet pivot so it grows over cell C; Cancel the prompt: C stays overwritten and X's undo step is gone.
+**Fix:** fixed
+
+## BUG-0194 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** dialog-input-honoured
+
+THE CLOSE PROMPT DISCARDED UNSAVED WORK ON X OR ESCAPE. 'Do you want to save changes?' had only Save and Don't Save, so dismissing the native box with the title-bar X or Escape came back as Don't Save and the window was destroyed without saving. BEFORE_CLOSE was also broadcast before the prompt, so a Cancel left the window open with every script, the macro recording and the animation driver torn down, and Save skipped every script's onBeforeSave veto.
+
+**Repro:** Type in a cell, close the window, press Escape on the prompt: the app closes and the edit is lost.
+**Fix:** fixed
+
+## BUG-0195 `[fixed]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** paint-hit-agreement
+
+ON A CANVAS, ESCAPE WITH A FLOATING-GRID CONTEXT MENU OPEN CLEARED THE OBJECT SELECTION AND LEFT THE MENU OPEN: the canvas's Escape binding runs in the dispatcher's window-capture listener and stopped the key before the menu's document listener.
+
+**Repro:** Canvas, select a floating grid, right-click it, press Escape: the menu stays, the selection is gone.
+**Fix:** fixed
+
+## BUG-0196 `[open]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** paint-hit-agreement
+
+ON A CANVAS, ESCAPE WITH A CHART, AXIS, CONTROL OR SLICER CONTEXT MENU OPEN deselects the object and leaves the menu open (same class as the fixed floating-grid case): none of those families claims Escape while its menu is open.
+
+**Repro:** Canvas, right-click a chart, press Escape.
+
+## BUG-0197 `[open]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** design-query-filter
+
+CHARTS AND REPORTS SILENTLY DROP A DESIGN-QUERY INCLUSION FILTER. compileDesignQuery passes no filterUniqueValues, so Field = ("a") in a chart or report design query cannot be inverted and runs UNFILTERED with no warning.
+
+**Repro:** Chart design query with Region = ("East"): the chart shows every region.
+
+## BUG-0198 `[open]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** report-filter-pages
+
+SHOW REPORT FILTER PAGES SKIPS A VALUE WHOSE CLEANED SHEET NAME COLLIDES with another value's page in the same run (' 'x and x' ' both become x; a/b and a_b; East and east), with no page and no error.
+
+**Repro:** Report filter over values East and east: one page.
+
+## BUG-0199 `[open]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** keybinding-dead
+
+KEYBOARD LEFTOVERS: the FloatingRange refusals are bound to the default combos, so a user who remaps Copy away from Ctrl+C copies the hidden cell with the new key; Format Painter starts twice on Ctrl+Shift+C with the grid focused (registry binding plus its own listener); the shortcut capture box runs an already-bound combo instead of recording it; a stuck Core edit flag now also stands down Ctrl+Z / Ctrl+Y until a key reaches the grid container.
+
+**Repro:** Settings > Keyboard, remap Copy to Ctrl+Shift+Q; select a floating-grid cell on a worksheet; press Ctrl+Shift+Q.
+
+## BUG-0200 `[open]`
+
+**Found:** 2026-09-27 (manual)
+**Oracle:** undo-completeness
+
+A SCRIPT BATCH CAN JOIN A GESTURE'S UNDO STEP: if a script calls beginBatch after a slicer click or ribbon filter has opened its step, the backend begin is a no-op and the script's writes join the gesture's step, so the gesture's decline (or a Ctrl+Z) takes the script's writes back too. Also: the ribbon backend records the selection as its own step and closes any open transaction; the FilterDropdown level-change and connections saves record an overwrite step but do not ask; a close-then-Save races async BEFORE_CLOSE work (a recording taken just before may not reach the file); a Save whose Save As picker is cancelled leaves the window open over torn-down scripts.
+
+**Repro:** Script: await delay(0) inside a slicer click's re-query, beginBatch, write A1; decline the overwrite prompt: A1 reverts.
+
+## BUG-0201 `[fixed]`
+
+**Found:** 2026-09-28 (manual)
+**Oracle:** dirty-flag
+
+OPENING OR RELOADING A WORKBOOK WITH INDEX-ONLY CHART RANGES MARKED IT MODIFIED and added one 'Edit chart' undo step per chart: the load-time sheet-id migration (canvas M4, ceb52724) persisted its stamp through update_chart, an ordinary user edit; a create whose sheet cache was cold added a second undo step after 'Insert chart'.
+
+**Repro:** e2e/journeys/dirty-flag.spec.ts PERSISTENCE: save, reopen, page.reload(): is_file_modified is true.
+**Fix:** fixed
+
+## BUG-0202 `[fixed]`
+
+**Found:** 2026-09-28 (manual)
+**Oracle:** cascade-announcement
+
+DELETING A SHEET THAT HOLDS A CHART LOGGED 'SourceSheetMissingError' AND SHOWED AN ERROR CARD: the sheet-delete announcement repaints charts before the chart store reloads, so a stale render of the deleted sheet's chart read a sheet that no longer existed (canvas M4 made chart reads sheet-id based).
+
+**Repro:** e2e/journeys/cascade-announcement-live.spec.ts:201 (console error during the sheet cascade).
+**Fix:** fixed
+
+## BUG-0203 `[fixed]`
+
+**Found:** 2026-09-28 (manual)
+**Oracle:** model-validation
+
+A MODEL PIPELINE EDIT NEVER VALIDATED THE MODEL. set_transformations_inner (bi/model_editor.rs) installed steps without DataModel::validate, so a lookup into a DirectQuery table (the default for a new import) or a lookup cycle was accepted and the refresh failed later with 'unknown lookup table'; the deriveSchema and fromScript dry runs reported such a pipeline as clean.
+
+**Repro:** e2e/journeys/model-transform.spec.ts Probe 1b: a lookup into DirectQuery 'customers' is accepted.
+**Fix:** fixed
+
+## BUG-0204 `[open]`
+
+**Found:** 2026-09-28 (manual)
+**Oracle:** chart-sheet-identity
+
+HYPOTHESIS, NOT REPRODUCED: if a sheet is added, deleted or moved within the ~300 ms between a load and the chart sheet-id stamp, the stamp is refused (it no longer names the sheet at that index), and the NEXT load stamps the stored old index against the new sheet list, which could point the chart at the wrong sheet.
+
+**Repro:** Open a workbook with index-only chart ranges and delete a sheet before the charts finish loading; save; reopen.
+
+## BUG-0205 `[open]`
+
+**Found:** 2026-09-28 (manual)
+**Oracle:** e2e-harness
+
+E2E CLEANUPS THAT CALL THE BACKEND'S new_file DIRECTLY LEAVE FRONTEND STORES STALE: the chart store reloads only on AFTER_OPEN / AFTER_NEW, which the app's own newFile emits and a raw invoke does not, so a chart from the previous spec keeps painting over the next spec's grid. floating-range.spec.ts's pixel probe also assumes nothing else is painted at (420,180) and does not reset first, so a leftover object fails it as 'the floating frame never painted'.
+
+**Repro:** Run dirty-flag.spec.ts then floating-range.spec.ts with the old raw new_file cleanup.

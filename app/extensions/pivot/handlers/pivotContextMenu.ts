@@ -403,18 +403,24 @@ export function registerPivotContextMenuItems(): () => void {
           const fieldInZone = fields.find((f) => f.sourceIndex === fieldIndex);
           if (!fieldInZone) return;
 
-          // Build the update request: toggle showSubtotals
+          // Build the update request: toggle showSubtotals. Every field of
+          // the zone carries the items it hides NOW, explicitly:
+          // `update_pivot_fields` rebuilds each field it is given, and an
+          // absent list builds one that hides nothing -- toggling one field's
+          // subtotals used to clear the filters of every field in its zone.
           const updatedFields = fields.map((f) => {
             if (f.sourceIndex === fieldIndex) {
               return {
                 sourceIndex: f.sourceIndex,
                 name: f.name,
+                hiddenItems: [...(f.hiddenItems ?? [])],
                 showSubtotals: !currentShowSubtotals,
               };
             }
             return {
               sourceIndex: f.sourceIndex,
               name: f.name,
+              hiddenItems: [...(f.hiddenItems ?? [])],
             };
           });
 

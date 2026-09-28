@@ -10,7 +10,12 @@ import type { DslError } from './errors';
 
 export { lex, type LexResult } from './lexer';
 export { parse, type ParseResult } from './parser';
-export { compile, type CompileResult, type CompileContext } from './compiler';
+export {
+  compile,
+  type CompileResult,
+  type CompileContext,
+  type UnresolvedInclusion,
+} from './compiler';
 export { serialize, type SerializeOptions } from './serializer';
 export { validate, type ValidateContext } from './validator';
 

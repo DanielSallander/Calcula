@@ -21,6 +21,8 @@ import {
   getFloatingRangeById,
   upsertFromInfo,
   syncFloatingRangeRegions,
+  frGeometryEditable,
+  frObjectEditable,
 } from "../lib/floatingRangeStore";
 import { invalidateFrCache } from "../rendering/frRenderer";
 
@@ -163,6 +165,11 @@ export function FloatingRangePropertiesDialog(
   if (!isOpen || !frId) return null;
   const entry = getFloatingRangeById(frId);
   if (!entry) return null;
+  // THE one per-range geometry answer (a range its canvas locks, or one on a
+  // subscribed canvas, keeps its size): the row/column counts and the three
+  // chrome strips all change the frame's size, so all five are frozen with
+  // it. The name is not geometry and stays editable.
+  const geometryEditable = frGeometryEditable(frId);
 
   const clampRows = (v: number) =>
     Math.max(1, Math.min(FLOATING_RANGE_MAX_ROWS, Math.trunc(v) || 1));
@@ -180,14 +187,17 @@ export function FloatingRangePropertiesDialog(
       // Only the fields that actually differ are sent — an absent flag means
       // "leave it alone", and a no-op patch records no undo entry at all.
       const patch: FloatingRangePatch = {};
-      if (nextRows !== entry.rows) patch.rowCount = nextRows;
-      if (nextCols !== entry.cols) patch.colCount = nextCols;
-      if (showTitle !== entry.showTitle) patch.showTitle = showTitle;
-      if (showColumnHeaders !== entry.showColumnHeaders) {
-        patch.showColumnHeaders = showColumnHeaders;
-      }
-      if (showRowHeaders !== entry.showRowHeaders) {
-        patch.showRowHeaders = showRowHeaders;
+      // Re-asked at apply time: a lock set while the dialog was open wins.
+      if (frGeometryEditable(frId)) {
+        if (nextRows !== entry.rows) patch.rowCount = nextRows;
+        if (nextCols !== entry.cols) patch.colCount = nextCols;
+        if (showTitle !== entry.showTitle) patch.showTitle = showTitle;
+        if (showColumnHeaders !== entry.showColumnHeaders) {
+          patch.showColumnHeaders = showColumnHeaders;
+        }
+        if (showRowHeaders !== entry.showRowHeaders) {
+          patch.showRowHeaders = showRowHeaders;
+        }
       }
       if (Object.keys(patch).length > 0) {
         const info = await updateFloatingRange(frId, patch);
@@ -249,6 +259,7 @@ export function FloatingRangePropertiesDialog(
                 style={styles.input}
                 data-fr-rows-input=""
                 value={rows}
+                disabled={!geometryEditable}
                 onChange={(e) => setRows(clampRows(Number(e.target.value)))}
               />
             </div>
@@ -261,12 +272,13 @@ export function FloatingRangePropertiesDialog(
                 style={styles.input}
                 data-fr-cols-input=""
                 value={cols}
+                disabled={!geometryEditable}
                 onChange={(e) => setCols(clampCols(Number(e.target.value)))}
               />
             </div>
           </div>
 
-          <fieldset style={styles.fieldset}>
+          <fieldset style={styles.fieldset} disabled={!geometryEditable}>
             <legend style={styles.legend}>Show</legend>
             <label style={styles.check}>
               <input
@@ -297,11 +309,19 @@ export function FloatingRangePropertiesDialog(
             </label>
           </fieldset>
 
+          {geometryEditable ? null : (
+            <div style={{ color: "#777", fontSize: 12 }} data-fr-geometry-locked="">
+              {frObjectEditable(frId)
+                ? "This range is locked on its canvas, so its size and the strips it shows cannot change. Unlock it (Canvas tab) to change them."
+                : "This range is on a canvas subscribed from an application, which is read-only until it is detached."}
+            </div>
+          )}
+
           <div style={{ color: "#777", fontSize: 12 }}>
             Hiding a strip makes the range smaller — the cells stay put and the
-            frame shrinks around them. With the title bar hidden there is
-            nothing left to grab, so in Design Mode a drag anywhere on the range
-            moves it.
+            frame shrinks around them. Drag the title bar to move the range;
+            with the title bar hidden, drag its border (or, in Design Mode,
+            anywhere on it).
           </div>
 
           <div style={{ color: "#777", fontSize: 12 }}>

@@ -14,6 +14,7 @@ import {
   DEFAULT_NOTE_AUTHOR,
   isKeyClaimed,
 } from "@api";
+import { isEditKeystroke } from "@api/editing";
 import { refreshAnnotationState } from "../lib/annotationStore";
 
 // ============================================================================
@@ -58,16 +59,11 @@ async function handleKeyDown(e: KeyboardEvent): Promise<void> {
   if (isKeyClaimed(e)) return;
   if (!currentActiveCell) return;
 
-  // Don't intercept if an input/textarea/contenteditable is focused
-  const active = document.activeElement;
-  if (
-    active &&
-    (active.tagName === "INPUT" ||
-      active.tagName === "TEXTAREA" ||
-      (active as HTMLElement).isContentEditable)
-  ) {
-    return;
-  }
+  // Don't intercept while a text field is focused or any cell edit is in
+  // progress -- the tag list this replaced could not see a floating grid's
+  // live cell edit parked with the keyboard on the grid, where Ctrl+Alt+M
+  // would put a comment on Core's hidden cell.
+  if (isEditKeystroke(e)) return;
 
   const { row, col } = currentActiveCell;
 

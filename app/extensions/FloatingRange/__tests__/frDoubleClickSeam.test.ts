@@ -20,6 +20,7 @@ vi.mock("../editor/frEditor", () => ({
   cancelFrEditor: vi.fn(),
   commitFrEditor: vi.fn(),
   getFrEditorCell: vi.fn(() => null),
+  getFrEditorSession: vi.fn(() => null),
   isFrEditorOpen: vi.fn(() => false),
   destroyFrEditor: vi.fn(),
 }));

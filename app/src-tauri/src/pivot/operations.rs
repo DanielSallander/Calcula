@@ -503,11 +503,17 @@ pub(crate) fn build_cache_with_synthetic_dim(
 /// FIRST for exactly this reason). `sheet_kinds` and `sheet_visibility` are
 /// deliberately NOT read here: `delete_sheet_impl` holds `sheet_visibility`
 /// while it takes `pivot_tables`, so reading it under `pivot_tables` closed a
-/// cycle. KNOWN OPEN (predates canvases): `delete_sheet_impl` also holds
-/// `sheet_names` / `active_sheet` while it takes `pivot_tables`, so the two
-/// reads this resolver has always made under `pivot_tables` are the same
-/// shape; closing that needs `delete_sheet_impl` to stop taking
-/// `pivot_tables` under its sheet guards.
+/// cycle. `delete_sheet_impl` ALSO holds `sheet_names` / `active_sheet` while
+/// it takes `pivot_tables`, and so does the calculation pass (`calculate_now`,
+/// an `(async)` command off the main thread: grid, grids, sheet_names,
+/// active_sheet, then `pivot_tables` for GETPIVOTDATA). A call under
+/// `pivot_tables` is therefore an ABBA hang against either, so a caller that
+/// holds the pivot lock copies [`PivotDestSheet::of`] under it and resolves
+/// with [`PivotDestSheet::resolve`] AFTER releasing it (fix round 3, every
+/// pivot command in `pivot/commands.rs`).
+///
+/// READS ONLY `destination_sheet` AND `id` -- [`PivotDestSheet`] relies on
+/// it; `a_dest_sheet_copy_resolves_exactly_like_its_definition` pins it.
 pub(crate) fn resolve_dest_sheet_index(state: &AppState, definition: &PivotDefinition) -> usize {
     if let Some(ref sheet_name) = definition.destination_sheet {
         let sheet_names = state.sheet_names.read().unwrap();
@@ -535,6 +541,38 @@ pub(crate) fn resolve_dest_sheet_index(state: &AppState, definition: &PivotDefin
     // Neither a name nor a region: the active sheet, exactly as before
     // canvases. A canvas here is refused by `update_pivot_in_grid`.
     *state.active_sheet.read().unwrap()
+}
+
+/// What [`resolve_dest_sheet_index`] reads from a definition -- its id and
+/// its `destination_sheet` -- copied out WHILE `pivot_tables` is held, so the
+/// resolution itself runs AFTER the guard is released:
+///
+/// ```ignore
+/// let dest_sheet = PivotDestSheet::of(definition); // under pivot_tables
+/// drop(pivot_tables);
+/// let dest_sheet_idx = dest_sheet.resolve(&state); // sheet_names, regions, active_sheet
+/// ```
+///
+/// It carries a stripped definition (the id and the sheet name, nothing else)
+/// rather than a second copy of the resolver's rules, so there is ONE
+/// resolver; `a_dest_sheet_copy_resolves_exactly_like_its_definition` compares
+/// the two over definitions whose anchor, source sheet and canvas frame are
+/// all set, so a resolver that starts reading one of those diverges there.
+pub(crate) struct PivotDestSheet {
+    probe: PivotDefinition,
+}
+
+impl PivotDestSheet {
+    pub(crate) fn of(definition: &PivotDefinition) -> Self {
+        let mut probe = PivotDefinition::new(definition.id, (0, 0), (0, 0));
+        probe.destination_sheet = definition.destination_sheet.clone();
+        PivotDestSheet { probe }
+    }
+
+    /// Resolve the sheet. The caller must hold no `pivot_tables` guard.
+    pub(crate) fn resolve(&self, state: &AppState) -> usize {
+        resolve_dest_sheet_index(state, &self.probe)
+    }
 }
 
 /// Carry every pivot's sheet NAMES through a sheet rename: each
@@ -964,6 +1002,27 @@ pub(crate) fn sheet_names_snapshot(state: &AppState) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The current range and sheet of table `table_name` (case-insensitive), for
+/// a pivot linked to it: `((start_row, start_col), (end_row, end_col),
+/// sheet_index)`, or `None` when no such table exists.
+///
+/// LOCKS: `table_names` is read and RELEASED before `tables` is taken. The
+/// crate's order is `tables` BEFORE `table_names` (`delete_sheet_impl`, and the
+/// calculation pass, which holds both for every formula evaluation); the
+/// nested read this replaced in `refresh_pivot_cache` took them the other way
+/// round, an ABBA hang between a pivot refresh and an F9 -- both async
+/// commands, so both off the main thread. The caller holds no lock.
+pub(crate) fn linked_table_source(
+    state: &AppState,
+    table_name: &str,
+) -> Option<((u32, u32), (u32, u32), usize)> {
+    let located = state.table_names.read().ok()?.get(&table_name.to_uppercase()).cloned();
+    let (sheet_index, table_id) = located?;
+    let tables = state.tables.read().ok()?;
+    let table = tables.get(&sheet_index)?.get(&table_id)?;
+    Some(((table.start_row, table.start_col), (table.end_row, table.end_col), table.sheet_index))
+}
+
 /// Index of `name` within a [`sheet_names_snapshot`], or `None`.
 ///
 /// Pivot definitions anchor both their destination and their source by sheet
@@ -1026,30 +1085,53 @@ pub(crate) fn update_pivot_region(
     destination: (u32, u32),
     view: &PivotView,
 ) {
+    // Calculate region size - use actual view size or minimum reserved size for empty pivots
+    let (rows, cols) = if view.row_count > 0 && view.col_count > 0 {
+        // Count all rows in the view (headers + data)
+        (view.row_count as u32, view.col_count as u32)
+    } else {
+        // Empty pivot - reserve minimum space for placeholder
+        (EMPTY_PIVOT_ROWS, EMPTY_PIVOT_COLS)
+    };
+    register_pivot_region(state, pivot_id, sheet_index, destination, rows, cols, view.row_count == 0);
+}
+
+/// Register a pivot's protected region as an explicit block of `rows` x
+/// `cols` cells at `destination` -- the load path's entry for a BI pivot,
+/// whose region must cover the output it WROTE last session (saved as
+/// `SavedBiPivotMetadata::output_extent`), not the empty placeholder its
+/// still-empty cache renders. A region smaller than the saved output made the
+/// first refresh count the pivot's own rows as foreign data; one larger
+/// would make that refresh CLEAR user cells beside it.
+pub(crate) fn update_pivot_region_extent(
+    state: &AppState,
+    pivot_id: PivotId,
+    sheet_index: usize,
+    destination: (u32, u32),
+    rows: u32,
+    cols: u32,
+) {
+    register_pivot_region(state, pivot_id, sheet_index, destination, rows.max(1), cols.max(1), false);
+}
+
+fn register_pivot_region(
+    state: &AppState,
+    pivot_id: PivotId,
+    sheet_index: usize,
+    destination: (u32, u32),
+    rows: u32,
+    cols: u32,
+    empty: bool,
+) {
     let mut regions = state.protected_regions.lock().unwrap();
 
     // Remove any existing region for this pivot
     regions.retain(|r| !(r.region_type == "pivot" && r.owner_id == pivot_id));
 
     let (dest_row, dest_col) = destination;
-    
-    // Calculate region size - use actual view size or minimum reserved size for empty pivots
-    let (end_row, end_col) = if view.row_count > 0 && view.col_count > 0 {
-        // Count all rows in the view (headers + data)
-        let total_rows = view.row_count as u32;
-        let total_cols = view.col_count as u32;
-        (
-            dest_row + total_rows.saturating_sub(1),
-            dest_col + total_cols.saturating_sub(1),
-        )
-    } else {
-        // Empty pivot - reserve minimum space for placeholder
-        (
-            dest_row + EMPTY_PIVOT_ROWS - 1,
-            dest_col + EMPTY_PIVOT_COLS - 1,
-        )
-    };
-    
+    let end_row = dest_row + rows.saturating_sub(1);
+    let end_col = dest_col + cols.saturating_sub(1);
+
     regions.push(ProtectedRegion {
         id: format!("pivot-{}", pivot_id),
         region_type: "pivot".to_string(),
@@ -1070,7 +1152,7 @@ pub(crate) fn update_pivot_region(
         dest_col,
         end_row,
         end_col,
-        view.row_count == 0
+        empty
     );
 }
 
@@ -1747,9 +1829,27 @@ pub fn resolve_pivot_data_formula(
 // FINALIZE PIVOT UPDATE (grid write + region update + formula recalc)
 // ============================================================================
 
+/// Is the pivot's destination a CANVAS? A canvas's hidden grid holds nothing
+/// a user typed -- only pivot output, one pivot per
+/// [`CANVAS_PIVOT_BLOCK_COLS`] block, and a pivot wider than its block is
+/// refused at the write -- so a cell a canvas pivot grows over is never
+/// "existing data" to warn about or save for undo. Reads `sheet_kinds` ALONE:
+/// every caller has released the pivot locks.
+fn destination_is_canvas(state: &AppState, dest_sheet_idx: usize) -> bool {
+    state
+        .sheet_kinds
+        .read()
+        .map(|kinds| crate::sheets::is_canvas_sheet(&kinds, dest_sheet_idx))
+        .unwrap_or(false)
+}
+
 /// Counts non-empty cells in the new pivot region that lie OUTSIDE the current
 /// (old) pivot region.  These are user-owned cells that the pivot would
 /// overwrite.  Must be called BEFORE `update_pivot_in_grid` writes to the grid.
+///
+/// Always 0 on a canvas (see [`destination_is_canvas`]): the frontend asks
+/// "A PivotTable report will overwrite existing data" whenever this is
+/// non-zero, and on a canvas there is nobody's data to overwrite.
 pub(crate) fn count_overwritten_cells(
     state: &AppState,
     pivot_id: PivotId,
@@ -1758,6 +1858,9 @@ pub(crate) fn count_overwritten_cells(
     view: &PivotView,
 ) -> u32 {
     if view.row_count == 0 || view.col_count == 0 {
+        return 0;
+    }
+    if destination_is_canvas(state, dest_sheet_idx) {
         return 0;
     }
 
@@ -1823,6 +1926,11 @@ pub(crate) fn save_overwritten_cells(
 ) -> Vec<SavedCell> {
     let mut saved = Vec::new();
     if view.row_count == 0 || view.col_count == 0 {
+        return saved;
+    }
+    // A canvas holds only pivot output: nothing of the user's to save or to
+    // count (callers report `saved.len()` as the overwrite count).
+    if destination_is_canvas(state, dest_sheet_idx) {
         return saved;
     }
 
@@ -2140,5 +2248,184 @@ pub(crate) fn recalculate_sheet_formulas(
                 grids[active_sheet].set_cell(row, col, updated);
             }
         }
+    }
+}
+
+/// [`PivotDestSheet`] resolves EXACTLY like the definition it was copied from
+/// (it carries a stripped definition, so a resolver that starts reading a
+/// field the copy leaves out would diverge here), and no pivot command
+/// resolves a destination while it still holds the pivot guard.
+#[cfg(test)]
+mod dest_sheet_tests {
+    use super::*;
+    use crate::document_effect::test_seed_effect;
+
+    /// A definition with every field the copy drops set to something that
+    /// COULD change the answer: an anchor, a source sheet that is a different
+    /// sheet, a canvas frame, a name.
+    fn full_definition(destination_sheet: Option<&str>) -> PivotDefinition {
+        let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let mut def = PivotDefinition::new(id, (3, 4), (40, 9));
+        def.destination = (5, 7);
+        def.destination_sheet = destination_sheet.map(str::to_string);
+        def.source_sheet = Some("Sheet1".to_string());
+        def.name = Some("PivotTable7".to_string());
+        def.canvas_frame = Some(pivot_engine::CanvasFrame {
+            x: 1.0,
+            y: 2.0,
+            width: 300.0,
+            height: 200.0,
+            frozen_headers: true,
+        });
+        def
+    }
+
+    #[test]
+    fn a_dest_sheet_copy_resolves_exactly_like_its_definition() {
+        let state = crate::create_app_state();
+        let file = crate::persistence::FileState::default();
+        for _ in 0..2 {
+            crate::sheets::add_sheet_inner(&state, &file, None, ::persistence::SheetKind::Worksheet)
+                .expect("add a sheet");
+        }
+        let names = state.sheet_names.read().unwrap().clone();
+        assert_eq!(names.len(), 3, "fixture: three sheets");
+        *state.active_sheet.write(&test_seed_effect()).unwrap() = 1;
+
+        let exact = full_definition(Some(&names[2]));
+        let drifted = full_definition(Some(&names[2].to_uppercase()));
+        let missing_with_region = full_definition(Some("NoSuchSheet"));
+        state.protected_regions.lock().unwrap().push(crate::ProtectedRegion {
+            id: format!("pivot-{}", missing_with_region.id),
+            region_type: "pivot".to_string(),
+            owner_id: missing_with_region.id,
+            sheet_index: 2,
+            start_row: 5,
+            start_col: 7,
+            end_row: 9,
+            end_col: 9,
+        });
+        let no_name_no_region = full_definition(None);
+
+        for (case, def, expected) in [
+            ("exact name", &exact, 2),
+            ("case-drifted name", &drifted, 2),
+            ("missing name, registered region", &missing_with_region, 2),
+            ("no name, no region: the active sheet", &no_name_no_region, 1),
+        ] {
+            let direct = resolve_dest_sheet_index(&state, def);
+            assert_eq!(direct, expected, "fixture ({case}): the resolver's own answer");
+            assert_eq!(
+                PivotDestSheet::of(def).resolve(&state),
+                direct,
+                "{case}: the copy resolved differently from its definition"
+            );
+        }
+    }
+
+    /// `linked_table_source` (a table-linked pivot's refresh) must not hold
+    /// `table_names` while it waits for `tables`: the crate's order is
+    /// `tables` first (`delete_sheet_impl`, the calculation pass), so the
+    /// nested read it replaced could hang against an F9.
+    #[test]
+    fn the_linked_table_lookup_never_holds_table_names_while_it_waits_for_tables() {
+        let state = crate::create_app_state();
+        let seed = test_seed_effect();
+        let table_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        state.tables.write(&seed).unwrap().entry(0).or_default().insert(
+            table_id,
+            crate::tables::Table {
+                id: table_id,
+                name: "Sales".to_string(),
+                sheet_index: 0,
+                start_row: 2,
+                start_col: 1,
+                end_row: 9,
+                end_col: 4,
+                columns: vec![],
+                style_options: crate::tables::TableStyleOptions::default(),
+                style_name: "TableStyleMedium2".to_string(),
+                auto_filter_id: None,
+            },
+        );
+        state.table_names.write(&seed).unwrap().insert("SALES".to_string(), (0, table_id));
+
+        let (reached, found) = std::thread::scope(|scope| {
+            // `delete_sheet` / the calculation pass: `tables` first...
+            let tables_guard = state.tables.read().unwrap();
+            let lookup = scope.spawn(|| linked_table_source(&state, "sales"));
+            std::thread::sleep(std::time::Duration::from_millis(250)); // the lookup now waits on `tables`
+            // ...then `table_names`. That must not wait on the lookup.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let state_ref = &state;
+            let taker = scope.spawn(move || {
+                let _names = state_ref.table_names.read().unwrap();
+                let _ = tx.send(());
+            });
+            let reached = rx.recv_timeout(std::time::Duration::from_secs(3)).is_ok();
+            drop(tables_guard);
+            let found = lookup.join().unwrap();
+            taker.join().unwrap();
+            (reached, found)
+        });
+        assert_eq!(found, Some(((2, 1), (9, 4), 0)), "fixture: the table is found (case-insensitively)");
+        assert!(
+            reached,
+            "linked_table_source held table_names while waiting for tables (ABBA against delete_sheet and F9)"
+        );
+    }
+
+    /// Strip `//` comments (the census must not count a sentence).
+    fn code_only(src: &str) -> String {
+        src.replace("\r\n", "\n")
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The body of the fn whose signature starts with `sig` (to the next
+    /// top-level `fn`).
+    fn body_of<'a>(src: &'a str, sig: &str) -> &'a str {
+        let start = src.find(sig).unwrap_or_else(|| panic!("test out of date: `{sig}` not found"));
+        let rest = &src[start + sig.len()..];
+        let end = ["\nfn ", "\npub fn ", "\npub(crate) fn ", "\nasync fn ", "\npub async fn ", "\npub(crate) async fn "]
+            .iter()
+            .filter_map(|m| rest.find(m))
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// A pivot command that resolves its destination from the GUARD-BORROWED
+    /// `definition` (spelled without `&`: `get_mut` hands out a reference)
+    /// does it while `pivot_tables` is held -- the ABBA against
+    /// `delete_sheet` and the calculation pass that fix round 3 removed from
+    /// every pivot command. Copy `PivotDestSheet::of(definition)` under the
+    /// guard and resolve after `drop(pivot_tables)`.
+    #[test]
+    fn no_pivot_command_resolves_its_sheet_under_the_pivot_guard() {
+        let commands = code_only(include_str!("commands.rs"));
+        let mut offenders: Vec<String> = Vec::new();
+        for (n, line) in commands.lines().enumerate() {
+            if line.contains("resolve_dest_sheet_index(&state, definition)")
+                || line.contains("resolve_dest_sheet_index(state, definition)")
+            {
+                offenders.push(format!("pivot/commands.rs:{}: {}", n + 1, line.trim()));
+            }
+        }
+        let undo = code_only(include_str!("../undo_commands.rs"));
+        let restore = body_of(&undo, "fn apply_pivot_definition_restore(");
+        if restore.contains("resolve_dest_sheet_index(") {
+            offenders.push("undo_commands.rs: apply_pivot_definition_restore resolves under pivot_tables".into());
+        }
+        assert!(
+            commands.contains("PivotDestSheet::of(definition)") && restore.contains("PivotDestSheet::of(definition)"),
+            "test out of date: the copy-then-resolve pattern is gone"
+        );
+        assert!(offenders.is_empty(), "resolved under the pivot guard:\n{}", offenders.join("\n"));
     }
 }

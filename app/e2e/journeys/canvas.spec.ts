@@ -34,6 +34,17 @@
  *      Send to Back reverses it; a marquee selects both and Align Left moves
  *      the box to the chart's left edge; an arrow-key nudge lands on the next
  *      snap multiple, persisted, and one Ctrl+Z undoes it.
+ *   #8-#10 the owner's live findings (2026-09-27): a floating grid inserted
+ *      from the Canvas tab moves by its title with Design Mode off; a
+ *      floating-grid cell edit survives a sheet switch (point mode across
+ *      sheets, Enter returns); a selected floating-grid cell shows its formula
+ *      in the formula bar and its address in the Name Box, and the formula bar
+ *      edits it.
+ *   #11 the owner's fourth finding: a slicer on a Calcula model -- Insert
+ *      Slicers offers the model, its items come from the model, it filters the
+ *      pivots on ITS canvas (not a Sheet1 pivot of the same model), one Ctrl+Z
+ *      undoes a click, deleting it clears its filter (Ctrl+Z restores both),
+ *      and it survives save and reopen.
  *
  * SHARED APP. Every test ends in File > New inside a `finally`, so the next
  * spec starts on a plain worksheet (the fixture's own Name Box reset would be
@@ -43,6 +54,7 @@ import type { Page } from "@playwright/test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
 import { readGridGeometry } from "../helpers/grid";
 import { samplePixelGrids, diffCount, type PixelClip } from "../viewportSample";
@@ -50,6 +62,7 @@ import { samplePixelGrids, diffCount, type PixelClip } from "../viewportSample";
 const SAVED_DOC = path.join(os.tmpdir(), "calcula-canvas-journey.cala");
 const SAVED_PIVOT_DOC = path.join(os.tmpdir(), "calcula-canvas-pivot-journey.cala");
 const SAVED_ARRANGE_DOC = path.join(os.tmpdir(), "calcula-canvas-arrange-journey.cala");
+const SAVED_MODEL_DOC = path.join(os.tmpdir(), "calcula-canvas-model-slicer-journey.cala");
 const WORKSPACE = path.join(os.tmpdir(), "calcula-canvas-journey-workspace");
 const APPLICATION = "canvas-journey";
 
@@ -68,6 +81,10 @@ const SLICER_STORE = "/extensions/Slicer/lib/slicerStore.ts";
 const PIVOT_BOX = { x: 64, y: 64, width: 400, height: 320 };
 const PIVOT_ITEMS = 40;
 const OBJECT_SELECTION = "/src/api/objectSelection.ts";
+
+/** #9/#10's floating grid, and the centre of its A1 cell (default chrome: 28px row headers, 20px title, 16px column headers, 64.29 x 20 cells). */
+const FR_BOX = { x: 640, y: 96 };
+const FR_A1 = { dx: 28 + 32, dy: 20 + 16 + 10 };
 
 /** #7's pivot box, overlapping the chart's lower right (multiples of 16). */
 const ARRANGE_BOX = { x: 240, y: 160, width: 320, height: 240 };
@@ -295,6 +312,64 @@ async function dragChart(page: Page, from: { x: number; y: number }, dx: number,
   await page.mouse.move(start.x + (dx * geo.zoom) / 2, start.y + (dy * geo.zoom) / 2, { steps: 4 });
   await page.mouse.move(start.x + dx * geo.zoom, start.y + dy * geo.zoom, { steps: 4 });
   await page.mouse.up();
+}
+
+// ---------------------------------------------------------------------------
+// A real Calcula model: the sales-star fixture as CSV files bound by a `csv`
+// source (the recipe of insight-overlays-pivot.spec.ts). Used by #11.
+// ---------------------------------------------------------------------------
+
+const MODEL_FIXTURE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../tests/fixtures/model");
+const MODEL_SOURCE_ID = "star_csv";
+
+interface StarBundle {
+  model: {
+    tables: Array<{ name: string; columns: Array<{ name: string; data_type: unknown }>; [k: string]: unknown }>;
+    [k: string]: unknown;
+  };
+  data: Record<string, { columns: string[]; rows: unknown[][] }>;
+}
+
+function csvCell(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  const s = String(v);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** Write one CSV per table and return the model with a `csv` source bound to them. */
+function writeStarAsCsv(dir: string): { model: Record<string, unknown>; data: StarBundle["data"] } {
+  const bundle = JSON.parse(fs.readFileSync(path.join(MODEL_FIXTURE_DIR, "sales_star.json"), "utf8")) as StarBundle;
+  for (const [table, { columns, rows }] of Object.entries(bundle.data)) {
+    const lines = [columns.join(","), ...rows.map((r) => r.map(csvCell).join(","))];
+    fs.writeFileSync(path.join(dir, `${table}.csv`), lines.join("\n") + "\n", "utf8");
+  }
+  const model: Record<string, unknown> = { ...bundle.model };
+  model.tables = bundle.model.tables.map((t) => ({
+    ...t,
+    columns: t.columns.map((c) => (c.data_type === "Int32" ? { ...c, data_type: "Int64" } : c)),
+    source_binding: { source_id: MODEL_SOURCE_ID, schema: "csv", table: t.name },
+  }));
+  model.sources = [
+    {
+      id: MODEL_SOURCE_ID,
+      kind: "csv",
+      connection: { database: dir, default_schema: "csv" },
+      preferred_auth: "integrated",
+      display_name: "Sales star (CSV)",
+    },
+  ];
+  return { model, data: bundle.data };
+}
+
+/** Create a live BI connection over the fixture; returns its id and the CSV dir to delete afterwards. */
+async function createStarConnection(page: Page, name: string): Promise<{ connectionId: string; dir: string; data: StarBundle["data"] }> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "calcula-canvas-model-"));
+  const { model, data } = writeStarAsCsv(dir);
+  const info = await invoke<{ id: string }>(page, "bi_create_connection", {
+    request: { name, description: null, connectionString: "", modelJson: { formatVersion: 1, model } },
+  });
+  await invoke(page, "bi_model_connect_source", { connectionId: info.id, sourceId: MODEL_SOURCE_ID, connectionString: "", remember: false });
+  return { connectionId: info.id, dir, data };
 }
 
 // ---------------------------------------------------------------------------
@@ -933,6 +1008,268 @@ test.describe.serial("canvas sheets, live", () => {
       );
     } finally {
       await fileApi(page, "newFile");
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // The owner's live findings (2026-09-27). Each test is the finding, stated as
+  // the behaviour a user expects, driven through the product.
+  // ---------------------------------------------------------------------------
+
+  test("#8 a floating grid inserted from the Canvas tab moves when its title is dragged, with Design Mode OFF", async ({
+    appPage: page,
+  }) => {
+    try {
+      const canvas = await addCanvasViaContextRoute(page);
+      // The nine Insert heroes fold into an "Insert" launcher when the band is
+      // short of room; open it first when they are not on the band itself.
+      const insertItem = page.locator('[data-testid="canvas-insert-floatingGrid"]');
+      if (!(await insertItem.isVisible())) {
+        await page.locator('[data-ribbon-content]').getByRole('button', { name: /^Insert/ }).first().click();
+      }
+      await insertItem.click();
+      const listFrs = () =>
+        invoke<Array<{ id: string; x: number; y: number; hostSheetIndex: number }>>(page, "list_floating_ranges");
+      const frs = await eventually(listFrs, (r) => r.some((f) => f.hostSheetIndex === canvas.index), "no floating grid was inserted");
+      const fr = frs.find((f) => f.hostSheetIndex === canvas.index)!;
+      await page.waitForTimeout(600);
+
+      // Drag its TITLE bar by (96, 64) -- whole multiples of the default 16px pitch.
+      const geo = await readGridGeometry(page);
+      const start = await sheetPointToPage(page, fr.x + 40, fr.y + 8);
+      await page.mouse.move(start.x, start.y);
+      await page.mouse.down();
+      await page.mouse.move(start.x + 48 * geo.zoom, start.y + 32 * geo.zoom, { steps: 4 });
+      await page.mouse.move(start.x + 96 * geo.zoom, start.y + 64 * geo.zoom, { steps: 4 });
+      await page.mouse.up();
+
+      const moved = await eventually(
+        async () => (await listFrs()).find((f) => f.id === fr.id),
+        (f) => !!f && (f.x !== fr.x || f.y !== fr.y),
+        "the floating grid did not move (Design Mode is off: a canvas is editable unless subscribed)",
+      );
+      expect({ x: moved!.x, y: moved!.y }).toEqual({ x: fr.x + 96, y: fr.y + 64 });
+    } finally {
+      await fileApi(page, "newFile");
+    }
+  });
+
+  test("#9 editing a floating-grid cell survives a sheet switch: point at Sheet1!E2, Enter commits and returns to the canvas", async ({
+    appPage: page,
+    grid,
+  }) => {
+    try {
+      await seedSheet1(page);
+      await invoke(page, "update_cell", { row: 1, col: 4, value: "42" }); // Sheet1!E2
+      const canvas = await addCanvasViaContextRoute(page);
+      const fr = await callModule<{ id: string }>(page, FLOATING_RANGES, "createFloatingRange", [FR_BOX.x, FR_BOX.y, "Float1"]);
+      await page.waitForTimeout(800);
+
+      const a1 = await sheetPointToPage(page, FR_BOX.x + FR_A1.dx, FR_BOX.y + FR_A1.dy);
+      await page.mouse.dblclick(a1.x, a1.y);
+      await page.waitForTimeout(300);
+      await page.keyboard.type("=");
+
+      // Point mode across sheets: the edit stays alive on Sheet1.
+      await page.locator('button[data-sheet-tab="0"]').click();
+      await page.waitForTimeout(500);
+      expect(await grid.formulaBar.inputValue(), "still editing on Sheet1: the formula bar shows the formula").toBe("=");
+      await grid.clickCell("E2"); // canvas-relative click on Sheet1!E2
+      await eventually(
+        () => grid.formulaBar.inputValue(),
+        (v) => v === "=Sheet1!E2",
+        "clicking Sheet1!E2 did not insert a qualified reference into the floating-grid edit",
+      );
+      await page.keyboard.press("Enter");
+
+      const cell = await eventually(
+        async () =>
+          (await callModule<Array<{ formula: string | null; value: unknown }>>(page, FLOATING_RANGES, "getFloatingRangeCells", [fr.id, 0, 0, 0, 0]))[0],
+        (c) => !!c && c.formula === "=Sheet1!E2",
+        "Enter did not commit the formula into the floating-grid cell",
+      );
+      expect(Number(cell!.value)).toBe(42);
+      await eventually(() => sheetsResult(page), (r) => r.activeIndex === canvas.index, "Enter did not return to the canvas");
+    } finally {
+      await fileApi(page, "newFile");
+    }
+  });
+
+  test("#10 a selected floating-grid cell shows its formula in the formula bar and its address in the Name Box, and the formula bar edits it", async ({
+    appPage: page,
+    grid,
+  }) => {
+    try {
+      await seedSheet1(page);
+      await invoke(page, "update_cell", { row: 1, col: 4, value: "42" }); // Sheet1!E2
+      await addCanvasViaContextRoute(page);
+      const fr = await callModule<{ id: string }>(page, FLOATING_RANGES, "createFloatingRange", [FR_BOX.x, FR_BOX.y, "Float1"]);
+      await callModule(page, FLOATING_RANGES, "updateFloatingRangeCell", [fr.id, 0, 0, "=Sheet1!E2"]);
+      await page.waitForTimeout(800);
+
+      const a1 = await sheetPointToPage(page, FR_BOX.x + FR_A1.dx, FR_BOX.y + FR_A1.dy);
+      await page.mouse.click(a1.x, a1.y);
+      await eventually(() => grid.formulaBar.inputValue(), (v) => v === "=Sheet1!E2", "the formula bar does not show the floating-grid cell's formula");
+      await eventually(() => grid.nameBox.inputValue(), (v) => v === "Float1!A1", "the Name Box does not show the floating-grid cell's address");
+
+      // Editing in the formula bar writes THAT cell.
+      await grid.formulaBar.click();
+      await page.keyboard.press("Control+a");
+      await page.keyboard.type("=Sheet1!E2*2");
+      await page.keyboard.press("Enter");
+      await eventually(
+        async () =>
+          (await callModule<Array<{ value: unknown }>>(page, FLOATING_RANGES, "getFloatingRangeCells", [fr.id, 0, 0, 0, 0]))[0]?.value,
+        (v) => Number(v) === 84,
+        "a formula-bar edit did not reach the floating-grid cell",
+      );
+    } finally {
+      await fileApi(page, "newFile");
+    }
+  });
+
+  test("#11 a slicer on a Calcula model: Insert Slicers offers the model, its items come from the model, it filters the pivots on ITS canvas only, one Ctrl+Z undoes a click, deleting it clears its filter, and it survives reopen", async ({
+    appPage: page,
+  }) => {
+    test.setTimeout(420_000);
+    let conn: { connectionId: string; dir: string } | null = null;
+    try {
+      await installAppImport(page);
+      conn = await createStarConnection(page, "Sales star (canvas journey)");
+      const categories = ["Widgets", "Gadgets", "Gizmos", "Doodads", "Trinkets"];
+
+      type ViewRow = { cells: Array<{ value: unknown }> };
+      const pivotApi = async <T,>(fn: string, arg: unknown): Promise<T> =>
+        page.evaluate(
+          async ({ fn, arg, mod }) => {
+            const m = (await (window as unknown as AppWindow).__appImport!(mod)) as { pivot: Record<string, (a: unknown) => Promise<unknown>> };
+            return (await m.pivot[fn](arg)) as unknown;
+          },
+          { fn, arg, mod: "/src/api/pivot.ts" },
+        ) as Promise<T>;
+      const categoryPivot = async (sheetIndex: number, extra: Record<string, unknown>): Promise<string> => {
+        const v = await pivotApi<{ pivotId: string }>("createFromBiModel", {
+          destinationSheet: sheetIndex,
+          connectionId: conn!.connectionId,
+          destinationCell: "B2",
+          ...extra,
+        });
+        await pivotApi("updateBiFields", {
+          pivotId: v.pivotId,
+          rowFields: [{ table: "Product", column: "Category" }],
+          columnFields: [],
+          valueFields: [{ measureName: "Revenue" }],
+          filterFields: [],
+        });
+        return String(v.pivotId);
+      };
+      /** The category labels a pivot shows (row labels that are categories). */
+      const shownCategories = async (pivotId: string): Promise<string[]> => {
+        const view = await pivotApi<{ rows: ViewRow[] }>("getView", pivotId);
+        const seen = new Set<string>();
+        for (const r of view.rows) for (const c of r.cells) if (typeof c.value === "string" && categories.includes(c.value)) seen.add(c.value);
+        return [...seen].sort();
+      };
+      const ALL = [...categories].sort();
+
+      // Sheet1 carries a pivot of the SAME model: the negative control.
+      const sheetPivot = await categoryPivot(0, {});
+      const canvas = await addCanvasViaContextRoute(page);
+      const canvasPivotA = await categoryPivot(canvas.index, { canvasFrame: { x: 48, y: 48, width: 320, height: 240, frozenHeaders: true } });
+      const canvasPivotB = await categoryPivot(canvas.index, { canvasFrame: { x: 400, y: 48, width: 320, height: 240, frozenHeaders: true } });
+      expect(await shownCategories(canvasPivotA)).toEqual(ALL);
+
+      // ---- Insert > Slicer on the canvas offers the MODEL (the owner's screenshot said it could not).
+      const insertItem = page.locator('[data-testid="canvas-insert-slicer"]');
+      if (!(await insertItem.isVisible())) {
+        await page.locator("[data-ribbon-content]").getByRole("button", { name: /^Insert/ }).first().click();
+      }
+      await insertItem.click();
+      const dialog = page.locator("h2", { hasText: "Insert Slicers" }).locator("xpath=../..");
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByText("No Tables or PivotTables found")).toHaveCount(0);
+      // The sources load asynchronously (models first): wait for the model option.
+      const modelOption = await eventually(
+        () =>
+          dialog.locator("select option").evaluateAll((opts) =>
+            opts.map((o) => ({ value: (o as HTMLOptionElement).value, label: (o.textContent ?? "").trim() })).find((o) => o.label.endsWith("(Model)")),
+          ),
+        (o) => !!o,
+        "the dialog does not list the model as a source",
+        15000,
+      );
+      expect(modelOption, "the dialog lists the model as a source").toBeTruthy();
+      await dialog.locator("select").selectOption(modelOption!.value);
+      await expect(dialog.locator('[data-testid="model-slicer-reach"]')).toBeVisible();
+      await dialog.locator("label", { hasText: /^\s*AaCategory\s*$|Category/ }).locator('input[type="checkbox"]').first().check();
+      await dialog.getByRole("button", { name: "OK" }).click();
+
+      type SlicerRow = { id: string; sheetIndex: number; sourceType: string; selectedItems: string[] | null };
+      const slicers = () => callModule<SlicerRow[]>(page, SLICER_STORE, "getAllSlicers", []);
+      const created = await eventually(slicers, (s) => s.some((x) => x.sourceType === "biConnection"), "no model slicer was created");
+      const slicer = created.find((x) => x.sourceType === "biConnection")!;
+      expect(slicer.sheetIndex, "the slicer sits on the canvas").toBe(canvas.index);
+      const items = await eventually(
+        () => callModule<Array<{ value: string }> | undefined>(page, SLICER_STORE, "getCachedItems", [slicer.id]),
+        (it) => (it?.length ?? 0) > 0,
+        "the model slicer shows no items",
+      );
+      expect(items!.map((i) => i.value).sort(), "its items are the model column's distinct values").toEqual(ALL);
+
+      // ---- A click filters the canvas pivots and NOT the Sheet1 pivot.
+      await callModule(page, SLICER_STORE, "updateSlicerSelectionAsync", [slicer.id, ["Gadgets"]]);
+      await eventually(() => shownCategories(canvasPivotA), (c) => JSON.stringify(c) === '["Gadgets"]', "canvas pivot A was not filtered");
+      await eventually(() => shownCategories(canvasPivotB), (c) => JSON.stringify(c) === '["Gadgets"]', "canvas pivot B was not filtered");
+      expect(await shownCategories(sheetPivot), "a pivot of the same model on ANOTHER sheet is untouched").toEqual(ALL);
+
+      // ---- One Ctrl+Z undoes the click: slicer AND pivots.
+      const emptyPage = await sheetPointToPage(page, 900, 600);
+      await page.mouse.click(emptyPage.x, emptyPage.y);
+      await page.keyboard.press("Control+z");
+      await eventually(() => shownCategories(canvasPivotA), (c) => JSON.stringify(c) === JSON.stringify(ALL), "one Ctrl+Z did not unfilter the canvas pivot");
+      await eventually(
+        async () => (await slicers()).find((x) => x.id === slicer.id)?.selectedItems ?? null,
+        (sel) => sel === null || (Array.isArray(sel) && sel.length === 0),
+        "one Ctrl+Z did not clear the slicer's selection",
+      );
+
+      // ---- Deleting a filtering slicer clears its filter; Ctrl+Z brings both back.
+      await callModule(page, SLICER_STORE, "updateSlicerSelectionAsync", [slicer.id, ["Gizmos"]]);
+      await eventually(() => shownCategories(canvasPivotA), (c) => JSON.stringify(c) === '["Gizmos"]', "re-filter failed");
+      await callModule(page, SLICER_STORE, "deleteSlicerAsync", [slicer.id]);
+      await eventually(() => shownCategories(canvasPivotA), (c) => JSON.stringify(c) === JSON.stringify(ALL), "deleting the slicer left the pivot filtered");
+      await page.mouse.click(emptyPage.x, emptyPage.y);
+      await page.keyboard.press("Control+z");
+      await eventually(slicers, (s) => s.some((x) => x.id === slicer.id), "Ctrl+Z did not bring the slicer back");
+      await eventually(() => shownCategories(canvasPivotA), (c) => JSON.stringify(c) === '["Gizmos"]', "Ctrl+Z did not bring the filter back");
+
+      // ---- Save, File > New, reopen: the slicer, its selection and the filtered canvas pivots come back.
+      await invoke(page, "save_file", { path: SAVED_MODEL_DOC });
+      await fileApi(page, "newFile");
+      await fileApi(page, "openFileAtPath", SAVED_MODEL_DOC);
+      const reopened = await eventually(() => sheetsResult(page), (r) => r.sheets.some((s) => s.kind === "canvas"), "the canvas did not come back");
+      const back = reopened.sheets.find((s) => s.kind === "canvas")!;
+      await page.locator(`button[data-sheet-tab="${back.index}"]`).click();
+      const again = await eventually(slicers, (s) => s.some((x) => x.sourceType === "biConnection"), "the model slicer did not survive reopen");
+      expect(again.find((x) => x.sourceType === "biConnection")!.selectedItems).toEqual(["Gizmos"]);
+      // The SAVED pivot cells come back filtered (no model connection needed).
+      type RegionRow = { pivotId: string; startRow: number; startCol: number; endRow: number; endCol: number };
+      const regionA = (await invoke<RegionRow[]>(page, "get_pivot_regions_for_sheet")).find((r) => String(r.pivotId) === canvasPivotA)!;
+      expect(regionA, "the canvas pivot's region came back on the canvas").toBeTruthy();
+      const savedCells = await invoke<Array<{ display: string }>>(page, "get_range_cells_typed", {
+        sheetIndex: back.index, startRow: regionA.startRow, startCol: regionA.startCol, endRow: regionA.endRow, endCol: regionA.endCol,
+      });
+      expect(savedCells.map((c) => c.display).filter((d) => categories.includes(d)), "the saved canvas pivot is filtered").toEqual(["Gizmos"]);
+      // And with the model reachable again, a live re-query keeps the filter.
+      await invoke(page, "bi_model_connect_source", { connectionId: conn!.connectionId, sourceId: MODEL_SOURCE_ID, connectionString: "", remember: false });
+      await pivotApi("refreshCache", canvasPivotA);
+      await eventually(() => shownCategories(canvasPivotA), (c) => JSON.stringify(c) === '["Gizmos"]', "a live re-query after reopen dropped the slicer filter");
+    } finally {
+      await fileApi(page, "newFile");
+      if (conn) {
+        await invoke(page, "bi_delete_connection", { connectionId: conn.connectionId }).catch(() => undefined);
+        fs.rmSync(conn.dir, { recursive: true, force: true });
+      }
     }
   });
 

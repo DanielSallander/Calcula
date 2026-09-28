@@ -208,22 +208,23 @@ export function usePivotGridInteraction(
   }, []);
 
   const handleApplyFilter = useCallback(
-    async (fieldIndex: number, _selectedValues: string[], hiddenItems: string[]) => {
+    async (fieldIndex: number, selectedValues: string[], hiddenItems: string[]) => {
       if (!pivotView) return;
 
       try {
-        // Build the filter field config for the specific field
-        const filterFieldConfig = {
-          sourceIndex: fieldIndex,
-          name: pivotView.filterRows.find(fr => fr.fieldIndex === fieldIndex)?.fieldName || '',
-          hiddenItems: hiddenItems.length > 0 ? hiddenItems : undefined,
-        };
-
-        // Call API to update pivot fields
-        await pivot.updateFields({
-          pivotId: pivotId,
-          filterFields: [filterFieldConfig],
-        });
+        // Filter THIS field only: `update_pivot_fields` with a one-entry
+        // filterFields list REPLACED the whole zone and dropped every other
+        // report filter (review3 finding 2). apply/clear_pivot_filter patch
+        // one field by its cache index.
+        if (hiddenItems.length === 0) {
+          await pivot.clearFilter({ pivotId, fieldIndex });
+        } else {
+          await pivot.applyFilter({
+            pivotId,
+            fieldIndex,
+            filters: { manualFilter: { selectedItems: selectedValues } },
+          });
+        }
 
         // Close dropdown
         setActiveFilterDropdown(null);

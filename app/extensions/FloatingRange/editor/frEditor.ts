@@ -9,8 +9,22 @@
 //          in the app (see planFrontend §3). Commit goes through
 //          update_floating_range_cell (undoable backend-side); the editor
 //          records nothing itself.
-// V1 PARITY GAPS (accepted, documented): no F4 abs/rel toggle, no arrow-key
-//          reference navigation inside FR formulas.
+//
+// ONE EDIT, TWO VIEWS (2026-09-27, owner findings #9/#10). The edit is a
+//          SESSION (`ExternalEditSession`, @api/externalEdit) registered in
+//          Core's one external-edit slot. The textarea is one view of it; the
+//          FORMULA BAR is the other: it shows the same text, types into it,
+//          commits and cancels it, and hosts it alone while the edit is PARKED
+//          (a formula picking a reference on another sheet, where this
+//          range's textarea cannot be shown). `view` says which of the two
+//          owns the caret; only a FOCUS changes it. A bar-begun edit
+//          (`openFrEditor(..., { focus: false, view: "bar" })`) never takes
+//          focus from the bar. Every session method is token-checked, so a
+//          session object the shell still holds after its edit ended can
+//          never write into a newer one.
+//
+// V1 PARITY GAPS (accepted, documented): no F4 abs/rel toggle and no arrow-key
+//          reference navigation inside the IN-CELL view (the bar view has F4).
 
 import type { OverlayRenderContext } from "@api/gridOverlays";
 import {
@@ -27,6 +41,14 @@ import {
 import { restoreFocusToGrid } from "@api/events";
 import { getGridStateSnapshot } from "@api/grid";
 import { registerExternalFormulaTarget } from "@api/editing";
+import {
+  notifyExternalEditChanged,
+  isExternalSessionParked,
+  isFormulaBarElement,
+  type ExternalEditMove,
+  type ExternalEditSession,
+  type ExternalEditView,
+} from "@api/externalEdit";
 import {
   updateFloatingRangeCell,
   getFloatingRangeCells,
@@ -46,6 +68,7 @@ import {
   type FrView,
 } from "../lib/frDimensions";
 import { getLocalSelection, moveLocalSelection } from "../lib/frSelection";
+import { setFrEditingRange } from "../lib/frEditingRange";
 import { invalidateFrCache } from "../rendering/frRenderer";
 import { buildQualifiedRef } from "../lib/frRefs";
 import { getFrView, ensureFrCellVisible } from "../lib/frView";
@@ -58,11 +81,28 @@ interface FrEditorState {
   frId: string;
   row: number;
   col: number;
-  /** Guard for the async initial-load: stale loads must not clobber typing. */
+  /** The text was changed (typed, picked, seeded, set from the bar): the async
+   *  initial load must not clobber it. */
   touched: boolean;
+  /** The cell's own content arrived (or the edit was seeded). An edit that is
+   *  neither touched nor loaded has NOTHING to write: committing it would
+   *  write "" over a cell whose content never reached the editor. */
+  loaded: boolean;
+  /** Which view owns the caret: this textarea ("cell") or the formula bar. */
+  view: ExternalEditView;
+  /** The caret while the BAR owns it (the textarea's selection is not read
+   *  then -- it may be hidden, and its selection APIs are unverified there). */
+  cursor: number;
+  /** TRUE workbook index of the sheet hosting the range; fixed for the edit. */
+  hostSheetIndex: number;
+  /** Increments per open (see the header). */
+  token: number;
 }
 
 let editorState: FrEditorState | null = null;
+/** The session object of the CURRENT edit (null when none is open). */
+let editorSession: ExternalEditSession | null = null;
+let tokenSeq = 0;
 let textarea: HTMLTextAreaElement | null = null;
 let unregisterExtTarget: (() => void) | null = null;
 let removeAcceptedListener: (() => void) | null = null;
@@ -106,12 +146,26 @@ export function isFrEditorOpen(): boolean {
 }
 
 export function getFrEditorCell(): { frId: string; row: number; col: number } | null {
-  return editorState ? { ...editorState } : null;
+  return editorState
+    ? { frId: editorState.frId, row: editorState.row, col: editorState.col }
+    : null;
+}
+
+/** The open edit's two-view session, or null when no edit is open. */
+export function getFrEditorSession(): ExternalEditSession | null {
+  return editorState ? editorSession : null;
 }
 
 /** True when this element is the FR editor's textarea (keyboard-guard check). */
 export function isFrEditorElement(el: EventTarget | null): boolean {
   return textarea !== null && el === textarea;
+}
+
+/** The caret of the edit: the textarea's while it owns the caret, else the stored one. */
+function caretOf(st: FrEditorState): number {
+  if (!textarea) return st.cursor;
+  if (st.view === "cell") return textarea.selectionStart ?? textarea.value.length;
+  return Math.max(0, Math.min(st.cursor, textarea.value.length));
 }
 
 // ============================================================================
@@ -147,6 +201,7 @@ function ensureTextarea(): HTMLTextAreaElement | null {
   el.addEventListener("input", handleInput);
   el.addEventListener("keydown", handleKeyDown);
   el.addEventListener("blur", handleBlur);
+  el.addEventListener("focus", handleFocus);
 
   layer.appendChild(el);
   textarea = el;
@@ -160,6 +215,7 @@ export function destroyFrEditor(): void {
     textarea.removeEventListener("input", handleInput);
     textarea.removeEventListener("keydown", handleKeyDown);
     textarea.removeEventListener("blur", handleBlur);
+    textarea.removeEventListener("focus", handleFocus);
     textarea.remove();
     textarea = null;
   }
@@ -169,19 +225,33 @@ export function destroyFrEditor(): void {
 // Open / close
 // ============================================================================
 
+export interface FrEditorOpenOptions {
+  /** Default true. false = the formula bar hosts the caret: the textarea is
+   *  shown but NOT focused (a bar-begun edit must not steal the bar's focus). */
+  focus?: boolean;
+  /** Which view owns the caret at open. Default "cell". */
+  view?: ExternalEditView;
+  /** Text shown until the cell's own content loads, WITHOUT marking the edit
+   *  touched or loaded (so an untouched commit still writes nothing). Only
+   *  meaningful with `initialValue === null`. */
+  provisional?: string | null;
+}
+
 /**
  * Open the editor on an FR cell. `initialValue` seeds type-to-edit; null loads
  * the cell's existing formula (or display value) asynchronously WITHOUT
  * clobbering anything the user typed in the meantime.
  *
  * Opens synchronously (the no-editOpenBuffer-race rule): the textarea exists,
- * is focused and receives keystrokes before this function returns.
+ * is focused (unless `opts.focus === false`) and receives keystrokes before
+ * this function returns, and the session is registered in Core's slot.
  */
 export function openFrEditor(
   frId: string,
   row: number,
   col: number,
   initialValue: string | null,
+  opts: FrEditorOpenOptions = {},
 ): void {
   const entry = getFloatingRangeById(frId);
   const el = ensureTextarea();
@@ -192,31 +262,48 @@ export function openFrEditor(
     void commitFrEditor(null);
   }
 
-  editorState = { frId, row, col, touched: initialValue !== null };
+  const token = ++tokenSeq;
+  const seeded = initialValue !== null;
+  const text = initialValue ?? opts.provisional ?? "";
+  editorState = {
+    frId,
+    row,
+    col,
+    touched: seeded,
+    loaded: seeded,
+    view: opts.view ?? "cell",
+    cursor: text.length,
+    hostSheetIndex: entry.sheetIndex,
+    token,
+  };
   clearSuppressBlurCommit();
   closing = false;
 
-  el.value = initialValue ?? "";
+  el.value = text;
   el.style.display = "block";
   // A clip left by the previous session's last layout must not trim this one
   // for the frame before its own layout runs.
   el.style.clipPath = "";
-  el.focus();
-  el.setSelectionRange(el.value.length, el.value.length);
+  if (opts.focus !== false) {
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }
 
-  // External formula edit session: while this editor expects a reference, a
-  // grid click inserts "Sheet1!A1" here instead of moving the grid selection.
+  // The session: ONE edit that this textarea and the formula bar both show.
+  // Registered as the external formula target, so while it expects a
+  // reference a grid click inserts "Sheet1!A1" here instead of moving the grid
+  // selection -- at the caret of whichever view owns it.
+  editorSession = createSession(token, frId, row, col, entry.name, entry.sheetIndex);
   unregisterExtTarget = registerExternalFormulaTarget({
     isExpectingReference: () => {
-      if (!editorState || !textarea) return false;
+      const st = editorState;
+      if (!st || st.token !== token || !textarea) return false;
       const v = textarea.value;
       if (!v.startsWith("=")) return false;
-      return isFormulaExpectingReference(
-        v,
-        textarea.selectionStart ?? v.length,
-      );
+      return isFormulaExpectingReference(v, caretOf(st));
     },
     insertReference: (ref) => {
+      if (!editorState || editorState.token !== token) return;
       insertTextAtCursor(
         buildQualifiedRef(
           ref.sheetName,
@@ -227,52 +314,185 @@ export function openFrEditor(
         ),
       );
     },
+    session: editorSession,
   });
 
-  // Autocomplete acceptance (InlineEditor pattern).
+  // Autocomplete acceptance (InlineEditor pattern). ONE owner per view:
+  // ACCEPTED carries no source, and the formula bar (and every formula dialog)
+  // hears it too -- so this view applies it only while IT has the focus. The
+  // dropdown preventDefaults its mousedown, so a click on a suggestion keeps
+  // the focus where the typing was.
   const onAccepted = (e: Event) => {
-    if (!editorState || !textarea) return;
+    const st = editorState;
+    if (!st || st.token !== token || !textarea) return;
+    if (document.activeElement !== textarea) return;
     const { newValue, newCursorPosition } = (e as CustomEvent<AutocompleteAcceptedPayload>).detail;
     textarea.value = newValue;
-    editorState.touched = true;
+    st.touched = true;
+    st.cursor = newCursorPosition;
     textarea.setSelectionRange(newCursorPosition, newCursorPosition);
     textarea.focus();
+    notifyExternalEditChanged();
   };
   window.addEventListener(AutocompleteEvents.ACCEPTED, onAccepted);
   removeAcceptedListener = () =>
     window.removeEventListener(AutocompleteEvents.ACCEPTED, onAccepted);
 
+  // The range's resize handles stand down while one of its cells is edited:
+  // the store re-publishes `resizable` on this signal (Core's corner boxes).
+  setFrEditingRange(frId);
+
   if (initialValue === null) {
-    void loadInitialValue(frId, row, col);
+    void loadInitialValue(frId, row, col, token);
   }
 
   requestOverlayRedraw();
+}
+
+/**
+ * The session object of one edit (see ExternalEditSession in
+ * core/lib/formulaEditTarget.ts for the contract). Every method first checks
+ * that its edit is still THE edit (`token`).
+ */
+function createSession(
+  token: number,
+  frId: string,
+  row: number,
+  col: number,
+  nameAtOpen: string,
+  hostSheetIndex: number,
+): ExternalEditSession {
+  const live = (): FrEditorState | null =>
+    editorState !== null && editorState.token === token && textarea !== null ? editorState : null;
+
+  return {
+    // A getter: a rename during the edit re-derives the Name Box text.
+    get address(): string {
+      return buildQualifiedRef(getFloatingRangeById(frId)?.name ?? nameAtOpen, row, col);
+    },
+    hostSheetIndex,
+    anchor: Object.freeze({ row, col }),
+
+    getText(): string {
+      return live() && textarea ? textarea.value : "";
+    },
+
+    getCursor(): number {
+      const st = live();
+      return st ? caretOf(st) : 0;
+    },
+
+    getView(): ExternalEditView {
+      return live()?.view ?? "bar";
+    },
+
+    setText(text: string, cursor: number): void {
+      const st = live();
+      if (!st || !textarea) return;
+      const caret = Math.max(0, Math.min(cursor, text.length));
+      const changed = textarea.value !== text;
+      // No-op, and NO notify, when nothing changed: the bar feeds its own
+      // value back on every select event, and a notify there would loop
+      // through the bar's caret effect.
+      if (!changed && st.cursor === caret) return;
+      if (changed) {
+        textarea.value = text;
+        st.touched = true;
+      }
+      st.cursor = caret;
+      // The view is NEVER changed here (only a focus does); while the textarea
+      // owns the caret its selection IS the caret, so it follows.
+      if (st.view === "cell") textarea.setSelectionRange(caret, caret);
+      notifyExternalEditChanged();
+    },
+
+    setCursor(cursor: number): void {
+      const st = live();
+      if (!st || !textarea) return;
+      st.cursor = Math.max(0, Math.min(cursor, textarea.value.length));
+    },
+
+    adoptBarView(): void {
+      const st = live();
+      if (!st || st.view === "bar") return;
+      // Snapshot the textarea's caret before the bar takes over the edit.
+      if (textarea) st.cursor = textarea.selectionStart ?? textarea.value.length;
+      st.view = "bar";
+      notifyExternalEditChanged();
+    },
+
+    focusCellView(): void {
+      const st = live();
+      if (!st || !textarea) return;
+      // Parked: this range is not on screen, the bar is the only view.
+      if (isExternalSessionParked()) return;
+      const caret = caretOf(st);
+      textarea.focus();
+      const pos = Math.max(0, Math.min(caret, textarea.value.length));
+      textarea.setSelectionRange(pos, pos);
+    },
+
+    commit(move: ExternalEditMove): Promise<boolean> {
+      return live() ? commitFrEditor(move) : Promise.resolve(false);
+    },
+
+    cancel(): void {
+      if (live()) cancelFrEditor();
+    },
+
+    onParkedChanged(parked: boolean): void {
+      const st = live();
+      if (!st || !textarea) return;
+      if (parked) {
+        // Snapshot the caret BEFORE hiding: the selection APIs of a
+        // display:none textarea are unverified in WebView2.
+        if (st.view === "cell") st.cursor = textarea.selectionStart ?? textarea.value.length;
+        st.view = "bar";
+        textarea.style.display = "none";
+      } else {
+        // The next overlay frame lays it out over its cell again.
+        textarea.style.display = "block";
+        textarea.style.clipPath = "";
+        requestOverlayRedraw();
+      }
+    },
+  };
 }
 
 async function loadInitialValue(
   frId: string,
   row: number,
   col: number,
+  token: number,
 ): Promise<void> {
   try {
     const cells = await getFloatingRangeCells(frId, row, col, row, col);
     const st = editorState;
-    if (!st || st.frId !== frId || st.row !== row || st.col !== col) return;
+    if (!st || st.token !== token) return;
     if (st.touched || !textarea) return; // the user got there first
     const cell = cells.find((c) => c.row === row && c.col === col);
     const value = cell ? (cell.formula ?? cell.display ?? "") : "";
-    textarea.value = value;
-    textarea.setSelectionRange(value.length, value.length);
+    st.loaded = true;
+    if (textarea.value !== value) {
+      textarea.value = value;
+      st.cursor = value.length;
+      if (st.view === "cell") textarea.setSelectionRange(value.length, value.length);
+      // The bar mirrors the session: it must see the content arrive.
+      notifyExternalEditChanged();
+    }
   } catch {
-    // Editing an unreadable cell starts blank — the commit still goes through.
+    // The content never arrived: `loaded` stays false, so an untouched commit
+    // writes NOTHING. A transient read failure must not blank the cell.
   }
 }
 
 function teardown(): void {
   closing = true;
   editorState = null;
+  editorSession = null;
   clearSuppressBlurCommit();
   if (unregisterExtTarget) {
+    // Notifies the external-edit store (and clears `parked` there).
     unregisterExtTarget();
     unregisterExtTarget = null;
   }
@@ -285,34 +505,33 @@ function teardown(): void {
     textarea.value = "";
   }
   window.dispatchEvent(new CustomEvent(AutocompleteEvents.DISMISS));
+  setFrEditingRange(null);
   closing = false;
 }
 
-/** Commit the value, then optionally move the FR-local selection. */
-export async function commitFrEditor(
-  move: "down" | "up" | "right" | "left" | null,
-): Promise<void> {
+/**
+ * Commit the value, then optionally move the FR-local selection. Tears the
+ * edit down SYNCHRONOUSLY before its first await. Resolves true when the value
+ * was written or there was nothing to write, false when there was no edit or
+ * the backend refused (the user has already been told why).
+ */
+export async function commitFrEditor(move: ExternalEditMove): Promise<boolean> {
   const st = editorState;
-  if (!st || !textarea || closing) return;
+  if (!st || !textarea || closing) return false;
   const value = textarea.value;
+  // Nothing typed and the cell's content never arrived: writing would blank
+  // the cell with "" (double-click, then Enter before the read lands).
+  const nothingToWrite = !st.touched && !st.loaded;
   teardown();
 
-  try {
-    await updateFloatingRangeCell(st.frId, st.row, st.col, value);
-  } catch (err) {
-    // The editor is already gone, so a refused write must not vanish into the
-    // console: the user typed a value and is owed a reason it did not stick.
-    // (Until the backend's write gate follows the content extent, a cell the
-    // user scrolled to beyond the window is one such refusal.)
-    console.error("[FloatingRange] Cell commit failed:", err);
-    showToast(
-      `The value could not be written: ${err instanceof Error ? err.message : String(err)}`,
-      { type: "error" },
-    );
-  }
-  invalidateFrCache(st.frId);
-  requestOverlayRedraw();
-
+  // The MOVE happens now, with the teardown, before the write's first await --
+  // the way the grid moves its cursor on Enter. Moved only after the write
+  // resolved, the selection sat on the committed cell for the whole IPC and
+  // recalc: the formula bar re-published THAT cell with its pre-edit cached
+  // text, a key typed in the window opened a NEW edit on it seeded with the old
+  // text, and when the move finally landed the edit-lifetime rule committed
+  // that stale text over the value just written. The move never depended on
+  // `written`; a new edit opened during the write now opens on the NEXT cell.
   const entry = getFloatingRangeById(st.frId);
   const sel = getLocalSelection();
   if (move && entry && sel && sel.frId === st.frId) {
@@ -332,9 +551,31 @@ export async function commitFrEditor(
     if (moved) ensureFrCellVisible(entry, moved.endRow, moved.endCol);
     requestOverlayRedraw();
   }
+
+  let written = true;
+  if (!nothingToWrite) {
+    try {
+      await updateFloatingRangeCell(st.frId, st.row, st.col, value);
+    } catch (err) {
+      // The editor is already gone, so a refused write must not vanish into
+      // the console: the user typed a value and is owed a reason it did not
+      // stick. (Until the backend's write gate follows the content extent, a
+      // cell the user scrolled to beyond the window is one such refusal.)
+      written = false;
+      console.error("[FloatingRange] Cell commit failed:", err);
+      showToast(
+        `The value could not be written: ${err instanceof Error ? err.message : String(err)}`,
+        { type: "error" },
+      );
+    }
+    invalidateFrCache(st.frId);
+  }
+  requestOverlayRedraw();
+
   // A NEW editor session may have opened while the write was in flight
   // (double-click on another cell); stealing its focus would blur-commit it.
   if (editorState === null) restoreFocusToGrid();
+  return written;
 }
 
 /** Discard the edit (Esc). Local selection and object selection stay. */
@@ -349,20 +590,32 @@ export function cancelFrEditor(): void {
 // Reference insertion (grid->FR and float->float both land here)
 // ============================================================================
 
+/**
+ * Insert `text` at the caret of whichever view owns it. The textarea view
+ * replaces its selection and keeps the focus; the BAR view inserts at the
+ * bar's caret and never focuses the textarea -- the bar keeps the keyboard, and
+ * it emits its own autocomplete input.
+ */
 function insertTextAtCursor(text: string): void {
-  if (!textarea || !editorState) return;
-  const start = textarea.selectionStart ?? textarea.value.length;
-  const end = textarea.selectionEnd ?? start;
-  textarea.value =
-    textarea.value.slice(0, start) + text + textarea.value.slice(end);
-  editorState.touched = true;
+  const st = editorState;
+  if (!textarea || !st) return;
+  const v = textarea.value;
+  const start = Math.min(caretOf(st), v.length);
+  const end =
+    st.view === "cell" ? Math.max(start, textarea.selectionEnd ?? start) : start;
+  textarea.value = v.slice(0, start) + text + v.slice(end);
+  st.touched = true;
   const pos = start + text.length;
-  // The click that picked the reference is about to blur (or already blurred)
-  // the textarea — that blur must not commit a half-typed formula.
-  suppressNextBlurCommit();
-  textarea.focus();
-  textarea.setSelectionRange(pos, pos);
-  emitAutocompleteInput();
+  st.cursor = pos;
+  if (st.view === "cell") {
+    // The click that picked the reference is about to blur (or already
+    // blurred) the textarea — that blur must not commit a half-typed formula.
+    suppressNextBlurCommit();
+    textarea.focus();
+    textarea.setSelectionRange(pos, pos);
+    emitAutocompleteInput();
+  }
+  notifyExternalEditChanged();
 }
 
 /** Insert reference text into THIS editor (used by the FR claimsBodyDrag
@@ -398,9 +651,21 @@ function emitAutocompleteInput(): void {
 }
 
 function handleInput(): void {
-  if (!editorState) return;
-  editorState.touched = true;
+  const st = editorState;
+  if (!st) return;
+  st.touched = true;
+  if (textarea) st.cursor = textarea.selectionStart ?? textarea.value.length;
   emitAutocompleteInput();
+  // The formula bar mirrors in-place typing live.
+  notifyExternalEditChanged();
+}
+
+/** The textarea took the focus: it owns the caret again (from the bar). */
+function handleFocus(): void {
+  const st = editorState;
+  if (!st || st.view === "cell") return;
+  st.view = "cell";
+  notifyExternalEditChanged();
 }
 
 function handleKeyDown(e: KeyboardEvent): void {
@@ -422,6 +687,8 @@ function handleKeyDown(e: KeyboardEvent): void {
     }
   }
 
+  // The textarea is only ever focused on the host sheet (it is hidden while
+  // the edit is parked), so these never need to return anywhere first.
   if (e.key === "Enter" && !e.altKey) {
     e.preventDefault();
     void commitFrEditor(e.shiftKey ? "up" : "down");
@@ -446,6 +713,31 @@ function handleBlur(): void {
     // reaching it first means the flag is not consumed by a blur that was
     // never a departure in the first place.
     if (textarea && document.activeElement === textarea) return;
+    // Parked: the edit is picking a reference on another sheet, and hiding
+    // the textarea is what blurred it. The formula bar hosts the edit now.
+    if (isExternalSessionParked()) return;
+    // A hand-off, not a departure: the formula bar is the edit's OTHER view
+    // (the InlineEditor rule). The bar now owns the caret.
+    if (isFormulaBarElement(document.activeElement)) {
+      if (st.view !== "bar") {
+        st.view = "bar";
+        notifyExternalEditChanged();
+      }
+      return;
+    }
+    // The BAR owns the edit (it adopted it -- fx does, before its dialog takes
+    // the focus): the textarea losing a focus it no longer owns ends nothing.
+    // The bar's own doors end the edit (Enter, Tab, X, the check mark, and a
+    // click away through the edit-lifetime rule).
+    if (st.view === "bar") return;
+    // A formula still EXPECTING a reference is never blur-committed (Core's
+    // InlineEditor rule): the focus left for something that feeds it -- the
+    // Insert Function dialog's search box after fx, above all. Committed, the
+    // half-typed "=SUM(" was written (or refused) and the function the user
+    // then chose had no edit to land in.
+    if (textarea && textarea.value.startsWith("=") && isFormulaExpectingReference(textarea.value, caretOf(st))) {
+      return;
+    }
     if (suppressBlurCommit) {
       clearSuppressBlurCommit();
       return;
@@ -504,6 +796,12 @@ export function layoutFrEditorForFrame(
 ): void {
   const st = editorState;
   if (!st || st.frId !== entry.id || !textarea) return;
+  // Parked: the grid shows another sheet. Belt and braces -- the regions are
+  // suppressed then, so this frame should not have been painted at all.
+  if (isExternalSessionParked()) {
+    textarea.style.display = "none";
+    return;
+  }
 
   const origin = localCellOrigin(entry, st.row, st.col, view);
   const cellX = frameCanvasX + origin.x;

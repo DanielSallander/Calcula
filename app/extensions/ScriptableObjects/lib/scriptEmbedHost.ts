@@ -482,9 +482,11 @@ export function installScriptEmbedHost(deps: ScriptEmbedHostDeps): ScriptEmbedHo
    *     is the host's job and it ends them as "reset", which DROPS those pending
    *     writes.
    *
-   * BEFORE_CLOSE deliberately does NOT sweep: it is broadcast ahead of the
-   * cancellable "save changes?" prompt (shell/Layout.tsx), and a user who
-   * answers Cancel must still have the forms they placed.
+   * BEFORE_CLOSE deliberately does NOT sweep. Since 2026-09-28 it goes out only
+   * once the window is really closing (shell/Layout.tsx: after Don't Save, or
+   * after Save's Before-Save check), but a Save can still end without closing
+   * -- a cancelled Save As picker or a declined lossy-format warning leaves the
+   * window open -- and the user must still have the forms they placed.
    */
   const forgetEveryPlacement = (): void => {
     if (disposed) return;

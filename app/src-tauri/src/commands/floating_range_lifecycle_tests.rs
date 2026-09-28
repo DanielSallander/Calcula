@@ -546,3 +546,410 @@ fn a_visibility_restore_recorded_before_the_range_existed_cannot_resurrect_its_s
          put the floating range's cell store on the tab bar"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GATES BEFORE THE EFFECT (owner finding 2026-09-27, fr-move diagnosis E)
+//
+// `DocumentEffect::mutates` dirties the document AT CONSTRUCTION, so every gate
+// that can still refuse must run before it. The update used to build it BEFORE
+// the id lookup (a stale id dirtied the document it then refused to change),
+// and had no gate at all for a range on a SUBSCRIBED canvas -- the publisher's
+// read-only layout, which the frontend refuses to drag but a script could move.
+// ---------------------------------------------------------------------------
+
+/// A canvas added (and made active), with a floating range created on it.
+fn fr_on_new_canvas(wb: &Workbook) -> (usize, crate::api_types::FloatingRangeInfo) {
+    let added = crate::sheets::add_sheet_inner(
+        &wb.state,
+        &wb.file,
+        None,
+        ::persistence::SheetKind::new_canvas(),
+    )
+    .expect("add a canvas");
+    let canvas = added.active_index;
+    let info = create(wb, None);
+    assert_eq!(
+        crate::floating_range::list_floating_ranges_inner(&wb.state)
+            .into_iter()
+            .find(|f| f.range.id == info.range.id)
+            .map(|f| f.host_sheet_index),
+        Some(canvas),
+        "precondition: the range is hosted on the canvas"
+    );
+    (canvas, info)
+}
+
+/// Record sheet `index` as materialized by an application (the subscription
+/// ledger `SheetProvenance` reads -- the same shape a pull writes).
+fn subscribe_sheet(wb: &Workbook, index: usize) {
+    let seed = crate::document_effect::test_seed_effect();
+    let local = wb.state.sheet_ids.read().unwrap()[index];
+    let name = wb.state.sheet_names.read().unwrap()[index].clone();
+    let mut subs = wb.state.subscriptions.write(&seed).unwrap();
+    subs.subscriptions.push(calp::manifest::Subscription {
+        package_name: "Reports".to_string(),
+        registry_url: "C:/workspace".to_string(),
+        version_pin: "latest".to_string(),
+        resolved_version: "1.0.0".to_string(),
+        resolved_at: "2026-09-27T00:00:00Z".to_string(),
+        sheets: vec![calp::manifest::SubscribedSheet {
+            package_sheet_id: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
+            local_sheet_id: local,
+            local_name: name,
+            extra: std::collections::HashMap::new(),
+        }],
+        environment: None,
+        data_source_configs: Vec::new(),
+        objects: Vec::new(),
+        detached_sheets: Vec::new(),
+        detached_local_sheets: Vec::new(),
+        upstream_removed_sheets: Vec::new(),
+        extra: std::collections::HashMap::new(),
+    });
+}
+
+fn row_x(wb: &Workbook, id: identity::EntityId) -> f64 {
+    crate::floating_range::list_floating_ranges_inner(&wb.state)
+        .into_iter()
+        .find(|f| f.range.id == id)
+        .expect("the range is listed")
+        .range
+        .x
+}
+
+#[test]
+fn a_range_on_a_subscribed_canvas_refuses_geometry_and_leaves_the_document_clean() {
+    let wb = Workbook::new(1);
+    let (canvas, info) = fr_on_new_canvas(&wb);
+    subscribe_sheet(&wb, canvas);
+    crate::document_effect::mark_saved(&wb.file);
+    let depth = wb.state.undo_stack.lock().unwrap().undo_depth();
+
+    for patch in [
+        FloatingRangePatch { x: Some(400.0), ..Default::default() },
+        FloatingRangePatch { row_count: Some(4), ..Default::default() },
+        FloatingRangePatch { show_title: Some(false), ..Default::default() },
+    ] {
+        let err = crate::floating_range::update_floating_range_inner(
+            &wb.state,
+            &wb.file,
+            info.range.id,
+            patch,
+        )
+        .expect_err("a pulled canvas is the publisher's layout: read-only until detached");
+        assert!(
+            err.contains("Reports") && err.contains("Detach"),
+            "the refusal names the application and the remedy, got: {err}"
+        );
+    }
+
+    assert!(!wb.file.is_dirty(), "a refused update must not dirty the document");
+    assert_eq!(row_x(&wb, info.range.id), 100.0, "the range did not move");
+    assert_eq!(
+        wb.state.undo_stack.lock().unwrap().undo_depth(),
+        depth,
+        "and no undo entry was recorded"
+    );
+}
+
+#[test]
+fn a_range_on_a_subscribed_worksheet_still_moves() {
+    // The rule is the CANVAS's (canvas-sheets.md section 2): a subscribed
+    // worksheet is editable by design (its edits go through the override
+    // ledger) and the frontend offers the gestures there, so the backend must
+    // not contradict it.
+    let wb = Workbook::new(1);
+    let info = create(&wb, None);
+    subscribe_sheet(&wb, 0);
+
+    let moved = crate::floating_range::update_floating_range_inner(
+        &wb.state,
+        &wb.file,
+        info.range.id,
+        FloatingRangePatch { x: Some(300.0), ..Default::default() },
+    )
+    .expect("a range on a subscribed WORKSHEET moves");
+    assert_eq!(moved.range.x, 300.0);
+}
+
+#[test]
+fn a_range_on_an_unsubscribed_canvas_moves_and_dirties_once() {
+    let wb = Workbook::new(1);
+    let (_canvas, info) = fr_on_new_canvas(&wb);
+    crate::document_effect::mark_saved(&wb.file);
+
+    crate::floating_range::update_floating_range_inner(
+        &wb.state,
+        &wb.file,
+        info.range.id,
+        FloatingRangePatch { x: Some(160.0), y: Some(96.0), ..Default::default() },
+    )
+    .expect("an editable canvas's range moves");
+    assert_eq!(row_x(&wb, info.range.id), 160.0);
+    assert!(wb.file.is_dirty(), "a real change dirties the document");
+}
+
+#[test]
+fn an_unknown_id_is_refused_without_dirtying_the_document() {
+    let wb = Workbook::new(1);
+    create(&wb, None);
+    crate::document_effect::mark_saved(&wb.file);
+
+    crate::floating_range::update_floating_range_inner(
+        &wb.state,
+        &wb.file,
+        identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+        FloatingRangePatch { x: Some(10.0), ..Default::default() },
+    )
+    .expect_err("no such range");
+    assert!(
+        !wb.file.is_dirty(),
+        "the lookup is a gate: it runs before DocumentEffect::mutates"
+    );
+}
+
+#[test]
+fn a_patch_that_changes_nothing_does_not_dirty_the_document() {
+    let wb = Workbook::new(1);
+    let info = create(&wb, None);
+    crate::document_effect::mark_saved(&wb.file);
+
+    crate::floating_range::update_floating_range_inner(
+        &wb.state,
+        &wb.file,
+        info.range.id,
+        FloatingRangePatch { x: Some(100.0), y: Some(50.0), ..Default::default() },
+    )
+    .expect("a no-op patch is not an error");
+    assert!(
+        !wb.file.is_dirty(),
+        "a patch that changes nothing is not an edit: the effect is built only on the changing branch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SHEET PROTECTION ("Edit objects") -- review 2026-09-27 findings 1 and 12.
+//
+// A floating range is an OBJECT on its host sheet. Since the title bar moves a
+// range outside Design Mode, a plain drag on a protected sheet reached
+// `update_floating_range` -- which asked about the subscribed canvas and never
+// about protection -- while a chart, a control, a slicer and a timeline on the
+// same sheet refused the same drag. Every authoring door asks the HOST now.
+// ---------------------------------------------------------------------------
+
+/// Protect sheet `index` with Excel's DEFAULT options ("Edit objects" off).
+fn protect_with_defaults(wb: &Workbook, index: usize) {
+    wb.state
+        .sheet_protection
+        .write(&crate::document_effect::test_seed_effect())
+        .unwrap()
+        .insert(
+            index,
+            crate::protection::SheetProtection { protected: true, ..Default::default() },
+        );
+}
+
+#[test]
+fn a_protected_host_refuses_every_geometry_patch_and_leaves_the_document_clean() {
+    let wb = Workbook::new(1);
+    let info = create(&wb, None);
+    protect_with_defaults(&wb, 0);
+    crate::document_effect::mark_saved(&wb.file);
+    let depth = wb.state.undo_stack.lock().unwrap().undo_depth();
+
+    for patch in [
+        // The title-bar drag (x only), the menu's Add Row, the edge-ball cell
+        // scale, and a Properties chrome toggle.
+        FloatingRangePatch { x: Some(200.0), ..Default::default() },
+        FloatingRangePatch { row_count: Some(3), ..Default::default() },
+        FloatingRangePatch {
+            col_widths: Some([(0u32, 120.0f64)].into_iter().collect()),
+            ..Default::default()
+        },
+        FloatingRangePatch { show_title: Some(false), ..Default::default() },
+    ] {
+        let err = crate::floating_range::update_floating_range_inner(
+            &wb.state,
+            &wb.file,
+            info.range.id,
+            patch,
+        )
+        .expect_err("a protected host without 'Edit objects' refuses the object edit");
+        assert!(
+            err.contains("protected sheet") && err.contains("floating range"),
+            "the refusal names the protection and the object, got: {err}"
+        );
+    }
+
+    let row = crate::floating_range::list_floating_ranges_inner(&wb.state)
+        .into_iter()
+        .find(|f| f.range.id == info.range.id)
+        .expect("the range is listed");
+    assert_eq!(row.range.x, 100.0, "the range did not move");
+    assert_eq!(row.range.row_count, 1, "nor grow");
+    assert!(row.range.col_widths.is_empty(), "nor rescale");
+    assert!(row.range.show_title, "nor lose its title");
+    assert!(!wb.file.is_dirty(), "a refused patch must not dirty the document");
+    assert_eq!(
+        wb.state.undo_stack.lock().unwrap().undo_depth(),
+        depth,
+        "and no undo entry was recorded"
+    );
+}
+
+#[test]
+fn a_protected_host_that_allows_edit_objects_still_moves_its_range() {
+    // The gate is the OPTION, not protection as such: Excel's "Edit objects"
+    // checkbox lets a protected sheet's objects move.
+    let wb = Workbook::new(1);
+    let info = create(&wb, None);
+    let mut protection = crate::protection::SheetProtection { protected: true, ..Default::default() };
+    protection.options.allow_edit_objects = true;
+    wb.state
+        .sheet_protection
+        .write(&crate::document_effect::test_seed_effect())
+        .unwrap()
+        .insert(0, protection);
+
+    crate::floating_range::update_floating_range_inner(
+        &wb.state,
+        &wb.file,
+        info.range.id,
+        FloatingRangePatch { x: Some(240.0), ..Default::default() },
+    )
+    .expect("'Edit objects' allowed: the object moves");
+    assert_eq!(row_x(&wb, info.range.id), 240.0);
+}
+
+#[test]
+fn a_protected_host_refuses_a_new_floating_range_and_stays_clean() {
+    let wb = Workbook::new(1);
+    protect_with_defaults(&wb, 0);
+    crate::document_effect::mark_saved(&wb.file);
+    let sheets_before = wb.state.sheet_names.read().unwrap().len();
+
+    let err = crate::floating_range::create_floating_range_inner(
+        &wb.state,
+        &wb.file,
+        None,
+        100.0,
+        50.0,
+    )
+    .expect_err("inserting an object is an object edit (save_chart parity)");
+    assert!(err.contains("protected sheet"), "got: {err}");
+    assert!(crate::floating_range::list_floating_ranges_inner(&wb.state).is_empty());
+    assert_eq!(
+        wb.state.sheet_names.read().unwrap().len(),
+        sheets_before,
+        "no backing sheet was appended"
+    );
+    assert!(!wb.file.is_dirty(), "a refused create must not dirty the document");
+}
+
+#[test]
+fn a_protected_host_refuses_the_users_rename_and_delete() {
+    let wb = Workbook::new(1);
+    let tl = timeline();
+    let info = create(&wb, None);
+    protect_with_defaults(&wb, 0);
+    crate::document_effect::mark_saved(&wb.file);
+
+    crate::floating_range::rename_floating_range_inner(
+        &wb.state,
+        &wb.file,
+        &wb.pivots,
+        info.range.id,
+        "Rates".to_string(),
+    )
+    .expect_err("a protected host's object keeps its name");
+    let err = crate::floating_range::delete_floating_range_impl(
+        &wb.state,
+        &wb.file,
+        &wb.pivots,
+        &wb.files,
+        &wb.pane,
+        &wb.filters,
+        &wb.slicer,
+        &tl,
+        info.range.id,
+    )
+    .expect_err("a protected host's object cannot be deleted");
+    assert!(err.contains("protected sheet"), "got: {err}");
+
+    let listed = crate::floating_range::list_floating_ranges_inner(&wb.state);
+    assert_eq!(listed.len(), 1, "the range survived");
+    assert_eq!(listed[0].name, info.name, "under its own name");
+    assert!(!wb.file.is_dirty(), "a refused rename/delete must not dirty the document");
+}
+
+#[test]
+fn deleting_a_protected_host_sheet_still_cascades_its_floating_ranges() {
+    // The object gate belongs to the USER's delete, never the cascade: deleting
+    // the host sheet is workbook STRUCTURE (unprotected here), and a gate on
+    // the dying host's object option would strand the cascade halfway.
+    let wb = Workbook::new(2);
+    let tl = timeline();
+    wb.switch_to(1);
+    let info = create(&wb, None);
+    assert_eq!(info.host_sheet_index, 1);
+    protect_with_defaults(&wb, 1);
+    wb.switch_to(0);
+
+    crate::sheets::delete_sheet_impl(
+        &wb.state,
+        &wb.file,
+        &wb.pivots,
+        &wb.files,
+        &wb.pane,
+        &wb.filters,
+        &wb.slicer,
+        &tl,
+        1,
+        false,
+    )
+    .expect("delete the protected host sheet");
+    assert!(
+        crate::floating_range::list_floating_ranges_inner(&wb.state).is_empty(),
+        "the floating range died with its protected host"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CREATE on a SUBSCRIBED canvas -- review 2026-09-27 finding 2.
+//
+// The update refuses a pulled canvas's ranges; the create did not, so a
+// script's create-then-resize appended a 1x1 range to the publisher's layout,
+// was refused on the resize, and left a non-undoable orphan nobody could size,
+// move or open.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_on_a_subscribed_canvas_is_refused_and_the_document_stays_clean() {
+    let wb = Workbook::new(1);
+    let added = crate::sheets::add_sheet_inner(
+        &wb.state,
+        &wb.file,
+        None,
+        ::persistence::SheetKind::new_canvas(),
+    )
+    .expect("add a canvas");
+    subscribe_sheet(&wb, added.active_index);
+    crate::document_effect::mark_saved(&wb.file);
+    let sheets_before = wb.state.sheet_names.read().unwrap().len();
+
+    let err = crate::floating_range::create_floating_range_inner(
+        &wb.state,
+        &wb.file,
+        None,
+        100.0,
+        50.0,
+    )
+    .expect_err("a pulled canvas is the publisher's layout: no new object on it");
+    assert!(
+        err.contains("Reports") && err.contains("Detach"),
+        "the refusal names the application and the remedy, got: {err}"
+    );
+    assert!(crate::floating_range::list_floating_ranges_inner(&wb.state).is_empty());
+    assert_eq!(wb.state.sheet_names.read().unwrap().len(), sheets_before);
+    assert!(!wb.file.is_dirty(), "a refused create must not dirty the document");
+}

@@ -14,9 +14,18 @@
 
 export {
   confirmAsync,
+  confirmOutcomeAsync,
+  askSaveDiscardCancelAsync,
   alertAsync,
   promptAsync,
   PROMPT_DIALOG_ATTR,
 } from "../core/lib/dialogs";
 
-export type { DialogTextOptions, ConfirmOptions, PromptOptions } from "../core/lib/dialogs";
+export type {
+  DialogTextOptions,
+  ConfirmOptions,
+  ConfirmOutcome,
+  SaveDiscardCancelOutcome,
+  SaveDiscardCancelOptions,
+  PromptOptions,
+} from "../core/lib/dialogs";

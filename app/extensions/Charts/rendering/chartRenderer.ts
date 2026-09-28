@@ -11,7 +11,7 @@ import {
   overlayGetColHeaderHeight,
   overlaySheetToCanvas,
   requestOverlayRedraw,
-  getGridRegions,
+  getLiveGridRegions,
   floatingHitOrder,
   hasStackingOrder,
   type OverlayRenderContext,
@@ -35,7 +35,7 @@ import {
   type CommentBox,
   type CueStepperControl,
 } from "./cueChrome";
-import { getChartById, getAllCharts, getActiveSheetIndex } from "../lib/chartStore";
+import { getChartById, getAllCharts, getActiveSheetIndex, isChartStoreReloadPending } from "../lib/chartStore";
 import { readChartDataResolved } from "../lib/chartDataReader";
 import { dispatchPaint, dispatchComputeLayout, dispatchComputeGeometry } from "./chartDispatch";
 import { DEFAULT_CHART_THEME, resolveChartTheme } from "./chartTheme";
@@ -269,9 +269,13 @@ export function getChartLocalCoords(
  * @api/gridOverlays), so of two overlapping charts the one painted on top
  * answers. Whether some OTHER family's object covers the point is the
  * caller's question (the context menu asks it before this).
+ *
+ * LIVE regions only (`getLiveGridRegions`): while a formula picks a reference
+ * on another sheet, the published charts belong to the edit's sheet and are
+ * not on screen, so they must not answer a click there.
  */
 export function findChartAtCanvasPos(canvasX: number, canvasY: number): string | null {
-  const regions = floatingHitOrder(getGridRegions()).filter((r) => r.type === "chart");
+  const regions = floatingHitOrder(getLiveGridRegions()).filter((r) => r.type === "chart");
   for (const region of regions) {
     if (!region.floating) continue;
     const chartId = region.data?.chartId as string | undefined;
@@ -361,10 +365,12 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
   // under the pointer decides: a chart covered by another object -- or by
   // another chart -- shows no hover through it, exactly as a press cannot
   // reach it. Without one, the historical walk over the charts alone is kept.
-  const stacked = hasStackingOrder();
+  // LIVE regions: no hover on a chart that cross-sheet point mode is not showing.
+  const live = getLiveGridRegions();
+  const stacked = hasStackingOrder(live);
   const regions = stacked
-    ? floatingHitOrder()
-    : getGridRegions().filter((r) => r.type === "chart");
+    ? floatingHitOrder(live)
+    : live.filter((r) => r.type === "chart");
   let foundHover = false;
 
   for (const region of regions) {
@@ -794,10 +800,15 @@ async function renderChartAsync(
 ): Promise<void> {
   pendingRenders.add(chartId);
   let superseded = false;
+  // The store's chart object this render was started from: a reload replaces
+  // every chart object, so a different one (or none) afterwards means the
+  // render answered for a store that has since moved on.
+  let startedFrom: ReturnType<typeof getChartById> = null;
 
   try {
     const chart = getChartById(chartId);
     if (!chart) return;
+    startedFrom = chart;
 
     // Skip rendering if the chart's PLACEMENT sheet isn't the active sheet: it
     // is not on screen. (The data read itself goes to the data's own sheet,
@@ -903,6 +914,15 @@ async function renderChartAsync(
     // Also emit grid refresh to ensure main canvas repaints
     window.dispatchEvent(new Event("app:grid-refresh"));
   } catch (err) {
+    // A RENDER THAT RACED THE STORE IS NOT A BROKEN CHART. While a reload of the
+    // store is pending (or once it has replaced this chart), the render read
+    // data for a chart collection the backend has already changed -- typically
+    // a chart whose own sheet was just deleted, which the reload is about to
+    // drop. The reload repaints every chart when it lands, and a chart that
+    // really is broken (its data sheet deleted, the chart itself kept) fails
+    // again THEN, from the fresh store, and is reported. See chartStore.ts,
+    // "Reload window".
+    if (isChartStoreReloadPending() || getChartById(chartId) !== startedFrom) return;
     console.error(`[Charts] Failed to render chart ${chartId}:`, err, (err as Error)?.stack);
     // Paint an error placeholder so the chart object stays VISIBLE — a blank
     // region reads as "the chart disappeared". The object remains selectable,

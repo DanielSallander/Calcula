@@ -479,11 +479,12 @@ fn rotate_element<T>(v: &mut Vec<T>, from: usize, to: usize) {
 ///
 /// Call from EVERY command that adds, deletes, renames, moves or copies a
 /// sheet, AFTER the last gate that can still refuse (a refused operation must
-/// not cost the user their history) and with NO other state lock held. The
-/// crate's canonical order takes `undo_stack` BEFORE `grid`/`grids`
-/// (`undo_commands::apply_changes`), so taking it here while a grid guard is
-/// alive would close a deadlock cycle against the background recalculation
-/// pass. `sheet_structure_commands_invalidate_the_undo_history` in
+/// not cost the user their history) and with NO other state lock held, so
+/// clearing the history adds no edge to the lock order at all. (This comment
+/// used to call `undo_stack` BEFORE `grid`/`grids` the crate's canonical
+/// order; the lock-order census showed the opposite -- every cell writer takes
+/// the stack while it holds the grid locks, and `undo_commands::apply_changes`
+/// now does too, fix round 4.) `sheet_structure_commands_invalidate_the_undo_history` in
 /// `undo_sheet_structure_tests` reads this file and fails the build if one of
 /// the five stops calling it.
 pub(crate) fn invalidate_undo_history_for_sheet_structure(state: &AppState, action: &str) {
@@ -1020,8 +1021,9 @@ pub(crate) fn restore_partition_invariant(
     // floating-range cell edit recorded on the old backing index would undo
     // onto whichever sheet holds that index now. Excel's answer, and so this
     // crate's: a change to the workbook's structure ends the undo history.
-    // Taken with every lock above released (the canonical order puts
-    // `undo_stack` before the grid locks), and only when something moved.
+    // Taken with every lock above released (see the contract on
+    // `invalidate_undo_history_for_sheet_structure`), and only when something
+    // moved.
     invalidate_undo_history_for_sheet_structure(state, "restore the sheet partition");
 
     Ok(Some(old_to_new))
@@ -1775,25 +1777,160 @@ pub(crate) fn add_sheet_inner(
     name: Option<String>,
     kind: ::persistence::SheetKind,
 ) -> Result<SheetsResult, String> {
-    crate::protection::check_workbook_structure(state, "add a sheet")?;
+    let name = match name {
+        Some(requested) => NewSheetName::Exact(requested),
+        None => NewSheetName::Default,
+    };
+    let added = append_user_sheet(
+        state,
+        file_state,
+        NewUserSheet { name, kind, cells: None, activate: true },
+        "add a sheet",
+    )?;
+
+    // EXCEL PARITY: adding a sheet ends the undo history (BUG-0005). Runs with
+    // every lock above released — see the function for the order that requires.
+    invalidate_undo_history_for_sheet_structure(&state, "add a sheet");
+
+    // The new (empty) sheet is now active — rebuild the single-sheet
+    // dependency maps for it (see set_active_sheet / BUG-0016).
+    crate::undo_commands::rebuild_all_dependencies(&state);
+
+    Ok(added.result)
+}
+
+/// What a sheet added through [`append_user_sheet`] is called.
+pub(crate) enum NewSheetName {
+    /// A name the CALLER chose. It goes through Excel's rule
+    /// (`validate_sheet_name`) before the document is touched, and is refused
+    /// when another sheet already has it, ignoring case.
+    Exact(String),
+    /// `base`, else `base2`, `base3`, ... -- the first one no sheet has,
+    /// ignoring case. For a sheet a command names itself (a drill-through's
+    /// detail rows), where there is nobody to refuse. `base` must itself be a
+    /// legal sheet name.
+    FirstFree(String),
+    /// `Sheet{n}`: `add_sheet`'s default.
+    Default,
+}
+
+/// One user sheet for [`append_user_sheet`] to add.
+pub(crate) struct NewUserSheet {
+    pub name: NewSheetName,
+    pub kind: ::persistence::SheetKind,
+    /// The cells it starts with -- a drill-through's detail rows, a report
+    /// filter page. `None` is an empty sheet.
+    pub cells: Option<engine::grid::Grid>,
+    /// Switch to it (`add_sheet`, a drill-through), or leave the user on the
+    /// sheet they are looking at (Show Report Filter Pages).
+    pub activate: bool,
+}
+
+/// What [`append_user_sheet`] added.
+pub(crate) struct AppendedUserSheet {
+    /// Where it landed: the end of the USER prefix, which is not the end of
+    /// the sheet list once a floating range's object sheet exists.
+    pub index: usize,
+    pub name: String,
+    pub result: SheetsResult,
+}
+
+/// THE ONE PATH BY WHICH A COMMAND ADDS A USER SHEET.
+///
+/// `add_sheet`, a pivot's drill-through and Show Report Filter Pages all come
+/// through here. The last two used to push only `sheet_names` and `grids`
+/// (fix round 4, B4), and a sheet made that way had no id, kind, visibility,
+/// freeze, zoom, page setup, gridline or row/column-size entry -- every
+/// per-sheet store fell one short of the sheet list, so the next sheet added
+/// paired each store with its neighbour's value. A drill-through also switched
+/// to its sheet without stashing the one it left, so a column width set there
+/// was lost; both appended BEHIND a floating range's object sheet, breaking
+/// the "user sheets first" partition the sheet list and every 3D reference
+/// rely on; and a protected workbook structure stopped neither.
+///
+/// In order: the workbook-structure gate, Excel's rule for a caller's name,
+/// the name's uniqueness under the held sheet locks -- every refusal BEFORE
+/// the `DocumentEffect`, so a refused add leaves the document clean -- then
+/// every per-sheet store through `append_sheet_stores`, the partition
+/// rotation, the cells, and (when `activate`) the stash of the sheet being
+/// left and the switch. Lock order is the crate's canonical one: `grid`,
+/// `grids`, `sheet_names`, then everything else.
+///
+/// Returns with every lock released, and ends NOTHING: the caller ends the
+/// undo history (`invalidate_undo_history_for_sheet_structure`, Excel parity,
+/// BUG-0005) and, when it activated the sheet, rebuilds the dependency maps
+/// for it -- `add_sheet_inner` above is the worked example.
+pub(crate) fn append_user_sheet(
+    state: &AppState,
+    file_state: &FileState,
+    sheet: NewUserSheet,
+    action: &str,
+) -> Result<AppendedUserSheet, String> {
+    crate::protection::check_workbook_structure(state, action)?;
+    let NewUserSheet { name, kind, cells, activate } = sheet;
     // Excel's rule, checked BEFORE the document is marked modified: a refused
     // name must not dirty the workbook. The uniqueness half needs the sheet
-    // list and is checked under the lock below.
+    // list and is checked under the lock below -- still before the effect.
     let name = match name {
-        Some(requested) => Some(crate::sheet_names::validate_sheet_name(&requested)?),
-        None => None,
+        NewSheetName::Exact(requested) => {
+            NewSheetName::Exact(crate::sheet_names::validate_sheet_name(&requested)?)
+        }
+        other => other,
     };
-    // Past the workbook-structure protection gate. Adding a sheet appends to every
-    // per-sheet persisted vector.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let result = {
+
+    let appended = {
     // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else --
     // including `sheet_names`. The recalculation pass takes `sheet_names` only
     // AFTER both grid locks and runs on a background thread, so holding it here
     // and then waiting for a grid lock closes a cycle that hangs the app.
-    let mut current_grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
-    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
+    // PENDING until the name is known to be free: the duplicate refusal below
+    // must leave the document clean.
+    let current_grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
+    let sheet_names = state.sheet_names.lock_pending().unwrap();
+
+    // The duplicate check is case-INSENSITIVE (`crate::sheet_names`) -- sheet
+    // lookup is case-insensitive everywhere else, so `sheet1` beside `Sheet1`
+    // was two sheets the rest of the crate believed were one.
+    let is_free = |candidate: &str| {
+        crate::sheet_names::ensure_sheet_name_is_free(candidate, &sheet_names, None).is_ok()
+    };
+    let new_name = match name {
+        NewSheetName::Exact(requested) => {
+            crate::sheet_names::ensure_sheet_name_is_free(&requested, &sheet_names, None)?;
+            requested
+        }
+        NewSheetName::FirstFree(base) => {
+            let mut counter = 1usize;
+            loop {
+                let candidate = if counter == 1 {
+                    base.clone()
+                } else {
+                    format!("{}{}", base, counter)
+                };
+                if is_free(&candidate) {
+                    break candidate;
+                }
+                counter += 1;
+            }
+        }
+        NewSheetName::Default => {
+            let mut counter = sheet_names.len() + 1;
+            loop {
+                let candidate = format!("Sheet{}", counter);
+                if is_free(&candidate) {
+                    break candidate;
+                }
+                counter += 1;
+            }
+        }
+    };
+
+    // Past every gate. Adding a sheet appends to every per-sheet persisted vector.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut current_grid = current_grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
+    let mut sheet_names = sheet_names.authorize(&effect);
     let mut active_sheet = state.active_sheet.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
@@ -1803,63 +1940,43 @@ pub(crate) fn add_sheet_inner(
     let mut all_column_widths = state.all_column_widths.write(&effect).unwrap();
     let mut all_row_heights = state.all_row_heights.write(&effect).unwrap();
 
-    // A name the CALLER gave goes through Excel's rule; the default this
-    // generates cannot violate it. The duplicate check is case-INSENSITIVE
-    // (`crate::sheet_names`) -- sheet lookup is case-insensitive everywhere
-    // else, so `sheet1` beside `Sheet1` was two sheets the rest of the crate
-    // believed were one.
-    let new_name = match name {
-        Some(requested) => requested,
-        None => {
-            let mut counter = sheet_names.len() + 1;
-            loop {
-                let candidate = format!("Sheet{}", counter);
-                if crate::sheet_names::ensure_sheet_name_is_free(&candidate, &sheet_names, None)
-                    .is_ok()
-                {
-                    break candidate;
-                }
-                counter += 1;
-            }
-        }
-    };
-
-    crate::sheet_names::ensure_sheet_name_is_free(&new_name, &sheet_names, None)?;
-
     let old_index = *active_sheet;
-
-    if old_index < grids.len() {
-        grids[old_index] = current_grid.clone();
-    }
-
-    // Save current sheet's dimensions before switching
-    while all_column_widths.len() <= old_index {
-        all_column_widths.push(HashMap::new());
-    }
-    while all_row_heights.len() <= old_index {
-        all_row_heights.push(HashMap::new());
-    }
-    all_column_widths[old_index] = std::mem::take(&mut *column_widths);
-    all_row_heights[old_index] = std::mem::take(&mut *row_heights);
 
     // Stash the ACTIVE sheet's view state before switching to the new one —
     // this is activation bookkeeping, deliberately outside `append_sheet_stores`
-    // (an appended object sheet is never activated, so it must not stash).
-    crate::commands::dimensions::stash_active_user_hidden(&state, old_index);
-    {
-        let mut all_merged = state.all_merged_regions.write(&effect).unwrap();
-        // Save current sheet's merged regions before switching
-        let mut current_merged = state.merged_regions.write(&effect).unwrap();
-        while all_merged.len() <= old_index {
-            all_merged.push(HashSet::new());
+    // (an appended object sheet is never activated, so it must not stash; nor
+    // does a sheet added without switching to it).
+    if activate {
+        if old_index < grids.len() {
+            grids[old_index] = current_grid.clone();
         }
-        all_merged[old_index] = std::mem::take(&mut *current_merged);
+
+        // Save current sheet's dimensions before switching
+        while all_column_widths.len() <= old_index {
+            all_column_widths.push(HashMap::new());
+        }
+        while all_row_heights.len() <= old_index {
+            all_row_heights.push(HashMap::new());
+        }
+        all_column_widths[old_index] = std::mem::take(&mut *column_widths);
+        all_row_heights[old_index] = std::mem::take(&mut *row_heights);
+
+        crate::commands::dimensions::stash_active_user_hidden(&state, old_index);
+        {
+            let mut all_merged = state.all_merged_regions.write(&effect).unwrap();
+            // Save current sheet's merged regions before switching
+            let mut current_merged = state.merged_regions.write(&effect).unwrap();
+            while all_merged.len() <= old_index {
+                all_merged.push(HashSet::new());
+            }
+            all_merged[old_index] = std::mem::take(&mut *current_merged);
+        }
     }
 
     let (appended_at, _sheet_id) = append_sheet_stores(
         &state,
         &effect,
-        new_name,
+        new_name.clone(),
         "visible",
         kind,
         &mut sheet_names,
@@ -1965,28 +2082,34 @@ pub(crate) fn add_sheet_inner(
         }
     };
 
-    *active_sheet = new_index;
-    *current_grid = engine::grid::Grid::new();
-
-    SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
-        active_index: *active_sheet,
+    // The cells, at the sheet's FINAL index (after the rotation). An active
+    // sheet is a USER sheet, so it sits before `k` and the rotation never
+    // moved it: `*active_sheet` still names the sheet the user is on.
+    let cells = cells.unwrap_or_else(engine::grid::Grid::new);
+    if activate {
+        grids[new_index] = cells.clone();
+        *active_sheet = new_index;
+        *current_grid = cells;
+    } else {
+        grids[new_index] = cells;
     }
-    }; // drop all locks before rebuilding dependency maps
 
-    // EXCEL PARITY: adding a sheet ends the undo history (BUG-0005). Runs with
-    // every lock above released — see the function for the order that requires.
-    invalidate_undo_history_for_sheet_structure(&state, "add a sheet");
+    AppendedUserSheet {
+        index: new_index,
+        name: new_name,
+        result: SheetsResult {
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
+            active_index: *active_sheet,
+        },
+    }
+    }; // every lock above released here
 
-    // The new (empty) sheet is now active — rebuild the single-sheet
-    // dependency maps for it (see set_active_sheet / BUG-0016).
-    crate::undo_commands::rebuild_all_dependencies(&state);
-
-    Ok(result)
+    Ok(appended)
 }
 
 #[tauri::command]
 pub fn delete_sheet(
+    app: tauri::AppHandle,
     state: State<AppState>,
     file_state: State<FileState>,
     pivot_state: State<'_, PivotState>,
@@ -1999,7 +2122,23 @@ pub fn delete_sheet(
     timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     index: usize,
 ) -> Result<SheetsResult, String> {
-    delete_sheet_impl(
+    // OWNER DECISION 3 for the slicers that go WITH the sheet: deleting ANY
+    // slicer removes its filter, and a sheet delete deletes every slicer on
+    // it. Before this only `delete_slicer` cleared -- a pivot slicer on a
+    // dashboard sheet driving a BI pivot on another sheet left its mask
+    // behind when the dashboard was deleted: no slicer, nothing on screen
+    // showing the filter, saved with the pivot, and (a sheet delete ends the
+    // undo history) no Ctrl+Z out of it. The targets are resolved BEFORE the
+    // delete (the indices still mean what they meant) and cleared AFTER it,
+    // with every lock released. The floating-range path calls
+    // `delete_sheet_impl` directly: an object sheet hosts no slicers.
+    let doomed = crate::slicer::commands::filter_targets_of_slicers_on_sheet(
+        &state,
+        &pivot_state,
+        &slicer_state,
+        index,
+    );
+    let result = delete_sheet_impl(
         &state,
         &file_state,
         &pivot_state,
@@ -2010,7 +2149,24 @@ pub fn delete_sheet(
         &timeline_state,
         index,
         false,
-    )
+    )?;
+    let requery = crate::slicer::commands::clear_filters_of_deleted_slicers(
+        &state,
+        &file_state,
+        &pivot_state,
+        crate::pivot::operations::PivotRecalcStates {
+            pane: &pane_control_state,
+            ribbon: &ribbon_filter_state,
+            user_files: &user_files_state,
+        },
+        &doomed,
+    );
+    // A removed slicer's PIN lived inside a BI pivot's query: that pivot's
+    // records were fetched with it, so they must be fetched again. This
+    // command runs on the main thread and cannot await the engine; the
+    // re-query runs in the background and repaints when it lands.
+    crate::pivot::commands::spawn_quiet_bi_requery(app, requery);
+    Ok(result)
 }
 
 /// Command body over plain references, with the ONE parameterized gate:
@@ -2657,20 +2813,26 @@ pub(crate) fn rename_sheet_inner(
     allow_object: bool,
 ) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(state, "rename a sheet")?;
-    // Same reason the grid pair below is `lock_pending`: the three validation
-    // gates can still refuse, and this guard has to be held across them.
-    let sheet_names = state.sheet_names.lock_pending().unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let freeze_configs = state.freeze_configs.read().unwrap();
-    let tab_colors = state.tab_colors.read().unwrap();
-    let sheet_visibility = state.sheet_visibility.read().unwrap();
+    // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else --
+    // `sheet_names` included. The calculation pass (`calculate_now`, an async
+    // command, so off the main thread) takes `grid`, `grids` and only then
+    // `sheet_names`; this took `sheet_names`, `freeze_configs`, `tab_colors`
+    // and `sheet_visibility` FIRST and waited for both grid locks while holding
+    // them, so a rename that overlapped an F9 hung the app (fix round 4, B2;
+    // invisible to the lock-order census until it learned `lock_pending`).
+    //
     // Locked but UNDECIDED: the three validation gates below can still refuse,
     // and this command previously took no `FileState` at all -- renaming a sheet
     // rewrote every cross-sheet formula in the workbook and left the document
     // looking clean. `lock_pending` lets the gates read under the lock they
     // already hold and postpones the dirty decision past the last `return Err`.
-    let grids = state.grids.lock_pending().unwrap();
     let current_grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
+    let sheet_names = state.sheet_names.lock_pending().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let freeze_configs = state.freeze_configs.read().unwrap();
+    let tab_colors = state.tab_colors.read().unwrap();
+    let sheet_visibility = state.sheet_visibility.read().unwrap();
 
     if index >= sheet_names.len() {
         return Err(format!("Sheet index {} out of range", index));
@@ -3261,11 +3423,9 @@ pub(crate) fn move_sheet_impl(
         active_index: new_active,
     };
 
-    // EVERY GUARD RELEASED, in one move, before the undo history is touched.
-    // The crate's canonical order takes `undo_stack` BEFORE `grid`/`grids`
-    // (`undo_commands::apply_changes`), and the background recalculation pass
-    // takes the grid pair — so clearing the history while these are alive would
-    // close the same deadlock cycle `state_digest_lock_order_tests` exists for.
+    // EVERY GUARD RELEASED, in one move, before the undo history is touched:
+    // `invalidate_undo_history_for_sheet_structure`'s contract is that it runs
+    // with nothing else held, so it adds no edge to the lock order.
     drop((
         current_grid,
         grids,
@@ -3677,11 +3837,10 @@ pub(crate) fn hide_sheet_inner(
 
         // Captured AFTER the last refusal and BEFORE the write. Recording the
         // entry itself happens outside this block: `record_custom_restore` takes
-        // `undo_stack`, and the crate's canonical order puts `undo_stack` ahead
-        // of the grid locks, so taking it under these guards would close a cycle
-        // against the background recalculation pass -- the same reason
+        // `undo_stack`, and it is taken with these sheet guards released, as
         // `invalidate_undo_history_for_sheet_structure` documents for its own
-        // caller contract.
+        // caller contract -- the one recorded inversion around the stack was a
+        // sheet-keyed store held while it was taken.
         // `None` when the sheet was already at that level: a no-op must not
         // burn an undo step. Excel does not push an entry for a change that
         // changed nothing, and a step that restores the state it is already in
@@ -3754,7 +3913,8 @@ pub(crate) fn unhide_sheet_inner(
     index: usize,
 ) -> Result<SheetsResult, String> {
     // Every guard is scoped to this block: the undo entry below takes
-    // `undo_stack`, which the crate's canonical order puts ahead of these.
+    // `undo_stack`, and it is taken with none of these held (the one recorded
+    // inversion around the stack was a sheet-keyed store held while it was taken).
     let (result, previous_visibility) = {
         let sheet_names = state.sheet_names.read().unwrap();
         let active_sheet = *state.active_sheet.read().unwrap();
@@ -3830,7 +3990,8 @@ pub(crate) fn set_tab_color_inner(
     color: String,
 ) -> Result<SheetsResult, String> {
     // Every guard is scoped to this block: the undo entry below takes
-    // `undo_stack`, which the crate's canonical order puts ahead of these.
+    // `undo_stack`, and it is taken with none of these held (the one recorded
+    // inversion around the stack was a sheet-keyed store held while it was taken).
     let (result, previous_tab_colors) = {
         let sheet_names = state.sheet_names.read().unwrap();
         let active_sheet = *state.active_sheet.read().unwrap();
@@ -4647,3 +4808,71 @@ mod sheet_tab_state_undo_tests;
 #[cfg(test)]
 #[path = "object_sheet_tests.rs"]
 mod object_sheet_tests;
+
+#[cfg(test)]
+mod rename_lock_order_tests {
+    //! FIX ROUND 4, B2. `rename_sheet_inner` took `sheet_names`,
+    //! `freeze_configs`, `tab_colors` and `sheet_visibility`, and only then
+    //! `grids` and `grid`. The calculation pass takes `grid`, `grids` and then
+    //! `sheet_names`, on a background thread, so the two could each hold what
+    //! the other waited for.
+    use super::*;
+    use crate::document_effect::test_seed_effect;
+    use std::time::Duration;
+
+    #[test]
+    fn renaming_a_sheet_never_holds_sheet_names_while_it_waits_for_the_grid_locks() {
+        let state = crate::create_app_state();
+        let file = FileState::default();
+        let pivots = PivotState::new();
+        let (parked, reached, result) = std::thread::scope(|scope| {
+            // The pass at its third step: both grid locks held...
+            let grid_guard = state.grid.write(&test_seed_effect()).unwrap();
+            let grids_guard = state.grids.write(&test_seed_effect()).unwrap();
+            let runner = scope.spawn(|| rename_sheet_inner(&state, &file, &pivots, 0, "Renamed".to_string(), false));
+            std::thread::sleep(Duration::from_millis(300));
+            // The rename needs the grid locks, so it cannot have finished.
+            let parked = !runner.is_finished();
+            // ...and `sheet_names` next. That must not wait on the rename.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let state_ref = &state;
+            let taker = scope.spawn(move || {
+                let _g = state_ref.sheet_names.read().unwrap();
+                let _ = tx.send(());
+            });
+            let reached = rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            drop(grids_guard); // let everyone finish, whatever happened
+            drop(grid_guard);
+            let result = runner.join().unwrap();
+            taker.join().unwrap();
+            (parked, reached, result)
+        });
+        result.expect("the rename");
+        assert!(parked, "fixture: the rename did not wait for the grid locks");
+        assert_eq!(state.sheet_names.read().unwrap()[0], "Renamed", "fixture: the rename landed");
+        assert!(
+            reached,
+            "rename_sheet held sheet_names while it waited for grid/grids (ABBA against the calculation pass)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod append_user_sheet_tests {
+    //! Found while routing fix round 4's B4 through `append_user_sheet`:
+    //! `add_sheet` minted its document effect BEFORE the name's uniqueness
+    //! check, so a refused duplicate name marked the document changed. The name
+    //! is now resolved under PENDING guards and the effect minted after it.
+    use super::*;
+
+    #[test]
+    fn a_refused_duplicate_sheet_name_leaves_the_document_clean() {
+        let state = crate::create_app_state();
+        let file = FileState::default();
+        let err = add_sheet_inner(&state, &file, Some("sheet1".to_string()), ::persistence::SheetKind::Worksheet)
+            .expect_err("a name another sheet has, ignoring case, must be refused");
+        assert!(err.contains("already exists"), "got: {err}");
+        assert!(!file.is_dirty(), "a refused duplicate sheet name marked the document changed");
+        assert_eq!(state.sheet_names.read().unwrap().len(), 1, "a sheet was added anyway");
+    }
+}

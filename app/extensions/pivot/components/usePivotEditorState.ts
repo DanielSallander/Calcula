@@ -20,6 +20,29 @@ import { emitAppEvent, onAppEvent } from '@api';
 import { PivotEvents } from '../../_shared/lib/pivotEvents';
 import { registerDragOutRemoval } from '../../_shared/components/useDragDrop';
 import type { ValueFieldSettings } from './ValueFieldSettingsModal';
+import {
+  diffHiddenItemEdits,
+  reconcileChipHiddenItems,
+  sameHiddenItems,
+  type HiddenItemEdits,
+  type PivotHiddenItemsSnapshot,
+} from './biFieldsRequest';
+
+/**
+ * The item-filter edits one request carries (see `biFieldsRequest.ts`), and
+ * how to retire them once the backend has taken the request.
+ */
+export interface HiddenItemEditBatch {
+  /** Field name -> hidden items to send (`[]` = the filter was removed). */
+  edits: HiddenItemEdits;
+  /**
+   * Call after the backend ACCEPTED the request that carried `edits`: forgets
+   * each edit unless a newer edit of the same field replaced it meanwhile. An
+   * edit whose request failed or was superseded stays pending, so the next
+   * request sends it again instead of losing it.
+   */
+  acknowledge: () => void;
+}
 
 interface UsePivotEditorStateOptions {
   pivotId: PivotId;
@@ -30,8 +53,18 @@ interface UsePivotEditorStateOptions {
   initialFilters?: ZoneField[];
   initialLayout?: LayoutConfig;
   initialCalculatedFields?: CalculatedFieldDef[];
-  onUpdate?: (request: UpdatePivotFieldsRequest) => void;
+  onUpdate?: (request: UpdatePivotFieldsRequest, hiddenItemEdits: HiddenItemEditBatch) => void;
+  /**
+   * Read the pivot's row/column/filter fields as its definition holds them
+   * NOW (null when it cannot be read). Called after each change of the
+   * pivot's view, so the chips' item filters follow what the header dropdown,
+   * the context menu, a slicer or a ribbon filter did to the pivot.
+   */
+  readPivotFields?: () => Promise<PivotHiddenItemsSnapshot | null>;
 }
+
+/** The zones that carry item filters. */
+type FilterZones = { rows: ZoneField[]; columns: ZoneField[]; filters: ZoneField[] };
 
 export function usePivotEditorState({
   pivotId,
@@ -43,6 +76,7 @@ export function usePivotEditorState({
   initialLayout = {},
   initialCalculatedFields,
   onUpdate,
+  readPivotFields,
 }: UsePivotEditorStateOptions) {
   // Merge initial calculated fields into the values array as ZoneField entries
   const mergedInitialValues = useMemo(() => {
@@ -89,6 +123,152 @@ export function usePivotEditorState({
   const isInitialMount = useRef(true);
   const pendingUpdate = useRef(false);
 
+  // Item-filter edits the user made in THIS editor that the backend has not
+  // acknowledged yet: field name -> the hidden items to send ([] = removed).
+  // Only these reach the wire as a field's hidden items -- a chip's own list
+  // is for display and may be stale (biFieldsRequest.ts explains why).
+  const hiddenItemEditsRef = useRef<Map<string, string[]>>(new Map());
+  // The zones as last rendered, for the edit bookkeeping below (read outside
+  // a state updater, so a StrictMode double-invoke cannot record twice).
+  const zonesRef = useRef<FilterZones>({
+    rows: initialRows,
+    columns: initialColumns,
+    filters: initialFilters,
+  });
+  zonesRef.current = { rows, columns, filters };
+
+  // Bumped whenever a request is built or acknowledged: a read of the pivot's
+  // definition that was in flight across either may describe the pivot from
+  // BEFORE the request, and is re-read rather than trusted (see the re-sync
+  // effect below).
+  const editGenerationRef = useRef(0);
+
+  /** Record that the user set `name`'s item filter to `hidden` in the editor. */
+  const recordHiddenItemEdit = useCallback((name: string, hidden: readonly string[]) => {
+    hiddenItemEditsRef.current.set(name, [...hidden]);
+  }, []);
+
+  /**
+   * A field LEAVES the zones: forget the pending edit of every field that is
+   * not placed in `next` (rows, columns and filters as they will be after this
+   * change). Re-adding a field later is not an item-filter edit and must not
+   * resend a filter from before it left -- and under Defer Layout Update no
+   * request runs between the removal and the re-add, so waiting for the next
+   * take to prune it was too late (review3 finding 4).
+   */
+  const forgetEditsOfUnplaced = useCallback((next: FilterZones) => {
+    const pending = hiddenItemEditsRef.current;
+    if (pending.size === 0) return;
+    const placed = new Set([...next.rows, ...next.columns, ...next.filters].map((z) => z.name));
+    for (const name of [...pending.keys()]) {
+      if (!placed.has(name)) pending.delete(name);
+    }
+  }, []);
+
+  /**
+   * The edits the next request carries. Edits of a field no longer placed in
+   * any zone are dropped first: re-adding a field later is not an item-filter
+   * edit, and must not resend a filter from before it left.
+   */
+  const takeHiddenItemEdits = useCallback((): HiddenItemEditBatch => {
+    forgetEditsOfUnplaced(zonesRef.current);
+    editGenerationRef.current++;
+    const snapshot = new Map<string, string[]>();
+    for (const [name, hidden] of hiddenItemEditsRef.current) snapshot.set(name, [...hidden]);
+    return {
+      edits: snapshot,
+      acknowledge: () => {
+        editGenerationRef.current++;
+        for (const [name, sent] of snapshot) {
+          const now = hiddenItemEditsRef.current.get(name);
+          if (now !== undefined && sameHiddenItems(now, sent)) {
+            hiddenItemEditsRef.current.delete(name);
+          }
+        }
+      },
+    };
+  }, [forgetEditsOfUnplaced]);
+
+  /**
+   * The chips' item filters, brought up to the pivot's definition (a chip the
+   * user has a pending edit on keeps it). Display only: no request is sent.
+   */
+  const syncHiddenItemsFromPivot = useCallback((snapshot: PivotHiddenItemsSnapshot) => {
+    const reconcile = (prev: ZoneField[]) =>
+      reconcileChipHiddenItems(prev, snapshot, hiddenItemEditsRef.current);
+    setRows(reconcile);
+    setColumns(reconcile);
+    setFilters(reconcile);
+  }, []);
+
+  // Re-read the pivot's definition after each change of its VIEW (a field
+  // edit, a filter, a slicer, a refresh: `PIVOT_VIEW_UPDATED`) and bring the
+  // chips' item filters up to it. One read at a time; a view change during a
+  // read asks for one more. A read that a request was built or acknowledged
+  // across is not trusted -- it may describe the pivot from before that
+  // request -- and is repeated. The view's version is the definition's, so a
+  // re-fetch of an unchanged pivot (every grid refresh re-fetches views) does
+  // not read at all.
+  const readPivotFieldsRef = useRef(readPivotFields);
+  readPivotFieldsRef.current = readPivotFields;
+  useEffect(() => {
+    let disposed = false;
+    let reading = false;
+    let readAgain = false;
+    let lastVersion: number | undefined;
+    const readAndSync = async (): Promise<void> => {
+      if (reading) {
+        readAgain = true;
+        return;
+      }
+      reading = true;
+      try {
+        // Bounded: a request cannot be built or acknowledged forever.
+        for (let attempt = 0; attempt < 5 && !disposed; attempt++) {
+          readAgain = false;
+          const read = readPivotFieldsRef.current;
+          if (!read) return;
+          const generation = editGenerationRef.current;
+          let snapshot: PivotHiddenItemsSnapshot | null = null;
+          try {
+            snapshot = await read();
+          } catch (err) {
+            console.warn('[PivotEditor] Could not re-read the pivot\'s fields:', err);
+            return;
+          }
+          if (disposed) return;
+          if (editGenerationRef.current !== generation) continue;
+          if (snapshot) syncHiddenItemsFromPivot(snapshot);
+          if (!readAgain) return;
+        }
+      } finally {
+        reading = false;
+      }
+    };
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const off = onAppEvent<{ pivotId: PivotId; version?: number }>(
+      PivotEvents.PIVOT_VIEW_UPDATED,
+      (detail) => {
+        if (detail?.pivotId !== pivotId) return;
+        if (detail.version !== undefined && detail.version === lastVersion) return;
+        lastVersion = detail.version;
+        // The editor's OWN request announces its view before the request
+        // resolves and is acknowledged; starting the read a task later lets
+        // the acknowledgement land first, so that read is not thrown away.
+        if (timer !== null) return;
+        timer = setTimeout(() => {
+          timer = null;
+          void readAndSync();
+        }, 0);
+      },
+    );
+    return () => {
+      disposed = true;
+      if (timer !== null) clearTimeout(timer);
+      off();
+    };
+  }, [pivotId, syncHiddenItemsFromPivot]);
+
   // When the pivotId changes (e.g. a new pivot is created after deleting the
   // old one), reset zone state to the new initial values. Without this,
   // useState keeps the previous pivot's field configuration.
@@ -97,6 +277,7 @@ export function usePivotEditorState({
     if (prevPivotId.current !== pivotId) {
       prevPivotId.current = pivotId;
       isInitialMount.current = true;
+      hiddenItemEditsRef.current.clear();
       setRows(initialRows);
       setColumns(initialColumns);
       setValues(mergedInitialValues);
@@ -120,7 +301,14 @@ export function usePivotEditorState({
   // fields (isCalculated=true). We separate them and build the unified ordering.
   const buildUpdateRequest = useCallback((): UpdatePivotFieldsRequest => {
     // Row/column fields carry hiddenItems too (a placed calculation group's
-    // item subset rides on its chip like a field filter).
+    // item subset rides on its chip like a field filter). For a BI pivot
+    // these are the chips' DISPLAY lists: PivotEditor's BI request sends a
+    // real field's list only when it was edited here (biFieldsRequest.ts).
+    // A RANGE pivot's `update_pivot_fields` reads an absent list as CLEAR,
+    // so it must send every chip's list -- which is why the chips re-read the
+    // pivot's definition after each view change (syncHiddenItemsFromPivot):
+    // a list the header dropdown or a slicer changed is echoed as it is now,
+    // not as it was when the pane mounted.
     const rowFields: PivotFieldConfig[] = rows.map((f) => ({
       sourceIndex: f.sourceIndex,
       name: f.name,
@@ -211,10 +399,10 @@ export function usePivotEditorState({
           columns: columns.length,
           values: values.length,
         });
-        onUpdate(buildUpdateRequest());
+        onUpdate(buildUpdateRequest(), takeHiddenItemEdits());
       }
     }
-  }, [rows, columns, values, filters, layout, onUpdate, buildUpdateRequest, deferUpdate]);
+  }, [rows, columns, values, filters, layout, onUpdate, buildUpdateRequest, deferUpdate, takeHiddenItemEdits]);
 
   // Mark that an update should be triggered after state changes
   const scheduleUpdate = useCallback(() => {
@@ -270,6 +458,12 @@ export function usePivotEditorState({
             useNameMatch ? f.name !== field.name : f.sourceIndex !== field.index
           );
 
+        const z = zonesRef.current;
+        forgetEditsOfUnplaced({
+          rows: removeFromZone(z.rows),
+          columns: removeFromZone(z.columns),
+          filters: removeFromZone(z.filters),
+        });
         setFilters(removeFromZone);
         setColumns(removeFromZone);
         setRows(removeFromZone);
@@ -279,7 +473,29 @@ export function usePivotEditorState({
       // Schedule update to run after state is updated
       scheduleUpdate();
     },
-    [scheduleUpdate]
+    [scheduleUpdate, forgetEditsOfUnplaced]
+  );
+
+  /**
+   * Rows, columns and filters as they will be after removing `fromIndex` of
+   * `fromZone` (when given) and adding `added` to `toZone` (when given). For
+   * the pending-edit bookkeeping, which must know what is still placed.
+   */
+  const zonesAfter = useCallback(
+    (
+      from?: { zone: DropZoneType; index: number },
+      to?: { zone: DropZoneType; field: ZoneField },
+    ): FilterZones => {
+      const next: FilterZones = { ...zonesRef.current };
+      if (from && from.zone !== 'values') {
+        next[from.zone] = next[from.zone].filter((_, i) => i !== from.index);
+      }
+      if (to && to.zone !== 'values') {
+        next[to.zone] = [...next[to.zone], to.field];
+      }
+      return next;
+    },
+    []
   );
 
   // Handle drop into a zone
@@ -290,11 +506,22 @@ export function usePivotEditorState({
         return;
       }
 
-      // Remove from source zone if moving between zones
-      if (dragField.fromZone && dragField.fromIndex !== undefined) {
-        const sourceSetter = getZoneSetter(dragField.fromZone);
-        sourceSetter((prev) => prev.filter((_, i) => i !== dragField.fromIndex));
-      }
+      // A chip MOVED from another zone keeps its item filter (and LOOKUP
+      // flag), as the context menu's Move does: a calculation group's item
+      // subset lives only on its chip, and a range pivot's request sends the
+      // chip's list -- a fresh chip reset the subset to every item and cleared
+      // the range field's filter (review3 finding 5).
+      const moving = dragField.fromZone !== undefined && dragField.fromIndex !== undefined;
+      const source = moving && dragField.fromZone !== 'values'
+        ? zonesRef.current[dragField.fromZone!][dragField.fromIndex!]
+        : undefined;
+      const carried: Partial<ZoneField> =
+        source && source.name === dragField.name && zone !== 'values'
+          ? {
+              ...(source.hiddenItems !== undefined ? { hiddenItems: [...source.hiddenItems] } : {}),
+              ...(source.isLookup !== undefined ? { isLookup: source.isLookup } : {}),
+            }
+          : {};
 
       // Create zone field
       const isBiField = dragField.sourceIndex === -1;
@@ -307,7 +534,21 @@ export function usePivotEditorState({
             ? getDefaultAggregation(dragField.isNumeric)
             : undefined,
         customName: isBiField ? dragField.name : undefined,
+        ...carried,
       };
+
+      forgetEditsOfUnplaced(
+        zonesAfter(
+          moving ? { zone: dragField.fromZone!, index: dragField.fromIndex! } : undefined,
+          { zone, field: zoneField },
+        ),
+      );
+
+      // Remove from source zone if moving between zones
+      if (moving) {
+        const sourceSetter = getZoneSetter(dragField.fromZone!);
+        sourceSetter((prev) => prev.filter((_, i) => i !== dragField.fromIndex));
+      }
 
       // Add to target zone
       const targetSetter = getZoneSetter(zone);
@@ -322,36 +563,36 @@ export function usePivotEditorState({
 
       scheduleUpdate();
     },
-    [getZoneSetter, scheduleUpdate]
+    [getZoneSetter, scheduleUpdate, forgetEditsOfUnplaced, zonesAfter]
   );
 
   // Handle remove from zone
   const handleRemove = useCallback(
     (zone: DropZoneType, index: number) => {
+      forgetEditsOfUnplaced(zonesAfter({ zone, index }));
       const setter = getZoneSetter(zone);
       setter((prev) => prev.filter((_, i) => i !== index));
       scheduleUpdate();
     },
-    [getZoneSetter, scheduleUpdate]
+    [getZoneSetter, scheduleUpdate, forgetEditsOfUnplaced, zonesAfter]
   );
 
   // Set the hidden-items subset on a zone field wherever it is placed
   // (rows/columns/filters). Used by the calculation-group item checkboxes;
-  // works for any name-matched field.
+  // works for any name-matched field. A cleared subset is stored as `[]`,
+  // never `undefined`: on the wire "none" means KEEP, `[]` means clear.
   const setZoneFieldHiddenItems = useCallback(
     (name: string, hiddenItems: string[] | undefined) => {
+      const next = hiddenItems ?? [];
       const apply = (prev: ZoneField[]) =>
-        prev.map((f) =>
-          f.name === name
-            ? { ...f, hiddenItems: hiddenItems && hiddenItems.length > 0 ? hiddenItems : undefined }
-            : f
-        );
+        prev.map((f) => (f.name === name ? { ...f, hiddenItems: [...next] } : f));
       setRows(apply);
       setColumns(apply);
       setFilters(apply);
+      recordHiddenItemEdit(name, next);
       scheduleUpdate();
     },
-    [scheduleUpdate]
+    [scheduleUpdate, recordHiddenItemEdit]
   );
 
   // Keep a stable ref to handleRemove for the drag-out removal callback
@@ -430,19 +671,18 @@ export function usePivotEditorState({
     [scheduleUpdate]
   );
 
-  // Handle filter change (update hidden items for a filter field)
+  // Handle filter change (update hidden items for a filter field). A cleared
+  // filter is stored -- and sent -- as `[]`: `undefined` would read as "keep".
   const handleFilterHiddenItemsChange = useCallback(
     (filterIndex: number, hiddenItems: string[]) => {
+      const field = zonesRef.current.filters[filterIndex];
       setFilters((prev) =>
-        prev.map((f, i) =>
-          i === filterIndex
-            ? { ...f, hiddenItems: hiddenItems.length > 0 ? hiddenItems : undefined }
-            : f
-        )
+        prev.map((f, i) => (i === filterIndex ? { ...f, hiddenItems: [...hiddenItems] } : f))
       );
+      if (field) recordHiddenItemEdit(field.name, hiddenItems);
       scheduleUpdate();
     },
-    [scheduleUpdate]
+    [scheduleUpdate, recordHiddenItemEdit]
   );
 
   // Handle layout change
@@ -491,9 +731,12 @@ export function usePivotEditorState({
     );
   }, [pivotId, scheduleUpdate]);
 
-  // Listen for filter applied events from the filter dropdown menu.
-  // The filter dropdown bypasses the editor state (calls pivot.updateFields directly),
-  // so we need to sync the hiddenItems back into our zone state.
+  // Listen for filter applied events from the report-filter dropdown menu.
+  // The dropdown filters the pivot itself (apply/clear_pivot_filter), so we
+  // sync its hiddenItems -- and the field's full item list, which the DSL
+  // needs to write and read `= (...)` -- back into our zone state. (The
+  // definition re-read after the view change would bring the list too; this
+  // is the immediate path, and the only one that knows the item list.)
   useEffect(() => {
     return onAppEvent<{
       pivotId: PivotId;
@@ -509,15 +752,18 @@ export function usePivotEditorState({
         filterUniqueValuesRef.current.set(detail.fieldName, detail.allValues);
       }
 
+      // Match by sourceIndex for regular pivots, by name for BI pivots (sourceIndex === -1)
+      const isMatch = (f: ZoneField) =>
+        f.sourceIndex === -1 ? f.name === detail.fieldName : f.sourceIndex === detail.fieldIndex;
+      // The dropdown just put this filter on the pivot itself: an older,
+      // unsent editor edit of the same field must not overwrite it later.
+      for (const f of zonesRef.current.filters) {
+        if (isMatch(f)) hiddenItemEditsRef.current.delete(f.name);
+      }
+      // A cleared dropdown arrives as no list: store `[]` (cleared), not
+      // `undefined`.
       setFilters((prev) =>
-        prev.map((f) => {
-          // Match by sourceIndex for regular pivots, by name for BI pivots (sourceIndex === -1)
-          const isMatch = f.sourceIndex === -1
-            ? f.name === detail.fieldName
-            : f.sourceIndex === detail.fieldIndex;
-          if (!isMatch) return f;
-          return { ...f, hiddenItems: detail.hiddenItems };
-        })
+        prev.map((f) => (isMatch(f) ? { ...f, hiddenItems: detail.hiddenItems ?? [] } : f))
       );
       // Don't scheduleUpdate — the filter dropdown already sent the update to the backend
     });
@@ -531,6 +777,15 @@ export function usePivotEditorState({
         const field = values[fromIndex];
         if (field?.isCalculated && toZone !== 'values') return;
       }
+
+      // Moving into Values takes the field out of the zones that filter.
+      const movedNow = fromZone !== 'values' ? zonesRef.current[fromZone][fromIndex] : undefined;
+      forgetEditsOfUnplaced(
+        zonesAfter(
+          { zone: fromZone, index: fromIndex },
+          movedNow ? { zone: toZone, field: movedNow } : undefined,
+        ),
+      );
 
       const fromSetter = getZoneSetter(fromZone);
       const toSetter = getZoneSetter(toZone);
@@ -564,7 +819,7 @@ export function usePivotEditorState({
         scheduleUpdate();
       });
     },
-    [getZoneSetter, scheduleUpdate]
+    [getZoneSetter, scheduleUpdate, forgetEditsOfUnplaced, zonesAfter]
   );
 
   // Drag handlers
@@ -585,9 +840,9 @@ export function usePivotEditorState({
   const flushUpdate = useCallback(() => {
     if (onUpdate) {
       setHasPendingChanges(false);
-      onUpdate(buildUpdateRequest());
+      onUpdate(buildUpdateRequest(), takeHiddenItemEdits());
     }
-  }, [onUpdate, buildUpdateRequest]);
+  }, [onUpdate, buildUpdateRequest, takeHiddenItemEdits]);
 
   // When deferUpdate is turned OFF and there are pending changes, flush immediately
   const prevDeferRef = useRef(deferUpdate);
@@ -596,15 +851,28 @@ export function usePivotEditorState({
       // Defer was just unchecked with pending changes — flush now
       if (onUpdate) {
         setHasPendingChanges(false);
-        onUpdate(buildUpdateRequest());
+        onUpdate(buildUpdateRequest(), takeHiddenItemEdits());
       }
     }
     prevDeferRef.current = deferUpdate;
-  }, [deferUpdate, hasPendingChanges, onUpdate, buildUpdateRequest]);
+  }, [deferUpdate, hasPendingChanges, onUpdate, buildUpdateRequest, takeHiddenItemEdits]);
 
   /**
    * Bulk-set all zones at once (for DSL editor sync).
    * Triggers a single update rather than five separate state changes.
+   *
+   * The DSL is the editor's one item-filter control for real row, column and
+   * filter fields, so this is where their edits are recorded: each incoming
+   * field is compared with the previous zone entry of the same name
+   * (`diffHiddenItemEdits`). A deleted `NOT IN` clause is stored and sent as
+   * `[]`; a changed one as the new list; an untouched field sends nothing and
+   * keeps whatever the pivot hides now (a slicer's, the header dropdown's).
+   *
+   * `unresolvedFilters` names the filter fields whose inclusion list the DSL
+   * could not turn into hidden items (dslCompile.ts): they are NO edit and
+   * keep their current list -- the compiler hands them back with no list,
+   * which would otherwise read as a deleted clause and CLEAR the filter.
+   * A field the new zones no longer place loses its pending edit.
    */
   const setAllZones = useCallback((
     newRows: ZoneField[],
@@ -614,6 +882,7 @@ export function usePivotEditorState({
     newLayout: LayoutConfig,
     newCalculatedFields?: CalculatedFieldDef[],
     newValueColumnOrder?: ValueColumnRefDef[],
+    unresolvedFilters?: ReadonlySet<string>,
   ) => {
     // Merge calculated fields into the values array as ZoneField entries
     const mergedValues = [...newValues];
@@ -632,18 +901,36 @@ export function usePivotEditorState({
     }
     calculatedFieldsRef.current = newCalculatedFields;
     valueColumnOrderRef.current = newValueColumnOrder;
-    setRows(newRows);
-    setColumns(newColumns);
+    const before = zonesRef.current;
+    const previous = [...before.rows, ...before.columns, ...before.filters];
+    const settledRows = diffHiddenItemEdits(previous, newRows);
+    const settledColumns = diffHiddenItemEdits(previous, newColumns);
+    const settledFilters = diffHiddenItemEdits(previous, newFilters, unresolvedFilters);
+    for (const settled of [settledRows, settledColumns, settledFilters]) {
+      for (const [name, hidden] of settled.edits) recordHiddenItemEdit(name, hidden);
+    }
+    // A second DSL apply before the next render compares with THIS one.
+    zonesRef.current = {
+      rows: settledRows.fields,
+      columns: settledColumns.fields,
+      filters: settledFilters.fields,
+    };
+    forgetEditsOfUnplaced(zonesRef.current);
+    setRows(settledRows.fields);
+    setColumns(settledColumns.fields);
     setValues(mergedValues);
-    setFilters(newFilters);
+    setFilters(settledFilters.fields);
     setLayout(newLayout);
     scheduleUpdate();
-  }, [scheduleUpdate]);
+  }, [scheduleUpdate, recordHiddenItemEdit, forgetEditsOfUnplaced]);
 
   /** Reset all zones to initial values (used on cancel to revert optimistic state). */
   const resetZones = useCallback(() => {
     // Prevent the useEffect from triggering an update for this reset
     isInitialMount.current = true;
+    // The edits belonged to the cancelled change; the zones go back to the
+    // pivot's own state, so there is nothing left to send.
+    hiddenItemEditsRef.current.clear();
     setRows(initialRows);
     setColumns(initialColumns);
     setValues(mergedInitialValues);
@@ -680,6 +967,7 @@ export function usePivotEditorState({
     buildUpdateRequest,
     setZoneFieldHiddenItems,
     setAllZones,
+    takeHiddenItemEdits,
     filterUniqueValues: filterUniqueValuesRef,
     calculatedFields: calculatedFieldsRef,
     flushUpdate,

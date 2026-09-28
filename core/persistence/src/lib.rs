@@ -1676,6 +1676,13 @@ pub struct SavedSlicer {
     /// camelCase `filterLevel` in the `.cala` `SlicerDef`.
     #[serde(default = "default_filter_level")]
     pub filter_level: u8,
+    /// MODEL slicers (`BiConnection` source) on a package connection: the
+    /// stable package data-source id, so the slicer re-binds after reload /
+    /// re-pull (package connections mint a fresh uuid each time). None for
+    /// every other slicer. No format-version link: an older reader that drops
+    /// it loses the re-bind visibly (an unbound slicer), it does not lie.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_source_id: Option<String>,
 }
 
 fn default_filter_level() -> u8 {

@@ -7,11 +7,21 @@
 //   - Formula input syncs with inline cell editor
 //   - Expand/collapse (chevron, Ctrl+Shift+U) and a draggable bottom edge
 
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { NameBox } from "./NameBox";
 import { FormulaInput } from "./FormulaInput";
 import { InsertFunctionDialog } from "./InsertFunctionDialog";
 import { useEditing } from "../../api/editing";
+// The SUBPATH: the bar's tests double `api/editing` with a fixed list, and the
+// external-edit store (a floating grid's cell edit) must stay real in them.
+import {
+  subscribeExternalEdit,
+  getExternalEditVersion,
+  isExternalEditLive,
+  getExternalEditSession,
+  resolveFormulaBarSource,
+  endExternalFormulaSession,
+} from "../../api/externalEdit";
 import { useGridContext } from "../../api";
 import { CommandRegistry } from "../../api/commands";
 import { FORMULA_BAR_TOGGLE_EXPANDED_COMMAND } from "../../api/keybindings";
@@ -91,7 +101,16 @@ export function FormulaBar(): React.ReactElement {
     setEditorHeight(clampFormulaBarHeight(state.formulaBarHeight));
   }
 
-  const isEditing = editing !== null;
+  // A live EXTERNAL session (a floating grid's cell edit, in whichever view)
+  // is an edit in progress too: X and the check mark end IT. Subscribed by the
+  // store's VERSION and read during render, not with the boolean as the
+  // snapshot: this component sets state during render (the `seed` sync above),
+  // and a render-phase update drops React's record of the snapshot it rendered
+  // -- a boolean that flips back to that stale record would then never
+  // re-render (see NameBox.tsx, where it was measured).
+  useSyncExternalStore(subscribeExternalEdit, getExternalEditVersion);
+  const extLive = isExternalEditLive();
+  const isEditing = editing !== null || extLive;
 
   const toggleExpanded = useCallback(() => {
     setExpanded((current) => !current);
@@ -167,23 +186,53 @@ export function FormulaBar(): React.ReactElement {
   }, []);
 
   const handleCancel = useCallback(async () => {
+    // A Core edit wins; otherwise a live external session is what X cancels
+    // (returning to its sheet first when it is parked on another one).
+    if (!editing && getExternalEditSession()) {
+      await endExternalFormulaSession("cancel");
+      return;
+    }
     await cancelEdit();
-  }, [cancelEdit]);
+  }, [editing, cancelEdit]);
 
   const handleEnterMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
   }, []);
 
   const handleEnter = useCallback(async () => {
+    if (!editing && getExternalEditSession()) {
+      await endExternalFormulaSession("commit", null);
+      return;
+    }
     await commitEdit();
-  }, [commitEdit]);
+  }, [editing, commitEdit]);
 
   const handleInsertFunction = useCallback(() => {
     if (!editing) {
-      startEditing("=");
+      // fx on a selected floating-grid cell starts THAT cell's edit, never a
+      // Core edit of the grid cell under it.
+      //
+      // A LIVE session is handed to the BAR before the dialog opens. The
+      // dialog focuses its search box on mount, which blurs the owner's
+      // in-cell view; while that view still owned the edit, its deferred blur
+      // committed the half-typed formula 150 ms later ("=SUM(A1" expects no
+      // reference, so nothing else held it) and the function then chosen had
+      // no edit to land in. Owned by the bar, the in-cell blur ends nothing:
+      // the bar's own doors (Enter, Tab, X, the check mark) end it.
+      const src = resolveFormulaBarSource();
+      if (src.kind === "session") src.session.adoptBarView();
+      else if (src.kind === "cell") src.cell.beginEdit("=");
+      else startEditing("=");
     }
     setShowFunctionDialog(true);
   }, [editing, startEditing]);
+
+  // fx must not take the focus off an entry in progress either (the X and
+  // check-mark rule): the press itself blurred the floating grid's in-cell
+  // editor before the click could hand its edit to the bar.
+  const handleInsertFunctionMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+  }, []);
 
   // The chevron must not take focus off an entry in progress — clicking it
   // mid-formula would otherwise blur the editor and commit the cell.
@@ -192,7 +241,12 @@ export function FormulaBar(): React.ReactElement {
   }, []);
 
   const handleFunctionSelect = useCallback((functionName: string, template: string) => {
-    if (editing) {
+    const session = editing ? null : getExternalEditSession();
+    if (session) {
+      const current = session.getText();
+      const next = current === "=" || current === "" ? template : current + functionName + "(";
+      session.setText(next, next.length);
+    } else if (editing) {
       const currentValue = editing.value;
       if (currentValue === "=" || currentValue === "") {
         updateValue(template);
@@ -229,9 +283,19 @@ export function FormulaBar(): React.ReactElement {
 
   const handleFunctionBuilt = useCallback((formula: string) => {
     setShowFunctionDialog(false);
+    // An external session's text is SYNCHRONOUS (it is not React state), so
+    // the parked-commit dance below -- which exists because Core's commitEdit
+    // commits from a render-old closure -- is not needed: set, then commit
+    // through the owner's own path.
+    const session = editing ? null : getExternalEditSession();
+    if (session) {
+      session.setText(formula, formula.length);
+      void endExternalFormulaSession("commit", null);
+      return;
+    }
     pendingCommitRef.current = formula;
     updateValue(formula);
-  }, [updateValue]);
+  }, [editing, updateValue]);
 
   useEffect(() => {
     if (pendingCommitRef.current === null) return;
@@ -254,9 +318,16 @@ export function FormulaBar(): React.ReactElement {
   // Where a built formula will land. `editing` is authoritative once the fx
   // button's startEditing has resolved; the selection anchor covers the window
   // before that, so the builder is never handed (0,0) by accident.
+  //
+  // An external session's anchor is in its OWNER's coordinates (FR-local): a
+  // builder that reads the host sheet at those coordinates reads the wrong
+  // cells (a stated v1 gap), but it is still the cell the formula lands in.
+  const externalAnchor = editing ? null : (extLive ? getExternalEditSession()?.anchor ?? null : null);
   const builderAnchor = editing
     ? { row: editing.row, col: editing.col }
-    : { row: state.selection?.startRow ?? 0, col: state.selection?.startCol ?? 0 };
+    : externalAnchor
+      ? { row: externalAnchor.row, col: externalAnchor.col }
+      : { row: state.selection?.startRow ?? 0, col: state.selection?.startCol ?? 0 };
 
   const barHeight = expanded
     ? editorHeight + FORMULA_BAR_EXPANDED_CHROME_HEIGHT
@@ -297,6 +368,7 @@ export function FormulaBar(): React.ReactElement {
 
           <S.IconButton
             $variant="function"
+            onMouseDown={handleInsertFunctionMouseDown}
             onClick={handleInsertFunction}
             title="Insert Function"
           >

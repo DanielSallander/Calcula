@@ -11,7 +11,7 @@ import { getViewportCells, getSpillRanges } from "../../lib/tauri-api";
 import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation, FreezeConfig, SplitConfig, SpillRangeInfo, ViewMode, SheetSurface } from "../../types";
 import { cellKey, createEmptyDimensionOverrides, DEFAULT_FREEZE_CONFIG, DEFAULT_SPLIT_CONFIG } from "../../types";
 import type { GridTheme } from "../../lib/gridRenderer";
-import { getGridRegions, getOverlayRenderers, getPostHeaderOverlayRenderers, onRegionChange } from "../../../api/gridOverlays";
+import { getLiveGridRegions, getOverlayRenderers, getPostHeaderOverlayRenderers, onRegionChange } from "../../../api/gridOverlays";
 import { getColumnX, getRowY } from "../../lib/gridRenderer/layout/dimensions";
 import { setGridCapturer, setGridCanvas, type CaptureRange } from "../../lib/gridCapture";
 import {
@@ -575,7 +575,9 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         animationOffset,
         currentInsertionAnimation,
         freezeConfig,
-        getGridRegions(),
+        // LIVE regions: none while cross-sheet point mode shows a sheet the
+        // published objects do not belong to (@api/gridOverlays).
+        getLiveGridRegions(),
         getOverlayRenderers(),
         currentSheetName,
         getPostHeaderOverlayRenderers(),

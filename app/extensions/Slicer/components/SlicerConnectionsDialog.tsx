@@ -1,13 +1,26 @@
 //! FILENAME: app/extensions/Slicer/components/SlicerConnectionsDialog.tsx
 // PURPOSE: "Report Connections" dialog for managing which PivotTables/Tables
-//          a slicer filters. All connections are equal and freely toggleable.
+//          a slicer filters. For a table or pivot slicer all connections are
+//          equal and freely toggleable.
+// CONTEXT: A MODEL slicer has no per-pivot connections: it filters every BI
+//          pivot of its model on its own sheet or canvas (the page), including
+//          pivots added later, and the backend refuses any other connection
+//          list for it. So for a model slicer this dialog SHOWS that page,
+//          read-only, and says what is not reached -- rather than listing every
+//          pivot with ticks that would give the slicer mixed semantics.
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api";
 import { getAllPivotTables, getPivotHierarchies, getAllTables } from "@api/backend";
 import { getSlicerById, updateSlicerAsync } from "../lib/slicerStore";
 import { broadcastSelectedSlicers } from "../handlers/selectionHandler";
-import { syncReportConnections } from "../lib/slicerFilterBridge";
+import {
+  getModelSlicerPageTargets,
+  syncReportConnections,
+  type ModelConnectionPivot,
+} from "../lib/slicerFilterBridge";
+import { MODEL_SLICER_REACH } from "../lib/insertSlicerPlan";
+import { runStepThenConfirmOverwrite } from "@api/pivotOverwrite";
 import type { Slicer, SlicerSourceType, SlicerConnection } from "../lib/slicerTypes";
 
 // ============================================================================
@@ -38,6 +51,8 @@ export function SlicerConnectionsDialog({
   const [connectedKeys, setConnectedKeys] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** A model slicer's page (read-only); null for table / pivot slicers. */
+  const [pageTargets, setPageTargets] = useState<ModelConnectionPivot[] | null>(null);
 
   const connKey = (type: SlicerSourceType, id: string) => `${type}:${id}`;
 
@@ -55,8 +70,27 @@ export function SlicerConnectionsDialog({
     setConnectedKeys(
       new Set((s.connectedSources ?? []).map((c) => connKey(c.sourceType, c.sourceId))),
     );
-    loadTargets(s);
+    if (s.sourceType === "biConnection") {
+      setTargets([]);
+      loadPageTargets(s);
+    } else {
+      setPageTargets(null);
+      loadTargets(s);
+    }
   }, [isOpen, slicerId]);
+
+  const loadPageTargets = async (s: Slicer) => {
+    setIsLoading(true);
+    try {
+      setPageTargets(await getModelSlicerPageTargets(s.cacheSourceId, s.sheetIndex));
+    } catch (err) {
+      console.error("[SlicerConnections] Error loading the model slicer's page:", err);
+      setPageTargets([]);
+      setError("Failed to load the PivotTables this slicer filters.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const loadTargets = async (s: Slicer) => {
     setIsLoading(true);
@@ -157,17 +191,32 @@ export function SlicerConnectionsDialog({
 
   const handleOk = async () => {
     if (!slicer) return;
+    // A model slicer's connections are fixed (its page): nothing to write.
+    if (slicer.sourceType === "biConnection") {
+      handleClose();
+      return;
+    }
 
     try {
       const oldConns = slicer.connectedSources ?? [];
       const newConns = buildConnections();
 
-      await updateSlicerAsync(slicer.id, {
-        connectedSources: newConns,
-      });
+      // ONE undo step for the Save: the new connection list AND the filters
+      // it clears and applies (each records undo joining it). A pivot that
+      // grows over the user's cells is asked about ONCE after it commits, and
+      // a decline takes back the whole Save -- never a connection list left
+      // without the filters it implied. The pivots whose masks recorded no
+      // step (they overwrote nothing) are put back by the slicer reconcile the
+      // take-back's announcement runs: it follows the restored connections.
+      // Inside someone else's open transaction (a script batch) it never asks.
+      await runStepThenConfirmOverwrite("Slicer Connections", async (overwrites) => {
+        await updateSlicerAsync(slicer.id, {
+          connectedSources: newConns,
+        });
 
-      // Clear filters on removed connections, apply on newly added ones
-      await syncReportConnections(slicer, oldConns, newConns);
+        // Clear filters on removed connections, apply on newly added ones
+        await syncReportConnections(slicer, oldConns, newConns, overwrites);
+      });
 
       broadcastSelectedSlicers();
       handleClose();
@@ -215,6 +264,32 @@ export function SlicerConnectionsDialog({
 
           <div style={s.separator} />
 
+          {pageTargets !== null ? (
+            <div data-testid="model-slicer-page">
+              <div style={s.sectionLabel}>
+                PivotTables this model slicer filters (this sheet):
+              </div>
+              <div style={s.reachNote}>{MODEL_SLICER_REACH}</div>
+              {isLoading ? (
+                <div style={s.loadingText}>Loading PivotTables...</div>
+              ) : pageTargets.length === 0 ? (
+                <div style={s.emptyText}>
+                  No PivotTable of this model on this sheet yet. PivotTables added here later
+                  are filtered automatically.
+                </div>
+              ) : (
+                <div style={s.targetList}>
+                  {pageTargets.map((p) => (
+                    <label key={p.id} style={{ ...s.targetRow, cursor: "default" }} title={p.name}>
+                      <input type="checkbox" checked readOnly disabled style={s.checkbox} />
+                      <span style={s.targetName}>{p.name}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+          <>
           <div style={s.sectionLabel}>
             Select PivotTables or Tables to connect to this slicer:
           </div>
@@ -271,6 +346,8 @@ export function SlicerConnectionsDialog({
                 </label>
               ))}
             </div>
+          )}
+          </>
           )}
 
           {error && <div style={s.error}>{error}</div>}
@@ -427,6 +504,12 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: "13px",
     color: "#888888",
     padding: "12px 0",
+  },
+  reachNote: {
+    fontSize: "12px",
+    color: "#aaaaaa",
+    marginBottom: "10px",
+    lineHeight: 1.4,
   },
   error: {
     marginTop: "12px",

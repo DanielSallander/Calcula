@@ -23,6 +23,7 @@ import {
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import { canvasObjectRef } from "@api/canvasSheet";
 import { FLOATING_RANGE_REGION_TYPE, getFloatingRangeById } from "./floatingRangeStore";
+import { isFrContextMenuOpen } from "./frContextMenu";
 import {
   clearLocalSelection,
   deselectAllFloatingRanges,
@@ -69,6 +70,12 @@ export function createFloatingRangeSelectionProvider(): ObjectSelectionProvider 
     },
 
     ownsKey(key: ObjectSelectionKey): boolean {
+      // The range's right-click menu, while open, owns Escape: it closes
+      // itself (a document-capture listener). A canvas's Escape binding runs
+      // EARLIER, in the dispatcher's window-capture listener, and stops the
+      // key -- so unless the range claims it here, Escape cleared the
+      // selection behind the menu and left the menu open (fix round 4, F5).
+      if (key === "Escape" && isFrContextMenuOpen()) return true;
       // Tab moves the inner cell, the arrows move (or Shift-extend) it, and
       // Escape drops the inner selection — all only while an inner selection
       // exists (handleFrKeyDown). Without one, the range has no use for them.

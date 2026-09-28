@@ -5,7 +5,7 @@
 
 import {
   getSlicerById,
-  updateSlicerSelectionAsync,
+  clickSlicerClearFilter,
   updateSlicerAsync,
   deleteSlicerAsync,
   getCachedItems,
@@ -115,14 +115,16 @@ function showContextMenu(clientX: number, clientY: number, slicerId: string): vo
       label: "Select All",
       disabled: !isFiltered,
       onClick: () => {
-        updateSlicerSelectionAsync(slicerId, null).catch(console.error);
+        // Queued behind any click still applying (one gesture, one Ctrl+Z).
+        clickSlicerClearFilter(slicerId).catch(console.error);
       },
     },
     {
       label: `Clear Filter from "${slicer.name}"`,
       disabled: !isFiltered,
       onClick: () => {
-        updateSlicerSelectionAsync(slicerId, null).catch(console.error);
+        // Queued behind any click still applying (one gesture, one Ctrl+Z).
+        clickSlicerClearFilter(slicerId).catch(console.error);
       },
     },
     { label: "", separator: true },

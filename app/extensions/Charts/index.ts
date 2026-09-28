@@ -132,6 +132,7 @@ import {
   getActiveSheetIndex,
   loadChartsFromBackend,
   reloadChartsAfterSheetListChange,
+  beginChartStoreReload,
   getChartById,
   updateChartSpec,
   replaceChartSpec as storeReplaceChartSpec,
@@ -1917,12 +1918,28 @@ function activate(context: ExtensionContext): void {
     const req: ChartReloadRequest = { document: false, sheets: false, objects: false };
     req[kind] = true;
     queuedReload = req;
+    // From the REQUEST, not from when the chain gets to it: the window in which
+    // the store is behind the backend opens with the announcement, and a render
+    // that fails inside it is not reported (chartStore.ts, "Reload window").
+    const reloadFinished = beginChartStoreReload();
     queueMicrotask(() => {
       const next = queuedReload ?? req;
       queuedReload = null;
-      reloadChain = reloadChain.then(() => reloadCharts(next)).catch(() => {});
+      reloadChain = reloadChain
+        .then(() => reloadCharts(next))
+        .catch(() => {})
+        .finally(reloadFinished);
     });
   };
+
+  // A deleted sheet takes its charts with it. The deleteSheet wrapper announces
+  // SHEET_DELETED BEFORE it fans the `sheets` and `objects` domains out, so
+  // asking for the reload here opens the reload window ahead of every repaint
+  // that fan-out causes, whatever order its domains are dispatched in. It
+  // coalesces with the SHEET_CHANGED request that follows (one reload).
+  cleanupFunctions.push(
+    context.events.on(AppEvents.SHEET_DELETED, () => requestChartsReload("sheets")),
+  );
 
   cleanupFunctions.push(
     context.events.on<{ sheetIndex?: unknown } | undefined>(AppEvents.SHEET_CHANGED, async (detail) => {

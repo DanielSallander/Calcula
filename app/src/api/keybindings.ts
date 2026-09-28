@@ -33,6 +33,14 @@
 import { CommandRegistry } from "./commands";
 import { showToast } from "./notifications";
 import { findPointerClaim } from "./pointerClaims";
+// Straight from the Core module (the same binding @api/externalEdit re-exports):
+// formulaEditTarget has no imports, whereas the externalEdit door also carries
+// the point-mode switch and its backend calls, which this dispatcher never needs.
+import { isExternalEditLive } from "../core/lib/formulaEditTarget";
+// Core's OWN edit flag, for the same reason: cellEditFlag has no imports, where
+// core/hooks/useEditing (which reads and writes it) is a hook module with the
+// grid state and the backend calls behind it.
+import { isCoreCellEditOpen } from "../core/lib/cellEditFlag";
 
 // ============================================================================
 // Types
@@ -60,6 +68,32 @@ export interface KeyBinding {
   extensionId?: string;
   /** Sandboxed script that registered it (source === "script" only). */
   scriptId?: string;
+  /**
+   * When THIS binding wins a keystroke, no other keydown listener hears it:
+   * the dispatcher calls `stopImmediatePropagation`, not only
+   * `stopPropagation`. For a REFUSAL ("not while my subject owns the
+   * selection"). Several extensions still act on their own shortcut from a
+   * window-CAPTURE listener of their own -- Ctrl+K (Hyperlinks), Ctrl+E (Flash
+   * Fill), Alt+Shift+Arrow (Grouping), Ctrl+Shift+L (AutoFilter), Ctrl+Alt+M
+   * and Shift+F2 (Review), Alt+Down (Data Validation) -- on the same target and
+   * in the same phase as this dispatcher, where `stopPropagation` does not
+   * reach them. A binding that exists to say "not now" was otherwise followed
+   * by the very action it refused. Ignored for script bindings.
+   */
+  exclusive?: boolean;
+  /**
+   * `false` keeps the binding out of the user-facing shortcut list (Settings >
+   * Keyboard shortcuts) and out of that page's conflict warnings; absent means
+   * listed. For a binding that is not a shortcut anyone looks up or remaps: a
+   * REFUSAL that exists only to say "not now" over somebody else's key.
+   * FloatingRange refuses about forty grid keys while its range owns the
+   * selection, and listing them put forty "X (Floating Range)" rows on the
+   * page, each with an Edit button that would move the refusal OFF the very
+   * key it refuses. Dispatch is untouched: an unlisted binding matches, wins
+   * and runs exactly as a listed one does -- only the list is told to skip it
+   * ({@link isListedKeybinding}).
+   */
+  listed?: boolean;
 }
 
 export interface ParsedCombo {
@@ -159,7 +193,23 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
   { id: "core.file.saveAs", combo: "Ctrl+Shift+S", commandId: "core.file.saveAs", label: "Save As", category: "File", source: "built-in" },
 
   // Insert / navigation (menu-bar shortcuts formerly dispatched only by MenuBar)
-  { id: "core.insertTable", combo: "Ctrl+T", commandId: "insert.table", label: "Insert Table", category: "Insert", source: "built-in" },
+  //
+  // "not-editing" on every binding below whose command acts on Core's
+  // SELECTION -- builds something from it (a table, a filter, a group, a
+  // comment, a hyperlink, a bookmark, a flash fill) or moves it (bookmark
+  // navigation, Select Visible Cells). Excel ignores these in edit mode, and
+  // they were context "always": Ctrl+T in the in-cell editor, in the formula
+  // bar, or in a floating grid's cell edit (whose keyboard can sit on the grid
+  // container while it picks a reference) ran Insert Table over Core's
+  // selection -- a cell the user was not editing and, during a floating-grid
+  // edit, could not see. "not-editing" is the dispatcher's own editing context
+  // (isEditingKeystroke): a text field, a pointer claim, or a live cell edit --
+  // Core's own (parked on another sheet included) or an external session. An
+  // extension that ALSO listens for its key itself asks the same question
+  // through @api/editing isEditKeystroke. (Format Painter's Ctrl+Shift+C, like
+  // the fills, merge and Format Cells, is GRID-SCOPED instead, and a live cell
+  // edit refuses every grid-scoped binding -- see handleGlobalKeyDown.)
+  { id: "core.insertTable", combo: "Ctrl+T", commandId: "insert.table", label: "Insert Table", category: "Insert", context: "not-editing", source: "built-in" },
   { id: "core.goToSpecial", combo: "Ctrl+G", commandId: "view.goToSpecial", label: "Go To Special", category: "Navigation", source: "built-in" },
 
   // Merge (grid-scoped; bridges to gridCommands.mergeCells via CommandRegistry)
@@ -179,8 +229,8 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
   { id: "core.view.toggleFormulaBarExpanded", combo: "Ctrl+Shift+U", commandId: FORMULA_BAR_TOGGLE_EXPANDED_COMMAND, label: "Expand/Collapse Formula Bar", category: "Navigation", source: "built-in" },
 
   // Data
-  { id: "ext.autofilter.toggle", combo: "Ctrl+Shift+L", commandId: "autofilter.toggle", label: "Toggle AutoFilter", category: "Data", source: "built-in" },
-  { id: "ext.flashFill", combo: "Ctrl+E", commandId: "flashFill.execute", label: "Flash Fill", category: "Data", source: "built-in" },
+  { id: "ext.autofilter.toggle", combo: "Ctrl+Shift+L", commandId: "autofilter.toggle", label: "Toggle AutoFilter", category: "Data", context: "not-editing", source: "built-in" },
+  { id: "ext.flashFill", combo: "Ctrl+E", commandId: "flashFill.execute", label: "Flash Fill", category: "Data", context: "not-editing", source: "built-in" },
 
   // Names. Excel's Ctrl+F3. BARE F3 IS NOT TAKEN BY THIS: the app's only other
   // F3 handler is Find Next inside the Find and Replace dialog, which tests
@@ -193,22 +243,22 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
   { id: "ext.print", combo: "Ctrl+P", commandId: "print.preview", label: "Print", category: "File", source: "built-in" },
 
   // Hyperlinks
-  { id: "ext.hyperlinks.insert", combo: "Ctrl+K", commandId: "hyperlinks.insert", label: "Insert Hyperlink", category: "Editing", source: "built-in" },
+  { id: "ext.hyperlinks.insert", combo: "Ctrl+K", commandId: "hyperlinks.insert", label: "Insert Hyperlink", category: "Editing", context: "not-editing", source: "built-in" },
 
   // Bookmarks
-  { id: "ext.bookmarks.toggle", combo: "Ctrl+Shift+B", commandId: "bookmarks.toggle", label: "Toggle Bookmark", category: "Navigation", source: "built-in" },
-  { id: "ext.bookmarks.next", combo: "Ctrl+]", commandId: "bookmarks.next", label: "Next Bookmark", category: "Navigation", source: "built-in" },
-  { id: "ext.bookmarks.prev", combo: "Ctrl+[", commandId: "bookmarks.prev", label: "Previous Bookmark", category: "Navigation", source: "built-in" },
+  { id: "ext.bookmarks.toggle", combo: "Ctrl+Shift+B", commandId: "bookmarks.toggle", label: "Toggle Bookmark", category: "Navigation", context: "not-editing", source: "built-in" },
+  { id: "ext.bookmarks.next", combo: "Ctrl+]", commandId: "bookmarks.next", label: "Next Bookmark", category: "Navigation", context: "not-editing", source: "built-in" },
+  { id: "ext.bookmarks.prev", combo: "Ctrl+[", commandId: "bookmarks.prev", label: "Previous Bookmark", category: "Navigation", context: "not-editing", source: "built-in" },
 
   // Grouping
-  { id: "ext.grouping.group", combo: "Alt+Shift+ArrowRight", commandId: "grouping.group", label: "Group Rows/Columns", category: "Data", source: "built-in" },
-  { id: "ext.grouping.ungroup", combo: "Alt+Shift+ArrowLeft", commandId: "grouping.ungroup", label: "Ungroup Rows/Columns", category: "Data", source: "built-in" },
+  { id: "ext.grouping.group", combo: "Alt+Shift+ArrowRight", commandId: "grouping.group", label: "Group Rows/Columns", category: "Data", context: "not-editing", source: "built-in" },
+  { id: "ext.grouping.ungroup", combo: "Alt+Shift+ArrowLeft", commandId: "grouping.ungroup", label: "Ungroup Rows/Columns", category: "Data", context: "not-editing", source: "built-in" },
 
   // Review
-  { id: "ext.review.newComment", combo: "Ctrl+Alt+M", commandId: "review.newComment", label: "New Comment", category: "Review", source: "built-in" },
+  { id: "ext.review.newComment", combo: "Ctrl+Alt+M", commandId: "review.newComment", label: "New Comment", category: "Review", context: "not-editing", source: "built-in" },
 
   // Select Visible Cells
-  { id: "ext.selectVisible", combo: "Alt+;", commandId: "selectVisibleCells.execute", label: "Select Visible Cells", category: "Editing", source: "built-in" },
+  { id: "ext.selectVisible", combo: "Alt+;", commandId: "selectVisibleCells.execute", label: "Select Visible Cells", category: "Editing", context: "not-editing", source: "built-in" },
 
   // Script Notebook
   { id: "ext.scriptNotebook.toggle", combo: "Ctrl+Shift+N", commandId: "scriptNotebook.toggle", label: "Toggle Script Notebook", category: "Navigation", source: "built-in" },
@@ -392,6 +442,41 @@ function ownsItsOwnKeys(event: KeyboardEvent): boolean {
 }
 
 /**
+ * The dispatcher's EDITING context for a keystroke: what a `context:
+ * "not-editing"` binding stands down for (and an `"editing"` one needs). True
+ * when a text field or a pointer claim owns the key (`ownsItsOwnKeys`), or a
+ * CELL EDIT is live wherever its keyboard is:
+ *   - an external edit session -- a floating grid's cell edit, whichever view
+ *     hosts its caret, parked or not (see the long comment in
+ *     handleGlobalKeyDown);
+ *   - Core's own edit (`isCoreCellEditOpen`). A focused <textarea> is NOT
+ *     enough to see it: parked on another sheet while it picks a reference,
+ *     the in-cell editor is not rendered there and the keyboard sits on the
+ *     grid container, which no tag test answers. Without the flag, Ctrl+T,
+ *     Ctrl+Shift+L, Alt+Shift+Arrow and Delete ran over the viewed sheet's
+ *     selection in the middle of typing =SUM( -- while every extension
+ *     listener for the same keys (which did read the flag) stood down.
+ *
+ * Exported so the extension-facing question -- @api/editing `isEditKeystroke`,
+ * which an extension's OWN key listener asks before acting on the selection --
+ * is built FROM this rule rather than beside it, so a listener and the binding
+ * for the same key cannot disagree.
+ */
+export function isEditingKeystroke(event: KeyboardEvent): boolean {
+  return ownsItsOwnKeys(event) || isCellEditLive();
+}
+
+/**
+ * Whether a CELL EDIT is live, wherever its keyboard is: Core's own (in-cell
+ * editor, formula bar, or parked on another sheet) or an external session. The
+ * one question both halves of the dispatcher ask -- the editing context above
+ * and the grid-scoped refusal in handleGlobalKeyDown -- so they cannot drift.
+ */
+function isCellEditLive(): boolean {
+  return isCoreCellEditOpen() || isExternalEditLive();
+}
+
+/**
  * Check if focus is currently within the spreadsheet grid container.
  * When focus is outside the grid (e.g., in a dialog, side pane, or menu),
  * grid-scoped keybindings should not fire so that native browser behaviour
@@ -459,6 +544,15 @@ const GRID_SCOPED_COMMANDS = new Set([
  */
 export function getAllKeybindings(): KeyBinding[] {
   return Array.from(registry.values());
+}
+
+/**
+ * Whether a binding belongs in the user-facing shortcut list (see
+ * {@link KeyBinding.listed}). The ONE spelling of the rule, so the settings
+ * page's rows and its conflict warnings cannot disagree about it.
+ */
+export function isListedKeybinding(binding: KeyBinding): boolean {
+  return binding.listed !== false;
 }
 
 /**
@@ -1199,9 +1293,37 @@ export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
   // Both rules fall out of the binding's OWN declared metadata, so a new binding
   // is classified by what it says about itself — there is no third hand-written
   // list here to drift out of date.
+  //
+  // A LIVE EXTERNAL EDIT SESSION (a floating grid's cell edit, hosted by the
+  // formula bar or parked on another sheet while it picks a reference) is
+  // answered the SAME way as a claim, for the same reason: the keyboard belongs
+  // to a formula being typed, and the selected cells of the sheet on screen
+  // are not the target. It sets no Core editing flag and, parked or with the
+  // formula bar hidden, the keyboard can sit on the grid's own container --
+  // where Delete ran core.edit.clearContents over the viewed sheet's selection,
+  // Ctrl+V pasted into it and Ctrl+Z undid a workbook action, all with the edit
+  // still open, because this capture-phase dispatcher pre-empted the two Core
+  // doors that route a live session's keys (useGridKeyboard's gate and the
+  // container's fallback branch in useSpreadsheetEditing). So: "not-editing"
+  // and grid-scoped bindings are refused WITHOUT preventDefault -- the key
+  // falls through to those doors, which hand it to the session -- and truly
+  // global ones (Ctrl+S, Ctrl+O, Ctrl+P) still work.
+  //
+  // CORE'S OWN EDIT is answered the same way, wherever its keyboard is
+  // (isCellEditLive). Parked on another sheet while it picks a reference, the
+  // keyboard sits on the grid container exactly like a parked session's, and
+  // Delete cleared that sheet's selected cells mid-formula. In the in-cell
+  // editor -- a <textarea> INSIDE the grid container, so "grid focused" held --
+  // Ctrl+Shift+C started Format Painter, Ctrl+D/Ctrl+R filled, Ctrl+M merged
+  // and Ctrl+V pasted over the selection rather than into the text being
+  // typed. Refused unprevented, those keys reach the editor itself (Ctrl+C/X/V
+  // become the text field's own clipboard, as they already were in the
+  // formula bar and in a floating grid's editor) or, parked, Core's two doors,
+  // which leave the grid alone while its edit is open. Excel ignores these in
+  // edit mode.
   // -------------------------------------------------------------------------
-  const editing = ownsItsOwnKeys(event);
-  const gridFocused = isGridFocused() && !isClaimedKeystroke(event);
+  const editing = isEditingKeystroke(event);
+  const gridFocused = isGridFocused() && !isClaimedKeystroke(event) && !isCellEditLive();
 
   // Find matching keybindings
   const matches: KeyBinding[] = [];
@@ -1261,6 +1383,10 @@ export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
 
   event.preventDefault();
   event.stopPropagation();
+  // An EXCLUSIVE winner also silences the other listeners on `window`'s
+  // capture phase (see KeyBinding.exclusive): stopPropagation alone never
+  // reaches a listener on the same target and phase.
+  if (winner.exclusive === true && winner.source !== "script") event.stopImmediatePropagation();
 
   if (winner.source === "script") {
     const run = scriptRunners.get(winner.id);

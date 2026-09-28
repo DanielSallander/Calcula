@@ -28,6 +28,7 @@ import { getGlobalIsEditing } from "./useEditing";
 import { handleCellTypeKeyDown } from "../../api/cellTypes";
 import { getGridRegions } from "../../api/gridOverlays";
 import { isKeyClaimed } from "../lib/pointerClaims";
+import { isExternalEditLive } from "../lib/formulaEditTarget";
 
 /**
  * Options for the useGridKeyboard hook.
@@ -738,8 +739,21 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
 
       // FIX: Check the global editing flag synchronously
       // The isEditing prop may be stale (from React state that hasn't re-rendered yet)
-      // but the global flag is updated immediately when editing starts
-      const isCurrentlyEditing = isEditing || getGlobalIsEditing();
+      // but the global flag is updated immediately when editing starts.
+      // A live EXTERNAL edit session (a floating grid's cell edit, whichever
+      // view hosts it) counts too: it sets no Core flag, and without this a key
+      // that reached the container during it acted on the grid -- Backspace
+      // cleared the cells, Tab and arrows moved the cursor -- while the user was
+      // typing a formula. The container's React handler then routes the key to
+      // the session (useSpreadsheetEditing).
+      //
+      // DELETE reaches this gate only because the capture-phase keybinding
+      // dispatcher (api/keybindings.ts) stands down for a live session; before
+      // it did, the DISPATCHER ran core.edit.clearContents and stopped the key
+      // first, and this gate never saw it. Both halves are load-bearing now:
+      // the dispatcher's refusal lets Delete through unprevented, and this gate
+      // keeps it off the onDelete branch below.
+      const isCurrentlyEditing = isEditing || getGlobalIsEditing() || isExternalEditLive();
 
       if (isCurrentlyEditing) {
         fnLog.exit('handleKeyDown', 'skipped (editing active - global check)');
@@ -866,8 +880,20 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
-      // Handle DELETE/Backspace key - clear selection contents
-      if ((key === "Delete" || key === "Backspace") && onDelete) {
+      // Handle DELETE/Backspace key - clear selection contents. BARE keys only
+      // (review 2026-09-28): with any modifier this branch cleared the
+      // selection too, and nothing else binds a modified Delete -- so while a
+      // floating range's cell owned the selection, Ctrl+Backspace (Excel's
+      // "show the active cell", pressed out of habit) or Shift+Backspace
+      // (Excel's "collapse to the active cell") cleared Core's HIDDEN cell.
+      // Excel clears on none of them; neither does this. Shift+Delete and
+      // Ctrl+Delete are no clear here either -- a clear is the bare key.
+      // useSpreadsheetEditing's container fallback asks the same question.
+      if (
+        (key === "Delete" || key === "Backspace") &&
+        !modKey && !altKey && !shiftKey &&
+        onDelete
+      ) {
         event.preventDefault();
         event.stopPropagation();
         eventLog.keyboard('Grid', 'handleKeyDown', key, []);

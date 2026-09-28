@@ -3051,6 +3051,7 @@ mod tests {
             computed_properties: Vec::new(),
             connected_sources: Vec::new(),
             filter_level: 1,
+            data_source_id: None,
         }
     }
 

@@ -292,7 +292,7 @@ pub(crate) async fn compute_design_query_view(
         .iter()
         .map(|f| {
             let mut field = field_pf(f);
-            field.hidden_items = f.hidden_items.clone();
+            field.hidden_items = f.hidden().to_vec();
             pivot_engine::PivotFilter {
                 field,
                 condition: pivot_engine::FilterCondition::ValueList(Vec::new()),

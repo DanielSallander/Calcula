@@ -716,3 +716,50 @@ describe("api/range.ts CellRange surface stability", () => {
     expect(range.endCol).toBe(20);
   });
 });
+
+// ============================================================================
+// externalEdit.ts -- the external-edit seam has TWO import doors and ONE copy
+// ============================================================================
+// The shell imports `api/externalEdit` by subpath (its tests double
+// `api/editing` with fixed lists); extensions may use either. `api/editing`
+// does `export * from "./externalEdit"`, and both are PURE re-exports of Core's
+// modules -- so the session the formula bar drives and the one a grid pick
+// reaches are the same binding. A wrapper on either door would be a second copy
+// that can drift. The Core-internal parking write is on NEITHER door: only the
+// point-mode switch may park a session.
+
+describe("api/externalEdit.ts and api/editing.ts are one binding", () => {
+  it("every shared name is the SAME function through both doors, and Core's", async () => {
+    const editing = (await import("../editing")) as Record<string, unknown>;
+    const external = (await import("../externalEdit")) as Record<string, unknown>;
+    const core = (await import("../../core/lib/formulaEditTarget")) as Record<string, unknown>;
+    const coreSwitch = (await import("../../core/lib/pointModeSheetSwitch")) as Record<string, unknown>;
+    for (const fn of [
+      "resolveFormulaBarSource",
+      "publishExternalCellTarget",
+      "getExternalEditSession",
+      "isExternalEditLive",
+      "subscribeExternalEdit",
+      "registerExternalAddressResolver",
+    ]) {
+      expect(typeof external[fn], fn).toBe("function");
+      expect(editing[fn], fn).toBe(external[fn]);
+      expect(external[fn], fn).toBe(core[fn]);
+    }
+    for (const fn of ["endExternalFormulaSession", "switchSheetForPointMode", "focusExternalSessionView"]) {
+      expect(editing[fn], fn).toBe(external[fn]);
+      expect(external[fn], fn).toBe(coreSwitch[fn]);
+    }
+    // The pick slot stays on `api/editing`, and is Core's too.
+    expect(editing.registerExternalFormulaTarget).toBe(core.registerExternalFormulaTarget);
+  });
+
+  it("the Core-internal parking write and the test reset are on neither door", async () => {
+    const editing = (await import("../editing")) as Record<string, unknown>;
+    const external = (await import("../externalEdit")) as Record<string, unknown>;
+    for (const name of ["setExternalSessionParked", "__resetExternalEditForTests"]) {
+      expect(editing[name], name).toBeUndefined();
+      expect(external[name], name).toBeUndefined();
+    }
+  });
+});

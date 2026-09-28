@@ -22,15 +22,26 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 // Hoisted for the same reason as the refusal suite's: `vi.mock` factories are
 // lifted above every declaration in the file.
-const { toasts } = vi.hoisted(() => ({ toasts: [] as unknown[][] }));
+const { toasts, pointMode } = vi.hoisted(() => ({
+  toasts: [] as unknown[][],
+  // The renderer subscribes to Core's cross-sheet point-mode signal at MODULE
+  // scope; the double captures that listener so section 6 can flip it.
+  pointMode: { listener: null as ((foreign: boolean) => void) | null, redraws: 0 },
+}));
 
 vi.mock("@api/gridOverlays", () => ({
   overlayGetRowHeaderWidth: () => 0,
   overlayGetColHeaderHeight: () => 0,
   overlaySheetToCanvas: (_c: unknown, x: number, y: number) => ({ canvasX: x, canvasY: y }),
-  requestOverlayRedraw: () => undefined,
+  requestOverlayRedraw: () => {
+    pointMode.redraws++;
+  },
   replaceGridRegionsByType: () => undefined,
   removeGridRegionsByType: () => undefined,
+  onPointModeViewChanged: (listener: (foreign: boolean) => void) => {
+    pointMode.listener = listener;
+    return () => undefined;
+  },
 }));
 vi.mock("@api", () => ({
   getShapeBitmap: () => null,
@@ -692,6 +703,50 @@ describe("a row inserted above two pinned html shapes one row apart", () => {
       expect(getShapeFrameRefusal(idFor(0, upperRow))).toBeUndefined();
       expect(getShapeFrameRefusal(idFor(0, lowerRow))).toBeUndefined();
     }
+    expect(parkedScriptFrameCount()).toBe(0);
+  });
+});
+
+// ===========================================================================
+// 6. Cross-sheet point mode (a formula picking a reference on another sheet)
+//
+// That switch emits no SHEET_CHANGED -- the edit must survive it -- so the
+// control store keeps publishing the edit's sheet and the region-publication
+// sweep never runs; the grid merely stops painting those regions. A frame and
+// its shims are DOM: left alone they stayed over the other sheet and swallowed
+// the very click meant to pick a reference there. Core's edge-triggered signal
+// (`onPointModeViewChanged`, @api/gridOverlays) is what parks them.
+// ===========================================================================
+
+describe("cross-sheet point mode", () => {
+  it("parks every html shape and its claims on the flip in, and redraws on the flip out", () => {
+    const a = idFor(0, 0);
+    announceFloatingControlRegions(new Set([a]));
+    setShapeHitRegions(a, [{ id: "save", x: 0, y: 0, width: 40, height: 20 }]);
+    setShapeHtmlContent(a, HTML);
+    paint(a, 0, 0);
+    const frame = frameFor(a);
+    expect(frame?.style.display).toBe("block");
+    expect(shims()).toHaveLength(1);
+
+    // Subscribed once, at module scope -- before any shape existed.
+    expect(pointMode.listener).not.toBeNull();
+    pointMode.listener!(true);
+
+    // No region publication happened, and the shape is still off screen.
+    expect(frame?.style.display).toBe("none");
+    expect(shims()).toHaveLength(0);
+    expect(parkedScriptFrameCount()).toBe(1);
+
+    const redrawsBefore = pointMode.redraws;
+    pointMode.listener!(false);
+    expect(pointMode.redraws).toBe(redrawsBefore + 1);
+
+    // The redraw's paint brings back the SAME element (never reloaded) and its claim.
+    paint(a, 0, 0);
+    expect(frameFor(a)).toBe(frame);
+    expect(frame?.style.display).toBe("block");
+    expect(shims()).toHaveLength(1);
     expect(parkedScriptFrameCount()).toBe(0);
   });
 });

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 157,
+  "nextId": 206,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -5444,6 +5444,1183 @@
         "date": "2026-09-25",
         "description": "M8 part C/D: ONE conversion, extensions/Charts/lib/chartPointer.ts -- clientToChartCanvas divides the client offset by the grid zoom (as Core's press path and @api topFloatingRegionAtClient do), insideChartCanvas measures the grid box in logical px, and chartCanvasToClient scales back for the two DOM popup anchors (pivot field-button filter menu, quick-access panel) that turned the canvas point into a screen point. Both pointer paths of Charts/index.ts (handleMouseMove -> hover, tooltips and the pending ladder click; the context-menu lookup) use it. Tests: extensions/Charts/lib/__tests__/chartArrange.test.ts at zoom 1.5 (client (250,130) with the grid at (100,40) -> logical (100,60) and back), plus a source pin that no raw `clientX - rect.left` remains and both paths call the helper; red under a sabotage that drops the division."
       }
+    },
+    {
+      "id": "BUG-0157",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "object-geometry-editable",
+        "message": "A FLOATING GRID COULD NOT BE MOVED WITHOUT DESIGN MODE (owner finding 1). Its store published `movable` from Design Mode, which is session-only and starts off, so a floating grid inserted on a canvas (or a worksheet) could not be dragged at all, while a chart beside it moved freely.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every floating-grid journey turned Design Mode on first; the canvas journeys dragged charts.",
+      "repro": {
+        "description": "Canvas tab > Insert > Floating grid; drag its title bar: nothing moves."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "The store publishes `movable` from `objectGeometryEditable` (@api/layoutSurface) with the title bar as off-surface chrome (a title-less grid moves by a 4px border band; Design Mode grabs the whole body); handles only on a selected grid; one write at moveComplete. Live proof canvas.spec.ts #8."
+      }
+    },
+    {
+      "id": "BUG-0158",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "external-edit-session",
+        "message": "EDITING A FLOATING-GRID CELL ENDED WHEN ANOTHER SHEET TAB WAS CLICKED (owner finding 2, design D1). The in-cell editor blurred and committed or cancelled in a race, so a formula could not reference another sheet by pointing, and a half-typed plain value could be lost.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Floating-grid edits were only ever tested on the host sheet.",
+      "repro": {
+        "description": "Double-click a floating-grid cell, type '=', click the Sheet1 tab: the editor closes and Sheet1 opens in plain navigation."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "One edit session with two views (the cell textarea and the formula bar) in app/src/core/lib/formulaEditTarget.ts, parked across sheet switches by pointModeSheetSwitch.ts; the grid shows the other sheet in point mode, a click inserts the reference, Enter commits to the floating-grid cell and returns to the host. Live proof canvas.spec.ts #9."
+      }
+    },
+    {
+      "id": "BUG-0159",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "formula-bar-target",
+        "message": "A SELECTED FLOATING-GRID CELL WAS INVISIBLE TO THE FORMULA BAR AND NAME BOX (owner finding 3, design D2). The bar showed nothing on a canvas; on a WORKSHEET it showed -- and an edit in the bar WROTE -- Core's last active cell, hidden behind the floating grid.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The formula bar only ever read Core's selection.",
+      "repro": {
+        "description": "Select a floating-grid cell holding =Sheet1!E2: the bar is blank (canvas) or shows another cell (worksheet); type in the bar and press Enter on a worksheet: the hidden grid cell changes."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "A selection-scoped external cell target (formulaEditTarget.ts) read through ONE resolver, resolveFormulaBarSource; the bar edits the floating-grid cell and the Name Box shows Float1!A1 and accepts Float1!B2. Live proof canvas.spec.ts #10."
+      }
+    },
+    {
+      "id": "BUG-0160",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "sheet-name-casing",
+        "message": "THE OFF-SHEET WRITE DOOR NEVER RESTAMPED THE WORKBOOK'S CAPITALISATION. update_cell_on_sheets_inner stored the lexer's uppercase spelling, so every off-sheet write (a floating grid's cells, a script writing another sheet, a grouped-sheet edit) showed =SHEET1!E2 in the formula bar. Evaluation was unaffected.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Only the active-sheet door (split_entered_formula) was ever read back in the formula bar.",
+      "repro": {
+        "description": "Type =Sheet1!E2 into a floating-grid cell and select it: the bar shows =SHEET1!E2."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "commands/data.rs restamps name, table and sheet casing on that door too; test an_off_sheet_formula_keeps_the_sheet_names_capitalisation (floating_range_recalc_tests.rs)."
+      }
+    },
+    {
+      "id": "BUG-0161",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "slicer-source-model",
+        "message": "INSERT SLICERS OFFERED NO CALCULA MODEL (owner finding 4). A workbook whose pivots come from a model showed 'No Tables or PivotTables found in this workbook', so a slicer could not filter model pivots at all.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Slicers were built for range pivots and tables; the model route existed only as the ribbon filter pane.",
+      "repro": {
+        "description": "Create a model connection and a BI pivot on a canvas; Canvas tab > Insert > Slicer."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "Model slicers (SlicerSourceType BiConnection): the dialog lists '<connection> (Model)', items come from the model column, the slicer filters every pivot of that model on its OWN sheet or canvas (page rule, pivots added later included) through a server-side ensure/page fold; the dialog says which objects it reaches. Live proof canvas.spec.ts #11."
+      }
+    },
+    {
+      "id": "BUG-0162",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "pivot-overwrite-self",
+        "message": "A REOPENED MODEL PIVOT COUNTED ITS OWN OUTPUT AS FOREIGN DATA. restore_pivot_definitions registered a BI pivot's protected region from its empty-cache view, so the first refresh after open saw its own cells as user data and raised the native 'A PivotTable report will overwrite existing data' prompt (a hung E2E run; a needless prompt for users).",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Refresh after reopen was never exercised for model pivots.",
+      "repro": {
+        "description": "BI pivot, save, File > New, reopen, reconnect the source, Refresh: the overwrite prompt appears."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "SavedBiPivotMetadata.outputExtent records the output size and the load registers the region from it; count_overwritten_cells / save_overwritten_cells return 0 on a canvas; tests a_reopened_bi_pivot_refreshes_without_counting_its_own_output_as_foreign_data and a_canvas_pivot_never_counts_overwritten_cells_even_without_a_saved_extent; live canvas.spec.ts #11."
+      }
+    },
+    {
+      "id": "BUG-0163",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "slicer-delete-filter",
+        "message": "DELETING A SLICER LEFT ITS FILTER APPLIED. Pivots stayed filtered by a slicer that no longer existed (pivot and model slicers), and a table slicer's AutoFilter column stayed filtered, with nothing on screen explaining the missing rows.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "delete_slicer removed the object only.",
+      "repro": {
+        "description": "Filter a pivot with a slicer, delete the slicer: the pivot stays filtered."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "delete_slicer_core clears the slicer's filter on every target (a table slicer's AutoFilter column included) and records the pre-delete state, so one Ctrl+Z restores slicer and filter (owner decision 3); tests in slicer/model_slicer_tests.rs; live canvas.spec.ts #11."
+      }
+    },
+    {
+      "id": "BUG-0164",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "sheet-delete-slicer-filter",
+        "message": "DELETING THE SHEET A SLICER LIVES ON LEFT ITS MASK ON PIVOTS ELSEWHERE, an invisible filter nothing in the UI could clear.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The sheet-delete cascade removed the slicer object only.",
+      "repro": {
+        "description": "Slicer on Sheet2 filtering a pivot on Sheet1; delete Sheet2: the pivot stays filtered."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "delete_sheet works out each slicer's targets before the delete and clears them after it with every lock released; a dropped pin is re-queried quietly; tests deleting_the_sheet_a_slicer_lives_on_clears_its_filter_on_pivots_elsewhere, a_pin_of_a_slicer_removed_with_its_sheet_is_dropped_and_requeried."
+      }
+    },
+    {
+      "id": "BUG-0165",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "table-slicer-hidden-rows",
+        "message": "A TABLE SLICER CLICK NEVER REFRESHED THE GRID'S HIDDEN ROWS. The bridge called get_auto_filter / set_column_filter_values / clear_column_criteria directly and emitted only GRID_REFRESH, which repaints but does not reload hidden rows.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The next unrelated reload hid the rows, so it looked like lag.",
+      "repro": {
+        "description": "Table slicer: click an item; the table's rows do not collapse until something else reloads the view."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "The bridge goes through @api/autoFilterService (get / setColumn / clear), which pushes hidden rows and refreshes the AutoFilter cache (Seam Rule)."
+      }
+    },
+    {
+      "id": "BUG-0166",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "filter-value-spelling",
+        "message": "A LEVEL-1 SLICER OR RIBBON FILTER ON A BOOLEAN OR DECIMAL MODEL COLUMN EMPTIED EVERY PIVOT IT REACHED. The model spells values 'true' / '12.55' and the pivot cache 'TRUE' / its own decimal text, so the computed hidden list held every value.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every filter test used text columns.",
+      "repro": {
+        "description": "Ribbon filter or slicer on a boolean model column, select 'true': the pivot shows nothing."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "One shared rule (cache_value_is_selected / hidden_for_selection) for the apply and the page fold; pure and engine-backed tests."
+      }
+    },
+    {
+      "id": "BUG-0167",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "bi-model-snapshot",
+        "message": "FILTERS WERE CHECKED AGAINST THE PIVOT'S CREATION-TIME MODEL SNAPSHOT, so a column added to the model after the pivot was created could not be filtered (ribbon filter and slicer both refused).",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Models rarely change under a live pivot in tests.",
+      "repro": {
+        "description": "Create a BI pivot, add a column to the model, filter on it: refused."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "refresh_bi_model_snapshot re-reads tables, measures and hierarchies from the live engine (a derived cache, no dirty) before every update, ensure, refresh and clear; test a_column_added_to_the_live_model_after_the_pivot_can_be_filtered."
+      }
+    },
+    {
+      "id": "BUG-0168",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "model-table-identity",
+        "message": "A FILTER ON ONE MODEL TABLE'S COLUMN FILTERED ANOTHER TABLE'S SAME-NAMED COLUMN. Pivot filters were identified by bare cache name and attributed to the first table owning it, so Products.name and Customers.name collided (a pivot could come back empty, or a filter became a silent no-op).",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The sample models have unique column names.",
+      "repro": {
+        "description": "Model with Products.name and Customers.name; slicer on Products.name: Customers.name is filtered instead."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "Filters and cache columns carry their Table.Column key (SlicerFilter.model_key, FieldCache.model_key); a bare name is used only when exactly one table owns it; tests two_tables_sharing_a_column_name_keep_their_own_filters and reapplying_a_cleared_column_whose_name_two_tables_share_records_no_step_and_keeps_redo."
+      }
+    },
+    {
+      "id": "BUG-0169",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "pinned-filter-undo",
+        "message": "UNDOING A PINNED (LEVEL 2+) FILTER RESTORED THE WRONG STATE. apply_pivot_filter_core mutated the definition in place and the re-query then recorded that POST-pin definition, so Ctrl+Z showed every region while the slicer said East, or kept pin [West] (saved to .cala) while the view showed East.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "No test undid a pinned apply.",
+      "repro": {
+        "description": "Level-2 slicer on East, click West, Ctrl+Z, Refresh All: the pivot shows West while the slicer shows East."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "The filter step clones the definition and cache before any mutation and records ONE restore of that pre-state after the re-query, joining an open transaction and never holding one open across the engine wait; tests undoing_a_pinned_apply_restores_the_pre_pin_definition, undoing_a_level_change_to_pinned_restores_the_mask, undoing_a_pinned_clear_restores_the_pin."
+      }
+    },
+    {
+      "id": "BUG-0170",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "lock-order",
+        "message": "PIVOT COMMANDS COULD DEADLOCK AGAINST THE F9 CALCULATION PASS. calculate_now holds grid, grids and sheet_names and then takes pivot_tables, while about 29 pivot commands (apply/clear filter, update_bi_pivot_fields, toggle group, delete, change source, undo restore) held pivot_tables and then read sheet_names; get_pivot_source_data held pivot_tables while taking grids (a two-party deadlock, Persisted::read is exclusive); refresh_pivot_cache held table_names while taking tables; show_report_filter_pages held pivot_tables while taking the grids and sheet_names write locks.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Needs an F9 (or any calculation) overlapping a pivot command on another thread.",
+      "repro": {
+        "description": "Traced; deterministic lock-order tests park one side and prove the other side blocks."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "PivotDestSheet (pivot/operations.rs) copies the destination under the pivot lock and resolves it after release; pivot_source_data_core and drill_through_to_sheet_core copy then release; linked_table_source; tests a_filter_apply_..., a_filter_clear_..., undoing_a_pivot_change_never_holds_the_pivot_lock_while_it_waits_for_sheet_names, showing_a_pivots_details_never_holds_the_pivot_lock_while_it_waits_for_grids, no_pivot_command_resolves_its_sheet_under_the_pivot_guard."
+      }
+    },
+    {
+      "id": "BUG-0171",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "lock-order",
+        "message": "SIX AUTOFILTER COMMANDS TOOK THE AUTOFILTER LOCK BEFORE GRIDS, the reverse of the canonical order apply_auto_filter_inner documents (clear_column_criteria_inner, reapply_auto_filter_inner, set_column_filter_values_inner, set_column_custom_filter_inner, set_column_top_bottom_filter_inner, set_column_dynamic_filter_inner), so a header filter could deadlock against apply_auto_filter or a table-slicer delete.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Needs two AutoFilter commands on different threads at once.",
+      "repro": {
+        "description": "Traced; autofilter_lock_order_tests::every_autofilter_command_takes_grids_before_auto_filters."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "All six take grids first; the test runs one thread per command."
+      }
+    },
+    {
+      "id": "BUG-0172",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "drill-through-source-sheet",
+        "message": "A GRID PIVOT'S DRILL-THROUGH LISTED SHEET 0'S ROWS whatever its source sheet, so 'Show Details' on a pivot built from Sheet2 showed Sheet1's data.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every drill-through test used a Sheet1 source.",
+      "repro": {
+        "description": "Pivot over Sheet2 data; double-click a value: the new sheet lists Sheet1's rows."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "drill_through_to_sheet_core reads the pivot's own source sheet; test a_grid_drill_through_lists_the_rows_of_the_pivots_own_source_sheet."
+      }
+    },
+    {
+      "id": "BUG-0173",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "dialog-fail-open",
+        "message": "THE PIVOT OVERWRITE PROMPT FAILED OPEN. pivot-api.ts imported the dialog plugin's ask directly; when the dialog could not open it threw, every caller skipped undo_pivot_overwrite, and the user's overwritten cells stayed overwritten without being asked. The dialog-globals lint ban did not cover plugin imports.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The dialog always opened in manual testing.",
+      "repro": {
+        "description": "Make ask throw (no window) during a refresh that overwrites cells: the overwrite stands."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "One confirmPivotOverwrite() through @api/dialogs confirmAsync, awaited, failing closed; pivotOverwriteConfirm.test.ts."
+      }
+    },
+    {
+      "id": "BUG-0174",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "pivot-zone-replace",
+        "message": "A ONE-FIELD PIVOT UPDATE CLEARED EVERY OTHER FILTER IN ITS ZONE. The Subtotal toggle, the report-filter dropdown and Field Settings sent update_pivot_fields with a partial zone (or a zone without hidden items), and the backend replaces the whole zone.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Tests used one filtered field at a time.",
+      "repro": {
+        "description": "Range pivot with two filtered row fields; toggle Subtotal on one: both filters are gone."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "The dropdown uses applyFilter/clearFilter on its one field; Field Settings and the Subtotal toggle send the whole zone with current hidden items; reportFilterDropdown.test.ts, fieldSettingsDialogZone.test.tsx, subtotalToggleKeepsFilters.test.ts. update_pivot_fields still rebuilds every field it is sent (open, see pivot-field-rebuild)."
+      }
+    },
+    {
+      "id": "BUG-0175",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "calc-group-subset",
+        "message": "A CALCULATION-GROUP CHIP LOST ITS ITEM SUBSET on the first field-list edit after a hierarchy was placed (the seeding path dropped hiddenItems) and when dragged between zones.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Calculation-group subsets are rarely combined with hierarchies or drags.",
+      "repro": {
+        "description": "Place a calculation group with two items unticked and a hierarchy; make any field-list edit: every item returns."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "selectionHandler seeding keeps hiddenItems; a zone drag keeps hidden items and the LOOKUP flag; pivotPaneSeeding.test.ts and the drag tests."
+      }
+    },
+    {
+      "id": "BUG-0176",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "protection-gate-parity",
+        "message": "FLOATING-RANGE GEOMETRY, CREATE, RENAME AND DELETE IGNORED THE HOST SHEET'S 'EDIT OBJECTS' PROTECTION, and a refused or no-op patch still marked the document modified.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Protected sheets with floating ranges were never tested.",
+      "repro": {
+        "description": "Protect a sheet without Edit objects; drag or resize its floating range: it moves and the title bar shows unsaved."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "floating_range.rs checks the permission before DocumentEffect on every door (the host-sheet delete cascade stays ungated); tests a_protected_host_refuses_every_geometry_patch_and_leaves_the_document_clean and siblings."
+      }
+    },
+    {
+      "id": "BUG-0177",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "fr-wrong-cell",
+        "message": "KEYS AND GRID COMMANDS ACTED ON CORE'S HIDDEN CELL WHILE A FLOATING-GRID CELL WAS SELECTED. Delete, Ctrl+V/X/D/R, Ctrl+K/T/E, font toggles, number formats, fill, merge and clear formatting went to the worksheet cell Core still had selected behind the floating grid, a write the user could not see.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The floating grid's selection is its own; nothing told the grid keyboard or the command registry it owned the keyboard.",
+      "repro": {
+        "description": "Worksheet with A1 selected; select a floating-grid cell; press Ctrl+B: A1 turns bold."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "FloatingRange routes Delete/Backspace to its cells and REFUSES the rest with a toast through exclusive keybindings (KeyBinding.exclusive stops later listeners), guards all 18 grid commands (GridCommand now derived from Core); frKeyRouting.test.ts. Ribbon/menu formatting doors remain (open, see the next fr-wrong-cell entry)."
+      }
+    },
+    {
+      "id": "BUG-0178",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "canvas-bar-focus",
+        "message": "FOCUSING THE FORMULA BAR ON A CANVAS WITH NOTHING SELECTED LEFT globalIsEditing TRUE (design D3), which killed the floating-grid and grid keyboards until the next edit.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Canvases have no Core selection; the bar assumed one.",
+      "repro": {
+        "description": "Canvas, nothing selected, click the formula bar, click a floating-grid cell, type: nothing happens."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "FormulaInput.tsx treats 'canvas + no selection + no external source' as nothing to edit and never raises the flag; formulaInputExternalEdit tests."
+      }
+    },
+    {
+      "id": "BUG-0179",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "dialog-input-honoured",
+        "message": "ENTER BEFORE A FLOATING-GRID CELL'S CONTENT LOADED WROTE '' OVER THE CELL (design D4): the editor opened with an empty buffer and an untouched Enter committed it.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The load is fast on a warm backend.",
+      "repro": {
+        "description": "Double-click a floating-grid cell holding a value and press Enter immediately: the value is gone."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "An untouched Enter before the content arrives writes nothing; frEditorSession.test.ts 'content that never arrived (defect D4)'."
+      }
+    },
+    {
+      "id": "BUG-0180",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "paint-hit-agreement",
+        "message": "IN FORMULA POINT MODE THE SOURCE SHEET'S FLOATING OBJECTS PAINTED ON, AND CAUGHT CLICKS ON, THE SHEET BEING POINTED AT (design D5): a reference click could land on an invisible chart or floating grid of the sheet the edit started on.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Point mode across sheets was grid-only before the floating-grid edit seam.",
+      "repro": {
+        "description": "Start a formula on Sheet2 (which has a chart), click the Sheet1 tab, click where the chart sits on Sheet2: the click is swallowed."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "isPointModeOnForeignSheet() (core/lib/pointModeView.ts) empties getLiveGridRegions and suppresses overlay hit tests; pointModeView.test.ts."
+      }
+    },
+    {
+      "id": "BUG-0181",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "name-box-target",
+        "message": "THE NAME BOX DEFINED A NAME OVER CORE'S HIDDEN SELECTION while an object or floating-grid cell was shown (design D6).",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The Name Box read Core's selection only.",
+      "repro": {
+        "description": "Select a floating-grid cell, type a new name in the Name Box: the name refers to the worksheet cell behind it."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "The Name Box resolves through the external target and refuses to define a name over the wrong cell; nameBoxExternalAddress.test.tsx."
+      }
+    },
+    {
+      "id": "BUG-0182",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "modified-delete-clears",
+        "message": "DELETE AND BACKSPACE WITH A MODIFIER CLEARED THE SELECTION (Shift/Ctrl+Delete, Ctrl/Shift/Alt+Backspace). Excel clears on the bare key only (Ctrl+Backspace shows the active cell, Shift+Backspace collapses the selection).",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Nobody presses them on purpose; found while auditing keys that reach the hidden cell.",
+      "repro": {
+        "description": "Select A1:B2 with values, press Ctrl+Backspace: the cells are cleared."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "useGridKeyboard and the container fallback clear on the bare key only; gridKeyboardModifiedDelete.test.tsx, externalEditContainerKeys.test.tsx."
+      }
+    },
+    {
+      "id": "BUG-0183",
+      "status": "open",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "keybinding-dead",
+        "message": "CTRL+SHIFT+B (TOGGLE BOOKMARK) DOES NOTHING. The registry's ext.bookmarks.toggle points at the unregistered command bookmarks.toggle; the dispatcher matches it in the capture phase and stops propagation, so CellBookmarks' own bubble-phase listener never runs.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The binding is listed in settings, so it looks wired.",
+      "repro": {
+        "description": "Select a cell, press Ctrl+Shift+B: no bookmark."
+      },
+      "notes": "Pre-existing (the dispatcher's stopPropagation predates the canvas work). Related: several built-ins point at unregistered command ids (hyperlinks.insert, flashFill.execute, autofilter.toggle, review.newComment, grouping.group/ungroup, selectVisibleCells.execute) and work only because each extension's own capture listener runs next to the dispatcher."
+    },
+    {
+      "id": "BUG-0184",
+      "status": "open",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "pivot-field-rebuild",
+        "message": "TRACED, NOT RUN: update_pivot_fields rebuilds every field it is sent through PivotField::new and keeps only collapse state, so any field-list edit on a RANGE pivot resets sort order, grouping, subtotals and show-all-items on the fields it sends; it also reads an absent hidden-items list as CLEAR, so a filter changed elsewhere within one IPC round trip of a field-list edit is reverted.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Field-list tests check layout, not per-field settings.",
+      "repro": {
+        "description": "Range pivot, sort a row field descending, drag another field into Columns: the sort is back to ascending (expected per the trace)."
+      },
+      "notes": "Fix: give PivotFieldConfig the tri-state BiFieldRef already has (None keeps, Some sets) and keep sort/subtotal/grouping/show-all when not sent; then the editor can send only edited fields for range pivots. pivot/commands.rs ~1174-1209, pivot/utils.rs 135-186."
+    },
+    {
+      "id": "BUG-0185",
+      "status": "open",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "fr-wrong-cell",
+        "message": "RIBBON AND MENU FORMATTING ACT ON CORE'S HIDDEN CELL WHILE A FLOATING-GRID CELL IS SELECTED (Home tab font/fill/number/alignment/styles, Format Cells, Format menu, mini toolbar, Format Painter, Paste Special, Conditional Formatting). There is no single choke point; each door reads Core's selection itself.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Keyboard doors were closed first; these are mouse doors.",
+      "repro": {
+        "description": "Worksheet with A1 selected; select a floating-grid cell; click Bold on the Home tab: A1 turns bold."
+      },
+      "notes": "Door list in docs/design/open-items.md 2.af. Fix = a feature-neutral 'selection owner' seam in @api checked at each door."
+    },
+    {
+      "id": "BUG-0186",
+      "status": "open",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "external-edit-session",
+        "message": "TWO SELECTIONS CAN STAY VISIBLE AFTER A GRID HEADER OR RIGHT PRESS: re-clicking an already-selected row/column header, or right-pressing inside Core's hidden selection, does not drop a floating grid's selection (only cell presses announce onGridCellPressed), so the grid context menu opens on Core's cell while the floating grid still shows its own.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Round 3 added the press signal for cell presses only.",
+      "repro": {
+        "description": "Select a floating-grid cell on a worksheet whose A1 is selected; right-click A1: the grid menu opens, the floating-grid cell stays selected."
+      },
+      "notes": "core/hooks/useMouseSelection/selection/cellSelectionHandlers.ts (notifyGridCellPressed); header handlers do not emit it."
+    },
+    {
+      "id": "BUG-0187",
+      "status": "open",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "undo-completeness",
+        "message": "A SLICER CLICK'S UNDO TRANSACTION STAYS OPEN ACROSS THE MODEL RE-QUERY, so an unrelated edit made during a slow click joins the click's Ctrl+Z step, and a Ctrl+Z pressed mid-click loses redo. User clicks are queued (so two clicks never merge); the window remains for other edits and for script setSelectedItems.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Re-queries are fast on the sample models.",
+      "repro": {
+        "description": "Slow model; click a slicer item and immediately type into a cell; Ctrl+Z undoes both."
+      },
+      "notes": "Fix = one backend command (apply_slicer_selection) that builds a local transaction and pushes it once. Slicer/lib/slicerStore.ts updateSlicerSelectionAsync; the ribbon filter's 'Ribbon filter change' transaction has the same window."
+    },
+    {
+      "id": "BUG-0188",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "lock-order",
+        "message": "FOUR MORE LOCK-ORDER INVERSIONS, found once the crate census could see lock_pending(), guards named inside string literals, and chains or lets split over lines: (1) undo apply_changes took undo_stack before the grid locks, the reverse of about 40 cell writers including the MCP formatting tool that runs off the main thread (a Ctrl+Z overlapping it could deadlock); (2) rename_sheet_inner held sheet_names, freeze_configs, tab_colors and sheet_visibility while taking grids and grid, the reverse of F9; (3) apply_names_to_formulas held named_ranges while taking grid; (4) drill_through_to_sheet took bi_metadata before pivot_tables, the reverse of apply_pivot_filter. And the save path (collect_pivot_definitions, reached from save_file, AutoRecover and publish) took pivot_tables then sheet_names, so a save or AutoRecover overlapping F9 could hang the app.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The census had three blind spots, and its comments claimed 'undo_stack is taken first everywhere', which was false.",
+      "repro": {
+        "description": "Traced; deterministic lock-order tests park one side and prove the other side stays reachable."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "Each site reordered or copied-then-released; tests saving_pivots_never_holds_the_pivot_lock_while_it_waits_for_sheet_names, renaming_a_sheet_never_holds_sheet_names_while_it_waits_for_the_grid_locks, undoing_never_holds_the_undo_stack_while_it_waits_for_a_grid_lock, no_function_holds_bi_metadata_while_acquiring_pivot_tables; census self-tests the_census_sees_a_lock_pending_acquisition, a_brace_or_quote_inside_a_literal_does_not_hide_a_held_guard, the_census_sees_a_lock_taken_through_a_method_chain_split_over_lines, the_census_sees_a_guard_whose_let_is_split_after_the_equals_sign, blanking_literals_swallows_no_rust_code_anywhere_in_the_crate (state_digest_lock_order_tests.rs); one shared FN_START_SPELLINGS list for every function-body census."
+      }
+    },
+    {
+      "id": "BUG-0189",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "sheet-keyed-store-remap",
+        "message": "DRILL-THROUGH AND SHOW REPORT FILTER PAGES CREATED SHEETS BEHIND THE ADD PATH'S BACK. They pushed only sheet_names and grids, so the new sheets had no id, kind, visibility, freeze, tab colour or row/column size entries; a column width set on the drilled-from sheet was LOST on save; with a floating range present the new sheet landed after the object sheets (breaking the user-sheets-first partition); workbook-structure protection was skipped; the undo history was not ended (a floating-range step could replay onto the new sheet) and the drill-through never rebuilt the dependency maps for the sheet it switched to.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Both commands predate the per-sheet stores and the partition rule.",
+      "repro": {
+        "description": "Set column C's width on Sheet1, drill through a pivot value, save and reopen: Sheet1's width is gone; per-sheet store lengths disagree with the sheet count."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "One add path, sheets.rs append_user_sheet (structure check, name rule and uniqueness before the effect, append_sheet_stores, partition rotation, stash of the sheet being left); census every_caller_of_the_one_add_path_ends_what_the_add_path_leaves_to_it; tests a_drill_through_sheet_gets_every_per_sheet_store_and_keeps_the_width_of_the_sheet_it_left, report_filter_pages_get_every_per_sheet_store_and_land_before_a_floating_ranges_object_sheet, a_protected_workbook_structure_refuses_a_drill_through_and_stays_clean, a_drill_through_ends_the_undo_history_so_a_floating_range_step_never_replays_onto_it."
+      }
+    },
+    {
+      "id": "BUG-0190",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "dirty-flag",
+        "message": "THREE REFUSALS MARKED THE DOCUMENT MODIFIED: a refused pinned (level 2+) filter apply (invalid level, no selection, not a BI pivot, unknown field, a column two tables share) built its effect before the refusals; add_sheet refused a duplicate name after minting the effect; and Show Report Filter Pages could mark the document changed while silently dropping a page whose cleaned name was still illegal (sanitize_sheet_name trimmed once, so ' 'x became 'x).",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The refusals are rare paths.",
+      "repro": {
+        "description": "Apply a level-2 filter with no selection to a pivot in a saved workbook: the title shows unsaved."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "refuse_an_unroutable_pin before pivot_write; append_user_sheet refuses before the effect; sanitize_sheet_name trims to a fixpoint and the command validates every planned name before writing; tests every_refused_pinned_apply_leaves_the_document_clean, a_refused_duplicate_sheet_name_leaves_the_document_clean, sanitizing_trims_until_no_space_or_apostrophe_is_left_at_either_end."
+      }
+    },
+    {
+      "id": "BUG-0191",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "keybinding-edit-context",
+        "message": "SHORTCUTS ACTED ON THE SELECTION DURING A CELL EDIT. Ctrl+T, Ctrl+Shift+L, Ctrl+E, Ctrl+K, Ctrl+Shift+B, Alt+Shift+Arrow, Ctrl+Alt+M and Alt+; were 'always' bindings; the AutoFilter, Grouping and Format Painter listeners had no edit check; and the dispatcher could not see Core's own PARKED cross-sheet edit (the edit flag lived inside the useEditing hook module), so during '=SUM(' parked on Sheet2, Delete cleared Sheet2's cell and Ctrl+T created a table there. In the in-cell editor, Ctrl+V pasted over the selected cells instead of into the text.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Journeys type a value and press Enter; nobody pressed a shortcut mid-edit.",
+      "repro": {
+        "description": "Type =SUM( in Sheet1!A1, click the Sheet2 tab, press Delete: Sheet2's active cell is cleared."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "The edit flag lives in core/lib/cellEditFlag.ts; the dispatcher's isEditingKeystroke / isCellEditLive stand down grid-scoped and not-editing bindings during any edit; the listeners use @api isEditKeystroke; keybindings.editContext.test.ts (109 cases); live proof e2e/journeys/core-edit-keys.spec.ts (L1 parked keys, L2 in-cell Ctrl+V), each with a positive control."
+      }
+    },
+    {
+      "id": "BUG-0192",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "dialog-fail-open",
+        "message": "THE DIALOG BAN DID NOT COVER THE DIALOG PLUGIN. ask / confirm / message imported straight from @tauri-apps/plugin-dialog bypassed the fail-closed wrappers (Pivot's overwrite prompt, six clipboard prompts in useClipboard, the close prompt).",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The lint ban matched the window globals only.",
+      "repro": {
+        "description": "Import ask from @tauri-apps/plugin-dialog in an extension: lint:boundaries passes."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "dialogGuardConfigs bans those imports (named, aliased, namespace, re-export, dynamic with quoted or backtick specifier) outside core/lib/dialogs.ts; offenders moved to @api/dialogs; dialogGlobalsBan.test.ts."
+      }
+    },
+    {
+      "id": "BUG-0193",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "undo-completeness",
+        "message": "A PLAIN (LEVEL-1) PIVOT FILTER THAT GREW A PIVOT OVER USER CELLS OVERWROTE THEM WITH NO UNDO STEP, and the header dropdown's Cancel called undo_pivot_overwrite, which popped the TOP undo entry unconditionally: it discarded the user's previous, unrelated step, restored nothing, and left the cells overwritten. Undo-redo-undo of a pivot restore also lost the cells, and undoing a slicer delete whose clear grew a pivot left them overwritten.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Filters usually shrink a pivot; the overwrite prompt was tested with refresh, not with filters.",
+      "repro": {
+        "description": "Type X in a cell; filter a worksheet pivot so it grows over cell C; Cancel the prompt: C stays overwritten and X's undo step is gone."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "A level-1 apply or clear that overwrites records ONE pivot step carrying the cells and an overwrite token; undo_pivot_overwrite_core peeks and refuses unless the top entry carries the gesture's token, undoes exactly that step and drops its redo; the reconcile re-apply records nothing (reconcile flag); slicer and ribbon bridges ask once per gesture through @api/pivotOverwrite and a decline takes back exactly that gesture; tests ctrl_z_after_a_level_one_filter_that_overwrote_a_cell_restores_it, cancelling_a_level_one_overwrite_restores_the_cell_and_keeps_the_earlier_step, a_cancel_whose_step_is_not_on_top_refuses_and_pops_nothing, the_reconcile_re_apply_records_nothing_even_when_it_overwrites."
+      }
+    },
+    {
+      "id": "BUG-0194",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "dialog-input-honoured",
+        "message": "THE CLOSE PROMPT DISCARDED UNSAVED WORK ON X OR ESCAPE. 'Do you want to save changes?' had only Save and Don't Save, so dismissing the native box with the title-bar X or Escape came back as Don't Save and the window was destroyed without saving. BEFORE_CLOSE was also broadcast before the prompt, so a Cancel left the window open with every script, the macro recording and the animation driver torn down, and Save skipped every script's onBeforeSave veto.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every close test answered with a button.",
+      "repro": {
+        "description": "Type in a cell, close the window, press Escape on the prompt: the app closes and the edit is lost."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "askSaveDiscardCancelAsync (core/lib/dialogs.ts; mapping pinned to tauri-plugin-dialog 2.6.0 and rfd 0.16.0 sources): only an explicit Don't Save click discards; Layout sends BEFORE_CLOSE only once the window is really closing and runs the Before-Save guards while scripts are still mounted; layoutClosePrompt.test.tsx; live proof e2e/journeys/zy-close-prompt-cancel.spec.ts (Cancel button, X and Escape each keep the window and the dirty document)."
+      }
+    },
+    {
+      "id": "BUG-0195",
+      "status": "fixed",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "paint-hit-agreement",
+        "message": "ON A CANVAS, ESCAPE WITH A FLOATING-GRID CONTEXT MENU OPEN CLEARED THE OBJECT SELECTION AND LEFT THE MENU OPEN: the canvas's Escape binding runs in the dispatcher's window-capture listener and stopped the key before the menu's document listener.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Menus were closed by clicking away in tests.",
+      "repro": {
+        "description": "Canvas, select a floating grid, right-click it, press Escape: the menu stays, the selection is gone."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "frObjectSelection.ownsKey claims Escape while the floating-grid menu is open; frContextMenuCanvasEscape.test.tsx."
+      }
+    },
+    {
+      "id": "BUG-0196",
+      "status": "open",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "paint-hit-agreement",
+        "message": "ON A CANVAS, ESCAPE WITH A CHART, AXIS, CONTROL OR SLICER CONTEXT MENU OPEN deselects the object and leaves the menu open (same class as the fixed floating-grid case): none of those families claims Escape while its menu is open.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by analogy while fixing the floating-grid case; not run.",
+      "repro": {
+        "description": "Canvas, right-click a chart, press Escape."
+      },
+      "notes": "Fix per family: ownsKey('Escape') while its menu is open (FloatingRange/lib/frObjectSelection.ts is the worked example)."
+    },
+    {
+      "id": "BUG-0197",
+      "status": "open",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "design-query-filter",
+        "message": "CHARTS AND REPORTS SILENTLY DROP A DESIGN-QUERY INCLUSION FILTER. compileDesignQuery passes no filterUniqueValues, so Field = (\"a\") in a chart or report design query cannot be inverted and runs UNFILTERED with no warning.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Design-query tests use NOT IN or measures.",
+      "repro": {
+        "description": "Chart design query with Region = (\"East\"): the chart shows every region."
+      },
+      "notes": "CompileResult.unresolvedInclusions (extensions/_shared/dsl/pivotLayout/compiler.ts) now names these fields; whether it becomes an error or a warning is the owner's call."
+    },
+    {
+      "id": "BUG-0198",
+      "status": "open",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "report-filter-pages",
+        "message": "SHOW REPORT FILTER PAGES SKIPS A VALUE WHOSE CLEANED SHEET NAME COLLIDES with another value's page in the same run (' 'x and x' ' both become x; a/b and a_b; East and east), with no page and no error.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Filter values are usually distinct after cleaning.",
+      "repro": {
+        "description": "Report filter over values East and east: one page."
+      },
+      "notes": "Fix: unique_sheet_name suffixes, or refuse the command; needs the owner's call on Excel behaviour. pivot/commands.rs show_report_filter_pages_core."
+    },
+    {
+      "id": "BUG-0199",
+      "status": "open",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "keybinding-dead",
+        "message": "KEYBOARD LEFTOVERS: the FloatingRange refusals are bound to the default combos, so a user who remaps Copy away from Ctrl+C copies the hidden cell with the new key; Format Painter starts twice on Ctrl+Shift+C with the grid focused (registry binding plus its own listener); the shortcut capture box runs an already-bound combo instead of recording it; a stuck Core edit flag now also stands down Ctrl+Z / Ctrl+Y until a key reaches the grid container.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found while auditing keys that reach Core's hidden cell.",
+      "repro": {
+        "description": "Settings > Keyboard, remap Copy to Ctrl+Shift+Q; select a floating-grid cell on a worksheet; press Ctrl+Shift+Q."
+      },
+      "notes": "FloatingRange/lib/frKeyRouting.ts, BuiltIn/FormatPainter/index.ts, Settings/components/KeybindingsPage.tsx, src/api/keybindings.ts (isCellEditLive)."
+    },
+    {
+      "id": "BUG-0200",
+      "status": "open",
+      "discovered": "2026-09-27",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "canvas owner findings 2026-09-27 (fix rounds 1-4)"
+      },
+      "violation": {
+        "oracleId": "undo-completeness",
+        "message": "A SCRIPT BATCH CAN JOIN A GESTURE'S UNDO STEP: if a script calls beginBatch after a slicer click or ribbon filter has opened its step, the backend begin is a no-op and the script's writes join the gesture's step, so the gesture's decline (or a Ctrl+Z) takes the script's writes back too. Also: the ribbon backend records the selection as its own step and closes any open transaction; the FilterDropdown level-change and connections saves record an overwrite step but do not ask; a close-then-Save races async BEFORE_CLOSE work (a recording taken just before may not reach the file); a Save whose Save As picker is cancelled leaves the window open over torn-down scripts.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Needs overlapping gestures or scripts; found by review in fix round 5.",
+      "repro": {
+        "description": "Script: await delay(0) inside a slicer click's re-query, beginBatch, write A1; decline the overwrite prompt: A1 reverts."
+      },
+      "notes": "Needs backend transaction ownership (refuse a take-back of a step that absorbed someone else's begin) and an awaitable close-decided hook; app/src/api/pivotOverwrite.ts, ribbon_filter/commands.rs, shell/Layout.tsx, core/lib/file-api.ts."
+    },
+    {
+      "id": "BUG-0201",
+      "status": "fixed",
+      "discovered": "2026-09-28",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "journey regression sweep 2026-09-28"
+      },
+      "violation": {
+        "oracleId": "dirty-flag",
+        "message": "OPENING OR RELOADING A WORKBOOK WITH INDEX-ONLY CHART RANGES MARKED IT MODIFIED and added one 'Edit chart' undo step per chart: the load-time sheet-id migration (canvas M4, ceb52724) persisted its stamp through update_chart, an ordinary user edit; a create whose sheet cache was cold added a second undo step after 'Insert chart'.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Only documents with charts saved before M4 (or written by a raw save_chart) carry index-only ranges.",
+      "repro": {
+        "description": "e2e/journeys/dirty-flag.spec.ts PERSISTENCE: save, reopen, page.reload(): is_file_modified is true."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "update_chart takes sheetIdStamp (AfterLoad / AfterCreate); record_chart_sheet_id_stamp (chart_commands.rs) verifies the change adds sheetId members naming the sheet at that index and nothing else, under one lock; AfterLoad is deliberately_clean(LoadingFromDisk), AfterCreate dirties like the create; neither records undo; tests chart_commands::sheet_id_stamp_tests, chartStoreSheetIds.test.ts; live dirty-flag.spec.ts 6/6."
+      }
+    },
+    {
+      "id": "BUG-0202",
+      "status": "fixed",
+      "discovered": "2026-09-28",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "journey regression sweep 2026-09-28"
+      },
+      "violation": {
+        "oracleId": "cascade-announcement",
+        "message": "DELETING A SHEET THAT HOLDS A CHART LOGGED 'SourceSheetMissingError' AND SHOWED AN ERROR CARD: the sheet-delete announcement repaints charts before the chart store reloads, so a stale render of the deleted sheet's chart read a sheet that no longer existed (canvas M4 made chart reads sheet-id based).",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The render and the store reload race within ~130 ms; the error card flashes once.",
+      "repro": {
+        "description": "e2e/journeys/cascade-announcement-live.spec.ts:201 (console error during the sheet cascade)."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "A chart-store reload window (beginChartStoreReload / isChartStoreReloadPending, chartStore.ts); SHEET_DELETED requests the reload; a render failing inside the window, or for a chart object the store replaced, is dropped and the reload repaints; chartRenderReloadWindow.test.ts; live 2/2."
+      }
+    },
+    {
+      "id": "BUG-0203",
+      "status": "fixed",
+      "discovered": "2026-09-28",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "journey regression sweep 2026-09-28"
+      },
+      "violation": {
+        "oracleId": "model-validation",
+        "message": "A MODEL PIPELINE EDIT NEVER VALIDATED THE MODEL. set_transformations_inner (bi/model_editor.rs) installed steps without DataModel::validate, so a lookup into a DirectQuery table (the default for a new import) or a lookup cycle was accepted and the refresh failed later with 'unknown lookup table'; the deriveSchema and fromScript dry runs reported such a pipeline as clean.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The bi_model_transform doc comment promised revalidation; every sibling edit validates; the journey that would have shown it failed earlier on a spec mistake.",
+      "repro": {
+        "description": "e2e/journeys/model-transform.spec.ts Probe 1b: a lookup into DirectQuery 'customers' is accepted."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-28",
+        "description": "model_with_pipeline rebuilds and validates the whole model for the edit AND both dry runs (model_level_diagnostic puts the refusal on the step that causes it); Rust tests for the DirectQuery target, the cycle and both dry-run diagnostics; live model-transform.spec.ts 3/3 (the spec also reconnects the source after its reopen, as the restore contract requires)."
+      }
+    },
+    {
+      "id": "BUG-0204",
+      "status": "open",
+      "discovered": "2026-09-28",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "journey regression sweep 2026-09-28"
+      },
+      "violation": {
+        "oracleId": "chart-sheet-identity",
+        "message": "HYPOTHESIS, NOT REPRODUCED: if a sheet is added, deleted or moved within the ~300 ms between a load and the chart sheet-id stamp, the stamp is refused (it no longer names the sheet at that index), and the NEXT load stamps the stored old index against the new sheet list, which could point the chart at the wrong sheet.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Needs a structural sheet edit inside the stamp window right after an open.",
+      "repro": {
+        "description": "Open a workbook with index-only chart ranges and delete a sheet before the charts finish loading; save; reopen."
+      },
+      "notes": "app/extensions/Charts/lib/chartStore.ts (migrateSheetIds), app/src-tauri/src/chart_commands.rs (record_chart_sheet_id_stamp)."
+    },
+    {
+      "id": "BUG-0205",
+      "status": "open",
+      "discovered": "2026-09-28",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "journey regression sweep 2026-09-28"
+      },
+      "violation": {
+        "oracleId": "e2e-harness",
+        "message": "E2E CLEANUPS THAT CALL THE BACKEND'S new_file DIRECTLY LEAVE FRONTEND STORES STALE: the chart store reloads only on AFTER_OPEN / AFTER_NEW, which the app's own newFile emits and a raw invoke does not, so a chart from the previous spec keeps painting over the next spec's grid. floating-range.spec.ts's pixel probe also assumes nothing else is painted at (420,180) and does not reset first, so a leftover object fails it as 'the floating frame never painted'.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "dirty-flag.spec.ts's PERSISTENCE cleanup never ran before its line-556 failure was fixed.",
+      "repro": {
+        "description": "Run dirty-flag.spec.ts then floating-range.spec.ts with the old raw new_file cleanup."
+      },
+      "notes": "dirty-flag.spec.ts now cleans up in afterAll through the app's newFile; helpers/screenshots.ts resetToNewWorkbook still uses the raw call."
     }
   ]
 }

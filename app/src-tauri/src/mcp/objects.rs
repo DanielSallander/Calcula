@@ -1323,6 +1323,7 @@ pub fn delete_sheet(handle: &AppHandle, index: usize) -> Result<String, String> 
             .ok_or_else(|| format!("Sheet index {} out of range. Use list_sheets.", index))?
     };
     let result = crate::sheets::delete_sheet(
+        handle.clone(),
         handle.state::<AppState>(),
         handle.state::<crate::persistence::FileState>(),
         handle.state::<crate::pivot::PivotState>(),

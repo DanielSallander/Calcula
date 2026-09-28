@@ -614,6 +614,34 @@ fn only_mentions_it_in_a_comment() {
     );
 }
 
+/// Every function-start spelling ends the previous body and names its own (fix
+/// round 5, the review of round 4's B6): a second decider declared any way the
+/// crate declares functions, right after `apply_spill_decision`, is named.
+#[test]
+fn the_one_decision_detector_sees_every_function_start_spelling() {
+    // A LITERAL list, not the constant: a spelling dropped from the constant
+    // must fail here, not silently leave the loop.
+    for start in [
+        "fn ",
+        "pub fn ",
+        "pub(crate) fn ",
+        "pub(super) fn ",
+        "async fn ",
+        "pub async fn ",
+        "pub(crate) async fn ",
+        "pub(super) async fn ",
+    ] {
+        let src = format!(
+            "pub(crate) fn apply_spill_decision() {{\n    spill_ranges.insert((sheet, row, col), cells);\n}}\n\n{start}a_second_decider() {{\n    spill_ranges.insert((sheet, row, col), cells);\n}}\n"
+        );
+        assert_eq!(
+            functions_containing(&src, "spill_ranges.insert("),
+            vec!["apply_spill_decision".to_string(), "a_second_decider".to_string()],
+            "`{start}` is not read as the start of a function: a second decider hid inside the first"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Census plumbing
 // ---------------------------------------------------------------------------
@@ -641,13 +669,11 @@ fn functions_containing(text: &str, needle: &str) -> Vec<String> {
     let mut current: Option<(String, bool)> = None;
     for raw in text.lines() {
         let code = raw.split("//").next().unwrap_or("");
-        if raw.starts_with("fn ")
-            || raw.starts_with("pub fn ")
-            || raw.starts_with("pub(crate) fn ")
-            || raw.starts_with("pub(super) fn ")
-            || raw.starts_with("async fn ")
-            || raw.starts_with("pub async fn ")
-        {
+        // The crate's ONE list of function-start spellings: this walk kept its
+        // own and lacked both async `pub(..)` forms (fix round 5), so a second
+        // spill decider declared `pub(crate) async fn` right after
+        // `apply_spill_decision` was charged to it and the census passed.
+        if crate::formula_serialisation_tests::starts_a_function(raw) {
             if let Some((name, hit)) = current.take() {
                 if hit {
                     out.push(name);

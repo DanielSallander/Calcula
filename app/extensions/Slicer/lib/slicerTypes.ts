@@ -1,7 +1,11 @@
 //! FILENAME: app/extensions/Slicer/lib/slicerTypes.ts
 // PURPOSE: TypeScript interfaces mirroring Rust slicer types.
 
-export type SlicerSourceType = "table" | "pivot";
+/** "biConnection" = a MODEL slicer: items come straight from a Calcula model
+ * connection (cacheSourceId = the connection id, fieldName = "Table.Column",
+ * connectedSources = [{ sourceType: "biConnection", sourceId: connectionId }],
+ * meaning every BI pivot of that connection on the slicer's own sheet). */
+export type SlicerSourceType = "table" | "pivot" | "biConnection";
 
 /** A typed reference to a pivot or table that a slicer filters. */
 export interface SlicerConnection {
@@ -49,6 +53,10 @@ export interface Slicer {
    * filter survives a measure's bare CLEAR/RESET/CLEAREXCEPT and is stripped
    * only by an explicit `CLEAR(…, LEVEL n)` at or above its level. */
   filterLevel: number;
+  /** MODEL slicers on a package connection only: the stable package
+   * data-source id the slicer re-binds by after reload / re-pull. Stamped by
+   * the backend; absent otherwise. */
+  dataSourceId?: string | null;
 }
 
 export interface SlicerItem {
@@ -72,6 +80,8 @@ export interface CreateSlicerParams {
   connectedSources: SlicerConnection[];
   columns?: number;
   stylePreset?: string;
+  /** Initial filter level (1 = ordinary, 2-9 = pinned); defaults to 1. */
+  filterLevel?: number;
 }
 
 export interface UpdateSlicerParams {

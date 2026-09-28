@@ -15,6 +15,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { css } from "@emotion/css";
 import {
   getAllKeybindings,
+  isListedKeybinding,
   getCategories,
   getEffectiveCombo,
   hasUserOverride,
@@ -93,8 +94,9 @@ function KeybindingRow(props: KeybindingRowProps): React.ReactElement {
       const formatted = formatCombo(combo);
       setCapturedCombo(formatted);
 
-      // Check for conflicts
-      const conflictList = findConflicts(formatted, binding.id);
+      // Check for conflicts (a binding the list does not show is not one the
+      // user can be told to resolve here -- see KeyBinding.listed)
+      const conflictList = findConflicts(formatted, binding.id).filter(isListedKeybinding);
       setConflicts(conflictList);
     },
     [binding.id, onCancelEdit]
@@ -254,8 +256,12 @@ export function KeybindingsPage(): React.ReactElement {
     return unsub;
   }, []);
 
-  const allBindings = getAllKeybindings();
+  // Only the bindings the list is meant to show: a REFUSAL binding (for one,
+  // FloatingRange's ~40 "not while my range owns the selection" keys) declares
+  // `listed: false` and is left out, rows and conflict warnings alike.
+  const allBindings = getAllKeybindings().filter(isListedKeybinding);
   const categories = getCategories();
+  const addConflicts = addCombo ? findConflicts(addCombo).filter(isListedKeybinding) : [];
 
   // Filter
   const normalizedSearch = searchTerm.toLowerCase().trim();
@@ -425,8 +431,8 @@ export function KeybindingsPage(): React.ReactElement {
           h("option", { value: "editing" }, "When editing"),
         ),
       ),
-      addCombo && findConflicts(addCombo).length > 0 && h("div", { style: pageStyles.addFormConflict },
-        "Warning: conflicts with ", findConflicts(addCombo).map((c) => c.label).join(", "),
+      addConflicts.length > 0 && h("div", { style: pageStyles.addFormConflict },
+        "Warning: conflicts with ", addConflicts.map((c) => c.label).join(", "),
       ),
       h("div", { style: pageStyles.addFormActions },
         h(Button, {

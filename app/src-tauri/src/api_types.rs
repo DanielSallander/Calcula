@@ -2438,6 +2438,27 @@ pub struct ChartEntry {
     pub spec_json: String,
 }
 
+/// Which step of the chart store an `update_chart` SHEET-ID STAMP completes.
+///
+/// A stamp carries nothing but source-sheet ids: the chart store names each
+/// data range's sheet by id as well as by index (chartStore.ts,
+/// `migrateSheetIds`), and the backend verifies the write is exactly that
+/// before recording it (chart_commands.rs, `record_chart_sheet_id_stamp`).
+/// The origin decides only what the stamp does to the dirty flag -- never
+/// what it may change, which the verification fixes for both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChartSheetIdStamp {
+    /// The store just LOADED the chart (open, reload, a sheet-list reload):
+    /// the stamp restates what the loaded index already says, and the next
+    /// load re-derives it from the same file. Recorded clean.
+    AfterLoad,
+    /// The store just CREATED the chart while its sheet list was cold, so the
+    /// create's own write went out by index. The stamp finishes that create
+    /// and dirties like it -- a no-op on a document the create already dirtied.
+    AfterCreate,
+}
+
 // ============================================================================
 // Floating Control Geometry (batch move/resize)
 // ============================================================================

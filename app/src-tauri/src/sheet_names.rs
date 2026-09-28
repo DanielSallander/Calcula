@@ -117,6 +117,10 @@ pub fn ensure_sheet_name_is_free(
 /// anything at all. Illegal characters become `_`, the result is trimmed and cut
 /// to the length limit, and a name that coerces away to nothing becomes
 /// `Sheet`.
+///
+/// THE RESULT IS ALWAYS A NAME `validate_sheet_name` ACCEPTS, unchanged -- the
+/// promise every caller builds on (Show Report Filter Pages plans its pages
+/// out of these names and the add path then validates them again).
 pub fn sanitize_sheet_name(raw: &str) -> String {
     let replaced: String = raw
         .chars()
@@ -125,7 +129,20 @@ pub fn sanitize_sheet_name(raw: &str) -> String {
     // Truncate FIRST, then trim: cutting at 31 characters can leave a trailing
     // space or apostrophe that the trim below has to remove.
     let truncated: String = replaced.chars().take(MAX_SHEET_NAME_CHARS).collect();
-    let trimmed = truncated.trim().trim_matches('\'').trim();
+    // Trimmed UNTIL NOTHING MOVES. Whitespace and apostrophes hide each other:
+    // one pass of whitespace, apostrophes, whitespace turned `' 'x` into `'x`
+    // and `x' '` into `x'` -- names entry refuses for their end apostrophe --
+    // so Show Report Filter Pages planned a page the add path then refused,
+    // and the value got no page and no error (fix round 5). Every pass that
+    // does not stop removes at least one character, so this ends.
+    let mut trimmed: &str = &truncated;
+    loop {
+        let next = trimmed.trim().trim_matches('\'');
+        if next.len() == trimmed.len() {
+            break;
+        }
+        trimmed = next;
+    }
     if trimmed.is_empty() {
         return "Sheet".to_string();
     }
@@ -476,6 +493,54 @@ mod tests {
                 cleaned
             );
         }
+    }
+
+    /// EVERY mix of spaces, tabs, apostrophes, an illegal character and a
+    /// letter, up to six characters long, alone and at both ends of a name
+    /// long enough to be truncated: the cleaned name is one entry accepts AS IT
+    /// IS, and cleaning it again changes nothing. One pass of trimming turned
+    /// `' 'x` into `'x` (fix round 5), a name entry refuses; the fixed list
+    /// above never tried a space BETWEEN two apostrophes.
+    #[test]
+    fn sanitizing_trims_until_no_space_or_apostrophe_is_left_at_either_end() {
+        assert_eq!(sanitize_sheet_name("' 'x"), "x");
+        assert_eq!(sanitize_sheet_name("x' '"), "x");
+        assert_eq!(sanitize_sheet_name(" ' ' History ' "), "History_");
+        assert_eq!(sanitize_sheet_name("' ' '"), "Sheet");
+
+        const ALPHABET: [char; 5] = [' ', '\'', '\t', ':', 'x'];
+        let mut words: Vec<String> = vec![String::new()];
+        let mut frontier: Vec<String> = vec![String::new()];
+        for _ in 0..6 {
+            let mut next = Vec::with_capacity(frontier.len() * ALPHABET.len());
+            for word in &frontier {
+                for c in ALPHABET {
+                    next.push(format!("{word}{c}"));
+                }
+            }
+            words.extend(next.iter().cloned());
+            frontier = next;
+        }
+        assert_eq!(words.len(), 19_531, "fixture: every word of up to six characters");
+        let pad = "a".repeat(27);
+        let mut checked = 0usize;
+        for word in &words {
+            for raw in [word.clone(), format!("{pad}{word}"), format!("{word}{pad}")] {
+                let cleaned = sanitize_sheet_name(&raw);
+                assert_eq!(
+                    validate_sheet_name(&cleaned).as_deref(),
+                    Ok(cleaned.as_str()),
+                    "sanitizing {raw:?} produced {cleaned:?}, which entry refuses or rewrites"
+                );
+                assert_eq!(
+                    sanitize_sheet_name(&cleaned),
+                    cleaned,
+                    "sanitizing {raw:?} is not finished: cleaning {cleaned:?} again changes it"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 3 * 19_531);
     }
 
     #[test]

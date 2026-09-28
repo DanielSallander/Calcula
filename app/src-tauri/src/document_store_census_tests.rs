@@ -848,8 +848,9 @@ fn every_store_the_save_path_reads_is_reset_when_the_document_is_replaced() {
 
     // NON-VACUITY. The census must be finding the members it was built for —
     // the three §2w named, plus the two the enumeration itself turned up, plus
-    // one the PUBLISH root contributes and the save root does not
-    // (`protected_regions`, read to build the package's excluded regions).
+    // `protected_regions` (read by the publish root to build the package's
+    // excluded regions, and by the save root for each BI pivot's output
+    // extent).
     for known in [
         "PivotState.pivot_tables",
         "RibbonFilterState.filters",
@@ -890,14 +891,18 @@ fn every_store_the_save_path_reads_is_reset_when_the_document_is_replaced() {
 /// project: the `.calp` carrier is built from the save path's own collectors, so
 /// its sources are nearly the same set, and the ones that differ were already
 /// reset. MEASURED when this was added, rather than assumed: the save root
-/// reaches **70** stores, both roots together reach **71**, and the single
-/// publish-only store is `AppState.protected_regions` (read to compute the
+/// reached **70** stores, both roots together **71**, and the single
+/// publish-only store was `AppState.protected_regions` (read to compute the
 /// package's excluded regions), which `reset_document_scoped_stores` already
-/// clears. So the second root demanded nothing on the day it was added — which
-/// is exactly why it must be added on a day when it demands nothing. Asserting
-/// it keeps the claim honest: the day publish starts reading a store the save
-/// path does not, this test says so by name and the census above demands the
-/// decision.
+/// clears. Since 2026-09-27 the SAVE root reads it too -- each BI pivot's output
+/// extent (`SavedBiPivotMetadata::output_extent`) comes from its region -- so
+/// today the publish root adds NO store of its own. Asserting that keeps the
+/// claim honest: the day publish starts reading a store the save path does
+/// not, this test says so by name and the census above demands the decision.
+///
+/// The non-vacuity half therefore no longer needs a publish-ONLY store: it
+/// checks the publish root, walked ALONE, reaches the package carrier's own
+/// sources -- a root that resolved to nothing would fail here, not pass.
 #[test]
 fn the_two_projection_roots_are_both_real_and_the_publish_root_adds_no_demands() {
     let sources = read_crate_sources();
@@ -921,17 +926,23 @@ fn the_two_projection_roots_are_both_real_and_the_publish_root_adds_no_demands()
     let both = store_accesses(&call_closure(&fns, SAVE_ROOTS));
     let resets = store_accesses(&call_closure(&fns, RESET_FUNCTIONS));
 
-    // The publish root really does reach stores of its own — otherwise this
-    // test would be asserting "nothing changed" about a root that contributes
-    // nothing, which is a vacuous pass dressed as a measurement.
+    // The publish root, walked ALONE, really does reach the package carrier's
+    // sources — otherwise this test would be asserting "nothing new" about a
+    // root that contributes nothing, which is a vacuous pass dressed as a
+    // measurement. (It used to demand a publish-ONLY store; the one it had,
+    // `protected_regions`, is now read by the save path too.)
+    let publish_alone = store_accesses(&call_closure(&fns, &["assemble_publish_workbook"]));
+    for known in ["PivotState.pivot_tables", "AppState.protected_regions"] {
+        assert!(
+            publish_alone.contains_key(known),
+            "the publish root alone does not reach `{}`. Either \
+             `assemble_publish_workbook` no longer builds the package carrier, or \
+             the walk is not reaching it — a root that adds nothing cannot fail \
+             for anything",
+            known
+        );
+    }
     let publish_only: Vec<&String> = both.keys().filter(|k| !save_only.contains_key(*k)).collect();
-    assert!(
-        !publish_only.is_empty(),
-        "the publish root contributed no store the save path does not already \
-         read. Either `assemble_publish_workbook` no longer builds the package \
-         carrier, or the walk is not reaching it — a root that adds nothing \
-         cannot fail for anything"
-    );
 
     let publish_only_unreset: Vec<&str> = publish_only
         .iter()
@@ -1053,7 +1064,11 @@ const NOT_DOCUMENT_REPLACING: &[(&str, &str)] = &[
     ("apply_pivot_filter", "sets one pivot's filter"),
     ("clear_pivot_filter", "clears one pivot's filter"),
     ("get_slicer_items", "reads a slicer's item list; holds BiState only to fetch the full \
-      value domain of a PINNED slicer from the model (the pivot cache is pin-filtered)"),
+      value domain of a PINNED slicer or a MODEL slicer from the model (the pivot cache is pin-filtered)"),
+    ("delete_slicer", "deletes one slicer and, owner decision 3, clears the filter it set on its \
+      pivots (a pinned filter re-queries the model, hence BiState); the document stays"),
+    ("set_slicer_item_selected", "toggles one slicer item; holds BiState only to read a MODEL \
+      slicer's full item list from its model"),
     ("drill_through_to_sheet", "adds a sheet of detail rows"),
     ("create_pivot_from_bi_model", "adds a pivot"),
     // -- BI / report / script surfaces ----------------------------------------
@@ -2509,12 +2524,16 @@ mod xlsx_loss_census {
 ///
 /// THE EXEMPTION LIST HAS EXACTLY ONE ENTRY, and it is none of the three. All
 /// three offenders were PROMOTED rather than excused. The single exemption is
-/// `protected_regions`, and it earns it on a fact rather than an opinion: it never
-/// reaches a `.cala` save at all (`rg protected_regions src/persistence.rs`
-/// returns one hit, the reset), so no change to it can make a saved document
-/// stale, and its own declaration says the extensions that own it — pivot tables,
-/// charts — re-register it every session. `DocumentEffect::mutates` would be a
-/// false statement about it.
+/// `protected_regions`, and it earns it on a fact rather than an opinion. Until
+/// 2026-09-27 it never reached a `.cala` save at all. Since then the save reads
+/// ONE thing from it -- each BI pivot's output extent -- and that is DERIVED
+/// from the pivot's written cells: every write that moves a pivot's region is
+/// the same command's grid write of that pivot's output, which already holds
+/// `DocumentEffect::mutates` (and the load path re-registers it clean). So no
+/// region change can make a saved document stale on its own, and the
+/// extensions that own it -- pivot tables, charts -- re-register it every
+/// session. `DocumentEffect::mutates` on the region itself would be a false
+/// statement about it.
 ///
 /// Before adding a second entry, read `spill_restore.rs`. `spill_ranges` looked
 /// exactly like a derived cache that needed no gate, and that module header
@@ -2596,7 +2615,7 @@ fn every_store_the_save_path_reads_is_gated_by_a_document_effect() {
     // comment above states the bar an entry has to clear.
     const PUBLISH_ONLY_DERIVED: &[(&str, &str)] = &[(
         "protected_regions",
-        "publish-only and never written to a .cala (persistence.rs touches it once,          to reset it), and re-registered every session by the extensions that own          it (pivots, charts). A change to it cannot make a SAVED document stale,          which is the only thing is_modified claims.",
+        "derived: the save reads it only for a BI pivot's output extent, which          moves exactly when that pivot's cells are rewritten under the same          command's DocumentEffect::mutates; re-registered every session by the          extensions that own it (pivots, charts). A change to it cannot make a          SAVED document stale on its own, which is the only thing is_modified claims.",
     )];
 
     let mut ungated: Vec<String> = Vec::new();

@@ -58,7 +58,7 @@ import {
   setSelection as setSelectionAction,
   clearFormulaReferences,
 } from "../../state/gridActions";
-import { getExternalFormulaTarget } from "../../lib/formulaEditTarget";
+import { getExternalFormulaTarget, isExternalEditLive } from "../../lib/formulaEditTarget";
 import { applyRowsHidden, applyColsHidden, refreshUserHidden } from "../../lib/hiddenRowsCols";
 import { primeSheetSwitch } from "../../lib/sheetSwitchPrefetch";
 import { cellEvents, cellToChange } from "../../lib/cellEvents";
@@ -954,7 +954,18 @@ export function useSpreadsheetSelection({
   // command registry rather than the keyboard can tell success from failure.
   // Ctrl+Z itself ignores it; the fused app CLI does not, and a `void` return
   // is what let its `undo` verb print "Undone." after a refusal.
+  //
+  // NOT WHILE AN EXTERNAL EDIT IS LIVE (a floating grid's cell edit, hosted
+  // by the formula bar or parked on another sheet): Excel's rule that Undo is
+  // unavailable in edit mode. The keyboard's Ctrl+Z already stands down then
+  // (api/keybindings.ts), but these handlers are also the COMMAND, which the
+  // ribbon and Quick Access Toolbar buttons, Edit > Undo and the CLI reach:
+  // they undid a workbook action under the open edit, and an undo that
+  // followed its sheet ended a parked edit through `sheet:beforeSwitch`,
+  // storing the half-typed formula as text. Refused silently, as a disabled
+  // command is; `undefined` is the refusal the CLI already reports.
   const handleUndo = useCallback(async (): Promise<UndoResult | undefined> => {
+    if (isExternalEditLive()) return undefined;
     console.log("[useSpreadsheetSelection] Undo requested");
     try {
       const result = await undoApi();
@@ -968,8 +979,10 @@ export function useSpreadsheetSelection({
   }, [applyRestoreToTheView]);
 
   // Handle Redo (Ctrl+Y or Ctrl+Shift+Z) — returns its result for the same
-  // reason `handleUndo` does.
+  // reason `handleUndo` does, and stands down during a live external edit for
+  // the reason it does.
   const handleRedo = useCallback(async (): Promise<UndoResult | undefined> => {
+    if (isExternalEditLive()) return undefined;
     console.log("[useSpreadsheetSelection] Redo requested");
     try {
       const result = await redoApi();
@@ -1161,7 +1174,15 @@ export function useSpreadsheetSelection({
       const onEarlyMouseUp = () => { mouseUpDuringAsyncCheck = true; };
       window.addEventListener("mouseup", onEarlyMouseUp, { once: true });
 
-      if (clickedCell && !isEditing) {
+      // A LIVE EXTERNAL SESSION counts as editing here. A floating grid's cell
+      // edit hosted by the formula bar (or parked on another sheet) opens no
+      // Core edit, so `isEditing` alone let a checkbox cell TOGGLE (a write and
+      // an undo entry) or a button cell run its macro in place of the pick or
+      // the commit -- and while parked the interceptors answered from the HOST
+      // sheet's stale indexes. The click falls through to baseHandleMouseDown,
+      // which picks for an expecting session and otherwise commits it
+      // (commit-before-select) before selecting.
+      if (clickedCell && !isEditing && !isExternalEditLive()) {
         // Let extensions intercept the click (e.g., pivot filter dropdowns)
         // Skip when editing so formula cell references work normally
         const intercepted = await checkCellClickInterceptors(
@@ -1710,6 +1731,12 @@ export function useSpreadsheetSelection({
    */
   const handleDoubleClickEvent = useCallback(
     async (event: React.MouseEvent<HTMLDivElement>) => {
+      // Never a second, CORE edit beside a live external session (a floating
+      // grid's cell edit parked on this sheet while it picks a reference): the
+      // first click of the pair picks the reference, the second is a plain
+      // selection click, and the dblclick used to open the grid's editor on the
+      // cell that was just picked.
+      if (isExternalEditLive()) return;
       const cell = getDoubleClickCell(event);
       if (cell) {
         // Check if any extension intercepts the double-click (e.g., pivot expand/collapse)

@@ -23,7 +23,12 @@ import { alertAsync } from "@api/dialogs";
 // resolver: the store is imported almost everywhere, and the resolver pulls the
 // whole `@api` facade and the grid state with it.
 import { loadSheetIdMap, peekSheetIdForIndex } from "./sheetIdMap";
-import { specHasUnstampedRangeRef, stampSpecSheetIds, type SheetIdForIndex } from "./chartSheetRefs";
+import {
+  specHasUnstampedRangeRef,
+  stampSpecSheetIds,
+  stampStoredChartJson,
+  type SheetIdForIndex,
+} from "./chartSheetRefs";
 
 // ============================================================================
 // Backend Types
@@ -35,6 +40,14 @@ export interface ChartEntry {
   sheetIndex: number;
   specJson: string;
 }
+
+/**
+ * Matches Rust ChartSheetIdStamp (api_types.rs): which step of this store an
+ * `update_chart` sheet-id stamp finishes. `afterLoad` is recorded clean (the
+ * stamp restates what the loaded index says); `afterCreate` dirties like the
+ * create it completes. Neither adds an undo step.
+ */
+export type ChartSheetIdStamp = "afterLoad" | "afterCreate";
 
 // ============================================================================
 // Store State
@@ -476,9 +489,23 @@ const dirtyChartIds = new Set<string>();
  * carries nothing the user authored -- the stamp names the same sheet the index
  * already names -- so a refusal (a protected sheet refuses every chart write)
  * is logged and NOT put in front of the user as lost work. Any real edit to the
- * chart before the flush removes it from this set.
+ * chart before the flush removes it from this map. The value is the step the
+ * stamp finishes, which the backend needs to decide the dirty flag.
  */
-const stampOnlyChartIds = new Set<string>();
+const stampOnlyCharts = new Map<string, ChartSheetIdStamp>();
+
+/**
+ * For a load-time stamp: the entry AS THE BACKEND STORES IT, with the stamps
+ * applied (`stampStoredChartJson`), computed from the same sheet list as the
+ * in-memory stamp. A stamp-only flush sends this, flagged `sheetIdStamp`, and
+ * the backend records it without an undo step -- and, after a load, without
+ * dirtying the document -- once it has verified the write adds sheet ids and
+ * nothing else. The normalized definition
+ * would not pass that check (a bare spec comes back wrapped, missing axes come
+ * back filled in), and through the ordinary update the stamp made every
+ * workbook holding such a chart open DIRTY. Any real edit removes the entry.
+ */
+const pendingStampEntries = new Map<string, ChartEntry>();
 
 /** Timer handle for the debounced save. */
 let saveTimer: number | null = null;
@@ -487,11 +514,12 @@ let saveTimer: number | null = null;
  * Mark a chart as dirty and schedule a debounced persist.
  * Multiple calls within 300ms are batched into a single flush.
  */
-function scheduleSave(chartId: string, reason: "edit" | "sheetIdStamp" = "edit"): void {
-  if (reason === "sheetIdStamp") {
-    if (!dirtyChartIds.has(chartId)) stampOnlyChartIds.add(chartId);
+function scheduleSave(chartId: string, reason: "edit" | ChartSheetIdStamp = "edit"): void {
+  if (reason !== "edit") {
+    if (!dirtyChartIds.has(chartId)) stampOnlyCharts.set(chartId, reason);
   } else {
-    stampOnlyChartIds.delete(chartId);
+    stampOnlyCharts.delete(chartId);
+    pendingStampEntries.delete(chartId);
   }
   dirtyChartIds.add(chartId);
   if (saveTimer !== null) clearTimeout(saveTimer);
@@ -545,13 +573,19 @@ function runFlush(report: boolean): Promise<ChartPersistFailure[]> {
  */
 async function flushDirtyCharts(report = true): Promise<ChartPersistFailure[]> {
   const ids = Array.from(dirtyChartIds);
-  const stampOnly = new Set(ids.filter((id) => stampOnlyChartIds.has(id)));
-  for (const id of ids) stampOnlyChartIds.delete(id);
+  const stampOnly = new Map<string, ChartSheetIdStamp>();
+  for (const id of ids) {
+    const origin = stampOnlyCharts.get(id);
+    if (origin !== undefined) stampOnly.set(id, origin);
+    stampOnlyCharts.delete(id);
+  }
   dirtyChartIds.clear();
   // The timer is the CALLER's to clear (a serialised flush can start after a
   // newer save was scheduled, and must not forget that newer timer).
   const failures: ChartPersistFailure[] = [];
   for (const id of ids) {
+    const storedStamp = pendingStampEntries.get(id);
+    pendingStampEntries.delete(id);
     const chart = getChartById(id);
     if (!chart) continue;
     // Every write carries the source sheet's id where the cache can supply it,
@@ -560,19 +594,33 @@ async function flushDirtyCharts(report = true): Promise<ChartPersistFailure[]> {
     // NEVER the previewed spec: a save scheduled by an unrelated edit must not
     // carry a hover preview to disk (see `chartAsPersisted`).
     const persistable = chartAsPersisted(chart);
-    try {
-      await chartsBackend.invoke("update_chart", { entry: toEntry(persistable) });
-      recordPersisted(persistable);
-    } catch (error) {
-      if (stampOnly.has(id)) {
+    const stampOrigin = stampOnly.get(id);
+    if (stampOrigin !== undefined) {
+      // A STAMP, sent as one: the stored record plus its sheet ids (or, for a
+      // create whose sheet list was cold, the entry the create wrote plus the
+      // stamp), with the step it finishes. The backend verifies that it is a
+      // stamp and records it with no undo step -- clean after a load, dirty
+      // after a create (chart_commands.rs, `record_chart_sheet_id_stamp`).
+      try {
+        await chartsBackend.invoke("update_chart", {
+          entry: storedStamp ?? toEntry(persistable),
+          sheetIdStamp: stampOrigin,
+        });
+        recordPersisted(persistable);
+      } catch (error) {
         // Nothing the user did was refused: the stored chart still resolves
         // its data by index, and the next load tries the stamp again.
         console.warn(
           `[Charts] Could not record the source sheet id for chart "${chart.name}" (${id}); ` +
             `it keeps resolving its data by sheet index: ${describeBackendError(error)}`,
         );
-        continue;
       }
+      continue;
+    }
+    try {
+      await chartsBackend.invoke("update_chart", { entry: toEntry(persistable) });
+      recordPersisted(persistable);
+    } catch (error) {
       // Describe the loss BEFORE the rollback, while both versions still exist.
       const snapshot = persistedSnapshots.get(id);
       // Also the persistable shape: a preview is not a lost EDIT, and naming it
@@ -665,8 +713,10 @@ export async function loadChartsFromBackend(): Promise<void> {
   // otherwise survive as a restore token aimed at a chart id from another
   // workbook (the document-scoped-state lesson).
   activePreview = null;
+  let loadedEntries: ChartEntry[] = [];
   try {
     const entries = await chartsBackend.invoke<ChartEntry[]>("get_charts");
+    loadedEntries = entries;
     charts = entries.map(fromEntry);
     // Everything that just came OFF the backend is, by definition, persisted —
     // this is the rollback target for the first refused write of the session.
@@ -719,16 +769,21 @@ export async function loadChartsFromBackend(): Promise<void> {
     nextChartNumber = 1;
     return;
   }
-  // AFTER the snapshots are recorded: they are what the backend holds, and the
-  // stamp is a change to be persisted like any other.
-  await migrateSheetIds(charts);
+  // AFTER the snapshots are recorded: they are what the backend holds. The
+  // stamp is persisted AS a stamp (see `pendingStampEntries`).
+  await migrateSheetIds(charts, loadedEntries, "afterLoad");
 }
 
 /**
  * Load-time migration: stamp the source sheet's id on every DataRangeRef a
  * chart carries without one (spec.data, layers[].data, lookup `from`, concat
  * children -- see chartSheetRefs.ts), from ONE sheet-list read, and persist the
- * stamped charts through the ordinary debounced update path.
+ * stamps through the debounced update path AS STAMPS: the stored record plus
+ * its sheet ids, flagged `sheetIdStamp` with `origin`, which the backend
+ * records without an undo step. After a load (`afterLoad`) that is also
+ * without dirtying the document -- loading a workbook is not editing it;
+ * after a create with a cold sheet list (`afterCreate`) it dirties like the
+ * create it finishes.
  *
  * The id comes from the ref's own `sheetIndex` at load -- the only thing a
  * ref written before ids existed says about its sheet. A ref whose index no
@@ -736,7 +791,11 @@ export async function loadChartsFromBackend(): Promise<void> {
  * failed sheet-list read leaves every chart as it was: an unstamped ref still
  * resolves by index, exactly as before.
  */
-async function migrateSheetIds(loaded: readonly ChartDefinition[]): Promise<void> {
+async function migrateSheetIds(
+  loaded: readonly ChartDefinition[],
+  entries: readonly ChartEntry[],
+  origin: ChartSheetIdStamp,
+): Promise<void> {
   const needing = loaded.filter((c) => specHasUnstampedRangeRef(c.spec));
   if (needing.length === 0) return;
   let idForIndex: SheetIdForIndex;
@@ -754,7 +813,12 @@ async function migrateSheetIds(loaded: readonly ChartDefinition[]): Promise<void
     const stamped = stampSpecSheetIds(chart.spec, idForIndex);
     if (stamped === chart.spec) continue;
     chart.spec = stamped;
-    scheduleSave(chart.chartId, "sheetIdStamp");
+    const stored = entries.find((e) => e.id === chart.chartId);
+    const storedJson = stored ? stampStoredChartJson(stored.specJson, idForIndex) : null;
+    if (stored && storedJson !== null) {
+      pendingStampEntries.set(chart.chartId, { id: stored.id, sheetIndex: stored.sheetIndex, specJson: storedJson });
+    }
+    scheduleSave(chart.chartId, origin);
   }
 }
 
@@ -792,7 +856,8 @@ export async function reloadChartsAfterSheetListChange(): Promise<void> {
         const stored = storedPlacement.get(id);
         if (!chart || stored === undefined) {
           dirtyChartIds.delete(id);
-          stampOnlyChartIds.delete(id);
+          stampOnlyCharts.delete(id);
+          pendingStampEntries.delete(id);
           continue;
         }
         const snapshot = persistedSnapshots.get(id);
@@ -875,15 +940,19 @@ async function persistNewChart(
   chart: ChartDefinition,
   operation: "create" | "restore",
 ): Promise<void> {
+  // The record exactly as written: a later stamp is verified against it.
+  const written = toEntry(chart);
   try {
-    await chartsBackend.invoke("save_chart", { entry: toEntry(chart) });
+    await chartsBackend.invoke("save_chart", { entry: written });
     recordPersisted(chart);
     // The create could not stamp every ref from the cache (the sheet list was
     // not to hand). The save above is NOT delayed for it -- a create followed
     // at once by a delete must reach the backend in that order -- so the stamp
-    // follows as an ordinary debounced update.
+    // follows as a debounced STAMP of the record just written, marked as
+    // finishing this create: it dirties like the create (nothing is being
+    // loaded) and adds no step behind "Insert chart".
     if (operation === "create" && specHasUnstampedRangeRef(chart.spec)) {
-      void migrateSheetIds([chart]);
+      void migrateSheetIds([chart], [written], "afterCreate");
     }
   } catch (error) {
     const chartName = chart.name;
@@ -1160,6 +1229,49 @@ export function getActiveSheetIndex(): number {
   return activeSheetIndex;
 }
 
+// ============================================================================
+// Reload window -- a render that raced a store reload is not the store's answer
+// ============================================================================
+
+/**
+ * How many requested reloads of this store have not finished yet (each one a
+ * coalesced burst -- see `requestChartsReload` in the extension's index).
+ *
+ * WHY THE RENDERER ASKS. Between the backend changing the chart collection (a
+ * sheet deleted together with its charts, a document replaced) and this store
+ * re-reading it, the store still holds the OLD charts at their OLD sheets, and
+ * anything that invalidates and repaints inside that window renders one of
+ * them -- the one announcement that deletes a sheet also fans out to table
+ * definitions, pivots and slicers, and each of those repaints. That render's
+ * data read then answers for a workbook that no longer has the chart. Since a
+ * range is pinned to its sheet by id (canvas sheets, M4), a chart whose OWN
+ * sheet was just deleted fails with "the chart's source sheet no longer
+ * exists", and it was reported as a broken chart -- console error, error card --
+ * for the few frames until the reload dropped it. The reload repaints every
+ * chart when it lands, so a render that FAILS inside the window is dropped
+ * quietly and the fresh one reports (chartRenderer.ts, renderChartAsync).
+ */
+let pendingReloads = 0;
+
+/**
+ * Record that a reload of this store has been requested. Returns the callback
+ * that marks it finished; calling that more than once is harmless.
+ */
+export function beginChartStoreReload(): () => void {
+  pendingReloads++;
+  let finished = false;
+  return () => {
+    if (finished) return;
+    finished = true;
+    pendingReloads = Math.max(0, pendingReloads - 1);
+  };
+}
+
+/** True while a requested reload of this store has not finished. */
+export function isChartStoreReloadPending(): boolean {
+  return pendingReloads > 0;
+}
+
 /**
  * Reset the entire chart store (used during extension deactivation).
  */
@@ -1170,7 +1282,8 @@ export function resetChartStore(): void {
     saveTimer = null;
   }
   dirtyChartIds.clear();
-  stampOnlyChartIds.clear();
+  stampOnlyCharts.clear();
+  pendingStampEntries.clear();
   flushInFlight = Promise.resolve();
   // The store is going away; there is nothing left to restore a preview onto.
   activePreview = null;
@@ -1178,6 +1291,7 @@ export function resetChartStore(): void {
   persistedSnapshots.clear();
   nextChartNumber = 1;
   activeSheetIndex = 0;
+  pendingReloads = 0;
   removeGridRegionsByType("chart");
 }
 

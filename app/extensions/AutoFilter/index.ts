@@ -14,6 +14,7 @@ import {
   type OverlayRegistration,
   isKeyClaimed,
 } from "@api";
+import { isEditKeystroke } from "@api/editing";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { renderFilterChevrons, hitTestFilterChevron, isClickOnChevronButton, getFilterChevronCursor, getFilterChevronCanvas, BUTTON_SIZE, BUTTON_MARGIN } from "./rendering/filterChevronRenderer";
 import {
@@ -50,7 +51,8 @@ const cleanupFns: (() => void)[] = [];
 // Keyboard shortcut handler
 // ============================================================================
 
-function handleKeyDown(e: KeyboardEvent): void {
+/** The window-capture Ctrl+Shift+L listener (exported for tests). */
+export function handleKeyDown(e: KeyboardEvent): void {
   // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
   // field, a shape's declared hit rectangle -- is not this extension's.
   // This handler had no focus guard at all, and a longer tag list would only
@@ -60,6 +62,12 @@ function handleKeyDown(e: KeyboardEvent): void {
   if (isKeyClaimed(e)) return;
   // Ctrl+Shift+L = Toggle Filter
   if (e.ctrlKey && e.shiftKey && e.key === "L") {
+    // Not while a cell edit owns the keyboard: Core's in-cell editor, the
+    // formula bar, any text field, or a floating grid's live cell edit (whose
+    // keyboard can sit on the grid container while it picks a reference).
+    // Excel ignores this key in edit mode, and here it acted on Core's
+    // selection -- during a floating-grid edit, a HIDDEN one.
+    if (isEditKeystroke(e)) return;
     e.preventDefault();
     e.stopPropagation();
     toggleFilter();

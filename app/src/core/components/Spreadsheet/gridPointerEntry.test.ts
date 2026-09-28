@@ -9,15 +9,21 @@
 //          actually bound to (Spreadsheet.tsx `onMouseDown={wrappedMouseDown}`,
 //          whose body is `gridPointerMouseDown`).
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type React from "react";
 import {
   gridPointerMouseDown,
   gridPointerDoubleClick,
   gridShouldTakeKeyboardFocus,
+  editBlocksGridFocus,
   type GridPointerEntryDeps,
 } from "./gridPointerEntry";
 import { claimPointer } from "../../lib/pointerClaims";
+import {
+  registerExternalFormulaTarget,
+  __resetExternalEditForTests,
+} from "../../lib/formulaEditTarget";
+import { createFakeExternalEdit } from "../../lib/__tests__/helpers/fakeExternalEdit";
 
 interface GridDom {
   /** `[data-focus-container="spreadsheet"]`, `tabIndex={0}` — as Spreadsheet.tsx renders it. */
@@ -334,5 +340,58 @@ describe("the grid's double-click door", () => {
     const p = press(dom.input);
     gridPointerDoubleClick(p.event, onGridDoubleClick);
     expect(onGridDoubleClick).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ===========================================================================
+// A live EXTERNAL edit session holds the keyboard too (2026-09-27)
+// ===========================================================================
+// A floating grid's cell edit hosted by the FORMULA BAR sets no Core editing
+// flag. With `getGlobalIsEditing` alone as the door's `isEditing`, a reference
+// pick on the grid moved the keyboard from the bar to the grid container, and
+// the next key reached the GRID: Delete cleared the picked cell, Tab moved the
+// cursor, a printable key opened a Core edit on a cell nobody was editing.
+
+describe("editBlocksGridFocus", () => {
+  afterEach(() => __resetExternalEditForTests());
+
+  it("is false with no edit open, and true with a live external session", () => {
+    expect(editBlocksGridFocus()).toBe(false);
+    const fake = createFakeExternalEdit({ hostSheetIndex: 2, text: "=" });
+    fake.register();
+    expect(editBlocksGridFocus()).toBe(true);
+  });
+
+  it("a pick-only target (the chart text editor) does not hold the keyboard", () => {
+    registerExternalFormulaTarget({ isExpectingReference: () => true, insertReference: () => undefined });
+    expect(editBlocksGridFocus()).toBe(false);
+  });
+
+  it("wired as the door's isEditing, a pick during a bar-hosted session leaves the keyboard on the bar", () => {
+    const dom = buildDom();
+    const bar = document.createElement("input");
+    bar.setAttribute("data-formula-bar", "true");
+    document.body.appendChild(bar);
+    const fake = createFakeExternalEdit({ hostSheetIndex: 2, text: "=" });
+    fake.register();
+    bar.focus();
+
+    expect(gridShouldTakeKeyboardFocus(dom.canvas, bar, dom.focusContainer, editBlocksGridFocus())).toBe(false);
+
+    const onGridMouseDown = vi.fn();
+    gridPointerMouseDown(press(dom.canvas).event, {
+      containerRef: { current: dom.gridArea },
+      zoom: 1,
+      hitTestSplitBar: () => null,
+      splitRow: null,
+      splitCol: null,
+      beginSplitDrag: vi.fn(),
+      onGridMouseDown,
+      focusContainerRef: { current: dom.focusContainer },
+      isEditing: editBlocksGridFocus,
+    });
+    expect(document.activeElement).toBe(bar);
+    // The press still reaches the grid: that is the pick.
+    expect(onGridMouseDown).toHaveBeenCalledTimes(1);
   });
 });

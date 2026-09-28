@@ -36,12 +36,16 @@ vi.mock("@api/gridOverlays", () => ({
 const mockUpdateSlicer = vi.fn(async (..._a: unknown[]) => undefined);
 const mockUpdatePosition = vi.fn(async (..._a: unknown[]) => undefined);
 const mockDeleteSlicer = vi.fn(async (..._a: unknown[]) => undefined);
+const mockDeleteSlicers = vi.fn(async (..._a: unknown[]) => [] as string[]);
 vi.mock("../../lib/slicerStore", () => ({
   getSlicerById: () => undefined,
   updateSlicerAsync: (...a: unknown[]) => mockUpdateSlicer(...a),
   // The Size fields write every selected slicer as ONE undo step (M8 C2).
   commitSlicerGeometryAsync: (...a: unknown[]) => mockUpdatePosition(...a),
   deleteSlicerAsync: (...a: unknown[]) => mockDeleteSlicer(...a),
+  // Several selected slicers are deleted as ONE undo step (the backend clears
+  // each one's pivot filter inside that step).
+  deleteSlicersAsync: (...a: unknown[]) => mockDeleteSlicers(...a),
 }));
 
 vi.mock("../../manifest", () => ({
@@ -318,7 +322,8 @@ describe("Slicer Options sections — behaviour", () => {
     const del = buttonByText("Delete (2)");
     expect(del.disabled).toBe(false);
     await clickAsync(del);
-    expect(mockDeleteSlicer.mock.calls.map((c) => c[0])).toEqual(["s-1", "s-2"]);
+    expect(mockDeleteSlicers.mock.calls).toEqual([[["s-1", "s-2"], "Delete Slicers"]]);
+    expect(mockDeleteSlicer).not.toHaveBeenCalled();
   });
 
   it("the column count is a Dropdown that writes to every selected slicer", async () => {

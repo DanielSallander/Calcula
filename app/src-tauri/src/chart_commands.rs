@@ -4,8 +4,8 @@
 //! All mutations record obj_chart undo snapshots (BUG-0001: chart lifecycle
 //! used to bypass the undo system entirely).
 
-use crate::api_types::ChartEntry;
-use crate::document_effect::DocumentEffect;
+use crate::api_types::{ChartEntry, ChartSheetIdStamp};
+use crate::document_effect::{CleanReason, DocumentEffect};
 use crate::persistence::FileState;
 use crate::AppState;
 use tauri::State;
@@ -55,16 +55,37 @@ pub fn save_chart(
 }
 
 /// Update an existing chart entry.
+///
+/// `sheet_id_stamp`: the write carries NOTHING but source-sheet ids, and says
+/// which step of the chart store it completes (see
+/// [`record_chart_sheet_id_stamp`]). It is verified to be exactly a stamp, and
+/// is then recorded without an undo step.
 #[tauri::command]
 pub fn update_chart(
     state: State<AppState>,
     file_state: State<FileState>,
     entry: ChartEntry,
+    sheet_id_stamp: Option<ChartSheetIdStamp>,
+) -> Result<(), String> {
+    update_chart_core(&state, &file_state, entry, sheet_id_stamp)
+}
+
+/// [`update_chart`] over borrowed state, so the whole path -- protection gate,
+/// the stamp verification, the dirty flag and the undo entry -- is testable
+/// with `create_app_state()`.
+pub(crate) fn update_chart_core(
+    state: &AppState,
+    file_state: &FileState,
+    entry: ChartEntry,
+    sheet_id_stamp: Option<ChartSheetIdStamp>,
 ) -> Result<(), String> {
     // allowEditObjects option gate — charts are the "objects" the flag names.
     crate::protection::check_sheet_action(
-        &state, entry.sheet_index, "editObjects", "edit objects",
+        state, entry.sheet_index, "editObjects", "edit objects",
     )?;
+    if let Some(origin) = sheet_id_stamp {
+        return record_chart_sheet_id_stamp(state, file_state, entry, origin);
+    }
     // RESOLVE FIRST, THEN DECIDE, THEN MUTATE.
     // `DocumentEffect::mutates` sets the dirty flag in its constructor, and
     // `Persisted::write` will not hand out a mutable guard without one -- so the
@@ -79,15 +100,186 @@ pub fn update_chart(
             .cloned()
             .ok_or_else(|| format!("Chart with id {} not found", entry.id))?
     };
-    let effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(file_state);
     {
         let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
         if let Some(existing) = charts.iter_mut().find(|c| c.id == entry.id) {
             *existing = entry.clone();
         }
     }
-    crate::undo_commands::record_chart_undo(&state, entry.id, Some(previous), "Edit chart");
+    crate::undo_commands::record_chart_undo(state, entry.id, Some(previous), "Edit chart");
     Ok(())
+}
+
+/// Record the chart store's SHEET-ID STAMP: a chart written before ranges named
+/// their sheet by id (or written by a script, by index) gets the id of the sheet
+/// its `sheetIndex` names, once, when the store loads it -- or right after the
+/// store creates it, when the sheet list was not to hand (chartStore.ts,
+/// `migrateSheetIds`). Through the ordinary update that stamp dirtied the
+/// document and recorded an "Edit chart" undo step -- so every workbook holding
+/// such a chart opened (and reloaded) with unsaved changes the user never made,
+/// and the first Ctrl+Z quietly undid the migration.
+///
+/// TWO ORIGINS, TWO EFFECTS ([`ChartSheetIdStamp`]); neither records an undo
+/// step, and both pass the same verification.
+///
+/// - `AfterLoad` is CLEAN, as `LoadingFromDisk`. The stamp is the last step of
+///   loading the charts -- the frontend's half of the load path, issued once
+///   the store has read what `open_file` / `new_file` / a reload installed. It
+///   states, in a second spelling, exactly what the loaded index already says,
+///   and the next open re-derives it from the same file. A close without
+///   saving loses nothing, so it must not arm the close prompt or AutoRecover
+///   -- the reason `LoadingFromDisk` exists (document_effect.rs names this
+///   step under that variant).
+/// - `AfterCreate` DIRTIES, as the create it finishes. A chart created while
+///   the sheet list was cold went out by index, and this stamp completes that
+///   create; nothing is being loaded, so `LoadingFromDisk` would be a false
+///   audit row. It adds no undo step either: the create's "Insert chart" step
+///   restores "no chart" and so already covers it, where a second "Edit chart"
+///   step would make the first Ctrl+Z after an insert undo only the stamp.
+///
+/// WHY IT CANNOT HIDE AN EDIT. The renderer is not trusted to call a write
+/// clean, so the write is VERIFIED here, against the stored entry, inside the
+/// one critical section that then replaces it: the placement is unchanged, and
+/// the new JSON differs from the stored JSON only by `sheetId` members added
+/// to objects that carry an integer `sheetIndex`, each naming the sheet at that
+/// index NOW ([`count_sheet_id_stamps`]). Anything else is refused and changes
+/// nothing; the store then logs it and the chart keeps resolving by index. A
+/// renderer that mislabels a create as a load gains nothing but a wrong label
+/// on a write that could only restate the chart's own index.
+fn record_chart_sheet_id_stamp(
+    state: &AppState,
+    file_state: &FileState,
+    entry: ChartEntry,
+    origin: ChartSheetIdStamp,
+) -> Result<(), String> {
+    let next: serde_json::Value = serde_json::from_str(&entry.spec_json)
+        .map_err(|e| format!("A sheet-id stamp must be a JSON chart record: {}", e))?;
+    // The sheet ids, COPIED and released before the chart lock: nothing here
+    // nests the two stores' locks.
+    let sheet_ids: Vec<String> = state
+        .sheet_ids
+        .read()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|id| id.to_string())
+        .collect();
+    // Verify and replace in ONE critical section: a newer edit that landed
+    // since the frontend read the entry makes this a mismatch, never an
+    // overwrite.
+    let pending = state.charts.lock_pending().map_err(|e| e.to_string())?;
+    let slot = pending
+        .iter()
+        .position(|c| c.id == entry.id)
+        .ok_or_else(|| format!("Chart with id {} not found", entry.id))?;
+    if pending[slot].sheet_index != entry.sheet_index {
+        return Err("A sheet-id stamp cannot move a chart to another sheet.".to_string());
+    }
+    let stored: serde_json::Value = serde_json::from_str(&pending[slot].spec_json)
+        .map_err(|e| format!("The stored chart is not a JSON record: {}", e))?;
+    let stamps = count_sheet_id_stamps(&stored, &next, &|index| sheet_ids.get(index).cloned())?;
+    if stamps == 0 {
+        // Nothing the stored entry lacks: leave it exactly as it is.
+        return Ok(());
+    }
+    // Every gate has passed and the write changes the entry: decide now.
+    let effect = match origin {
+        ChartSheetIdStamp::AfterLoad => DocumentEffect::deliberately_clean(CleanReason::LoadingFromDisk),
+        ChartSheetIdStamp::AfterCreate => DocumentEffect::mutates(file_state),
+    };
+    let mut charts = pending.authorize(&effect);
+    charts[slot].spec_json = entry.spec_json;
+    // No undo entry: the stamp is not an edit, and undoing it would only put the
+    // chart back on following an index.
+    Ok(())
+}
+
+/// Deepest JSON nesting [`count_sheet_id_stamps`] walks (serde_json's own parse limit).
+const MAX_STAMP_JSON_DEPTH: usize = 128;
+
+/// How many `sheetId` stamps `next` adds to `stored` -- or why `next` is NOT a
+/// pure stamp of `stored`.
+///
+/// The one difference allowed: an object that carries an integer `sheetIndex`
+/// and no `sheetId` gains a `sheetId` that is the id of the sheet at that index
+/// (`sheet_id_at`). Any other difference -- a value changed, a member removed or
+/// added, an array resized, a stamp naming another sheet or an index no sheet
+/// has -- is an `Err` naming it.
+///
+/// GENERIC JSON ON PURPOSE. Where a chart spec keeps its ranges (`data`,
+/// `layers[].data`, a lookup's `from`, `concat` children) is the frontend's
+/// knowledge (chartSheetRefs.ts). A copy of that walk here would drift from it;
+/// this checks only that nothing but a range's sheet-id spelling changed.
+pub(crate) fn count_sheet_id_stamps(
+    stored: &serde_json::Value,
+    next: &serde_json::Value,
+    sheet_id_at: &dyn Fn(usize) -> Option<String>,
+) -> Result<usize, String> {
+    fn walk(
+        stored: &serde_json::Value,
+        next: &serde_json::Value,
+        sheet_id_at: &dyn Fn(usize) -> Option<String>,
+        depth: usize,
+    ) -> Result<usize, String> {
+        use serde_json::Value;
+        if depth > MAX_STAMP_JSON_DEPTH {
+            return Err("The chart record is nested too deeply to verify.".to_string());
+        }
+        match (stored, next) {
+            (Value::Object(s), Value::Object(n)) => {
+                let mut stamps = 0usize;
+                for (key, sv) in s {
+                    let nv = n
+                        .get(key)
+                        .ok_or_else(|| format!("A sheet-id stamp may not remove '{}'.", key))?;
+                    stamps += walk(sv, nv, sheet_id_at, depth + 1)?;
+                }
+                for (key, nv) in n {
+                    if s.contains_key(key) {
+                        continue;
+                    }
+                    if key != "sheetId" {
+                        return Err(format!("A sheet-id stamp may not add '{}'.", key));
+                    }
+                    let id = nv
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .ok_or("A sheet-id stamp must be a non-empty string.")?;
+                    let index = s
+                        .get("sheetIndex")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|v| usize::try_from(v).ok())
+                        .ok_or("A sheet id may only be stamped on a range that names its sheet by index.")?;
+                    let actual = sheet_id_at(index)
+                        .ok_or_else(|| format!("Sheet index {} names no sheet.", index))?;
+                    if actual != id {
+                        return Err(format!(
+                            "The stamp names sheet {} but sheet index {} is sheet {}.",
+                            id, index, actual
+                        ));
+                    }
+                    stamps += 1;
+                }
+                Ok(stamps)
+            }
+            (Value::Array(s), Value::Array(n)) => {
+                if s.len() != n.len() {
+                    return Err("A sheet-id stamp may not resize a list.".to_string());
+                }
+                let mut stamps = 0usize;
+                for (sv, nv) in s.iter().zip(n.iter()) {
+                    stamps += walk(sv, nv, sheet_id_at, depth + 1)?;
+                }
+                Ok(stamps)
+            }
+            // A number that went through JSON.parse/stringify may change its
+            // spelling (1.0 -> 1) and nothing else.
+            (Value::Number(s), Value::Number(n)) if s == n || s.as_f64() == n.as_f64() => Ok(0),
+            (s, n) if s == n => Ok(0),
+            _ => Err("A sheet-id stamp may not change a value.".to_string()),
+        }
+    }
+    walk(stored, next, sheet_id_at, 0)
 }
 
 /// Delete a chart entry by ID.
@@ -163,4 +355,207 @@ pub fn delete_chart(
     // C10: a deleted chart must not leave its object script mounted/persisted.
     crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &effect, &id.to_string());
     Ok(())
+}
+
+#[cfg(test)]
+mod sheet_id_stamp_tests {
+    //! The chart store's load-time SHEET-ID STAMP (chartStore.ts, `migrateSheetIds`)
+    //! used to go through the ordinary `update_chart`: every workbook holding a chart
+    //! written before ranges named their sheet by id (or by a script, by index) was
+    //! DIRTY the moment its charts loaded -- a reopen, a page reload -- and had an
+    //! "Edit chart" undo step nobody made. Journey
+    //! `dirty-flag.spec.ts` "PERSISTENCE ... survive save, new_file and reopen" read
+    //! `is_file_modified` TRUE after a reload for exactly this.
+    use super::{count_sheet_id_stamps, update_chart_core};
+    use crate::api_types::{ChartEntry, ChartSheetIdStamp};
+    use crate::document_effect::test_seed_effect;
+    use serde_json::json;
+
+    /// A chart stored the way a raw `save_chart` stores it: a BARE spec whose
+    /// range names its sheet by index only.
+    fn bare_chart(sheet_index: usize) -> ChartEntry {
+        ChartEntry {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            sheet_index: 0,
+            spec_json: serde_json::to_string(&json!({
+                "mark": "bar",
+                "data": { "sheetIndex": sheet_index, "startRow": 5, "startCol": 30, "endRow": 8, "endCol": 31 },
+                "series": [{ "sourceIndex": 1, "name": "Sales", "color": "#4472C4" }],
+                "title": "Dirty Flag Chart"
+            }))
+            .unwrap(),
+        }
+    }
+
+    /// The same record with its range stamped `sheet_id` (and `title` optionally changed).
+    fn stamped(entry: &ChartEntry, sheet_id: &str, title: &str) -> ChartEntry {
+        let mut v: serde_json::Value = serde_json::from_str(&entry.spec_json).unwrap();
+        v["data"]["sheetId"] = json!(sheet_id);
+        v["title"] = json!(title);
+        ChartEntry { id: entry.id, sheet_index: entry.sheet_index, spec_json: serde_json::to_string(&v).unwrap() }
+    }
+
+    /// An app state with TWO sheets, and the id of each.
+    fn two_sheets() -> (crate::AppState, Vec<String>) {
+        let state = crate::create_app_state();
+        state
+            .sheet_ids
+            .write(&test_seed_effect())
+            .unwrap()
+            .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
+        let ids = state.sheet_ids.read().unwrap().iter().map(|id| id.to_string()).collect();
+        (state, ids)
+    }
+
+    fn stored_json(state: &crate::AppState) -> serde_json::Value {
+        serde_json::from_str(&state.charts.read().unwrap()[0].spec_json).unwrap()
+    }
+
+    #[test]
+    fn a_stamp_only_write_is_recorded_without_dirtying_the_document_or_an_undo_step() {
+        let (state, ids) = two_sheets();
+        let fs = crate::persistence::FileState::default();
+        let chart = bare_chart(1);
+        state.charts.write(&test_seed_effect()).unwrap().push(chart.clone());
+        assert!(!fs.is_dirty(), "fixture: the document starts clean");
+
+        update_chart_core(&state, &fs, stamped(&chart, &ids[1], "Dirty Flag Chart"), Some(ChartSheetIdStamp::AfterLoad))
+            .expect("a pure stamp is accepted");
+
+        assert_eq!(
+            stored_json(&state)["data"]["sheetId"],
+            json!(ids[1]),
+            "the stamp is recorded in the stored entry"
+        );
+        assert!(
+            !fs.is_dirty(),
+            "loading a chart's sheet id is not an edit: the document must stay clean"
+        );
+        assert!(
+            !state.undo_stack.lock().unwrap().can_undo(),
+            "the stamp must not become an undo step"
+        );
+
+        // POSITIVE CONTROL: the SAME bytes through the ordinary update do dirty and do
+        // record an undo step -- so the two assertions above are about the stamp path,
+        // not about a harness in which nothing can dirty.
+        let other = bare_chart(0);
+        state.charts.write(&test_seed_effect()).unwrap().push(other.clone());
+        update_chart_core(&state, &fs, stamped(&other, &ids[0], "Dirty Flag Chart"), None).unwrap();
+        assert!(fs.is_dirty());
+        assert!(state.undo_stack.lock().unwrap().can_undo());
+    }
+
+    #[test]
+    fn a_stamp_that_finishes_a_create_dirties_like_the_create_and_adds_no_undo_step() {
+        // A chart created while the store's sheet list was cold went out by index;
+        // the stamp that follows FINISHES that create. Nothing is being loaded, so
+        // recording it as `LoadingFromDisk` would be a false audit row: it must
+        // dirty like the create it completes. Started from a CLEAN document so the
+        // dirty assertion can fail (after a real create the flag is already set).
+        let (state, ids) = two_sheets();
+        let fs = crate::persistence::FileState::default();
+        let chart = bare_chart(1);
+        state.charts.write(&test_seed_effect()).unwrap().push(chart.clone());
+        assert!(!fs.is_dirty(), "fixture: the document starts clean");
+
+        update_chart_core(&state, &fs, stamped(&chart, &ids[1], "Dirty Flag Chart"), Some(ChartSheetIdStamp::AfterCreate))
+            .expect("a pure stamp is accepted");
+
+        assert_eq!(stored_json(&state)["data"]["sheetId"], json!(ids[1]), "the stamp is recorded");
+        assert!(fs.is_dirty(), "a stamp that finishes a create must dirty the document like the create");
+        assert!(
+            !state.undo_stack.lock().unwrap().can_undo(),
+            "the create's own undo step covers the stamp; a second one would make Ctrl+Z undo only the stamp"
+        );
+
+        // The same verification binds it: an edit riding on a create-stamp is refused.
+        let fs = crate::persistence::FileState::default();
+        let before = state.charts.read().unwrap()[0].spec_json.clone();
+        let mut restamped: serde_json::Value = serde_json::from_str(&before).unwrap();
+        restamped["title"] = json!("Renamed");
+        let entry = ChartEntry { id: chart.id, sheet_index: chart.sheet_index, spec_json: restamped.to_string() };
+        assert!(update_chart_core(&state, &fs, entry, Some(ChartSheetIdStamp::AfterCreate)).is_err());
+        assert_eq!(state.charts.read().unwrap()[0].spec_json, before, "a refused create-stamp changes nothing");
+        assert!(!fs.is_dirty(), "a refused create-stamp must not dirty the document");
+    }
+
+    #[test]
+    fn the_stamp_origin_is_spelled_in_camel_case_on_the_wire() {
+        // chartStore.ts sends `sheetIdStamp: "afterLoad" | "afterCreate"`.
+        assert_eq!(serde_json::from_value::<ChartSheetIdStamp>(json!("afterLoad")).unwrap(), ChartSheetIdStamp::AfterLoad);
+        assert_eq!(serde_json::from_value::<ChartSheetIdStamp>(json!("afterCreate")).unwrap(), ChartSheetIdStamp::AfterCreate);
+        assert!(serde_json::from_value::<ChartSheetIdStamp>(json!(true)).is_err(), "the old boolean flag is gone");
+    }
+
+    #[test]
+    fn a_stamp_only_write_that_is_not_a_pure_stamp_is_refused_and_changes_nothing() {
+        let (state, ids) = two_sheets();
+        let fs = crate::persistence::FileState::default();
+        let chart = bare_chart(1);
+        state.charts.write(&test_seed_effect()).unwrap().push(chart.clone());
+        let before = state.charts.read().unwrap()[0].spec_json.clone();
+
+        let mut moved = stamped(&chart, &ids[1], "Dirty Flag Chart");
+        moved.sheet_index = 1;
+        let refusals: Vec<(&str, ChartEntry)> = vec![
+            // A stamp that also edits something the user sees.
+            ("an edit riding on the stamp", stamped(&chart, &ids[1], "Renamed")),
+            // A stamp naming the OTHER sheet: that would re-point the chart's data.
+            ("a stamp naming another sheet", stamped(&chart, &ids[0], "Dirty Flag Chart")),
+            // A stamp naming no sheet at all.
+            ("a stamp naming no sheet", stamped(&chart, "not-a-sheet", "Dirty Flag Chart")),
+            // A placement move is never a stamp.
+            ("a placement move", moved),
+        ];
+        for (what, entry) in refusals {
+            let result = update_chart_core(&state, &fs, entry, Some(ChartSheetIdStamp::AfterLoad));
+            assert!(result.is_err(), "{what} must be refused as a stamp");
+            assert_eq!(state.charts.read().unwrap()[0].spec_json, before, "{what} changed the stored chart");
+            assert!(!fs.is_dirty(), "{what} dirtied the document");
+            assert!(!state.undo_stack.lock().unwrap().can_undo(), "{what} recorded an undo step");
+        }
+    }
+
+    #[test]
+    fn the_verifier_accepts_only_added_sheet_ids_that_name_the_indexed_sheet() {
+        let ids = ["s0".to_string(), "s1".to_string()];
+        let at = |i: usize| ids.get(i).cloned();
+        let stored = json!({
+            "chartId": "c", "spec": {
+                "data": { "sheetIndex": 0, "startRow": 0 },
+                "layers": [{ "data": { "sheetIndex": 1, "startRow": 0 } }],
+                "transform": [{ "type": "lookup", "from": { "sheetIndex": 1, "startRow": 2 } }],
+                "width": 1.0
+            }
+        });
+        let mut next = stored.clone();
+        next["spec"]["data"]["sheetId"] = json!("s0");
+        next["spec"]["layers"][0]["data"]["sheetId"] = json!("s1");
+        next["spec"]["transform"][0]["from"]["sheetId"] = json!("s1");
+        next["spec"]["width"] = json!(1);
+        assert_eq!(count_sheet_id_stamps(&stored, &next, &at), Ok(3));
+        assert_eq!(count_sheet_id_stamps(&stored, &stored, &at), Ok(0), "no change is no stamp");
+
+        let mut changed_stamp = next.clone();
+        changed_stamp["spec"]["layers"][0]["data"]["sheetId"] = json!("s0");
+        assert!(count_sheet_id_stamps(&stored, &changed_stamp, &at).is_err());
+
+        let mut no_index = stored.clone();
+        no_index["spec"]["sheetId"] = json!("s0");
+        assert!(count_sheet_id_stamps(&stored, &no_index, &at).is_err(), "a stamp needs a sheetIndex beside it");
+
+        let mut removed = next.clone();
+        removed["spec"].as_object_mut().unwrap().remove("transform");
+        assert!(count_sheet_id_stamps(&stored, &removed, &at).is_err());
+
+        let mut restamp = stored.clone();
+        restamp["spec"]["data"]["sheetId"] = json!("s0");
+        let mut changed_existing = restamp.clone();
+        changed_existing["spec"]["data"]["sheetId"] = json!("s1");
+        assert!(
+            count_sheet_id_stamps(&restamp, &changed_existing, &at).is_err(),
+            "an EXISTING sheet id is a value, and may not change"
+        );
+    }
 }

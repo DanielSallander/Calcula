@@ -9,6 +9,7 @@ import type { GridConfig, Viewport, Selection, DimensionOverrides, SelectionType
 import type { CellPosition, MousePosition, HeaderDragState } from "../types";
 import { getCellFromPixel } from "../../../lib/gridRenderer";
 import { getMergeInfo } from "../../../lib/tauri-api";
+import { notifyGridCellPressed } from "../../../lib/cellClickInterceptors";
 
 interface CellSelectionDependencies {
   config: GridConfig;
@@ -177,6 +178,22 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
         onSelectCell(row, col);
       }
     }
+
+    // Announce the HANDLED press -- after the commit-before-select above and
+    // after the selection. A press on the cell Core already had active changes
+    // no selection, so without this nothing told an object that keeps its own
+    // cell selection over the grid (a floating grid's selected cell) that the
+    // user clicked back onto the sheet: it kept its cell, and the formula bar
+    // wrote the next entry there instead of into the cell just clicked. (A
+    // right-press INSIDE the selection returned above: it keeps the selection
+    // for the context menu and announces nothing.)
+    notifyGridCellPressed({
+      row,
+      col,
+      button: event.button,
+      shiftKey,
+      ctrlKey: event.ctrlKey,
+    });
 
     return true;
   };

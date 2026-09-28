@@ -13,7 +13,10 @@
 //!
 //!   * `pivot/commands.rs`  — create_pivot_inner (its body is now
 //!                            `create_pivot_core`), delete_pivot_table,
-//!                            undo_pivot_overwrite
+//!                            undo_pivot_overwrite (since 2026-09-28 it
+//!                            writes no cells itself: it undoes the one
+//!                            step carrying its overwrite token through
+//!                            `apply_changes`, which recalculates)
 //!   * `tables.rs`          — toggle_totals_row, set_totals_row_function,
 //!                            set_calculated_column, check_table_auto_expand
 //!   * `commands/structure.rs` — relocate_cell_references
@@ -428,7 +431,8 @@ fn every_pivot_cell_write_seeds_the_shared_cascade() {
     for (source, name) in [
         (PIVOT_RS, "create_pivot_core"),
         (PIVOT_RS, "delete_pivot_table"),
-        (PIVOT_RS, "undo_pivot_overwrite"),
+        // `undo_pivot_overwrite` left this list 2026-09-28: it no longer writes
+        // cells itself but undoes its own step through `apply_changes`.
         // M6: every OTHER pivot write -- the refresh/refilter/field-change
         // funnel -- seeds the same cascade through this one helper. It used to
         // run `recalculate_sheet_formulas`, the ACTIVE sheet only, so a canvas

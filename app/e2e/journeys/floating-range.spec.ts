@@ -361,22 +361,27 @@ test.describe.serial("floating ranges, live", () => {
   // into the grid registry instead, so nothing rendered them: the menu was
   // registered, ordered, gated — and unreachable. Nothing caught it because
   // the menu had no test of any kind, which is why this one asserts in BOTH
-  // directions (design mode shows it, run mode does not).
+  // directions.
+  //
+  // 2026-09-27 (owner decision): the menu follows EDITABILITY, not Design
+  // Mode -- a worksheet, or a canvas that is not subscribed -- so it opens in
+  // run mode too. The negative control is now a right-click just OUTSIDE the
+  // frame, which must never open the object's menu.
   // -------------------------------------------------------------------------
 
-  test("right-clicking the object opens its own menu in Design Mode, and nothing in run mode", async ({
+  test("right-clicking the object opens its own menu with Design Mode OFF, and nothing just outside it", async ({
     appPage: page,
   }) => {
     const fr = await createFr(page, "FloatE2E");
     try {
-      // Run mode first: the negative control has to fail for the right reason,
-      // so it runs BEFORE the toggle rather than after it.
       await setDesignMode(page, false);
-      await rightClickFr(page, 40, 8);
+      // The negative control first, so it fails for the right reason: 60px
+      // left of the frame is an ordinary grid cell.
+      await rightClickFr(page, -60, 8);
       await page.waitForTimeout(300);
       expect(await page.locator("[data-fr-context-menu]").count()).toBe(0);
+      await page.keyboard.press("Escape"); // the grid's own cell menu, if it opened
 
-      await setDesignMode(page, true);
       await rightClickFr(page, 40, 8);
       const menu = page.locator("[data-fr-context-menu]");
       await expect(menu).toBeVisible({ timeout: 3000 });

@@ -23,6 +23,7 @@
 
 import type { ChartSpec, DataSource, DataRangeRef, LayerSpec, TransformSpec } from "../types";
 import { isDataRangeRef } from "../types";
+import { storedSpecOf } from "./chartSpecNormalize";
 
 /** Maps a live sheet index to that sheet's id (undefined when unknown). */
 export type SheetIdForIndex = (sheetIndex: number) => string | undefined;
@@ -110,6 +111,37 @@ export function stampSpecSheetIds(spec: ChartSpec, idForIndex: SheetIdForIndex, 
   }
 
   return changed ? next : spec;
+}
+
+/**
+ * Stamp the sheet ids onto a chart record AS THE BACKEND STORES IT (the entry's
+ * `specJson`), not onto the definition the store normalized from it.
+ *
+ * WHY THE STORED TEXT. The load-time stamp is recorded by the backend as a
+ * STAMP -- clean, no undo step -- only after it has verified that the new JSON
+ * differs from the stored JSON by added `sheetId`s and nothing else
+ * (chart_commands.rs, `count_sheet_id_stamps`). The normalized definition
+ * differs in far more: a bare spec comes back wrapped in a ChartDefinition, and
+ * missing axes, legend and palette come back filled in. So the stamp is applied
+ * to the stored record itself, through the same walk as every other stamp.
+ *
+ * Returns the stamped JSON, or null when nothing needed a stamp or the record
+ * is not a JSON object with a spec.
+ */
+export function stampStoredChartJson(specJson: string, idForIndex: SheetIdForIndex): string | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(specJson);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const { spec, bare } = storedSpecOf(record);
+  if (typeof spec !== "object" || spec === null || Array.isArray(spec)) return null;
+  const stamped = stampSpecSheetIds(spec as ChartSpec, idForIndex);
+  if (stamped === spec) return null;
+  return JSON.stringify(bare ? stamped : { ...record, spec: stamped });
 }
 
 /**

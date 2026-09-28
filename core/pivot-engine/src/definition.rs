@@ -324,6 +324,18 @@ pub struct SlicerFilter {
     pub source_index: FieldIndex,
     /// Items to hide (same semantics as PivotField::hidden_items).
     pub hidden_items: Vec<String>,
+    /// BI pivots: the model column this filter is on, as "Table.Column".
+    ///
+    /// A BI cache names its columns from the query's Arrow schema, which is
+    /// the BARE column name ("name"), so two model tables that share a column
+    /// name are indistinguishable by cache name alone -- a filter on
+    /// Products.name could be matched, cleared or re-attributed as
+    /// Customers.name. The key is stamped whenever the host writes the filter
+    /// and is the authority for which column it is on. `None` for grid pivots
+    /// and for definitions saved before it existed (the host then accepts a
+    /// bare name only when exactly one model table has that column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_key: Option<String>,
 }
 
 /// An ENGINE-ROUTED filter (a PINNED, level-2+ slicer on a BI pivot).
@@ -1134,5 +1146,27 @@ mod canvas_frame_tests {
                 .is_ok(),
             "both bounds are inclusive"
         );
+    }
+}
+#[cfg(test)]
+mod slicer_filter_model_key_tests {
+    use super::*;
+
+    /// A slicer filter without a model key (every grid pivot, and every BI
+    /// definition saved before the key existed) writes NO `model_key` field,
+    /// and a definition from before it reads back as `None`; a stamped key
+    /// round-trips.
+    #[test]
+    fn model_key_is_optional_on_the_wire() {
+        let keyless = SlicerFilter { source_index: 2, hidden_items: vec!["West".to_string()], model_key: None };
+        let value = serde_json::to_value(&keyless).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("model_key"), "{value}");
+
+        let old: SlicerFilter = serde_json::from_str(r#"{"source_index":1,"hidden_items":["East"]}"#).unwrap();
+        assert_eq!(old.model_key, None);
+
+        let keyed = SlicerFilter { model_key: Some("Products.name".to_string()), ..keyless };
+        let back: SlicerFilter = serde_json::from_value(serde_json::to_value(&keyed).unwrap()).unwrap();
+        assert_eq!(back.model_key.as_deref(), Some("Products.name"));
     }
 }

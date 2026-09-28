@@ -25,6 +25,8 @@ import {
 import { getMoveAfterReturn, getMoveDirection, getMoveDelta } from "../../../api/editingPreferences";
 import { alertAsync } from "../../lib/dialogs";
 import { isKeyClaimed } from "../../lib/pointerClaims";
+import { getExternalEditSession, isExternalEditLive } from "../../lib/formulaEditTarget";
+import { endExternalFormulaSession, focusExternalSessionView } from "../../lib/pointModeSheetSwitch";
 
 type GridState = ReturnType<typeof useGridState>;
 
@@ -142,7 +144,18 @@ export function useSpreadsheetEditing({
   // FIX: Also check isGlobalFormulaMode() synchronously to prevent committing
   // when React state is stale. This handles the race where the user types an operator
   // (e.g., comma) and immediately clicks a cell before React re-renders.
+  //
+  // A live EXTERNAL session (a floating grid's cell edit) is ended the same way:
+  // this path runs only when the click is NOT a reference pick
+  // (useMouseSelection routes an expecting target's click to the pick), so it
+  // is the grid's own rule -- a complete formula plus a cell click commits --
+  // and, when the session is parked on another sheet, it also returns to the
+  // host first. It is also the click-away commit on a worksheet host.
   const handleCommitBeforeSelect = useCallback(async () => {
+    if (isExternalEditLive()) {
+      await endExternalFormulaSession("commit", null);
+      return;
+    }
     if (isEditing && !isFormulaMode && !isGlobalFormulaMode()) {
       await commitEdit();
     }
@@ -375,6 +388,74 @@ export function useSpreadsheetEditing({
         }
       }
 
+      // === A LIVE EXTERNAL EDIT SESSION (the fallback door) ===
+      // A floating grid's cell edit hosted by the formula bar, or parked on
+      // another sheet while it picks a reference. The keyboard belongs on the
+      // bar (the pointer door no longer moves it here during a pick), but when
+      // a key does reach the container it must still go to the FORMULA, never
+      // to the grid: before this, Enter moved the grid cursor and a printable
+      // key opened a second, CORE edit on a cell nobody was editing. Parked
+      // with the formula bar HIDDEN, this container is the session's only
+      // keyboard (focusExternalSessionView focuses it).
+      //
+      // DELETE AND THE OTHER REGISTRY KEYS (Ctrl+V/X/C/D/R/1/M, Ctrl+Z/Y) do
+      // not depend on this branch alone. The capture-phase keybinding
+      // dispatcher (api/keybindings.ts) runs first; it used to run
+      // core.edit.clearContents / paste / undo here and stop the key before
+      // this handler (or useGridKeyboard's gate) ever saw it. It now stands
+      // down for a live session WITHOUT preventDefault, so those keys arrive
+      // here and are handed back to the session like any other key.
+      const externalSession = getExternalEditSession();
+      if (externalSession) {
+        event.preventDefault();
+        if (event.key === "Enter" || event.key === "Tab") {
+          const move =
+            event.key === "Enter"
+              ? (event.shiftKey ? "up" : "down")
+              : (event.shiftKey ? "left" : "right");
+          await endExternalFormulaSession("commit", move);
+          return;
+        }
+        if (event.key === "Escape") {
+          await endExternalFormulaSession("cancel");
+          return;
+        }
+        if (
+          event.key.length === 1 &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.altKey &&
+          !event.nativeEvent.isComposing &&
+          event.nativeEvent.keyCode !== 229
+        ) {
+          // The character goes INTO the formula at its caret, then the caret
+          // goes back to the view that hosts it.
+          const caret = externalSession.getCursor();
+          const text = externalSession.getText();
+          externalSession.setText(text.slice(0, caret) + event.key + text.slice(caret), caret + 1);
+        } else if (
+          event.key === "Backspace" &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.altKey
+        ) {
+          // Backspace deletes the character before the formula's caret. Parked
+          // with the formula bar HIDDEN this container is the session's only
+          // keyboard (focusExternalSessionView focuses it), so a Backspace that
+          // only handed the keyboard back -- to this same container -- left a
+          // mistyped formula impossible to correct without the mouse.
+          const caret = externalSession.getCursor();
+          if (caret > 0) {
+            const text = externalSession.getText();
+            externalSession.setText(text.slice(0, caret - 1) + text.slice(caret), caret - 1);
+          }
+        }
+        // Everything else (Delete, arrows, F2, a lone modifier) is never a grid
+        // action while a session is live: hand the keyboard back.
+        focusExternalSessionView();
+        return;
+      }
+
       // === THE EDITOR IS OPENING ===
       // Opening the editor by typing is asynchronous (two IPC round trips, a
       // React render, then focus). Every keystroke that lands in that window
@@ -561,7 +642,13 @@ export function useSpreadsheetEditing({
         return;
       }
 
-      if (event.key === "Delete" || event.key === "Backspace") {
+      // A clear is the BARE key (useGridKeyboard's onDelete branch asks the
+      // same): a modified Delete/Backspace that the grid keyboard now lets
+      // through must not land here and clear the cell after all.
+      if (
+        (event.key === "Delete" || event.key === "Backspace") &&
+        !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+      ) {
         event.preventDefault();
         await startEditing("");
         await handleCommitEdit();

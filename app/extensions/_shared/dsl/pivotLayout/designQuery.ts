@@ -2,9 +2,9 @@
 // PURPOSE: Compile pivot-layout DSL text against a BI model into a backend
 //   `DesignQueryRequest` — the payload for the headless `run_design_query`
 //   command. Lets any consumer (charts now, paginated reports later) run a
-//   design query without creating a pivot. Mirrors the BI branch of the pivot
-//   editor's applyPivotDsl (Pivot/lib/pivot-api.ts) but targets a connection
-//   instead of a stored pivot.
+//   design query without creating a pivot. Mirrors the BI mapping in
+//   Pivot/components/biFieldsRequest.ts (the pivot editor's one request
+//   builder) but targets a connection instead of a stored pivot.
 
 import { processDsl } from './index';
 import { splitBiFieldKey } from '../../lib/biFieldKey';

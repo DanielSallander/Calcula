@@ -30,8 +30,13 @@ vi.mock("@api/floatingRanges", () => ({
 }));
 
 import { updateFloatingRange, type FloatingRangeInfo } from "@api/floatingRanges";
-import { getGridRegions } from "@api/gridOverlays";
+import { getGridRegions, type GridRegion } from "@api/gridOverlays";
 import { setDesignMode } from "@api/designMode";
+import {
+  registerLayoutSurfaceProvider,
+  notifyLayoutSurfaceChanged,
+  type LayoutSurface,
+} from "@api/layoutSurface";
 import {
   fromInfo,
   toInfo,
@@ -42,8 +47,17 @@ import {
   moveFloatingRange,
   flushPendingFloatingRangeSaves,
   getFloatingRangeById,
+  frGeometryEditable,
+  frObjectEditable,
+  installFrRegionResyncs,
   FLOATING_RANGE_REGION_TYPE,
 } from "../floatingRangeStore";
+import {
+  selectFloatingRange,
+  deselectAllFloatingRanges,
+  resetFrSelection,
+} from "../frSelection";
+import { setFrEditingRange } from "../frEditingRange";
 import {
   FR_ROW_HDR_W,
   FR_TITLE_H,
@@ -75,14 +89,23 @@ function makeInfo(overrides: Partial<FloatingRangeInfo> = {}): FloatingRangeInfo
   };
 }
 
+/** The published region data of range `id` on the active sheet. */
+function regionData(id: string): Record<string, unknown> {
+  const region = getGridRegions().find((r) => r.id === `fr-${id}`);
+  expect(region, `range ${id} is published`).toBeDefined();
+  return region!.data as Record<string, unknown>;
+}
+
 beforeEach(() => {
   resetFloatingRangeStore();
+  resetFrSelection();
   vi.clearAllMocks();
 });
 
 afterEach(() => {
   vi.useRealTimers();
   resetFloatingRangeStore();
+  resetFrSelection();
 });
 
 // ============================================================================
@@ -270,11 +293,11 @@ describe("syncFloatingRangeRegions", () => {
     );
   });
 
-  it("gates move/resize on DESIGN MODE — the button rule, not the shape rule", () => {
-    // In run mode a floating range is a working surface: cells select and
-    // edit, but a drag that relocates the object is layout work. Core
-    // consults these two flags before starting either gesture, so this IS
-    // the gate (owner decision 2026-08-13).
+  it("on a WORKSHEET a range moves without Design Mode, and resizes only when selected", () => {
+    // Owner decision 2026-09-27, replacing the 2026-08-13 button rule: the
+    // title bar is the frame, not the working surface, so it moves the range
+    // in every mode on every sheet kind. The handles exist only on a SELECTED
+    // range, so an unselected one's corner boxes never take a cell click.
     upsertFromInfo(
       makeInfo({ id: "d", name: "Float1", hostSheetIndex: 0, rowCount: 1, colCount: 1 }),
     );
@@ -282,16 +305,19 @@ describe("syncFloatingRangeRegions", () => {
     try {
       setDesignMode(false);
       syncFloatingRangeRegions();
-      expect(getGridRegions().find((r) => r.id === "fr-d")!.data).toMatchObject({
-        movable: false,
-        resizable: false,
-      });
+      expect(regionData("d")).toMatchObject({ movable: true, resizable: false, bodyGrab: false });
+
+      selectFloatingRange("d");
+      syncFloatingRangeRegions();
+      expect(regionData("d")).toMatchObject({ movable: true, resizable: true });
 
       setDesignMode(true);
       syncFloatingRangeRegions();
-      expect(getGridRegions().find((r) => r.id === "fr-d")!.data).toMatchObject({
+      expect(regionData("d")).toMatchObject({
         movable: true,
         resizable: true,
+        // A title is shown, so even Design Mode leaves the body to the cells.
+        bodyGrab: false,
       });
     } finally {
       setDesignMode(false);
@@ -315,6 +341,163 @@ describe("syncFloatingRangeRegions", () => {
       FR_ROW_HDR_W + 100 + FR_DEFAULT_COL_W,
       5,
     );
+  });
+});
+
+// ============================================================================
+// Geometry on a LAYOUT SURFACE (a canvas) — owner decision 2026-09-27
+// ============================================================================
+
+describe("geometry flags on a layout surface", () => {
+  /** The canvas's answer for sheet 0, mutable per test. */
+  let surface: LayoutSurface | null;
+  let unregister: (() => void) | null = null;
+
+  function canvas(over: Partial<LayoutSurface> = {}): LayoutSurface {
+    return {
+      snapToGrid: true,
+      gridSize: 16,
+      showGrid: true,
+      page: { width: 1280, height: 720 },
+      editable: true,
+      ...over,
+    };
+  }
+
+  beforeEach(() => {
+    surface = canvas();
+    unregister = registerLayoutSurfaceProvider({ get: (i) => (i === 0 ? surface : null) });
+    setFrActiveSheetIndex(0);
+  });
+
+  afterEach(() => {
+    unregister?.();
+    unregister = null;
+    setDesignMode(false);
+  });
+
+  it("an EDITABLE canvas with Design Mode OFF: movable, not resizable until selected, no body grab", () => {
+    // THE owner's finding: the title-bar drag did nothing on a canvas because
+    // the store published `movable: designMode`.
+    upsertFromInfo(makeInfo({ id: "a", hostSheetIndex: 0 }));
+    setDesignMode(false);
+    syncFloatingRangeRegions();
+    expect(regionData("a")).toMatchObject({ movable: true, resizable: false, bodyGrab: false });
+  });
+
+  it("a SUBSCRIBED canvas refuses everything, even in Design Mode on a selected range", () => {
+    // This also closes the edge-scale hole: that gesture reads `resizable`
+    // and never asks Core.
+    surface = canvas({ editable: false });
+    upsertFromInfo(makeInfo({ id: "a", hostSheetIndex: 0, showTitle: false }));
+    selectFloatingRange("a");
+    setDesignMode(true);
+    syncFloatingRangeRegions();
+    expect(regionData("a")).toMatchObject({ movable: false, resizable: false, bodyGrab: false });
+  });
+
+  it("a range the canvas LOCKS is neither movable nor resizable; its neighbour is", () => {
+    surface = canvas({ isLocked: (r: GridRegion) => r.data?.frId === "d" });
+    upsertFromInfo(makeInfo({ id: "d", hostSheetIndex: 0 }));
+    upsertFromInfo(makeInfo({ id: "e", hostSheetIndex: 0, name: "Float2" }));
+    selectFloatingRange("d");
+    syncFloatingRangeRegions();
+    expect(regionData("d")).toMatchObject({ movable: false, resizable: false });
+    expect(regionData("e")).toMatchObject({ movable: true });
+  });
+
+  it("bodyGrab is Design Mode AND no title AND geometry editable — nothing else", () => {
+    upsertFromInfo(makeInfo({ id: "t", hostSheetIndex: 0, showTitle: true }));
+    upsertFromInfo(makeInfo({ id: "n", hostSheetIndex: 0, showTitle: false, name: "Float2" }));
+    setDesignMode(false);
+    syncFloatingRangeRegions();
+    expect(regionData("t").bodyGrab).toBe(false);
+    expect(regionData("n").bodyGrab).toBe(false);
+
+    setDesignMode(true);
+    syncFloatingRangeRegions();
+    expect(regionData("t").bodyGrab).toBe(false);
+    expect(regionData("n").bodyGrab).toBe(true);
+
+    surface = canvas({ editable: false });
+    syncFloatingRangeRegions();
+    expect(regionData("n").bodyGrab).toBe(false);
+  });
+
+  it("re-publishes on its own when the SURFACE, the SELECTION or DESIGN MODE changes", () => {
+    // A range can sync before the canvas store knows its sheet is a canvas,
+    // and lock / subscribe / detach all change the answer later: without the
+    // subscriptions the flag waits for some unrelated sync.
+    const uninstall = installFrRegionResyncs();
+    try {
+      upsertFromInfo(makeInfo({ id: "a", hostSheetIndex: 0, showTitle: false }));
+      syncFloatingRangeRegions();
+      expect(regionData("a")).toMatchObject({ movable: true, resizable: false });
+
+      selectFloatingRange("a");
+      expect(regionData("a").resizable).toBe(true);
+      deselectAllFloatingRanges();
+      expect(regionData("a").resizable).toBe(false);
+
+      setDesignMode(true);
+      expect(regionData("a").bodyGrab).toBe(true);
+
+      surface = canvas({ editable: false });
+      notifyLayoutSurfaceChanged();
+      expect(regionData("a")).toMatchObject({ movable: false, bodyGrab: false });
+    } finally {
+      uninstall();
+    }
+  });
+
+  it("resizable stands down while one of the range's cells is EDITED, re-published on the editor's signal", () => {
+    // Core's corner boxes read the published flag, not the extension's live
+    // check, so the flag itself must follow the editor (owner, 2026-09-27: no
+    // handle over the cell the user is typing in). The editor announces
+    // itself through frEditingRange (proved in frEditorSession.test.ts).
+    const uninstall = installFrRegionResyncs();
+    try {
+      upsertFromInfo(makeInfo({ id: "a", hostSheetIndex: 0 }));
+      upsertFromInfo(makeInfo({ id: "b", hostSheetIndex: 0, name: "Float2" }));
+      selectFloatingRange("a");
+      expect(regionData("a").resizable).toBe(true);
+
+      setFrEditingRange("a");
+      expect(regionData("a")).toMatchObject({ resizable: false, movable: true });
+      // Only the EDITED range's handles stand down.
+      setFrEditingRange("b");
+      expect(regionData("a").resizable).toBe(true);
+      setFrEditingRange(null);
+      expect(regionData("a").resizable).toBe(true);
+    } finally {
+      setFrEditingRange(null);
+      uninstall();
+    }
+  });
+
+  it("frGeometryEditable / frObjectEditable: one answer per range for every geometry door", () => {
+    upsertFromInfo(makeInfo({ id: "a", hostSheetIndex: 0 }));
+    upsertFromInfo(makeInfo({ id: "w", hostSheetIndex: 1, name: "Float2" }));
+
+    // Editable canvas; a worksheet (no surface) always.
+    expect(frGeometryEditable("a")).toBe(true);
+    expect(frObjectEditable("a")).toBe(true);
+    expect(frGeometryEditable("w")).toBe(true);
+    expect(frObjectEditable("w")).toBe(true);
+
+    // A lock freezes GEOMETRY only: the range can still be authored.
+    surface = canvas({ isLocked: (r: GridRegion) => r.data?.frId === "a" });
+    expect(frGeometryEditable("a")).toBe(false);
+    expect(frObjectEditable("a")).toBe(true);
+
+    // A subscribed canvas is the publisher's: nothing.
+    surface = canvas({ editable: false });
+    expect(frGeometryEditable("a")).toBe(false);
+    expect(frObjectEditable("a")).toBe(false);
+    expect(frGeometryEditable("w")).toBe(true);
+
+    expect(frGeometryEditable("missing")).toBe(false);
+    expect(frObjectEditable("missing")).toBe(false);
   });
 });
 

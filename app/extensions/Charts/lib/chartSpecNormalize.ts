@@ -145,6 +145,19 @@ export function normalizeChartSpec(raw: unknown): ChartSpec {
 }
 
 /**
+ * Where the SPEC sits in a persisted chart record. Two shapes reach the store
+ * (see `normalizeChartDefinition`): a `ChartDefinition` whose spec is its
+ * nested `spec`, and a BARE spec -- recognised by having no nested `spec`
+ * object and a `mark` string. ONE rule, because the load-time sheet-id stamp
+ * (chartSheetRefs.ts, `stampStoredChartJson`) must stamp the very object this
+ * module normalizes.
+ */
+export function storedSpecOf(record: Record<string, unknown>): { spec: unknown; bare: boolean } {
+  const bare = !isPlainObject(record.spec) && typeof record.mark === "string";
+  return { spec: bare ? record : record.spec, bare };
+}
+
+/**
  * Complete a persisted chart RECORD, not just its spec.
  *
  * Two shapes reach this. The one the store writes is a `ChartDefinition` with a
@@ -161,8 +174,7 @@ export function normalizeChartDefinition(
   fallback: { chartId: string; sheetIndex: number },
 ): ChartDefinition {
   const source: Record<string, unknown> = isPlainObject(raw) ? raw : {};
-  const looksLikeBareSpec = !isPlainObject(source.spec) && typeof source.mark === "string";
-  const specSource = looksLikeBareSpec ? source : source.spec;
+  const specSource = storedSpecOf(source).spec;
 
   return {
     chartId: typeof source.chartId === "string" ? source.chartId : fallback.chartId,

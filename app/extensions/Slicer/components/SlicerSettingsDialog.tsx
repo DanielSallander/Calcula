@@ -17,6 +17,7 @@ import { useDialogWindow } from "@api/dialogWindow";
 import { getSlicerById, updateSlicerAsync } from "../lib/slicerStore";
 import { applySlicerFilter } from "../lib/slicerFilterBridge";
 import { requestOverlayRedraw } from "@api/gridOverlays";
+import { runStepThenConfirmOverwrite } from "@api/pivotOverwrite";
 import type { SlicerSelectionMode, SlicerArrangement } from "../lib/slicerTypes";
 import { getSlicerComputedAttributes } from "../lib/slicer-api";
 import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
@@ -172,31 +173,40 @@ export function SlicerSettingsDialog({
     const selectionMode: SlicerSelectionMode = singleSelect ? "single" : "standard";
     const levelChanged = getSlicerById(slicerId)?.filterLevel !== filterLevel;
 
-    await updateSlicerAsync(slicerId, {
-      selectionMode,
-      forceSelection,
-      showSelectAll,
-      filterLevel,
-      hideNoData,
-      indicateNoData,
-      sortNoDataLast,
-      arrangement,
-      rows,
-      columns,
-      autogrid,
-      itemGap,
-      itemPadding,
-      buttonRadius,
-    });
-    // A level change moves an ACTIVE selection between the host-side mask
-    // and the engine-routed (pinned) filter — re-apply so the connected
-    // pivots pick up the new routing.
-    if (levelChanged) {
-      const fresh = getSlicerById(slicerId);
-      if (fresh && fresh.selectedItems !== null) {
-        await applySlicerFilter(fresh);
+    // The settings AND the re-routed filter are ONE undo step: moving a
+    // filter into or out of the pivot's query re-queries the pivot, which
+    // records its definition -- joining this step -- so one Ctrl+Z puts the
+    // slicer and its pivots back together. A re-routed filter that grows a
+    // pivot over the user's cells is asked about ONCE after the step commits;
+    // a decline takes back the whole step (settings included). Inside someone
+    // else's open transaction (a script batch) it never asks.
+    await runStepThenConfirmOverwrite("Slicer Settings", async (overwrites) => {
+      await updateSlicerAsync(slicerId, {
+        selectionMode,
+        forceSelection,
+        showSelectAll,
+        filterLevel,
+        hideNoData,
+        indicateNoData,
+        sortNoDataLast,
+        arrangement,
+        rows,
+        columns,
+        autogrid,
+        itemGap,
+        itemPadding,
+        buttonRadius,
+      });
+      // A level change moves an ACTIVE selection between the host-side mask
+      // and the engine-routed (pinned) filter — re-apply so the connected
+      // pivots pick up the new routing.
+      if (levelChanged) {
+        const fresh = getSlicerById(slicerId);
+        if (fresh && fresh.selectedItems !== null) {
+          await applySlicerFilter(fresh, { overwrites });
+        }
       }
-    }
+    });
     requestOverlayRedraw();
     handleClose();
   };

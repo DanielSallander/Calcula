@@ -1334,7 +1334,38 @@ pub fn apply_names_to_formulas(
     end_row: Option<u32>,
     end_col: Option<u32>,
 ) -> Result<ApplyNamesResult, String> {
-    let named_ranges = state.named_ranges.read().unwrap();
+    // Build the list of (name, col_letters, row_1based) for single-cell named
+    // ranges -- from the names ALONE, released before any grid lock. This held
+    // `named_ranges` while it took `grid`; the calculation pass (an async
+    // command, off the main thread) takes `grid` first and `named_ranges` after
+    // it, so the two could each hold what the other waited for (fix round 4,
+    // found by the lock-order census once it could see `lock_pending`). The
+    // names are only read here, to build the text replacements.
+    let names_filter: HashSet<String> = names.iter().map(|n| n.to_uppercase()).collect();
+    let apply_all = names_filter.is_empty();
+
+    let mut replacements: Vec<(String, Vec<String>)> = Vec::new();
+    {
+        let named_ranges = state.named_ranges.read().unwrap();
+        for nr in named_ranges.values() {
+            if !apply_all && !names_filter.contains(&nr.name.to_uppercase()) {
+                continue;
+            }
+
+            if let Some((col_letters, row_num)) = extract_single_cell_ref(&nr.refers_to) {
+                let patterns = build_ref_patterns(&col_letters, row_num);
+                replacements.push((nr.name.clone(), patterns));
+            }
+        }
+    }
+
+    if replacements.is_empty() {
+        return Ok(ApplyNamesResult {
+            formulas_modified: 0,
+            cells: Vec::new(),
+        });
+    }
+
     // LOCKED BUT UNDECIDED. This command has three ways to write nothing --
     // no applicable names, no formula that mentions one, and (since the §3bc
     // fix below) a replacement that cannot be read back -- and the dirty
@@ -1346,30 +1377,6 @@ pub fn apply_names_to_formulas(
     let styles = state.style_registry.read().unwrap();
     let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
-
-    // Build the list of (name, col_letters, row_1based) for single-cell named ranges
-    let names_filter: HashSet<String> = names.iter().map(|n| n.to_uppercase()).collect();
-    let apply_all = names_filter.is_empty();
-
-    let mut replacements: Vec<(String, Vec<String>)> = Vec::new();
-
-    for nr in named_ranges.values() {
-        if !apply_all && !names_filter.contains(&nr.name.to_uppercase()) {
-            continue;
-        }
-
-        if let Some((col_letters, row_num)) = extract_single_cell_ref(&nr.refers_to) {
-            let patterns = build_ref_patterns(&col_letters, row_num);
-            replacements.push((nr.name.clone(), patterns));
-        }
-    }
-
-    if replacements.is_empty() {
-        return Ok(ApplyNamesResult {
-            formulas_modified: 0,
-            cells: Vec::new(),
-        });
-    }
 
     // Determine the cell range to scan
     let scan_start_row = start_row.unwrap_or(0);
@@ -1490,7 +1497,6 @@ pub fn apply_names_to_formulas(
     drop(merged_regions);
     drop(styles);
     drop(grid);
-    drop(named_ranges);
     if modified > 0 {
         crate::undo_commands::rebuild_all_dependencies(&state);
     }

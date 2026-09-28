@@ -14,8 +14,12 @@
 //          the user's own and editable again. Design mode is NOT part of the
 //          rule: it is a session-only flag that starts off, and gating on it
 //          would leave the charts on a new canvas immovable while the same
-//          chart on a worksheet moves freely. (Floating ranges still follow
-//          design mode through their own region data, as they do everywhere.)
+//          chart on a worksheet moves freely. Families publish their
+//          `movable`/`resizable` flags from this answer through
+//          `objectGeometryEditable` (@api/layoutSurface) -- floating grids
+//          included, which move by their title bar in every mode. Only a
+//          button still needs Design Mode to be dragged, because a press on
+//          it RUNS it.
 //
 //          LOCKED. An object whose ref is in the layout's `locked` list is
 //          selectable but neither movable nor resizable (lib/canvasLocks.ts);

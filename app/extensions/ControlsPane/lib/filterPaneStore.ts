@@ -15,6 +15,13 @@ import * as api from "./filterPaneApi";
 import { FilterPaneEvents } from "./filterPaneEvents";
 import { applyRibbonFilter, clearRibbonFilter } from "./filterPaneFilterBridge";
 import { cellEvents } from "@api/cellEvents";
+import { showToast } from "@api/notifications";
+import {
+  confirmPivotOverwriteOrUndo,
+  createPivotOverwriteTally,
+  isAnyUndoTransactionOpen,
+  runNamingItsUndoStep,
+} from "@api/pivotOverwrite";
 import { emitAppEvent, AppEvents } from "@api/events";
 import {
   CONTROL_VALUE_CHANGED,
@@ -228,6 +235,23 @@ export async function updateFilterAsync(
   }
 }
 
+/**
+ * A ribbon filter's selection change: the selection write, then the filter on
+ * every target pivot (ONE "Ribbon filter change" step for the pivots).
+ *
+ * OVERWRITE. A pivot the change grows over the user's cells records a step
+ * holding them. Once the pivot step has committed, the user is asked ONCE for
+ * the whole change (every pivot, how many cells) through `@api/pivotOverwrite`,
+ * failing closed. A decline takes back the pivot step AND the selection step
+ * beneath it -- the backend records the selection as a step of its own, before
+ * the pivots' -- but that one only when it is PROVABLY this change's (exactly
+ * one entry appeared for the write; `runNamingItsUndoStep`), never a guess. A
+ * change that runs inside someone else's open transaction -- the frontend's,
+ * or a script batch's opened on the backend directly -- never asks. After a
+ * decline, the pivots the change masked without overwriting (they recorded
+ * nothing, so the take-back could not restore them) are re-derived from the
+ * restored selection ({@link rederiveAfterDecline}).
+ */
 export async function updateFilterSelectionAsync(
   filterId: string,
   selectedItems: string[] | null,
@@ -242,15 +266,30 @@ export async function updateFilterSelectionAsync(
       filter.selectedItems = selectedItems;
     }
 
-    await api.updateRibbonFilterSelection(filterId, selectedItems);
+    const joined = await isAnyUndoTransactionOpen();
+    const { seq: selectionStep } = await runNamingItsUndoStep(() =>
+      api.updateRibbonFilterSelection(filterId, selectedItems),
+    );
 
     // Apply or clear filter on connected sources
     const updatedFilter = cachedFilters.find((f) => f.id === filterId);
     if (updatedFilter) {
+      const overwrites = createPivotOverwriteTally();
       if (selectedItems === null) {
-        await clearRibbonFilter(updatedFilter);
+        await clearRibbonFilter(updatedFilter, undefined, overwrites);
       } else {
-        await applyRibbonFilter(updatedFilter);
+        await applyRibbonFilter(updatedFilter, undefined, overwrites);
+      }
+      if (!joined) {
+        const outcome = await confirmPivotOverwriteOrUndo(overwrites, { thenUndoSeq: selectionStep });
+        if (outcome === "undone") {
+          // The take-back announced what it restored: the "ribbonFilter"
+          // domain re-reads this cache (and tells @Name consumers). Formulas
+          // bound to the filter follow the restored selection.
+          await rederiveAfterDecline(filterId, selectedItems, overwrites.pivotIds);
+          triggerControlValueRecalc([updatedFilter.name]);
+          return;
+        }
       }
       // GET.CONTROLVALUE: formulas bound to this filter's name react to the
       // new selection (multi-select spills handled backend-side).
@@ -284,6 +323,51 @@ export async function updateFilterSelectionAsync(
       filter.selectedItems = previousSelection;
     }
     console.error("[FilterPane] Failed to update filter selection:", err);
+  }
+}
+
+/** Told when the pivots a declined change left on its selection could not be
+ *  put back (the filter could not be re-read). */
+export const RIBBON_DECLINE_NOT_REDERIVED =
+  "Some PivotTables may still show the filter you declined. Select the filter's items again to update them.";
+
+/**
+ * After a DECLINED selection change was taken back (fix round 5 review): the
+ * take-back restored every pivot whose step it holds -- the ones that grew
+ * over the user's cells -- but a pivot the change masked WITHOUT overwriting
+ * recorded nothing (a level-1 mask records no step), so it still showed the
+ * declined selection while the card showed the restored one. Re-derive
+ * exactly those from the selection the take-back RESTORED, read back from
+ * the backend (the cache still holds the declined one until the take-back's
+ * own re-read lands), recording nothing: `RibbonFilterReconcile` sends
+ * `reconcile: true`, opens no step, and skips `restoredPivotIds`.
+ *
+ * Nothing is re-derived when the selection did not come back (its step was
+ * not provably this change's, so the backend still holds the declined
+ * selection and the untouched pivots agree with it), or at a PINNED level
+ * (every pivot's re-query recorded its pre-state in the step that came back).
+ */
+async function rederiveAfterDecline(
+  filterId: string,
+  declined: string[] | null,
+  restoredPivotIds: readonly string[],
+): Promise<void> {
+  let restored: RibbonFilter | undefined;
+  try {
+    restored = (await api.getAllRibbonFilters()).find((f) => f.id === filterId);
+  } catch (err) {
+    console.warn("[FilterPane] Could not re-read the filter after a declined change:", err);
+    showToast(RIBBON_DECLINE_NOT_REDERIVED, { type: "error", duration: 8000 });
+    return;
+  }
+  if (!restored) return;
+  if (JSON.stringify(restored.selectedItems) === JSON.stringify(declined)) return;
+  if ((restored.filterLevel ?? 1) !== 1) return;
+  const reconcile = { skipPivotIds: restoredPivotIds };
+  if (restored.selectedItems === null) {
+    await clearRibbonFilter(restored, undefined, undefined, reconcile);
+  } else {
+    await applyRibbonFilter(restored, undefined, undefined, reconcile);
   }
 }
 

@@ -7,6 +7,10 @@
 #   -TitleLike  substring of the dialog's window title (e.g. "Script Security").
 #               Pass "Calcula" for a confirmAsync raised without a title option.
 #   -Action     ok | cancel | read     ("read" reports the text and clicks nothing)
+#               button                 press the button whose label is EXACTLY -Button
+#               close                  the title-bar X (WM_SYSCOMMAND / SC_CLOSE)
+#               escape                 the Escape key, delivered to the dialog itself
+#   -Button     with -Action button: the label to press ("&" accelerators ignored)
 #
 # Finds the dialog owned by app.exe, enumerates its child BUTTONs, and posts
 # BM_CLICK to the matching one. Clicking the real button is used in preference to
@@ -16,6 +20,18 @@
 # Emits:
 #   TEXT:<message>        the dialog's message text, read via UI Automation
 #   CLICKED:<button text> | NOTFOUND | NOBUTTON:<texts>
+# and, for the three by-name actions (button / close / escape) only:
+#   BUTTONS:<a>|<b>|...   every button the dialog offered, in window order
+#   CLICKED:<label> | CLOSED:X | ESCAPED   what was sent
+#   GONE | STILLOPEN      whether the dialog window was destroyed within 5 s --
+#                         the caller's proof that the answer was DELIVERED, not
+#                         merely sent (an X that is disabled is silently ignored)
+#
+# WHY "button" EXISTS. "cancel" presses "the last button that is not OK-like",
+# which is right for a two-button confirm and a GUESS for three custom labels:
+# on the save-before-closing prompt (Save / Don't Save / Cancel) a wrong guess
+# presses Don't Save and destroys the app under test. A by-label press either
+# finds the named button or reports NOBUTTON and presses nothing.
 #
 # The message is read through UIAutomation rather than GetWindowText because rfd
 # raises a TASKDIALOG whose body is DirectUI — Win32 text APIs return nothing for
@@ -23,8 +39,9 @@
 # an owned dialog), not a separate top-level window.
 param(
   [Parameter(Mandatory = $true)][string]$TitleLike,
-  [Parameter(Mandatory = $true)][ValidateSet("ok", "cancel", "read")][string]$Action,
-  [int]$TimeoutMs = 20000
+  [Parameter(Mandatory = $true)][ValidateSet("ok", "cancel", "read", "button", "close", "escape")][string]$Action,
+  [int]$TimeoutMs = 20000,
+  [string]$Button = ""
 )
 $ErrorActionPreference = "Stop"
 
@@ -43,6 +60,7 @@ public class DlgWin {
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wp, IntPtr lp);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wp, IntPtr lp);
   [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
 }
 "@
 
@@ -133,6 +151,57 @@ $cbChild = [DlgWin+EnumProc]{
 
 # Strip the & accelerator marker before reporting.
 function Strip-Accel([string]$s) { return ($s -replace "&", "").Trim() }
+
+# --- the by-name actions: button / close / escape ---
+# Each reports every button it saw, what it sent, and whether the dialog then
+# went away. "Sent" is not "answered": a TaskDialog without
+# TDF_ALLOW_DIALOG_CANCELLATION greys its X and ignores Escape, and a caller that
+# trusted the send would then assert on an app still blocked by the prompt.
+function Wait-DialogGone([IntPtr]$h) {
+  $until = (Get-Date).AddMilliseconds(5000)
+  while ((Get-Date) -lt $until) {
+    if (-not [DlgWin]::IsWindow($h) -or -not [DlgWin]::IsWindowVisible($h)) { return "GONE" }
+    Start-Sleep -Milliseconds 100
+  }
+  return "STILLOPEN"
+}
+
+if ($Action -eq "button" -or $Action -eq "close" -or $Action -eq "escape") {
+  Write-Output ("BUTTONS:" + (($buttons | ForEach-Object { Strip-Accel $_.text }) -join "|"))
+  if ($Action -eq "button") {
+    if ([string]::IsNullOrWhiteSpace($Button)) { Write-Output "NOBUTTON:(no -Button label given)"; exit 0 }
+    $named = $null
+    foreach ($b in $buttons) { if ((Strip-Accel $b.text) -eq $Button) { $named = $b; break } }
+    if ($null -eq $named) {
+      Write-Output ("NOBUTTON:" + (($buttons | ForEach-Object { Strip-Accel $_.text }) -join "|"))
+      exit 0
+    }
+    [DlgWin]::SendMessage($named.hwnd, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Write-Output ("CLICKED:" + (Strip-Accel $named.text))
+  } elseif ($Action -eq "close") {
+    # Exactly what a click on the title-bar X sends. Posted, so a dialog that
+    # refuses it cannot block this script.
+    $WM_SYSCOMMAND = 0x0112
+    $SC_CLOSE = 0xF060
+    [DlgWin]::PostMessage($dlg, $WM_SYSCOMMAND, [IntPtr]$SC_CLOSE, [IntPtr]::Zero) | Out-Null
+    Write-Output "CLOSED:X"
+  } else {
+    # Escape as the dialog's own modal loop receives a keypress: a key message
+    # for a control INSIDE the dialog, which IsDialogMessage turns into
+    # IDCANCEL. Posted to the dialog's control rather than synthesised with
+    # SendInput, so it cannot land in whatever window is in the foreground.
+    if ($buttons.Count -eq 0) { Write-Output "NOBUTTON:"; exit 0 }
+    $WM_KEYDOWN = 0x0100
+    $WM_KEYUP = 0x0101
+    $VK_ESCAPE = 0x1B
+    $h = $buttons[0].hwnd
+    [DlgWin]::PostMessage($h, $WM_KEYDOWN, [IntPtr]$VK_ESCAPE, [IntPtr]0x00010001) | Out-Null
+    [DlgWin]::PostMessage($h, $WM_KEYUP, [IntPtr]$VK_ESCAPE, [IntPtr][Int64]3221291009) | Out-Null
+    Write-Output "ESCAPED"
+  }
+  Write-Output (Wait-DialogGone $dlg)
+  exit 0
+}
 
 # PICKING THE BUTTON. Two traps, both hit for real while building this:
 #

@@ -648,8 +648,20 @@ pub struct ToggleGroupRequest {
 pub struct ApplyPivotFilterRequest {
     /// Pivot table ID
     pub pivot_id: PivotId,
-    /// Field index (in source data)
-    pub field_index: usize,
+    /// Field index (in the pivot cache). Optional when `bi_field_key` is
+    /// given; one of the two is required.
+    #[serde(default)]
+    pub field_index: Option<usize>,
+    /// BI pivots only: the model column to filter, as a "Table.Column" key.
+    /// When present it WINS over `field_index`: the backend resolves the cache
+    /// index itself and, when the column is not in the pivot yet, ENSURES it --
+    /// appends it to the stored definition as a slicer field (no visible filter
+    /// row) and re-queries the model in this same command, keeping every
+    /// existing field, hidden item and hierarchy, as ONE undo step (joining an
+    /// open transaction). A pivot with no fields at all is left alone and its
+    /// current view returned.
+    #[serde(default)]
+    pub bi_field_key: Option<String>,
     /// Filters to apply
     pub filters: PivotFilters,
     /// Filter level: 1 = ordinary (host-side mask, the default), 2..=9 =
@@ -662,6 +674,13 @@ pub struct ApplyPivotFilterRequest {
     /// pivot's own dropdown / the filter pane).
     #[serde(default)]
     pub slicer_id: Option<String>,
+    /// A RE-APPLY of a selection an undo or redo already restored (the
+    /// Slicer's reconcile after Ctrl+Z / Ctrl+Y): it records NO undo step at
+    /// all -- not the overwrite step, not an ensure, not a re-query's. A step
+    /// recorded after an undo clears the redo stack, which is exactly what the
+    /// reconcile must never do. Absent = a user gesture, which records.
+    #[serde(default)]
+    pub reconcile: bool,
 }
 
 pub(crate) fn default_apply_filter_level() -> u8 {
@@ -674,10 +693,22 @@ pub(crate) fn default_apply_filter_level() -> u8 {
 pub struct ClearPivotFilterRequest {
     /// Pivot table ID
     pub pivot_id: PivotId,
-    /// Field index (in source data)
-    pub field_index: usize,
+    /// Field index (in the pivot cache). Optional when `bi_field_key` is
+    /// given; one of the two is required.
+    #[serde(default)]
+    pub field_index: Option<usize>,
+    /// BI pivots only: the model column as a "Table.Column" key; wins over
+    /// `field_index`. A column the pivot does not carry is a NO-OP (the current
+    /// view is returned and the document stays clean): clearing never ADDS a
+    /// field to the query.
+    #[serde(default)]
+    pub bi_field_key: Option<String>,
     /// Optional: specific filter type to clear (if None, clears all)
     pub filter_type: Option<PivotFilterType>,
+    /// A re-clear by the undo/redo reconcile: records NO undo step (see
+    /// [`ApplyPivotFilterRequest::reconcile`]).
+    #[serde(default)]
+    pub reconcile: bool,
 }
 
 /// Request to sort a pivot field.
@@ -946,11 +977,35 @@ pub struct PivotViewResponse {
     /// ask the user for confirmation and undo if declined.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub overwritten_cell_count: u32,
+    /// The identity of the undo step that holds the overwritten cells, when
+    /// this command recorded one. The frontend hands it back to
+    /// `undo_pivot_overwrite` when the user declines the overwrite, and the
+    /// backend takes back ONLY the step that carries it. Absent when the
+    /// command recorded no such step (it overwrote nothing, or it records no
+    /// undo) -- and then a decline has nothing it may take back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overwrite_token: Option<u64>,
     /// What the user should be told about THIS response — a refusal by the
     /// active security role, or a degradation. Empty on the ordinary path, so
     /// the wire bytes are unchanged for every healthy pivot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<PivotNotice>,
+}
+
+/// What a declined "overwrite existing data?" took back
+/// (`undo_pivot_overwrite`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotOverwriteUndoResponse {
+    /// How many undo steps were taken back (the overwrite steps, plus the
+    /// step the caller named to follow them).
+    pub steps_undone: u32,
+    /// Every token the caller named was found and its step taken back. False
+    /// when a step of the gesture sat under something else and was left.
+    pub complete: bool,
+    /// The refresh DOMAINS the steps touched, as the undo command reports
+    /// them (`UndoResult::refresh_domains`), for the frontend's one fan-out.
+    pub refresh_domains: Vec<String>,
 }
 
 /// Filter row metadata for frontend interaction
@@ -1604,8 +1659,16 @@ pub struct UpdateBiPivotFieldsRequest {
     /// Fields needed only by slicers — included in the GROUP BY query so
     /// they appear in the cache, but NOT shown as visible filter rows.
     /// Mapped to `definition.slicer_filters` instead of `filter_fields`.
+    ///
+    /// `None` (absent or null) = KEEP the slicer fields the pivot already
+    /// carries, with their hidden items -- a layout edit from the field list
+    /// must not silently drop a slicer's filter. `Some([])` = clear them all.
+    /// `Some(list)` = exactly these. A slicer field that is also a row, column
+    /// or filter field is merged into that zone field (its hidden items move
+    /// with it), and the active MODEL slicers on the pivot's own sheet are
+    /// folded in server-side whatever is sent.
     #[serde(default)]
-    pub slicer_fields: Vec<BiFieldRef>,
+    pub slicer_fields: Option<Vec<BiFieldRef>>,
     /// Hierarchies placed on the row axis (drill-down paths).
     #[serde(default)]
     pub row_hierarchies: Vec<BiHierarchyFieldRef>,
@@ -1648,15 +1711,33 @@ pub struct BiFieldRef {
     /// rather than a GROUP BY column.
     #[serde(default)]
     pub is_lookup: bool,
-    /// Items to hide from the filter. Only relevant for filter fields.
-    #[serde(default)]
-    pub hidden_items: Vec<String>,
+    /// Items to hide (a filter subset). Honoured on every zone: row, column,
+    /// filter and slicer fields.
+    ///
+    /// THREE states, because a caller that does not know about a field's
+    /// filter must be told apart from one that removed it:
+    /// - ABSENT (`None`): keep what this field (by its Table.Column name)
+    ///   already hides on the pivot. The field list sends this for a field it
+    ///   did not edit, so a slicer's or ribbon filter's mask on a row field
+    ///   survives a layout edit.
+    /// - a non-empty list: exactly these are hidden.
+    /// - `[]` (`Some(vec![])`): the caller REMOVED the filter -- e.g. the
+    ///   Pivot Layout DSL editor after its `NOT IN (...)` clause was deleted.
+    ///   Before this was distinguishable, an empty list meant "keep" and the
+    ///   removed clause came straight back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_items: Option<Vec<String>>,
 }
 
 impl BiFieldRef {
     /// True when this ref is a calculation-group placement (pseudo table).
     pub fn is_calc_group(&self) -> bool {
         self.table == CALC_GROUP_TABLE
+    }
+
+    /// The settled hidden items (after the carry-over): `None` reads as none.
+    pub fn hidden(&self) -> &[String] {
+        self.hidden_items.as_deref().unwrap_or(&[])
     }
 }
 
@@ -1786,6 +1867,30 @@ pub struct SavedBiPivotMetadata {
     /// Cultures defined in the BI model (per-locale metadata translations).
     #[serde(default)]
     pub cultures: Vec<BiCultureMeta>,
+    /// The block of cells this pivot's output occupied on its destination
+    /// sheet when the workbook was saved.
+    ///
+    /// A BI pivot reopens with an EMPTY cache (its data arrives on the first
+    /// query), so the view it renders on load is the empty placeholder -- far
+    /// smaller than the output it wrote last time, which IS in the saved
+    /// cells. Registering the protected region from that empty view made the
+    /// first refresh count the pivot's OWN saved rows as foreign data and ask
+    /// "A PivotTable report will overwrite existing data" on every reopen. The
+    /// region is registered from this extent instead.
+    ///
+    /// Optional, no format bump: an older reader drops it and gets exactly
+    /// the old behaviour (a spurious prompt) -- a visible nuisance, never a
+    /// silent misreading of the document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_extent: Option<SavedPivotOutputExtent>,
+}
+
+/// The size of a pivot's written output, anchored at its destination cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedPivotOutputExtent {
+    pub rows: u32,
+    pub cols: u32,
 }
 
 /// Metadata stored per BI-backed pivot (not serialized to frontend directly).

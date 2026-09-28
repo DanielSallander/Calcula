@@ -8,6 +8,11 @@ export {
   type CellClickInterceptorFn,
   registerCellClickInterceptor,
   checkCellClickInterceptors,
+  // The AFTER-press announcement. Its `notifyGridCellPressed` is Core's alone
+  // and is deliberately not re-exported: an extension listens, never presses.
+  type GridCellPress,
+  type GridCellPressListener,
+  onGridCellPressed,
   type CellCursorInterceptorFn,
   registerCellCursorInterceptor,
   getCellCursorOverride,

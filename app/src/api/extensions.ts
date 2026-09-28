@@ -5,6 +5,7 @@
 // FIX: Types now match core/lib/gridCommands.ts definitions exactly.
 
 import type { Selection } from "../core/types";
+import type { GridCommand, CommandGuard } from "../core/lib/gridCommands";
 
 // ============================================================================
 // Type Definitions (Contracts) - Must match Shell implementations
@@ -116,16 +117,15 @@ export interface GridContextMenuItem {
   children?: GridContextMenuItem[];
 }
 
-/** Available grid command names */
-export type GridCommand =
-  | "cut"
-  | "copy"
-  | "paste"
-  | "clearContents"
-  | "insertRow"
-  | "insertColumn"
-  | "deleteRow"
-  | "deleteColumn";
+/**
+ * Available grid command names, and the list itself -- DERIVED from Core
+ * (core/lib/gridCommands.ts), the way api/types.ts re-exports Core's types.
+ * This used to be a copied union under the "MUST match exactly" banner above,
+ * and it had drifted to 8 of Core's 18 commands. Pinned by
+ * src/api/__tests__/gridCommandDrift.test.ts.
+ */
+export type { GridCommand, CommandGuard } from "../core/lib/gridCommands";
+export { GRID_COMMANDS } from "../core/lib/gridCommands";
 
 // ============================================================================
 // Sheet Context Types
@@ -224,8 +224,9 @@ export interface GridExtensionsService {
   onChange(callback: () => void): () => void;
 }
 
-/** Guard function type - receives current selection, return true to allow, or a string (error message) to block. */
-export type CommandGuard = (selection: Selection | null) => boolean | string;
+// `CommandGuard` (a guard receives the current selection and returns true to
+// allow, or a sentence to block) is Core's type, re-exported with GridCommand
+// above.
 
 export interface GridCommandsService {
   register(command: GridCommand, handler: () => void | Promise<void>): void;

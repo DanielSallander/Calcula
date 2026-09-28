@@ -1,6 +1,8 @@
 //! FILENAME: app/src/api/layoutSurface.ts
 // PURPOSE: Public facade for the LAYOUT SURFACE seam (snap grid, page bounds,
-//          editability of floating objects on a sheet).
+//          editability of floating objects on a sheet -- and
+//          `objectGeometryEditable`, the one per-object answer families
+//          publish `movable`/`resizable` from).
 // CONTEXT: Core consults the registered provider from its floating-object move
 //          and resize handlers and from the scrollbar extent; an extension (the
 //          canvas sheet extension) registers the provider. Re-exported from Core
@@ -23,6 +25,7 @@ export {
   GRID_SCROLLBAR_GUTTER_PX,
   pageScrollExtent,
   isRegionLocked,
+  objectGeometryEditable,
 } from "../core/lib/layoutSurface";
 
 export type {

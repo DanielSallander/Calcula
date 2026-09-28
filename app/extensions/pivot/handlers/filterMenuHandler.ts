@@ -112,17 +112,20 @@ async function handleApplyFilter(
   console.log("[Pivot Extension] Applying filter:", { fieldIndex, selectedValues, hiddenItems });
 
   try {
-    // Update the pivot with the new filter configuration
-    await pivot.updateFields({
-      pivotId: currentFilterState.pivotId,
-      filterFields: [
-        {
-          sourceIndex: fieldIndex,
-          name: currentFilterState.fieldName,
-          hiddenItems: hiddenItems.length > 0 ? hiddenItems : undefined,
-        },
-      ],
-    });
+    // Filter THIS field only. This used to send `update_pivot_fields` with a
+    // one-entry filterFields list, and that command REPLACES the whole zone:
+    // every other report filter left the pivot, with its own filter
+    // (review3 finding 2). apply/clear_pivot_filter patch one field and keep
+    // the rest; they also carry the overwrite prompt and the undo step.
+    if (hiddenItems.length === 0) {
+      await pivot.clearFilter({ pivotId: currentFilterState.pivotId, fieldIndex });
+    } else {
+      await pivot.applyFilter({
+        pivotId: currentFilterState.pivotId,
+        fieldIndex,
+        filters: { manualFilter: { selectedItems: selectedValues } },
+      });
+    }
 
     // Notify the PivotEditor so it can update its zone state
     emitAppEvent(PivotEvents.PIVOT_FILTER_APPLIED, {

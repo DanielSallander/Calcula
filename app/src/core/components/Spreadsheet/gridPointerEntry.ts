@@ -117,6 +117,25 @@
 
 import type React from "react";
 import { isPointerClaimed } from "../../lib/pointerClaims";
+import { getGlobalIsEditing } from "../../hooks/useEditing";
+import { isExternalEditLive } from "../../lib/formulaEditTarget";
+
+/**
+ * The `isEditing` answer the pointer door is wired with (Spreadsheet.tsx): an
+ * open CORE edit, OR a live EXTERNAL edit session (a floating grid's cell edit,
+ * core/lib/formulaEditTarget.ts), whichever view hosts its caret.
+ *
+ * The second half is the reason this exists. A session hosted by the FORMULA
+ * BAR sets no Core flag (that flag means Core's own editor is open and feeds
+ * `isGlobalFormulaMode`), so with `getGlobalIsEditing` alone every reference
+ * pick moved the keyboard from the bar to the grid container -- and the next
+ * keystroke reached the grid's keyboard instead of the formula: Delete cleared
+ * the picked cell, Tab moved the grid cursor, typing opened a Core edit on a
+ * cell nobody was editing.
+ */
+export function editBlocksGridFocus(): boolean {
+  return getGlobalIsEditing() || isExternalEditLive();
+}
 
 export interface SplitDragStart {
   axis: "row" | "col";

@@ -5,7 +5,8 @@
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import Editor, { type OnMount, type OnChange } from '@monaco-editor/react';
 import type * as monaco from 'monaco-editor';
-import { processDsl, serialize, type CompileContext } from '../../_shared/dsl/pivotLayout';
+import { serialize, type CompileContext } from '../../_shared/dsl/pivotLayout';
+import { compileForEditor } from './dslCompile';
 import { getControlValue, type ControlValue } from '@api/controlValues';
 import { LANGUAGE_ID, clearDslModelContext, registerPivotDslLanguage, setDslEditorContext, setDslModelContext } from '../../_shared/dsl/pivotLayout/pivotDslLanguage';
 import { DescribeQueryPanel } from '../../_shared/dsl/pivotLayout/describeQuery';
@@ -48,7 +49,9 @@ interface DesignEditorProps {
   filterUniqueValues: Map<string, string[]>;
   /** Calculated fields to include in serialization. */
   calculatedFields?: CalculatedFieldDef[];
-  /** Callback to apply compiled DSL state to the pivot editor. */
+  /** Callback to apply compiled DSL state to the pivot editor.
+   *  `unresolvedFilters`: filter fields whose `= (...)` list could not be
+   *  turned into hidden items (dslCompile.ts) -- NOT a request to clear them. */
   onZoneStateChange: (
     rows: ZoneField[],
     columns: ZoneField[],
@@ -57,6 +60,7 @@ interface DesignEditorProps {
     layout: LayoutConfig,
     calculatedFields?: CalculatedFieldDef[],
     valueColumnOrder?: ValueColumnRefDef[],
+    unresolvedFilters?: ReadonlySet<string>,
   ) => void;
   /** Called when a SAVE AS clause is compiled from user-typed DSL. */
   onSaveAs?: (name: string, dslText: string) => void;
@@ -263,7 +267,9 @@ export function DesignEditor({
     // Debounce: compile after 300ms of inactivity
     debounceTimer.current = setTimeout(() => {
       const ctx: CompileContext = { sourceFields, biModel, filterUniqueValues, resolveControl };
-      const result = processDsl(value, ctx);
+      // An inclusion `= (...)` whose items are not loaded is reported (a
+      // warning marker) and applied as NO change, never as a cleared filter.
+      const result = compileForEditor(value, ctx);
 
       // Update Monaco markers for errors
       const monacoInstance = monacoRef.current;
@@ -289,6 +295,7 @@ export function DesignEditor({
           result.layout,
           result.calculatedFields.length > 0 ? result.calculatedFields : undefined,
           result.valueColumnOrder.length > 0 ? result.valueColumnOrder : undefined,
+          result.unresolvedInclusions,
         );
 
         // Notify parent about SAVE AS clause

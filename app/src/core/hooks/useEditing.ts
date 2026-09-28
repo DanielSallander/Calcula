@@ -58,6 +58,7 @@ import {
 } from "../lib/formulaRefParser";
 import { alertAsync } from "../lib/dialogs";
 import { openEntryValue, abortEditorOpen } from "../lib/editOpenBuffer";
+import { setCoreCellEditFlag, isCoreCellEditOpen } from "../lib/cellEditFlag";
 
 /**
  * MODULE-LEVEL singleton ref for synchronous editing state.
@@ -69,8 +70,11 @@ import { openEntryValue, abortEditorOpen } from "../lib/editOpenBuffer";
  * - useSpreadsheetSelection.ts sets isEditingRef.current = true
  * - useSpreadsheetEditing.ts checks ITS OWN ref which is still false
  * - Keystroke slips through and starts a new edit session in replace mode
+ *
+ * The flag itself lives in core/lib/cellEditFlag.ts (no imports), so the
+ * keybinding dispatcher can read it without loading this hook module. This
+ * module reads and writes it ONLY through that module's two functions.
  */
-let globalIsEditing = false;
 
 /**
  * MODULE-LEVEL variable for synchronous formula value checking.
@@ -108,7 +112,7 @@ let arrowRefSuffix: string = "";
  * Set the global editing flag. Used internally by the hook.
  */
 export function setGlobalIsEditing(value: boolean): void {
-  globalIsEditing = value;
+  setCoreCellEditFlag(value);
   if (!value) {
     globalEditingValue = "";
     globalCursorPosition = 0;
@@ -123,7 +127,7 @@ export function setGlobalIsEditing(value: boolean): void {
  * Get the global editing flag. Can be used for synchronous checks.
  */
 export function getGlobalIsEditing(): boolean {
-  return globalIsEditing;
+  return isCoreCellEditOpen();
 }
 
 /**
@@ -163,7 +167,7 @@ export function getGlobalCursorPosition(): number {
  * FIX: Now uses cursor position to correctly detect formula mode when cursor is mid-formula.
  */
 export function isGlobalFormulaMode(): boolean {
-  return globalIsEditing && isFormulaExpectingReference(globalEditingValue, globalCursorPosition);
+  return isCoreCellEditOpen() && isFormulaExpectingReference(globalEditingValue, globalCursorPosition);
 }
 
 /**
@@ -172,7 +176,7 @@ export function isGlobalFormulaMode(): boolean {
  * even when the formula doesn't end with an operator.
  */
 export function isEditingFormula(): boolean {
-  return globalIsEditing && globalEditingValue.startsWith("=");
+  return isCoreCellEditOpen() && globalEditingValue.startsWith("=");
 }
 
 /**
@@ -518,7 +522,7 @@ export function findReferenceContainingCell(
   currentSheetName?: string,
   formulaSourceSheet?: string
 ): number {
-  if (!globalIsEditing || !globalEditingValue.startsWith("=")) {
+  if (!isCoreCellEditOpen() || !globalEditingValue.startsWith("=")) {
     return -1;
   }
 
@@ -530,7 +534,7 @@ export function findReferenceContainingCell(
  * Get the parsed references with positions for the current formula.
  */
 export function getReferencesWithPositions(): FormulaReferenceWithPosition[] {
-  if (!globalIsEditing || !globalEditingValue.startsWith("=")) {
+  if (!isCoreCellEditOpen() || !globalEditingValue.startsWith("=")) {
     return [];
   }
   return parseFormulaReferencesWithPositions(globalEditingValue);
@@ -695,8 +699,8 @@ export function useEditing(): UseEditingReturn {
   // FIX: Create a ref-like object that accesses the module-level singleton
   // This ensures all hook instances see the same value
   const isEditingRef = useRef<{ current: boolean }>({
-    get current() { return globalIsEditing; },
-    set current(value: boolean) { globalIsEditing = value; }
+    get current() { return isCoreCellEditOpen(); },
+    set current(value: boolean) { setCoreCellEditFlag(value); }
   }).current;
 
   /**
@@ -1608,11 +1612,11 @@ export function useEditing(): UseEditingReturn {
       }
 
       // FIX: Clear global flag and arrow reference state when editing stops
-      console.log("[commitEdit] SUCCESS - clearing globalIsEditing, was:", globalIsEditing);
+      console.log("[commitEdit] SUCCESS - clearing globalIsEditing, was:", isCoreCellEditOpen());
       setGlobalIsEditing(false);
       setGlobalEditingValue("");
       resetArrowRefState();
-      console.log("[commitEdit] globalIsEditing is now:", globalIsEditing);
+      console.log("[commitEdit] globalIsEditing is now:", isCoreCellEditOpen());
 
       if (primaryCell) {
         cellEvents.emit({

@@ -1361,8 +1361,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         // -- Writes a region no dynamic array can be inside --------------------
         ("pivot/commands.rs", "create_pivot_core", "a pivot's output region is protected against every content write, so no spill ORIGIN can be inside it (create_pivot_inner is now its State-handle wrapper)"),
         ("pivot/commands.rs", "delete_pivot_table", "clears the same protected region"),
-        ("pivot/commands.rs", "undo_pivot_overwrite", "restores cells the pivot displaced, inside the same protected region"),
-        ("pivot/commands.rs", "drill_through_to_sheet", "writes a freshly created sheet, which can hold no pre-existing spill"),
+        ("pivot/commands.rs", "drill_through_to_sheet_core", "builds a freshly created sheet's cells in a detached grid, which can hold no pre-existing spill (the `drill_through_to_sheet` command is a one-line delegation to it; this entry named the command, and passed only because the census read `pub(crate) async fn` bodies as part of the function before them)"),
         ("bi/commands.rs", "bi_insert_result", "writes a query result block and seeds the shared cascade"),
         ("bi/commands.rs", "bi_refresh_connection", "rewrites the same result block and seeds the shared cascade"),
         ("bi/cube.rs", "build_cube_prefetch", "builds a detached prefetch grid, never the document's"),
@@ -1497,6 +1496,36 @@ fn every_spill_exemption_carries_a_written_reason() {
     }
 }
 
+/// Every function-start spelling ends the previous body and names its own
+/// (fix round 4, B6). For each spelling, a writer that forgets the map follows
+/// a function that writes nothing: the census must charge the write to the
+/// writer, by name -- read as part of the function before it, the write was
+/// either invisible or excused by that function's exemption.
+#[test]
+fn the_spill_census_sees_every_function_start_spelling() {
+    // A LITERAL list, not the constant: a spelling dropped from the constant
+    // must fail here, not silently leave the loop.
+    for start in [
+        "fn ",
+        "pub fn ",
+        "pub(crate) fn ",
+        "pub(super) fn ",
+        "async fn ",
+        "pub async fn ",
+        "pub(crate) async fn ",
+        "pub(super) async fn ",
+    ] {
+        let src = format!(
+            "pub fn quiet_neighbour(grid: &Grid) {{\n    let _ = grid.get_cell(0, 0);\n}}\n\n{start}writer(grid: &mut Grid) {{\n    grid.clear_cell(0, 0);\n}}\n"
+        );
+        assert_eq!(
+            spill_relevant_functions(&src),
+            vec![("writer".to_string(), false)],
+            "`{start}` is not read as the start of a function: its body was charged to the one before it"
+        );
+    }
+}
+
 /// THE CENSUS HAS TEETH, asserted rather than trusted — the same sabotage
 /// discipline the recalculation census carries, including the two holes that
 /// one was found to have (a delegating helper, and a COMMENTED-OUT call).
@@ -1595,28 +1624,7 @@ pub fn write_table_formula_cell(grid: &mut Grid) {
 fn every_release_policy_call_site_actually_releases_the_spill() {
     const DATA_RS: &str = include_str!("data.rs");
 
-    // Which functions take the exemption, read from the source rather than
-    // listed, so a new one cannot be added without answering for itself.
-    let mut current = String::new();
-    let mut takers: Vec<String> = Vec::new();
-    for line in DATA_RS.lines() {
-        if let Some(rest) = line.strip_prefix("pub fn ").or_else(|| {
-            line.strip_prefix("pub(crate) fn ")
-                .or_else(|| line.strip_prefix("fn "))
-        }) {
-            current = rest.split(['(', '<']).next().unwrap_or("").to_string();
-        }
-        // `check_spill_protection` is the guard's own definition — it names the
-        // variant to implement it, and it is not a call site.
-        if line.contains("SpillOriginPolicy::ReleasedByCaller")
-            && !line.trim_start().starts_with("//")
-            && !current.is_empty()
-            && current != "check_spill_protection"
-            && !takers.contains(&current)
-        {
-            takers.push(current.clone());
-        }
-    }
+    let takers = release_policy_takers(DATA_RS);
     assert!(
         !takers.is_empty(),
         "no call site takes the origin exemption at all — either the guard \
@@ -1652,6 +1660,70 @@ fn every_release_policy_call_site_actually_releases_the_spill() {
             "`{}` no longer takes the origin exemption — 'select the spill and \
              press Delete' is refused again (§2y's second impossible remedy)",
             expected
+        );
+    }
+}
+
+/// Which functions in `text` take the `ReleasedByCaller` exemption, read from
+/// the source rather than listed, so a new one cannot be added without
+/// answering for itself.
+///
+/// A function starts at ANY spelling the crate uses (`starts_a_function`).
+/// This walk knew only `pub fn`, `pub(crate) fn` and `fn` (fix round 5), so
+/// an exemption taken inside a function declared any other way was charged to
+/// the function before it -- and the tear-down question was asked of the wrong
+/// body.
+fn release_policy_takers(text: &str) -> Vec<String> {
+    let mut current = String::new();
+    let mut takers: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if crate::formula_serialisation_tests::starts_a_function(line) {
+            current = line
+                .split("fn ")
+                .nth(1)
+                .unwrap_or("")
+                .split(['(', '<'])
+                .next()
+                .unwrap_or("")
+                .to_string();
+        }
+        // `check_spill_protection` is the guard's own definition — it names the
+        // variant to implement it, and it is not a call site.
+        if line.contains("SpillOriginPolicy::ReleasedByCaller")
+            && !line.trim_start().starts_with("//")
+            && !current.is_empty()
+            && current != "check_spill_protection"
+            && !takers.contains(&current)
+        {
+            takers.push(current.clone());
+        }
+    }
+    takers
+}
+
+/// Every function-start spelling names the function that takes the
+/// exemption (fix round 5, the review of round 4's B6).
+#[test]
+fn the_release_policy_census_sees_every_function_start_spelling() {
+    // A LITERAL list, not the constant: a spelling dropped from the constant
+    // must fail here, not silently leave the loop.
+    for start in [
+        "fn ",
+        "pub fn ",
+        "pub(crate) fn ",
+        "pub(super) fn ",
+        "async fn ",
+        "pub async fn ",
+        "pub(crate) async fn ",
+        "pub(super) async fn ",
+    ] {
+        let src = format!(
+            "pub fn quiet_neighbour(grid: &Grid) {{\n    let _ = grid.get_cell(0, 0);\n}}\n\n{start}taker(state: &AppState) {{\n    check(SpillOriginPolicy::ReleasedByCaller);\n}}\n"
+        );
+        assert_eq!(
+            release_policy_takers(&src),
+            vec!["taker".to_string()],
+            "`{start}` is not read as the start of a function: the exemption was charged to the one before it"
         );
     }
 }
@@ -1812,13 +1884,7 @@ fn spill_relevant_functions(text: &str) -> Vec<(String, bool)> {
     let mut current: Option<(String, bool, bool)> = None; // name, writes, maintains
     for raw in stripped.lines() {
         let code = raw.split("//").next().unwrap_or("");
-        if raw.starts_with("fn ")
-            || raw.starts_with("pub fn ")
-            || raw.starts_with("pub(crate) fn ")
-            || raw.starts_with("pub(super) fn ")
-            || raw.starts_with("async fn ")
-            || raw.starts_with("pub async fn ")
-        {
+        if SPILL_CENSUS_FN_STARTS.iter().any(|p| raw.starts_with(p)) {
             if let Some((name, writes, maintains)) = current.take() {
                 if writes {
                     out.push((name, maintains));
@@ -1850,6 +1916,19 @@ fn spill_relevant_functions(text: &str) -> Vec<(String, bool)> {
     }
     out
 }
+
+/// Every spelling of a function's first line at the left margin.
+///
+/// `pub(crate) async fn` and `pub(super) async fn` WERE MISSING (fix round 4,
+/// B6), so every body declared that way was read as part of the function
+/// before it: its writes were charged to a neighbour, and an exemption keyed on
+/// the neighbour's name passed for the wrong reason (the `drill_through_to_sheet`
+/// entry covered the writes of `drill_through_to_sheet_core`, which follows
+/// it). `the_spill_census_sees_every_function_start_spelling` pins every entry.
+/// Since fix round 5 it IS the crate's one list
+/// (`formula_serialisation_tests::FN_START_SPELLINGS`): three other censuses
+/// had the same defect in their own copies.
+const SPILL_CENSUS_FN_STARTS: &[&str] = &crate::formula_serialisation_tests::FN_START_SPELLINGS;
 
 /// Everything outside `#[cfg(test)]` modules. Nested braces are counted, so a
 /// test module containing one does not end the strip early.

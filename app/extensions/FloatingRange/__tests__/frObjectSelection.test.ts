@@ -33,6 +33,7 @@ import {
   resetFrSelection,
   setLocalSelection,
 } from "../lib/frSelection";
+import { noteFrContextMenuMounted } from "../lib/frContextMenu";
 
 function info(id: string): FloatingRangeInfo {
   return {
@@ -114,6 +115,21 @@ describe("ownsKey follows the inner cell selection", () => {
     innerCell("fr-b");
     expect(objectOwnsKey("Tab")).toBe(true);
     expect(objectOwnsKey("Escape")).toBe(true);
+  });
+
+  it("owns Escape (only) while the range's right-click menu is open, inner selection or not", () => {
+    // The menu closes itself on Escape; a canvas binding asks this before it
+    // takes the key (frContextMenuCanvasEscape.test.tsx drives the real pair).
+    const p = createFloatingRangeSelectionProvider();
+    p.select(region("fr-a"));
+    const release = noteFrContextMenuMounted();
+    try {
+      expect(p.ownsKey!("Escape")).toBe(true);
+      expect(p.ownsKey!("Tab")).toBe(false);
+    } finally {
+      release();
+    }
+    expect(p.ownsKey!("Escape")).toBe(false);
   });
 
   it("does not own a key for an inner selection whose range is gone", () => {

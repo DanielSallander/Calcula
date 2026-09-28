@@ -18,6 +18,7 @@ import {
   isKeyClaimed,
 } from "@api";
 import { getGridBounds } from "@api/lib";
+import { isEditKeystroke } from "@api/editing";
 import { getGridStateSnapshot } from "@api/grid";
 import { learn, applyProgram } from "./lib/patternEngine";
 import type { Example, Program } from "./lib/patternEngine";
@@ -307,15 +308,10 @@ function handleKeyDown(e: KeyboardEvent): void {
   if (isKeyClaimed(e)) return;
   // Ctrl+E: Flash Fill
   if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "e") {
-    // Don't intercept if user is typing in an input/textarea
-    const target = e.target as HTMLElement;
-    if (
-      target.tagName === "INPUT" ||
-      target.tagName === "TEXTAREA" ||
-      target.isContentEditable
-    ) {
-      return;
-    }
+    // Don't intercept while the user is typing (a text field) or while any
+    // cell edit is in progress -- the tag list this replaced could not see a
+    // floating grid's live cell edit parked with the keyboard on the grid.
+    if (isEditKeystroke(e)) return;
 
     e.preventDefault();
     e.stopPropagation();

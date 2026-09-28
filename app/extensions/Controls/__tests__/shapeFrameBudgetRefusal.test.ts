@@ -35,6 +35,8 @@ vi.mock("@api/gridOverlays", () => ({
   requestOverlayRedraw: () => undefined,
   replaceGridRegionsByType: () => undefined,
   removeGridRegionsByType: () => undefined,
+  // The renderer subscribes to Core's cross-sheet point-mode signal at module scope.
+  onPointModeViewChanged: () => () => undefined,
 }));
 vi.mock("@api", () => ({
   getShapeBitmap: () => null,

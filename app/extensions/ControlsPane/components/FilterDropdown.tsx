@@ -25,35 +25,19 @@ import {
 } from "@api/layout";
 import { focusWhenVisible, primaryButtonClass } from "./paneChrome";
 import type { SlicerItem, ConnectionMode, UpdateRibbonFilterParams, AdvancedFilter, AdvancedFilterOperator, AdvancedFilterLogic, FieldDataType } from "../lib/filterPaneTypes";
-import { filterPaneBackend } from "../lib/filterPaneBackend";
 import { updateFilterAsync, updateFilterSelectionAsync, getAllFilters, getConnectionName } from "../lib/filterPaneStore";
-import { applyRibbonFilter } from "../lib/filterPaneFilterBridge";
+import {
+  applyRibbonFilter,
+  clearModelColumnOnPivots,
+  reportRibbonFilterFailures,
+  type RibbonFilterFailure,
+} from "../lib/filterPaneFilterBridge";
 import {
   getAllSlicers as fetchAllSlicers,
   getPivotsForBiConnection,
   type SlicerInfo,
   type BiConnectionPivot,
 } from "../lib/filterPaneApi";
-
-/** Resolve a pivot field's index from its name. */
-async function resolveFieldIndex(
-  pivotId: string,
-  fieldName: string,
-): Promise<number> {
-  try {
-    const info = await filterPaneBackend.invoke<{
-      hierarchies: Array<{ index: number; name: string }>;
-    }>("get_pivot_hierarchies", { pivotId });
-    let field = info.hierarchies.find((h) => h.name === fieldName);
-    if (!field && fieldName.includes(".")) {
-      const colPart = fieldName.split(".").pop()!;
-      field = info.hierarchies.find((h) => h.name === colPart);
-    }
-    return field ? field.index : -1;
-  } catch {
-    return -1;
-  }
-}
 
 export interface FilterDropdownProps {
   filterId: string;
@@ -200,27 +184,30 @@ export function FilterDropdown({
     }
     const updated = await updateFilterAsync(filterId, updates);
 
-    // Clear this filter's field on pivots that are no longer targeted
-    for (const pivotId of oldTargets) {
-      if (newTargets.has(pivotId)) continue;
-      try {
-        const fieldIndex = await resolveFieldIndex(pivotId, fieldName);
-        if (fieldIndex >= 0) {
-          await filterPaneBackend.invoke("clear_pivot_filter", {
-            request: { pivotId, fieldIndex },
-          });
-          window.dispatchEvent(new Event("pivot:refresh"));
-        }
-      } catch {
-        // Best effort
-      }
+    // Clear this filter's column on pivots that are no longer targeted, by
+    // its "Table.Column" key: the Pivot owner resolves the column, and a pivot
+    // that does not carry it is left alone. Never by a field index found
+    // here -- BI cache names are bare, so "Customers.Region" matched the
+    // first "Region" in the cache (Stores.Region on Rows) and wiped the
+    // user's own row filter on it.
+    // ONE Save is one gesture: the pivots that refuse the clears below and the
+    // apply after them are told in ONE toast at the end.
+    const refused: RibbonFilterFailure[] = [];
+    const disconnected = Array.from(oldTargets).filter((pivotId) => !newTargets.has(pivotId));
+    if (disconnected.length > 0) {
+      await clearModelColumnOnPivots(fieldName, disconnected, {
+        label: updated?.name ?? getAllFilters().find((f) => f.id === filterId)?.name,
+        failures: refused,
+      });
+      window.dispatchEvent(new Event("pivot:refresh"));
     }
 
     // Re-apply an active selection to the (possibly grown) target set —
     // newly targeted pivots have never seen this filter.
     if (updated && updated.selectedItems !== null) {
-      await applyRibbonFilter(updated);
+      await applyRibbonFilter(updated, refused);
     }
+    reportRibbonFilterFailures(refused);
 
     emitAppEvent(AppEvents.GRID_REFRESH);
 

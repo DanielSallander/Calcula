@@ -725,10 +725,12 @@ pub fn get_undo_state(state: State<AppState>) -> UndoState {
 /// The active sheet's index and name, for `UndoResult`.
 ///
 /// Two short read locks, taken and dropped one at a time and never while the
-/// undo stack is held: the crate's one recorded lock-order inversion was a
-/// sheet-keyed store and `undo_stack` taken in the wrong order, and the census
-/// that followed it asserts `undo_stack` comes FIRST. Every caller here reads
-/// this before it touches the stack.
+/// undo stack is held: the crate's cell writers take `undo_stack` while they
+/// hold the grid locks and several sheet-keyed stores, so waiting for any of
+/// those with the stack held is the reverse order (the one recorded inversion
+/// was a sheet-keyed store and `undo_stack`; `apply_changes` holding the
+/// stack while it waited for `grid` was a second, fixed in round 4). Every
+/// caller here reads this before it touches the stack.
 fn active_sheet_identity(state: &AppState) -> (usize, String) {
     let index = *state.active_sheet.read().unwrap();
     let name = state
@@ -803,7 +805,17 @@ pub(crate) fn apply_changes(
     transaction: Transaction,
     is_undo: bool,
 ) -> UndoResult {
-    let undo_stack = state.undo_stack.lock().unwrap();
+    // CANONICAL LOCK ORDER: the grid pair FIRST, the active-sheet mirrors next,
+    // and `undo_stack` after them. This took `undo_stack` first and then
+    // waited for `grid`; but every cell writer -- update_cell, clear_range,
+    // sort_range, fill_range, set_cell_style, merge_cells, the structural
+    // edits, the MCP formatting tool, ~40 functions -- records its step while
+    // it HOLDS `grid`/`grids` (and `set_column_width` / `set_row_height`
+    // while they hold their mirror), so the two orders were opposite. The MCP
+    // server's tools run off the main thread, so a Ctrl+Z overlapping one
+    // could hang the app (fix round 4: found once the lock-order census could
+    // see `lock_pending`). The stack is held across the restore only so no
+    // concurrent recorder can interleave with it; nothing below reads it.
     let grid = state.grid.lock_pending().unwrap();
     let grids = state.grids.lock_pending().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
@@ -813,6 +825,7 @@ pub(crate) fn apply_changes(
     let column_widths = state.column_widths.lock_pending().unwrap();
     let row_heights = state.row_heights.lock_pending().unwrap();
     let merged_regions = state.merged_regions.lock_pending().unwrap();
+    let undo_stack = state.undo_stack.lock().unwrap();
     let locale = state.locale.lock().unwrap();
 
     // Undo/redo rewrites persisted state, so it dirties -- deliberately even when the
@@ -1594,7 +1607,7 @@ fn r_comment(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilte
 fn r_note(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_note_restore(s, e, d, inv); }
 fn r_hyperlink(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_hyperlink_restore(s, e, d, inv); }
 fn r_default_dim(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_default_dimension_restore(s, e, k, d, inv); }
-fn r_pivot_definition(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_definition_restore(s, p, rf, pc, uf, e, d, inv); }
+fn r_pivot_definition(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { if let Some(sheet) = apply_pivot_definition_restore(s, p, rf, pc, uf, e, d, inv) { rp.wrote_sheet(sheet); } }
 fn r_pivot_create(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_create_restore(s, p, d, inv, e); }
 fn r_pivot_delete(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_delete_restore(s, p, rf, pc, uf, d, inv, e); }
 fn r_slicer(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_slicer_restore(sl, e, d, inv); }
@@ -2562,7 +2575,7 @@ fn apply_default_dimension_restore(
 ///
 /// Runs only when the flag is set, so the ordinary cell-edit undo pays one
 /// bool test. Errors are swallowed: the undo itself already succeeded.
-fn recalc_visibility_after_undo(
+pub(crate) fn recalc_visibility_after_undo(
     app: &tauri::AppHandle,
     state: &AppState,
     user_files_state: &UserFilesState,
@@ -2582,6 +2595,25 @@ fn recalc_visibility_after_undo(
         pane_control_state,
         ribbon_filter_state,
     );
+}
+
+/// Take the inverse of undone entry `seq` back OFF the redo stack -- for an
+/// undo that WITHDRAWS a gesture the user declined (`undo_pivot_overwrite`),
+/// which must leave nothing for Ctrl+Y to re-apply. `apply_changes` pushes
+/// the inverse with the entry's own id, so the top of the redo stack is it
+/// unless a concurrent undo landed in between; then it is put back untouched
+/// and `false` returned (Ctrl+Y can re-apply the declined change -- a
+/// nuisance, never a loss).
+pub(crate) fn discard_redo_of(state: &AppState, seq: u64) -> bool {
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    match undo_stack.pop_redo() {
+        Some(top) if top.seq == seq => true,
+        Some(other) => {
+            undo_stack.push_redo(other);
+            false
+        }
+        None => false,
+    }
 }
 
 /// What a scoped undo should do, decided from the history's ids alone.
@@ -2671,9 +2703,10 @@ pub fn undo(
     // uses for its params.
     expected_seq: Option<u64>,
 ) -> UndoResult {
-    // Read BEFORE the undo stack is locked: `undo_stack` is taken first
-    // everywhere in this crate, and the one lock-order inversion it has ever
-    // had was a sheet-keyed store taken around it.
+    // Read BEFORE the undo stack is locked, so the stack is held ALONE: the
+    // cell writers take `undo_stack` while they hold the grid locks and
+    // several sheet-keyed stores, so waiting for any of those with the stack
+    // held is the reverse order (see `active_sheet_identity`).
     let (active_sheet_index, active_sheet_name) = active_sheet_identity(&state);
     let transaction = {
         let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -2851,6 +2884,52 @@ pub(crate) struct PivotDefinitionSnapshot {
     /// BUG-0022). `None` means "the cache was not touched — leave it alone".
     #[serde(default)]
     pub(crate) cache: Option<pivot_engine::PivotCache>,
+    /// The identity of an OVERWRITE step: minted when the step carries cells
+    /// the pivot grew over (`overwritten_cells` non-empty) and handed to the
+    /// frontend in the command's response (`overwriteToken`), so the
+    /// "overwrite existing data?" Cancel can take back exactly THIS step and
+    /// nothing else (`undo_pivot_overwrite_core`). `None` on every step that
+    /// overwrote nothing, and on every inverse a restore builds: a redone step
+    /// is no longer a gesture anyone can decline.
+    #[serde(default)]
+    pub(crate) overwrite_token: Option<u64>,
+}
+
+/// A fresh overwrite-step identity (see
+/// [`PivotDefinitionSnapshot::overwrite_token`]). Process-wide and never
+/// reused, so a token a response handed out can never name a LATER step.
+pub(crate) fn mint_pivot_overwrite_token() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The overwrite tokens a transaction's pivot-definition restores carry --
+/// what `undo_pivot_overwrite_core` matches a Cancel against. Empty for a
+/// transaction that holds no overwrite step.
+pub(crate) fn pivot_overwrite_tokens_of(transaction: &Transaction) -> Vec<u64> {
+    transaction
+        .changes
+        .iter()
+        .filter_map(|change| match change {
+            CellChange::CustomRestore { kind, data } if kind == PIVOT_DEFINITION_RESTORE_KIND => {
+                decode_pivot_overwrite_token(data)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Only the token of a pivot-definition snapshot, without decoding its
+/// definition and cache (a BI cache can be large, and a Cancel reads every
+/// restore of the step on top).
+fn decode_pivot_overwrite_token(data: &[u8]) -> Option<u64> {
+    #[derive(serde::Deserialize)]
+    struct TokenOnly {
+        #[serde(default)]
+        overwrite_token: Option<u64>,
+    }
+    serde_json::from_slice::<TokenOnly>(data).ok()?.overwrite_token
 }
 
 /// Read a pivot-definition undo snapshot back.
@@ -2878,12 +2957,26 @@ pub(crate) fn encode_pivot_definition_snapshot(
     dest_sheet_idx: usize,
     cache: Option<pivot_engine::PivotCache>,
 ) -> Vec<u8> {
+    encode_pivot_definition_snapshot_with_token(pivot_id, definition, overwritten_cells, dest_sheet_idx, cache, None)
+}
+
+/// [`encode_pivot_definition_snapshot`] carrying an overwrite token (see
+/// [`PivotDefinitionSnapshot::overwrite_token`]).
+pub(crate) fn encode_pivot_definition_snapshot_with_token(
+    pivot_id: pivot_engine::PivotId,
+    definition: PivotDefinition,
+    overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
+    dest_sheet_idx: usize,
+    cache: Option<pivot_engine::PivotCache>,
+    overwrite_token: Option<u64>,
+) -> Vec<u8> {
     let snapshot = PivotDefinitionSnapshot {
         pivot_id,
         definition,
         overwritten_cells,
         dest_sheet_idx,
         cache,
+        overwrite_token,
     };
     serde_json::to_vec(&snapshot).unwrap_or_default()
 }
@@ -2915,6 +3008,11 @@ pub(crate) fn pivot_delete_snapshot_bytes(
 
 /// Restore a pivot definition for undo/redo.
 /// Replaces the current definition, recalculates the view, and rewrites the grid.
+///
+/// Returns the sheet whose CELLS it put back (the ones the undone change had
+/// overwritten), for the caller's `RestoreReport`: they are written after
+/// `finalize_pivot_update`'s recalculation, so only `apply_changes`'s own
+/// off-sheet cascade can follow them.
 fn apply_pivot_definition_restore(
     state: &AppState,
     pivot_state: &PivotState,
@@ -2924,12 +3022,12 @@ fn apply_pivot_definition_restore(
     effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
     inverse_transaction: &mut Transaction,
-) {
+) -> Option<usize> {
     let snapshot: PivotDefinitionSnapshot = match serde_json::from_slice(data) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[undo] Failed to deserialize pivot definition snapshot: {}", e);
-            return;
+            return None;
         }
     };
 
@@ -2937,25 +3035,20 @@ fn apply_pivot_definition_restore(
 
     let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
     if let Some((definition, cache)) = pivot_tables.get_mut(&pivot_id) {
-        // Save current definition for inverse transaction
-        let dest_sheet_idx_current = resolve_dest_sheet_index(state, definition);
+        // Save current definition for inverse transaction. Its sheet, like the
+        // restored one's below, is resolved only AFTER `pivot_tables` is
+        // released: the calculation pass (`calculate_now`, off the main
+        // thread) and `delete_sheet` hold `sheet_names` while they take
+        // `pivot_tables`, so resolving under it is an ABBA hang against an
+        // F9 that lands during this undo (see `PivotDestSheet`).
+        let current_definition = definition.clone();
+        let current_dest = PivotDestSheet::of(definition);
 
         // THE INVERSE MIRRORS THE SNAPSHOT'S SHAPE. If this entry carries a
         // cache, the action it undoes replaced the cache — so redoing it has to
         // put the current one back too, or the redo would render the restored
         // definition against records from before the change.
-        let inverse_data = encode_pivot_definition_snapshot(
-            pivot_id,
-            definition.clone(),
-            // Overwritten cells for the inverse will be captured when redo runs
-            Vec::new(),
-            dest_sheet_idx_current,
-            snapshot.cache.as_ref().map(|_| cache.clone()),
-        );
-        inverse_transaction.add_change(CellChange::CustomRestore {
-            kind: PIVOT_DEFINITION_RESTORE_KIND.to_string(),
-            data: inverse_data,
-        });
+        let current_cache = snapshot.cache.as_ref().map(|_| cache.clone());
 
         // Restore the old definition — and the records it was written against,
         // when the action being undone replaced them.
@@ -2971,9 +3064,31 @@ fn apply_pivot_definition_restore(
         pivot_state.views.lock().unwrap().insert(pivot_id, view.clone());
 
         let destination = definition.destination;
-        let dest_sheet_idx = resolve_dest_sheet_index(state, definition);
+        let dest_ref = PivotDestSheet::of(definition);
 
         drop(pivot_tables);
+
+        let dest_sheet_idx = dest_ref.resolve(state);
+        // What THIS restore's render is about to grow over: the user's cells
+        // outside the pivot's current block. The inverse carries them, so
+        // running it (the redo of an undo, or the undo of a redo) puts them
+        // back. It used to carry nothing ("captured when redo runs" -- it was
+        // not): undo, redo, undo of a filter that had grown over a cell left
+        // that cell overwritten, because the second undo had no copy of it.
+        // Read with no lock held (the pivot guard was released above).
+        let overwritten_now = save_overwritten_cells(state, pivot_id, dest_sheet_idx, destination, &view);
+        let inverse_sheet = if overwritten_now.is_empty() { current_dest.resolve(state) } else { dest_sheet_idx };
+        let inverse_data = encode_pivot_definition_snapshot(
+            pivot_id,
+            current_definition,
+            overwritten_now,
+            inverse_sheet,
+            current_cache,
+        );
+        inverse_transaction.add_change(CellChange::CustomRestore {
+            kind: PIVOT_DEFINITION_RESTORE_KIND.to_string(),
+            data: inverse_data,
+        });
 
         // Rewrite the grid. A refusal (the destination is a canvas) wrote
         // nothing and did not move the region; the undo still restores the
@@ -3001,10 +3116,18 @@ fn apply_pivot_definition_restore(
                     grid.set_cell(sc.row, sc.col, sc.cell.clone());
                 }
             }
+            drop(grids);
+            drop(grid);
+            // The put-back cells are written AFTER `finalize_pivot_update`'s
+            // recalculation, so nothing followed them: a formula reading one
+            // kept the pivot's number. Reported, `apply_changes` recalculates
+            // the sheet once every restore has run.
+            return Some(snapshot.dest_sheet_idx);
         }
     } else {
         eprintln!("[undo] Pivot table {} not found for definition restore", pivot_id);
     }
+    None
 }
 
 /// Undo pivot creation: remove the pivot and clear its grid region.
@@ -4763,6 +4886,18 @@ pub(crate) fn record_table_undo(
 ) {
     let snap = TableObjSnapshot { sheet_index, table_id, previous };
     record_object_undo(state, "obj_table", serde_json::to_vec(&snap).unwrap_or_default(), description);
+}
+
+/// The restore payload `record_autofilter_undo` records, for a caller that
+/// batches several restores into ONE `record_restores_joining_open_transaction`
+/// call (deleting a table slicer clears its AutoFilter column in the same step
+/// as the delete). Built from the same snapshot type the restore reads back.
+pub(crate) fn encode_autofilter_restore(
+    sheet_index: usize,
+    previous: Option<crate::autofilter::AutoFilter>,
+) -> (&'static str, Vec<u8>) {
+    let snap = AutoFilterObjSnapshot { sheet_index, previous, filter_buttons: Vec::new() };
+    ("obj_autofilter", serde_json::to_vec(&snap).unwrap_or_default())
 }
 
 pub(crate) fn record_autofilter_undo(

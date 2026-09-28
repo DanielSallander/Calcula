@@ -16,7 +16,6 @@ use pivot_engine::{
     drill_down, AggregationType, PivotCache, PivotDefinition, PivotField, PivotId,
     PivotView, ValueField, VALUE_ID_EMPTY,
 };
-use crate::sheets::FreezeConfig;
 use std::time::Instant;
 use tauri::{Emitter, State};
 
@@ -174,7 +173,14 @@ fn store_view(pivot_state: &PivotState, pivot_id: PivotId, view: &PivotView) {
 /// against new records renders a view that was never on screen (BUG-0021 /
 /// BUG-0022). The payload itself is built by `undo_commands`, which owns the
 /// shape and is the only thing that reads it back.
-fn record_pivot_definition_undo(
+///
+/// Returns the step's OVERWRITE TOKEN when it carries overwritten cells (and
+/// `None` when it carries none): the caller puts it in its response
+/// (`PivotViewResponse::overwrite_token`), because it is the only thing a
+/// declined "overwrite existing data?" may hand back to
+/// `undo_pivot_overwrite` -- the backend takes back the step that carries it
+/// and nothing else.
+pub(crate) fn record_pivot_definition_undo(
     state: &AppState,
     pivot_id: PivotId,
     definition: PivotDefinition,
@@ -183,13 +189,15 @@ fn record_pivot_definition_undo(
     prev_col_widths: Vec<(u32, Option<f64>)>,
     cache: Option<pivot_engine::PivotCache>,
     description: &str,
-) {
-    let data = crate::undo_commands::encode_pivot_definition_snapshot(
+) -> Option<u64> {
+    let token = (!overwritten_cells.is_empty()).then(crate::undo_commands::mint_pivot_overwrite_token);
+    let data = crate::undo_commands::encode_pivot_definition_snapshot_with_token(
         pivot_id,
         definition,
         overwritten_cells,
         dest_sheet_idx,
         cache,
+        token,
     );
     // ONE critical section for the whole step. The width record is serialized
     // here rather than through `record_pivot_col_widths_undo` so the stack lock
@@ -209,6 +217,107 @@ fn record_pivot_definition_undo(
         restores.push((crate::undo_commands::PIVOT_COL_WIDTHS_RESTORE_KIND, widths));
     }
     crate::undo_commands::record_restores_joining_open_transaction(state, description, restores);
+    token
+}
+
+/// The undo step a BI field change WOULD record -- the arguments of one
+/// [`record_pivot_definition_undo`] call -- handed back to the caller instead
+/// of recorded, so a caller that owns the gesture can decide what the step
+/// restores.
+///
+/// `update_bi_pivot_fields_core` records it as is (when the context records
+/// at all: `delete_slicer_core` runs its clears quietly and records ONE step
+/// at the end, so no undo transaction is held open across the BI re-query).
+/// A FILTER edit that re-queries (a pin added, replaced or dropped; a
+/// calculation group's item state) records it with the definition and cache
+/// from BEFORE its own in-place edit instead: the re-query's snapshot is taken
+/// after that edit, so recording it as is made the undo restore the NEW pin
+/// against the OLD records.
+pub(crate) struct BiFieldChangeUndo {
+    pub pivot_id: PivotId,
+    pub definition: PivotDefinition,
+    pub overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
+    pub dest_sheet_idx: usize,
+    pub prev_col_widths: Vec<(u32, Option<f64>)>,
+    pub cache: Option<pivot_engine::PivotCache>,
+}
+
+impl BiFieldChangeUndo {
+    /// Record it (joining an open transaction), as the step `description`.
+    /// Returns its overwrite token (see [`record_pivot_definition_undo`]).
+    pub(crate) fn record(self, state: &AppState, description: &str) -> Option<u64> {
+        record_pivot_definition_undo(
+            state,
+            self.pivot_id,
+            self.definition,
+            self.overwritten_cells,
+            self.dest_sheet_idx,
+            self.prev_col_widths,
+            self.cache,
+            description,
+        )
+    }
+}
+
+/// The model columns an EXTERNAL filter currently holds on BI pivot
+/// `pivot_id`: a PIVOT slicer connected to it with a selection, or an active
+/// ribbon filter whose targets include it (manual list, its sheet in bySheet
+/// mode, or the whole workbook -- on the pivot's own connection). Model
+/// slicers are not listed: the page fold re-applies them on every rebuild.
+///
+/// Read with no pivot lock held (the slicer and filter stores alone).
+fn external_filter_columns(
+    ctx: &PivotCmdCtx<'_>,
+    pivot_id: PivotId,
+    meta: &BiPivotMetadata,
+    dest_sheet: usize,
+) -> Result<std::collections::HashSet<(String, String)>, String> {
+    let column_of = |field_name: &str| -> Option<(String, String)> {
+        if let Ok(tc) = split_model_column_key(field_name, meta) {
+            return Some(tc);
+        }
+        resolve_bi_cache_name(field_name, meta)
+    };
+    let mut out = std::collections::HashSet::new();
+    {
+        let slicers = ctx.slicer_state.slicers.read().map_err(|e| e.to_string())?;
+        for s in slicers.values() {
+            let connected = s.source_type == crate::slicer::SlicerSourceType::Pivot
+                && (s.cache_source_id == pivot_id
+                    || s.connected_sources.iter().any(|c| {
+                        c.source_type == crate::slicer::SlicerSourceType::Pivot && c.source_id == pivot_id
+                    }));
+            if connected && s.selected_items.is_some() {
+                if let Some(tc) = column_of(&s.field_name) {
+                    out.insert(tc);
+                }
+            }
+        }
+    }
+    {
+        use crate::ribbon_filter::ConnectionMode;
+        let filters = ctx.ribbon_filter_state.filters.read().map_err(|e| e.to_string())?;
+        for f in filters.values() {
+            if f.selected_items.is_none() {
+                continue;
+            }
+            // The pivot's connection, by live id or by the stable package id
+            // (the rule `bi_pivots_for_connection` resolves targets with).
+            let same_connection = f.connection_id == meta.connection_id
+                || meta.data_source_id.as_deref() == Some(f.connection_id.to_string().as_str());
+            let targets_pivot = match f.connection_mode {
+                ConnectionMode::Manual => f.connected_pivots.contains(&pivot_id),
+                ConnectionMode::Workbook => same_connection,
+                ConnectionMode::BySheet => same_connection && f.connected_sheets.contains(&dest_sheet),
+            };
+            if targets_pivot {
+                if let Some(tc) = column_of(&f.field_name) {
+                    out.insert(tc);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Populate children_indices from parent_index on a PivotView.
@@ -844,134 +953,181 @@ pub fn revert_pivot_operation(
     }
 }
 
-/// Undoes the last pivot operation that overwrote existing cells.
-/// Called by the frontend when the user declines the "overwrite data?" dialog.
+/// Why a declined overwrite took nothing back: the step it names is not the
+/// last change in the history (something landed on top of it, or it was
+/// already undone). Nothing was popped.
+pub(crate) const OVERWRITE_STEP_NOT_ON_TOP: &str =
+    "The PivotTable change was not taken back: it is no longer the last change in the undo \
+     history. Use Undo (Ctrl+Z) to step back to it.";
+
+/// Why a declined overwrite took nothing back: the command that overwrote the
+/// cells recorded no step that holds them, so there is nothing of THIS gesture
+/// to take back -- and taking back whatever is on top instead would undo
+/// something else.
+pub(crate) const NO_OVERWRITE_STEP: &str =
+    "The PivotTable change recorded no undo step for the cells it overwrote, so nothing was \
+     taken back.";
+
+/// Take back EXACTLY the step(s) a declined "A PivotTable report will
+/// overwrite existing data" names, and nothing else.
 ///
-/// This bypasses the normal undo system (`apply_changes`) because that function
-/// holds grid/style/merge locks and then re-acquires them inside the pivot
-/// restore handler, causing a deadlock.  Instead, this command directly:
-///   1. Pops the last undo entry (so Ctrl+Z doesn't replay it)
-///   2. Extracts the pivot definition from the undo snapshot
-///   3. Restores the definition, recalculates the view, and rewrites the grid
+/// THE DEFECT THIS REPLACES. The old command popped the top undo entry
+/// unconditionally and, when that entry was not a pivot restore of this pivot,
+/// "silently succeeded": a level-1 filter records no step, so its Cancel
+/// discarded the user's previous, UNRELATED step, restored nothing, and left
+/// the cells overwritten.
+///
+/// THE RULE. Every step that holds overwritten cells carries an overwrite
+/// token (`record_pivot_definition_undo`), and the command that recorded it
+/// returns it (`PivotViewResponse::overwrite_token`). A Cancel hands the
+/// tokens of its gesture back. Under ONE lock, the top entry is examined: if it
+/// carries one of them it is taken and undone -- the WHOLE transaction, so a
+/// slicer click's selection comes back with its pivots -- otherwise it is put
+/// back exactly where it was (same id, redo untouched) and the Cancel is
+/// REFUSED (`OVERWRITE_STEP_NOT_ON_TOP`). It repeats while the next entry also
+/// carries one (a gesture whose applies each recorded a step of their own).
+/// No tokens at all is refused too (`NO_OVERWRITE_STEP`): the command recorded
+/// nothing, and there is nothing of this gesture to take back.
+///
+/// `then_undo_seq`: one more entry to take back AFTER the overwrite steps, by
+/// its history id, and only when it is then on top -- the ribbon filter's
+/// selection step, which its backend records separately, BENEATH the pivot
+/// step (a scoped undo, `scoped_undo_verdict`'s rule).
+///
+/// A declined gesture never happened: each undone step's inverse is taken
+/// OFF the redo stack again (by its id), so Ctrl+Y cannot re-apply what the
+/// user refused. The restore itself is the ordinary undo body
+/// (`apply_changes`): pivot restores are deferred until its grid guards drop,
+/// which is what made the old bespoke restore (and its deadlock note)
+/// unnecessary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn undo_pivot_overwrite_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &PivotState,
+    slicer_state: &crate::slicer::SlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    overwrite_tokens: &[u64],
+    then_undo_seq: Option<u64>,
+) -> Result<(Vec<crate::undo_commands::UndoResult>, bool), String> {
+    if overwrite_tokens.is_empty() {
+        return Err(NO_OVERWRITE_STEP.to_string());
+    }
+    let mut pending: std::collections::HashSet<u64> = overwrite_tokens.iter().copied().collect();
+    let mut results = Vec::new();
+    let undo_one = |transaction: engine::Transaction| {
+        let seq = transaction.seq;
+        let result = crate::undo_commands::apply_changes(
+            state,
+            file_state,
+            user_files_state,
+            pivot_state,
+            slicer_state,
+            ribbon_filter_state,
+            pane_control_state,
+            timeline_state,
+            transaction,
+            true,
+        );
+        crate::undo_commands::discard_redo_of(state, seq);
+        result
+    };
+    while !pending.is_empty() {
+        // PEEK, under the one lock: the stack has no borrowing peek, so the
+        // top is taken and -- when it is not this gesture's -- put straight
+        // back with its id (`push_undo_for_redo` neither restamps nor clears
+        // the redo stack). Nothing else can see the stack in between.
+        let transaction = {
+            let mut undo_stack = state.undo_stack.lock().unwrap();
+            let Some(top) = undo_stack.pop_undo() else { break };
+            let tokens = crate::undo_commands::pivot_overwrite_tokens_of(&top);
+            if tokens.iter().any(|t| pending.contains(t)) {
+                for t in &tokens {
+                    pending.remove(t);
+                }
+                top
+            } else {
+                undo_stack.push_undo_for_redo(top);
+                break;
+            }
+        };
+        results.push(undo_one(transaction));
+    }
+    if results.is_empty() {
+        return Err(OVERWRITE_STEP_NOT_ON_TOP.to_string());
+    }
+    let complete = pending.is_empty();
+    if let Some(seq) = then_undo_seq {
+        let transaction = {
+            let mut undo_stack = state.undo_stack.lock().unwrap();
+            if undo_stack.top_undo_seq() == Some(seq) {
+                undo_stack.pop_undo()
+            } else {
+                None
+            }
+        };
+        if let Some(transaction) = transaction {
+            results.push(undo_one(transaction));
+        }
+    }
+    Ok((results, complete))
+}
+
+/// Take back the step(s) a declined "overwrite existing data?" names -- see
+/// [`undo_pivot_overwrite_core`]. Called by the frontend when the user
+/// declines the dialog, with the `overwriteToken`(s) of the gesture's
+/// responses. `pivot_id` names the pivot the dialog was about (logged); the
+/// tokens are the authority.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn undo_pivot_overwrite(
+    app: tauri::AppHandle,
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     pivot_id: PivotId,
-) -> Result<(), String> {
-    // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
-    // token, so a refused command leaves the document clean.
-    let effect = pivot_mutation_token(&state, &pivot_state, &file_state, pivot_id)?;
-
-    log_info!("PIVOT", "undo_pivot_overwrite pivot_id={}", pivot_id);
-
-    // 1. Pop the undo entry so Ctrl+Z doesn't replay it
-    let transaction = {
-        let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.pop_undo()
-    };
-
-    // 2. Find the pivot definition snapshot in the transaction
-    if let Some(txn) = transaction {
-        for change in &txn.changes {
-            if let crate::CellChange::CustomRestore { kind, data } = change {
-                if kind == crate::undo_commands::PIVOT_DEFINITION_RESTORE_KIND {
-                    // Decoded by `undo_commands`, which owns the shape. A local
-                    // copy of the struct here could not see a field the snapshot
-                    // grew — and it grew one (`cache`).
-                    if let Some(snapshot) =
-                        crate::undo_commands::decode_pivot_definition_snapshot(data)
-                    {
-                        if snapshot.pivot_id == pivot_id {
-                            let dest_sheet_idx = resolve_dest_sheet_index(&state, &snapshot.definition);
-                            let destination = snapshot.definition.destination;
-
-                            // Restore definition and recalculate
-                            let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
-                            if let Some((def, cache)) = pivot_tables.get_mut(&pivot_id) {
-                                *def = snapshot.definition;
-                                // ...against the records it was written for. A
-                                // source change or a BI re-query replaced them,
-                                // and the snapshot carries the originals.
-                                if let Some(old_cache) = snapshot.cache {
-                                    *cache = old_cache;
-                                }
-                                let view = safe_calculate_pivot(def, cache);
-                                store_view(&pivot_state, pivot_id, &view);
-                                drop(pivot_tables);
-
-                                finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
-
-                                // Restore cells that were overwritten by the pivot expansion
-                                if !snapshot.overwritten_cells.is_empty() {
-                                    {
-                                        // CANONICAL GRID LOCK ORDER: `grid`
-                                        // before `grids`.
-                                        let mut grid = state.grid.write(&effect).unwrap();
-                                        let mut grids = state.grids.write(&effect).unwrap();
-                                        if let Some(dest_grid) = grids.get_mut(snapshot.dest_sheet_idx) {
-                                            for sc in &snapshot.overwritten_cells {
-                                                dest_grid.set_cell(sc.row, sc.col, sc.cell.clone());
-                                            }
-                                        }
-                                        let active_sheet = *state.active_sheet.read().unwrap();
-                                        if snapshot.dest_sheet_idx == active_sheet {
-                                            for sc in &snapshot.overwritten_cells {
-                                                grid.set_cell(sc.row, sc.col, sc.cell.clone());
-                                            }
-                                        }
-                                    }
-
-                                    // PHASE B — the RESTORED cells seed the ONE
-                                    // shared cascade, after the guards above are
-                                    // released. `finalize_pivot_update` did
-                                    // recalculate the sheet, but it ran BEFORE
-                                    // these writes, so the restore was the one
-                                    // write in this command that nothing
-                                    // followed.
-                                    let seeds: Vec<(u32, u32)> = snapshot
-                                        .overwritten_cells
-                                        .iter()
-                                        .map(|sc| (sc.row, sc.col))
-                                        .collect();
-                                    let active_sheet = *state.active_sheet.read().unwrap();
-                                    if snapshot.dest_sheet_idx == active_sheet {
-                                        let mut recalculated = Vec::new();
-                                        crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
-                                            &state,
-                                            &user_files_state,
-                                            &pane_control_state,
-                                            &ribbon_filter_state,
-                                            &seeds,
-                                            &mut recalculated,
-                                        );
-                                    } else {
-                                        crate::commands::data::recalc_after_off_sheet_write(
-                                            &state,
-                                            &user_files_state,
-                                            &pivot_state,
-                                            &pane_control_state,
-                                            &ribbon_filter_state,
-                                            &[snapshot.dest_sheet_idx],
-                                        );
-                                    }
-                                }
-
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
+    overwrite_tokens: Option<Vec<u64>>,
+    then_undo_seq: Option<u64>,
+) -> Result<PivotOverwriteUndoResponse, String> {
+    log_info!("PIVOT", "undo_pivot_overwrite pivot_id={} tokens={:?}", pivot_id, overwrite_tokens);
+    let (results, complete) = undo_pivot_overwrite_core(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &slicer_state,
+        &ribbon_filter_state,
+        &pane_control_state,
+        &timeline_state,
+        overwrite_tokens.as_deref().unwrap_or(&[]),
+        then_undo_seq,
+    )?;
+    let mut refresh_domains: Vec<String> = Vec::new();
+    for result in &results {
+        crate::undo_commands::recalc_visibility_after_undo(
+            &app,
+            &state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            result,
+        );
+        for domain in &result.refresh_domains {
+            if !refresh_domains.contains(domain) {
+                refresh_domains.push(domain.clone());
             }
         }
     }
-
-    // No matching undo entry found — silently succeed
-    Ok(())
+    Ok(PivotOverwriteUndoResponse { steps_undone: results.len() as u32, complete, refresh_domains })
 }
 
 /// Updates the field configuration of an existing pivot table
@@ -985,6 +1141,7 @@ pub async fn update_pivot_fields(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     bi_state: State<'_, crate::bi::types::BiState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
     request: UpdatePivotFieldsRequest,
 ) -> Result<PivotViewResponse, String> {
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
@@ -1046,6 +1203,7 @@ pub async fn update_pivot_fields(
                 ribbon_filter_state,
                 user_files_state,
                 bi_state,
+                slicer_state,
                 pivot_id,
             )
             .await;
@@ -1057,7 +1215,7 @@ pub async fn update_pivot_fields(
     pivot_state.cancellation_tokens.lock().unwrap().insert(pivot_id, token.clone());
 
     // 1. Lock briefly: apply field updates, clone old + new state, release lock
-    let (old_definition, old_cache, new_definition, new_cache, dest_sheet_idx) = {
+    let (old_definition, old_cache, new_definition, new_cache, dest_ref) = {
         let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
         let (definition, cache) = pivot_tables
             .get_mut(&pivot_id)
@@ -1147,12 +1305,14 @@ pub async fn update_pivot_fields(
         // Bump version for cache invalidation
         definition.bump_version();
 
-        let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+        let dest_ref = PivotDestSheet::of(definition);
         let new_def = definition.clone();
         let new_cache = cache.clone();
-        (old_definition, old_cache, new_def, new_cache, dest_sheet_idx)
+        (old_definition, old_cache, new_def, new_cache, dest_ref)
     };
-    // pivot_tables lock released here — UI is unblocked
+    // pivot_tables lock released here — UI is unblocked. The sheet is
+    // resolved only now (see `PivotDestSheet`).
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     // 2. Emit progress: calculating (stage 2 of 4)
     emit_pivot_progress(&window, pivot_id, "Calculating...", 1, 4);
@@ -1283,7 +1443,7 @@ pub async fn update_pivot_fields(
     // Record undo snapshot AFTER successful completion (not before, to avoid
     // stale entries when the operation is cancelled).
     // Include saved overwritten cells so undo_pivot_overwrite can restore them.
-    record_pivot_definition_undo(&state, pivot_id, old_definition, saved_cells, dest_sheet_idx, prev_col_widths, None, "Pivot table field change");
+    response.overwrite_token = record_pivot_definition_undo(&state, pivot_id, old_definition, saved_cells, dest_sheet_idx, prev_col_widths, None, "Pivot table field change");
 
     log_perf!(
         "PIVOT",
@@ -1409,7 +1569,8 @@ pub fn toggle_pivot_group(
     definition.bump_version();
 
     let destination = definition.destination;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    // Resolved only after `pivot_tables` is released (see `PivotDestSheet`).
+    let dest_ref = PivotDestSheet::of(definition);
 
     // FAST PATH: Toggle visibility on the stored view instead of re-running
     // calculate_pivot (which takes ~2s for 98K rows). The view already contains
@@ -1461,13 +1622,14 @@ pub fn toggle_pivot_group(
 
                 store_view(&pivot_state, pivot_id, &view);
                 let destination = definition.destination;
-                let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+                let dest_ref = PivotDestSheet::of(definition);
                 drop(pivot_tables);
+                let dest_sheet_idx = dest_ref.resolve(&state);
 
                 let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 response.overwritten_cell_count = saved_cells.len() as u32;
                 finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
-                record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, Vec::new(), None, "Pivot expand/collapse");
+                response.overwrite_token = record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, Vec::new(), None, "Pivot expand/collapse");
 
                 let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
                 log_perf!(
@@ -1496,13 +1658,14 @@ pub fn toggle_pivot_group(
             // Store updated view
             store_view(&pivot_state, pivot_id, view);
             drop(pivot_tables);
+            let dest_sheet_idx = dest_ref.resolve(&state);
 
             // Clear old cells and write updated view to grid (prevents orphaned cells
             // when pivot shrinks after collapse)
             let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, view);
             response.overwritten_cell_count = saved_cells.len() as u32;
             finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
-            record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, Vec::new(), None, "Pivot expand/collapse");
+            response.overwrite_token = record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, Vec::new(), None, "Pivot expand/collapse");
 
             let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
             log_perf!(
@@ -1532,12 +1695,13 @@ pub fn toggle_pivot_group(
     store_view(&pivot_state, pivot_id, &view);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     // Clear old cells and write updated view to grid, then update region bounds
     let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     response.overwritten_cell_count = saved_cells.len() as u32;
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
-    record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo, saved_cells, dest_sheet_idx, Vec::new(), None, "Pivot expand/collapse");
+    response.overwrite_token = record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo, saved_cells, dest_sheet_idx, Vec::new(), None, "Pivot expand/collapse");
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
 
@@ -1714,8 +1878,9 @@ pub fn delete_pivot_table(
         undo_stack.commit_transaction();
     }
 
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
     
     // Get the region to clear
     let old_region = get_pivot_region(&state, pivot_id);
@@ -1936,35 +2101,63 @@ pub fn get_pivot_source_data(
         pivot_id,
         group_path.len()
     );
+    pivot_source_data_core(&state, &pivot_state, pivot_id, &group_path, max_records)
+}
 
+/// [`get_pivot_source_data`] over borrowed state.
+///
+/// LOCK ORDER: nothing here waits for a lock while holding the pivot guard.
+/// The calculation pass (`calculate_now`, an ASYNC command, so on a pool
+/// thread while this sync command runs on the main thread) holds `grid` and
+/// `grids` and then takes `pivot_tables` for GETPIVOTDATA; this command used
+/// to hold `pivot_tables` while it took `grids`, so a Show Details
+/// double-click during an F9 hung the main thread with no panic and no log.
+/// Everything the row read needs is copied under the guard, which is dropped
+/// before `grids` is taken.
+pub(crate) fn pivot_source_data_core(
+    state: &AppState,
+    pivot_state: &PivotState,
+    pivot_id: PivotId,
+    group_path: &[(usize, u32)],
+    max_records: Option<usize>,
+) -> Result<SourceDataResponse, String> {
     // Snapshot the sheet names BEFORE taking pivot_tables. `delete_sheet` locks
     // sheet_names and then pivot_tables; taking them in the opposite order here
     // would be a classic AB/BA deadlock between two concurrent commands.
-    let sheet_names_snapshot = sheet_names_snapshot(&state);
+    let sheet_names_snapshot = sheet_names_snapshot(state);
 
-    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
-    let (definition, cache) = pivot_tables
-        .get(&pivot_id)
-        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+    let (result, source_sheet_idx, (start_row, start_col), end_col, has_headers) = {
+        let pivot_tables = pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
+        let (definition, cache) = pivot_tables
+            .get(&pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
 
-    let max = max_records.unwrap_or(1000);
-    let result = drill_down(definition, cache, &group_path, max);
+        let max = max_records.unwrap_or(1000);
+        let result = drill_down(definition, cache, group_path, max);
 
-    // Convert source rows to formatted strings, reading the pivot's ACTUAL
-    // source sheet. Drilling through a Sheet3 pivot used to show Sheet1's rows.
-    let source_sheet_idx = definition
-        .source_sheet
-        .as_deref()
-        .and_then(|name| index_of_sheet(&sheet_names_snapshot, name))
-        .unwrap_or(0);
-    let grids = state.grids.read().unwrap();
+        // The pivot's ACTUAL source sheet. Drilling through a Sheet3 pivot
+        // used to show Sheet1's rows.
+        let source_sheet_idx = definition
+            .source_sheet
+            .as_deref()
+            .and_then(|name| index_of_sheet(&sheet_names_snapshot, name))
+            .unwrap_or(0);
+        (
+            result,
+            source_sheet_idx,
+            definition.source_start,
+            definition.source_end.1,
+            definition.source_has_headers,
+        )
+    }; // pivot guard released: `grids` is taken with no pivot lock held
+
+    // Convert source rows to formatted strings.
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
     let grid = grids
         .get(source_sheet_idx)
         .ok_or_else(|| "Source sheet not found".to_string())?;
 
-    let (start_row, start_col) = definition.source_start;
-    let (_, end_col) = definition.source_end;
-    let data_start = if definition.source_has_headers {
+    let data_start = if has_headers {
         start_row + 1
     } else {
         start_row
@@ -2020,6 +2213,822 @@ where
         .unwrap_or_else(|| (String::new(), name.to_string()))
 }
 
+// ============================================================================
+// BI PIVOT CORES -- borrowed-state entry points the commands and tests share
+// ============================================================================
+
+/// Every managed store a BI pivot command reads or writes, borrowed. The Tauri
+/// commands build one from their `State`s and hand it to the `_core` fns, so
+/// the unit tier drives the SAME code over plain states (this crate has no
+/// tauri test harness).
+#[derive(Clone, Copy)]
+pub(crate) struct PivotCmdCtx<'a> {
+    pub state: &'a AppState,
+    pub file_state: &'a crate::persistence::FileState,
+    pub pivot_state: &'a PivotState,
+    pub pane_control_state: &'a crate::pane_control::PaneControlState,
+    pub ribbon_filter_state: &'a crate::ribbon_filter::RibbonFilterState,
+    pub user_files_state: &'a crate::persistence::UserFilesState,
+    pub bi_state: &'a BiState,
+    pub slicer_state: &'a crate::slicer::SlicerState,
+    /// `false` = a caller that records the whole gesture itself, once, at the
+    /// end (`delete_slicer_core`): the field changes this context makes then
+    /// record no undo step of their own. Every Tauri command passes `true`.
+    pub record_undo: bool,
+}
+
+/// The ONE model table that has a column called `column`, or `None` when no
+/// table -- or more than one -- has it. A BI cache names its columns from the
+/// query's Arrow schema, which is the BARE column name, so a bare name can be
+/// attributed to a table only when the attribution cannot be wrong: with
+/// Customers(name) and Products(name) in one model, "name" is neither.
+pub(crate) fn unique_model_table_for_column(column: &str, meta: &BiPivotMetadata) -> Option<String> {
+    let mut owners = meta
+        .model_tables
+        .iter()
+        .filter(|t| t.columns.iter().any(|c| c.name == column));
+    let first = owners.next()?;
+    owners.next().is_none().then(|| first.name.clone())
+}
+
+/// True when the cache column `name` of a BI pivot IS model column
+/// `table.column`. Cache names are "Table.Column" in older definitions or the
+/// bare column name from the Arrow schema; a bare name matches only when
+/// `table` is the ONLY model table with that column (see
+/// [`unique_model_table_for_column`]) -- "has such a column" is not enough,
+/// because the cache column may have come from a different table that also
+/// has one, and a filter on Products.name would then be matched, cleared or
+/// overwritten as Customers.name.
+pub(crate) fn bi_cache_name_matches(
+    name: &str,
+    table: &str,
+    column: &str,
+    meta: &BiPivotMetadata,
+) -> bool {
+    if name.contains('.') {
+        let (t, c) = split_bi_field_key(name, meta.model_tables.iter().map(|t| t.name.as_str()));
+        return t == table && c == column;
+    }
+    name == column && unique_model_table_for_column(column, meta).as_deref() == Some(table)
+}
+
+/// Attribute a BI pivot's cache column name to (table, column): a dotted name
+/// is split against the model table names, a bare one goes to the ONE table
+/// that has such a column. `None` when no table can be named -- including when
+/// several can, because a guessed table silently filters the wrong column.
+pub(crate) fn resolve_bi_cache_name(name: &str, meta: &BiPivotMetadata) -> Option<(String, String)> {
+    let (table, column) = if name.contains('.') {
+        split_bi_field_key(name, meta.model_tables.iter().map(|t| t.name.as_str()))
+    } else {
+        (unique_model_table_for_column(name, meta)?, name.to_string())
+    };
+    (!table.is_empty()).then_some((table, column))
+}
+
+/// The model column a BI pivot's slicer filter is on. Its stamped
+/// [`pivot_engine::SlicerFilter::model_key`] is the authority; a filter from
+/// before the key existed falls back to its cache column name under the
+/// uniqueness rule. `None` (logged) when neither names a column of the model:
+/// the filter is dropped rather than attributed to a guess.
+pub(crate) fn slicer_filter_model_column(
+    sf: &pivot_engine::SlicerFilter,
+    cache: &PivotCache,
+    meta: &BiPivotMetadata,
+) -> Option<(String, String)> {
+    if let Some(key) = sf.model_key.as_deref() {
+        return match split_model_column_key(key, meta) {
+            Ok(tc) => Some(tc),
+            Err(e) => {
+                crate::log_warn!("PIVOT", "slicer filter on {} dropped: {}", key, e);
+                None
+            }
+        };
+    }
+    let name = cache.field_name(sf.source_index)?;
+    let resolved = resolve_bi_cache_name(&name, meta);
+    if resolved.is_none() {
+        crate::log_warn!(
+            "PIVOT",
+            "slicer filter on cache column '{}' dropped: no single model table owns it",
+            name
+        );
+    }
+    resolved
+}
+
+/// Does slicer filter `sf` sit on model column `table.column`?
+fn slicer_filter_is_on(
+    sf: &pivot_engine::SlicerFilter,
+    cache: &PivotCache,
+    meta: &BiPivotMetadata,
+    table: &str,
+    column: &str,
+) -> bool {
+    match sf.model_key.as_deref() {
+        Some(key) => key == format!("{table}.{column}"),
+        None => cache
+            .field_name(sf.source_index)
+            .is_some_and(|n| bi_cache_name_matches(&n, table, column, meta)),
+    }
+}
+
+/// Split a "Table.Column" key against the pivot's model and REFUSE a key that
+/// names no column of it: a mis-attributed filter would silently filter
+/// nothing (or the wrong column), so this fails closed.
+pub(crate) fn split_model_column_key(
+    key: &str,
+    meta: &BiPivotMetadata,
+) -> Result<(String, String), String> {
+    let (table, column) = split_bi_field_key(key, meta.model_tables.iter().map(|t| t.name.as_str()));
+    let known = meta
+        .model_tables
+        .iter()
+        .any(|t| t.name == table && t.columns.iter().any(|c| c.name == column));
+    if known {
+        Ok((table, column))
+    } else {
+        Err(format!("'{key}' is not a column of this pivot's model"))
+    }
+}
+
+/// The cache index at which a BI pivot carries model column `table.column`, or
+/// `None` when the pivot does not carry it at all. Zone fields are matched by
+/// their "Table.Column" name; slicer filters by their stamped model key (or,
+/// for a filter saved before the key existed, by a cache name that only ONE
+/// model table can own).
+pub(crate) fn resolve_bi_field_index(
+    definition: &PivotDefinition,
+    cache: &PivotCache,
+    meta: &BiPivotMetadata,
+    table: &str,
+    column: &str,
+) -> Option<usize> {
+    let key_name = format!("{table}.{column}");
+    definition
+        .row_fields
+        .iter()
+        .chain(definition.column_fields.iter())
+        .find(|f| f.name == key_name)
+        .map(|f| f.source_index)
+        .or_else(|| {
+            definition
+                .filter_fields
+                .iter()
+                .find(|f| f.field.name == key_name)
+                .map(|f| f.field.source_index)
+        })
+        .or_else(|| {
+            definition
+                .slicer_filters
+                .iter()
+                .find(|sf| slicer_filter_is_on(sf, cache, meta, table, column))
+                .map(|sf| sf.source_index)
+        })
+}
+
+/// The slicer fields a BI pivot already carries, as request refs WITH their
+/// hidden items: the KEEP arm of `slicer_fields: None` and the refresh
+/// reconstruction. A filter whose column cannot be attributed to a model table
+/// is dropped, because it could not be queried.
+pub(crate) fn slicer_fields_from_definition(
+    definition: &PivotDefinition,
+    cache: &PivotCache,
+    meta: &BiPivotMetadata,
+) -> Vec<BiFieldRef> {
+    let mut out: Vec<BiFieldRef> = Vec::new();
+    for sf in &definition.slicer_filters {
+        let Some((table, column)) = slicer_filter_model_column(sf, cache, meta) else { continue };
+        if out.iter().any(|f| f.table == table && f.column == column) {
+            continue;
+        }
+        out.push(BiFieldRef { table, column, is_lookup: false, hidden_items: Some(sf.hidden_items.clone()) });
+    }
+    out
+}
+
+/// What every field of the OLD definition hides, keyed by (table, column):
+/// the name-based carry-over `update_bi_pivot_fields` falls back to when a
+/// request field arrives with no hidden items. Source indices shift between
+/// queries; names do not.
+fn hidden_items_by_model_key(
+    definition: &PivotDefinition,
+    cache: &PivotCache,
+    meta: &BiPivotMetadata,
+) -> std::collections::HashMap<(String, String), Vec<String>> {
+    let table_names: Vec<&str> = meta.model_tables.iter().map(|t| t.name.as_str()).collect();
+    let is_model_key = |t: &str, c: &str| {
+        meta.model_tables
+            .iter()
+            .any(|mt| mt.name == t && mt.columns.iter().any(|mc| mc.name == c))
+    };
+    let mut out = std::collections::HashMap::new();
+    for f in definition
+        .row_fields
+        .iter()
+        .chain(definition.column_fields.iter())
+        .chain(definition.filter_fields.iter().map(|f| &f.field))
+    {
+        if f.hidden_items.is_empty() {
+            continue;
+        }
+        let (t, c) = split_bi_field_key(&f.name, table_names.iter().copied());
+        if is_model_key(&t, &c) {
+            out.entry((t, c)).or_insert_with(|| f.hidden_items.clone());
+        }
+    }
+    for sf in &definition.slicer_filters {
+        if sf.hidden_items.is_empty() {
+            continue;
+        }
+        if let Some(key) = slicer_filter_model_column(sf, cache, meta) {
+            out.entry(key).or_insert_with(|| sf.hidden_items.clone());
+        }
+    }
+    out
+}
+
+/// A pivot with nothing placed: filtering it would turn it into a query of
+/// the slicer column alone, so an ensure leaves it untouched.
+fn pivot_has_no_fields(definition: &PivotDefinition) -> bool {
+    definition.row_fields.is_empty()
+        && definition.column_fields.is_empty()
+        && definition.value_fields.is_empty()
+        && definition.filter_fields.is_empty()
+}
+
+/// Rebuild the `update_bi_pivot_fields` request that reproduces a BI pivot's
+/// stored definition -- what a refresh re-runs and what an ensure extends.
+///
+/// NOTHING THE USER SET MAY FALL OUT OF IT: every dimension's hidden items
+/// (a level-1 slicer filter on a column that is a row or column field lives
+/// there), hierarchy placements (the level fields `update_bi_pivot_fields`
+/// appended are folded back into their hierarchy), value custom names, the
+/// calculation-group placement, lookups, calculated fields, and the slicer
+/// fields with their hidden items. The previous in-line copy in
+/// `refresh_pivot_cache` rebuilt rows and columns with no hidden items and no
+/// hierarchies, so every refresh -- and every frontend "ensure" built on the
+/// same recipe -- silently dropped them.
+pub(crate) fn bi_request_from_definition(
+    pivot_id: PivotId,
+    definition: &PivotDefinition,
+    cache: &PivotCache,
+    meta: &BiPivotMetadata,
+) -> UpdateBiPivotFieldsRequest {
+    let table_names: Vec<&str> = meta.model_tables.iter().map(|t| t.name.as_str()).collect();
+    let calc_group_names: std::collections::HashSet<&str> =
+        meta.calculation_groups.iter().map(|g| g.name.as_str()).collect();
+    // A placed calculation-group field is named after the GROUP (no table
+    // part) — reconstruct it as its pseudo ref so update_bi_pivot_fields
+    // re-places it.
+    let parse_field = |name: &str, is_lookup: bool| -> BiFieldRef {
+        if calc_group_names.contains(name) {
+            return BiFieldRef {
+                table: CALC_GROUP_TABLE.to_string(),
+                column: name.to_string(),
+                is_lookup: false,
+                hidden_items: None,
+            };
+        }
+        let (table, column) = split_bi_field_key(name, table_names.iter().copied());
+        BiFieldRef { table, column, is_lookup, hidden_items: None }
+    };
+    // Every dimension's hidden items are sent EXPLICITLY (`Some`, even when
+    // empty): the stored definition is the truth this request reproduces.
+    let parse_dim_field = |f: &PivotField| -> BiFieldRef {
+        let mut r = parse_field(&f.name, f.is_attribute);
+        r.hidden_items = Some(f.hidden_items.clone());
+        r
+    };
+    // Skip the synthetic values-only "Total" row field — it is not a model
+    // column (update_bi_pivot_fields re-injects it as needed).
+    let is_synthetic_total =
+        |f: &PivotField| -> bool { f.name == "Total" && !calc_group_names.contains("Total") };
+
+    // Hierarchy placements: update_bi_pivot_fields appended each hierarchy's
+    // level fields after the plain fields and recorded the range in
+    // `hierarchy_configs`. A range whose fields are no longer exactly the
+    // hierarchy's levels is stale, and is kept as plain fields rather than
+    // guessed at.
+    let mut row_levels: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut col_levels: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut row_hierarchies: Vec<BiHierarchyFieldRef> = Vec::new();
+    let mut column_hierarchies: Vec<BiHierarchyFieldRef> = Vec::new();
+    for hc in &definition.hierarchy_configs {
+        let fields = if hc.is_row { &definition.row_fields } else { &definition.column_fields };
+        let end = hc.field_start + hc.field_count;
+        if hc.field_count == 0 || end > fields.len() {
+            continue;
+        }
+        let (table, _) = split_bi_field_key(&fields[hc.field_start].name, table_names.iter().copied());
+        let Some(h) = meta.hierarchies.iter().find(|h| h.name == hc.name && h.table == table) else {
+            continue;
+        };
+        let levels_match = h.levels.len() == hc.field_count
+            && h.levels
+                .iter()
+                .zip(&fields[hc.field_start..end])
+                .all(|(level, f)| f.name == format!("{}.{}", table, level.column));
+        if !levels_match {
+            continue;
+        }
+        let r = BiHierarchyFieldRef { hierarchy: hc.name.clone(), table: table.clone(), expanded: Vec::new() };
+        if hc.is_row {
+            row_levels.extend(hc.field_start..end);
+            row_hierarchies.push(r);
+        } else {
+            col_levels.extend(hc.field_start..end);
+            column_hierarchies.push(r);
+        }
+    }
+
+    let row_fields: Vec<BiFieldRef> = definition
+        .row_fields
+        .iter()
+        .enumerate()
+        .filter(|(i, f)| !row_levels.contains(i) && !is_synthetic_total(f))
+        .map(|(_, f)| parse_dim_field(f))
+        .collect();
+    let column_fields: Vec<BiFieldRef> = definition
+        .column_fields
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !col_levels.contains(i))
+        .map(|(_, f)| parse_dim_field(f))
+        .collect();
+    // Strip the "[...]" display wrapper to recover the clean measure name
+    // (value fields are one per base measure).
+    let value_fields: Vec<BiValueFieldRef> = {
+        let mut seen_calc: std::collections::HashSet<String> = std::collections::HashSet::new();
+        definition
+            .value_fields
+            .iter()
+            .filter(|v| v.calc_item.is_none() || seen_calc.insert(v.name.clone()))
+            .map(|v| BiValueFieldRef {
+                measure_name: v.name.trim_start_matches('[').trim_end_matches(']').to_string(),
+                custom_name: if v.calc_item.is_some() { None } else { v.custom_name.clone() },
+            })
+            .collect()
+    };
+    let filter_fields: Vec<BiFieldRef> = definition
+        .filter_fields
+        .iter()
+        .map(|f| {
+            let mut field = parse_field(&f.field.name, f.field.is_attribute);
+            field.hidden_items = Some(f.field.hidden_items.clone());
+            field
+        })
+        .collect();
+    let slicer_fields = slicer_fields_from_definition(definition, cache, meta);
+    let calculated_fields: Option<Vec<CalculatedFieldDef>> = if definition.calculated_fields.is_empty() {
+        None
+    } else {
+        Some(
+            definition
+                .calculated_fields
+                .iter()
+                .map(|cf| CalculatedFieldDef {
+                    name: cf.name.clone(),
+                    formula: cf.formula.clone(),
+                    number_format: cf.number_format.clone(),
+                })
+                .collect(),
+        )
+    };
+    let value_column_order = if definition.value_column_order.is_empty() {
+        None
+    } else {
+        Some(
+            definition
+                .value_column_order
+                .iter()
+                .map(|v| match v {
+                    pivot_engine::ValueColumnRef::Value(i) => ValueColumnRefDef::Value { index: *i },
+                    pivot_engine::ValueColumnRef::Calculated(i) => ValueColumnRefDef::Calculated { index: *i },
+                })
+                .collect(),
+        )
+    };
+
+    UpdateBiPivotFieldsRequest {
+        pivot_id,
+        row_fields,
+        column_fields,
+        value_fields,
+        filter_fields,
+        slicer_fields: Some(slicer_fields),
+        row_hierarchies,
+        column_hierarchies,
+        layout: None, // keep current layout
+        lookup_columns: meta.lookup_columns.iter().cloned().collect(),
+        calculated_fields,
+        value_column_order,
+        force_requery: false,
+    }
+}
+
+/// An active MODEL slicer that reaches a BI pivot (owner decision 2, the page
+/// rule): same connection, the pivot's own sheet, a selection, on a column the
+/// pivot's model has.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PageModelSlicer {
+    pub slicer_id: identity::EntityId,
+    pub table: String,
+    pub column: String,
+    pub selected: Vec<String>,
+    pub level: u8,
+}
+
+/// Does model slicer `slicer` read the connection a pivot queries? The live id
+/// first; the stable package data-source id covers a slicer and a pivot that
+/// have not both been re-bound yet after a load.
+pub(crate) fn model_slicer_reads_connection(
+    slicer: &crate::slicer::Slicer,
+    connection_id: identity::EntityId,
+    data_source_id: Option<&str>,
+) -> bool {
+    slicer.is_model_slicer()
+        && (slicer.cache_source_id == connection_id
+            || data_source_id.is_some_and(|ds| {
+                slicer.data_source_id.as_deref() == Some(ds) || slicer.cache_source_id.to_string() == ds
+            }))
+}
+
+/// The page's active model slicers for one BI pivot, in a deterministic order.
+/// Pure over a snapshot of the slicer store.
+pub(crate) fn page_model_slicers<'s, I>(
+    slicers: I,
+    meta: &BiPivotMetadata,
+    dest_sheet: usize,
+) -> Vec<PageModelSlicer>
+where
+    I: IntoIterator<Item = &'s crate::slicer::Slicer>,
+{
+    let mut out: Vec<PageModelSlicer> = slicers
+        .into_iter()
+        .filter(|s| s.sheet_index == dest_sheet)
+        .filter(|s| model_slicer_reads_connection(s, meta.connection_id, meta.data_source_id.as_deref()))
+        .filter_map(|s| {
+            let selected = s.selected_items.clone()?;
+            let (table, column) = split_model_column_key(&s.field_name, meta).ok()?;
+            Some(PageModelSlicer { slicer_id: s.id, table, column, selected, level: s.filter_level })
+        })
+        .collect();
+    out.sort_by(|a, b| a.slicer_id.cmp(&b.slicer_id));
+    out
+}
+
+/// Every non-empty value of cache column `idx`, as the filter paths spell it.
+fn cache_field_values(cache: &mut PivotCache, idx: usize) -> Vec<String> {
+    let Some(field_cache) = cache.fields.get_mut(idx) else { return Vec::new() };
+    let sorted_ids = field_cache.sorted_ids().to_vec();
+    sorted_ids
+        .iter()
+        .filter_map(|&id| {
+            if id == VALUE_ID_EMPTY {
+                return None;
+            }
+            field_cache.get_value(id).map(cache_value_to_string)
+        })
+        .collect()
+}
+
+/// Whether a cache value is one of `selected`, spelled either the cache's way
+/// ("TRUE", "12.5") or the model's way (`arrow_value_to_string`: "true",
+/// "12.50"). A model slicer's and a ribbon filter's items -- and so their
+/// selections -- come from the model, while the mask is computed over the
+/// pivot cache: with an exact match, selecting "true" on a boolean column hid
+/// BOTH "TRUE" and "FALSE" and emptied every pivot on the page, and a selected
+/// 12.50 silently disappeared.
+pub(crate) fn cache_value_is_selected(v: &pivot_engine::CacheValue, selected: &[String]) -> bool {
+    let display = cache_value_to_string(v);
+    selected.iter().any(|s| {
+        *s == display
+            || match v {
+                pivot_engine::CacheValue::Boolean(b) => {
+                    s.trim().eq_ignore_ascii_case(if *b { "true" } else { "false" })
+                }
+                pivot_engine::CacheValue::Number(n) => s.trim().parse::<f64>().is_ok_and(|x| {
+                    let n = n.as_f64();
+                    x == n || (x - n).abs() <= f64::EPSILON * 4.0 * n.abs().max(1.0)
+                }),
+                _ => false,
+            }
+    })
+}
+
+/// Hidden items (in the cache's spelling, which is what the engine matches)
+/// for "every non-empty value of cache column `idx` not in `selected`" -- the
+/// ONE level-1 mask rule `apply_pivot_filter` and the page fold share.
+pub(crate) fn hidden_for_selection(cache: &mut PivotCache, idx: usize, selected: &[String]) -> Vec<String> {
+    let Some(field_cache) = cache.fields.get_mut(idx) else { return Vec::new() };
+    let sorted_ids = field_cache.sorted_ids().to_vec();
+    sorted_ids
+        .iter()
+        .filter(|&&id| id != VALUE_ID_EMPTY)
+        .filter_map(|&id| field_cache.get_value(id).cloned())
+        .filter(|v| !cache_value_is_selected(v, selected))
+        .map(|v| cache_value_to_string(&v))
+        .collect()
+}
+
+/// Put `hidden` on whichever field carries cache column `idx` -- the zone
+/// fields that show it, or else its slicer filter (added when missing). The
+/// one host-side mask rule `apply_pivot_filter` and the page fold share.
+///
+/// `model_key` ("Table.Column", BI pivots) is stamped on the slicer filter so
+/// it is identified by its column, never by the bare cache name.
+fn set_hidden_items_at(
+    definition: &mut PivotDefinition,
+    idx: usize,
+    hidden: Vec<String>,
+    model_key: Option<&str>,
+) {
+    let mut found = false;
+    for field in definition.row_fields.iter_mut().chain(definition.column_fields.iter_mut()) {
+        if field.source_index == idx {
+            field.hidden_items = hidden.clone();
+            found = true;
+        }
+    }
+    for filter in &mut definition.filter_fields {
+        if filter.field.source_index == idx {
+            filter.field.hidden_items = hidden.clone();
+            found = true;
+        }
+    }
+    if !found {
+        if let Some(sf) = definition.slicer_filters.iter_mut().find(|sf| sf.source_index == idx) {
+            sf.hidden_items = hidden;
+            if sf.model_key.is_none() {
+                sf.model_key = model_key.map(str::to_string);
+            }
+        } else {
+            definition.slicer_filters.push(pivot_engine::SlicerFilter {
+                source_index: idx,
+                hidden_items: hidden,
+                model_key: model_key.map(str::to_string),
+            });
+        }
+    }
+}
+
+/// The current view of a pivot, rendered without touching the document (the
+/// no-op answer of an ensure on an empty pivot or a clear of a column the
+/// pivot does not carry).
+fn current_pivot_view(pivot_state: &PivotState, pivot_id: PivotId) -> Result<PivotViewResponse, String> {
+    let mut pivot_tables = pivot_state
+        .pivot_tables
+        .write(&pivot_render_effect())
+        .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+    let (definition, cache) = pivot_tables
+        .get_mut(&pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+    let view = safe_calculate_pivot(definition, cache);
+    store_view(pivot_state, pivot_id, &view);
+    Ok(view_to_response(&view, definition, cache))
+}
+
+/// Refresh a BI pivot's model snapshot (`model_tables`, `measures`,
+/// `hierarchies`) from the LIVE engine.
+///
+/// The snapshot was written only at create, load and pull, while the Model
+/// Editor edits the live model: a column or table added after the pivot
+/// existed was listed by the slicer and ribbon-filter dialogs (they read the
+/// live model) and then REFUSED by the apply ("not a column of this pivot's
+/// model"), leaving a filter that showed a selection and filtered nothing.
+/// Every key resolution below reads the snapshot, so it is brought up to date
+/// first, under the connection's role so object-level security hides exactly
+/// what it hides at create.
+///
+/// The snapshot mirrors the model, so it is written as a DERIVED cache: a
+/// read path that refreshes it does not dirty the document. A connection with
+/// no loaded engine (a reopened workbook before it reconnects) keeps the
+/// saved snapshot.
+pub(crate) async fn refresh_bi_model_snapshot(ctx: &PivotCmdCtx<'_>, pivot_id: PivotId) -> Result<(), String> {
+    let connection_id = {
+        let bi_meta = ctx.pivot_state.bi_metadata.read().map_err(|e| e.to_string())?;
+        match bi_meta.get(&pivot_id) {
+            Some(meta) => meta.connection_id,
+            None => return Ok(()),
+        }
+    };
+    let engine_arc = {
+        let connections = ctx.bi_state.connections.lock().map_err(|e| e.to_string())?;
+        match connections.get(&connection_id).and_then(|c| c.engine.clone()) {
+            Some(engine) => engine,
+            None => return Ok(()),
+        }
+    };
+    let (model_tables, measures, hierarchies, _calc_groups, _perspectives, _cultures) = {
+        let mut engine = engine_arc.lock().await;
+        crate::bi::commands::apply_connection_role(&mut engine, ctx.bi_state, connection_id);
+        extract_bi_model_metadata(&engine)
+    };
+    let derived = crate::document_effect::DocumentEffect::deliberately_clean(
+        crate::document_effect::CleanReason::DerivedCache,
+    );
+    let mut bi_meta = ctx.pivot_state.bi_metadata.write(&derived).map_err(|e| e.to_string())?;
+    if let Some(meta) = bi_meta.get_mut(&pivot_id) {
+        meta.model_tables = model_tables;
+        meta.measures = measures;
+        meta.hierarchies = hierarchies;
+    }
+    Ok(())
+}
+
+/// Re-query a BI pivot from its stored definition (refresh), through the one
+/// reconstruction that keeps everything the user set. Records the step the
+/// way [`update_bi_pivot_fields_core`] does.
+pub(crate) async fn refresh_bi_pivot_core(
+    ctx: &PivotCmdCtx<'_>,
+    pivot_id: PivotId,
+) -> Result<PivotViewResponse, String> {
+    let (mut response, undo) = refresh_bi_pivot_unrecorded(ctx, pivot_id, Vec::new()).await?;
+    if ctx.record_undo {
+        if let Some(undo) = undo {
+            response.overwrite_token = undo.record(ctx.state, "Pivot table field change");
+        }
+    }
+    Ok(response)
+}
+
+/// [`refresh_bi_pivot_core`] that hands its undo step back (see
+/// [`update_bi_pivot_fields_unrecorded`]), applying `masks` to the fresh
+/// records (see [`PostQueryMask`]; empty for a plain refresh).
+///
+/// A parameter rather than a wrapper: every async layer over the BI update
+/// adds a copy of its (large) future to the polling thread's stack in a debug
+/// build, and one extra layer overflowed a 2 MB test thread.
+pub(crate) async fn refresh_bi_pivot_unrecorded(
+    ctx: &PivotCmdCtx<'_>,
+    pivot_id: PivotId,
+    masks: Vec<PostQueryMask>,
+) -> Result<(PivotViewResponse, Option<BiFieldChangeUndo>), String> {
+    // The reconstruction resolves every slicer filter's model key against the
+    // snapshot: a column added in the Model Editor must not be dropped here.
+    refresh_bi_model_snapshot(ctx, pivot_id).await?;
+    let bi_request = {
+        let pivot_tables = ctx.pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
+        let (definition, cache) = pivot_tables
+            .get(&pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+        let bi_meta = ctx.pivot_state.bi_metadata.read().map_err(|e| e.to_string())?;
+        let meta = bi_meta
+            .get(&pivot_id)
+            .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?;
+        let mut request = bi_request_from_definition(pivot_id, definition, cache, meta);
+        // A refresh exists to fetch fresh data — the identical-fields cosmetic
+        // fast path must not swallow it.
+        request.force_requery = true;
+        request
+    };
+    log_info!(
+        "CALP-DIAG",
+        "refresh BI pivot {}: rows={}, cols={}, values={}, filters={}, slicer fields={}, hierarchies={}",
+        pivot_id,
+        bi_request.row_fields.len(),
+        bi_request.column_fields.len(),
+        bi_request.value_fields.len(),
+        bi_request.filter_fields.len(),
+        bi_request.slicer_fields.as_ref().map_or(0, |v| v.len()),
+        bi_request.row_hierarchies.len() + bi_request.column_hierarchies.len()
+    );
+    update_bi_pivot_fields_unrecorded(ctx, bi_request, masks).await
+}
+
+/// Re-query BI pivots in the BACKGROUND, recording no undo step, then ask the
+/// frontend to repaint. For a synchronous command (a sheet delete runs on the
+/// main thread) whose edit changed a BI pivot's engine query -- a removed
+/// slicer's pin -- and so left its cached records stale. Nothing to do for an
+/// empty list.
+pub(crate) fn spawn_quiet_bi_requery(app: tauri::AppHandle, pivots: Vec<PivotId>) {
+    if pivots.is_empty() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        let file_state = app.state::<crate::persistence::FileState>();
+        let pivot_state = app.state::<PivotState>();
+        let pane_control_state = app.state::<crate::pane_control::PaneControlState>();
+        let ribbon_filter_state = app.state::<crate::ribbon_filter::RibbonFilterState>();
+        let user_files_state = app.state::<crate::persistence::UserFilesState>();
+        let bi_state = app.state::<BiState>();
+        let slicer_state = app.state::<crate::slicer::SlicerState>();
+        let ctx = PivotCmdCtx {
+            state: &state,
+            file_state: &file_state,
+            pivot_state: &pivot_state,
+            pane_control_state: &pane_control_state,
+            ribbon_filter_state: &ribbon_filter_state,
+            user_files_state: &user_files_state,
+            bi_state: &bi_state,
+            slicer_state: &slicer_state,
+            record_undo: false,
+        };
+        for pivot_id in pivots {
+            if let Err(e) = refresh_bi_pivot_core(&ctx, pivot_id).await {
+                crate::log_warn!("PIVOT", "background re-query of pivot {} failed: {}", pivot_id, e);
+            }
+        }
+        let _ = app.emit("grid:refresh", ());
+    });
+}
+
+/// The outcome of resolving a model column on a BI pivot for a filter.
+enum EnsuredBiField {
+    /// The pivot carries model column `table.column` at this cache index (now,
+    /// if it was added).
+    Index { idx: usize, table: String, column: String },
+    /// The pivot has no fields at all; it was left untouched.
+    EmptyPivot,
+}
+
+/// Resolve model column `key` on a BI pivot, ADDING it (as a slicer field)
+/// when the pivot does not carry it yet: the server-side "ensure" that
+/// replaces the three drifted frontend copies. The addition re-queries in this
+/// command through [`bi_request_from_definition`], so nothing the pivot
+/// already has is lost, and records ONE undo step (joining an open one).
+async fn ensure_bi_field(
+    ctx: &PivotCmdCtx<'_>,
+    pivot_id: PivotId,
+    key: &str,
+) -> Result<EnsuredBiField, String> {
+    // Validate against the LIVE model, not the creation-time snapshot.
+    refresh_bi_model_snapshot(ctx, pivot_id).await?;
+    let (table, column, rebuild) = {
+        let pivot_tables = ctx.pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
+        let (definition, cache) = pivot_tables
+            .get(&pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+        let bi_meta = ctx.pivot_state.bi_metadata.read().map_err(|e| e.to_string())?;
+        let meta = bi_meta.get(&pivot_id).ok_or_else(|| {
+            format!("biFieldKey '{key}' needs a BI model pivot; pivot {pivot_id} is not one")
+        })?;
+        let (table, column) = split_model_column_key(key, meta)?;
+        if let Some(idx) = resolve_bi_field_index(definition, cache, meta, &table, &column) {
+            return Ok(EnsuredBiField::Index { idx, table, column });
+        }
+        // The CURRENT CACHE may already carry the column although no field of
+        // the definition names it: a level-1 Clear drops the column's slicer
+        // filter but never re-queries, so the records still have it. Re-adding
+        // it through the rebuild below re-queried the model and recorded a
+        // "Pivot table field change" step -- which, on the slicer reconcile
+        // that runs after an undo, CLEARED THE REDO STACK (the Clear could no
+        // longer be redone) and left a step whose undo showed every region
+        // while the slicer still showed its selection. The caller's local
+        // path re-creates the slicer filter at this index instead.
+        //
+        // Identity: the column's STAMPED model key ("Table.Column", written
+        // when the query built these records) is the authority, so a name
+        // two tables share ("name" on Customers and Products) is re-used
+        // exactly when the records hold THIS table's column. Only a column
+        // with no key (records from before keys existed) falls back to its
+        // name, and `bi_cache_name_matches` accepts a bare name only when
+        // `table` is the ONE model table with such a column -- never a
+        // guess. A value field's column is a measure, never the slicer's.
+        let key_name = format!("{table}.{column}");
+        let measure_columns: std::collections::HashSet<usize> =
+            definition.value_fields.iter().map(|v| v.source_index).collect();
+        if let Some(idx) = (0..cache.fields.len()).find(|&i| {
+            !measure_columns.contains(&i)
+                && match cache.fields[i].model_key.as_deref() {
+                    Some(stamped) => stamped == key_name,
+                    None => bi_cache_name_matches(&cache.fields[i].name, &table, &column, meta),
+                }
+        }) {
+            return Ok(EnsuredBiField::Index { idx, table, column });
+        }
+        if pivot_has_no_fields(definition) {
+            return Ok(EnsuredBiField::EmptyPivot);
+        }
+        let mut rebuild = bi_request_from_definition(pivot_id, definition, cache, meta);
+        rebuild.slicer_fields.get_or_insert_with(Vec::new).push(BiFieldRef {
+            table: table.clone(),
+            column: column.clone(),
+            is_lookup: false,
+            hidden_items: Some(Vec::new()),
+        });
+        rebuild.force_requery = true;
+        (table, column, rebuild)
+    };
+    log_info!("PIVOT", "ensure BI field {}.{} on pivot {}", table, column, pivot_id);
+    update_bi_pivot_fields_core(ctx, rebuild).await?;
+
+    let pivot_tables = ctx.pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
+    let (definition, cache) = pivot_tables
+        .get(&pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+    let bi_meta = ctx.pivot_state.bi_metadata.read().map_err(|e| e.to_string())?;
+    let meta = bi_meta
+        .get(&pivot_id)
+        .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?;
+    match resolve_bi_field_index(definition, cache, meta, &table, &column) {
+        Some(idx) => Ok(EnsuredBiField::Index { idx, table, column }),
+        None => Err(format!("'{key}' could not be added to pivot {pivot_id}")),
+    }
+}
+
 /// Refreshes the pivot cache from current grid data
 #[tauri::command]
 pub async fn refresh_pivot_cache(
@@ -2031,6 +3040,7 @@ pub async fn refresh_pivot_cache(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     bi_state: State<'_, crate::bi::types::BiState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
     pivot_id: PivotId,
 ) -> Result<PivotViewResponse, String> {
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
@@ -2051,175 +3061,29 @@ pub async fn refresh_pivot_cache(
 
     if is_bi_pivot {
         log_info!("CALP-DIAG", "refresh_pivot_cache: BI pivot {} — re-querying live database", pivot_id);
-        // Reconstruct an UpdateBiPivotFieldsRequest from the stored definition
-        let bi_request = {
-            let pivot_tables = pivot_state.pivot_tables.read().unwrap();
-            let (definition, cache) = pivot_tables
-                .get(&pivot_id)
-                .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
-            let bi_meta = pivot_state.bi_metadata.read().unwrap();
-            let meta = bi_meta.get(&pivot_id)
-                .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?;
-
-            // Parse "Table.Column" field names back into BiFieldRef. Table
-            // names can contain dots, so resolve against the model's tables.
-            // A placed calculation-group field is named after the GROUP (no
-            // table part) — reconstruct it as its pseudo ref, carrying its
-            // hidden-item subset, so update_bi_pivot_fields re-places it.
-            let table_names: Vec<&str> =
-                meta.model_tables.iter().map(|t| t.name.as_str()).collect();
-            let calc_group_names: std::collections::HashSet<&str> =
-                meta.calculation_groups.iter().map(|g| g.name.as_str()).collect();
-            let parse_field = |name: &str, is_lookup: bool| -> super::types::BiFieldRef {
-                if calc_group_names.contains(name) {
-                    return super::types::BiFieldRef {
-                        table: super::types::CALC_GROUP_TABLE.to_string(),
-                        column: name.to_string(),
-                        is_lookup: false,
-                        hidden_items: Vec::new(),
-                    };
-                }
-                let (table, column) = split_bi_field_key(name, table_names.iter().copied());
-                super::types::BiFieldRef { table, column, is_lookup, hidden_items: Vec::new() }
-            };
-
-            let parse_dim_field = |f: &pivot_engine::PivotField| -> super::types::BiFieldRef {
-                let mut r = parse_field(&f.name, f.is_attribute);
-                if r.is_calc_group() {
-                    r.hidden_items = f.hidden_items.clone();
-                }
-                r
-            };
-            // Skip the synthetic values-only "Total" row field — it is not a
-            // model column (update_bi_pivot_fields re-injects it as needed);
-            // reconstructing it would send a bogus {"", "Total"} group-by that
-            // fails the query and blanks the pivot.
-            let is_synthetic_total = |f: &pivot_engine::PivotField| -> bool {
-                f.name == "Total" && !calc_group_names.contains("Total")
-            };
-            let row_fields: Vec<super::types::BiFieldRef> = definition.row_fields.iter()
-                .filter(|f| !is_synthetic_total(f))
-                .map(parse_dim_field)
-                .collect();
-            let column_fields: Vec<super::types::BiFieldRef> = definition.column_fields.iter()
-                .map(parse_dim_field)
-                .collect();
-            // Strip the "[...]" display wrapper to recover the clean measure
-            // name (value fields are one per base measure).
-            let value_fields: Vec<super::types::BiValueFieldRef> = {
-                let mut seen_calc: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                definition.value_fields.iter()
-                    .filter(|v| v.calc_item.is_none() || seen_calc.insert(v.name.clone()))
-                    .map(|v| super::types::BiValueFieldRef {
-                        measure_name: v.name
-                            .trim_start_matches('[')
-                            .trim_end_matches(']')
-                            .to_string(),
-                        custom_name: if v.calc_item.is_some() {
-                            None
-                        } else {
-                            v.custom_name.clone()
-                        },
-                    })
-                    .collect()
-            };
-            let filter_fields: Vec<super::types::BiFieldRef> = definition.filter_fields.iter()
-                .map(|f| {
-                    let mut field = parse_field(&f.field.name, f.field.is_attribute);
-                    field.hidden_items = f.field.hidden_items.clone();
-                    field
-                })
-                .collect();
-            // Slicer filters store source_index — resolve to Table.Column
-            // names from the cache so they are included in the BI GROUP BY query.
-            let slicer_fields: Vec<super::types::BiFieldRef> = definition.slicer_filters.iter()
-                .filter_map(|sf| {
-                    cache.field_name(sf.source_index).and_then(|name| {
-                        // Field names are "Table.Column" in the definition or
-                        // bare "Column" from the Arrow schema.
-                        let (table, column) = if name.contains('.') {
-                            split_bi_field_key(&name, table_names.iter().copied())
-                        } else {
-                            // Bare column name — look up table from BI metadata
-                            let table_name = meta.model_tables.iter()
-                                .find(|t| t.columns.iter().any(|c| c.name == name))
-                                .map(|t| t.name.clone())
-                                .unwrap_or_default();
-                            (table_name, name)
-                        };
-                        if table.is_empty() {
-                            None
-                        } else {
-                            Some(super::types::BiFieldRef {
-                                table,
-                                column,
-                                is_lookup: false,
-                                hidden_items: sf.hidden_items.clone(),
-                            })
-                        }
-                    })
-                })
-                .collect();
-            let calc_fields: Option<Vec<super::types::CalculatedFieldDef>> = if definition.calculated_fields.is_empty() {
-                None
-            } else {
-                Some(definition.calculated_fields.iter().map(|cf| {
-                    super::types::CalculatedFieldDef {
-                        name: cf.name.clone(),
-                        formula: cf.formula.clone(),
-                        number_format: cf.number_format.clone(),
-                    }
-                }).collect())
-            };
-            let value_column_order = if definition.value_column_order.is_empty() {
-                None
-            } else {
-                Some(definition.value_column_order.iter().map(|v| {
-                    match v {
-                        pivot_engine::ValueColumnRef::Value(i) => super::types::ValueColumnRefDef::Value { index: *i },
-                        pivot_engine::ValueColumnRef::Calculated(i) => super::types::ValueColumnRefDef::Calculated { index: *i },
-                    }
-                }).collect())
-            };
-
-            super::types::UpdateBiPivotFieldsRequest {
-                pivot_id,
-                row_fields,
-                column_fields,
-                value_fields,
-                filter_fields,
-                slicer_fields,
-                row_hierarchies: Vec::new(),
-                column_hierarchies: Vec::new(),
-                layout: None, // keep current layout
-                lookup_columns: meta.lookup_columns.iter().cloned().collect(),
-                calculated_fields: calc_fields,
-                value_column_order,
-                // A refresh exists to fetch fresh data — the identical-fields
-                // cosmetic fast path must not swallow it.
-                force_requery: true,
-            }
+        // The reconstruction lives in `bi_request_from_definition`, shared with
+        // the server-side ensure; it keeps dimension hidden items and hierarchy
+        // placements, which this in-line copy used to drop on every refresh.
+        let ctx = PivotCmdCtx {
+            state: &state,
+            file_state: &file_state,
+            pivot_state: &pivot_state,
+            pane_control_state: &pane_control_state,
+            ribbon_filter_state: &ribbon_filter_state,
+            user_files_state: &user_files_state,
+            bi_state: &bi_state,
+            slicer_state: &slicer_state,
+            record_undo: true,
         };
-
-        log_info!("CALP-DIAG", "refresh_pivot_cache: reconstructed BI request: rows={}, cols={}, values={}, filters={}",
-            bi_request.row_fields.len(), bi_request.column_fields.len(),
-            bi_request.value_fields.len(), bi_request.filter_fields.len());
-        for (i, f) in bi_request.row_fields.iter().enumerate() {
-            log_info!("CALP-DIAG", "  row_field[{}]: {}.{} (lookup={})", i, f.table, f.column, f.is_lookup);
-        }
-        for (i, f) in bi_request.value_fields.iter().enumerate() {
-            log_info!("CALP-DIAG", "  value_field[{}]: {}", i, f.measure_name);
-        }
-
-        // Delegate to update_bi_pivot_fields which handles the full BI query flow
-        return update_bi_pivot_fields(state, file_state, pivot_state, pane_control_state, ribbon_filter_state, user_files_state, bi_state, bi_request).await;
+        return refresh_bi_pivot_core(&ctx, pivot_id).await;
     }
 
-    // Snapshot sheet names BEFORE the pivot_tables lock — `delete_sheet` takes
-    // sheet_names then pivot_tables, so resolving names under pivot_tables is
-    // the reverse order. (The pre-existing `resolve_dest_sheet_index` call
-    // below still does that; this at least does not add another instance.)
+    // Snapshot sheet names BEFORE the pivot_tables lock — `delete_sheet` and
+    // the calculation pass take sheet_names (and `delete_sheet` the table
+    // stores) before pivot_tables, so nothing below reads a sheet or table
+    // store while the pivot guard is held: the source sheet resolves against
+    // this snapshot, and the destination and a linked table's range are
+    // resolved after the guard is dropped.
     let sheet_names_snapshot = sheet_names_snapshot(&state);
 
     // 1. Lock briefly: read source info, build new cache from grid, release locks
@@ -2230,7 +3094,6 @@ pub async fn refresh_pivot_cache(
             .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
 
         let destination = definition.destination;
-        let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
 
         // Save old state for reversion on cancel
         let old_definition = definition.clone();
@@ -2252,28 +3115,25 @@ pub async fn refresh_pivot_cache(
                 .as_deref()
                 .and_then(|name| index_of_sheet(&sheet_names_snapshot, name))
                 .unwrap_or(0);
-            // If the pivot is linked to a table, its current range wins.
-            if let Some(ref table_name) = source_table_name {
-                let table_names = state.table_names.read().unwrap();
-                if let Some((sheet_index, table_id)) = table_names.get(&table_name.to_uppercase()) {
-                    let tables = state.tables.read().unwrap();
-                    if let Some(sheet_tables) = tables.get(sheet_index) {
-                        if let Some(table) = sheet_tables.get(table_id) {
-                            source_start = (table.start_row, table.start_col);
-                            source_end = (table.end_row, table.end_col);
-                            source_sheet_idx = table.sheet_index;
-                            log_info!(
-                                "PIVOT",
-                                "resolved table '{}' -> ({},{})..({},{}) on sheet {}",
-                                table_name, source_start.0, source_start.1,
-                                source_end.0, source_end.1, source_sheet_idx
-                            );
-                        }
-                    }
-                }
-            }
 
             drop(pivot_tables);
+            // With the pivot guard released (see above).
+            let dest_sheet_idx = resolve_dest_sheet_index(&state, &old_definition);
+
+            // If the pivot is linked to a table, its current range wins.
+            if let Some(ref table_name) = source_table_name {
+                if let Some((start, end, sheet)) = linked_table_source(&state, table_name) {
+                    source_start = start;
+                    source_end = end;
+                    source_sheet_idx = sheet;
+                    log_info!(
+                        "PIVOT",
+                        "resolved table '{}' -> ({},{})..({},{}) on sheet {}",
+                        table_name, source_start.0, source_start.1,
+                        source_end.0, source_end.1, source_sheet_idx
+                    );
+                }
+            }
 
             // Get fresh data from grid (needs grids lock, but briefly)
             let grids = state.grids.read().unwrap();
@@ -3037,9 +3897,10 @@ pub async fn change_pivot_data_source(
 
         let has_headers = definition.source_has_headers;
         let destination = definition.destination;
-        let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+        let dest_ref = PivotDestSheet::of(definition);
 
         drop(pivot_tables);
+        let dest_sheet_idx = dest_ref.resolve(&state);
 
         // Build new cache from grid
         let grids = state.grids.read().unwrap();
@@ -3102,7 +3963,7 @@ pub async fn change_pivot_data_source(
     // Repointing a pivot at a different range is ONE undoable action, recorded
     // after the work succeeded so a refusal leaves no stale entry (the shape
     // `update_pivot_fields` already uses).
-    record_pivot_definition_undo(
+    response.overwrite_token = record_pivot_definition_undo(
         &state,
         pivot_id,
         old_definition,
@@ -3308,9 +4169,10 @@ pub fn update_pivot_layout(
     // Get destination info
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     // Update pivot in grid
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
@@ -3560,9 +4422,10 @@ pub fn add_pivot_hierarchy(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -3636,9 +4499,10 @@ pub fn remove_pivot_hierarchy(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -3770,9 +4634,10 @@ pub fn move_pivot_field(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -3823,9 +4688,10 @@ pub fn set_pivot_aggregation(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -3875,9 +4741,10 @@ pub fn set_pivot_number_format(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -3886,9 +4753,31 @@ pub fn set_pivot_number_format(
 }
 
 /// Applies a filter to a pivot field.
+///
+/// `biFieldKey` (BI pivots): the backend resolves the model column itself and,
+/// when the pivot does not carry it yet, adds it in this same command (see
+/// [`ApplyPivotFilterRequest::bi_field_key`]). A host-side (level-1) mask
+/// records no undo step -- a slicer click's undo is its slicer selection,
+/// re-derived by the Slicer's reconcile -- while an ENSURE records exactly
+/// one, because it changed the query and the cache. So does a filter that
+/// changes the ENGINE QUERY (a pin, a calculation group): its step restores
+/// the definition and records from before the edit (`requery_filter_change`).
+/// A column the pivot's current records already carry is re-used, never
+/// re-added, so the reconcile after an undo records nothing.
+///
+/// THE EXCEPTION TO "A MASK RECORDS NOTHING" (fix round 5): a level-1 mask
+/// that grows a WORKSHEET pivot over the user's cells records ONE step -- the
+/// pre-filter definition and the cells it overwrote -- joining the caller's
+/// open transaction (a slicer click's) or as a step of its own (the header
+/// dropdown). Without it those cells were gone for good: nothing had a copy,
+/// and the dropdown's Cancel popped whatever unrelated step was on top. The
+/// response carries the step's `overwrite_token`, which is what a Cancel
+/// hands back. A `reconcile` request (the Slicer's re-apply after an undo or
+/// redo) records NOTHING, overwrite or not: a step recorded there would wipe
+/// the redo stack.
 #[tauri::command]
 pub async fn apply_pivot_filter(
-    window: tauri::Window,
+    _window: tauri::Window,
     state: State<'_, AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
@@ -3896,13 +4785,83 @@ pub async fn apply_pivot_filter(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     bi_state: State<'_, crate::bi::types::BiState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
     request: ApplyPivotFilterRequest,
 ) -> Result<PivotViewResponse, String> {
+    let ctx = PivotCmdCtx {
+        state: &state,
+        file_state: &file_state,
+        pivot_state: &pivot_state,
+        pane_control_state: &pane_control_state,
+        ribbon_filter_state: &ribbon_filter_state,
+        user_files_state: &user_files_state,
+        bi_state: &bi_state,
+        slicer_state: &slicer_state,
+        record_undo: true,
+    };
+    apply_pivot_filter_core(&ctx, request).await
+}
+
+/// [`apply_pivot_filter`] over borrowed state.
+pub(crate) async fn apply_pivot_filter_core(
+    ctx: &PivotCmdCtx<'_>,
+    request: ApplyPivotFilterRequest,
+) -> Result<PivotViewResponse, String> {
+    // The reconcile's re-apply records nothing anywhere below: the ensure,
+    // the re-query and the overwrite step all read `ctx.record_undo`.
+    let quiet;
+    let ctx: &PivotCmdCtx<'_> = if request.reconcile {
+        quiet = PivotCmdCtx { record_undo: false, ..*ctx };
+        &quiet
+    } else {
+        ctx
+    };
+    let state = ctx.state;
+    let file_state = ctx.file_state;
+    let pivot_state = ctx.pivot_state;
+
+    // A PINNED apply's refusals that need nothing but the request, before
+    // anything at all is written -- the ensure below can ADD a column to the
+    // pivot, and a refused pin must not leave that behind either.
+    if request.filter_level >= 2 {
+        crate::slicer::types::validate_filter_level(request.filter_level)?;
+        if request.filters.manual_filter.is_none() {
+            return Err(pinned_needs_an_item_selection());
+        }
+    }
+
+    // Resolve the field. A BI key is resolved -- and, when missing, ADDED --
+    // on the server, from the stored definition; every refusal (not a BI
+    // pivot, not a model column) happens before anything is written.
+    // `model_column`: the (table, column) the filter is on, when the caller
+    // named it -- the authority for which slicer filter and which pin this is
+    // (a bare cache name can belong to two tables).
+    let (field_index, model_column): (usize, Option<(String, String)>) = match request.bi_field_key.as_deref() {
+        Some(key) => match ensure_bi_field(ctx, request.pivot_id, key).await? {
+            EnsuredBiField::Index { idx, table, column } => (idx, Some((table, column))),
+            EnsuredBiField::EmptyPivot => {
+                log_info!(
+                    "PIVOT",
+                    "apply_pivot_filter pivot_id={} key={}: the pivot has no fields; left untouched",
+                    request.pivot_id,
+                    key
+                );
+                return current_pivot_view(pivot_state, request.pivot_id);
+            }
+        },
+        None => (
+            request
+                .field_index
+                .ok_or_else(|| "apply_pivot_filter needs a fieldIndex or a biFieldKey".to_string())?,
+            None,
+        ),
+    };
+
     log_info!(
         "PIVOT",
         "apply_pivot_filter pivot_id={} field={}",
         request.pivot_id,
-        request.field_index
+        field_index
     );
 
     // BUG-0108 ROUTING IS BUILT BUT DELIBERATELY NOT WIRED HERE.
@@ -3926,15 +4885,31 @@ pub async fn apply_pivot_filter(
     // 24-grain totals cap, and undo not undoing the routed filter — are listed
     // with citations in docs/design/open-items.md under BUG-0108.
 
+    // EVERY REFUSAL OF A PINNED APPLY, BEFORE THE EFFECT (fix round 4, B5).
+    // `pivot_write` mints the document-modified token, and these used to run
+    // after it, under the write guard -- so a refused pin (not a BI pivot, an
+    // unknown field index, a column no single model table owns) marked the
+    // document changed when nothing had. Read guards only; the same checks
+    // stay under the write guard below, where they can now fire only if the
+    // pivot changed in between.
+    if request.filter_level >= 2 {
+        refuse_an_unroutable_pin(pivot_state, request.pivot_id, field_index, model_column.clone())?;
+    }
+
     // All lock-holding work happens in this block so no guard can live across
     // the await below (the Tauri command future must be Send).
-    // `None` = the changed field is a calculation group and needs a BI
-    // re-query; `Some(response)` = handled locally.
-    let local_response: Option<PivotViewResponse> = {
-        let (effect, mut pivot_tables) = pivot_write(&state, &pivot_state, &file_state, request.pivot_id)?;
+    // `Requery` = the edit changed the ENGINE QUERY (a calculation group's
+    // item state, a pin added, replaced or dropped) and needs a BI re-query;
+    // `Local(response)` = handled here.
+    let step: FilterStep = {
+        let (effect, mut pivot_tables) = pivot_write(state, pivot_state, file_state, request.pivot_id)?;
         let (definition, cache) = pivot_tables
             .get_mut(&request.pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+        // The definition BEFORE this edit: the undo step of a re-query must
+        // restore it (see `requery_filter_change`), and the destination sheet
+        // is resolved from it once the pivot lock is released.
+        let pre_definition = definition.clone();
 
         // A calculation-group field (BI pivots): its item selection decides
         // whether an item is APPLIED at all (PBI/AS semantics: one visible
@@ -3942,18 +4917,11 @@ pub async fn apply_pivot_filter(
         // a BI re-query — and its "all values" list comes from the group's
         // declared items, not cache uniques (canonical lock order
         // pivot_tables -> bi_metadata).
-        let field_name = cache.fields.get(request.field_index).map(|f| f.name.clone());
-        let calc_group_items: Option<Vec<String>> = {
+        let (field_name, calc_group_items, model_column) = {
             let bi_meta = pivot_state.bi_metadata.read().unwrap();
-            bi_meta.get(&request.pivot_id).and_then(|meta| {
-                field_name.as_deref().and_then(|n| {
-                    meta.calculation_groups
-                        .iter()
-                        .find(|g| g.name == n)
-                        .map(|g| g.items.iter().map(|i| i.name.clone()).collect())
-                })
-            })
+            filter_field_target(cache, bi_meta.get(&request.pivot_id), field_index, model_column.clone())
         };
+        let model_key: Option<String> = model_column.as_ref().map(|(t, c)| format!("{t}.{c}"));
 
         // PINNED (level >= 2) filters on BI pivots are routed INSIDE the
         // engine query as level-tagged IN-lists (`engine_filters` →
@@ -3966,57 +4934,39 @@ pub async fn apply_pivot_filter(
         // "built but deliberately not wired" note at the top of this command
         // for why routing it would regress more than it repairs.
         let pinned_routed: bool = if request.filter_level >= 2 {
+            // Every refusal below already ran BEFORE the effect
+            // (`refuse_an_unroutable_pin`, and the request checks at the top);
+            // re-checked here against the pivot as the write guard sees it.
             crate::slicer::types::validate_filter_level(request.filter_level)?;
             let Some(ref manual) = request.filters.manual_filter else {
-                return Err(
-                    "pinned filter levels (2+) support item-selection filters only".to_string()
-                );
+                return Err(pinned_needs_an_item_selection());
             };
-            let bi_meta = pivot_state.bi_metadata.read().unwrap();
-            let Some(meta) = bi_meta.get(&request.pivot_id) else {
-                return Err(
-                    "pinned filter levels (2+) require a BI model pivot — a range/table pivot \
-                     has no engine query to route the pin into; use level 1 for this slicer"
-                        .to_string(),
-                );
-            };
-            let name = field_name.clone().ok_or_else(|| {
-                format!("unknown pivot field index {}", request.field_index)
-            })?;
-            let table_names: Vec<&str> =
-                meta.model_tables.iter().map(|t| t.name.as_str()).collect();
-            let (table, column) = if name.contains('.') {
-                split_bi_field_key(&name, table_names.iter().copied())
-            } else {
-                let table_name = meta
-                    .model_tables
-                    .iter()
-                    .find(|t| t.columns.iter().any(|c| c.name == name))
-                    .map(|t| t.name.clone())
-                    .unwrap_or_default();
-                (table_name, name.clone())
-            };
-            if table.is_empty() {
-                return Err(format!(
-                    "cannot attribute field '{name}' to a model table; a mis-attributed pin \
-                     would silently mis-filter, so this fails closed"
-                ));
+            if !pivot_state.bi_metadata.read().unwrap().contains_key(&request.pivot_id) {
+                return Err(pinned_needs_a_model_pivot());
             }
+            let name = field_name.clone().ok_or_else(|| unknown_pivot_field(field_index))?;
+            // The caller's model column when it named one; otherwise the one
+            // table that can own the cache name. Never the FIRST table with
+            // such a column: two tables sharing a column name made the pin
+            // filter the wrong one.
+            let Some((table, column)) = model_column.clone() else {
+                return Err(pin_cannot_be_attributed(&name));
+            };
 
             // The engine filter replaces any host-side mask for this field —
             // a leftover mask would double-apply (and go stale).
             for field in &mut definition.row_fields {
-                if field.source_index == request.field_index {
+                if field.source_index == field_index {
                     field.hidden_items.clear();
                 }
             }
             for field in &mut definition.column_fields {
-                if field.source_index == request.field_index {
+                if field.source_index == field_index {
                     field.hidden_items.clear();
                 }
             }
             for filter in &mut definition.filter_fields {
-                if filter.field.source_index == request.field_index {
+                if filter.field.source_index == field_index {
                     filter.field.hidden_items.clear();
                 }
             }
@@ -4026,33 +4976,38 @@ pub async fn apply_pivot_filter(
             let in_zone = definition
                 .row_fields
                 .iter()
-                .any(|f| f.source_index == request.field_index)
+                .any(|f| f.source_index == field_index)
                 || definition
                     .column_fields
                     .iter()
-                    .any(|f| f.source_index == request.field_index)
+                    .any(|f| f.source_index == field_index)
                 || definition
                     .filter_fields
                     .iter()
-                    .any(|f| f.field.source_index == request.field_index);
+                    .any(|f| f.field.source_index == field_index);
             if let Some(sf) = definition
                 .slicer_filters
                 .iter_mut()
-                .find(|sf| sf.source_index == request.field_index)
+                .find(|sf| sf.source_index == field_index)
             {
                 sf.hidden_items.clear();
+                if sf.model_key.is_none() {
+                    sf.model_key = model_key.clone();
+                }
             } else if !in_zone {
                 definition.slicer_filters.push(pivot_engine::SlicerFilter {
-                    source_index: request.field_index,
+                    source_index: field_index,
                     hidden_items: Vec::new(),
+                    model_key: model_key.clone(),
                 });
             }
 
-            // Upsert the engine filter, keyed by the stable field name.
+            // Upsert the engine filter, keyed by its MODEL COLUMN (the bare
+            // field name can be shared by two tables).
             let entry = pivot_engine::EngineFilter {
                 field_name: name.clone(),
-                table,
-                column,
+                table: table.clone(),
+                column: column.clone(),
                 selected_items: manual.selected_items.clone(),
                 level: request.filter_level,
                 slicer_id: request.slicer_id.clone(),
@@ -4060,7 +5015,7 @@ pub async fn apply_pivot_filter(
             if let Some(existing) = definition
                 .engine_filters
                 .iter_mut()
-                .find(|ef| ef.field_name == name)
+                .find(|ef| ef.table == table && ef.column == column)
             {
                 *existing = entry;
             } else {
@@ -4073,87 +5028,73 @@ pub async fn apply_pivot_filter(
         // An ordinary (level-1) selection on a field that previously held a
         // PIN drops the pin — the mask path below takes over, and the drop
         // changes the engine query, so a BI re-query is still required.
-        let pin_dropped: bool = if !pinned_routed {
-            let before = definition.engine_filters.len();
-            if let Some(name) = field_name.as_deref() {
-                definition.engine_filters.retain(|ef| ef.field_name != name);
+        // `dropped_pins`: the model column of every pin this dropped.
+        let mut dropped_pins: Vec<(String, String)> = Vec::new();
+        if !pinned_routed {
+            let mut drop_if = |ef: &pivot_engine::EngineFilter, hit: bool| {
+                if hit {
+                    dropped_pins.push((ef.table.clone(), ef.column.clone()));
+                }
+                !hit
+            };
+            match (&model_column, field_name.as_deref()) {
+                // By its column: a pin on ANOTHER table's same-named column
+                // is not this field's pin.
+                (Some((table, column)), _) => definition
+                    .engine_filters
+                    .retain(|ef| drop_if(ef, &ef.table == table && &ef.column == column)),
+                (None, Some(name)) => definition.engine_filters.retain(|ef| drop_if(ef, ef.field_name == name)),
+                (None, None) => {}
             }
-            definition.engine_filters.len() != before
-        } else {
-            false
+        }
+        let pin_dropped = !dropped_pins.is_empty();
+        // The level-1 selection that REPLACES a dropped pin cannot be turned
+        // into a mask here: the records were queried THROUGH the pin, so they
+        // hold only the pinned values, and "every value not selected" over
+        // them hides nothing outside the pin -- a pin [East] replaced by a
+        // selection [East, West] showed North too. The re-query applies the
+        // selection to its NEW records instead (see `PostQueryMask`), on the
+        // column the pin was on.
+        let post_query_mask: Option<PostQueryMask> = match &request.filters.manual_filter {
+            Some(manual) if pin_dropped && calc_group_items.is_none() => {
+                let column = model_column.clone().or_else(|| match dropped_pins.as_slice() {
+                    [only] => Some(only.clone()),
+                    // Two tables' pins shared the dropped cache name: no
+                    // single column to mask, and a guessed one would
+                    // silently mis-filter. The pre-query mask stands.
+                    _ => None,
+                });
+                column.map(|(table, column)| PostQueryMask {
+                    table,
+                    column,
+                    selected: manual.selected_items.clone(),
+                })
+            }
+            _ => None,
         };
-
-        // Find the field in row, column, or filter fields and update hidden_items
-        let mut found = false;
 
         // Apply manual filter as hidden items
         if pinned_routed {
             // Host-side masking skipped: the pin travels inside the engine query.
         } else if let Some(ref manual) = request.filters.manual_filter {
-            // Get all unique values for this field
-            let all_values: Vec<String> = if let Some(items) = &calc_group_items {
-                items.clone()
-            } else if let Some(field_cache) = cache.fields.get_mut(request.field_index) {
-                let sorted_ids = field_cache.sorted_ids().to_vec();
-                sorted_ids.iter()
-                    .filter_map(|&id| {
-                        if id == VALUE_ID_EMPTY {
-                            return None;
-                        }
-                        field_cache.get_value(id).map(cache_value_to_string)
-                    })
+            // Hidden items = all items - selected items. A calculation group's
+            // items are its declared (text) item names; a real column's are
+            // the cache's values, matched spelling-tolerantly because the
+            // selection may be spelled the MODEL's way ("true", "12.50").
+            let hidden_items: Vec<String> = if let Some(items) = &calc_group_items {
+                items
+                    .iter()
+                    .filter(|v| !manual.selected_items.contains(v))
+                    .cloned()
                     .collect()
             } else {
-                Vec::new()
+                hidden_for_selection(cache, field_index, &manual.selected_items)
             };
 
-            // Hidden items = all items - selected items
-            let hidden_items: Vec<String> = all_values.iter()
-                .filter(|v| !manual.selected_items.contains(v))
-                .cloned()
-                .collect();
-
-            // Update row fields
-            for field in &mut definition.row_fields {
-                if field.source_index == request.field_index {
-                    field.hidden_items = hidden_items.clone();
-                    found = true;
-                }
-            }
-
-            // Update column fields
-            for field in &mut definition.column_fields {
-                if field.source_index == request.field_index {
-                    field.hidden_items = hidden_items.clone();
-                    found = true;
-                }
-            }
-
-            // Update filter fields
-            for filter in &mut definition.filter_fields {
-                if filter.field.source_index == request.field_index {
-                    filter.field.hidden_items = hidden_items.clone();
-                    found = true;
-                }
-            }
-
-            if !found {
-                // Field not in any zone — add as slicer filter (external, no UI).
-                // This filters data without adding a visible filter dropdown row.
-                log_debug!("PIVOT", "Field {} not in any zone, adding as slicer filter", request.field_index);
-
-                // Check if a slicer filter for this field already exists
-                if let Some(sf) = definition.slicer_filters.iter_mut()
-                    .find(|sf| sf.source_index == request.field_index)
-                {
-                    sf.hidden_items = hidden_items;
-                } else {
-                    definition.slicer_filters.push(pivot_engine::SlicerFilter {
-                        source_index: request.field_index,
-                        hidden_items,
-                    });
-                }
-            }
+            // Row, column and filter fields carry it where they show the
+            // field; a field in no zone gets it as a slicer filter (external,
+            // no visible filter row), stamped with its model column.
+            set_hidden_items_at(definition, field_index, hidden_items, model_key.as_deref());
         }
 
         definition.bump_version();
@@ -4164,47 +5105,268 @@ pub async fn apply_pivot_filter(
             // for a DIFFERENT engine query, so recalculating from it would
             // be wrong — fall through to the BI re-query (refresh
             // reconstructs the request from the definition, including the
-            // engine filters and hidden_items just applied).
-            None
+            // engine filters and hidden_items just applied). The cache is
+            // still the pre-edit records here: nothing above replaced it.
+            FilterStep::Requery { pre_definition, pre_cache: cache.clone(), mask: post_query_mask }
         } else {
             let view = safe_calculate_pivot(definition, cache);
-            store_view(&pivot_state, request.pivot_id, &view);
+            store_view(pivot_state, request.pivot_id, &view);
             let mut response = view_to_response(&view, definition, cache);
 
             let destination = definition.destination;
             let pivot_id = definition.id;
-            let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
 
             drop(pivot_tables);
+            // Resolved with the pivot lock RELEASED: `delete_sheet` and the
+            // calculation pass hold `sheet_names` while they take
+            // `pivot_tables`, so reading names under it is the reverse order.
+            // A filter never moves the pivot, so the pre-edit clone names the
+            // same sheet.
+            let dest_sheet_idx = resolve_dest_sheet_index(state, &pre_definition);
 
-            response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-            finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
+            // SAVED, not merely counted: the step below must put them back.
+            // Always empty on a canvas (its hidden grid holds only output).
+            let overwritten = save_overwritten_cells(state, pivot_id, dest_sheet_idx, destination, &view);
+            response.overwritten_cell_count = overwritten.len() as u32;
+            finalize_pivot_update(state, &effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: ctx.pane_control_state, ribbon: ctx.ribbon_filter_state, user_files: ctx.user_files_state }))?;
 
-            Some(response)
+            FilterStep::Local(response, local_overwrite_step(pivot_id, pre_definition, overwritten, dest_sheet_idx))
         }
     };
 
-    if let Some(response) = local_response {
-        return Ok(response);
+    match step {
+        FilterStep::Local(response, overwrite) => Ok(record_local_overwrite(ctx, response, overwrite)),
+        // Every re-query fork above is BI-only (calculation groups and engine
+        // filters exist only on model pivots).
+        FilterStep::Requery { pre_definition, pre_cache, mask } => {
+            requery_filter_change(ctx, request.pivot_id, pre_definition, pre_cache, mask).await.0
+        }
     }
-    refresh_pivot_cache(
-        window,
-        state,
-        file_state,
-        pivot_state,
-        pane_control_state,
-        ribbon_filter_state,
-        user_files_state,
-        bi_state,
-        request.pivot_id,
+}
+
+/// The step a LOCAL (host-side mask) filter apply or clear hands back when it
+/// grew the pivot over the user's cells: the definition from BEFORE the
+/// filter and the cells it overwrote. `None` when it overwrote nothing -- an
+/// ordinary mask records no step (the Slicer's reconcile re-derives it). The
+/// cache is left out: a mask renders the SAME records, so the definition
+/// alone describes what to put back.
+fn local_overwrite_step(
+    pivot_id: PivotId,
+    pre_definition: PivotDefinition,
+    overwritten: Vec<crate::pivot::operations::SavedCell>,
+    dest_sheet_idx: usize,
+) -> Option<BiFieldChangeUndo> {
+    (!overwritten.is_empty()).then(|| BiFieldChangeUndo {
+        pivot_id,
+        definition: pre_definition,
+        overwritten_cells: overwritten,
+        dest_sheet_idx,
+        prev_col_widths: Vec::new(),
+        cache: None,
+    })
+}
+
+/// Record a local filter's overwrite step (joining an open transaction, or as
+/// a step of its own) unless the context records nothing -- a reconcile, or
+/// `delete_slicer_core`'s quiet clears -- and stamp its token on the response.
+fn record_local_overwrite(
+    ctx: &PivotCmdCtx<'_>,
+    mut response: PivotViewResponse,
+    overwrite: Option<BiFieldChangeUndo>,
+) -> PivotViewResponse {
+    if ctx.record_undo {
+        if let Some(step) = overwrite {
+            response.overwrite_token = step.record(ctx.state, "Filter pivot");
+        }
+    }
+    response
+}
+
+/// What a filter apply is aimed at, read from the pivot's records and BI
+/// metadata: the cache column's name, a calculation group's declared items
+/// (when the field IS one), and the model column -- the caller's when it named
+/// one, otherwise the one table that can own the cache name (a header-dropdown
+/// apply names only a cache index; a column two tables share is attributed to
+/// neither). Read-only; shared by the pre-effect refusals and the apply itself
+/// so the two cannot disagree about the target.
+fn filter_field_target(
+    cache: &PivotCache,
+    meta: Option<&BiPivotMetadata>,
+    field_index: usize,
+    model_column: Option<(String, String)>,
+) -> (Option<String>, Option<Vec<String>>, Option<(String, String)>) {
+    let field_name = cache.fields.get(field_index).map(|f| f.name.clone());
+    let items: Option<Vec<String>> = meta.and_then(|meta| {
+        field_name.as_deref().and_then(|n| {
+            meta.calculation_groups
+                .iter()
+                .find(|g| g.name == n)
+                .map(|g| g.items.iter().map(|i| i.name.clone()).collect())
+        })
+    });
+    let column = model_column.or_else(|| {
+        let meta = meta?;
+        if items.is_some() {
+            return None;
+        }
+        resolve_bi_cache_name(field_name.as_deref()?, meta)
+    });
+    (field_name, items, column)
+}
+
+/// The refusals of a PINNED (level 2+) apply that depend on the pivot, under
+/// READ guards (`pivot_tables`, then `bi_metadata`: the canonical order), so
+/// they run before `pivot_write` mints the document-modified token. A pin is
+/// routed into the ENGINE QUERY, so it needs a model pivot, a field the
+/// records carry, and one model column to route it to.
+fn refuse_an_unroutable_pin(
+    pivot_state: &PivotState,
+    pivot_id: PivotId,
+    field_index: usize,
+    model_column: Option<(String, String)>,
+) -> Result<(), String> {
+    let pivot_tables = pivot_state
+        .pivot_tables
+        .read()
+        .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+    let (_, cache) = pivot_tables
+        .get(&pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+    let bi_meta = pivot_state
+        .bi_metadata
+        .read()
+        .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+    let Some(meta) = bi_meta.get(&pivot_id) else {
+        return Err(pinned_needs_a_model_pivot());
+    };
+    let (field_name, _, column) = filter_field_target(cache, Some(meta), field_index, model_column);
+    let name = field_name.ok_or_else(|| unknown_pivot_field(field_index))?;
+    if column.is_none() {
+        return Err(pin_cannot_be_attributed(&name));
+    }
+    Ok(())
+}
+
+fn pinned_needs_an_item_selection() -> String {
+    "pinned filter levels (2+) support item-selection filters only".to_string()
+}
+
+fn pinned_needs_a_model_pivot() -> String {
+    "pinned filter levels (2+) require a BI model pivot — a range/table pivot \
+     has no engine query to route the pin into; use level 1 for this slicer"
+        .to_string()
+}
+
+fn unknown_pivot_field(field_index: usize) -> String {
+    format!("unknown pivot field index {}", field_index)
+}
+
+fn pin_cannot_be_attributed(name: &str) -> String {
+    format!(
+        "cannot attribute field '{name}' to a model table; a mis-attributed pin \
+         would silently mis-filter, so this fails closed"
     )
-    .await
+}
+
+/// The outcome of the synchronous, lock-holding half of a filter apply or
+/// clear.
+pub(crate) enum FilterStep {
+    /// Handled host-side: the pivot was recalculated and rewritten. Carries
+    /// the overwrite step when the rewrite grew over the user's cells (see
+    /// [`local_overwrite_step`]); recording it is the caller's decision.
+    Local(PivotViewResponse, Option<BiFieldChangeUndo>),
+    /// The edit changed the ENGINE QUERY and the pivot must be re-queried.
+    /// Carries the definition and records as they were BEFORE the edit (which
+    /// is already stored), for the undo step, and the level-1 selection the
+    /// re-query must apply to its NEW records (a dropped pin's replacement).
+    Requery { pre_definition: PivotDefinition, pre_cache: PivotCache, mask: Option<PostQueryMask> },
+}
+
+/// A level-1 selection a BI re-query applies to the records IT fetched,
+/// after the query and before the one write -- the page fold's rule
+/// ("hide every value not selected") for a selection that is not a model
+/// slicer's. Needed when the records on hand cannot answer "every value":
+/// a selection replacing a PIN, whose records were queried through the pin.
+#[derive(Debug, Clone)]
+pub(crate) struct PostQueryMask {
+    pub table: String,
+    pub column: String,
+    pub selected: Vec<String>,
+}
+
+/// Re-query a BI pivot after a filter edit that changed its engine query, and
+/// record the gesture's undo step from the state BEFORE the edit.
+///
+/// The edit (a pin added, replaced or dropped; a calculation group's item
+/// state) is made IN PLACE, and the re-query snapshots the stored definition
+/// on entry -- so the step it would record restores the NEW pin against the
+/// OLD records. Ctrl+Z after a level change to pinned then showed every region
+/// while the slicer was back at level 1; after a pinned click from East to
+/// West it showed East but kept pin [West], which the next refresh re-applied.
+///
+/// The re-query records nothing itself; this records ONE pivot restore of the
+/// pre-edit definition and records, carrying the cells and column widths the
+/// re-query's write overwrote -- joining the caller's open transaction (the
+/// Slicer Settings dialog's "update level + apply" step) or as a step of its
+/// own. No transaction is opened across the BI await (a concurrent edit would
+/// be swallowed into it, `delete_slicer_core`'s rule). Redo works because the
+/// restore's inverse captures the post-query definition and records.
+///
+/// A failed re-query still records the step: the edit is already stored and
+/// the document dirtied, and Ctrl+Z must take it back. A context that records
+/// nothing (`delete_slicer_core`'s quiet clears) records nothing here either.
+///
+/// `mask`: a level-1 selection the re-query applies to its NEW records before
+/// it writes (see [`PostQueryMask`]).
+///
+/// Also returns the user's cells the re-query grew over when it recorded
+/// NOTHING (a quiet context), for a caller that records the gesture itself
+/// (see [`clear_pivot_filter_core_keeping`]); empty when it recorded them.
+async fn requery_filter_change(
+    ctx: &PivotCmdCtx<'_>,
+    pivot_id: PivotId,
+    pre_definition: PivotDefinition,
+    pre_cache: PivotCache,
+    mask: Option<PostQueryMask>,
+) -> (Result<PivotViewResponse, String>, Vec<crate::pivot::operations::SavedCell>) {
+    let (mut result, pending) = match refresh_bi_pivot_unrecorded(ctx, pivot_id, mask.into_iter().collect()).await {
+        Ok((response, pending)) => (Ok(response), pending),
+        Err(e) => (Err(e), None),
+    };
+    if !ctx.record_undo {
+        return (result, pending.map(|p| p.overwritten_cells).unwrap_or_default());
+    }
+    {
+        let (overwritten_cells, dest_sheet_idx, prev_col_widths) = match pending {
+            Some(p) => (p.overwritten_cells, p.dest_sheet_idx, p.prev_col_widths),
+            // No pivot lock is held here.
+            None => (Vec::new(), resolve_dest_sheet_index(ctx.state, &pre_definition), Vec::new()),
+        };
+        let token = BiFieldChangeUndo {
+            pivot_id,
+            definition: pre_definition,
+            overwritten_cells,
+            dest_sheet_idx,
+            prev_col_widths,
+            cache: Some(pre_cache),
+        }
+        .record(ctx.state, "Filter pivot");
+        // The re-query's own overwrite is this step's: a Cancel hands the
+        // token back and takes back exactly the pre-edit state it restores.
+        if let Ok(response) = result.as_mut() {
+            response.overwrite_token = token;
+        }
+    }
+    (result, Vec::new())
 }
 
 /// Clears filters from a pivot field.
+///
+/// `biFieldKey` (BI pivots): a column the pivot does not carry is a no-op that
+/// leaves the document clean -- clearing never adds a field.
 #[tauri::command]
 pub async fn clear_pivot_filter(
-    window: tauri::Window,
+    _window: tauri::Window,
     state: State<'_, AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
@@ -4212,106 +5374,240 @@ pub async fn clear_pivot_filter(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     bi_state: State<'_, crate::bi::types::BiState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
     request: ClearPivotFilterRequest,
 ) -> Result<PivotViewResponse, String> {
+    let ctx = PivotCmdCtx {
+        state: &state,
+        file_state: &file_state,
+        pivot_state: &pivot_state,
+        pane_control_state: &pane_control_state,
+        ribbon_filter_state: &ribbon_filter_state,
+        user_files_state: &user_files_state,
+        bi_state: &bi_state,
+        slicer_state: &slicer_state,
+        record_undo: true,
+    };
+    clear_pivot_filter_core(&ctx, request).await
+}
+
+/// [`clear_pivot_filter`] over borrowed state.
+///
+/// A host-side clear that grows a worksheet pivot over the user's cells
+/// records ONE step carrying them, as the apply does (see
+/// [`apply_pivot_filter`]); a `reconcile` clear records nothing.
+pub(crate) async fn clear_pivot_filter_core(
+    ctx: &PivotCmdCtx<'_>,
+    request: ClearPivotFilterRequest,
+) -> Result<PivotViewResponse, String> {
+    clear_pivot_filter_core_keeping(ctx, request).await.map(|(response, _)| response)
+}
+
+/// [`clear_pivot_filter_core`] that also hands back the user's cells the clear
+/// grew the pivot over and did NOT record: non-empty only in a context that
+/// records nothing. `delete_slicer_core` runs its clears that way and records
+/// ONE step for the whole delete at the end -- which must carry these cells,
+/// or undoing the delete brought the slicer and its filter back over cells
+/// that stayed overwritten.
+pub(crate) async fn clear_pivot_filter_core_keeping(
+    ctx: &PivotCmdCtx<'_>,
+    request: ClearPivotFilterRequest,
+) -> Result<(PivotViewResponse, Vec<crate::pivot::operations::SavedCell>), String> {
+    let quiet;
+    let ctx: &PivotCmdCtx<'_> = if request.reconcile {
+        quiet = PivotCmdCtx { record_undo: false, ..*ctx };
+        &quiet
+    } else {
+        ctx
+    };
+    let state = ctx.state;
+    let file_state = ctx.file_state;
+    let pivot_state = ctx.pivot_state;
+
+    // Resolve the field BEFORE any token exists. A model column the pivot
+    // does not carry has no filter to clear: answer with the current view.
+    let (field_index, model_key): (usize, Option<(String, String)>) = match request.bi_field_key.as_deref() {
+        Some(key) => {
+            // A column added in the Model Editor is resolvable too.
+            refresh_bi_model_snapshot(ctx, request.pivot_id).await?;
+            let resolved = {
+                let pivot_tables = pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
+                let (definition, cache) = pivot_tables
+                    .get(&request.pivot_id)
+                    .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+                let bi_meta = pivot_state.bi_metadata.read().map_err(|e| e.to_string())?;
+                let meta = bi_meta.get(&request.pivot_id).ok_or_else(|| {
+                    format!("biFieldKey '{key}' needs a BI model pivot; pivot {} is not one", request.pivot_id)
+                })?;
+                let (table, column) = split_model_column_key(key, meta)?;
+                resolve_bi_field_index(definition, cache, meta, &table, &column)
+                    .map(|idx| (idx, (table, column)))
+            };
+            match resolved {
+                Some((idx, key)) => (idx, Some(key)),
+                None => return current_pivot_view(pivot_state, request.pivot_id).map(|r| (r, Vec::new())),
+            }
+        }
+        None => (
+            request
+                .field_index
+                .ok_or_else(|| "clear_pivot_filter needs a fieldIndex or a biFieldKey".to_string())?,
+            None,
+        ),
+    };
+
     log_info!(
         "PIVOT",
         "clear_pivot_filter pivot_id={} field={}",
         request.pivot_id,
-        request.field_index
+        field_index
     );
 
-    // All lock-holding work happens in this block so no guard can live across
-    // the await below (the Tauri command future must be Send). `None` = the
-    // cleared field is a calculation group and needs a BI re-query.
-    let local_response: Option<PivotViewResponse> = {
-        let (effect, mut pivot_tables) = pivot_write(&state, &pivot_state, &file_state, request.pivot_id)?;
-        let (definition, cache) = pivot_tables
-            .get_mut(&request.pivot_id)
-            .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
-
-        // Calc-group field? Clearing the filter changes the applied-item state
-        // (e.g. one visible item -> all visible = NO item applied), so it
-        // needs a BI re-query, like apply_pivot_filter.
-        let is_calc_group_field = {
-            let field_name = cache.fields.get(request.field_index).map(|f| f.name.clone());
-            let bi_meta = pivot_state.bi_metadata.read().unwrap();
-            bi_meta.get(&request.pivot_id).is_some_and(|meta| {
-                field_name
-                    .as_deref()
-                    .is_some_and(|n| meta.calculation_groups.iter().any(|g| g.name == n))
-            })
-        };
-
-        // Clear hidden items from all matching fields
-        for field in &mut definition.row_fields {
-            if field.source_index == request.field_index {
-                field.hidden_items.clear();
-            }
-        }
-        for field in &mut definition.column_fields {
-            if field.source_index == request.field_index {
-                field.hidden_items.clear();
-            }
-        }
-        for filter in &mut definition.filter_fields {
-            if filter.field.source_index == request.field_index {
-                filter.field.hidden_items.clear();
-            }
-        }
-        // Also remove any slicer filters for this field
-        definition.slicer_filters.retain(|sf| sf.source_index != request.field_index);
-
-        // And any engine-routed (pinned) filter: it lives INSIDE the engine
-        // query, so dropping it changes the query — the local cache is stale
-        // and a BI re-query is required (same fork as calc groups).
-        let engine_filter_dropped = {
-            let field_name = cache.fields.get(request.field_index).map(|f| f.name.clone());
-            let before = definition.engine_filters.len();
-            if let Some(name) = field_name.as_deref() {
-                definition.engine_filters.retain(|ef| ef.field_name != name);
-            }
-            definition.engine_filters.len() != before
-        };
-
-        definition.bump_version();
-
-        if is_calc_group_field || engine_filter_dropped {
-            None
-        } else {
-            let view = safe_calculate_pivot(definition, cache);
-            store_view(&pivot_state, request.pivot_id, &view);
-            let mut response = view_to_response(&view, definition, cache);
-
-            let destination = definition.destination;
-            let pivot_id = definition.id;
-            let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
-
-            drop(pivot_tables);
-
-            response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-            finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
-
-            Some(response)
-        }
-    };
-
-    if let Some(response) = local_response {
-        return Ok(response);
-    }
-    refresh_pivot_cache(
-        window,
+    // All lock-holding work happens in the synchronous helper, so no guard
+    // can live across the await below (the Tauri command future must be
+    // Send). `Requery` = the cleared field needs a BI re-query, whose undo
+    // step restores the pre-clear state (`requery_filter_change`).
+    let step = clear_pivot_filter_local(
         state,
         file_state,
         pivot_state,
-        pane_control_state,
-        ribbon_filter_state,
-        user_files_state,
-        bi_state,
+        PivotRecalcStates {
+            pane: ctx.pane_control_state,
+            ribbon: ctx.ribbon_filter_state,
+            user_files: ctx.user_files_state,
+        },
         request.pivot_id,
-    )
-    .await
+        field_index,
+        model_key.as_ref(),
+    )?;
+
+    match step {
+        FilterStep::Local(response, overwrite) if ctx.record_undo => {
+            Ok((record_local_overwrite(ctx, response, overwrite), Vec::new()))
+        }
+        FilterStep::Local(response, overwrite) => {
+            Ok((response, overwrite.map(|step| step.overwritten_cells).unwrap_or_default()))
+        }
+        FilterStep::Requery { pre_definition, pre_cache, mask } => {
+            let (result, unrecorded) =
+                requery_filter_change(ctx, request.pivot_id, pre_definition, pre_cache, mask).await;
+            result.map(|response| (response, unrecorded))
+        }
+    }
 }
+
+/// The host-side half of a filter clear, SYNCHRONOUS: the field's hidden items
+/// come off every zone field and slicer filter at `field_index`, its pin (by
+/// model column when `model_key` names one, else by cache name) is dropped, and
+/// -- when nothing needs the engine -- the pivot is recalculated and rewritten
+/// in place. Returns [`FilterStep::Requery`] (with the pre-clear definition and
+/// records) when the clear changed the engine query (a pin dropped, or a
+/// calculation group's item state) and the caller must re-query. Records no
+/// undo step itself; the caller owns that -- including the overwrite step a
+/// local clear hands back when it grew the pivot over the user's cells.
+///
+/// Shared by `clear_pivot_filter_core` and the sheet-delete cascade, which
+/// runs synchronously and has no engine to await.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn clear_pivot_filter_local(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    pivot_state: &PivotState,
+    recalc: PivotRecalcStates<'_>,
+    pivot_id: PivotId,
+    field_index: usize,
+    model_key: Option<&(String, String)>,
+) -> Result<FilterStep, String> {
+    let (effect, mut pivot_tables) = pivot_write(state, pivot_state, file_state, pivot_id)?;
+    let (definition, cache) = pivot_tables
+        .get_mut(&pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+    // Before the clear: the re-query's undo step restores it, and the
+    // destination sheet is resolved from it after the lock is released.
+    let pre_definition = definition.clone();
+
+    // Calc-group field? Clearing the filter changes the applied-item state
+    // (e.g. one visible item -> all visible = NO item applied), so it
+    // needs a BI re-query, like apply_pivot_filter.
+    let is_calc_group_field = {
+        let field_name = cache.fields.get(field_index).map(|f| f.name.clone());
+        let bi_meta = pivot_state.bi_metadata.read().unwrap();
+        bi_meta.get(&pivot_id).is_some_and(|meta| {
+            field_name
+                .as_deref()
+                .is_some_and(|n| meta.calculation_groups.iter().any(|g| g.name == n))
+        })
+    };
+
+    // Clear hidden items from all matching fields
+    for field in &mut definition.row_fields {
+        if field.source_index == field_index {
+            field.hidden_items.clear();
+        }
+    }
+    for field in &mut definition.column_fields {
+        if field.source_index == field_index {
+            field.hidden_items.clear();
+        }
+    }
+    for filter in &mut definition.filter_fields {
+        if filter.field.source_index == field_index {
+            filter.field.hidden_items.clear();
+        }
+    }
+    // Also remove any slicer filters for this field
+    definition.slicer_filters.retain(|sf| sf.source_index != field_index);
+
+    // And any engine-routed (pinned) filter: it lives INSIDE the engine
+    // query, so dropping it changes the query — the local cache is stale
+    // and a BI re-query is required (same fork as calc groups). Matched by
+    // the model column when the caller named it (a pin folded under a
+    // different spelling of the name cannot survive its clear), otherwise by
+    // the cache column name.
+    let engine_filter_dropped = {
+        let field_name = cache.fields.get(field_index).map(|f| f.name.clone());
+        let before = definition.engine_filters.len();
+        definition.engine_filters.retain(|ef| {
+            // When the caller named the model column, ONLY that column's
+            // pin goes: the bare cache name is shared by every table with
+            // a same-named column, and matching by it too cleared a
+            // different table's pin.
+            let hit = match &model_key {
+                Some((t, c)) => &ef.table == t && &ef.column == c,
+                None => field_name.as_deref().is_some_and(|n| ef.field_name == n),
+            };
+            !hit
+        });
+        definition.engine_filters.len() != before
+    };
+
+    definition.bump_version();
+
+    if is_calc_group_field || engine_filter_dropped {
+        // The cache is still the pre-clear records: nothing above replaced it.
+        // A clear shows every value, so there is nothing to mask afterwards.
+        Ok(FilterStep::Requery { pre_definition, pre_cache: cache.clone(), mask: None })
+    } else {
+        let view = safe_calculate_pivot(definition, cache);
+        store_view(pivot_state, pivot_id, &view);
+        let mut response = view_to_response(&view, definition, cache);
+
+        let destination = definition.destination;
+
+        drop(pivot_tables);
+        // With the pivot lock RELEASED (`delete_sheet` and the calculation
+        // pass take `sheet_names` before `pivot_tables`); a clear never moves
+        // the pivot, so the pre-clear clone names the same sheet.
+        let dest_sheet_idx = resolve_dest_sheet_index(state, &pre_definition);
+
+        let overwritten = save_overwritten_cells(state, pivot_id, dest_sheet_idx, destination, &view);
+        response.overwritten_cell_count = overwritten.len() as u32;
+        finalize_pivot_update(state, &effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(recalc))?;
+
+        Ok(FilterStep::Local(response, local_overwrite_step(pivot_id, pre_definition, overwritten, dest_sheet_idx)))
+    }
+}
+
 
 /// Sorts a pivot field by labels.
 #[tauri::command]
@@ -4362,9 +5658,10 @@ pub fn sort_pivot_field(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -4515,9 +5812,10 @@ pub fn set_pivot_item_visibility(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -4565,15 +5863,22 @@ pub fn get_pivot_bi_metadata(
     pivot_id: PivotId,
 ) -> Option<serde_json::Value> {
     // Lock order: pivot_tables before bi_metadata (canonical — see
-    // bi_pivots_for_connection).
-    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
-    let bi_meta = pivot_state.bi_metadata.read().unwrap();
+    // bi_pivots_for_connection). Both are RELEASED before the sheet is
+    // resolved: `resolve_dest_sheet_index` reads `sheet_names` /
+    // `active_sheet`, which `delete_sheet` holds while it takes
+    // `pivot_tables` -- resolving under the pivot locks is the reverse order.
+    let (definition, meta) = {
+        let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+        let bi_meta = pivot_state.bi_metadata.read().unwrap();
+        let meta = bi_meta.get(&pivot_id).cloned();
+        (pivot_tables.get(&pivot_id).map(|(def, _)| def.clone()), meta)
+    };
 
-    if let Some(meta) = bi_meta.get(&pivot_id) {
+    if let Some(meta) = meta {
         // Get the sheet index from the pivot definition
-        let sheet_index = pivot_tables
-            .get(&pivot_id)
-            .map(|(def, _)| resolve_dest_sheet_index(&state, def))
+        let sheet_index = definition
+            .as_ref()
+            .map(|def| resolve_dest_sheet_index(&state, def))
             .unwrap_or(0);
 
         Some(serde_json::json!({
@@ -4604,22 +5909,39 @@ pub(crate) fn bi_pivots_for_connection(
     // Lock order: pivot_tables BEFORE bi_metadata — the order every site that
     // holds both uses (refresh_pivot_cache, collect_pivot_definitions); the
     // reverse order would be an ABBA deadlock.
-    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
-    let bi_meta = pivot_state.bi_metadata.read().unwrap();
-    let connection_key = connection_id.to_string();
-
-    bi_meta
-        .iter()
-        .filter(|(_, meta)| {
-            meta.connection_id == connection_id
-                || meta.data_source_id.as_deref() == Some(connection_key.as_str())
-        })
-        .filter_map(|(pivot_id, _)| {
-            pivot_tables.get(pivot_id).map(|(def, _)| super::types::BiConnectionPivot {
-                id: *pivot_id,
-                name: def.name.clone().unwrap_or_else(|| format!("PivotTable{}", pivot_id)),
-                sheet_index: resolve_dest_sheet_index(state, def),
+    //
+    // COLLECT under the pivot locks, RESOLVE after releasing them:
+    // `resolve_dest_sheet_index` reads `sheet_names` (and `active_sheet` as
+    // its fallback), and `delete_sheet` holds both while it takes
+    // `pivot_tables`. Resolving under the pivot locks was that order reversed
+    // -- an ABBA hang on every model slicer's item fetch and every slicer
+    // delete that raced a sheet delete. Every caller is covered here.
+    let hits: Vec<(PivotId, String, PivotDefinition)> = {
+        let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+        let bi_meta = pivot_state.bi_metadata.read().unwrap();
+        let connection_key = connection_id.to_string();
+        bi_meta
+            .iter()
+            .filter(|(_, meta)| {
+                meta.connection_id == connection_id
+                    || meta.data_source_id.as_deref() == Some(connection_key.as_str())
             })
+            .filter_map(|(pivot_id, _)| {
+                pivot_tables.get(pivot_id).map(|(def, _)| {
+                    (
+                        *pivot_id,
+                        def.name.clone().unwrap_or_else(|| format!("PivotTable{}", pivot_id)),
+                        def.clone(),
+                    )
+                })
+            })
+            .collect()
+    }; // pivot_tables + bi_metadata released here
+    hits.into_iter()
+        .map(|(id, name, def)| super::types::BiConnectionPivot {
+            id,
+            name,
+            sheet_index: resolve_dest_sheet_index(state, &def),
         })
         .collect()
 }
@@ -4689,9 +6011,10 @@ pub fn set_pivot_item_expanded(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -4752,9 +6075,10 @@ pub fn expand_collapse_level(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -4798,9 +6122,10 @@ pub fn expand_collapse_all(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -4819,6 +6144,7 @@ pub async fn refresh_all_pivot_tables(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     bi_state: State<'_, crate::bi::types::BiState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
 ) -> Result<Vec<PivotViewResponse>, String> {
     log_info!("PIVOT", "refresh_all_pivot_tables");
 
@@ -4829,7 +6155,7 @@ pub async fn refresh_all_pivot_tables(
 
     let mut responses = Vec::new();
     for pivot_id in pivot_ids {
-        match refresh_pivot_cache(window.clone(), state.clone(), file_state.clone(), pivot_state.clone(), pane_control_state.clone(), ribbon_filter_state.clone(), user_files_state.clone(), bi_state.clone(), pivot_id).await {
+        match refresh_pivot_cache(window.clone(), state.clone(), file_state.clone(), pivot_state.clone(), pane_control_state.clone(), ribbon_filter_state.clone(), user_files_state.clone(), bi_state.clone(), slicer_state.clone(), pivot_id).await {
             Ok(response) => responses.push(response),
             Err(e) => log_debug!("PIVOT", "Failed to refresh pivot {}: {}", pivot_id, e),
         }
@@ -4992,9 +6318,10 @@ pub fn group_pivot_field(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -5068,9 +6395,10 @@ pub fn create_manual_group(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -5124,9 +6452,10 @@ pub fn ungroup_pivot_field(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -5319,15 +6648,50 @@ pub async fn drill_through_to_sheet(
         request.group_path.len()
     );
 
+    drill_through_to_sheet_core(&state, &file_state, &pivot_state, &bi_state, request).await
+}
+
+/// [`drill_through_to_sheet`] over borrowed state.
+///
+/// LOCK ORDER: no lock is waited for while a pivot lock is held (a
+/// grid-backed pivot's rows are read once the pivot guards are dropped), the
+/// pivot guards themselves are taken `pivot_tables` then `bi_metadata` (the
+/// order every filter command takes them in; this took them the other way
+/// round), and the new sheet is added through `sheets::append_user_sheet`,
+/// which takes the crate's canonical order `grid`, `grids`, `sheet_names`.
+///
+/// THE SHEET GOES IN THROUGH THE ONE ADD PATH (fix round 4, B4). This pushed
+/// only `sheet_names` and `grids`: the sheet got no id, kind, visibility,
+/// freeze, zoom or row/column-size entries, the width of a column on the sheet
+/// it left was lost (the switch never stashed it), it landed behind a floating
+/// range's object sheet, and a protected workbook structure did not stop it.
+pub(crate) async fn drill_through_to_sheet_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    pivot_state: &PivotState,
+    bi_state: &crate::bi::types::BiState,
+    request: DrillThroughRequest,
+) -> Result<DrillThroughResponse, String> {
+    // Refused before the query runs: the sheet could never be added.
+    crate::protection::check_workbook_structure(state, DRILL_THROUGH_ACTION)?;
     let max = request.max_records.unwrap_or(10000);
 
     // Gather the detail rows. A BI-backed pivot builds an engine DetailRequest
     // here (while the pivot locks are held) and runs it after they drop; a
-    // grid-backed pivot reads its source rows from the grid now.
+    // grid-backed pivot notes which source rows to copy, and copies them after
+    // the locks drop too.
     let mut headers: Vec<String> = Vec::new();
     let mut row_data: Vec<Vec<engine::CellValue>> = Vec::new();
     // What the user has to be told about the sheet they are about to get.
     let mut notices: Vec<crate::pivot::types::PivotNotice> = Vec::new();
+    /// A grid-backed pivot's drill: which source rows, and where they live.
+    struct GridDrill {
+        source_rows: Vec<u32>,
+        source_sheet: Option<String>,
+        source_start: (u32, u32),
+        has_headers: bool,
+    }
+    let mut grid_drill: Option<GridDrill> = None;
     let bi_drill: Option<(
         crate::bi::types::ConnectionId,
         bi_engine::DetailRequest,
@@ -5336,14 +6700,18 @@ pub async fn drill_through_to_sheet(
         bool,
         String,
     )> = {
-        let bi_meta = pivot_state
-            .bi_metadata
-            .read()
-            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+        // `pivot_tables` FIRST, then `bi_metadata`: the order the filter
+        // commands take them in (`apply_pivot_filter_core`). Both are
+        // `Persisted` (a Mutex, so a read is exclusive), and this async
+        // command took them the other way round.
         let pivot_tables = pivot_state
             .pivot_tables
             .read()
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+        let bi_meta = pivot_state
+            .bi_metadata
+            .read()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         let (definition, cache) = pivot_tables
             .get(&request.pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -5391,42 +6759,61 @@ pub async fn drill_through_to_sheet(
                 meta.measures.first().map(|m| m.name.clone()).unwrap_or_default(),
             ))
         } else {
-            // Grid-backed pivot — read the matching source rows from the grid.
+            // Grid-backed pivot — note the matching source rows; they are
+            // read from the grid below, with the pivot locks RELEASED.
             let result = drill_down(definition, cache, &request.group_path, max);
             headers = cache.fields.iter().map(|f| f.name.clone()).collect();
-            let col_count = headers.len();
-
-            let grids = state
-                .grids
-                .read()
-                .map_err(|e| format!("grids lock poisoned: {}", e))?;
-            let grid = grids
-                .get(0)
-                .ok_or_else(|| "Source sheet not found".to_string())?;
-
-            let (start_row, start_col) = definition.source_start;
-            let data_start = if definition.source_has_headers {
-                start_row + 1
-            } else {
-                start_row
-            };
-
-            for &src_row in &result.source_rows {
-                let grid_row = data_start + src_row;
-                let mut row = Vec::with_capacity(col_count);
-                for c in 0..col_count {
-                    let col = start_col + c as u32;
-                    let cv = grid
-                        .get_cell(grid_row, col)
-                        .map(|cell| cell.value.clone())
-                        .unwrap_or(engine::CellValue::Empty);
-                    row.push(cv);
-                }
-                row_data.push(row);
-            }
+            grid_drill = Some(GridDrill {
+                source_rows: result.source_rows,
+                source_sheet: definition.source_sheet.clone(),
+                source_start: definition.source_start,
+                has_headers: definition.source_has_headers,
+            });
             None
         }
     };
+
+    // Grid-backed pivot: copy its source rows. `grids` is taken only now: the
+    // calculation pass holds `grid`/`grids` and then takes `pivot_tables`, so
+    // waiting for `grids` under the pivot guard closed a cycle. And from the
+    // pivot's OWN source sheet: this read sheet 0 whatever the source was, so
+    // drilling through a pivot built on Sheet2 listed Sheet1's rows.
+    if let Some(drill) = grid_drill {
+        let col_count = headers.len();
+        let source_sheet_idx = drill
+            .source_sheet
+            .as_deref()
+            .and_then(|name| index_of_sheet(&sheet_names_snapshot(state), name))
+            .unwrap_or(0);
+        let grids = state
+            .grids
+            .read()
+            .map_err(|e| format!("grids lock poisoned: {}", e))?;
+        let grid = grids
+            .get(source_sheet_idx)
+            .ok_or_else(|| "Source sheet not found".to_string())?;
+
+        let (start_row, start_col) = drill.source_start;
+        let data_start = if drill.has_headers {
+            start_row + 1
+        } else {
+            start_row
+        };
+
+        for &src_row in &drill.source_rows {
+            let grid_row = data_start + src_row;
+            let mut row = Vec::with_capacity(col_count);
+            for c in 0..col_count {
+                let col = start_col + c as u32;
+                let cv = grid
+                    .get_cell(grid_row, col)
+                    .map(|cell| cell.value.clone())
+                    .unwrap_or(engine::CellValue::Empty);
+                row.push(cv);
+            }
+            row_data.push(row);
+        }
+    }
 
     // BI-backed pivot: run the secured drillthrough now the pivot locks are free.
     if let Some((connection_id, mut detail, mut fallback, has_query_override, first_measure)) =
@@ -5489,7 +6876,7 @@ pub async fn drill_through_to_sheet(
             }
             // Apply this connection's RLS role (or clear a sibling's) so drilled
             // detail rows are restricted to what the active role permits.
-            crate::bi::commands::apply_connection_role(&mut engine, &bi_state, connection_id);
+            crate::bi::commands::apply_connection_role(&mut engine, bi_state, connection_id);
             match engine.query_rows(detail).await {
                 Ok(b) => b,
                 // A SECURITY refusal is never retried away. The bare request
@@ -5545,48 +6932,7 @@ pub async fn drill_through_to_sheet(
     let data_row_count = row_data.len();
     let col_count = headers.len();
 
-    // Create new sheet
-    let sheet_names = state.sheet_names.lock_pending().unwrap();
-    let grids = state.grids.lock_pending().unwrap();
-    let active_sheet = state.active_sheet.lock_pending().unwrap();
-    let current_grid = state.grid.lock_pending().unwrap();
-    // Drill-through APPENDS A WHOLE NEW SHEET of detail rows. The non-verb name is
-    // exactly why a mutating-verb heuristic missed it; the sheet and its per-sheet
-    // vectors are persisted like any other.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut grids = grids.authorize(&effect);
-    let mut current_grid = current_grid.authorize(&effect);
-    let mut sheet_names = sheet_names.authorize(&effect);
-    // The drill-through sheet is created AND switched to; the switch rides the
-    // creation's effect rather than a Navigation one, because the sheet that is
-    // now active did not exist before this command ran.
-    let mut active_sheet = active_sheet.authorize(&effect);
-    let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
-
-    // Generate a unique sheet name
-    let base_name = "DrillThrough";
-    let sheet_name = {
-        let mut counter = 1;
-        loop {
-            let candidate = if counter == 1 {
-                base_name.to_string()
-            } else {
-                format!("{}{}", base_name, counter)
-            };
-            if !sheet_names.contains(&candidate) {
-                break candidate;
-            }
-            counter += 1;
-        }
-    };
-
-    // Save current active grid
-    let old_index = *active_sheet;
-    if old_index < grids.len() {
-        grids[old_index] = current_grid.clone();
-    }
-
-    // Create and populate the new grid
+    // The detail rows, built into a DETACHED grid: no lock is held here.
     let mut new_grid = engine::grid::Grid::new();
 
     // Write headers
@@ -5601,22 +6947,41 @@ pub async fn drill_through_to_sheet(
         }
     }
 
-    sheet_names.push(sheet_name.clone());
-    grids.push(new_grid.clone());
-    freeze_configs.push(FreezeConfig::default());
-
-    let new_index = sheet_names.len() - 1;
-    *active_sheet = new_index;
-    *current_grid = new_grid;
+    // Drill-through APPENDS A WHOLE NEW SHEET of detail rows (the non-verb name
+    // is exactly why a mutating-verb heuristic once missed it), created AND
+    // switched to: through the one add path, which owns every per-sheet store,
+    // the user/object partition, the stash of the sheet being left and the
+    // workbook-structure gate -- refused before anything is written.
+    let added = crate::sheets::append_user_sheet(
+        state,
+        file_state,
+        crate::sheets::NewUserSheet {
+            name: crate::sheets::NewSheetName::FirstFree("DrillThrough".to_string()),
+            kind: ::persistence::SheetKind::Worksheet,
+            cells: Some(new_grid),
+            activate: true,
+        },
+        DRILL_THROUGH_ACTION,
+    )?;
+    // Excel parity (BUG-0005), as `add_sheet`: a new sheet ends the undo
+    // history. And the new sheet is ACTIVE, so the single-sheet dependency
+    // maps are rebuilt for it (BUG-0016) -- this switched sheets and left them
+    // describing the sheet it came from. Both with every lock released.
+    crate::sheets::invalidate_undo_history_for_sheet_structure(state, DRILL_THROUGH_ACTION);
+    crate::undo_commands::rebuild_all_dependencies(state);
 
     Ok(DrillThroughResponse {
-        sheet_name,
-        sheet_index: new_index,
+        sheet_name: added.name,
+        sheet_index: added.index,
         row_count: data_row_count,
         col_count,
         notices,
     })
 }
+
+/// The drill-through's name for itself in a refusal ("Cannot add a
+/// drill-through sheet while the workbook structure is protected").
+const DRILL_THROUGH_ACTION: &str = "add a drill-through sheet";
 
 /// Set (or clear, with `None`) a BI pivot's drill-through behavior. Persists in
 /// the pivot's BI metadata; saved with the workbook and carried into `.calp`.
@@ -6447,25 +7812,102 @@ pub async fn update_bi_pivot_fields(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     bi_state: State<'_, BiState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
     request: UpdateBiPivotFieldsRequest,
 ) -> Result<PivotViewResponse, String> {
+    let ctx = PivotCmdCtx {
+        state: &state,
+        file_state: &file_state,
+        pivot_state: &pivot_state,
+        pane_control_state: &pane_control_state,
+        ribbon_filter_state: &ribbon_filter_state,
+        user_files_state: &user_files_state,
+        bi_state: &bi_state,
+        slicer_state: &slicer_state,
+        record_undo: true,
+    };
+    update_bi_pivot_fields_core(&ctx, request).await
+}
+
+/// [`update_bi_pivot_fields`] over borrowed state.
+///
+/// Three rules on top of the field assignment itself:
+/// - `slicer_fields: None` KEEPS the slicer fields the pivot carries (P1: a
+///   field-list edit used to drop every slicer and ribbon filter on the pivot);
+///   `Some([])` clears them. Kept fields are read from the OLD definition and
+///   cache before the query is built, because a slicer filter stores only a
+///   cache index and the new cache renumbers every column.
+/// - Every zone honours the request's hidden items and otherwise carries the
+///   old definition's by Table.Column NAME; a slicer field that is also a zone
+///   field is merged into it and its hidden items move with it.
+/// - The active MODEL slicers on the pivot's own sheet (owner decision 2, the
+///   page rule) are folded in: their column joins the query and their
+///   selection is applied to the new cache in this same command and undo
+///   step, so a pivot created or rebuilt on the page is filtered at once.
+///
+/// Records ONE "Pivot table field change" step (joining an open transaction)
+/// unless the context records nothing (`record_undo: false`).
+pub(crate) async fn update_bi_pivot_fields_core(
+    ctx: &PivotCmdCtx<'_>,
+    request: UpdateBiPivotFieldsRequest,
+) -> Result<PivotViewResponse, String> {
+    let (mut response, undo) = update_bi_pivot_fields_unrecorded(ctx, request, Vec::new()).await?;
+    if ctx.record_undo {
+        if let Some(undo) = undo {
+            response.overwrite_token = undo.record(ctx.state, "Pivot table field change");
+        }
+    }
+    Ok(response)
+}
+
+/// [`update_bi_pivot_fields_core`] that hands its undo step BACK instead of
+/// recording it (every successful path hands one back today; `None` is room
+/// for a path that changes nothing). For a caller that records the gesture
+/// itself, from state it captured before its own edit.
+///
+/// `masks` (see [`PostQueryMask`]; empty for every field-list edit) are
+/// folded into the fresh records exactly as the page fold folds a model
+/// slicer: each is carried in the query (added as a slicer field when nothing
+/// else carries its column) and masks "every value it did not select" of the
+/// NEW cache, AFTER the page fold, so the gesture's own selection wins.
+pub(crate) async fn update_bi_pivot_fields_unrecorded(
+    ctx: &PivotCmdCtx<'_>,
+    request: UpdateBiPivotFieldsRequest,
+    masks: Vec<PostQueryMask>,
+) -> Result<(PivotViewResponse, Option<BiFieldChangeUndo>), String> {
+    let state = ctx.state;
+    let file_state = ctx.file_state;
+    let pivot_state = ctx.pivot_state;
+    let pane_control_state = ctx.pane_control_state;
+    let ribbon_filter_state = ctx.ribbon_filter_state;
+    let user_files_state = ctx.user_files_state;
+    let bi_state = ctx.bi_state;
+
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
     // token, so a refused command leaves the document clean.
-    let effect = pivot_mutation_token(&state, &pivot_state, &file_state, request.pivot_id)?;
+    let effect = pivot_mutation_token(state, pivot_state, file_state, request.pivot_id)?;
 
     let t_total = Instant::now();
     log_info!("PIVOT", "update_bi_pivot_fields pivot_id={}", request.pivot_id);
 
     let pivot_id = request.pivot_id;
 
-    // Verify pivot exists and is BI-backed
-    {
+    // Resolve names against the LIVE model: a table or column added in the
+    // Model Editor since the pivot was created is part of the query below, so
+    // the kept slicer fields, the carried hidden items and the page fold must
+    // be able to name it too.
+    refresh_bi_model_snapshot(ctx, pivot_id).await?;
+
+    // Verify pivot exists and is BI-backed; keep the metadata this command
+    // resolves names against (a snapshot: the lock is not held below).
+    let meta_snapshot: BiPivotMetadata = {
         let bi_meta = pivot_state.bi_metadata.read()
             .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
-        if !bi_meta.contains_key(&pivot_id) {
-            return Err(format!("Pivot {} is not a BI-backed pivot", pivot_id));
-        }
-    }
+        bi_meta
+            .get(&pivot_id)
+            .cloned()
+            .ok_or_else(|| format!("Pivot {} is not a BI-backed pivot", pivot_id))?
+    };
 
     // ---- Calculation-group placement (Power BI-style dimension) ----
     // A calculation group arrives as a pseudo field ref (table = CALC_GROUP_TABLE)
@@ -6489,7 +7931,7 @@ pub async fn update_bi_pivot_fields(
                     group: f.column,
                     axis,
                     position: pos,
-                    hidden_items: f.hidden_items,
+                    hidden_items: f.hidden_items.unwrap_or_default(),
                 });
             }
             Ok(())
@@ -6498,10 +7940,13 @@ pub async fn update_bi_pivot_fields(
         take(&mut request.column_fields, CalcGroupAxis::Columns)?;
         take(&mut request.filter_fields, CalcGroupAxis::Filters)?;
     }
-    if request.slicer_fields.iter().any(|f| f.is_calc_group()) {
+    if request
+        .slicer_fields
+        .as_ref()
+        .is_some_and(|list| list.iter().any(|f| f.is_calc_group()))
+    {
         return Err("A calculation group can't be used as a slicer field yet.".to_string());
     }
-    let request = request; // placement stripped; immutable from here
 
     // Save previous state for revert-on-cancel AND for undo.
     //
@@ -6523,6 +7968,182 @@ pub async fn update_bi_pivot_fields(
         pair
     };
 
+    // ---- Slicer fields: explicit, or KEPT (P1) ----
+    // A pivot being emptied keeps nothing: a query of the slicer columns alone
+    // is not a pivot anyone asked for.
+    let otherwise_empty = request.value_fields.is_empty()
+        && request.row_fields.is_empty()
+        && request.column_fields.is_empty()
+        && request.filter_fields.is_empty()
+        && request.row_hierarchies.is_empty()
+        && request.column_hierarchies.is_empty()
+        && placement.is_none();
+    // The pivot's sheet, resolved once with no pivot lock held (the old
+    // definition is a clone).
+    let dest_sheet = resolve_dest_sheet_index(state, &old_definition);
+
+    // (table, column) of every hierarchy level the request places, for the
+    // dedupe below (levels are GROUP BY columns too).
+    let hierarchy_level_keys: std::collections::HashSet<(String, String)> = request
+        .row_hierarchies
+        .iter()
+        .chain(request.column_hierarchies.iter())
+        .filter_map(|href| {
+            meta_snapshot
+                .hierarchies
+                .iter()
+                .find(|h| h.name == href.hierarchy && h.table == href.table)
+        })
+        .flat_map(|h| h.levels.iter().map(move |l| (h.table.clone(), l.column.clone())))
+        .collect();
+    let zone_carries = |request: &UpdateBiPivotFieldsRequest, table: &str, column: &str| -> bool {
+        request
+            .row_fields
+            .iter()
+            .chain(request.column_fields.iter())
+            .chain(request.filter_fields.iter())
+            .any(|f| !f.is_lookup && f.table == table && f.column == column)
+            || hierarchy_level_keys.contains(&(table.to_string(), column.to_string()))
+    };
+
+    let mut slicer_fields: Vec<BiFieldRef> = match &request.slicer_fields {
+        Some(list) => list.clone(),
+        None if otherwise_empty => Vec::new(),
+        None => {
+            let mut kept = slicer_fields_from_definition(&old_definition, &old_cache, &meta_snapshot);
+            // A slicer's or ribbon filter's mask can live on a ZONE field (it
+            // was applied while the column was a row/column/filter field, or
+            // the dedupe below moved it there). When that field now LEAVES the
+            // layout, the filter must stay -- Excel and Power BI keep a
+            // slicer's filter when its field is taken off the pivot -- so it
+            // goes back to being a slicer field, but ONLY while a live
+            // external filter still holds that column. A plain header-dropdown
+            // filter on a field that leaves the layout is dropped, as in Excel.
+            let external = external_filter_columns(ctx, pivot_id, &meta_snapshot, dest_sheet)?;
+            let table_names: Vec<&str> = meta_snapshot.model_tables.iter().map(|t| t.name.as_str()).collect();
+            for f in old_definition
+                .row_fields
+                .iter()
+                .chain(old_definition.column_fields.iter())
+                .chain(old_definition.filter_fields.iter().map(|f| &f.field))
+            {
+                if f.hidden_items.is_empty() {
+                    continue;
+                }
+                let (table, column) = split_bi_field_key(&f.name, table_names.iter().copied());
+                let key = (table, column);
+                if !external.contains(&key)
+                    || zone_carries(&request, &key.0, &key.1)
+                    || kept.iter().any(|k| k.table == key.0 && k.column == key.1)
+                {
+                    continue;
+                }
+                kept.push(BiFieldRef {
+                    table: key.0,
+                    column: key.1,
+                    is_lookup: false,
+                    hidden_items: Some(f.hidden_items.clone()),
+                });
+            }
+            kept
+        }
+    };
+
+    // ---- The page's model slicers (owner decision 2) ----
+    // Resolved from the slicer store here, never from the frontend: a pivot
+    // added to a filtered canvas, or rebuilt by the field list, must come out
+    // filtered in THIS command, with no second write from a view listener.
+    let page_slicers: Vec<PageModelSlicer> = if otherwise_empty {
+        Vec::new()
+    } else {
+        let slicers = ctx.slicer_state.slicers.read().map_err(|e| e.to_string())?;
+        page_model_slicers(slicers.values(), &meta_snapshot, dest_sheet)
+    };
+
+    // The gesture's own post-query masks (see `PostQueryMask`): like the
+    // page's slicers, none for a pivot being emptied.
+    let masks: Vec<PostQueryMask> = if otherwise_empty { Vec::new() } else { masks };
+
+    for (table, column) in page_slicers
+        .iter()
+        .map(|ps| (&ps.table, &ps.column))
+        .chain(masks.iter().map(|m| (&m.table, &m.column)))
+    {
+        let carried = zone_carries(&request, table, column)
+            || slicer_fields.iter().any(|f| &f.table == table && &f.column == column);
+        if !carried {
+            slicer_fields.push(BiFieldRef {
+                table: table.clone(),
+                column: column.clone(),
+                is_lookup: false,
+                hidden_items: None,
+            });
+        }
+    }
+
+    // ---- Hidden items: honoured, else carried by NAME; dedupe ----
+    let mut carried_hidden = hidden_items_by_model_key(&old_definition, &old_cache, &meta_snapshot);
+    {
+        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        let mut kept: Vec<BiFieldRef> = Vec::new();
+        for sf in slicer_fields.drain(..) {
+            let key = (sf.table.clone(), sf.column.clone());
+            if !seen.insert(key.clone()) {
+                continue; // a duplicate slicer field
+            }
+            let mut merged = false;
+            for zf in request
+                .row_fields
+                .iter_mut()
+                .chain(request.column_fields.iter_mut())
+                .chain(request.filter_fields.iter_mut())
+            {
+                if !zf.is_lookup && zf.table == sf.table && zf.column == sf.column {
+                    // The slicer's column is (now) a zone field: ONE GROUP BY
+                    // column, and the filter moves onto the zone field rather
+                    // than silently disappearing -- unless the caller SENT the
+                    // zone field's hidden items (an explicit set or clear).
+                    if zf.hidden_items.is_none() && !sf.hidden().is_empty() {
+                        zf.hidden_items = sf.hidden_items.clone();
+                    }
+                    merged = true;
+                }
+            }
+            if hierarchy_level_keys.contains(&key) {
+                if !sf.hidden().is_empty() {
+                    carried_hidden.insert(key, sf.hidden().to_vec());
+                }
+                merged = true;
+            }
+            if !merged {
+                kept.push(sf);
+            }
+        }
+        slicer_fields = kept;
+    }
+    for f in request
+        .row_fields
+        .iter_mut()
+        .chain(request.column_fields.iter_mut())
+        .chain(request.filter_fields.iter_mut())
+        .chain(slicer_fields.iter_mut())
+    {
+        // ABSENT = carry what this Table.Column hides now; a sent list
+        // (including `[]`, an explicit clear) is authoritative.
+        if f.hidden_items.is_none() {
+            if let Some(hidden) = carried_hidden.get(&(f.table.clone(), f.column.clone())) {
+                f.hidden_items = Some(hidden.clone());
+            }
+        }
+    }
+    let request = request; // placement stripped, hidden items settled; immutable from here
+    let slicer_fields = slicer_fields;
+    // A page slicer whose column the pivot does not carry yet changes the
+    // query: never the cosmetic fast path.
+    let fold_adds_columns = page_slicers.iter().any(|ps| {
+        resolve_bi_field_index(&old_definition, &old_cache, &meta_snapshot, &ps.table, &ps.column).is_none()
+    });
+
     // Fast path: if only custom_name changed on value fields (no structural
     // changes to dimensions, measures, filters, layout, etc.), skip the
     // expensive BI query and just recalculate the view from the existing cache.
@@ -6540,8 +8161,12 @@ pub async fn update_bi_pivot_fields(
             // a failed earlier query leaves an empty cache behind, and
             // re-applying the same fields must retry the query, not render
             // "Grand Total 0" from the empty cache forever.
+            // A post-query mask exists only to be applied to FRESH records:
+            // the fast path renders the old ones and never reaches the fold.
             let cosmetic_only = placement.is_none()
                 && !request.force_requery
+                && !fold_adds_columns
+                && masks.is_empty()
                 && !stored_cache.records.is_empty()
                 && is_bi_cosmetic_only_change(definition, &request);
             if cosmetic_only {
@@ -6562,8 +8187,9 @@ pub async fn update_bi_pivot_fields(
                 let destination = definition.destination;
                 let auto_fit = definition.layout.auto_fit_column_widths;
                 let framed = definition.canvas_frame.is_some();
-                let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+                let dest_ref = PivotDestSheet::of(definition);
                 drop(pivot_tables);
+                let dest_sheet_idx = dest_ref.resolve(&state);
 
                 let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 response.overwritten_cell_count = saved_cells.len() as u32;
@@ -6591,21 +8217,19 @@ pub async fn update_bi_pivot_fields(
 
                 // A cosmetic change renders the SAME records, so no cache
                 // snapshot is needed (and one would be a large clone per rename).
-                record_pivot_definition_undo(
-                    &state,
+                let undo = BiFieldChangeUndo {
                     pivot_id,
-                    old_definition,
-                    saved_cells,
+                    definition: old_definition,
+                    overwritten_cells: saved_cells,
                     dest_sheet_idx,
                     prev_col_widths,
-                    None,
-                    "Pivot table field change",
-                );
+                    cache: None,
+                };
 
                 let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
                 log_perf!("PIVOT", "update_bi_pivot_fields (cosmetic) pivot_id={} | TOTAL={:.1}ms", pivot_id, total_ms);
 
-                return Ok(response);
+                return Ok((response, Some(undo)));
             }
         }
         drop(pivot_tables);
@@ -6622,7 +8246,7 @@ pub async fn update_bi_pivot_fields(
         || !request.row_hierarchies.is_empty() || !request.column_hierarchies.is_empty()
         || group_on_axis;
     let has_filters = !request.filter_fields.is_empty();
-    let has_slicer_fields = !request.slicer_fields.is_empty();
+    let has_slicer_fields = !slicer_fields.is_empty();
 
     // If no fields at all, clear to empty pivot
     if !has_values && !has_dimensions && !has_filters && !has_slicer_fields && placement.is_none() {
@@ -6648,8 +8272,9 @@ pub async fn update_bi_pivot_fields(
         let mut response = view_to_response(&view, definition, &mut empty_cache.clone());
 
         let destination = definition.destination;
-        let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+        let dest_ref = PivotDestSheet::of(definition);
         drop(pivot_tables);
+        let dest_sheet_idx = dest_ref.resolve(&state);
 
         // Replace cache with empty
         let mut pt = pivot_state.pivot_tables.write(&effect)
@@ -6663,17 +8288,15 @@ pub async fn update_bi_pivot_fields(
         finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
         // The cache was REPLACED with an empty one, so the old records travel
         // with the old definition or the undo renders an empty pivot.
-        record_pivot_definition_undo(
-            &state,
+        let undo = BiFieldChangeUndo {
             pivot_id,
-            old_definition,
-            Vec::new(),
+            definition: old_definition,
+            overwritten_cells: Vec::new(),
             dest_sheet_idx,
-            Vec::new(),
-            Some(old_cache),
-            "Pivot table field change",
-        );
-        return Ok(response);
+            prev_col_widths: Vec::new(),
+            cache: Some(old_cache),
+        };
+        return Ok((response, Some(undo)));
     }
 
     // When there are dimensions/filters but no user-selected measures, inject a
@@ -6727,9 +8350,10 @@ pub async fn update_bi_pivot_fields(
         let view = create_empty_view(pivot_id, definition.version);
         let mut response = view_to_response(&view, definition, &mut empty_cache.clone());
         let destination = definition.destination;
-        let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+        let dest_ref = PivotDestSheet::of(definition);
         *stored_cache = empty_cache;
         drop(pivot_tables);
+        let dest_sheet_idx = dest_ref.resolve(&state);
 
         response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
         // The field assignments were written and the document dirtied, so this
@@ -6741,17 +8365,15 @@ pub async fn update_bi_pivot_fields(
         ));
         finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
         // Same as the branch above: an empty cache replaced the records.
-        record_pivot_definition_undo(
-            &state,
+        let undo = BiFieldChangeUndo {
             pivot_id,
-            old_definition,
-            Vec::new(),
+            definition: old_definition,
+            overwritten_cells: Vec::new(),
             dest_sheet_idx,
-            Vec::new(),
-            Some(old_cache),
-            "Pivot table field change",
-        );
-        return Ok(response);
+            prev_col_widths: Vec::new(),
+            cache: Some(old_cache),
+        };
+        return Ok((response, Some(undo)));
     }
 
     // Get the connection_id from BI metadata
@@ -6771,7 +8393,7 @@ pub async fn update_bi_pivot_fields(
     for f in request.row_fields.iter()
         .chain(request.column_fields.iter())
         .chain(request.filter_fields.iter())
-        .chain(request.slicer_fields.iter())
+        .chain(slicer_fields.iter())
     {
         if !referenced_tables.contains(&f.table) {
             referenced_tables.push(f.table.clone());
@@ -6843,7 +8465,7 @@ pub async fn update_bi_pivot_fields(
     let filter_group_fields: Vec<&BiFieldRef> = request.filter_fields.iter().collect();
     // Slicer fields: included in GROUP BY so their values appear in the cache,
     // but mapped to slicer_filters instead of filter_fields (no visible filter row).
-    let slicer_group_fields: Vec<&BiFieldRef> = request.slicer_fields.iter().collect();
+    let slicer_group_fields: Vec<&BiFieldRef> = slicer_fields.iter().collect();
 
     // Expand hierarchy fields into GROUP BY columns.
     // ALL levels are included in the query — the pivot engine's collapse mechanism
@@ -6880,7 +8502,7 @@ pub async fn update_bi_pivot_fields(
                             table: href.table.clone(),
                             column: level.column.clone(),
                             is_lookup: false,
-                            hidden_items: Vec::new(),
+                            hidden_items: None,
                         });
                     }
                 }
@@ -6901,7 +8523,7 @@ pub async fn update_bi_pivot_fields(
                             table: href.table.clone(),
                             column: level.column.clone(),
                             is_lookup: false,
-                            hidden_items: Vec::new(),
+                            hidden_items: None,
                         });
                     }
                 }
@@ -6954,7 +8576,7 @@ pub async fn update_bi_pivot_fields(
                                     table: f.table.clone(),
                                     column: sort_col.clone(),
                                     is_lookup: false,
-                                    hidden_items: Vec::new(),
+                                    hidden_items: None,
                                 });
                             }
                         }
@@ -7140,25 +8762,53 @@ pub async fn update_bi_pivot_fields(
     // one filter class the engine actually sees from a pivot — so measure
     // CLEAR/RESET semantics honor them. Ordinary (level-1) filtering stays
     // host-side (`hidden_items` masks over the cached result).
-    let scoped_in_filters: Vec<bi_engine::ScopedInFilter> = {
+    //
+    // A PINNED page model slicer joins them here (its pin must be INSIDE the
+    // query, like any pin); an ORDINARY one drops a pin it set itself earlier
+    // (a level change), exactly as apply_pivot_filter's pin_dropped does.
+    let mut engine_filters_for_query: Vec<pivot_engine::EngineFilter> = {
         let pt = pivot_state.pivot_tables.read()
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         pt.get(&pivot_id)
-            .map(|(d, _)| {
-                d.engine_filters
-                    .iter()
-                    .map(|ef| bi_engine::ScopedInFilter {
-                        table: Some(ef.table.clone()),
-                        filter: bi_engine::InFilter::new(
-                            ef.column.clone(),
-                            ef.selected_items.iter().cloned(),
-                        ),
-                        level: ef.level,
-                    })
-                    .collect()
-            })
+            .map(|(d, _)| d.engine_filters.clone())
             .unwrap_or_default()
     };
+    for ps in &page_slicers {
+        let owner = ps.slicer_id.to_string();
+        let same_column = |ef: &pivot_engine::EngineFilter| ef.table == ps.table && ef.column == ps.column;
+        if ps.level >= 2 {
+            let entry = pivot_engine::EngineFilter {
+                field_name: ps.column.clone(),
+                table: ps.table.clone(),
+                column: ps.column.clone(),
+                selected_items: ps.selected.clone(),
+                level: ps.level,
+                slicer_id: Some(owner),
+            };
+            if let Some(existing) = engine_filters_for_query.iter_mut().find(|ef| same_column(ef)) {
+                // Keep the stored name: it is how the clear paths match it.
+                let name = std::mem::take(&mut existing.field_name);
+                *existing = entry;
+                existing.field_name = name;
+            } else {
+                engine_filters_for_query.push(entry);
+            }
+        } else {
+            engine_filters_for_query
+                .retain(|ef| !(same_column(ef) && ef.slicer_id.as_deref() == Some(owner.as_str())));
+        }
+    }
+    let scoped_in_filters: Vec<bi_engine::ScopedInFilter> = engine_filters_for_query
+        .iter()
+        .map(|ef| bi_engine::ScopedInFilter {
+            table: Some(ef.table.clone()),
+            filter: bi_engine::InFilter::new(
+                ef.column.clone(),
+                ef.selected_items.iter().cloned(),
+            ),
+            level: ef.level,
+        })
+        .collect();
 
     let query_request = bi_engine::QueryRequest {
         measures: query_measures.clone(),
@@ -7304,9 +8954,10 @@ pub async fn update_bi_pivot_fields(
                 let view = create_empty_view(pivot_id, definition.version);
                 let mut response = view_to_response(&view, definition, &mut empty_cache.clone());
                 let destination = definition.destination;
-                let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+                let dest_ref = PivotDestSheet::of(definition);
                 *stored_cache = empty_cache;
                 drop(pivot_tables);
+                let dest_sheet_idx = dest_ref.resolve(&state);
 
                 response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 // Ok with an empty view is indistinguishable from a successful
@@ -7329,17 +8980,15 @@ pub async fn update_bi_pivot_fields(
                 // The query failed but the FIELDS were still written, so this is
                 // a real document change and gets a real undo step — with the
                 // cache, which was replaced by an empty one.
-                record_pivot_definition_undo(
-                    &state,
+                let undo = BiFieldChangeUndo {
                     pivot_id,
-                    old_definition,
-                    Vec::new(),
+                    definition: old_definition,
+                    overwritten_cells: Vec::new(),
                     dest_sheet_idx,
-                    Vec::new(),
-                    Some(old_cache),
-                    "Pivot table field change",
-                );
-                return Ok(response);
+                    prev_col_widths: Vec::new(),
+                    cache: Some(old_cache),
+                };
+                return Ok((response, Some(undo)));
             }
             return Err(crate::bi::commands::friendly_bi_query_error("BI query failed", &e));
         }
@@ -7437,6 +9086,18 @@ pub async fn update_bi_pivot_fields(
         field_to_cache_idx.insert((f.table.clone(), f.column.clone()), cache_idx);
         cache_idx += 1;
     }
+    // Stamp every model column the records carry with its "Table.Column"
+    // identity. The Arrow schema names columns BARE, so Customers.name and
+    // Products.name are both "name" in the cache; anything that later has
+    // only the records to go on (the ensure's cache scan, after a Clear
+    // dropped the column's slicer filter) could otherwise not tell them
+    // apart, and re-queried instead -- recording a step that wiped the redo
+    // stack. The key travels with the cache into clones and undo snapshots.
+    for ((table, column), &idx) in &field_to_cache_idx {
+        if let Some(field) = cache.fields.get_mut(idx) {
+            field.model_key = Some(format!("{table}.{column}"));
+        }
+    }
 
     // ---- Engine-evaluated totals ------------------------------------------
     // The cache rows are pre-aggregated leaf groups, so the pivot engine's
@@ -7456,8 +9117,14 @@ pub async fn update_bi_pivot_fields(
             .iter()
             .chain(request.column_fields.iter())
             .chain(request.filter_fields.iter())
-            .chain(request.slicer_fields.iter())
-            .any(|f| !f.hidden_items.is_empty());
+            .chain(slicer_fields.iter())
+            .any(|f| !f.hidden().is_empty())
+            || page_slicers.iter().any(|ps| ps.level < 2)
+            || !masks.is_empty()
+            || hierarchy_row_fields
+                .iter()
+                .chain(hierarchy_col_fields.iter())
+                .any(|f| carried_hidden.contains_key(&(f.table.clone(), f.column.clone())));
         // Page-filter/slicer hidden items survive the definition rebuild
         // below (preserved from the old definition), so consult it too.
         let preserved_filters_active = {
@@ -7466,7 +9133,7 @@ pub async fn update_bi_pivot_fields(
             pivot_tables.get(&pivot_id).is_some_and(|(def, _)| {
                 (!request.filter_fields.is_empty()
                     && def.filter_fields.iter().any(|pf| !pf.field.hidden_items.is_empty()))
-                    || (!request.slicer_fields.is_empty()
+                    || (!slicer_fields.is_empty()
                         && def.slicer_filters.iter().any(|sf| !sf.hidden_items.is_empty()))
             })
         };
@@ -7619,6 +9286,9 @@ pub async fn update_bi_pivot_fields(
                 };
                 pf.sort_by_field_index = resolve_sort_by(f);
                 pf.number_format = dim_format_for(&f.table, &f.column);
+                // A row field's filter (a level-1 slicer on this column lands
+                // here) travels in the request, carried by name when unsent.
+                pf.hidden_items = f.hidden().to_vec();
                 pf
             })
             .collect();
@@ -7639,6 +9309,9 @@ pub async fn update_bi_pivot_fields(
             let mut pf = PivotField::new(idx, name);
             pf.collapsed = true;
             pf.sort_by_field_index = resolve_sort_by(f);
+            if let Some(hidden) = carried_hidden.get(&(f.table.clone(), f.column.clone())) {
+                pf.hidden_items = hidden.clone();
+            }
             row_fields_vec.push(pf);
         }
         definition.row_fields = row_fields_vec;
@@ -7662,6 +9335,7 @@ pub async fn update_bi_pivot_fields(
             };
             pf.sort_by_field_index = resolve_sort_by(f);
             pf.number_format = dim_format_for(&f.table, &f.column);
+            pf.hidden_items = f.hidden().to_vec();
             pf
         })
         .collect();
@@ -7680,6 +9354,9 @@ pub async fn update_bi_pivot_fields(
         let mut pf = PivotField::new(idx, name);
         pf.collapsed = true;
         pf.sort_by_field_index = resolve_sort_by(f);
+        if let Some(hidden) = carried_hidden.get(&(f.table.clone(), f.column.clone())) {
+            pf.hidden_items = hidden.clone();
+        }
         col_fields_vec.push(pf);
     }
     definition.column_fields = col_fields_vec;
@@ -7746,10 +9423,8 @@ pub async fn update_bi_pivot_fields(
         }
     }
 
-    // Filter fields — same as row/column fields, map BiFieldRef to PivotFilter.
-    // If the request carries hidden_items (from DSL editor), apply them.
-    // Otherwise, preserve hidden_items from the old definition (from filter dropdown).
-    let old_filter_fields = definition.filter_fields.clone();
+    // Filter fields — same as row/column fields, map BiFieldRef to PivotFilter,
+    // with the hidden items the request settled on above.
     definition.filter_fields = request
         .filter_fields
         .iter()
@@ -7768,13 +9443,12 @@ pub async fn update_bi_pivot_fields(
                 field,
                 condition: pivot_engine::FilterCondition::ValueList(Vec::new()),
             };
-            if !f.hidden_items.is_empty() {
-                // Request explicitly provides hidden_items (e.g., from DSL editor)
-                filter.field.hidden_items = f.hidden_items.clone();
-            } else if let Some(old) = old_filter_fields.iter().find(|of| of.field.source_index == idx) {
-                // Preserve from previous definition (filter dropdown applies via regular updateFields)
-                filter.field.hidden_items = old.field.hidden_items.clone();
-            }
+            // The request's hidden items -- sent (e.g. by the DSL editor) or
+            // carried over from the old definition by Table.Column NAME above.
+            // (The by-INDEX carry-over this replaced matched the old cache's
+            // index against the new one, so a reordered field list could hand
+            // one field's filter to another.)
+            filter.field.hidden_items = f.hidden().to_vec();
             filter
         })
         .collect();
@@ -7793,42 +9467,82 @@ pub async fn update_bi_pivot_fields(
         );
     }
 
-    // Slicer fields — map to slicer_filters (no visible filter row).
-    // When slicer_fields are provided, create new slicer_filters entries.
-    // When empty (e.g. Pivot editor updates), clear slicer_filters since the
-    // slicer extension will lazily re-add fields via ensureBiFieldInPivotCache.
-    if !request.slicer_fields.is_empty() {
-        // Build a name->old_hidden_items map so we can preserve filter state
-        // across cache rebuilds (source_index may shift).
-        let old_slicer_hidden: std::collections::HashMap<String, Vec<String>> = {
-            let old_cache_fields = &stored_cache.fields; // old cache before replacement
-            definition.slicer_filters.iter().filter_map(|sf| {
-                old_cache_fields.get(sf.source_index)
-                    .map(|fc| (fc.name.clone(), sf.hidden_items.clone()))
-            }).collect()
-        };
-        definition.slicer_filters = request
-            .slicer_fields
-            .iter()
-            .map(|f| {
-                let idx = *field_to_cache_idx
-                    .get(&(f.table.clone(), f.column.clone()))
-                    .unwrap_or(&0);
-                // Preserve hidden_items from the old slicer filter (matched by field name)
-                let hidden_items = old_slicer_hidden.get(&f.column)
-                    .or_else(|| old_slicer_hidden.get(&format!("{}.{}", f.table, f.column)))
-                    .cloned()
-                    .unwrap_or_default();
-                pivot_engine::SlicerFilter {
+    // Slicer fields — map to slicer_filters (no visible filter row). The list
+    // is settled above (explicit, or KEPT from the old definition, plus the
+    // page's model slicers, deduped against the zones) and its hidden items
+    // are already carried by name, so this is a straight mapping onto the NEW
+    // cache's indices. An empty list clears them.
+    definition.slicer_filters = slicer_fields
+        .iter()
+        .filter_map(|f| {
+            field_to_cache_idx
+                .get(&(f.table.clone(), f.column.clone()))
+                .map(|&idx| pivot_engine::SlicerFilter {
                     source_index: idx,
-                    hidden_items,
-                }
+                    hidden_items: f.hidden().to_vec(),
+                    // Identified by its model column from here on, never by
+                    // the bare cache name another table may share.
+                    model_key: Some(format!("{}.{}", f.table, f.column)),
+                })
+        })
+        .collect();
+    definition.engine_filters = engine_filters_for_query;
+
+    // THE PAGE FOLD: every active model slicer on this pivot's sheet applies
+    // its selection to the NEW cache now -- a pinned one travelled inside the
+    // query (above), so it only needs no host mask; an ordinary one masks
+    // "every value it did not select", the same rule apply_pivot_filter uses.
+    //
+    // Where model column `table.column` sits in the NEW definition/cache.
+    let fold_index = |definition: &PivotDefinition, table: &str, column: &str| -> Option<usize> {
+        let key_name = format!("{table}.{column}");
+        definition
+            .row_fields
+            .iter()
+            .chain(definition.column_fields.iter())
+            .find(|f| f.name == key_name)
+            .map(|f| f.source_index)
+            .or_else(|| {
+                definition
+                    .filter_fields
+                    .iter()
+                    .find(|f| f.field.name == key_name)
+                    .map(|f| f.field.source_index)
             })
-            .collect();
-    } else {
-        // No slicer_fields in request — clear stale slicer_filters whose
-        // source_index would be invalid in the new cache.
-        definition.slicer_filters.clear();
+            .or_else(|| field_to_cache_idx.get(&(table.to_string(), column.to_string())).copied())
+    };
+    for ps in &page_slicers {
+        let key_name = format!("{}.{}", ps.table, ps.column);
+        let Some(idx) = fold_index(definition, &ps.table, &ps.column) else { continue };
+        if ps.level >= 2 {
+            set_hidden_items_at(definition, idx, Vec::new(), Some(&key_name));
+            // The pin is matched by its cache column name on the clear paths.
+            if let Some(cache_name) = cache.field_name(idx) {
+                if let Some(ef) = definition
+                    .engine_filters
+                    .iter_mut()
+                    .find(|ef| ef.table == ps.table && ef.column == ps.column)
+                {
+                    ef.field_name = cache_name;
+                }
+            }
+        } else {
+            // Same rule as apply_pivot_filter: the selection is spelled the
+            // MODEL's way ("true", "12.50"), the cache its own.
+            let hidden = hidden_for_selection(&mut cache, idx, &ps.selected);
+            set_hidden_items_at(definition, idx, hidden, Some(&key_name));
+        }
+    }
+    // Then the gesture's own selections, same rule, over the same NEW
+    // records -- last, so a selection being applied right now wins.
+    for m in &masks {
+        let key_name = format!("{}.{}", m.table, m.column);
+        let Some(idx) = fold_index(definition, &m.table, &m.column) else {
+            crate::log_warn!("PIVOT", "post-query mask on {} dropped: the new records do not carry it", key_name);
+            continue;
+        };
+        let hidden = hidden_for_selection(&mut cache, idx, &m.selected);
+        set_hidden_items_at(definition, idx, hidden, Some(&key_name));
     }
 
     // Apply layout
@@ -7929,8 +9643,9 @@ pub async fn update_bi_pivot_fields(
     let destination = definition.destination;
     let auto_fit = definition.layout.auto_fit_column_widths;
     let framed = definition.canvas_frame.is_some();
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     // Update grid (clear old region + write new)
     let t_grid = Instant::now();
@@ -7996,19 +9711,18 @@ pub async fn update_bi_pivot_fields(
         }
     }
 
-    // ONE undo step for the whole field change, recorded after the work
-    // succeeded. The cache travels with it: this path re-queried the model, so
-    // the old definition means nothing against the new records (BUG-0021).
-    record_pivot_definition_undo(
-        &state,
+    // ONE undo step for the whole field change, built after the work
+    // succeeded (the caller records it). The cache travels with it: this path
+    // re-queried the model, so the old definition means nothing against the
+    // new records (BUG-0021).
+    let undo = BiFieldChangeUndo {
         pivot_id,
-        old_definition,
-        saved_cells,
+        definition: old_definition,
+        overwritten_cells: saved_cells,
         dest_sheet_idx,
         prev_col_widths,
-        Some(old_cache),
-        "Pivot table field change",
-    );
+        cache: Some(old_cache),
+    };
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
     let payload_bytes = serde_json::to_string(&response).map(|s| s.len()).unwrap_or(0);
@@ -8028,7 +9742,7 @@ pub async fn update_bi_pivot_fields(
         payload_kb
     );
 
-    Ok(response)
+    Ok((response, Some(undo)))
 }
 
 /// Persists the set of LOOKUP columns for a BI pivot without re-querying.
@@ -8084,11 +9798,45 @@ pub fn show_report_filter_pages(
         pivot_id,
         filter_field_index
     );
+    show_report_filter_pages_core(&state, &file_state, &pivot_state, pivot_id, filter_field_index)
+}
 
-    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
-    let (definition, cache) = pivot_tables
-        .get(&pivot_id)
-        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+/// The refusal wording for Show Report Filter Pages ("Cannot show report
+/// filter pages while the workbook structure is protected").
+const REPORT_FILTER_PAGES_ACTION: &str = "show report filter pages";
+
+/// [`show_report_filter_pages`] over borrowed state.
+///
+/// THE PAGES GO IN THROUGH THE ONE ADD PATH (fix round 4, B4):
+/// `sheets::append_user_sheet`, without switching to them. This pushed only
+/// `sheet_names` and `grids`, so every page lacked its id, kind, visibility,
+/// freeze, zoom and row/column-size entries; with a floating range in the
+/// workbook the pages landed BEHIND its object sheet; and a protected workbook
+/// structure did not stop it. Every refusal -- the pivot, the field, a value
+/// whose page cannot be named, the workbook structure -- comes before anything
+/// is written, and so does the plan of which pages are new, so a call with
+/// nothing to add leaves the document clean. Every planned name is one the add
+/// path accepts (fix round 5), so every planned page is added.
+pub(crate) fn show_report_filter_pages_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    pivot_state: &PivotState,
+    pivot_id: PivotId,
+    filter_field_index: usize,
+) -> Result<Vec<String>, String> {
+    // A COPY, with the guard released before any sheet is added: the
+    // calculation pass (`calculate_now`, off the main thread) holds grid, grids
+    // and sheet_names while it takes `pivot_tables`, so holding the pivot guard
+    // across the add was an ABBA hang. Every page renders from its own clone of
+    // the cache.
+    let (definition, cache) = {
+        let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+        let (definition, cache) = pivot_tables
+            .get(&pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+        (definition.clone(), cache.clone())
+    };
+    let definition = &definition;
 
     if filter_field_index >= definition.filter_fields.len() {
         return Err(format!(
@@ -8107,25 +9855,52 @@ pub fn show_report_filter_pages(
         return Ok(Vec::new());
     }
 
-    // Past every refusal (pivot exists, field is a filter, values non-empty). This
-    // generates one NEW SHEET per filter value -- a large document change behind a
-    // name that reads like a view action.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut created_sheets = Vec::new();
-
+    // THE PLAN: one page per value whose sheet name is free -- IGNORING CASE,
+    // the comparison the rest of the crate makes when it looks a sheet up by
+    // name -- against the workbook AND the pages already planned. A value whose
+    // page already exists is skipped, as it always was.
+    let mut taken = sheet_names_snapshot(state);
+    let mut planned: Vec<(String, String)> = Vec::new();
     for (_vid, value_label) in &unique_values {
         if value_label.is_empty() {
             continue;
         }
+        // The name the add path will be asked for must be one it ACCEPTS. A
+        // name it refused was refused AFTER this command's effect and the
+        // page's styles, and the value got no page with nothing but a log
+        // line to say so (fix round 5: `' 'x` cleaned to `'x`). The cleaning
+        // now always yields a legal name; should it ever not, the whole
+        // command is refused HERE, before anything is written, and says which
+        // value it could not name.
+        let sheet_name = crate::sheet_names::validate_sheet_name(&sanitize_sheet_name(value_label))
+            .map_err(|e| format!("Cannot name a report filter page after '{}': {}", value_label, e))?;
+        if crate::sheet_names::ensure_sheet_name_is_free(&sheet_name, &taken, None).is_err() {
+            continue;
+        }
+        taken.push(sheet_name.clone());
+        planned.push((sheet_name, value_label.clone()));
+    }
+    if planned.is_empty() {
+        return Ok(Vec::new());
+    }
 
-        // Clone definition and apply the filter for this value
+    // The workbook-structure gate, BEFORE the first write: registering the
+    // pages' styles below already changes the document. (The add path checks
+    // again, authoritatively, for each page.)
+    crate::protection::check_workbook_structure(state, REPORT_FILTER_PAGES_ACTION)?;
+    // Past every refusal. This generates one NEW SHEET per filter value -- a
+    // large document change behind a name that reads like a view action. This
+    // effect covers the style registry; each page's own add mints its own.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let all_labels: Vec<String> = unique_values.iter().map(|(_, l)| l.clone()).collect();
+    let mut created_sheets = Vec::new();
+
+    for (sheet_name, value_label) in planned {
+        // Clone definition and apply the filter for this value: show only this
+        // value (hide all others).
         let mut filtered_def = definition.clone();
-
-        // Set the filter to show only this value (hide all others)
-        let all_labels: Vec<String> = unique_values.iter()
-            .map(|(_, l)| l.clone())
-            .collect();
-        let hidden: Vec<String> = all_labels.iter()
+        let hidden: Vec<String> = all_labels
+            .iter()
             .filter(|l| l.as_str() != value_label.as_str())
             .cloned()
             .collect();
@@ -8135,31 +9910,13 @@ pub fn show_report_filter_pages(
         let mut cache_clone = cache.clone();
         let view = safe_calculate_pivot(&filtered_def, &mut cache_clone);
 
-        // Create a new sheet with this value's name
-        let sheet_name = sanitize_sheet_name(value_label);
-
-        // Use AppState to create the sheet and write the pivot view.
-        // CANONICAL LOCK ORDER: `grids` FIRST, then everything else.
-        let mut grids = state.grids.write(&effect).unwrap();
-        let mut sheet_names = state.sheet_names.write(&effect).unwrap();
-
-        // Skip if sheet already exists -- IGNORING CASE, the comparison the
-        // rest of the crate makes when it looks a sheet up by name.
-        if crate::sheet_names::ensure_sheet_name_is_free(&sheet_name, &sheet_names, None).is_err() {
-            continue;
-        }
-
-        let new_grid = engine::Grid::new();
-        sheet_names.push(sheet_name.clone());
-        grids.push(new_grid);
-
-        let sheet_idx = grids.len() - 1;
-
-        // Write the pivot view to the new sheet as static cells
-        let mut styles = state.style_registry.write(&effect).unwrap();
-        if let Some(grid) = grids.get_mut(sheet_idx) {
+        // The page's cells, written into a DETACHED grid under the style
+        // registry alone.
+        let mut page = engine::Grid::new();
+        {
+            let mut styles = state.style_registry.write(&effect).unwrap();
             let _ = crate::pivot::operations::write_pivot_to_grid(
-                grid,
+                &mut page,
                 None,
                 &view,
                 (0, 0),
@@ -8167,11 +9924,30 @@ pub fn show_report_filter_pages(
             );
         }
 
-        drop(styles);
-        drop(grids);
-        drop(sheet_names);
+        match crate::sheets::append_user_sheet(
+            state,
+            file_state,
+            crate::sheets::NewUserSheet {
+                name: crate::sheets::NewSheetName::Exact(sheet_name.clone()),
+                kind: ::persistence::SheetKind::Worksheet,
+                cells: Some(page),
+                activate: false,
+            },
+            REPORT_FILTER_PAGES_ACTION,
+        ) {
+            Ok(added) => created_sheets.push(added.name),
+            // The plan validated every name, so only a RACE lands here -- a
+            // name another command took, or a structure it protected, between
+            // the plan and this add: skipped, as a taken name always was.
+            Err(e) => log_info!("PIVOT", "show_report_filter_pages skipped '{}': {}", sheet_name, e),
+        }
+    }
 
-        created_sheets.push(sheet_name);
+    // Excel parity (BUG-0005), as `add_sheet`: new sheets end the undo
+    // history. Nothing was switched to, so the dependency maps -- which describe
+    // the active sheet -- still describe the sheet the user is on.
+    if !created_sheets.is_empty() {
+        crate::sheets::invalidate_undo_history_for_sheet_structure(state, REPORT_FILTER_PAGES_ACTION);
     }
 
     Ok(created_sheets)
@@ -8235,9 +10011,10 @@ pub fn add_calculated_field(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -8295,9 +10072,10 @@ pub fn update_calculated_field(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -8345,9 +10123,10 @@ pub fn remove_calculated_field(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -8401,9 +10180,10 @@ pub fn add_calculated_item(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
@@ -8451,12 +10231,648 @@ pub fn remove_calculated_item(
 
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
+    let dest_sheet_idx = dest_ref.resolve(&state);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
 
     Ok(response)
+}
+
+// ============================================================================
+// FIX ROUND 3 (review): the drill paths' lock order. The calculation pass
+// (`calculate_now`, an ASYNC command, so on a pool thread) takes `grid`, then
+// `grids`, then `sheet_names`, and then `pivot_tables` for GETPIVOTDATA. A
+// drill that waits for one of those while holding a later one closes a cycle
+// and hangs the app with no panic and no log.
+// ============================================================================
+
+#[cfg(test)]
+mod drill_lock_order_tests {
+    use super::*;
+    use crate::document_effect::test_seed_effect;
+    use crate::persistence::FileState;
+    use std::time::Duration;
+
+    struct Fx {
+        state: AppState,
+        file: FileState,
+        pivots: PivotState,
+        bi: BiState,
+        pivot: PivotId,
+    }
+
+    /// Two worksheets. The pivot's SOURCE is on the second one (A1:B3, with
+    /// headers); the first holds decoy values in the same cells, so a read of
+    /// the wrong sheet shows. Sheet 1 is active again afterwards.
+    fn fx() -> Fx {
+        let state = crate::create_app_state();
+        let file = FileState::default();
+        crate::sheets::add_sheet_inner(&state, &file, None, ::persistence::SheetKind::Worksheet)
+            .expect("add the source sheet");
+        let seed = test_seed_effect();
+        let names = state.sheet_names.read().unwrap().clone();
+        assert_eq!(names.len(), 2, "fixture: two sheets");
+        let cells = |rows: [[&str; 2]; 3]| {
+            let mut grid = engine::grid::Grid::new();
+            for (r, row) in rows.iter().enumerate() {
+                for (c, v) in row.iter().enumerate() {
+                    grid.set_cell(r as u32, c as u32, engine::Cell::new_text(v.to_string()));
+                }
+            }
+            grid
+        };
+        let source = cells([["Region", "Rep"], ["East", "Ann"], ["West", "Bo"]]);
+        let decoy = cells([["Region", "Rep"], ["DECOY", "DECOY"], ["DECOY", "DECOY"]]);
+        {
+            let mut grids = state.grids.write(&seed).unwrap();
+            grids[0] = decoy.clone();
+            grids[1] = source.clone();
+        }
+        *state.active_sheet.write(&seed).unwrap() = 0;
+        *state.grid.write(&seed).unwrap() = decoy;
+
+        let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let (mut cache, headers) =
+            crate::pivot::operations::build_cache_from_grid(&source, (0, 0), (2, 1), true).expect("the cache");
+        for (i, h) in headers.iter().enumerate() {
+            cache.set_field_name(i, h.clone());
+        }
+        let mut def = PivotDefinition::new(id, (0, 0), (2, 1));
+        def.source_has_headers = true;
+        def.source_sheet = Some(names[1].clone());
+        def.destination_sheet = Some(names[0].clone());
+        def.destination = (10, 10);
+        def.row_fields.push(PivotField::new(0, "Region".to_string()));
+        let pivots = PivotState::new();
+        pivots.pivot_tables.write(&seed).unwrap().insert(id, (def, cache));
+        Fx { state, file, pivots, bi: BiState::new(), pivot: id }
+    }
+
+    /// Run `command` on its own thread while THIS thread holds the lock a
+    /// concurrent holder takes FIRST (`hold`); once the command is parked on
+    /// it, a third thread takes the lock that holder takes NEXT (`next`).
+    /// Returns (the command was parked, `next` was reachable, its result).
+    /// Unreachable = the command held `next` while it waited: an ABBA.
+    fn next_lock_reachable_while_parked<G, R: Send>(
+        hold: impl FnOnce() -> G,
+        command: impl FnOnce() -> R + Send,
+        next: impl FnOnce() + Send,
+    ) -> (bool, bool, R) {
+        std::thread::scope(|scope| {
+            let guard = hold();
+            let runner = scope.spawn(command);
+            std::thread::sleep(Duration::from_millis(300));
+            // The command needs the held lock, so it cannot have finished.
+            let parked = !runner.is_finished();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let taker = scope.spawn(move || {
+                next();
+                let _ = tx.send(());
+            });
+            let reached = rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            drop(guard); // let everyone finish, whatever happened
+            let result = runner.join().unwrap();
+            taker.join().unwrap();
+            (parked, reached, result)
+        })
+    }
+
+    fn drill(fx: &Fx) -> Result<DrillThroughResponse, String> {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(drill_through_to_sheet_core(
+            &fx.state,
+            &fx.file,
+            &fx.pivots,
+            &fx.bi,
+            DrillThroughRequest { pivot_id: fx.pivot, group_path: Vec::new(), max_records: None },
+        ))
+    }
+
+    /// Show Details (a double-click on a pivot value) during an F9: the pass
+    /// holds `grids` and takes `pivot_tables` next. This command used to hold
+    /// `pivot_tables` while it waited for `grids`.
+    #[test]
+    fn showing_a_pivots_details_never_holds_the_pivot_lock_while_it_waits_for_grids() {
+        let fx = fx();
+        let (parked, reached, result) = next_lock_reachable_while_parked(
+            || fx.state.grids.read().unwrap(),
+            || pivot_source_data_core(&fx.state, &fx.pivots, fx.pivot, &[], None),
+            || {
+                let _g = fx.pivots.pivot_tables.read().unwrap();
+            },
+        );
+        let data = result.expect("the details");
+        assert!(parked, "fixture: the command did not wait for grids");
+        assert_eq!(
+            data.rows,
+            vec![vec!["East".to_string(), "Ann".to_string()], vec!["West".to_string(), "Bo".to_string()]],
+            "fixture: the details are the source sheet's rows"
+        );
+        assert!(
+            reached,
+            "get_pivot_source_data held pivot_tables while it waited for grids (ABBA against the calculation pass)"
+        );
+    }
+
+    /// The same for a grid-backed drill-through's row read.
+    #[test]
+    fn a_grid_drill_through_never_holds_the_pivot_lock_while_it_waits_for_grids() {
+        let fx = fx();
+        let (parked, reached, result) = next_lock_reachable_while_parked(
+            || fx.state.grids.read().unwrap(),
+            || drill(&fx),
+            || {
+                let _g = fx.pivots.pivot_tables.read().unwrap();
+            },
+        );
+        result.expect("the drill-through");
+        assert!(parked, "fixture: the drill-through did not wait for grids");
+        assert!(
+            reached,
+            "drill_through_to_sheet held pivot_tables while it waited for grids (ABBA against the calculation pass)"
+        );
+    }
+
+    /// The drill-through's new sheet: the calculation pass and `add_sheet`
+    /// take `grid` FIRST and `grids` next. This took `sheet_names`, `grids`
+    /// and `active_sheet`, and waited for `grid` while holding them.
+    #[test]
+    fn a_drill_through_sheet_takes_grid_before_grids() {
+        let fx = fx();
+        let (parked, reached, result) = next_lock_reachable_while_parked(
+            || fx.state.grid.write(&test_seed_effect()).unwrap(),
+            || drill(&fx),
+            || {
+                let _g = fx.state.grids.read().unwrap();
+            },
+        );
+        let response = result.expect("the drill-through");
+        assert!(parked, "fixture: the drill-through did not wait for grid");
+        assert_eq!(response.sheet_index, 2, "fixture: a third sheet");
+        assert!(
+            reached,
+            "drill_through_to_sheet held grids while it waited for grid (ABBA against the calculation pass \
+             and add_sheet)"
+        );
+    }
+
+    /// A grid-backed drill-through lists the rows of the pivot's OWN source
+    /// sheet. It read sheet 0 whatever the source was, so drilling a pivot
+    /// built on Sheet2 listed Sheet1's cells ("DECOY" here) under the pivot's
+    /// headers.
+    #[test]
+    fn a_grid_drill_through_lists_the_rows_of_the_pivots_own_source_sheet() {
+        let fx = fx();
+        let response = drill(&fx).expect("the drill-through");
+        assert_eq!(response.row_count, 2, "fixture: two source rows");
+        let grids = fx.state.grids.read().unwrap();
+        let sheet = &grids[response.sheet_index];
+        let text = |r: u32, c: u32| sheet.get_cell(r, c).map(|cell| cell.display_value()).unwrap_or_default();
+        assert_eq!((text(0, 0), text(0, 1)), ("Region".to_string(), "Rep".to_string()), "fixture: the headers");
+        assert_eq!(
+            [text(1, 0), text(1, 1), text(2, 0), text(2, 1)],
+            ["East", "Ann", "West", "Bo"].map(str::to_string),
+            "the drill-through listed another sheet's rows"
+        );
+    }
+
+    // ========================================================================
+    // FIX ROUND 4, B4: the drill-through and Show Report Filter Pages add
+    // their sheets through the ONE add path (`sheets::append_user_sheet`).
+    // Both pushed only `sheet_names` and `grids`.
+    // ========================================================================
+
+    /// Every per-sheet store `append_sheet_stores` maintains, with its length.
+    fn per_sheet_store_lengths(state: &AppState) -> Vec<(&'static str, usize)> {
+        vec![
+            ("grids", state.grids.read().unwrap().len()),
+            ("freeze_configs", state.freeze_configs.read().unwrap().len()),
+            ("tab_colors", state.tab_colors.read().unwrap().len()),
+            ("sheet_visibility", state.sheet_visibility.read().unwrap().len()),
+            ("all_column_widths", state.all_column_widths.read().unwrap().len()),
+            ("all_row_heights", state.all_row_heights.read().unwrap().len()),
+            ("split_configs", state.split_configs.read().unwrap().len()),
+            ("scroll_areas", state.scroll_areas.lock().unwrap().len()),
+            ("sheet_zooms", state.sheet_zooms.read().unwrap().len()),
+            ("page_setups", state.page_setups.read().unwrap().len()),
+            ("sheet_ids", state.sheet_ids.read().unwrap().len()),
+            ("show_gridlines", state.show_gridlines.read().unwrap().len()),
+            ("sheet_display_flags", state.sheet_display_flags.read().unwrap().len()),
+            ("sheet_kinds", state.sheet_kinds.read().unwrap().len()),
+            ("all_merged_regions", state.all_merged_regions.read().unwrap().len()),
+            ("all_user_hidden_rows", state.all_user_hidden_rows.read().unwrap().len()),
+            ("all_user_hidden_cols", state.all_user_hidden_cols.read().unwrap().len()),
+        ]
+    }
+
+    fn assert_every_store_has_one_entry_per_sheet(state: &AppState, sheets: usize, when: &str) {
+        let names = state.sheet_names.read().unwrap().len();
+        assert_eq!(names, sheets, "{when}: the sheet count");
+        let off: Vec<(&str, usize)> =
+            per_sheet_store_lengths(state).into_iter().filter(|(_, n)| *n != names).collect();
+        assert!(
+            off.is_empty(),
+            "{when}: these per-sheet stores do not have one entry per sheet ({names} sheets): {off:?}"
+        );
+        let ids = state.sheet_ids.read().unwrap().clone();
+        let mut unique = ids.clone();
+        unique.sort_by_key(|id| id.to_string());
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "{when}: two sheets share an id");
+    }
+
+    /// A floating range's OBJECT-backed sheet at the tail, appended exactly as
+    /// `create_floating_range` appends one.
+    fn append_object_sheet(state: &AppState, name: &str) -> usize {
+        let effect = test_seed_effect();
+        let mut sheet_names = state.sheet_names.write(&effect).unwrap();
+        let mut grids = state.grids.write(&effect).unwrap();
+        let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
+        let mut tab_colors = state.tab_colors.write(&effect).unwrap();
+        let mut sheet_visibility = state.sheet_visibility.write(&effect).unwrap();
+        let mut all_column_widths = state.all_column_widths.write(&effect).unwrap();
+        let mut all_row_heights = state.all_row_heights.write(&effect).unwrap();
+        crate::sheets::append_sheet_stores(
+            state,
+            &effect,
+            name.to_string(),
+            crate::sheets::OBJECT_SHEET_VISIBILITY,
+            ::persistence::SheetKind::Worksheet,
+            &mut sheet_names,
+            &mut grids,
+            &mut freeze_configs,
+            &mut tab_colors,
+            &mut sheet_visibility,
+            &mut all_column_widths,
+            &mut all_row_heights,
+        )
+        .0
+    }
+
+    fn protect_structure(state: &AppState) {
+        state.workbook_protection.write(&test_seed_effect()).unwrap().protected = true;
+    }
+
+    fn names(state: &AppState) -> Vec<String> {
+        state.sheet_names.read().unwrap().clone()
+    }
+
+    /// Region moves to the Filter area and Rep to the rows, so the pivot has
+    /// one report filter page per region (East, West).
+    fn filter_on_region(fx: &Fx) {
+        let mut tables = fx.pivots.pivot_tables.write(&test_seed_effect()).unwrap();
+        let (def, _) = tables.get_mut(&fx.pivot).unwrap();
+        def.row_fields.clear();
+        def.row_fields.push(PivotField::new(1, "Rep".to_string()));
+        def.filter_fields.push(pivot_engine::PivotFilter {
+            field: PivotField::new(0, "Region".to_string()),
+            condition: pivot_engine::FilterCondition::ValueList(Vec::new()),
+        });
+    }
+
+    /// The drill-through sheet gets an entry in EVERY per-sheet store, and the
+    /// column width set on the sheet it leaves is stashed with that sheet. It
+    /// pushed only `sheet_names` and `grids`, so a probe found 3 sheet names
+    /// and 2 ids, kinds and visibilities, and `all_column_widths` stayed
+    /// `[{}, {}]`: the width stayed live on the drill-through sheet and was
+    /// gone from its own.
+    #[test]
+    fn a_drill_through_sheet_gets_every_per_sheet_store_and_keeps_the_width_of_the_sheet_it_left() {
+        let fx = fx();
+        assert_every_store_has_one_entry_per_sheet(&fx.state, 2, "fixture");
+        fx.state.column_widths.write(&test_seed_effect()).unwrap().insert(3, 120.0);
+
+        let response = drill(&fx).expect("the drill-through");
+
+        assert_every_store_has_one_entry_per_sheet(&fx.state, 3, "after the drill-through");
+        assert_eq!(response.sheet_index, 2, "fixture: a third sheet");
+        assert_eq!(response.sheet_name, "DrillThrough");
+        assert_eq!(*fx.state.active_sheet.read().unwrap(), 2, "the drill-through sheet is active");
+        assert_eq!(
+            fx.state.all_column_widths.read().unwrap()[0].get(&3),
+            Some(&120.0),
+            "the width set on the drilled-from sheet was lost"
+        );
+        assert!(
+            fx.state.column_widths.read().unwrap().is_empty(),
+            "the drilled-from sheet's width stayed live on the drill-through sheet"
+        );
+        assert_eq!(
+            fx.state.sheet_visibility.read().unwrap()[2],
+            "visible",
+            "the drill-through sheet is an ordinary user sheet"
+        );
+        let grid = fx.state.grid.read().unwrap();
+        assert_eq!(
+            grid.get_cell(1, 0).map(|c| c.display_value()),
+            Some("East".to_string()),
+            "fixture: the active mirror carries the detail rows"
+        );
+    }
+
+    /// With a floating range in the workbook the drill-through sheet lands in
+    /// the USER prefix, before the object sheet -- it was appended behind it.
+    #[test]
+    fn a_drill_through_sheet_lands_before_a_floating_ranges_object_sheet() {
+        let fx = fx();
+        let object = append_object_sheet(&fx.state, "Float1");
+        assert_eq!(object, 2, "fixture: the object sheet is the tail");
+        assert_every_store_has_one_entry_per_sheet(&fx.state, 3, "fixture");
+
+        let response = drill(&fx).expect("the drill-through");
+
+        assert_eq!(response.sheet_index, 2, "the drill-through sheet is not in the user prefix");
+        assert_eq!(names(&fx.state), vec!["Sheet1", "Sheet2", "DrillThrough", "Float1"]);
+        let visibility = fx.state.sheet_visibility.read().unwrap().clone();
+        assert_eq!(visibility[2], "visible");
+        assert_eq!(visibility[3], crate::sheets::OBJECT_SHEET_VISIBILITY, "the object sheet stays at the tail");
+        assert_every_store_has_one_entry_per_sheet(&fx.state, 4, "after the drill-through");
+        let grids = fx.state.grids.read().unwrap();
+        assert_eq!(
+            grids[2].get_cell(1, 0).map(|c| c.display_value()),
+            Some("East".to_string()),
+            "the detail rows are on the drill-through sheet"
+        );
+        assert!(grids[3].get_cell(1, 0).is_none(), "the detail rows landed on the object sheet");
+    }
+
+    /// A protected workbook structure refuses the drill-through before
+    /// anything is written, and the document stays clean.
+    #[test]
+    fn a_protected_workbook_structure_refuses_a_drill_through_and_stays_clean() {
+        let fx = fx();
+        protect_structure(&fx.state);
+        crate::document_effect::mark_saved(&fx.file);
+
+        let err = drill(&fx).expect_err("a protected structure must refuse the drill-through");
+
+        assert!(err.contains("protected"), "got: {err}");
+        assert_eq!(names(&fx.state), vec!["Sheet1", "Sheet2"], "a sheet was added anyway");
+        assert!(!fx.file.is_dirty(), "a refused drill-through dirtied the document");
+        assert_every_store_has_one_entry_per_sheet(&fx.state, 2, "after the refusal");
+    }
+
+    /// Show Report Filter Pages: one page per value, each with an entry in
+    /// every per-sheet store, in the USER prefix (before a floating range's
+    /// object sheet), and the user stays on the sheet they were on.
+    #[test]
+    fn report_filter_pages_get_every_per_sheet_store_and_land_before_a_floating_ranges_object_sheet() {
+        let fx = fx();
+        filter_on_region(&fx);
+        append_object_sheet(&fx.state, "Float1");
+        fx.state.column_widths.write(&test_seed_effect()).unwrap().insert(3, 120.0);
+        crate::document_effect::mark_saved(&fx.file);
+
+        let created = show_report_filter_pages_core(&fx.state, &fx.file, &fx.pivots, fx.pivot, 0)
+            .expect("the report filter pages");
+
+        assert_eq!(created, vec!["East".to_string(), "West".to_string()]);
+        assert_eq!(names(&fx.state), vec!["Sheet1", "Sheet2", "East", "West", "Float1"]);
+        let visibility = fx.state.sheet_visibility.read().unwrap().clone();
+        assert_eq!(&visibility[2..4], &["visible".to_string(), "visible".to_string()]);
+        assert_eq!(visibility[4], crate::sheets::OBJECT_SHEET_VISIBILITY, "the object sheet stays at the tail");
+        assert_every_store_has_one_entry_per_sheet(&fx.state, 5, "after the pages");
+        assert_eq!(*fx.state.active_sheet.read().unwrap(), 0, "the pages switched the user away");
+        assert_eq!(
+            fx.state.column_widths.read().unwrap().get(&3),
+            Some(&120.0),
+            "the active sheet's width moved"
+        );
+        let grids = fx.state.grids.read().unwrap();
+        for page in [2usize, 3] {
+            assert!(!grids[page].cells.is_empty(), "page {page} carries no pivot cells");
+        }
+        assert!(grids[4].cells.is_empty(), "a page's cells landed on the object sheet");
+        assert!(fx.file.is_dirty(), "fixture: the pages are a document change");
+    }
+
+    /// A protected workbook structure refuses Show Report Filter Pages before
+    /// anything is written (the pages' styles included), and the document
+    /// stays clean.
+    #[test]
+    fn a_protected_workbook_structure_refuses_report_filter_pages_and_stays_clean() {
+        let fx = fx();
+        filter_on_region(&fx);
+        protect_structure(&fx.state);
+        crate::document_effect::mark_saved(&fx.file);
+
+        let err = show_report_filter_pages_core(&fx.state, &fx.file, &fx.pivots, fx.pivot, 0)
+            .expect_err("a protected structure must refuse the pages");
+
+        assert!(err.contains("protected"), "got: {err}");
+        assert_eq!(names(&fx.state), vec!["Sheet1", "Sheet2"], "a page was added anyway");
+        assert!(!fx.file.is_dirty(), "a refused Show Report Filter Pages dirtied the document");
+    }
+
+    // ========================================================================
+    // FIX ROUND 5 (review of round 4, finding 1): what the drill-through and
+    // Show Report Filter Pages END. `append_user_sheet` ends nothing itself:
+    // each caller ends the undo history (Excel parity, BUG-0005) and, when it
+    // switched to its sheet, rebuilds the dependency maps (BUG-0016). None of
+    // those three calls had a test, and the undo reset protects DATA: with a
+    // floating range in the workbook the new sheet is rotated INTO the object
+    // sheet's index, so a queued step recorded on the object sheet replays onto
+    // the new sheet. (`undo_sheet_structure_tests` holds the census that every
+    // caller of the add path makes the calls.)
+    // ========================================================================
+
+    /// The block an undo step recorded on the object sheet claims. Every cell
+    /// in it held nothing before the edit, so undoing the step CLEARS the block
+    /// on whichever sheet the step's index names when it replays.
+    const RECORDED_ROWS: std::ops::Range<u32> = 0..8;
+    const RECORDED_COLS: std::ops::Range<u32> = 0..4;
+
+    /// The floating range's cells typed in on sheet `object`, recorded the way
+    /// a cell writer records them.
+    fn record_an_edit_on(state: &AppState, object: usize) {
+        let seed = test_seed_effect();
+        let mut tx = crate::Transaction::new("Edit floating range");
+        {
+            let mut grids = state.grids.write(&seed).unwrap();
+            for row in RECORDED_ROWS {
+                for col in RECORDED_COLS {
+                    grids[object].set_cell(row, col, engine::Cell::new_text(format!("fr{row}.{col}")));
+                    tx.add_change(crate::CellChange::SetCell { sheet: object, row, col, previous: None });
+                }
+            }
+        }
+        state.undo_stack.lock().unwrap().push_transaction_direct(tx);
+    }
+
+    /// Every cell of sheet `index` as (row, col, text), sorted; the active
+    /// sheet is read through its mirror.
+    fn cells_of(state: &AppState, index: usize) -> Vec<(u32, u32, String)> {
+        let active = *state.active_sheet.read().unwrap();
+        let read = |grid: &engine::grid::Grid| {
+            let mut cells: Vec<(u32, u32, String)> =
+                grid.cells.iter().map(|(&(r, c), cell)| (r, c, cell.display_value())).collect();
+            cells.sort();
+            cells
+        };
+        if index == active {
+            read(&state.grid.read().unwrap())
+        } else {
+            read(&state.grids.read().unwrap()[index])
+        }
+    }
+
+    /// Ctrl+Z: the top step, replayed through the restore Undo runs.
+    fn undo_once(fx: &Fx) {
+        let popped = fx.state.undo_stack.lock().unwrap().pop_undo();
+        if let Some(transaction) = popped {
+            let files = crate::persistence::UserFilesState::default();
+            let slicers = crate::slicer::SlicerState::new();
+            let filters = crate::ribbon_filter::RibbonFilterState::new();
+            let pane = crate::pane_control::PaneControlState::new();
+            let timelines = crate::timeline_slicer::TimelineSlicerState::new();
+            crate::undo_commands::apply_changes(
+                &fx.state, &fx.file, &files, &fx.pivots, &slicers, &filters, &pane, &timelines, transaction, true,
+            );
+        }
+    }
+
+    /// A step recorded on a floating range's object sheet names index 2. The
+    /// drill-through sheet is rotated into index 2, so a drill-through that
+    /// leaves the history in place hands that step to the drill-through sheet:
+    /// Ctrl+Z erased its header and rows (a reviewer's probe, fix round 4).
+    #[test]
+    fn a_drill_through_ends_the_undo_history_so_a_floating_range_step_never_replays_onto_it() {
+        let fx = fx();
+        let object = append_object_sheet(&fx.state, "Float1");
+        assert_eq!(object, 2, "fixture: the object sheet is the tail");
+        record_an_edit_on(&fx.state, object);
+        let floating_range_cells = cells_of(&fx.state, object);
+
+        let response = drill(&fx).expect("the drill-through");
+        assert_eq!(response.sheet_index, 2, "fixture: the drill-through sheet took the object sheet's index");
+        let drill_sheet = cells_of(&fx.state, 2);
+        assert!(!drill_sheet.is_empty(), "fixture: the drill-through sheet has cells");
+        let history_left = fx.state.undo_stack.lock().unwrap().can_undo();
+
+        undo_once(&fx);
+
+        assert_eq!(
+            cells_of(&fx.state, 2),
+            drill_sheet,
+            "Ctrl+Z after a drill-through replayed the floating range's step onto the drill-through sheet"
+        );
+        assert_eq!(cells_of(&fx.state, 3), floating_range_cells, "the floating range's cells did not move with its sheet");
+        assert!(!history_left, "the drill-through left the undo history in place (Excel parity, BUG-0005)");
+    }
+
+    /// The same for Show Report Filter Pages: its first page is rotated into
+    /// the object sheet's index 2.
+    #[test]
+    fn report_filter_pages_end_the_undo_history_so_a_floating_range_step_never_replays_onto_a_page() {
+        let fx = fx();
+        filter_on_region(&fx);
+        let object = append_object_sheet(&fx.state, "Float1");
+        assert_eq!(object, 2, "fixture: the object sheet is the tail");
+        record_an_edit_on(&fx.state, object);
+        let floating_range_cells = cells_of(&fx.state, object);
+
+        show_report_filter_pages_core(&fx.state, &fx.file, &fx.pivots, fx.pivot, 0).expect("the report filter pages");
+        assert_eq!(names(&fx.state), vec!["Sheet1", "Sheet2", "East", "West", "Float1"], "fixture: the pages");
+        let first_page = cells_of(&fx.state, 2);
+        assert!(
+            first_page.iter().any(|(r, c, _)| RECORDED_ROWS.contains(r) && RECORDED_COLS.contains(c)),
+            "fixture: the recorded step covers none of the first page's cells: {first_page:?}"
+        );
+        let history_left = fx.state.undo_stack.lock().unwrap().can_undo();
+
+        undo_once(&fx);
+
+        assert_eq!(
+            cells_of(&fx.state, 2),
+            first_page,
+            "Ctrl+Z after Show Report Filter Pages replayed the floating range's step onto the first page"
+        );
+        assert_eq!(cells_of(&fx.state, 4), floating_range_cells, "the floating range's cells did not move with its sheet");
+        assert!(!history_left, "Show Report Filter Pages left the undo history in place (Excel parity, BUG-0005)");
+    }
+
+    /// The drill-through SWITCHES to its sheet, and the single-sheet dependency
+    /// maps describe the active sheet only: they must be rebuilt for the new
+    /// one (BUG-0016), or an edit there cascades along the edges of the sheet
+    /// the user left.
+    #[test]
+    fn a_drill_through_rebuilds_the_dependency_maps_for_the_sheet_it_switches_to() {
+        let fx = fx();
+        // Sheet1 (active): C1 = A1*2, so the maps describe Sheet1.
+        {
+            let seed = test_seed_effect();
+            let formula = engine::Cell::new_formula("A1*2".to_string());
+            fx.state.grid.write(&seed).unwrap().set_cell(0, 2, formula.clone());
+            fx.state.grids.write(&seed).unwrap()[0].set_cell(0, 2, formula);
+        }
+        crate::undo_commands::rebuild_all_dependencies(&fx.state);
+        assert!(
+            fx.state.dependencies.lock().unwrap().contains_key(&(0, 2)),
+            "fixture: the maps describe Sheet1's C1 = A1*2"
+        );
+
+        let response = drill(&fx).expect("the drill-through");
+        assert_eq!(*fx.state.active_sheet.read().unwrap(), response.sheet_index, "fixture: the drill-through sheet is active");
+
+        let dependencies = fx.state.dependencies.lock().unwrap().clone();
+        let dependents = fx.state.dependents.lock().unwrap().clone();
+        assert!(
+            dependencies.is_empty() && dependents.is_empty(),
+            "the single-sheet dependency maps still describe the sheet the drill-through left (C1 = A1*2 on \
+             Sheet1), not the drill-through sheet, which has no formula: dependencies {dependencies:?}, \
+             dependents {dependents:?}"
+        );
+    }
+
+    // ========================================================================
+    // FIX ROUND 5 (review of round 4, finding 2): a filter value whose cleaned
+    // name was still illegal. `' 'x` cleaned to `'x` (one pass of trimming),
+    // the add path refused it AFTER the effect and the page's styles, and the
+    // value got no page and no error.
+    // ========================================================================
+
+    /// The fixture, with the pivot's Region values replaced by `regions` and
+    /// Region moved to the Filter area.
+    fn fx_with_regions(regions: [&str; 2]) -> Fx {
+        let fx = fx();
+        let seed = test_seed_effect();
+        let mut source = engine::grid::Grid::new();
+        for (r, row) in [["Region", "Rep"], [regions[0], "Ann"], [regions[1], "Bo"]].iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                source.set_cell(r as u32, c as u32, engine::Cell::new_text(v.to_string()));
+            }
+        }
+        fx.state.grids.write(&seed).unwrap()[1] = source.clone();
+        let (mut cache, headers) =
+            crate::pivot::operations::build_cache_from_grid(&source, (0, 0), (2, 1), true).expect("the cache");
+        for (i, h) in headers.iter().enumerate() {
+            cache.set_field_name(i, h.clone());
+        }
+        fx.pivots.pivot_tables.write(&seed).unwrap().get_mut(&fx.pivot).unwrap().1 = cache;
+        filter_on_region(&fx);
+        fx
+    }
+
+    #[test]
+    fn every_filter_value_gets_a_page_even_when_its_cleaned_name_hid_an_apostrophe() {
+        let fx = fx_with_regions(["' 'x", "West"]);
+        crate::document_effect::mark_saved(&fx.file);
+
+        let mut created = show_report_filter_pages_core(&fx.state, &fx.file, &fx.pivots, fx.pivot, 0)
+            .expect("the report filter pages");
+
+        created.sort();
+        assert_eq!(
+            created,
+            vec!["West".to_string(), "x".to_string()],
+            "a filter value got no page and no error; sheets {:?}",
+            names(&fx.state)
+        );
+        assert_every_store_has_one_entry_per_sheet(&fx.state, 4, "after the pages");
+        assert!(fx.file.is_dirty(), "fixture: the pages are a document change");
+    }
 }

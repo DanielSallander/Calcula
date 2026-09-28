@@ -3,12 +3,15 @@
  * PURPOSE: The ONE consumer of a pivot response's `notices`, reachable from
  *          every caller of a pivot command.
  *
- * WHY IT LIVES IN @api RATHER THAN THE PIVOT EXTENSION: three of the callers
- * that most often produce a notice are NOT the Pivot extension. The Slicer's
- * filter bridge, the Insert Slicer dialog and the Controls pane's filter
- * bridge all call `updateBiPivotFields` straight from `@api/backend`, never
- * touching the Pivot extension's own api wrapper or its view store — and a
- * slicer field with no value fields is exactly what sends a request down the
+ * WHY IT LIVES IN @api RATHER THAN THE PIVOT EXTENSION: the callers that most
+ * often produce a notice are NOT the Pivot extension. The Slicer's filter
+ * bridge (a click on a slicer whose column its BI pivot no longer carries puts
+ * the column back through the apply's server-side ensure, inside the click's
+ * own undo step) and the Controls pane's ribbon-filter bridge call
+ * `apply_pivot_filter` / `clear_pivot_filter`
+ * through their own backend channels (`createBackendChannel`), never touching
+ * the Pivot extension's own api wrapper or its view store — and a slicer
+ * field with no value fields is exactly what sends a request down the
  * synthetic-placeholder-measure branch that produces these notices. A
  * consumer wired inside the Pivot extension would be invisible on the very
  * path that needs it most, and having Slicer or ControlsPane import Pivot's

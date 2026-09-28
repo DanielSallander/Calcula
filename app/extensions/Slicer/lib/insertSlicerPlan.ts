@@ -15,6 +15,13 @@
 //          `dialogData.placement = { x, y, width?, height? }` in sheet pixels.
 //          The slicers cascade side by side from that origin exactly as they
 //          cascade from the old fixed (100, 100) origin without one.
+//
+//          MODELS. Every loaded Calcula model connection is offered FIRST, as
+//          "<connection> (Model)", whether or not any table or pivot exists: a
+//          workbook that holds only a model (the canvas report page is the
+//          usual case) used to show "No Tables or PivotTables found" and offer
+//          nothing at all. A model slicer (sourceType "biConnection") filters
+//          every PivotTable of that model on the sheet it is placed on.
 
 import type { SlicerSourceType } from "./slicerTypes";
 
@@ -36,6 +43,8 @@ export interface BiModelInfo {
 /** One entry of the dialog's "Data source" list. */
 export interface SlicerDataSource {
   type: SlicerSourceType;
+  /** The table / pivot id, or -- for a "biConnection" source -- the model
+   *  connection id. */
   id: string;
   name: string;
   /** The sheet the SOURCE lives on — never where the slicer goes (always the
@@ -45,7 +54,8 @@ export interface SlicerDataSource {
   /** That sheet's name, for the label; null when unknown. */
   sheetName: string | null;
   fields: string[];
-  /** BI model info for BI-backed pivots (fields organised by table). */
+  /** BI model info for BI-backed pivots and model sources (fields organised
+   *  by table). */
   biModel?: BiModelInfo;
 }
 
@@ -124,10 +134,109 @@ export function pivotSource(
   };
 }
 
-/** The dropdown label: name, kind, and the source's sheet when known. */
+// ============================================================================
+// Models
+// ============================================================================
+
+/** The slice of a model connection this module reads (`bi_get_connections`). */
+export interface ModelConnectionListing {
+  id: string;
+  name: string;
+}
+
+/** The slice of `bi_get_model_info` this module reads. It carries a column's
+ *  `dataType` but no `isNumeric` and no `lookupColumns`, so it is mapped. */
+export interface ModelInfoListing {
+  tables: Array<{ name: string; columns: Array<{ name: string; dataType: string }> }>;
+  measures: Array<{ name: string }>;
+}
+
+/**
+ * Whether a model column's data type is numeric -- the same categories the
+ * Controls pane's Add Filter dialog uses ("int", "float", "decimal", ...).
+ */
+export function isNumericDataType(dataType: string | null | undefined): boolean {
+  const dt = (dataType ?? "").toLowerCase();
+  return ["int", "float", "decimal", "numeric", "double", "real"].some((k) => dt.includes(k));
+}
+
+/** A `bi_get_model_info` result as the dialog's field tree reads it. */
+export function toSlicerModel(info: ModelInfoListing): BiModelInfo {
+  return {
+    tables: info.tables.map((t) => ({
+      name: t.name,
+      columns: t.columns.map((c) => ({
+        name: c.name,
+        dataType: c.dataType,
+        isNumeric: isNumericDataType(c.dataType),
+      })),
+    })),
+    measures: info.measures.map((m) => ({ name: m.name })),
+  };
+}
+
+/**
+ * One "Model" source per loaded model connection, in the connections' order.
+ * A connection whose model is not loaded (null / absent info) is skipped: it
+ * has no columns to offer. The id is the CONNECTION id (a model slicer's
+ * `cacheSourceId`); each field is the "Table.Column" key, built by joining --
+ * never re-split on a dot, since a table name may contain one.
+ */
+export function modelSources(
+  connections: readonly ModelConnectionListing[],
+  modelInfoById: Readonly<Record<string, ModelInfoListing | null | undefined>>,
+): SlicerDataSource[] {
+  const out: SlicerDataSource[] = [];
+  for (const conn of connections) {
+    const info = modelInfoById[conn.id];
+    if (!info) continue;
+    const biModel = toSlicerModel(info);
+    const fields: string[] = [];
+    for (const table of biModel.tables) {
+      for (const col of table.columns) fields.push(`${table.name}.${col.name}`);
+    }
+    out.push({
+      type: "biConnection",
+      id: conn.id,
+      name: conn.name,
+      sheetIndex: null,
+      sheetName: null,
+      fields,
+      biModel,
+    });
+  }
+  return out;
+}
+
+/**
+ * What a model slicer reaches, said where the user chooses one (owner
+ * decision 2026-09-27: the dialog must name the objects). PivotCharts follow
+ * their pivot; charts that query the model directly are not reached in v1.
+ */
+export const MODEL_SLICER_REACH =
+  "A model slicer filters every PivotTable (and its PivotChart) built on this model " +
+  "on the sheet or canvas where the slicer is placed, including PivotTables added later. " +
+  "Other sheets are not affected. Charts that query the model directly are not filtered yet.";
+
+/** The dropdown label: name, kind, and the source's sheet when known. A BI
+ *  pivot says "PivotTable on model" so it never reads like the model itself. */
 export function sourceLabel(source: SlicerDataSource): string {
-  const kind =
-    source.type === "table" ? "Table" : source.biModel ? "Data Model" : "PivotTable";
+  let kind: string;
+  switch (source.type) {
+    case "table":
+      kind = "Table";
+      break;
+    case "pivot":
+      kind = source.biModel ? "PivotTable on model" : "PivotTable";
+      break;
+    case "biConnection":
+      kind = "Model";
+      break;
+    default: {
+      const never: never = source.type;
+      throw new Error(`Unknown slicer source type: ${String(never)}`);
+    }
+  }
   return source.sheetName ? `${source.name} (${kind}, ${source.sheetName})` : `${source.name} (${kind})`;
 }
 

@@ -9,6 +9,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import type { CellData, DimensionData, FormattingResult } from "../core/types";
+import type { PivotOverwriteUndoResponse } from "./pivotTypes";
 // The macro recorder observes the IPC bridge, and the sort family invokes Tauri
 // from HERE rather than from core/lib/tauri-api.ts. Reporting to the same single
 // hook is what keeps a recording complete: an omitted sort produces a macro that
@@ -523,8 +524,24 @@ export async function revertPivotOperation(pivotId: string): Promise<void> {
   return invoke<void>("revert_pivot_operation", { pivotId });
 }
 
-export async function undoPivotOverwrite(pivotId: string): Promise<void> {
-  return invoke<void>("undo_pivot_overwrite", { pivotId });
+/**
+ * Take back EXACTLY the undo step(s) a declined "overwrite existing data?"
+ * names -- the steps carrying `overwriteTokens` (each command's response
+ * `overwriteToken`), then `thenUndoSeq` when it is the next entry on top -- and
+ * nothing else. REJECTS, having popped nothing, when no token was given (the
+ * command recorded no step) or no such step is the last change in the history.
+ * Callers go through `@api/pivotOverwrite`, which also announces what came back.
+ */
+export async function undoPivotOverwrite(
+  pivotId: string,
+  overwriteTokens: readonly number[],
+  thenUndoSeq?: number | null,
+): Promise<PivotOverwriteUndoResponse> {
+  return invoke<PivotOverwriteUndoResponse>("undo_pivot_overwrite", {
+    pivotId,
+    overwriteTokens: [...overwriteTokens],
+    thenUndoSeq: thenUndoSeq ?? null,
+  });
 }
 
 // ============================================================================

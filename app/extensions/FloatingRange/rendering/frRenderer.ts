@@ -46,8 +46,8 @@ import {
   getFloatingRangeById,
   type FloatingRangeEntry,
 } from "../lib/floatingRangeStore";
+import type { GridRegion } from "@api/gridOverlays";
 import {
-  FR_TITLE_H,
   FR_EDGE_HANDLE_R,
   frTitleH,
   frColHdrH,
@@ -65,6 +65,8 @@ import {
   frVisibleRange,
   frEdgeHandles,
   frEdgeHandleAt,
+  frBorderGrabAt,
+  localCellFromPoint,
   edgeAxis,
   type FrCellRange,
   type FrView,
@@ -84,7 +86,31 @@ import {
   resetFrExtents,
 } from "../lib/frExtent";
 import { getFrView, commitFrViewClamp } from "../lib/frView";
-import { layoutFrEditorForFrame } from "../editor/frEditor";
+import { layoutFrEditorForFrame, getFrEditorCell } from "../editor/frEditor";
+
+// ============================================================================
+// Whether the resize handles are live
+// ============================================================================
+
+/**
+ * Whether range `frId`'s resize handles (Core's corner boxes AND this
+ * extension's edge balls) are armed on `region`: the store published
+ * `resizable` -- geometry editable, the range SELECTED and none of its cells
+ * being edited -- and the range's own cell editor is not open. The store
+ * re-publishes `resizable` when the editor opens or closes (that is what Core's
+ * corner boxes read), and the editor half is ALSO read live here, because the
+ * region a press hands `claimsBodyDrag` is the one Core captured before the
+ * press: a handle painted or grabbable over the cell the user is typing in is
+ * the one thing the owner ruled out (2026-09-27).
+ *
+ * The ONE gate for the paint, the extended hit area, the cursor and the edge
+ * gesture's claim (index.ts), so a ball is never grabbable where it is not
+ * painted, nor painted where it is not grabbable.
+ */
+export function frHandlesLive(region: GridRegion, frId: string): boolean {
+  if (region.data?.resizable !== true) return false;
+  return getFrEditorCell()?.frId !== frId;
+}
 
 // ============================================================================
 // Cell cache (async fetch, sync render)
@@ -564,12 +590,13 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
     ctx.setLineDash([]);
     ctx.strokeRect(canvasX + 1, canvasY + 1, w - 2, h - 2);
 
-    // The two families of handle are painted ONLY when design mode has armed
-    // them. Core skips every resize handle on a region with
-    // `resizable === false`, so painting them in run mode drew an affordance
-    // that silently did nothing — the selection outline above is what marks a
-    // selected object, and it still shows in both modes.
-    if (region.data?.resizable === true) {
+    // The two families of handle are painted ONLY when they are armed
+    // (`frHandlesLive`: geometry editable, the range selected, its cell
+    // editor closed). Core skips every resize handle on a region with
+    // `resizable === false`, so painting them on a subscribed canvas or a
+    // locked range would draw an affordance that silently did nothing — the
+    // selection outline above is what marks a selected object, always.
+    if (frHandlesLive(region, frId)) {
       // 4 CORNER handles (blue squares) at Core's getFloatingCornerPixels
       // positions: these change the row/column COUNTS.
       const handle = 6;
@@ -643,19 +670,26 @@ export function hitTestFloatingRange(hitCtx: OverlayHitTestContext): boolean {
   // centred ON the border, so its outer half lies outside the frame. Without
   // this, Core's inclusive bounds test would stop half of every yellow ball
   // from being grabbable and the handle would feel like it had a dead side.
-  if (hitCtx.region.data?.resizable !== true) return false;
+  // Only while the handles are LIVE: an unselected range's invisible balls
+  // must not reach past its frame and take a click meant for the grid.
   const frId = hitCtx.region.data?.frId as string | undefined;
-  const entry = frId ? getFloatingRangeById(frId) : null;
+  if (!frId || !frHandlesLive(hitCtx.region, frId)) return false;
+  const entry = getFloatingRangeById(frId);
   if (!entry) return false;
   return frEdgeHandleAt(entry, hitCtx.canvasX - b.x, hitCtx.canvasY - b.y) !== null;
 }
 
 /**
  * "move" wherever a drag would MOVE the object, "cell" wherever it would
- * select. Must stay in lockstep with `claimsBodyDrag` (index.ts): with a title
- * bar that is the title band; with the title bar hidden the whole body is the
- * grab zone, but only in design mode, because that is the only mode in which
- * Core will start a move at all.
+ * select. Must stay in lockstep with `claimsBodyDrag` (index.ts):
+ *
+ *   - the title zone moves when the store published `movable` (every mode,
+ *     every sheet kind; not on a subscribed canvas or a locked range, where
+ *     Core refuses the drag -- the cursor then says so, rather than
+ *     promising a move that does nothing, which is how the owner found this);
+ *   - with the title hidden, the 4px border band moves (`movable`), and in
+ *     Design Mode the whole body does (`bodyGrab`);
+ *   - everything else is the working surface.
  */
 export function getFrCursor(hitCtx: OverlayHitTestContext): string | null {
   const b = hitCtx.floatingCanvasBounds;
@@ -663,18 +697,20 @@ export function getFrCursor(hitCtx: OverlayHitTestContext): string | null {
   const frId = hitCtx.region.data?.frId as string | undefined;
   const entry = frId ? getFloatingRangeById(frId) : null;
   if (!entry) return null;
+  const dx = hitCtx.canvasX - b.x;
+  const dy = hitCtx.canvasY - b.y;
   // Edge handles first — they sit on the border, on top of whatever zone is
   // underneath, and they are the only thing there when they are painted.
-  if (hitCtx.region.data?.resizable === true) {
-    const edge = frEdgeHandleAt(entry, hitCtx.canvasX - b.x, hitCtx.canvasY - b.y);
+  if (frHandlesLive(hitCtx.region, entry.id)) {
+    const edge = frEdgeHandleAt(entry, dx, dy);
     if (edge) return edgeAxis(edge) === "cols" ? "ew-resize" : "ns-resize";
   }
-  if (entry.showTitle) {
-    const dy = hitCtx.canvasY - b.y;
-    return dy >= 0 && dy < FR_TITLE_H ? "move" : "cell";
-  }
-  // `movable` is the flag Core actually consults, and the store publishes it
-  // from the design-mode state — reading it here keeps the cursor honest
-  // instead of promising a move that Core will refuse.
-  return hitCtx.region.data?.movable === true ? "move" : "cell";
+  const movable = hitCtx.region.data?.movable === true;
+  // The title ZONE, exactly as the claim resolves it (it includes the corner
+  // box above the row gutter when a title is shown). Core's own default for
+  // an object that will not move is "pointer".
+  if (localCellFromPoint(entry, dx, dy).zone === "title") return movable ? "move" : "pointer";
+  if (hitCtx.region.data?.bodyGrab === true) return "move";
+  if (!entry.showTitle && movable && frBorderGrabAt(entry, dx, dy)) return "move";
+  return "cell";
 }

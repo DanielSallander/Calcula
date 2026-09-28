@@ -12,12 +12,25 @@ import type {
   PivotLayoutAST, FieldNode, ValueFieldNode,
   FilterFieldNode, SortNode, LayoutDirective,
 } from './ast';
-import { type DslError, dslError, dslWarning } from './errors';
+import { type DslError, type SourceLocation, dslError, dslWarning } from './errors';
 import type {
   SourceField, ZoneField, AggregationType,
 } from '../../components/types';
 import { getDefaultAggregation, getValueFieldDisplayName } from '../../components/types';
 import type { LayoutConfig, ShowValuesAs, BiPivotModelInfo, CalculatedFieldDef, ValueColumnRefDef } from '../../components/types';
+
+/**
+ * An inclusion filter (`Field = ("a", "b")`) the compiler could NOT turn into
+ * hidden items: a filter stores the items it HIDES, and inverting "show these"
+ * needs the field's full item list (`CompileContext.filterUniqueValues`), which
+ * had none for this field.
+ */
+export interface UnresolvedInclusion {
+  /** The filter field's compiled name -- the `name` of its entry in `filters`. */
+  fieldName: string;
+  /** The inclusion clause's position in the compiled text. */
+  location: SourceLocation;
+}
 
 /** The compiled output of a DSL definition. */
 export interface CompileResult {
@@ -34,6 +47,18 @@ export interface CompileResult {
   valueColumnOrder: ValueColumnRefDef[];
   /** Save-as name if SAVE AS clause was present. */
   saveAs?: string;
+  /**
+   * The filter fields whose inclusion list could not be inverted (see
+   * {@link UnresolvedInclusion}); empty when every one resolved. Their entry in
+   * `filters` carries NO `hiddenItems` -- exactly the shape of a field whose
+   * clause holds no list at all -- so a consumer that reads that shape as "no
+   * filter" MUST consult this first: the pivot editor did not, and
+   * `Sales.Channel = ("Store")` on a field hiding "Web" was sent as "remove the
+   * filter" (review3 finding 3). The compiler adds no diagnostic of its own,
+   * because what the right reaction is (keep the old filter, refuse the query)
+   * is the consumer's call.
+   */
+  unresolvedInclusions: UnresolvedInclusion[];
   errors: DslError[];
 }
 
@@ -72,6 +97,7 @@ class Compiler {
   private ast: PivotLayoutAST;
   private ctx: CompileContext;
   private errors: DslError[] = [];
+  private unresolvedInclusions: UnresolvedInclusion[] = [];
   private isBi: boolean;
 
   /** Map from lowercase field name to SourceField for fast lookup. */
@@ -171,6 +197,7 @@ class Compiler {
       calculatedFields,
       valueColumnOrder,
       saveAs: this.ast.saveAs,
+      unresolvedInclusions: this.unresolvedInclusions,
       errors: this.errors,
     };
   }
@@ -271,8 +298,10 @@ class Compiler {
           resolved.hiddenItems = allValues.filter(v => !includeSet.has(v));
         } else {
           // No unique values available — can't invert. Store as empty
-          // (no filter applied) to avoid incorrect semantics.
+          // (no filter applied) to avoid incorrect semantics, and SAY SO: the
+          // empty shape is otherwise indistinguishable from "no list here".
           resolved.hiddenItems = undefined;
+          this.unresolvedInclusions.push({ fieldName: resolved.name, location: node.location });
         }
       }
 

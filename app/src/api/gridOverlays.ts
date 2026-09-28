@@ -27,6 +27,13 @@ import {
 } from "./dimensions";
 import { getGridStateSnapshot } from "../core/state/GridContext";
 import { resolveHeaderSizes, paintedDisplayHeadings } from "../core/lib/gridRenderer/layout/headerVisibility";
+import { isPointModeOnForeignSheet } from "../core/lib/pointModeView";
+
+// What the grid SHOWS during cross-sheet point mode (a formula picking a
+// reference on another sheet). A family that must hide DOM it hosts itself
+// (embedded forms, html shapes) subscribes to the edge-triggered signal; paint
+// and hit sites read `getLiveGridRegions()` below.
+export { isPointModeOnForeignSheet, onPointModeViewChanged } from "../core/lib/pointModeView";
 
 // ============================================================================
 // Region Definition
@@ -253,6 +260,21 @@ export function getGridRegions(): GridRegion[] {
 }
 
 /**
+ * The regions the grid PAINTS and HIT-TESTS: none while
+ * `isPointModeOnForeignSheet()` -- a formula is picking a reference on a sheet
+ * other than the one the edit belongs to, and every published region belongs
+ * to the EDIT's sheet (a point-mode switch emits no SHEET_CHANGED, so no family
+ * re-filtered). Before this, a canvas's objects painted over Sheet1 and caught
+ * the very click meant to pick Sheet1!E2.
+ *
+ * Paint and hit sites ONLY. A family reading regions for its own STATE keeps
+ * `getGridRegions()`. Returns a fresh [] when suppressed.
+ */
+export function getLiveGridRegions(): GridRegion[] {
+  return isPointModeOnForeignSheet() ? [] : gridRegions;
+}
+
+/**
  * Get all registered overlay renderers, sorted by priority (ascending).
  * Lower priority renders first (underneath); higher priority renders on top.
  */
@@ -305,11 +327,14 @@ export function hitTestOverlays(
   colHeaderHeight?: number,
 ): GridRegion | null {
   const renderers = getOverlayRenderers().reverse();
+  // What the grid PAINTS is what a press can hit: nothing of the edit's sheet
+  // while point mode shows another one.
+  const live = getLiveGridRegions();
 
   for (const renderer of renderers) {
     if (!renderer.hitTest) continue;
 
-    const matchingRegions = gridRegions.filter((r) => r.type === renderer.type);
+    const matchingRegions = live.filter((r) => r.type === renderer.type);
     for (const region of matchingRegions) {
       // Pre-compute canvas bounds for floating overlays
       let floatingCanvasBounds: { x: number; y: number; width: number; height: number } | undefined;
@@ -489,12 +514,17 @@ export function currentFloatingHitGeometry(): FloatingHitGeometry | null {
  *
  * A family's own right-click / wheel lookup asks this before claiming a point,
  * so an object covered by another cannot open its menu (or scroll) from behind.
+ *
+ * The default list is the LIVE one (`getLiveGridRegions`), so during
+ * cross-sheet point mode no default-list caller -- `topFloatingRegionAtClient`,
+ * `isOccludedAtClientPoint`, every family's right-click lookup -- can reach an
+ * object of the sheet the edit belongs to.
  */
 export function topFloatingRegionAt(
   canvasX: number,
   canvasY: number,
   geo: FloatingHitGeometry | null = currentFloatingHitGeometry(),
-  regions: readonly GridRegion[] = gridRegions,
+  regions: readonly GridRegion[] = getLiveGridRegions(),
 ): GridRegion | null {
   if (!geo) return null;
   for (const r of floatingHitOrder(regions)) {

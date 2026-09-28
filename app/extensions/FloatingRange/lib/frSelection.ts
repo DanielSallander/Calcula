@@ -7,7 +7,11 @@
 //
 //          The OBJECT selection's mutations are selection chokepoints: each
 //          change is announced to the canvas-wide selection set
-//          (@api/objectSelection `notifyObjectSelectionChanged`).
+//          (@api/objectSelection `notifyObjectSelectionChanged`). The LOCAL
+//          selection's are too, to this extension's own listeners
+//          (`onLocalSelectionChanged`): the formula-bar publisher
+//          (lib/frFormulaBar.ts) shows the active cell and ends an edit whose
+//          cell the selection left.
 
 import { notifyObjectSelectionChanged } from "@api/objectSelection";
 
@@ -57,10 +61,55 @@ export interface FrLocalSelection {
   endCol: number;
 }
 
+/**
+ * The local selection is IMMUTABLE once stored: every change replaces the
+ * object and announces itself (`onLocalSelectionChanged`). It used to be
+ * mutated in place (the move below, and the drag-extend in index.ts wrote
+ * `sel.endRow = ...` straight into it), which no listener could see -- and the
+ * formula bar and the Name Box show the active cell, so they have to.
+ */
 let localSelection: FrLocalSelection | null = null;
 
+const localSelectionListeners = new Set<() => void>();
+
+/**
+ * Hear every change of the FR-local cell selection (set with a different
+ * value, clear of a non-null selection, a move that moved, an extend, a reset
+ * that dropped one). Identical re-sets are silent. Returns the unsubscribe.
+ */
+export function onLocalSelectionChanged(listener: () => void): () => void {
+  localSelectionListeners.add(listener);
+  return () => {
+    localSelectionListeners.delete(listener);
+  };
+}
+
+function notifyLocalSelectionChanged(): void {
+  // A COPY: a listener may (un)subscribe, or change the selection again.
+  for (const listener of [...localSelectionListeners]) {
+    try {
+      listener();
+    } catch (err) {
+      console.error("[FloatingRange] local-selection listener threw:", err);
+    }
+  }
+}
+
+function sameLocalSelection(a: FrLocalSelection | null, b: FrLocalSelection | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.frId === b.frId &&
+    a.anchorRow === b.anchorRow &&
+    a.anchorCol === b.anchorCol &&
+    a.endRow === b.endRow &&
+    a.endCol === b.endCol
+  );
+}
+
 export function setLocalSelection(sel: FrLocalSelection | null): void {
-  localSelection = sel;
+  if (sameLocalSelection(localSelection, sel)) return;
+  localSelection = sel ? { ...sel } : null;
+  notifyLocalSelectionChanged();
 }
 
 export function getLocalSelection(): FrLocalSelection | null {
@@ -68,7 +117,20 @@ export function getLocalSelection(): FrLocalSelection | null {
 }
 
 export function clearLocalSelection(): void {
+  if (localSelection === null) return;
   localSelection = null;
+  notifyLocalSelectionChanged();
+}
+
+/**
+ * Drag-extend: set the moving END (the caller clamps it). Notifies when it
+ * moved. No-op without a local selection.
+ */
+export function extendLocalSelection(endRow: number, endCol: number): void {
+  if (!localSelection) return;
+  if (localSelection.endRow === endRow && localSelection.endCol === endCol) return;
+  localSelection = { ...localSelection, endRow, endCol };
+  notifyLocalSelectionChanged();
 }
 
 /** Normalized [minRow, minCol, maxRow, maxCol] of the local selection. */
@@ -97,23 +159,30 @@ export function moveLocalSelection(
   if (!localSelection) return;
   const clampRow = (r: number) => Math.max(0, Math.min(rows - 1, r));
   const clampCol = (c: number) => Math.max(0, Math.min(cols - 1, c));
+  let next: FrLocalSelection;
   if (extend) {
-    localSelection.endRow = clampRow(localSelection.endRow + dRow);
-    localSelection.endCol = clampCol(localSelection.endCol + dCol);
+    next = {
+      ...localSelection,
+      endRow: clampRow(localSelection.endRow + dRow),
+      endCol: clampCol(localSelection.endCol + dCol),
+    };
   } else {
     const row = clampRow(localSelection.anchorRow + dRow);
     const col = clampCol(localSelection.anchorCol + dCol);
-    localSelection.anchorRow = row;
-    localSelection.anchorCol = col;
-    localSelection.endRow = row;
-    localSelection.endCol = col;
+    next = { ...localSelection, anchorRow: row, anchorCol: col, endRow: row, endCol: col };
   }
+  // Only a move that MOVED announces itself (an arrow against the edge is silent).
+  if (sameLocalSelection(localSelection, next)) return;
+  localSelection = next;
+  notifyLocalSelectionChanged();
 }
 
 /** Reset everything (document change, deactivate). */
 export function resetFrSelection(): void {
   const had = selectedFrIds.size > 0;
+  const hadLocal = localSelection !== null;
   selectedFrIds.clear();
   localSelection = null;
   if (had) notifyObjectSelectionChanged();
+  if (hadLocal) notifyLocalSelectionChanged();
 }

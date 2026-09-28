@@ -3,8 +3,13 @@
 // CONTEXT: Enhanced to support sheet switching during formula editing without page reload.
 //          Key fix: Uses global flag to prevent blur commit during formula mode navigation.
 // REFACTOR: Imports from api layer instead of core internals to comply with architecture rules.
+// FIX (2026-09-27): a floating grid's cell edit (an EXTERNAL session) is formula
+//      mode too. What a click means is decided by `resolveTabClick` (pure,
+//      tested); the switch itself is Core's one `switchSheetForPointMode`, which
+//      PARKS the session so it survives the trip and is brought back by a click
+//      on its host tab (a canvas included) or ended through the formula bar.
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
 import {
   // Tauri API functions
   getSheets,
@@ -43,7 +48,19 @@ import {
   onSheetTabDecorationsChanged,
   MAX_SHEET_TAB_DECORATION_GLYPHS,
 } from "../../api";
-import { isGlobalFormulaMode, getGlobalCursorPosition } from "../../api/editing";
+import { isGlobalFormulaMode, getGlobalCursorPosition, getExternalFormulaTarget } from "../../api/editing";
+// The SUBPATH (NameBox.tsx precedent): a dependency-free store plus Core's one
+// point-mode switch, kept out of any test's `@api/editing` double.
+import {
+  subscribeExternalEdit,
+  getCrossSheetPointModeKey,
+  isCrossSheetPointMode,
+  getExternalEditSession,
+  isExternalSessionParked,
+  switchSheetForPointMode,
+  focusExternalSessionView,
+} from "../../api/externalEdit";
+import { resolveTabClick } from "./resolveTabClick";
 import type {
   SheetInfo,
   SheetsResult,
@@ -179,7 +196,21 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   // FIX: Use BOTH React state AND synchronous global check. React state may be stale
   // if the user types an operator (e.g., comma) and immediately clicks a sheet tab
   // before React re-renders. The global check uses module-level state updated synchronously.
-  const isInFormulaMode = (editing !== null && isFormulaExpectingReference(editing.value)) || isGlobalFormulaMode();
+  //
+  // A live EXTERNAL session (a floating grid's cell edit) counts when it expects
+  // a reference or is parked on another sheet. `pointKey` is a primitive
+  // snapshot ("host:parked:expecting"), so the strip re-renders when one of
+  // those changes and not on every keystroke of the formula.
+  const pointKey = useSyncExternalStore(subscribeExternalEdit, getCrossSheetPointModeKey);
+  const externalLive = pointKey !== null;
+  const isInFormulaMode =
+    (editing !== null && isFormulaExpectingReference(editing.value)) ||
+    isGlobalFormulaMode() ||
+    isCrossSheetPointMode();
+  // Adding, deleting, renaming or reordering sheets is refused while ANY
+  // external session is live, expecting or not: the session holds its host's
+  // TRUE index, and a structural change would move that sheet underneath it.
+  const structuralLocked = isInFormulaMode || externalLive;
 
   // Register core menu items on first render
   useEffect(() => {
@@ -445,7 +476,10 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     (e: React.MouseEvent, sheetIndex: number) => {
       // FIX: Check BOTH the closure value AND the synchronous global state.
       // The closure value may be stale if React hasn't re-rendered since the last keystroke.
-      const isCurrentlyFormulaMode = isInFormulaMode || isGlobalFormulaMode();
+      // An external session is asked at event time too: without the
+      // preventDefault the tab button takes focus, and the floating grid's
+      // editor blur-commits whatever was typed ("=" included) 150 ms later.
+      const isCurrentlyFormulaMode = isInFormulaMode || isGlobalFormulaMode() || isCrossSheetPointMode();
       if (isCurrentlyFormulaMode && sheetIndex !== activeIndex) {
         console.log("[SheetTabs] Formula mode mousedown - setting prevent blur flag");
         // Set the global flag BEFORE blur fires
@@ -476,17 +510,40 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
       // FIX: Check BOTH the closure value AND the synchronous global state at event time.
       // The closure value may be stale if React hasn't re-rendered since the last keystroke.
-      const isCurrentlyFormulaMode = isInFormulaMode || isGlobalFormulaMode();
+      const coreFormulaMode =
+        (editing !== null && isFormulaExpectingReference(editing.value)) || isGlobalFormulaMode();
+      // The external session is read at EVENT time as well, never from the
+      // render: a keystroke can have made it expect a reference since.
+      const session = getExternalEditSession();
+      const sessionInput = session
+        ? {
+            hostSheetIndex: session.hostSheetIndex,
+            parked: isExternalSessionParked(),
+            expecting: getExternalFormulaTarget()?.isExpectingReference() === true,
+          }
+        : null;
+      const isCurrentlyFormulaMode =
+        coreFormulaMode || (sessionInput !== null && (sessionInput.expecting || sessionInput.parked));
+
+      // A CANVAS never joins a sheet group, from either end (a group replicates
+      // cell edits, clears and formats, and the backend refuses every one of
+      // those on a canvas -- for the WHOLE group); a CANVAS is never a formula's
+      // reference target nor a 3D endpoint, except that a parked session's own
+      // host tab brings the edit back. All of it lives in `resolveTabClick`.
+      const action = resolveTabClick({
+        index,
+        activeIndex,
+        targetIsCanvas: sheetAt(sheets, index)?.kind === "canvas",
+        activeIsCanvas: sheetAt(sheets, activeIndex)?.kind === "canvas",
+        ctrlKey: event?.ctrlKey === true,
+        shiftKey: event?.shiftKey === true,
+        dragging: dragState?.dragging === true,
+        coreFormulaMode,
+        session: sessionInput,
+      });
 
       // Ctrl+Click: Toggle sheet grouping (multi-select) when NOT in formula mode
-      if (event?.ctrlKey && !isCurrentlyFormulaMode) {
-        // A CANVAS never joins a sheet group, from either end: a group
-        // replicates cell edits, clears and formats, and the backend refuses
-        // every one of those on a canvas -- for the WHOLE group, so the
-        // worksheets in it would silently stop receiving them.
-        if (sheetAt(sheets, index)?.kind === "canvas" || sheetAt(sheets, activeIndex)?.kind === "canvas") {
-          return;
-        }
+      if (action === "group") {
         const newSelection = toggleSheetInGroup(index, activeIndex);
         const newSet = new Set(newSelection);
         setGroupedSheets(newSet);
@@ -495,27 +552,21 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         return;
       }
 
-      // Normal click (no Ctrl): clear sheet grouping
-      if (groupedSheets.size > 1 && !isCurrentlyFormulaMode) {
+      // Normal click (no Ctrl): clear sheet grouping. A Ctrl+click outside
+      // formula mode that was refused (a canvas at either end) leaves it alone.
+      if (groupedSheets.size > 1 && !isCurrentlyFormulaMode && !event?.ctrlKey) {
         setGroupedSheets(new Set());
         clearSheetGrouping();
         console.log("[SheetTabs] Normal click: cleared sheet grouping");
       }
 
-      if (index === activeIndex && !(event?.shiftKey && isCurrentlyFormulaMode)) return;
+      if (action === "ignore") return;
 
-      // A CANVAS has no cells, so it can be neither a formula's reference
-      // target nor an endpoint of a 3D reference. While a formula is being
-      // written, a click on a canvas tab does nothing.
-      if (isCurrentlyFormulaMode && sheetAt(sheets, index)?.kind === "canvas") {
-        return;
-      }
-
-      console.log("[SheetTabs] Sheet click, index:", index, "isCurrentlyFormulaMode:", isCurrentlyFormulaMode, "shift:", event?.shiftKey);
+      console.log("[SheetTabs] Sheet click, index:", index, "action:", action, "shift:", event?.shiftKey);
 
       try {
         // Shift+Click in formula mode: insert 3D reference prefix
-        if (isCurrentlyFormulaMode && event?.shiftKey) {
+        if (action === "prefix3d") {
           const startSheet = sheetAt(sheets, activeIndex)?.name;
           const endSheet = sheetAt(sheets, index)?.name;
           if (startSheet && endSheet) {
@@ -549,55 +600,49 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         }
 
         // When in formula mode, we need special handling
-        if (isCurrentlyFormulaMode) {
+        if (action === "pointMode") {
           console.log("[SheetTabs] Formula mode - switching without reload");
-          
-          // Just update the backend's active sheet for cell selection
-          // but DON'T reload the page or exit edit mode
-          const result: SheetsResult = await setActiveSheetApi(index);
+
+          // Core's ONE point-mode switch: the backend's active sheet moves (so
+          // clicks there pick references), the grid shows the new sheet, and the
+          // edit stays open. For an external session it also PARKS the session
+          // (before the dispatch, so the paint it causes already hides the
+          // edit's own objects) -- or un-parks it, on the way back to its host --
+          // and refreshes dimensions. GridCanvas refetches on the
+          // `sheet:formulaModeSwitch` it emits; InlineEditor refocuses on it.
+          const result: SheetsResult = await switchSheetForPointMode(index, dispatch);
           setSheets(result.sheets);
           setActiveIndex(result.activeIndex);
-          
-          const newActiveSheet = sheetAt(result.sheets, result.activeIndex);
-          
-          // Update the grid state with new sheet context
-          // This allows the grid to show the new sheet's cells
-          // while keeping the formula editing state intact
-          if (newActiveSheet) {
-            dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name, surfaceOf(newActiveSheet)));
-          }
 
+          const newActiveSheet = sheetAt(result.sheets, result.activeIndex);
           onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
-          
-          // Emit a custom event to trigger grid refresh and editor refocus
-          // GridCanvas listens for this to re-fetch cells
-          // InlineEditor listens for this to refocus and clear the prevent flag
-          console.log("[SheetTabs] Dispatching sheet:formulaModeSwitch event");
-          window.dispatchEvent(new CustomEvent("sheet:formulaModeSwitch", {
-            detail: {
-              newSheetIndex: result.activeIndex,
-              newSheetName: newActiveSheet?.name || "",
-            }
-          }));
-          
-          // Focus the formula bar since InlineEditor won't render on target sheet
-          // This matches Excel behavior where formula bar stays active during cross-sheet selection
+
+          // THE ONE PLACE that decides focus after a point-mode switch. For the
+          // grid's own editor: the formula bar (InlineEditor does not render on
+          // the target sheet), at the tracked caret -- Excel's behaviour. For an
+          // external session: the bar while parked, its own in-place editor back
+          // on the host. The two must never both run: each steals focus from
+          // the other.
           // FIX: Clear preventBlurCommit AFTER focus is stable on the formula bar.
           // On the target sheet, InlineEditor returns null and can't clear the flag itself.
           setTimeout(() => {
-            const formulaBar = document.querySelector('[data-formula-bar="true"]') as HTMLInputElement;
-            if (formulaBar) {
-              formulaBar.focus();
-              // FIX: Use tracked cursor position instead of always placing at end
-              const cursorPos = getGlobalCursorPosition();
-              const len = formulaBar.value.length;
-              const pos = Math.min(cursorPos, len);
-              formulaBar.setSelectionRange(pos, pos);
+            if (getExternalEditSession()) {
+              focusExternalSessionView();
+            } else {
+              const formulaBar = document.querySelector('[data-formula-bar="true"]') as HTMLInputElement;
+              if (formulaBar) {
+                formulaBar.focus();
+                // FIX: Use tracked cursor position instead of always placing at end
+                const cursorPos = getGlobalCursorPosition();
+                const len = formulaBar.value.length;
+                const pos = Math.min(cursorPos, len);
+                formulaBar.setSelectionRange(pos, pos);
+              }
             }
             // Clear the flag after focus is stable
             emitAppEvent(AppEvents.PREVENT_BLUR_COMMIT, false);
           }, 50);
-          
+
           // DO NOT reload - stay in edit mode for formula reference selection
           return;
         }
@@ -648,12 +693,12 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         void alertAsync("Failed to switch sheet: " + String(err));
       }
     },
-    [activeIndex, sheets, onSheetChange, isInFormulaMode, dispatch, dragState, groupedSheets]
+    [activeIndex, sheets, onSheetChange, editing, dispatch, dragState, groupedSheets]
   );
 
   const handleAddSheet = useCallback(async (kind?: SheetKindName) => {
     // Don't allow adding sheets while in formula mode
-    if (isInFormulaMode) {
+    if (structuralLocked) {
       return;
     }
     setAddMenu(null);
@@ -698,18 +743,18 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       console.error("[SheetTabs] addSheet error:", err);
       void alertAsync("Failed to add sheet: " + String(err));
     }
-  }, [onSheetChange, isInFormulaMode]);
+  }, [onSheetChange, structuralLocked]);
 
   const handleDeleteSheet = useCallback(
     (index: number) => {
       if (sheets.length <= 1) return;
-      if (isInFormulaMode) return;
+      if (structuralLocked) return;
 
       // Show confirmation dialog instead of using confirm()
       const sheetName = sheets.find(s => s.index === index)?.name || `Sheet ${index}`;
       setDeleteConfirm({ index, name: sheetName });
     },
-    [sheets, isInFormulaMode]
+    [sheets, structuralLocked]
   );
 
   const executeDeleteSheet = useCallback(
@@ -758,7 +803,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   const handleRenameSheet = useCallback(
     async (index: number, newName: string) => {
       // Don't allow renaming sheets while in formula mode
-      if (isInFormulaMode) {
+      if (structuralLocked) {
         return;
       }
 
@@ -770,7 +815,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         void alertAsync("Failed to rename sheet: " + String(err));
       }
     },
-    [isInFormulaMode]
+    [structuralLocked]
   );
 
   // Refs to always access the latest handler versions from stable event listeners.
@@ -793,7 +838,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     (e: React.MouseEvent, index: number) => {
       e.preventDefault();
       // Don't show context menu while in formula mode
-      if (isInFormulaMode) {
+      if (structuralLocked) {
         return;
       }
       setContextMenu({
@@ -802,13 +847,13 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         sheetIndex: index,
       });
     },
-    [isInFormulaMode]
+    [structuralLocked]
   );
 
   const handleDoubleClick = useCallback(
     async (index: number) => {
       // Don't allow rename while in formula mode
-      if (isInFormulaMode) {
+      if (structuralLocked) {
         return;
       }
       const currentName = sheetByIndex(index)?.name || "";
@@ -825,7 +870,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         handleRenameSheet(index, newName.trim());
       }
     },
-    [sheetByIndex, handleRenameSheet, isInFormulaMode]
+    [sheetByIndex, handleRenameSheet, structuralLocked]
   );
 
   const contextFor = useCallback(
@@ -910,7 +955,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
   const handleDragStart = useCallback(
     (e: React.MouseEvent, sheetIndex: number) => {
-      if (isInFormulaMode || e.button !== 0) return;
+      if (structuralLocked || e.button !== 0) return;
       // Only start drag on left-click, not on context-menu
       setDragState({
         dragging: false,
@@ -919,7 +964,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         startX: e.clientX,
       });
     },
-    [isInFormulaMode]
+    [structuralLocked]
   );
 
   // Global mousemove / mouseup for drag
@@ -1072,10 +1117,16 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     container.scrollLeft = container.scrollWidth;
   }, []);
 
+  // The sheet the formula being written BELONGS to: the grid editor's source
+  // sheet, or a live external session's host (a floating grid's sheet). Read at
+  // render; `pointKey` re-renders the strip when the session's host changes.
+  const sourceIndex: number | undefined =
+    editing?.sourceSheetIndex ?? getExternalEditSession()?.hostSheetIndex;
+
   // Determine if we're viewing a different sheet than the formula source
   const isViewingDifferentSheet = isInFormulaMode &&
-    editing?.sourceSheetIndex !== undefined &&
-    editing.sourceSheetIndex !== activeIndex;
+    sourceIndex !== undefined &&
+    sourceIndex !== activeIndex;
 
   // Visible tabs in render order; shared by the tab map and drag indicator.
   const visibleSheets = sheets.filter(s => s.visibility === "visible");
@@ -1100,7 +1151,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     !!s && (
       s.index === paintedActiveIndex ||
       groupedSheets.has(s.index) ||
-      (isInFormulaMode && editing?.sourceSheetIndex === s.index)
+      (isInFormulaMode && sourceIndex === s.index)
     );
 
   return (
@@ -1131,7 +1182,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         ) : (
           visibleSheets.map((sheet, visIdx) => {
             const isSourceSheet = isInFormulaMode &&
-              editing?.sourceSheetIndex === sheet.index;
+              sourceIndex === sheet.index;
             const isTargetSheet = isInFormulaMode &&
               sheet.index === paintedActiveIndex &&
               !isSourceSheet;
@@ -1230,10 +1281,10 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         <S.AddButton
           type="button"
           tabIndex={-1}
-          $disabled={isInFormulaMode}
+          $disabled={structuralLocked}
           onClick={() => void handleAddSheet()}
-          title={isInFormulaMode ? "Finish formula editing first" : "Add new sheet"}
-          disabled={isInFormulaMode}
+          title={structuralLocked ? "Finish formula editing first" : "Add new sheet"}
+          disabled={structuralLocked}
         >
           +
         </S.AddButton>
@@ -1242,12 +1293,12 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         <S.AddCaretButton
           type="button"
           tabIndex={-1}
-          $disabled={isInFormulaMode}
-          disabled={isInFormulaMode}
+          $disabled={structuralLocked}
+          disabled={structuralLocked}
           aria-haspopup="menu"
           aria-expanded={addMenu !== null}
           data-add-sheet-menu-trigger
-          title={isInFormulaMode ? "Finish formula editing first" : "Add a worksheet or a canvas"}
+          title={structuralLocked ? "Finish formula editing first" : "Add a worksheet or a canvas"}
           onClick={(e) => {
             const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
             setAddMenu((open) => (open ? null : { x: rect.left, y: rect.top - 2 }));
@@ -1282,7 +1333,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         <S.FormulaModeIndicator>
           Selecting from: {sheetAt(sheets, activeIndex)?.name} 
           {" --> "}
-          {editing?.sourceSheetName || sheetAt(sheets, editing?.sourceSheetIndex ?? 0)?.name}
+          {editing?.sourceSheetName || sheetAt(sheets, sourceIndex ?? 0)?.name}
         </S.FormulaModeIndicator>
       )}
 

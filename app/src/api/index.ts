@@ -1260,6 +1260,7 @@ export {
   initKeybindings,
   registerKeybinding,
   getAllKeybindings,
+  isListedKeybinding,
   getKeybinding,
   getKeybindingsForCategory,
   getCategories,
@@ -2924,6 +2925,29 @@ export type {
   ObjectGeometryOutcome,
   UndoTransactionHandle,
 } from "./objectGeometry";
+
+// The ONE "a PivotTable report will overwrite existing data" decision for any
+// gesture that filters or rebuilds pivots (a slicer click, a ribbon filter,
+// the pivot's own commands): asked once, failing closed, and on decline only
+// the gesture's own overwrite step taken back.
+export {
+  createPivotOverwriteTally,
+  confirmPivotOverwriteOrUndo,
+  takeBackPivotOverwrite,
+  pivotOverwriteQuestion,
+  undoStepPushedBetween,
+  runNamingItsUndoStep,
+  isAnyUndoTransactionOpen,
+  runStepThenConfirmOverwrite,
+  PIVOT_OVERWRITE_NOT_TAKEN_BACK,
+} from "./pivotOverwrite";
+
+export type {
+  PivotOverwriteTally,
+  PivotOverwriteOutcome,
+  PivotOverwriteStepOutcome,
+  ConfirmPivotOverwriteOptions,
+} from "./pivotOverwrite";
 
 // Restack floating objects (bring forward / send backward / to front / to
 // back) through whoever owns the page's paint order -- a canvas sheet's

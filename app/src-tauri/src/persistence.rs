@@ -1448,7 +1448,7 @@ pub(crate) fn saved_timeline_to_timeline_at(
     }
 }
 
-fn slicer_to_saved(slicer: &crate::slicer::Slicer, sheet_ids: &[SheetId]) -> Option<persistence::SavedSlicer> {
+pub(crate) fn slicer_to_saved(slicer: &crate::slicer::Slicer, sheet_ids: &[SheetId]) -> Option<persistence::SavedSlicer> {
     Some(persistence::SavedSlicer {
         id: slicer.id,
         name: slicer.name.clone(),
@@ -1501,6 +1501,7 @@ fn slicer_to_saved(slicer: &crate::slicer::Slicer, sheet_ids: &[SheetId]) -> Opt
             }
         }).collect(),
         filter_level: slicer.filter_level,
+        data_source_id: slicer.data_source_id.clone(),
     })
 }
 
@@ -1569,6 +1570,7 @@ pub(crate) fn saved_slicer_to_slicer_at(
             }
         }).collect(),
         filter_level: saved.filter_level,
+        data_source_id: saved.data_source_id.clone(),
     }
 }
 
@@ -2164,18 +2166,49 @@ pub(crate) fn collect_pivot_definitions(
     workbook: &mut Workbook,
 ) {
     use persistence::SavedPivotDefinition;
-    use crate::pivot::types::SavedBiPivotMetadata;
+    use crate::pivot::types::{SavedBiPivotMetadata, SavedPivotOutputExtent};
 
+    // Every pivot's written output block, snapshotted ALONE before the pivot
+    // locks (nothing below may take `protected_regions` under `sheet_names`).
+    // A BI pivot reopens with an empty cache; this is what lets the load
+    // register its region over the output it really wrote.
+    let output_extents: std::collections::HashMap<pivot_engine::PivotId, SavedPivotOutputExtent> = state
+        .protected_regions
+        .lock()
+        .map(|regions| {
+            regions
+                .iter()
+                .filter(|r| r.region_type == "pivot")
+                .map(|r| {
+                    (
+                        r.owner_id,
+                        SavedPivotOutputExtent {
+                            rows: r.end_row.saturating_sub(r.start_row) + 1,
+                            cols: r.end_col.saturating_sub(r.start_col) + 1,
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // The sheet names, COPIED and released before either pivot lock. The
+    // calculation pass (`calculate_now`, an async command, so off the main
+    // thread) holds `grid`, `grids` and `sheet_names` and then takes
+    // `pivot_tables`; reading the names under the pivot guard was the reverse
+    // order, so a save, an AutoRecover tick or a publish that overlapped an F9
+    // hung the app (fix round 4, B1). Only the names are needed, to resolve
+    // each grid pivot's source index below.
+    let sheet_names: Vec<String> = match state.sheet_names.read() {
+        Ok(sn) => sn.clone(),
+        Err(_) => return,
+    };
     let pivot_tables = match pivot_state.pivot_tables.read() {
         Ok(pt) => pt,
         Err(_) => return,
     };
     let bi_metadata = match pivot_state.bi_metadata.read() {
         Ok(bm) => bm,
-        Err(_) => return,
-    };
-    let sheet_names = match state.sheet_names.read() {
-        Ok(sn) => sn,
         Err(_) => return,
     };
 
@@ -2240,6 +2273,7 @@ pub(crate) fn collect_pivot_definitions(
             perspectives: meta.perspectives.clone(),
             selected_perspective: meta.selected_perspective.clone(),
             cultures: meta.cultures.clone(),
+            output_extent: output_extents.get(pivot_id).copied(),
             // Prefer the carried package data source id; fall back to the
             // live connection UUID (which IS the package ds id at publish
             // time on the authoring machine). Never write the ZERO placeholder.
@@ -2261,14 +2295,29 @@ pub(crate) fn collect_pivot_definitions(
 /// Restore full pivot definitions and BI metadata from Workbook into PivotState.
 /// For grid-sourced pivots, rebuilds the cache from source data.
 /// For BI pivots, creates an empty cache (data arrives when user reconnects).
-fn restore_pivot_definitions(
+pub(crate) fn restore_pivot_definitions(
     workbook: &Workbook,
     pivot_state: &crate::pivot::types::PivotState,
     state: &AppState,
 ) {
     use pivot_engine::{PivotCache, PivotDefinition};
     use crate::pivot::types::{BiPivotMetadata, SavedBiPivotMetadata};
-    use crate::pivot::operations::{build_cache_from_grid, safe_calculate_pivot, update_pivot_region};
+    use crate::pivot::operations::{
+        build_cache_from_grid, safe_calculate_pivot, update_pivot_region, update_pivot_region_extent,
+    };
+
+    // The output block every BI pivot last WROTE, read ahead of the pivots
+    // themselves: a BI pivot reopens with an empty cache, and a region
+    // registered from that empty view is smaller than the pivot's saved
+    // output, so its first refresh counted its own rows as someone else's data
+    // and asked to overwrite them (worksheets and canvases alike).
+    let bi_output_extents: std::collections::HashMap<pivot_engine::PivotId, crate::pivot::types::SavedPivotOutputExtent> =
+        workbook
+            .bi_pivot_metadata
+            .iter()
+            .filter_map(|json| serde_json::from_value::<SavedBiPivotMetadata>(json.clone()).ok())
+            .filter_map(|saved| saved.output_extent.map(|extent| (saved.pivot_id, extent)))
+            .collect();
 
     // LOAD PATH: rebuilding the pivot store from the file just read. `open_file`
     // assigns `is_modified = false` as its last act, so a dirty mark here would fight
@@ -2347,7 +2396,19 @@ fn restore_pivot_definitions(
                 .position(|n| n == dest_sheet_name)
                 .unwrap_or(0);
             drop(sheet_names);
-            update_pivot_region(state, pivot_id, dest_sheet_idx, def.destination, view);
+            match bi_output_extents.get(&pivot_id) {
+                // A BI pivot's empty cache renders nothing like its saved
+                // output: cover exactly the block it wrote.
+                Some(extent) if saved.source_type != "grid" => update_pivot_region_extent(
+                    state,
+                    pivot_id,
+                    dest_sheet_idx,
+                    def.destination,
+                    extent.rows,
+                    extent.cols,
+                ),
+                _ => update_pivot_region(state, pivot_id, dest_sheet_idx, def.destination, view),
+            }
         }
 
         pivot_tables.insert(pivot_id, (def, cache));
@@ -7047,5 +7108,69 @@ mod canvas_kind_persistence_tests {
         let included: Vec<usize> =
             (0..4).filter(|&i| ai_context_includes_sheet(&visibility, &kinds, i)).collect();
         assert_eq!(included, vec![0, 3], "a canvas and an object sheet are left out; a hidden worksheet is not");
+    }
+}
+
+#[cfg(test)]
+mod collect_pivot_definitions_lock_order_tests {
+    //! FIX ROUND 4, B1. `collect_pivot_definitions` is reached from
+    //! `save_file`, `auto_recover_save` and the `.calp` publish, and it took
+    //! `pivot_tables`, then `bi_metadata`, then `sheet_names`. The calculation
+    //! pass (`calculate_now`, off the main thread) holds `grid`, `grids` and
+    //! `sheet_names` and then takes `pivot_tables`, so a save that overlapped an
+    //! F9 could hang the app with nothing in the log.
+    use crate::document_effect::test_seed_effect;
+    use std::time::Duration;
+
+    #[test]
+    fn saving_pivots_never_holds_the_pivot_lock_while_it_waits_for_sheet_names() {
+        let state = crate::create_app_state();
+        let pivots = crate::pivot::types::PivotState::new();
+        let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let mut def = pivot_engine::PivotDefinition::new(id, (0, 0), (2, 1));
+        def.source_sheet = Some("Sheet1".to_string());
+        pivots
+            .pivot_tables
+            .write(&test_seed_effect())
+            .unwrap()
+            .insert(id, (def, pivot_engine::PivotCache::new(id, 0)));
+
+        let (parked, reached, saved) = std::thread::scope(|scope| {
+            // The pass holds `sheet_names` (after both grid locks)...
+            let names_guard = state.sheet_names.write(&test_seed_effect()).unwrap();
+            let runner = scope.spawn(|| {
+                let mut workbook = ::persistence::Workbook::new();
+                super::collect_pivot_definitions(&pivots, &state, &mut workbook);
+                workbook
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            // The save needs the names, so it cannot have finished.
+            let parked = !runner.is_finished();
+            // ...and takes `pivot_tables` next. That must not wait on the save.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let pivot_state = &pivots;
+            let taker = scope.spawn(move || {
+                let _g = pivot_state.pivot_tables.read().unwrap();
+                let _ = tx.send(());
+            });
+            let reached = rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            drop(names_guard); // let everyone finish, whatever happened
+            let saved = runner.join().unwrap();
+            taker.join().unwrap();
+            (parked, reached, saved)
+        });
+
+        assert!(parked, "fixture: the save did not wait for sheet_names");
+        assert_eq!(saved.pivot_definitions.len(), 1, "fixture: the pivot was saved");
+        assert_eq!(
+            saved.pivot_definitions[0].source_sheet_index,
+            Some(0),
+            "the grid pivot's source sheet still resolves from the copied names"
+        );
+        assert!(
+            reached,
+            "collect_pivot_definitions held pivot_tables while it waited for sheet_names (ABBA against \
+             the calculation pass: a save or AutoRecover overlapping an F9 hangs the app)"
+        );
     }
 }

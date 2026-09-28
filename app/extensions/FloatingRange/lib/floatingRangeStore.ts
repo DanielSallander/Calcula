@@ -10,6 +10,7 @@
 import {
   replaceGridRegionsByType,
   removeGridRegionsByType,
+  requestOverlayRedraw,
   type GridRegion,
 } from "@api/gridOverlays";
 import {
@@ -17,10 +18,18 @@ import {
   updateFloatingRange,
   type FloatingRangeInfo,
 } from "@api/floatingRanges";
-import { getDesignMode } from "@api/designMode";
+import { getDesignMode, onDesignModeChange } from "@api/designMode";
+import {
+  getLayoutSurface,
+  objectGeometryEditable,
+  onLayoutSurfaceChanged,
+} from "@api/layoutSurface";
+import { onObjectSelectionChanged } from "@api/objectSelection";
 import { showToast } from "@api/notifications";
 import { frameWidth, frameHeight } from "./frDimensions";
 import { clearFrScroll, resetFrScrolls } from "./frScroll";
+import { isFloatingRangeSelected } from "./frSelection";
+import { getFrEditingRange, onFrEditingRangeChanged } from "./frEditingRange";
 
 // ============================================================================
 // Entry model
@@ -341,8 +350,14 @@ export function previewFloatingRangePosition(id: string, x: number, y: number): 
   return true;
 }
 
-/** Move (store + debounced persist). Used by movePreview AND moveComplete —
- *  the debounce coalesces the stream into one backend write. */
+/**
+ * Move (store + debounced persist). The COMMIT of a position: a pointer drag
+ * calls it once, at moveComplete (its preview frames go through
+ * `previewFloatingRangePosition`, which writes nothing), and the object-
+ * geometry seam's commit calls it once per range. Persisting preview frames
+ * made a human drag that paused for longer than the debounce several
+ * "Move floating range" undo steps.
+ */
 export function moveFloatingRange(id: string, x: number, y: number): void {
   const entry = getFloatingRangeById(id);
   if (!entry) return;
@@ -388,25 +403,13 @@ export function resetFloatingRangeStore(): void {
 // Grid overlay sync
 // ============================================================================
 
-/**
- * Publish overlay regions for the ACTIVE sheet's floating ranges (atomically —
- * replaceGridRegionsByType, one listener notification). Frame size is derived
- * here, never read from anywhere else.
- *
- * MOVE/RESIZE ARE DESIGN-MODE ACTS, the BUTTON rule rather than the shape
- * rule (owner decision 2026-08-13): in run mode a floating range is a working
- * surface — its cells select and edit — and a drag that relocates it is
- * layout work. Core consults `data.movable`/`data.resizable` before starting
- * either gesture, so gating the flags here gates the whole interaction; the
- * DESIGN_MODE_CHANGED_EVENT listener in index.ts re-syncs so a toggle takes
- * effect on the spot. Cell interaction (claimsBodyDrag over the cell area)
- * stays live in both modes, exactly as a button still CLICKS in run mode.
- */
-export function syncFloatingRangeRegions(): void {
-  const visible = entries.filter((e) => e.sheetIndex === activeSheetIndex);
-  const designing = getDesignMode();
+// ============================================================================
+// Editability — THE one per-range answer every geometry door reads
+// ============================================================================
 
-  const regions: GridRegion[] = visible.map((entry) => ({
+/** The region a range publishes, WITHOUT its flags (the lock asks by region). */
+function baseRegionOf(entry: FloatingRangeEntry): GridRegion {
+  return {
     id: `${FR_REGION_ID_PREFIX}${entry.id}`,
     type: FLOATING_RANGE_REGION_TYPE,
     startRow: 0,
@@ -424,15 +427,136 @@ export function syncFloatingRangeRegions(): void {
       name: entry.name,
       rows: entry.rows,
       cols: entry.cols,
-      movable: designing,
-      resizable: designing,
+    },
+  };
+}
+
+/**
+ * Whether the range's POSITION and SIZE may change (owner decision
+ * 2026-09-27): on a layout surface the surface decides -- editable (not a
+ * subscribed canvas) and the range not locked there -- and on a worksheet it
+ * always may. Design Mode is never part of it.
+ */
+function geometryEditableFor(entry: FloatingRangeEntry, region: GridRegion): boolean {
+  return objectGeometryEditable(entry.sheetIndex, region, true);
+}
+
+/**
+ * THE one per-range geometry answer: the published `movable` flag, the menu's
+ * Add/Delete Row/Column items, the Properties dialog's size and chrome
+ * controls, the edge-handle cell scaling and the script provider's `resize`
+ * all read it. False for an unknown id.
+ */
+export function frGeometryEditable(id: string): boolean {
+  const entry = getFloatingRangeById(id);
+  if (!entry) return false;
+  return geometryEditableFor(entry, baseRegionOf(entry));
+}
+
+/**
+ * Whether the range may be AUTHORED at all -- its object menu opens, it can
+ * be renamed or deleted: its sheet is editable (a worksheet, or a canvas that
+ * is not subscribed). A LOCK freezes geometry only, so a locked range still
+ * answers true here and false from `frGeometryEditable`.
+ */
+export function frObjectEditable(id: string): boolean {
+  const entry = getFloatingRangeById(id);
+  if (!entry) return false;
+  const surface = getLayoutSurface(entry.sheetIndex);
+  return surface ? surface.editable : true;
+}
+
+// ============================================================================
+// Grid overlay sync
+// ============================================================================
+
+/**
+ * Publish overlay regions for the ACTIVE sheet's floating ranges (atomically —
+ * replaceGridRegionsByType, one listener notification). Frame size is derived
+ * here, never read from anywhere else.
+ *
+ * THE TITLE BAR IS A FRAME, THE CELLS ARE THE WORKING SURFACE (owner decision
+ * 2026-09-27, replacing the 2026-08-13 "button rule"). Design Mode no longer
+ * decides whether a range may move; it decides only what a press on its CELLS
+ * means. Three flags, all from `frGeometryEditable`'s rule:
+ *
+ *   - `movable`: the title bar (or, with the title hidden, the 4px border
+ *     band) moves the range in every mode, on every sheet kind -- unless the
+ *     sheet is a subscribed canvas or the canvas locks the range. Core reads it
+ *     before a move; the canvas's arrange, nudge and group drag read it too.
+ *   - `resizable`: the same, AND the range is SELECTED, AND none of its cells
+ *     is being edited -- the handles exist only on a selected object (Excel /
+ *     Power BI), so an unselected range's corner boxes and edge balls never
+ *     take a click meant for its cells, and never sit over the cell the user
+ *     is typing in (owner, 2026-09-27). The editor announces itself through
+ *     lib/frEditingRange.ts; Core's corner boxes read this flag, and the
+ *     extension's own paint and edge gesture re-check the editor live
+ *     (`frHandlesLive`).
+ *   - `bodyGrab`: Design Mode on AND no title bar -- the whole body is then the
+ *     move handle (the Charts/Controls convention). Never outside Design
+ *     Mode: flipping `movable` alone must not turn every title-less range's
+ *     cells into a move handle.
+ *
+ * Every input is re-published on its own signal: Design Mode, the layout
+ * surface (subscribe / detach / lock / a late canvas store) and the object
+ * selection each re-sync from index.ts.
+ */
+export function syncFloatingRangeRegions(): void {
+  const visible = entries.filter((e) => e.sheetIndex === activeSheetIndex);
+  const designing = getDesignMode();
+
+  const regions: GridRegion[] = visible.map((entry) => {
+    const region = baseRegionOf(entry);
+    const geometry = geometryEditableFor(entry, region);
+    region.data = {
+      ...region.data,
+      movable: geometry,
+      resizable:
+        geometry && isFloatingRangeSelected(entry.id) && getFrEditingRange() !== entry.id,
+      bodyGrab: geometry && designing && !entry.showTitle,
       // On a canvas the frame's POSITION snaps to the layout grid like every
       // object's, but its SIZE is whole rows and columns (quantised by this
       // extension on resize): a second, pixel-grid snap on top would make most
       // row/column counts unreachable. Core honours this for resize only.
       snapResize: false,
-    },
-  }));
+    };
+    return region;
+  });
 
   replaceGridRegionsByType(FLOATING_RANGE_REGION_TYPE, regions);
+}
+
+/**
+ * Re-publish the regions whenever an input of their flags changes, so no
+ * change waits for the next unrelated sync:
+ *
+ *   - Design Mode (`bodyGrab`);
+ *   - the layout surface: subscribe, detach, lock, and a canvas store that
+ *     loads AFTER the ranges did (without this a range synced before its
+ *     sheet was known to be a canvas kept the worksheet answer until some
+ *     other sync -- green in unit tests, intermittent live);
+ *   - the object selection (`resizable` needs the range SELECTED; selecting
+ *     and deselecting both announce through `notifyObjectSelectionChanged`);
+ *   - the cell editor opening or closing (`resizable` stands down while one
+ *     of the range's cells is edited; lib/frEditingRange.ts).
+ *
+ * No feedback loop: publishing regions notifies region listeners (the grid
+ * repaint, the canvas's object label, the formula-bar publisher), none of
+ * which writes any of the four.
+ * Returns the cleanup.
+ */
+export function installFrRegionResyncs(): () => void {
+  const resync = () => {
+    syncFloatingRangeRegions();
+    requestOverlayRedraw();
+  };
+  const cleanups = [
+    onDesignModeChange(resync),
+    onLayoutSurfaceChanged(resync),
+    onObjectSelectionChanged(resync),
+    onFrEditingRangeChanged(resync),
+  ];
+  return () => {
+    for (const cleanup of cleanups) cleanup();
+  };
 }

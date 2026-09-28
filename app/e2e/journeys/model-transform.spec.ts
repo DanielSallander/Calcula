@@ -564,8 +564,13 @@ test.describe("BI model — table transformations", () => {
    * THE PROBES, AND WHY THEY HAVE TEETH
    *
    *   "does the host know the model?" -> deriveSchema for a lookup step must
-   *                                      SUCCEED. It can only succeed if the
-   *                                      host handed the catalog down.
+   *                                      DERIVE the joined columns. It can
+   *                                      only do that if the host handed the
+   *                                      catalog down.
+   *   "does the dry run agree with the edit?" -> while the target is
+   *                                      DirectQuery, both dry runs report the
+   *                                      refusal the edit makes; once it is
+   *                                      Import, both are clean.
    *   "does it JOIN real rows?"       -> after refreshing, the joined column
    *                                      holds the target's values — and the
    *                                      ROW COUNT is unchanged even though
@@ -580,7 +585,9 @@ test.describe("BI model — table transformations", () => {
    *                                      standing. A cycle accepted here has
    *                                      no valid refresh order at all.
    *
-   * Runs after the script test, which leaves the orders pipeline cleared.
+   * Runs after the script test, which leaves the orders pipeline cleared -- and
+   * after the import test REOPENED the workbook, which leaves its source
+   * disconnected (see the first arrange step).
    */
   test("looks up another table, and refuses a cycle", async ({ sharedPage }) => {
     const page = sharedPage;
@@ -604,6 +611,24 @@ test.describe("BI model — table transformations", () => {
         ...body,
       });
 
+    // --- Arrange: the CSV source is connected again ------------------------
+    // The import test ends by SAVING, File > New and REOPENING the workbook
+    // (its Probe 4), and a reopened document carries no live connector: the
+    // restore rebuilds every BI connection with nothing wired
+    // (`restore_local_bi_connections` sets `connector_index: None`; credentials
+    // are never persisted), so the source is exactly as disconnected as it is
+    // for a user who reopens the file. Listing and importing source tables
+    // need it wired. This test assumed the pre-reopen connection was still
+    // live and failed with "Not connected to the database" in every journey
+    // run on record (2026-09-22 onward). Connecting is what the Connections
+    // tab's Connect does for a file source -- the call the import test makes.
+    await invoke(page, "bi_model_connect_source", {
+      connectionId,
+      sourceId: SOURCE_ID,
+      connectionString: "",
+      remember: false,
+    });
+
     // --- Arrange: the target table joins the model -------------------------
     const listed = await invoke<Array<{ schema: string; name: string }>>(
       page,
@@ -612,10 +637,13 @@ test.describe("BI model — table transformations", () => {
     );
     const target = listed.find((t) => t.name === CUSTOMERS_TABLE);
     expect(target, `source table '${CUSTOMERS_TABLE}' was listed`).toBeTruthy();
-    await invoke<Overview>(page, "bi_model_import_tables", {
+    const withTarget = await invoke<Overview>(page, "bi_model_import_tables", {
       connectionId,
       tables: [{ schema: target!.schema, name: target!.name }],
     });
+    // An import is DirectQuery until told otherwise (introspection's default;
+    // only a transformed table is switched to Import). Probe 1b depends on it.
+    expect(tableOf(withTarget, CUSTOMERS_TABLE).storageMode).toContain("DirectQuery");
 
     const lookup = [
       {
@@ -632,23 +660,89 @@ test.describe("BI model — table transformations", () => {
     // engine unit test still passes, which is why this probe is here.
     const derived = await transform<{
       columns: ColumnInfo[];
-      diagnostics: Array<{ message: string }>;
+      diagnostics: Array<{ index: number; message: string }>;
     }>("deriveSchema", TABLE, { steps: lookup });
     expect(
-      derived.diagnostics,
+      derived.diagnostics.map((d) => d.message).join("\n"),
       "the host must know the model's other tables",
-    ).toEqual([]);
+    ).not.toContain("unknown lookup table");
     const derivedNames = derived.columns.map((c) => c.name);
     expect(derivedNames).toContain("customer");
     expect(derivedNames, "outputName renames on the way in").toContain("customer_tier");
     expect(derivedNames, "and never under the target's own name").not.toContain("tier");
+    // ... and the dry run says what the EDIT will say (Probe 1b): the steps
+    // derive, but the model refuses a lookup into a DirectQuery table. It used
+    // to report this candidate as clean, so the Model Editor enabled Apply on
+    // an edit that was then refused (model_editor.rs `model_level_diagnostic`).
+    expect(derived.diagnostics, "the dry run reports what the edit refuses").toHaveLength(1);
+    expect(derived.diagnostics[0].index, "on the lookup step").toBe(0);
+    expect(derived.diagnostics[0].message).toContain("DirectQuery");
+    // The script pane's dry run too, placed on the statement's line.
+    const scripted = await transform<{
+      parsed: boolean;
+      diagnostics: Array<{ message: string; line?: number }>;
+    }>("fromScript", TABLE, {
+      text: [
+        "lookupColumn",
+        `  table=${CUSTOMERS_TABLE}`,
+        "  on=id:cid",
+        "  take=customer",
+        "  take=tier:customer_tier",
+      ].join("\n"),
+    });
+    expect(scripted.parsed).toBe(true);
+    expect(scripted.diagnostics, "the script dry run reports it too").toHaveLength(1);
+    expect(scripted.diagnostics[0].message).toContain("DirectQuery");
+    expect(scripted.diagnostics[0].line, "on the statement's first line").toBe(1);
+
+    // --- Probe 1b: a DirectQuery target is refused AT THE EDIT -------------
+    // A lookup joins the target's CACHED rows, and a DirectQuery table is never
+    // cached. The model refuses that combination (engine-core
+    // `validate_lookup_targets`), but the host's pipeline edit never ran model
+    // validation, so this edit used to be ACCEPTED and the refresh below then
+    // failed with "unknown lookup table 'customers'". The refusal must come now,
+    // name the reason, and install nothing.
+    const directQuery = await transform("set", TABLE, { steps: lookup }).then(
+      () => "accepted",
+      (err: unknown) => String(err),
+    );
+    expect(directQuery, "a lookup into a DirectQuery table must be refused at the edit").toContain(
+      "DirectQuery",
+    );
+    expect(
+      tableOf(await invoke<Overview>(page, "bi_model_get_overview", { connectionId }), TABLE)
+        .transformSteps,
+      "a refused edit installs nothing",
+    ).toEqual([]);
+    // What the refusal says to do: give the target Import storage.
+    await invoke(page, "bi_model_set_table_storage_mode", {
+      connectionId,
+      tableName: CUSTOMERS_TABLE,
+      storageMode: "InMemory",
+    });
+    // POSITIVE CONTROL for the dry run's report: the same candidate is clean
+    // now, so the diagnostic above was about the target's storage.
+    const cleared = await transform<{ diagnostics: unknown[] }>("deriveSchema", TABLE, { steps: lookup });
+    expect(cleared.diagnostics, "with an Import target the dry run is clean").toEqual([]);
 
     // --- Probe 2: the script projection round-trips it ---------------------
     await transform("set", TABLE, { steps: lookup });
     const rendered = await transform<{ script: string }>("toScript", TABLE, {});
-    expect(rendered.script).toContain(`lookupColumn table=${CUSTOMERS_TABLE}`);
-    expect(rendered.script).toContain("on=id:cid");
-    expect(rendered.script).toContain("take=tier:customer_tier");
+    // One key and two takes are THREE repeatable options, and a statement with
+    // more than one repeatable option puts each on its own continuation line
+    // -- the renderer's documented rule (engine-core transform/script
+    // render.rs `force_break`, pinned by `repeatable_options_break_onto_their_
+    // own_lines`), so a changed take is one changed line in a diff. This used
+    // to expect `lookupColumn table=customers` on ONE line, which the renderer
+    // has never produced for this step; it went unnoticed because the test
+    // never got past its first (disconnected) arrange step.
+    expect(rendered.script.split("\n")).toEqual([
+      "lookupColumn",
+      `  table=${CUSTOMERS_TABLE}`,
+      "  on=id:cid",
+      "  take=customer",
+      "  take=tier:customer_tier",
+    ]);
     const readBack = await transform<{
       parsed: boolean;
       steps: Array<Record<string, unknown>>;

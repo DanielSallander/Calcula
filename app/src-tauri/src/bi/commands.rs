@@ -456,7 +456,7 @@ pub fn batches_to_result(batches: &[arrow::record_batch::RecordBatch]) -> BiQuer
 /// Shared with the transformation-preview path (`bi::model_editor`) so a
 /// preview grid renders values exactly as a query result does — a second
 /// formatter would drift and show the same value two ways.
-pub(super) fn arrow_value_to_string(array: &dyn Array, idx: usize) -> Option<String> {
+pub(crate) fn arrow_value_to_string(array: &dyn Array, idx: usize) -> Option<String> {
     if array.is_null(idx) {
         return None;
     }
@@ -3285,6 +3285,19 @@ pub async fn bi_get_column_values(
     table: String,
     column: String,
 ) -> Result<Vec<String>, String> {
+    bi_get_column_values_core(&bi_state, connection_id, &table, &column).await
+}
+
+/// [`bi_get_column_values`] over a borrowed `BiState` -- the one path every
+/// model value list takes (ribbon filters, pinned pivot slicers, MODEL
+/// slicers), so auto-connect, auto-bind and the connection's RLS/OLS role
+/// apply to all of them alike.
+pub(crate) async fn bi_get_column_values_core(
+    bi_state: &BiState,
+    connection_id: ConnectionId,
+    table: &str,
+    column: &str,
+) -> Result<Vec<String>, String> {
     log_info!(
         "BI",
         "bi_get_column_values: conn={}, {}.{}",
@@ -3316,7 +3329,7 @@ pub async fn bi_get_column_values(
         let mut engine = engine_arc.lock().await;
         apply_connection_role(&mut engine, &bi_state, connection_id);
         let query_request =
-            distinct_values_request(&engine, vec![bi_engine::ColumnRef::new(&table, &column)])?;
+            distinct_values_request(&engine, vec![bi_engine::ColumnRef::new(table, column)])?;
         engine.query_auto_refresh(query_request).await
             .map_err(|e| friendly_bi_query_error("Query failed", &e))?
     };
@@ -3365,6 +3378,19 @@ pub async fn bi_get_column_available_values(
     column: String,
     cross_filters: Vec<BiCrossFilter>,
 ) -> Result<Vec<String>, String> {
+    bi_get_column_available_values_core(&bi_state, connection_id, &table, &column, &cross_filters).await
+}
+
+/// [`bi_get_column_available_values`] over a borrowed `BiState`: the values of
+/// `table.column` that still have rows under `cross_filters` (a model
+/// slicer's has-data shading).
+pub(crate) async fn bi_get_column_available_values_core(
+    bi_state: &BiState,
+    connection_id: ConnectionId,
+    table: &str,
+    column: &str,
+    cross_filters: &[BiCrossFilter],
+) -> Result<Vec<String>, String> {
     // Auto-connect + auto-bind, unless every table is already cache-warm (offline).
     let all_tables: Vec<String> = {
         let engine_arc = get_engine_arc(&bi_state, connection_id)?;
@@ -3380,8 +3406,8 @@ pub async fn bi_get_column_available_values(
     }
 
     // Build GROUP BY: target column + all cross-filter columns
-    let mut group_by = vec![bi_engine::ColumnRef::new(&table, &column)];
-    for cf in &cross_filters {
+    let mut group_by = vec![bi_engine::ColumnRef::new(table, column)];
+    for cf in cross_filters {
         group_by.push(bi_engine::ColumnRef::new(&cf.table, &cf.column));
     }
 

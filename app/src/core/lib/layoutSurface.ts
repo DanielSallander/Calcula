@@ -41,8 +41,10 @@ export interface LayoutSurface {
   page: { width: number; height: number } | null;
   /**
    * Whether objects may be moved/resized at all. `false` is consume mode (a
-   * subscribed canvas, or design mode off): objects stay clickable -- a click
-   * still selects -- but no drag changes their geometry.
+   * subscribed canvas): objects stay clickable -- a click still selects -- but
+   * no drag changes their geometry. Design Mode is never part of this answer
+   * (docs/design/canvas-sheets.md section 2); it only decides, per family,
+   * what a press on an object's WORKING area means.
    */
   editable: boolean;
   /**
@@ -66,6 +68,26 @@ export function isRegionLocked(surface: LayoutSurface | null, region: GridRegion
     console.error("[layoutSurface] isLocked threw; treating the object as unlocked:", err);
     return false;
   }
+}
+
+/**
+ * Whether a family may publish `movable`/`resizable` TRUE for `region` on the
+ * sheet at `sheetIndex` -- THE one answer for "may this object's position and
+ * size change", so every family and every geometry door (Core's drag, a
+ * family's own gesture, a menu item, a script) reads the same rule.
+ *
+ * On a layout surface the SURFACE decides: editable (not subscribed) AND the
+ * object is not locked there. Design Mode is never part of it. Off a surface
+ * (a worksheet) the family's own rule stands, passed in as `offSurface`.
+ */
+export function objectGeometryEditable(
+  sheetIndex: number,
+  region: GridRegion,
+  offSurface: boolean,
+): boolean {
+  const surface = getLayoutSurface(sheetIndex);
+  if (!surface) return offSurface;
+  return surface.editable && !isRegionLocked(surface, region);
 }
 
 /**

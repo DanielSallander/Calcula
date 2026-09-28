@@ -52,6 +52,26 @@ async function invoke<T = unknown>(page: Page, cmd: string, args: unknown = {}):
   ) as Promise<T>;
 }
 
+/**
+ * File > New as the APP performs it (`newFile`, src/core/lib/file-api.ts): the
+ * backend `new_file` PLUS the AFTER_NEW announcement every frontend store
+ * reloads on. A bare `invoke("new_file")` resets the BACKEND only, and the
+ * frontend keeps painting what it last loaded: this spec's cleanup ended that
+ * way, and left the "Dirty Flag Chart" its PERSISTENCE reload had loaded
+ * painted over a workbook that no longer held it -- a phantom that covered
+ * floating-range.spec.ts's pixel probe ("the floating frame never painted")
+ * whenever the two ran back to back.
+ */
+async function newFileLikeTheApp(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const mod = await (window as unknown as {
+      __calcImport: (u: string) => Promise<{ newFile: () => Promise<void> }>;
+    }).__calcImport(new URL("/src/core/lib/file-api.ts", document.baseURI).href);
+    await mod.newFile();
+  });
+  await page.waitForTimeout(1000);
+}
+
 /** The authoritative dirty flag — the one the close prompt and AutoRecover read. */
 async function isDirty(page: Page): Promise<boolean> {
   return invoke<boolean>(page, "is_file_modified");
@@ -554,9 +574,16 @@ test.describe.serial("Dirty flag: mutations, AutoRecover and transient previews"
       displayHeadings: false,
     });
     expect(await isDirty(page)).toBe(false);
+  });
 
-    // Restore defaults so later specs see a normal view.
-    await invoke(page, "set_sheet_display_flags", {
+  // Leave the shared app as the next spec expects to find it -- normal view
+  // flags and a new, EMPTY workbook in the backend AND in every frontend store
+  // -- whether or not the tests above passed. (This used to be the tail of the
+  // PERSISTENCE test, so it ran only when every assertion before it held, and
+  // its bare backend `new_file` left the frontend showing the reopened
+  // workbook's chart; see `newFileLikeTheApp`.)
+  test.afterAll(async ({ sharedPage }) => {
+    await invoke(sharedPage, "set_sheet_display_flags", {
       patch: {
         displayZeros: true,
         showFormulas: false,
@@ -564,7 +591,6 @@ test.describe.serial("Dirty flag: mutations, AutoRecover and transient previews"
         displayHeadings: true,
       },
     });
-    await invoke(page, "new_file").catch(() => {});
-    await page.waitForTimeout(500);
+    await newFileLikeTheApp(sharedPage);
   });
 });

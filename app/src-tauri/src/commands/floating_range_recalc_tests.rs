@@ -62,6 +62,25 @@ fn number(wb: &Workbook, sheet: usize, row: u32, col: u32) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// The off-sheet door keeps the workbook's capitalisation (owner finding
+// 2026-09-27: the formula bar showed a floating-grid formula as =SHEET1!E2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_off_sheet_formula_keeps_the_sheet_names_capitalisation() {
+    let wb = Workbook::new(1);
+    wb.set(1, 4, "42"); // Sheet1!E2
+    let info = create(&wb, "Float1");
+    set_fr(&wb, info.range.id, 0, 0, "=Sheet1!E2");
+    let backing = info.backing_sheet_index;
+    let formula = wb.state.grids.read().unwrap()[backing]
+        .get_cell(0, 0)
+        .and_then(|c| c.formula_string());
+    assert_eq!(formula.as_deref(), Some("Sheet1!E2"), "the lexer's SHEET1 must be restamped to the tab's own case");
+    assert_eq!(number(&wb, backing, 0, 0), 42.0, "and it still evaluates");
+}
+
+// ---------------------------------------------------------------------------
 // float → grid: an FR formula reads the grid and FOLLOWS it
 // ---------------------------------------------------------------------------
 

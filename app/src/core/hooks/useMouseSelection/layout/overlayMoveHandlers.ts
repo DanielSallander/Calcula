@@ -10,7 +10,7 @@
 
 import type { GridConfig, Viewport } from "../../../types";
 import {
-  getGridRegions,
+  getLiveGridRegions,
   getOverlayRegistration,
   floatingHitOrder,
   type GridRegion,
@@ -123,7 +123,8 @@ function getFloatingCanvasBounds(
  *
  * Walks `floatingHitOrder` (@api/gridOverlays): topmost first, the exact
  * reverse of the paint order when a stacking order is in force, reverse
- * publication order otherwise.
+ * publication order otherwise. Over the LIVE regions: nothing of the edit's
+ * sheet while cross-sheet point mode shows another one.
  */
 export function findFloatingRegionAt(
   mouseX: number,
@@ -131,7 +132,7 @@ export function findFloatingRegionAt(
   config: GridConfig,
   viewport: Viewport,
 ): GridRegion | null {
-  for (const region of floatingHitOrder(getGridRegions())) {
+  for (const region of floatingHitOrder(getLiveGridRegions())) {
     const bounds = getFloatingCanvasBounds(region, config, viewport);
     if (!bounds) continue;
     if (
@@ -175,8 +176,9 @@ export function createOverlayMoveHandlers(
     mouseY: number,
   ): { region: GridRegion; cursor: string | null } | null => {
     // Topmost first (`floatingHitOrder`): the object painted on top is the one
-    // a press reaches.
-    for (const region of floatingHitOrder(getGridRegions())) {
+    // a press reaches. LIVE regions only: during cross-sheet point mode the
+    // published regions belong to the edit's sheet, not the one on screen.
+    for (const region of floatingHitOrder(getLiveGridRegions())) {
       const bounds = getFloatingCanvasBounds(region, config, viewport);
       if (!bounds) continue;
 
@@ -365,9 +367,10 @@ export function createOverlayMoveHandlers(
     const moveState = overlayMoveStateRef.current;
     if (!moveState) return;
 
-    // CONSUME MODE (a subscribed canvas, or design mode off): the object was
-    // selected by the press, but no drag may change its geometry. Returning
-    // before `hasMoved` is set means mouse-up dispatches no moveComplete.
+    // CONSUME MODE (a subscribed canvas; Design Mode is never part of it, see
+    // LayoutSurface.editable): the object was selected by the press, but no
+    // drag may change its geometry. Returning before `hasMoved` is set means
+    // mouse-up dispatches no moveComplete.
     const surface = activeLayoutSurface();
     if (surface && !surface.editable) return;
 

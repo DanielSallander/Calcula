@@ -7559,12 +7559,33 @@ pub(crate) fn update_cell_on_sheets_inner(
             // delocalizing it against the workbook locale would corrupt it (sv-SE
             // reads "42.5" as 425), so it takes the invariant parse — the same split
             // update_cells_batch makes.
-            let cell_template = if invariant.unwrap_or(false) {
+            let mut cell_template = if invariant.unwrap_or(false) {
                 parse_cell_input_invariant(&value, &locale)
             } else {
                 parse_cell_input(&value, &locale)
             };
             let is_formula = cell_template.has_formula();
+
+            // THE WORKBOOK'S OWN CAPITALISATION, on this door too (§2ai / §2t).
+            // The lexer shouts bare identifiers, so `=Sheet1!E2` parses as
+            // `SHEET1!E2`; the active-sheet door restamps names, tables and sheet
+            // qualifiers in `split_entered_formula`, and this one never did -- so
+            // every off-sheet write (a floating grid's cells, a script writing
+            // another sheet, a grouped-sheet edit) stored and showed
+            // `=SHEET1!E2`. Cosmetic for evaluation (every lookup uppercases);
+            // it is what the formula bar shows.
+            if let Some(ast) = cell_template.ast.as_deref_mut() {
+                {
+                    let named_ranges_map = state.named_ranges.read().unwrap();
+                    crate::name_resolution::restamp_name_casing(ast, &named_ranges_map);
+                }
+                if crate::ast_has_table_refs(ast) {
+                    let tables_map = state.tables.read().unwrap();
+                    let table_names_map = state.table_names.read().unwrap();
+                    crate::table_deps::restamp_table_casing(ast, &tables_map, &table_names_map);
+                }
+                crate::sheet_names::restamp_sheet_casing(ast, &sheet_names);
+            }
 
             // Convert the AST once for reuse across sheets.
             //

@@ -283,7 +283,7 @@ export function CanvasViewSection(_props: PanelSectionProps): React.ReactElement
         icon={<RibbonIcon.Pencil size={HERO_ICON_SIZE} />}
         label="Design Mode"
         active={designMode}
-        tooltip="Design mode: select buttons and floating grids to move them instead of using them"
+        tooltip="Design mode: select buttons to move them instead of running them. A floating grid moves by its title bar in any mode; in Design Mode one with no title bar also moves by its body"
         data-testid="canvas-design-mode"
         onClick={toggleDesignMode}
       />

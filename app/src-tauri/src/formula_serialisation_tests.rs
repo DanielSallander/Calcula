@@ -132,7 +132,9 @@ fn a_builtin_never_serialises_to_a_custom_function() {
 }
 
 /// Every `.rs` under `src/`, so the scan cannot be fooled by a new file.
-fn crate_sources() -> Vec<(std::path::PathBuf, String)> {
+/// `pub(crate)`: the add-path census in `undo_sheet_structure_tests` walks
+/// the crate with it rather than with a fourth copy of the walk.
+pub(crate) fn crate_sources() -> Vec<(std::path::PathBuf, String)> {
     fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {
@@ -656,6 +658,38 @@ fn a_delete_that_does_touch_the_formula_still_produces_a_ref_error() {
 // runs. This fails by name when one does not.
 // ---------------------------------------------------------------------------
 
+/// EVERY SPELLING OF A FREE FUNCTION'S FIRST LINE, at the left margin: the ONE
+/// list every source census in this crate recognises a function start by.
+///
+/// A spelling missing from a census's own copy of this list does not make the
+/// census fail -- it makes it WRONG, quietly: the body of a function declared
+/// that way is read as part of the function before it, so its offence is
+/// charged to a neighbour, or excused by the neighbour's exemption. That
+/// happened three times (fix round 4, B6: the spill census's
+/// `drill_through_to_sheet` exemption passed only because it was covering the
+/// writes of `drill_through_to_sheet_core`, declared `pub(crate) async fn`;
+/// fix round 5: the grid/grids census still lacked `pub(super) async fn`, and
+/// both spill-decision censuses lacked both async `pub(..)` forms). So there
+/// is one list, and each census takes it from here; each census's own
+/// loop-over-spellings self-test pins it with a LITERAL list, so a spelling
+/// dropped from this constant fails there instead of silently leaving a loop.
+pub(crate) const FN_START_SPELLINGS: [&str; 8] = [
+    "fn ",
+    "async fn ",
+    "pub fn ",
+    "pub async fn ",
+    "pub(crate) fn ",
+    "pub(crate) async fn ",
+    "pub(super) fn ",
+    "pub(super) async fn ",
+];
+
+/// Does this RAW source line (unindented: a free function, never a method)
+/// start a function, in any spelling of [`FN_START_SPELLINGS`]?
+pub(crate) fn starts_a_function(line: &str) -> bool {
+    FN_START_SPELLINGS.iter().any(|p| line.starts_with(p))
+}
+
 /// Bodies of the free functions in a Rust source, keyed by name.
 ///
 /// Free functions only: an `impl` block's methods are skipped, for the same
@@ -686,16 +720,7 @@ fn a_delete_that_does_touch_the_formula_still_produces_a_ref_error() {
 /// both were in the walking, not in the question being asked, so every copy of
 /// the walker is a copy of the bugs waiting to be re-found.
 pub(crate) fn free_function_bodies(text: &str) -> Vec<(String, String)> {
-    const PREFIXES: [&str; 8] = [
-        "fn ",
-        "async fn ",
-        "pub fn ",
-        "pub async fn ",
-        "pub(crate) fn ",
-        "pub(crate) async fn ",
-        "pub(super) fn ",
-        "pub(super) async fn ",
-    ];
+    const PREFIXES: [&str; 8] = FN_START_SPELLINGS;
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < text.len() {

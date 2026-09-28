@@ -131,6 +131,63 @@ const DIALOG_GLOBAL_MESSAGE =
 const DIALOG_GLOBAL_NAMES = ['confirm', 'alert', 'prompt']
 const DIALOG_GLOBAL_HOSTS = ['window', 'globalThis', 'self']
 
+// THE SAME CLASS THROUGH THE PLUGIN'S FRONT DOOR. Importing `ask` / `confirm` /
+// `message` straight from @tauri-apps/plugin-dialog skips the wrapper as surely
+// as the globals do: `ask` THROWS when its dialog cannot be shown, and a caller
+// that does not catch it fails OPEN. Measured in fix round 3: Pivot imported
+// `ask` for its overwrite prompt, the prompt threw, every caller skipped
+// `undo_pivot_overwrite`, and the user's cells stayed overwritten without being
+// asked. `open` and `save` (file pickers) stay allowed -- they are not
+// questions, and a refused pick already reads as "no file".
+//
+// Enforced with `@typescript-eslint/no-restricted-imports`, NOT core
+// `no-restricted-imports`: flat config is last-wins per rule id, and the
+// FACADE / ALIEN / API-NEUTRALITY blocks below all set the core rule for their
+// files, so a dialog path added here under the core id would be silently
+// replaced for every extension, Core and @api file. The typescript-eslint rule
+// is the same rule under a different id, which nothing else sets. It also
+// reports `import * as d` and `export { ask } from` (importNames covers both).
+//
+// A DYNAMIC import of the plugin cannot be name-checked at all, so it is
+// refused outright (`no-restricted-syntax`); import `open` / `save`
+// statically. Those selectors are repeated in the two colour blocks below,
+// because they set `no-restricted-syntax` for their files and would otherwise
+// replace this one there (last-wins again).
+const DIALOG_PLUGIN_IMPORT_MESSAGE =
+  'Banned: ask / confirm / message from @tauri-apps/plugin-dialog. They THROW when the dialog ' +
+  'cannot be shown, so an uncaught call fails OPEN. Use confirmAsync / alertAsync from @api/dialogs ' +
+  '(confirmOutcomeAsync when "no" also acts) and AWAIT the result. open / save stay allowed. ' +
+  'Only src/core/lib/dialogs.ts may import them.'
+
+const DIALOG_PLUGIN_IMPORT_PATH = {
+  name: '@tauri-apps/plugin-dialog',
+  importNames: ['ask', 'confirm', 'message'],
+  message: DIALOG_PLUGIN_IMPORT_MESSAGE,
+}
+
+const DIALOG_PLUGIN_DYNAMIC_IMPORT_MESSAGE =
+  'Import @tauri-apps/plugin-dialog statically: a dynamic import hides which function is taken ' +
+  'from the ask / confirm / message ban. ' + DIALOG_PLUGIN_IMPORT_MESSAGE
+
+// TWO spellings of the same specifier, one selector each. A quoted string is a
+// `Literal` (it has a `value`); a backtick specifier is a `TemplateLiteral`,
+// which has no `value` at all, so the first selector never sees it -- measured
+// in the round-4 review: import(`@tauri-apps/plugin-dialog`) linted clean and
+// handed back the raw `ask`. The second matches the template's static text, so
+// a template that merely interpolates around the name is refused too. A
+// specifier computed from a VARIABLE cannot be checked by any selector; no
+// production file imports dynamically from a non-literal today.
+const DIALOG_PLUGIN_DYNAMIC_IMPORTS = [
+  {
+    selector: "ImportExpression[source.value='@tauri-apps/plugin-dialog']",
+    message: DIALOG_PLUGIN_DYNAMIC_IMPORT_MESSAGE,
+  },
+  {
+    selector: 'ImportExpression > TemplateLiteral.source > TemplateElement[value.raw=/plugin-dialog/]',
+    message: DIALOG_PLUGIN_DYNAMIC_IMPORT_MESSAGE,
+  },
+]
+
 export const dialogGuardConfigs = [
   {
     files: ['src/**/*.{ts,tsx}', 'extensions/**/*.{ts,tsx}'],
@@ -162,6 +219,8 @@ export const dialogGuardConfigs = [
           })),
         ),
       ],
+      '@typescript-eslint/no-restricted-imports': ['error', { paths: [DIALOG_PLUGIN_IMPORT_PATH] }],
+      'no-restricted-syntax': ['error', ...DIALOG_PLUGIN_DYNAMIC_IMPORTS],
     },
   },
 ]
@@ -247,6 +306,9 @@ const modelEditorColorConfigs = [
           selector: 'Literal[value=/rgba?\\(/]',
           message: MODEL_EDITOR_HEX_MESSAGE,
         },
+        // The dialog block's selector: this block's no-restricted-syntax
+        // replaces that block's for these files (flat config is last-wins).
+        ...DIALOG_PLUGIN_DYNAMIC_IMPORTS,
       ],
     },
   },
@@ -362,6 +424,9 @@ const chromeColorConfigs = [
           selector: 'TemplateElement[value.raw=/^(?![\\s\\S]*var\\()[\\s\\S]*\\brgba?\\(/]',
           message: CHROME_HEX_MESSAGE,
         },
+        // The dialog block's selector: this block's no-restricted-syntax
+        // replaces that block's for these files (flat config is last-wins).
+        ...DIALOG_PLUGIN_DYNAMIC_IMPORTS,
       ],
     },
   },

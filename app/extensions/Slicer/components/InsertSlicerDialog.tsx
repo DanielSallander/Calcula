@@ -1,29 +1,41 @@
 //! FILENAME: app/extensions/Slicer/components/InsertSlicerDialog.tsx
-// PURPOSE: Dialog for inserting slicers. Lists available Tables and PivotTables,
-//          shows their fields as checkboxes, and creates one slicer per checked field.
-// CONTEXT: Offers the tables of EVERY sheet (each labelled with its sheet) and
-//          places the slicers on the ACTIVE sheet — at `data.placement` when the
-//          caller passed one (a canvas sheet's snapped rectangle), else at the
-//          historical (100, 100) cascade. The list and the layout are pure
-//          functions in ../lib/insertSlicerPlan.ts.
+// PURPOSE: Dialog for inserting slicers. Lists the workbook's Calcula models,
+//          Tables and PivotTables, shows their fields as checkboxes, and creates
+//          one slicer per checked field.
+// CONTEXT: Offers every loaded MODEL first ("Sales (Model)" -- a model slicer
+//          filters every PivotTable of that model on the sheet or canvas it is
+//          placed on), then the tables of EVERY sheet (each labelled with its
+//          sheet), then the pivots, and places the slicers on the ACTIVE sheet —
+//          at `data.placement` when the caller passed one (a canvas sheet's
+//          snapped rectangle), else at the historical (100, 100) cascade. The
+//          list and the layout are pure functions in ../lib/insertSlicerPlan.ts.
+//
+//          The dialog never rebuilds a pivot. A slicer on a BI pivot whose
+//          column the pivot does not carry yet has the Pivot owner add it on
+//          the server (the store's item repair), and the whole insert is ONE
+//          undo step.
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import type { DialogProps } from "@api";
 import { useDialogWindow } from "@api/dialogWindow";
 import { getSheets } from "@api";
 import {
-  type Table,
   getAllPivotTables,
   getPivotHierarchies,
   getAllTables,
-  updateBiPivotFields,
+  biGetConnections,
+  biGetModelInfo,
 } from "@api/backend";
-import { surfacePivotNotices } from "@api/pivotNotices";
+import { runInUndoTransaction } from "@api/objectGeometry";
+import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 import { createSlicerAsync } from "../lib/slicerStore";
-import type { SlicerSourceType } from "../lib/slicerTypes";
+import type { SlicerSourceType, CreateSlicerParams } from "../lib/slicerTypes";
 import {
   type BiModelInfo,
+  type ModelInfoListing,
   type SlicerDataSource,
+  MODEL_SLICER_REACH,
+  modelSources,
   pivotSource,
   readSlicerPlacement,
   slicerRects,
@@ -38,148 +50,34 @@ import {
 /** One entry of the "Data source" list (see insertSlicerPlan). */
 type DataSource = SlicerDataSource;
 
-// ============================================================================
-// BI Pivot Helpers
-// ============================================================================
-
-interface BiFieldRef {
-  table: string;
-  column: string;
-  isLookup: boolean;
-}
-
-interface BiValueFieldRef {
-  measureName: string;
-}
-
-interface HierarchiesResult {
-  hierarchies: Array<{ index: number; name: string }>;
-  rowHierarchies: Array<{ name: string }>;
-  columnHierarchies: Array<{ name: string }>;
-  dataHierarchies: Array<{ name: string }>;
-  filterHierarchies: Array<{ name: string }>;
-  slicerFilterFields?: string[];
-  biModel?: BiModelInfo;
-}
-
-/** Parse "table.column" to BiFieldRef */
-function parseBiFieldRef(name: string, lookupColumns: string[]): BiFieldRef {
-  const dotIdx = name.indexOf(".");
-  const table = dotIdx >= 0 ? name.substring(0, dotIdx) : "";
-  const column = dotIdx >= 0 ? name.substring(dotIdx + 1) : name;
-  return { table, column, isLookup: lookupColumns.includes(name) };
-}
+/** The empty-state text: nothing in the workbook a slicer could filter. */
+export const NO_SLICER_SOURCES_TEXT =
+  "No Tables, PivotTables or models found in this workbook. Create a Table, a " +
+  "PivotTable or a model connection first, then insert a Slicer.";
 
 /**
- * Resolve a hierarchy name (which may be just "column" from the Arrow schema)
- * to a full BiFieldRef by looking up the table name in the BI model.
+ * Where the created slicer reads its items and what it connects to: a model
+ * source makes a MODEL slicer (items from the model; page scope), a table or
+ * pivot source what it always made.
  */
-function resolveHierarchyFieldRef(
-  name: string,
-  lookupColumns: string[],
-  biModel: BiModelInfo | undefined,
-): BiFieldRef {
-  if (name.includes(".")) {
-    return parseBiFieldRef(name, lookupColumns);
-  }
-  // Bare column name from cache — find which table it belongs to in the BI model.
-  // Use case-insensitive matching since Arrow schema names may differ in casing.
-  if (biModel) {
-    const nameLower = name.toLowerCase();
-    for (const table of biModel.tables) {
-      const col = table.columns.find((c) => c.name.toLowerCase() === nameLower);
-      if (col) {
-        const fullKey = `${table.name}.${col.name}`;
-        return { table: table.name, column: col.name, isLookup: lookupColumns.includes(fullKey) };
-      }
-    }
-  }
-  console.warn("[Slicer] resolveHierarchyFieldRef: could not resolve table for bare field name:", name);
-  return parseBiFieldRef(name, lookupColumns);
-}
-
-/** Parse "[MeasureName]" to BiValueFieldRef */
-function parseBiValueFieldRef(name: string): BiValueFieldRef {
-  return { measureName: name.replace(/^\[|\]$/g, "") };
-}
-
-/**
- * Ensures that the specified BI fields are in the pivot cache so slicer items
- * can be loaded. If any fields are missing, adds them as filter fields
- * by calling update_bi_pivot_fields.
- */
-async function ensureBiFieldsInPivot(
-  pivotId: string,
-  selectedFieldKeys: string[], // "table.column" format
-  biModel: BiModelInfo,
-): Promise<void> {
-  // Get current pivot state
-  const result = await getPivotHierarchies<HierarchiesResult>(pivotId);
-
-  // Cache field names (just column names from Arrow schema)
-  const cacheFieldNames = new Set(result.hierarchies.map((h) => h.name));
-
-  // Check which selected fields are NOT in the cache
-  const missingFields = selectedFieldKeys.filter((key) => {
-    const colPart = key.includes(".") ? key.split(".").pop()! : key;
-    return !cacheFieldNames.has(colPart) && !cacheFieldNames.has(key);
-  });
-
-  if (missingFields.length === 0) return; // All fields already in cache
-
-  // Reconstruct current field configuration as BiFieldRefs.
-  // Use the caller-provided biModel (already validated) as primary source for
-  // table name resolution; fall back to result.biModel from the hierarchies call.
-  const resolveModel = biModel ?? result.biModel;
-  const lookupCols = result.biModel?.lookupColumns ?? biModel?.lookupColumns ?? [];
-
-  // Filter out the synthetic "Total" row field (internal BI pivot implementation detail).
-  const rowFields: BiFieldRef[] = result.rowHierarchies
-    .filter((h) => h.name !== "Total")
-    .map((h) => resolveHierarchyFieldRef(h.name, lookupCols, resolveModel));
-  const columnFields: BiFieldRef[] = result.columnHierarchies
-    .filter((h) => h.name !== "Total")
-    .map((h) => resolveHierarchyFieldRef(h.name, lookupCols, resolveModel));
-  const valueFields: BiValueFieldRef[] = result.dataHierarchies.map((h) =>
-    parseBiValueFieldRef(h.name),
-  );
-  const filterFields: BiFieldRef[] = result.filterHierarchies.map((h) =>
-    resolveHierarchyFieldRef(h.name, lookupCols, resolveModel),
-  );
-
-  // Collect existing slicer filter fields so they aren't lost
-  const existingSlicerFields: BiFieldRef[] = (result.slicerFilterFields ?? [])
-    .map((name) => parseBiFieldRef(name, []));
-
-  // Add missing fields as slicer fields — included in the GROUP BY
-  // query so they appear in the cache, but NOT shown as visible filter rows.
-  const newSlicerFields: BiFieldRef[] = missingFields.map((fieldKey) =>
-    parseBiFieldRef(fieldKey, []),
-  );
-  // Merge: existing + new (avoiding duplicates)
-  const slicerFields: BiFieldRef[] = [...existingSlicerFields];
-  for (const nf of newSlicerFields) {
-    if (!slicerFields.some((f) => f.table === nf.table && f.column === nf.column)) {
-      slicerFields.push(nf);
-    }
-  }
-
-  // Re-query the BI engine with the updated field configuration. This path
-  // reaches the backend directly, so it surfaces any notice itself.
-  surfacePivotNotices(
-    await updateBiPivotFields({
-      pivotId,
-      rowFields,
-      columnFields,
-      valueFields,
-      filterFields,
-      slicerFields,
-      lookupColumns: lookupCols,
-    }),
-  );
-
-  // Wait for pivot refresh event
-  window.dispatchEvent(new Event("pivot:refresh"));
+export function slicerParamsFor(
+  source: SlicerDataSource,
+  fieldKey: string,
+): Pick<CreateSlicerParams, "name" | "sourceType" | "cacheSourceId" | "fieldName" | "connectedSources"> {
+  // A BI key's display name is its COLUMN, split against the model's own
+  // table names -- a table name may contain a dot ("BI.dim_customer.Name").
+  const tableNames = source.biModel?.tables.map((t) => t.name);
+  const name = source.biModel ? splitBiFieldKey(fieldKey, tableNames).column : fieldKey;
+  return {
+    name,
+    sourceType: source.type,
+    cacheSourceId: source.id,
+    // For BI sources the field is the full "Table.Column" key.
+    fieldName: fieldKey,
+    // A model slicer's one connection means "every BI pivot of this model on
+    // the slicer's own sheet" (the backend normalises it to exactly this).
+    connectedSources: [{ sourceType: source.type, sourceId: source.id }],
+  };
 }
 
 // ============================================================================
@@ -248,6 +146,25 @@ export function InsertSlicerDialog({
       const sheetNames = sheetsResult.sheets.map((s) => ({ index: s.index, name: s.name }));
 
       const allSources: DataSource[] = [];
+
+      // Every loaded MODEL first: a workbook that holds only a model (a canvas
+      // report page, typically) has no table and no pivot, and used to be
+      // told there was nothing to slice. A connection whose model is not
+      // loaded has no columns to offer and is skipped.
+      try {
+        const connections = await biGetConnections();
+        const infoById: Record<string, ModelInfoListing | null> = {};
+        for (const conn of connections) {
+          try {
+            infoById[conn.id] = await biGetModelInfo(conn.id);
+          } catch (err) {
+            console.warn("[InsertSlicerDialog] Failed to load model info for", conn.name, err);
+          }
+        }
+        allSources.push(...modelSources(connections, infoById));
+      } catch (err) {
+        console.warn("[InsertSlicerDialog] Failed to load model connections:", err);
+      }
 
       // Fetch the tables of EVERY sheet. A slicer addresses its source by id,
       // so a table on another sheet is as good a source as one here — and on a
@@ -365,49 +282,32 @@ export function InsertSlicerDialog({
 
     try {
       const fieldKeys = Array.from(checkedFields);
-      const isBi = !!selectedSource.biModel;
-
-      // For BI pivots, ensure selected fields are in the pivot cache
-      // by adding them as filter fields if needed
-      if (isBi) {
-        await ensureBiFieldsInPivot(
-          selectedSource.id,
-          fieldKeys,
-          selectedSource.biModel!,
-        );
-      }
 
       // Create one slicer per checked field, positioned side by side on the
       // ACTIVE sheet: from the caller's placement when it gave one, else from
-      // (100, 100) as always.
+      // (100, 100) as always. ONE undo step for the whole insert: each
+      // create_slicer -- and a BI pivot's server-side column add, run by the
+      // store when the slicer's items name a column the pivot lacks -- joins
+      // it.
       const rects = slicerRects(fieldKeys.length, placement);
-      for (let i = 0; i < fieldKeys.length; i++) {
-        const fieldKey = fieldKeys[i];
-        const rect = rects[i];
-        // For BI pivots, fieldKey is "table.column" - use "table.column" as the
-        // slicer fieldName so the backend can match it in the pivot cache
-        const fieldName = fieldKey;
-        const displayName = isBi && fieldKey.includes(".")
-          ? fieldKey.split(".").pop()!
-          : fieldKey;
+      await runInUndoTransaction(fieldKeys.length > 1 ? "Insert Slicers" : "Insert Slicer", async () => {
+        for (let i = 0; i < fieldKeys.length; i++) {
+          const rect = rects[i];
+          const params = slicerParamsFor(selectedSource, fieldKeys[i]);
+          const slicer = await createSlicerAsync({
+            ...params,
+            sheetIndex: activeSheetIndex,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          });
 
-        const slicer = await createSlicerAsync({
-          name: displayName,
-          sheetIndex: activeSheetIndex,
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height,
-          sourceType: selectedSource.type,
-          cacheSourceId: selectedSource.id,
-          fieldName,
-          connectedSources: [{ sourceType: selectedSource.type, sourceId: selectedSource.id }],
-        });
-
-        if (!slicer) {
-          throw new Error(`Failed to create slicer for field "${fieldName}".`);
+          if (!slicer) {
+            throw new Error(`Failed to create slicer for field "${params.fieldName}".`);
+          }
         }
-      }
+      });
 
       handleClose();
     } catch (err) {
@@ -528,10 +428,7 @@ export function InsertSlicerDialog({
           {isLoadingSources ? (
             <div style={styles.loadingText}>Loading data sources...</div>
           ) : sources.length === 0 ? (
-            <div style={styles.emptyText}>
-              No Tables or PivotTables found in this workbook. Create a Table
-              or PivotTable first, then insert a Slicer.
-            </div>
+            <div style={styles.emptyText}>{NO_SLICER_SOURCES_TEXT}</div>
           ) : (
             <>
               {/* Source selection */}
@@ -549,11 +446,20 @@ export function InsertSlicerDialog({
                 >
                   <option value={-1}>-- Select a source --</option>
                   {sources.map((source, i) => (
-                    <option key={`${source.type}-${source.id}`} value={i}>
+                    <option
+                      key={`${source.type}-${source.id}`}
+                      value={i}
+                      title={source.type === "biConnection" ? MODEL_SLICER_REACH : undefined}
+                    >
                       {sourceLabel(source)}
                     </option>
                   ))}
                 </select>
+                {selectedSource?.type === "biConnection" && (
+                  <div style={styles.reachNote} data-testid="model-slicer-reach">
+                    {MODEL_SLICER_REACH}
+                  </div>
+                )}
               </div>
 
               {/* Field checkboxes */}
@@ -751,6 +657,12 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "13px",
     color: "#888888",
     padding: "12px 0",
+  },
+  reachNote: {
+    fontSize: "12px",
+    color: "#aaaaaa",
+    marginTop: "8px",
+    lineHeight: 1.4,
   },
   error: {
     padding: "10px 12px",

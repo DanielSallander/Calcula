@@ -152,7 +152,10 @@ export interface PivotFieldConfig {
   showSubtotals?: boolean;
   /** Whether field is collapsed (field-level: collapses ALL items) */
   collapsed?: boolean;
-  /** Items to hide (filter out) */
+  /** Items to hide (filter out). On `update_pivot_fields` an ABSENT list
+   *  builds a field that hides nothing -- it CLEARS the field's filter (unlike
+   *  `BiFieldRef.hiddenItems`, where absent means keep). A caller that means
+   *  "keep" sends the definition's current list. */
   hiddenItems?: string[];
   /** Per-item collapse tracking: specific item labels that are collapsed */
   collapsedItems?: string[];
@@ -219,13 +222,17 @@ export interface LayoutConfig {
 export interface UpdatePivotFieldsRequest {
   /** Pivot table ID */
   pivotId: PivotId;
-  /** Row fields (optional - if undefined, keep existing) */
+  /** Row fields (optional - if undefined, keep existing). A list REPLACES the
+   *  whole zone, and each field is rebuilt from its config (only collapse
+   *  state is carried over by name): never send a partial zone to change one
+   *  field -- the others leave the pivot. To filter one field use
+   *  `applyFilter` / `clearFilter`. */
   rowFields?: PivotFieldConfig[];
-  /** Column fields (optional) */
+  /** Column fields (optional; replaces the zone like `rowFields`) */
   columnFields?: PivotFieldConfig[];
   /** Value fields (optional) */
   valueFields?: ValueFieldConfig[];
-  /** Filter fields (optional) */
+  /** Filter fields (optional; replaces the zone like `rowFields`) */
   filterFields?: PivotFieldConfig[];
   /** Layout options (optional) */
   layout?: LayoutConfig;
@@ -396,6 +403,10 @@ export interface PivotViewResponse {
   rowDescriptors?: PivotRowDescriptorData[];
   /** Number of non-empty cells outside the previous pivot region that were overwritten. */
   overwrittenCellCount?: number;
+  /** The undo step holding those cells, when the command recorded one: what a
+   *  declined overwrite hands back to `undo_pivot_overwrite` (through
+   *  `@api/pivotOverwrite`). Absent = nothing of this command can be taken back. */
+  overwriteToken?: number;
   /** What the user should be told about this response (a refusal, a degradation). */
   notices?: PivotNotice[];
 }
@@ -439,7 +450,14 @@ export interface ZoneFieldInfo {
   aggregation?: string;
   /** Whether this is a LOOKUP (attribute) field rather than GROUP. BI pivots only. */
   isLookup?: boolean;
-  /** Items hidden by the filter. Only present for filter fields with active filters. */
+  /** Items the field hides. Present on row, column and filter fields that hide
+   *  any (a placed calculation group's item subset included); never on value
+   *  fields. A SNAPSHOT of the definition at read time: filters change behind
+   *  a reader's back (the header dropdown, slicers, ribbon filters). For a
+   *  model pivot an editor that seeds its chips from it must not send it back
+   *  as if it were an edit -- see `BiFieldRef.hiddenItems`; a range pivot's
+   *  `update_pivot_fields` does need it sent back (absent = clear), so read it
+   *  again after the pivot's view changes rather than trusting the seed. */
   hiddenItems?: string[];
   /** User-provided custom display name override. */
   customName?: string;
@@ -593,8 +611,17 @@ export interface BiFieldRef {
   column: string;
   /** When true, this field is a lookup column (resolved post-aggregation). */
   isLookup?: boolean;
-  /** Items to hide from the field (filter subset / a placed calculation
-   *  group's item subset). */
+  /** Items to hide (a filter subset / a placed calculation group's item
+   *  subset). Honoured on EVERY zone (rows, columns, filters, slicer fields).
+   *  THREE states:
+   *  - ABSENT (`undefined`): keep what this Table.Column hides on the pivot
+   *    NOW. Send this for every field the caller did not edit -- in
+   *    particular a field-list edit must not echo a row/column field's
+   *    load-time hidden items, which may be stale (a slicer, the header
+   *    dropdown or a ribbon filter changed them since).
+   *  - a non-empty list: exactly these are hidden.
+   *  - `[]`: the caller REMOVED the filter (e.g. the Pivot Layout DSL after
+   *    its `NOT IN (...)` clause was deleted). */
   hiddenItems?: string[];
 }
 
@@ -622,8 +649,13 @@ export interface UpdateBiPivotFieldsRequest {
   columnFields: BiFieldRef[];
   valueFields: BiValueFieldRef[];
   filterFields: BiFieldRef[];
-  /** Fields needed only by slicers — included in the query but not shown as visible filter rows */
-  slicerFields?: BiFieldRef[];
+  /** Fields needed only by slicers — included in the query but not shown as
+   *  visible filter rows. ABSENT (or null) = KEEP the slicer fields the pivot
+   *  already carries, with their hidden items; `[]` = clear them all; a list
+   *  = exactly these. A slicer field that is also a row/column/filter field is
+   *  merged into that zone field. The active MODEL slicers on the pivot's own
+   *  sheet are folded in by the backend whatever is sent. */
+  slicerFields?: BiFieldRef[] | null;
   layout?: LayoutConfig;
   /** All columns toggled to LOOKUP mode, including those not in zones */
   lookupColumns?: string[];
@@ -962,15 +994,52 @@ export interface SetNumberFormatRequest {
 /** Request to apply filters to a pivot field */
 export interface ApplyPivotFilterRequest {
   pivotId: PivotId;
-  fieldIndex: number;
+  /** Cache field index. Optional when `biFieldKey` is given (one of the two
+   *  is required). */
+  fieldIndex?: number;
+  /** BI pivots only: the model column as a "Table.Column" key. Wins over
+   *  `fieldIndex`. The backend resolves the index itself and, when the pivot
+   *  does not carry the column yet, ADDS it (as a slicer field, no visible
+   *  filter row) and re-queries in the same command, keeping every existing
+   *  field, hidden item and hierarchy -- ONE undo step that joins an open
+   *  transaction. A pivot with no fields at all is left alone (its current
+   *  view is returned). Refused when the pivot is not a BI pivot or the key
+   *  names no column of its model. */
+  biFieldKey?: string;
   filters: PivotFilters;
+  /** 1 = ordinary host-side mask (default); 2..9 = PINNED, routed inside the
+   *  engine query (BI pivots only). */
+  filterLevel?: number;
+  /** The slicer applying this filter (provenance for a pinned filter). */
+  slicerId?: string | null;
+  /** A re-apply by the undo/redo RECONCILE (the Slicer's): records NO undo
+   *  step at all -- one recorded after an undo would wipe the redo stack. */
+  reconcile?: boolean;
 }
 
 /** Request to clear pivot field filters */
 export interface ClearPivotFilterRequest {
   pivotId: PivotId;
-  fieldIndex: number;
+  /** Cache field index. Optional when `biFieldKey` is given. */
+  fieldIndex?: number;
+  /** BI pivots only: the model column as a "Table.Column" key; wins over
+   *  `fieldIndex`. A column the pivot does not carry is a NO-OP (current view
+   *  returned, document stays clean): clearing never adds a field. */
+  biFieldKey?: string;
   filterType?: PivotFilterType;
+  /** A re-clear by the undo/redo reconcile: records NO undo step. */
+  reconcile?: boolean;
+}
+
+/** What a declined overwrite took back (`undo_pivot_overwrite`). Mirrors
+ *  `PivotOverwriteUndoResponse` in app/src-tauri/src/pivot/types.rs. */
+export interface PivotOverwriteUndoResponse {
+  /** Undo steps taken back (the overwrite steps, plus a named one after them). */
+  stepsUndone: number;
+  /** Every token was found; false when a step of the gesture was left. */
+  complete: boolean;
+  /** The refresh DOMAINS the steps touched, as an undo reports them. */
+  refreshDomains: string[];
 }
 
 /** Request to sort a pivot field */

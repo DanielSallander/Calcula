@@ -10,6 +10,8 @@
 
 import { describe, it, expect, vi } from "vitest";
 import {
+  isNumericDataType,
+  modelSources,
   pivotSource,
   readSlicerPlacement,
   slicerRects,
@@ -59,12 +61,54 @@ describe("pivotSource", () => {
     expect(sourceLabel(src)).toBe("PT (PivotTable, Report)");
   });
 
-  it("labels a BI pivot as a Data Model", () => {
+  it("labels a BI pivot as a PivotTable ON a model, never as the model itself", () => {
     const src = pivotSource({ id: "p2", name: "Model" }, ["T.c"], SHEETS, {
       tables: [],
       measures: [],
     });
-    expect(sourceLabel(src)).toBe("Model (Data Model)");
+    expect(sourceLabel(src)).toBe("Model (PivotTable on model)");
+  });
+});
+
+// The owner's case (finding 4, 2026-09-27): a canvas, a model, and NO table
+// and NO pivot. The dialog said "No Tables or PivotTables found" and offered
+// nothing, because it never listed a model.
+describe("modelSources", () => {
+  const SALES_MODEL = {
+    tables: [
+      { name: "Customers", columns: [{ name: "Region", dataType: "Utf8" }, { name: "Age", dataType: "Int64" }] },
+      { name: "BI.dim_date", columns: [{ name: "Year", dataType: "Float64" }] },
+    ],
+    measures: [{ name: "Total Sales" }],
+  };
+
+  it("with no table and no pivot, one loaded model is offered", () => {
+    const sources = modelSources([{ id: "c1", name: "Sales" }], { c1: SALES_MODEL });
+    expect(sources).toHaveLength(1);
+    const [model] = sources;
+    expect(model).toMatchObject({ type: "biConnection", id: "c1", name: "Sales", sheetIndex: null });
+    expect(model.fields).toEqual(["Customers.Region", "Customers.Age", "BI.dim_date.Year"]);
+    expect(sourceLabel(model)).toBe("Sales (Model)");
+    // The field tree reads isNumeric, which bi_get_model_info does not carry.
+    expect(model.biModel?.tables[0].columns.map((c) => c.isNumeric)).toEqual([false, true]);
+    expect(model.biModel?.tables[1].columns[0].isNumeric).toBe(true);
+  });
+
+  it("skips a connection whose model is not loaded, keeping the others in order", () => {
+    const sources = modelSources(
+      [
+        { id: "c0", name: "Unloaded" },
+        { id: "c1", name: "Sales" },
+        { id: "c2", name: "Missing" },
+      ],
+      { c0: null, c1: SALES_MODEL },
+    );
+    expect(sources.map((s) => s.id)).toEqual(["c1"]);
+  });
+
+  it("classifies numeric data types like the Add Filter dialog", () => {
+    expect(["Int64", "float", "Decimal(10,2)", "NUMERIC", "Double", "real"].every(isNumericDataType)).toBe(true);
+    expect(["Utf8", "Date32", "Boolean", "", undefined].some((t) => isNumericDataType(t))).toBe(false);
   });
 });
 

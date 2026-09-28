@@ -19,8 +19,8 @@ import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
 import { useScrollbarMetrics } from "../Scrollbar/useScrollbarMetrics";
 import { getLayoutSurface, onLayoutSurfaceChanged, GRID_SCROLLBAR_GUTTER_PX } from "../../lib/layoutSurface";
 import { useSpreadsheet } from "./useSpreadsheet";
-import { gridPointerMouseDown, gridPointerDoubleClick } from "./gridPointerEntry";
-import { getGlobalIsEditing } from "../../hooks/useEditing";
+import { gridPointerMouseDown, gridPointerDoubleClick, editBlocksGridFocus } from "./gridPointerEntry";
+import { notifyPointModeViewChanged } from "../../lib/pointModeView";
 import {
   clearRange,
   clearRangeWithOptions,
@@ -471,6 +471,23 @@ function SpreadsheetContent({
       window.removeEventListener("dimensions:refresh", handleDimensionsRefresh);
     };
   }, [refreshDimensions]);
+
+  // -------------------------------------------------------------------------
+  // Cross-sheet point mode: tell DOM-hosted overlays the SHOWN sheet flipped
+  // -------------------------------------------------------------------------
+  // A Core edit that switched sheets to pick a reference emits no SHEET_CHANGED,
+  // so the object families still publish the edit's sheet. `getLiveGridRegions`
+  // hides their painted objects; DOM-hosted ones (embedded forms, html shapes)
+  // hide on `onPointModeViewChanged`, whose Core-edit half can only be decided
+  // AFTER the render that made the grid-state snapshot current -- the snapshot
+  // lags a dispatch until render, which is why this is an effect and not a call
+  // at the dispatch site. (A parked external session is decided by the store.)
+  const editingSourceSheet = gridState.editing?.sourceSheetIndex;
+  const isCoreEditing = gridState.editing !== null;
+  const activeSheetForPointMode = gridState.sheetContext.activeSheetIndex;
+  useEffect(() => {
+    notifyPointModeViewChanged();
+  }, [editingSourceSheet, isCoreEditing, activeSheetForPointMode]);
 
   // NOTE: the "grid:set-manually-hidden-rows"/"-cols" window events are GONE.
   // They wrote a hand-computed set straight into the reducer and nowhere else,
@@ -1380,7 +1397,10 @@ function SpreadsheetContent({
         beginSplitDrag: setSplitDrag,
         onGridMouseDown: handleMouseDown,
         focusContainerRef,
-        isEditing: getGlobalIsEditing,
+        // A Core edit OR a live external session (a floating grid's cell edit
+        // hosted by the formula bar): a reference pick must never move the
+        // keyboard off the editor it is picking FOR.
+        isEditing: editBlocksGridFocus,
       });
     },
     [handleMouseDown, hitTestSplitBar, splitConfig, containerRef, gridState.zoom, focusContainerRef]

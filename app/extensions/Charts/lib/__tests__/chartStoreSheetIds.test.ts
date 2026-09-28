@@ -8,9 +8,13 @@
 //               stale copy inside the JSON (the backend remaps the entry on a
 //               sheet delete / move and never rewrites the JSON);
 //            3. the load-time migration stamps the sheet id and persists it
-//               through the ordinary debounced update -- and a refused stamp
-//               write is logged, not shown as lost work;
-//            4. createChart stamps from a warm sheet cache synchronously;
+//               through the debounced update AS A STAMP (`sheetIdStamp:
+//               "afterLoad"`, the stored record plus its ids -- recorded clean
+//               by the backend) -- and a refused stamp write is logged, not
+//               shown as lost work;
+//            4. createChart stamps from a warm sheet cache synchronously, and
+//               from a cold one as a stamp that says it FINISHES the create
+//               (`"afterCreate"`, which the backend records as dirtying);
 //            5. a reload after a sheet-list change flushes a pending save
 //               WITHOUT writing the pre-remap placement index back.
 
@@ -232,6 +236,57 @@ describe("load-time migration", () => {
     await flushPendingChartSaves();
     expect(h.alertAsync).toHaveBeenCalledTimes(1);
   });
+
+  it("records the stamp AS A STAMP: the STORED record plus its ids, flagged as finishing the load -- never the normalized definition", async () => {
+    // What a raw `save_chart` stores (scripts, MCP, the E2E harness): a BARE
+    // spec, no axes, no legend, no wrapper. The store normalizes that into a
+    // full ChartDefinition in memory. Written back through the ordinary update
+    // the stamp dirtied the document on every open and every reload (journey
+    // dirty-flag.spec.ts, PERSISTENCE); the backend records a write flagged
+    // `sheetIdStamp: "afterLoad"` clean, but only after verifying it adds sheet ids and nothing
+    // else -- which the normalized definition never would.
+    const bare = {
+      mark: "bar",
+      data: { sheetIndex: 1, startRow: 5, startCol: 30, endRow: 8, endCol: 31 },
+      series: [{ sourceIndex: 1, name: "Sales", color: "#4472C4" }],
+      title: "Dirty Flag Chart",
+    };
+    invokeBackend.mockImplementation(async (cmd: string) =>
+      cmd === "get_charts" ? [{ id: "c3", sheetIndex: 0, specJson: JSON.stringify(bare) }] : undefined,
+    );
+    await loadChartsFromBackend();
+    // In memory the chart is normalized AND stamped.
+    expect(getChartById("c3")!.spec.xAxis).toBeDefined();
+    expect((getChartById("c3")!.spec.data as DataRangeRef).sheetId).toBe("id-1");
+
+    await flushPendingChartSaves();
+    const writes = invokeBackend.mock.calls.filter((c) => c[0] === "update_chart");
+    expect(writes).toHaveLength(1);
+    const args = writes[0][1] as { entry: { id: string; sheetIndex: number; specJson: string }; sheetIdStamp?: string };
+    expect(args.sheetIdStamp, "the load-time stamp must travel as a stamp that finishes the LOAD").toBe("afterLoad");
+    expect(args.entry.id).toBe("c3");
+    expect(args.entry.sheetIndex).toBe(0);
+    expect(JSON.parse(args.entry.specJson), "exactly the stored record, plus the sheet id").toEqual({
+      ...bare,
+      data: { ...bare.data, sheetId: "id-1" },
+    });
+  });
+
+  it("a real edit is written as an ordinary update, whole definition, never flagged as a stamp", async () => {
+    invokeBackend.mockImplementation(async (cmd: string) =>
+      cmd === "get_charts" ? [entry("c1", 0, 0, spec())] : undefined,
+    );
+    await loadChartsFromBackend();
+    moveChart("c1", 99, 99);
+    await flushPendingChartSaves();
+    const writes = invokeBackend.mock.calls.filter((c) => c[0] === "update_chart");
+    expect(writes).toHaveLength(1);
+    const args = writes[0][1] as { entry: { specJson: string }; sheetIdStamp?: string };
+    expect(args.sheetIdStamp).toBeUndefined();
+    const written = JSON.parse(args.entry.specJson) as { x: number; spec: ChartSpec };
+    expect(written.x).toBe(99);
+    expect((written.spec.data as DataRangeRef).sheetId, "the edit still carries the stamp").toBe("id-1");
+  });
 });
 
 describe("createChart stamps the id", () => {
@@ -256,6 +311,20 @@ describe("createChart stamps the id", () => {
     await flushPendingChartSaves();
     expect((getChartById(chart.chartId)!.spec.data as DataRangeRef).sheetId).toBe("id-1");
     expect((lastWrittenSpec("update_chart")!.chart.spec.data as DataRangeRef).sheetId).toBe("id-1");
+    // A stamp of the record the create wrote, so it adds no second undo step
+    // behind "Insert chart": exactly that record plus the id. It says it
+    // finishes the CREATE: nothing is being loaded, so the backend must record
+    // it as dirtying (like the create), never under the load path's clean reason.
+    const stampWrite = invokeBackend.mock.calls.filter((c) => c[0] === "update_chart").pop()![1] as {
+      entry: { specJson: string };
+      sheetIdStamp?: string;
+    };
+    expect(stampWrite.sheetIdStamp, "a create's late stamp must say it finishes the create").toBe("afterCreate");
+    const created = JSON.parse((invokeBackend.mock.calls[0][1] as { entry: { specJson: string } }).entry.specJson);
+    expect(JSON.parse(stampWrite.entry.specJson)).toEqual({
+      ...created,
+      spec: { ...created.spec, data: { ...created.spec.data, sheetId: "id-1" } },
+    });
   });
 });
 

@@ -16,7 +16,7 @@ import { onAppEvent } from '@api/events';
 import type { SavePivotLayoutRequest } from '@api/pivot';
 import type { DesignStrategySummary } from '@api/designQueryAssist';
 import { TableFieldList } from '../../_shared/components/TableFieldList';
-import { getConnectionBiModel, setPivotPerspective } from '../lib/pivot-api';
+import { getConnectionBiModel, getPivotFieldConfiguration, setPivotPerspective } from '../lib/pivot-api';
 import type {
   SourceField,
   ZoneField,
@@ -24,9 +24,6 @@ import type {
   UpdatePivotFieldsRequest,
   UpdateBiPivotFieldsRequest,
   BiPivotModelInfo,
-  BiFieldRef,
-  BiValueFieldRef,
-  BiHierarchyFieldRef,
   BiPerspectiveInfo,
   BiCultureInfo,
   BiCalcGroup,
@@ -36,7 +33,8 @@ import type {
   DropZoneType,
   DragField,
 } from './types';
-import { CALC_GROUP_TABLE } from './types';
+import { buildBiUpdateRequest } from './biFieldsRequest';
+import type { HiddenItemEditBatch } from './usePivotEditorState';
 import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
 import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 import { ConnectSourceDialog, type ConnectSourceFields } from "../../_shared/components/ConnectSourceDialog";
@@ -179,33 +177,6 @@ function BiConnectionBanner({ connectionId, onConnected }: {
       )}
     </div>
   );
-}
-
-/** Check if a field name represents a hierarchy field ("Table.__hierarchy__.Name") */
-function isHierarchyField(name: string): boolean {
-  return name.includes('.__hierarchy__.');
-}
-
-/** Parse a hierarchy field key "Table.__hierarchy__.Name" into a BiHierarchyFieldRef */
-function toHierarchyFieldRef(name: string): BiHierarchyFieldRef {
-  const parts = name.split('.__hierarchy__.');
-  return { table: parts[0], hierarchy: parts[1], expanded: [] };
-}
-
-/** Parse a BI field key "Table.Column" into a BiFieldRef, optionally marking as lookup.
- *  Table names can contain dots, so resolve against the model's table names. */
-function toBiFieldRef(name: string, tableNames: string[], isLookup?: boolean): BiFieldRef {
-  const { table, column } = splitBiFieldKey(name, tableNames);
-  return { table, column, isLookup };
-}
-
-/** Parse a BI measure field key "[MeasureName]" into a BiValueFieldRef */
-function toBiValueFieldRef(name: string, customName?: string): BiValueFieldRef {
-  // Strip brackets: "[Revenue]" -> "Revenue"
-  const measureName = name.startsWith('[') && name.endsWith(']')
-    ? name.substring(1, name.length - 1)
-    : name;
-  return { measureName, customName };
 }
 
 export function PivotEditor({
@@ -375,49 +346,30 @@ export function PivotEditor({
     [pivotId],
   );
 
+  // The chips' item filters follow the pivot's definition after every view
+  // change (usePivotEditorState's re-sync): a filter the header dropdown, a
+  // slicer or a ribbon filter changed must not be shown -- nor, for a range
+  // pivot, echoed back -- as it was when the pane mounted.
+  const readPivotFields = useCallback(() => getPivotFieldConfiguration(pivotId), [pivotId]);
+
   // Ref to resetZones (set after usePivotEditorState, used in handleUpdate catch)
   const resetZonesRef = useRef<(() => void) | null>(null);
 
-  const handleUpdate = useCallback(async (request: UpdatePivotFieldsRequest) => {
-    // Build BI request upfront (if applicable) so it's accessible in catch block for retry
+  const handleUpdate = useCallback(async (
+    request: UpdatePivotFieldsRequest,
+    hiddenItemEdits: HiddenItemEditBatch,
+  ) => {
+    // Build BI request upfront (if applicable) so it's accessible in catch block for retry.
+    // A real field's hidden items travel ONLY when edited here (hiddenItemEdits):
+    // a chip's own list is a display copy that may be stale -- see biFieldsRequest.ts.
     let biRequest: UpdateBiPivotFieldsRequest | undefined;
     if (isBiPivot) {
-      const isCalcGroupField = (f: { name: string }) => calcGroupNames.has(f.name);
-      const isRealBiField = (f: { name: string }) =>
-        (f.name.includes('.') && !isHierarchyField(f.name)) || isCalcGroupField(f);
-      // A calculation-group chip becomes its pseudo ref; hiddenItems carry the
-      // item subset for every zone (the backend reads them off the placement).
-      const toBiRef = (f: { name: string; hiddenItems?: string[] }) =>
-        isCalcGroupField(f)
-          ? { table: CALC_GROUP_TABLE, column: f.name, hiddenItems: f.hiddenItems }
-          : { ...toBiFieldRef(f.name, biTableNames, lookupColumns.has(f.name)), hiddenItems: f.hiddenItems };
-      const biFilterFields = (request.filterFields ?? [])
-        .filter(isRealBiField)
-        .map(toBiRef);
-
-      // Extract hierarchy fields from rows/columns
-      const rowHierarchies = (request.rowFields ?? [])
-        .filter(f => isHierarchyField(f.name))
-        .map(f => toHierarchyFieldRef(f.name));
-      const columnHierarchies = (request.columnFields ?? [])
-        .filter(f => isHierarchyField(f.name))
-        .map(f => toHierarchyFieldRef(f.name));
-
-      biRequest = {
-        pivotId: request.pivotId,
-        rowFields: (request.rowFields ?? []).filter(isRealBiField).map(toBiRef),
-        columnFields: (request.columnFields ?? []).filter(isRealBiField).map(toBiRef),
-        valueFields: (request.valueFields ?? [])
-          .filter((f) => !isCalcGroupField(f))
-          .map((f) => toBiValueFieldRef(f.name, f.customName)),
-        filterFields: biFilterFields,
-        rowHierarchies: rowHierarchies.length > 0 ? rowHierarchies : undefined,
-        columnHierarchies: columnHierarchies.length > 0 ? columnHierarchies : undefined,
-        layout: request.layout,
-        lookupColumns: [...lookupColumns],
-        calculatedFields: request.calculatedFields,
-        valueColumnOrder: request.valueColumnOrder,
-      };
+      biRequest = buildBiUpdateRequest(request, {
+        calcGroupNames,
+        biTableNames,
+        lookupColumns,
+        hiddenItemEdits: hiddenItemEdits.edits,
+      });
     }
 
     try {
@@ -432,6 +384,9 @@ export function PivotEditor({
       } else {
         await pivot.updateFields(request);
       }
+      // The backend took the request: the item-filter edits it carried are
+      // on the pivot now, and the next edit must not resend them.
+      hiddenItemEdits.acknowledge();
 
       hasUserInteracted.current = true;
       const ipcMs = performance.now() - t0;
@@ -497,6 +452,7 @@ export function PivotEditor({
     handleDragEnd,
     setZoneFieldHiddenItems,
     setAllZones,
+    takeHiddenItemEdits,
     filterUniqueValues,
     calculatedFields,
     flushUpdate,
@@ -511,6 +467,7 @@ export function PivotEditor({
     initialLayout,
     initialCalculatedFields,
     onUpdate: handleUpdate,
+    readPivotFields,
   });
 
   // Wire up the reset ref so handleUpdate's catch block can access it
@@ -796,34 +753,21 @@ export function PivotEditor({
       return;
     }
 
-    // Build and send the update request directly (same as handleUpdate logic)
-    const isCalcGroupField = (f: { name: string }) => calcGroupNames.has(f.name);
-    const isRealBiField = (f: { name: string }) =>
-      (f.name.includes('.') && !isHierarchyField(f.name)) || isCalcGroupField(f);
-    const toBiRef = (f: { name: string; hiddenItems?: string[] }) =>
-      isCalcGroupField(f)
-        ? { table: CALC_GROUP_TABLE, column: f.name, hiddenItems: f.hiddenItems }
-        : { ...toBiFieldRef(f.name, biTableNames, lookupColumns.has(f.name)), hiddenItems: f.hiddenItems };
-    const rowHierarchies = rows.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
-    const columnHierarchies = columns.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
-    const biRequest: UpdateBiPivotFieldsRequest = {
-      pivotId,
-      rowFields: rows.filter(isRealBiField).map(toBiRef),
-      columnFields: columns.filter(isRealBiField).map(toBiRef),
-      valueFields: values
-        .filter((f) => !isCalcGroupField(f))
-        .map((f) => toBiValueFieldRef(f.name, f.customName)),
-      filterFields: filters.filter(isRealBiField).map(toBiRef),
-      rowHierarchies: rowHierarchies.length > 0 ? rowHierarchies : undefined,
-      columnHierarchies: columnHierarchies.length > 0 ? columnHierarchies : undefined,
-      lookupColumns: [...lookupColumns],
-    };
+    // Build and send the update request directly -- through the SAME mapping
+    // as handleUpdate, so a lookup toggle never echoes a chip's stale item
+    // filter either (it used to send every row/column chip's load-time list).
+    const hiddenItemEdits = takeHiddenItemEdits();
+    const biRequest = buildBiUpdateRequest(
+      { pivotId, rowFields: rows, columnFields: columns, valueFields: values, filterFields: filters },
+      { calcGroupNames, biTableNames, lookupColumns, hiddenItemEdits: hiddenItemEdits.edits },
+    );
     pivot.updateBiFields(biRequest).then(() => {
+      hiddenItemEdits.acknowledge();
       if (onViewUpdate) onViewUpdate();
     }).catch((err) => {
       console.error('Failed to update pivot after lookup toggle:', err);
     });
-  }, [lookupColumns, calcGroupNames, isBiPivot, biTableNames, pivotId, rows, columns, values, filters, onViewUpdate, deferUpdate, markPendingChanges]);
+  }, [lookupColumns, calcGroupNames, isBiPivot, biTableNames, pivotId, rows, columns, values, filters, onViewUpdate, deferUpdate, markPendingChanges, takeHiddenItemEdits]);
 
   // The calculation group currently PLACED on this pivot: the zone chip named
   // after a model calculation group, wherever it sits (rows/columns/filters).

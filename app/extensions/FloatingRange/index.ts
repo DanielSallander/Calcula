@@ -5,7 +5,10 @@
 //          the capture-phase keyboard, Insert/context menus, the properties
 //          dialog, the @api/floatingRangeService provider, the overflow-scroll
 //          wheel target (M7: content past the window scrolls; lib/frView.ts),
-//          and the document lifecycle (open/new/sheet-switch/undo re-sync).
+//          the formula bar / Name Box view of the selected cell and its edit
+//          (lib/frFormulaBar.ts over @api/externalEdit: one edit session, two
+//          views, surviving a point-mode sheet switch), and the document
+//          lifecycle (open/new/sheet-switch/undo re-sync).
 // CONTEXT: Store per Charts/lib/chartStore.ts; interaction per Controls; cell
 //          paint per shapeRenderer's async cache. Overlay priority 13 — above
 //          Controls (12), below Charts (15).
@@ -26,10 +29,18 @@ import { getActiveSheet } from "@api/lib";
 import {
   requestOverlayRedraw,
   topFloatingRegionAt,
+  isPointModeOnForeignSheet,
   type OverlayHitTestContext,
 } from "@api/gridOverlays";
+import {
+  endExternalFormulaSession,
+  getParkedViewSheetIndex,
+  isExternalSessionParked,
+  registerExternalAddressResolver,
+} from "@api/externalEdit";
 import { confirmAsync, promptAsync } from "@api/dialogs";
-import { getDesignMode, onDesignModeChange } from "@api/designMode";
+import { registerCellClickInterceptor, onGridCellPressed } from "@api/cellClickInterceptors";
+import { getLayoutSurface } from "@api/layoutSurface";
 import { getGridStateSnapshot } from "@api/grid";
 import { registerObjectWheelTarget } from "../_shared/lib/objectWheelScroll";
 import {
@@ -61,12 +72,14 @@ import {
   getFloatingRangeById,
   upsertFromInfo,
   removeFloatingRange,
-  moveFloatingRange,
   toInfo,
   setFrActiveSheetIndex,
   getFrActiveSheetIndex,
   syncFloatingRangeRegions,
   flushPendingFloatingRangeSaves,
+  frGeometryEditable,
+  frObjectEditable,
+  installFrRegionResyncs,
   type FloatingRangeEntry,
 } from "./lib/floatingRangeStore";
 import {
@@ -75,6 +88,7 @@ import {
   frameAtCanvasPoint,
 } from "./lib/frCanvasGeometry";
 import { getFrView, ensureFrCellVisible, createFrWheelTarget } from "./lib/frView";
+import { installFrMovePersistence } from "./lib/frMove";
 import { pruneFrScrolls } from "./lib/frScroll";
 import { invalidateAllFrExtents } from "./lib/frExtent";
 import { readFrCells } from "./lib/frCellReads";
@@ -89,6 +103,9 @@ import {
   contentWidth,
   contentHeight,
   frEdgeHandleAt,
+  frBorderGrabAt,
+  fitCountsWithin,
+  maxScaleWithin,
   edgeAxis,
   edgeMovesOrigin,
   clampScaleFactor,
@@ -107,10 +124,16 @@ import {
   getLocalSelection,
   setLocalSelection,
   clearLocalSelection,
+  extendLocalSelection,
   localSelectionRect,
   moveLocalSelection,
   resetFrSelection,
 } from "./lib/frSelection";
+import {
+  installFrFormulaBarPublisher,
+  createFrAddressResolver,
+  refreshFrFormulaBarContent,
+} from "./lib/frFormulaBar";
 import {
   renderFloatingRange,
   hitTestFloatingRange,
@@ -120,6 +143,7 @@ import {
   removeFrFromCache,
   resetFrRenderCaches,
   setFrResizeGhost,
+  frHandlesLive,
 } from "./rendering/frRenderer";
 import {
   openFrEditor,
@@ -130,11 +154,13 @@ import {
   destroyFrEditor,
 } from "./editor/frEditor";
 import { buildQualifiedRef } from "./lib/frRefs";
+import { installFrKeyRouting, frOwnsGridKeys } from "./lib/frKeyRouting";
 import { registerFloatingRangeObjectSelection, frIdOf } from "./lib/frObjectSelection";
 import { registerObjectGeometryProvider } from "@api/objectGeometry";
 import { createFloatingRangeGeometryProvider } from "./lib/frGeometry";
 import {
   buildFrContextMenu,
+  isFrContextMenuOpen,
   type FrContextMenuHandlers,
 } from "./lib/frContextMenu";
 import { FloatingRangePropertiesDialog } from "./components/FloatingRangePropertiesDialog";
@@ -166,6 +192,27 @@ let activeDragCleanup: (() => void) | null = null;
  */
 let edgeResizeActive = false;
 
+/**
+ * True when THIS press was consumed as a formula REFERENCE PICK by
+ * `claimsBodyDrag` (the reference is already in the formula).
+ *
+ * A FACT recorded when the pick happens, never re-derived afterwards: Core
+ * dispatches `floatingObject:bodyDragStart` synchronously after the claim, and
+ * by then the insertion has changed the text -- "=SUM(" became
+ * "=SUM(Float1!B1", which no longer EXPECTS a reference. Re-asking
+ * `externalTargetExpecting()` there passed, so the pick also moved the local
+ * selection onto the picked cell, and the edit-lifetime rule
+ * (lib/frFormulaBar.ts) then COMMITTED the half-typed formula into the edited
+ * cell -- after which the user's next keystroke typed over the cell they had
+ * only meant to reference. Reset at the top of every claim, so a stale flag
+ * cannot outlive the press it describes.
+ */
+let pressFedReference = false;
+
+/** Pointer travel (px) below which a press on an edge ball is a CLICK, not a
+ *  drag -- Core's own move threshold (overlayMoveHandlers.ts). */
+const EDGE_DRAG_THRESHOLD_PX = 3;
+
 // ============================================================================
 // Geometry helpers
 // ============================================================================
@@ -194,6 +241,25 @@ function clampedCellFromFramePoint(
 
 function externalTargetExpecting(): boolean {
   return getExternalFormulaTarget()?.isExpectingReference() === true;
+}
+
+/**
+ * A press on a WORKSHEET grid cell ends this extension's selection (listeners
+ * 8a and 8c in activate()): the object and its cell are deselected, so the
+ * formula bar and the Name Box stop naming the floating cell. Never on a
+ * canvas (no cells; its background press is the marquee's, where Shift/Ctrl
+ * ADD to the selection), and never while this range's edit picks a reference
+ * or is parked on another sheet (the press FEEDS the edit).
+ */
+function leaveForGridCellPress(): void {
+  if (getGridStateSnapshot()?.surface === "canvas") return;
+  if (isFrEditorOpen() && (externalTargetExpecting() || isExternalSessionParked())) return;
+  if (isFrEditorOpen()) void commitFrEditor(null);
+  if (getLocalSelection() !== null || getSelectedFloatingRange() !== null) {
+    deselectAllFloatingRanges();
+    clearLocalSelection();
+    requestOverlayRedraw();
+  }
 }
 
 /**
@@ -237,13 +303,48 @@ function commitFrEditorBeforeSelect(
 // Mutating operations (shared by keyboard / menus / provider)
 // ============================================================================
 
-async function resizeFr(
+/**
+ * Refuse a SIZE change the range's editability forbids (`frGeometryEditable`,
+ * the one answer): a range on a subscribed canvas, or one its canvas locks.
+ * Every geometry door funnels through `resizeFr` / `resizeFrCells`, so the
+ * menu, the Properties dialog's path, a script's `resize` and the gestures
+ * cannot disagree about it. The message names the reason and the remedy.
+ */
+function assertGeometryEditable(frId: string): void {
+  if (frGeometryEditable(frId)) return;
+  const entry = getFloatingRangeById(frId);
+  if (!entry) throw new Error(`No floating range with id ${frId}`);
+  const name = `"${entry.name}"`;
+  throw new Error(
+    frObjectEditable(frId)
+      ? `The floating range ${name} is locked on this canvas; unlock it to change its size.`
+      : `The floating range ${name} is on a canvas subscribed from an application, which is read-only until it is detached.`,
+  );
+}
+
+/** Tell the user a size change did not happen (menu doors are fire-and-forget). */
+function reportGeometryFailure(err: unknown): void {
+  console.error("[FloatingRange] Resize failed:", err);
+  showToast(
+    `The floating range could not be resized: ${err instanceof Error ? err.message : String(err)}`,
+    { type: "error" },
+  );
+}
+
+/**
+ * Change the window's row/column counts (and, for a corner drag, the origin).
+ * The door the menu, the corner count-resize and the script provider's
+ * `resize` share -- so the geometry refusal is here, once. Exported for the
+ * unit tier.
+ */
+export async function resizeFr(
   frId: string,
   rows: number,
   cols: number,
   x?: number,
   y?: number,
 ): Promise<FloatingRangeInfo> {
+  assertGeometryEditable(frId);
   const patch: { rowCount: number; colCount: number; x?: number; y?: number } = {
     rowCount: Math.max(1, Math.min(FLOATING_RANGE_MAX_ROWS, Math.trunc(rows))),
     colCount: Math.max(1, Math.min(FLOATING_RANGE_MAX_COLS, Math.trunc(cols))),
@@ -273,6 +374,7 @@ async function resizeFrCells(
   x: number,
   y: number,
 ): Promise<FloatingRangeInfo> {
+  assertGeometryEditable(frId);
   const info = await updateFloatingRange(frId, { colWidths, rowHeights, x, y });
   upsertFromInfo(info);
   syncFloatingRangeRegions();
@@ -292,6 +394,10 @@ async function renameFr(frId: string, name: string): Promise<FloatingRangeInfo> 
 
 async function deleteFrObject(frId: string): Promise<void> {
   await deleteFloatingRange(frId);
+  // An edit of one of its cells is DISCARDED, before the selection clear
+  // below: that clear would otherwise commit it into the deleted range (an
+  // edit never outlives its cell's selection, lib/frFormulaBar.ts).
+  if (getFrEditorCell()?.frId === frId) cancelFrEditor();
   removeFloatingRange(frId);
   removeFrFromCache(frId);
   const sel = getLocalSelection();
@@ -407,6 +513,16 @@ async function createFrOnActiveSheet(
 }
 
 async function insertFloatingRangeFromMenu(): Promise<void> {
+  // A canvas subscribed from an application is the publisher's read-only
+  // layout: the Canvas tab's Insert group is disabled there, and the menu door
+  // says why rather than asking the backend (which refuses the create too).
+  if (getLayoutSurface(getFrActiveSheetIndex())?.editable === false) {
+    showToast(
+      "A floating range cannot be inserted on a canvas subscribed from an application: it is read-only until it is detached.",
+      { type: "error" },
+    );
+    return;
+  }
   try {
     const entry = await createFrOnActiveSheet();
     selectFloatingRange(entry.id);
@@ -469,6 +585,21 @@ function startEdgeResizeDrag(
 
   if (baseExtent <= 0) return;
 
+  // THE PAGE. Core keeps every dragged edge it moves on a canvas's page
+  // (`applySurfaceToResize`), and this gesture is the FR's own, so it keeps
+  // the same promise itself: the scale stops where the dragged edge meets the
+  // page border, rather than overflowing it. A left/top edge moves the origin
+  // with the opposite edge fixed, so its limit is the sheet origin -- on every
+  // sheet kind, or the `Math.max(0, ...)` below would move the FIXED edge.
+  const page = getLayoutSurface(entry.sheetIndex)?.page ?? null;
+  const baseFrameExtent = axis === "cols" ? baseFrameW : baseFrameH;
+  const maxFrameExtent = movesOrigin
+    ? (axis === "cols" ? baseX : baseY) + baseFrameExtent
+    : page
+      ? (axis === "cols" ? page.width - baseX : page.height - baseY)
+      : Infinity;
+  const scaleCap = maxScaleWithin(baseFrameExtent, baseExtent, maxFrameExtent, baseSizes.length);
+
   const applyScale = (scale: number) => {
     const live = getFloatingRangeById(frId);
     if (!live) return;
@@ -488,16 +619,31 @@ function startEdgeResizeDrag(
   };
 
   let lastScale = 1;
+  // A CLICK on a ball is not a resize. The balls sit over the edge cells of
+  // every selected range, in every mode, so a 1px wobble while clicking one of
+  // those cells used to rescale every column by a fraction of a pixel -- an
+  // invisible change that still recorded "Resize floating range cells" and
+  // dirtied the document. Latched: once the press has travelled past the
+  // threshold it is a drag, and the scale is still measured from the PRESS
+  // point, so a drag that returns to its start restores the sizes exactly.
+  let dragging = false;
 
   const onMove = (ev: MouseEvent) => {
     const canvas = clientToCanvas(ev.clientX, ev.clientY);
     if (!canvas) return;
     const delta =
       axis === "cols" ? canvas.x - startCanvasX : canvas.y - startCanvasY;
+    if (!dragging) {
+      if (Math.abs(delta) <= EDGE_DRAG_THRESHOLD_PX) return;
+      dragging = true;
+    }
     // Dragging the left/top edge outward means a NEGATIVE delta grows the
     // object, so the sign flips for the origin-moving edges.
     const grow = movesOrigin ? -delta : delta;
-    lastScale = clampScaleFactor(baseSizes, (baseExtent + grow) / baseExtent, min, max);
+    lastScale = Math.min(
+      clampScaleFactor(baseSizes, (baseExtent + grow) / baseExtent, min, max),
+      scaleCap,
+    );
     applyScale(lastScale);
   };
 
@@ -516,7 +662,9 @@ function startEdgeResizeDrag(
       live.x,
       live.y,
     ).catch((err) => {
-      console.error("[FloatingRange] Cell resize failed:", err);
+      // Loud: the frame visibly stretched, so a refusal nobody announces
+      // reads as the gesture silently undoing itself.
+      reportGeometryFailure(err);
       // The optimistic local scale is now a lie; the backend is the authority.
       void loadFloatingRangesFromBackend().then(() => {
         syncFloatingRangeRegions();
@@ -537,11 +685,77 @@ function startEdgeResizeDrag(
   window.addEventListener("mouseup", finish);
 }
 
+/**
+ * Corner resize is REINTERPRETED as a quantized count change (M8): the rect
+ * Core dragged (already snapped and page-clamped) becomes whole row/column
+ * counts, and x/y move only for a left/top drag so the visually fixed corner
+ * stays put. Raw w/h is NEVER persisted. Exported for the unit tier.
+ */
+export function quantizeCornerResize(
+  entry: FloatingRangeEntry,
+  detail: { x: number; y: number; width: number; height: number },
+): {
+  rows: number;
+  cols: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  // Left/top edge moved => the OPPOSITE edge is the fixed one.
+  const leftDragged = Math.abs(detail.x - entry.x) > 0.5;
+  const topDragged = Math.abs(detail.y - entry.y) > 0.5;
+  // The NEAREST whole counts can overshoot the dragged rect by half a
+  // track. Where Core clamped that rect -- at a canvas page's far edge, or
+  // at the sheet origin for a left/top drag -- the overshoot would carry the
+  // frame past the clamp (or, at the origin, move the FIXED edge), so the
+  // counts step down until the frame fits.
+  const page = getLayoutSurface(entry.sheetIndex)?.page ?? null;
+  const maxWidth = leftDragged
+    ? entry.x + frameWidth(entry)
+    : page
+      ? page.width - entry.x
+      : Infinity;
+  const maxHeight = topDragged
+    ? entry.y + frameHeight(entry)
+    : page
+      ? page.height - entry.y
+      : Infinity;
+  const counts = fitCountsWithin(
+    entry,
+    bestCountsForSize(entry, detail.width, detail.height),
+    maxWidth,
+    maxHeight,
+  );
+  const snapped = frameSizeForCounts(entry, counts.rows, counts.cols);
+  const x = leftDragged
+    ? Math.max(0, entry.x + frameWidth(entry) - snapped.width)
+    : entry.x;
+  const y = topDragged
+    ? Math.max(0, entry.y + frameHeight(entry) - snapped.height)
+    : entry.y;
+  return { ...counts, x, y, width: snapped.width, height: snapped.height };
+}
+
 // ============================================================================
 // claimsBodyDrag — the zone router (and the M7 formula-mode branch)
 // ============================================================================
 
-function claimsBodyDrag(ctx: OverlayHitTestContext): boolean {
+/**
+ * The zone router Core consults on every press of a range (after dispatching
+ * `floatingObject:selected`). TRUE = the range owns the press (cells, headers,
+ * an edge-handle scale, a reference pick); FALSE = Core runs its MOVE path,
+ * which it refuses unless the store published `movable`.
+ *
+ * `ctx.region` is the region Core captured BEFORE the press selected the
+ * range (the store's selection re-sync publishes new objects), so its
+ * `resizable` says whether the handles were live when the press began.
+ *
+ * Exported for the unit tier (frMoveZones.test.ts).
+ */
+export function claimsBodyDrag(ctx: OverlayHitTestContext): boolean {
+  // Every press starts clean (see `pressFedReference`).
+  pressFedReference = false;
   const frId = ctx.region.data?.frId as string | undefined;
   if (!frId || !ctx.floatingCanvasBounds) return false;
   const entry = getFloatingRangeById(frId);
@@ -574,24 +788,44 @@ function claimsBodyDrag(ctx: OverlayHitTestContext): boolean {
       }
     }
     // Claim regardless of zone: in formula mode a click must never select or
-    // move the object (accepted, Excel-like).
+    // move the object (accepted, Excel-like). Recorded as a fact for the
+    // bodyDragStart Core dispatches next, which must select nothing.
+    pressFedReference = true;
     return true;
   }
 
+  // With the title bar hidden, the 4px band inside the frame edge is the move
+  // handle (owner decision 2026-09-27; Excel's text box moves by its border).
+  // Gated on `movable`, so the band never hands Core a drag it will refuse --
+  // on a subscribed canvas or a locked range the band is just the edge cells.
+  const borderGrab =
+    !entry.showTitle && ctx.region.data?.movable === true && frBorderGrabAt(entry, dx, dy);
+
+  // Whether the edge handles were armed when the press BEGAN -- read before
+  // the commit below, which closes the cell editor synchronously: read after
+  // it, a press on an invisible ball of a range being edited would commit the
+  // edit AND start a cell-scale drag.
+  const handlesLive = frHandlesLive(ctx.region, frId) && frGeometryEditable(frId);
+
   // The FR's commit-before-select. This is the ONE mousedown hook Core calls
   // for every zone — including the title bar, which dispatches no
-  // bodyDragStart — so it is the only place that can cover all of them.
+  // bodyDragStart — so it is the only place that can cover all of them. A
+  // border-band press is a frame press like the title's: it commits even when
+  // it lands over the edited cell.
   commitFrEditorBeforeSelect(
     frId,
-    hit.zone === "cells" ? { row: hit.row, col: hit.col } : null,
+    hit.zone === "cells" && !borderGrab ? { row: hit.row, col: hit.col } : null,
   );
 
   // Edge handles: scale the CELLS. Checked before the zone router because a
   // handle sits ON the frame border, where the zone underneath it would
-  // otherwise answer "cells" or "rowHeader". Design mode only, and gated on
-  // the same `resizable` flag Core reads for the corner handles — so the ball
-  // is never grabbable in a mode where it is not painted.
-  if (ctx.region.data?.resizable === true) {
+  // otherwise answer "cells" or "rowHeader". Gated on `frHandlesLive` -- the
+  // same gate the paint uses, so a ball is never grabbable where it is not
+  // painted: `ctx.region.resizable` is the value from BEFORE this press (see
+  // above), so an unselected range's balls do not take the press that selects
+  // it, and never while its cell editor is open. `frGeometryEditable` is the
+  // one per-range answer every geometry door asks, read live.
+  if (handlesLive) {
     const edge = frEdgeHandleAt(entry, dx, dy);
     if (edge) {
       startEdgeResizeDrag(entry, edge, ctx.canvasX, ctx.canvasY);
@@ -605,17 +839,19 @@ function claimsBodyDrag(ctx: OverlayHitTestContext): boolean {
   if (hit.zone === "outside") return true;
 
   // Title bar: Core runs the normal move path (floatingObject:selected has
-  // already been dispatched, so the object still gets selected).
+  // already been dispatched, so the object still gets selected). Core then
+  // refuses the drag unless the store published `movable`.
   if (hit.zone === "title") return false;
 
-  // No title bar = no grab zone. Rather than leave the object strandable,
-  // DESIGN MODE takes the whole body as the move handle — the Charts/Controls
-  // convention for an object with no title. Run mode is unchanged: the body
-  // still selects and edits cells, which is the working-surface doctrine in
-  // syncFloatingRangeRegions. Gated on `movable` (which the store publishes
-  // from the design-mode state) so the claim can never hand Core a drag it
-  // will refuse, leaving the click doing nothing at all.
-  if (!entry.showTitle && ctx.region.data?.movable === true) return false;
+  // No title bar: the border band moves the range in every mode...
+  if (borderGrab) return false;
+
+  // ...and in DESIGN MODE the whole body does -- the Charts/Controls
+  // convention for an object with no title. `bodyGrab`, NOT `movable`: since
+  // a range moves outside Design Mode too, reading `movable` here would turn
+  // the whole body of every title-less range into a move handle and its cells
+  // could no longer be selected or edited.
+  if (ctx.region.data?.bodyGrab === true) return false;
 
   // Headers + cells: the FR owns the interaction (local selection).
   return true;
@@ -678,9 +914,19 @@ export function handleFrDoubleClick(ctx: OverlayHitTestContext): boolean {
 function setupFloatingObjectEvents(): void {
   const handleSelected = (e: Event) => {
     const detail = (e as CustomEvent).detail;
-    if (detail.regionType !== FLOATING_RANGE_REGION_TYPE) return;
-    // A ref-pick click must not also select the object.
+    // A ref-pick click must not also select the object (nor drop a selection).
     if (isGlobalFormulaMode() || externalTargetExpecting()) return;
+    if (detail.regionType !== FLOATING_RANGE_REGION_TYPE) {
+      // Another object took the press: the range's CELL selection ends (the
+      // formula bar and the Name Box stop showing its cell, and an open edit
+      // is committed -- lib/frFormulaBar.ts). The OBJECT selection is left
+      // alone: a Ctrl/Shift press on a canvas ADDS to the selection set.
+      if (getLocalSelection()) {
+        clearLocalSelection();
+        requestOverlayRedraw();
+      }
+      return;
+    }
     const frId = detail.data?.frId as string | undefined;
     if (!frId) return;
     const sel = getLocalSelection();
@@ -693,67 +939,28 @@ function setupFloatingObjectEvents(): void {
     window.removeEventListener("floatingObject:selected", handleSelected),
   );
 
-  const handleMovePreview = (e: Event) => {
-    const detail = (e as CustomEvent).detail;
-    if (detail.regionType !== FLOATING_RANGE_REGION_TYPE) return;
-    const frId = detail.data?.frId as string | undefined;
-    if (!frId) return;
-    moveFloatingRange(frId, detail.x as number, detail.y as number);
-    syncFloatingRangeRegions();
-    emitAppEvent(AppEvents.GRID_REFRESH);
-  };
-  window.addEventListener("floatingObject:movePreview", handleMovePreview);
-  cleanupFns.push(() =>
-    window.removeEventListener("floatingObject:movePreview", handleMovePreview),
-  );
-
-  const handleMoveComplete = (e: Event) => {
-    const detail = (e as CustomEvent).detail;
-    if (detail.regionType !== FLOATING_RANGE_REGION_TYPE) return;
-    const frId = detail.data?.frId as string | undefined;
-    if (!frId) return;
-    // Same store write; the 300 ms debounce coalesces preview + complete into
-    // one undoable update_floating_range.
-    moveFloatingRange(frId, detail.x as number, detail.y as number);
-    syncFloatingRangeRegions();
-    emitAppEvent(AppEvents.GRID_REFRESH);
-  };
-  window.addEventListener("floatingObject:moveComplete", handleMoveComplete);
-  cleanupFns.push(() =>
-    window.removeEventListener("floatingObject:moveComplete", handleMoveComplete),
-  );
+  // --------------------------------------------------------------------------
+  // Move: preview frames SHOW the new position and write nothing; the ONE
+  // write is moveComplete's. Persisting previews (through the 300 ms debounce)
+  // made a human drag that paused mid-gesture several "Move floating range"
+  // undo steps -- invisible to a test driver's fast mouse, everyday for a
+  // person now that the title bar moves a range without Design Mode.
+  // --------------------------------------------------------------------------
+  cleanupFns.push(installFrMovePersistence());
 
   // --------------------------------------------------------------------------
-  // Corner resize is REINTERPRETED as a quantized count change (M8): the ghost
-  // snaps to whole rows/cols; resizeComplete converts the final rect to counts
-  // and adjusts x/y so the visually fixed corner stays put. Raw w/h is NEVER
-  // persisted.
+  // Corner resize is REINTERPRETED as a quantized count change (M8,
+  // `quantizeCornerResize`): the ghost snaps to whole rows/cols;
+  // resizeComplete converts the final rect to counts and adjusts x/y so the
+  // visually fixed corner stays put. Raw w/h is NEVER persisted.
   // --------------------------------------------------------------------------
-  const quantize = (
-    entry: FloatingRangeEntry,
-    detail: { x: number; y: number; width: number; height: number },
-  ) => {
-    const counts = bestCountsForSize(entry, detail.width, detail.height);
-    const snapped = frameSizeForCounts(entry, counts.rows, counts.cols);
-    // Left/top edge moved => the OPPOSITE edge is the fixed one.
-    const leftDragged = Math.abs(detail.x - entry.x) > 0.5;
-    const topDragged = Math.abs(detail.y - entry.y) > 0.5;
-    const x = leftDragged
-      ? Math.max(0, entry.x + frameWidth(entry) - snapped.width)
-      : entry.x;
-    const y = topDragged
-      ? Math.max(0, entry.y + frameHeight(entry) - snapped.height)
-      : entry.y;
-    return { ...counts, x, y, width: snapped.width, height: snapped.height };
-  };
-
   const handleResizePreview = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== FLOATING_RANGE_REGION_TYPE) return;
     const frId = detail.data?.frId as string | undefined;
     const entry = frId ? getFloatingRangeById(frId) : null;
     if (!frId || !entry) return;
-    const q = quantize(entry, detail as { x: number; y: number; width: number; height: number });
+    const q = quantizeCornerResize(entry, detail as { x: number; y: number; width: number; height: number });
     setFrResizeGhost({
       frId,
       x: q.x,
@@ -777,13 +984,13 @@ function setupFloatingObjectEvents(): void {
     const entry = frId ? getFloatingRangeById(frId) : null;
     setFrResizeGhost(null);
     if (!frId || !entry) return;
-    const q = quantize(entry, detail as { x: number; y: number; width: number; height: number });
+    const q = quantizeCornerResize(entry, detail as { x: number; y: number; width: number; height: number });
     if (q.rows === entry.rows && q.cols === entry.cols && q.x === entry.x && q.y === entry.y) {
       requestOverlayRedraw();
       return;
     }
     void resizeFr(frId, q.rows, q.cols, q.x, q.y).catch((err) => {
-      console.error("[FloatingRange] Resize failed:", err);
+      reportGeometryFailure(err);
       syncFloatingRangeRegions();
       requestOverlayRedraw();
     });
@@ -800,7 +1007,15 @@ function setupFloatingObjectEvents(): void {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== FLOATING_RANGE_REGION_TYPE) return;
     // The ref-pick claim also dispatches bodyDragStart; insertion already
-    // happened inside claimsBodyDrag, so there is nothing to select here.
+    // happened inside claimsBodyDrag, so there is nothing to select here. The
+    // RECORDED fact decides (`pressFedReference`): the text the pick just
+    // changed no longer expects a reference, so re-asking would select the
+    // picked cell and commit the edit that was being fed.
+    if (pressFedReference) {
+      pressFedReference = false;
+      return;
+    }
+    // Second line of defence (a bodyDragStart that reached no claim).
     if (isGlobalFormulaMode() || externalTargetExpecting()) return;
     const frId = detail.data?.frId as string | undefined;
     const entry = frId ? getFloatingRangeById(frId) : null;
@@ -858,8 +1073,9 @@ function setupFloatingObjectEvents(): void {
         canvas.y - liveBounds.y,
       );
       if (cell.row !== sel.endRow || cell.col !== sel.endCol) {
-        sel.endRow = cell.row;
-        sel.endCol = cell.col;
+        // Through the selection's own door, never in place: the formula bar
+        // and the Name Box follow the extended range.
+        extendLocalSelection(cell.row, cell.col);
         requestOverlayRedraw();
       }
     };
@@ -902,6 +1118,24 @@ export function handleFrKeyDown(e: KeyboardEvent): void {
     return;
   }
   if (getGlobalIsEditing() || isFrEditorOpen()) return;
+
+  // Delete/Backspace WITH A MODIFIER (review 2026-09-28): the range binds only
+  // the bare keys (lib/frKeyRouting.ts), and the grid's keyboard -- a listener
+  // on the container, AFTER this one -- clears Core's selection on whatever it
+  // treats as a delete: a modified one used to clear Core's HIDDEN cell
+  // (Ctrl+Backspace is Excel's "show the active cell", pressed out of habit).
+  // While the range owns the grid's keys (its cells or the object, the
+  // keyboard the grid's), none of them reaches the grid. Nothing is cleared:
+  // a clear is the bare key, here as on the sheet.
+  if (
+    (e.key === "Delete" || e.key === "Backspace") &&
+    (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) &&
+    frOwnsGridKeys()
+  ) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
 
   const sel = getLocalSelection();
   if (sel) {
@@ -951,6 +1185,9 @@ export function handleFrKeyDown(e: KeyboardEvent): void {
         move(0, e.shiftKey ? -1 : 1, false);
         return;
       case "Escape":
+        // With the range's right-click menu open, Escape is the MENU's (it
+        // closes itself and stops the key): the cell selection stays.
+        if (isFrContextMenuOpen()) return;
         swallow();
         // Drop the LOCAL selection; the object stays selected.
         clearLocalSelection();
@@ -962,12 +1199,11 @@ export function handleFrKeyDown(e: KeyboardEvent): void {
         ensureFrCellVisible(entry, sel.anchorRow, sel.anchorCol);
         openFrEditor(sel.frId, sel.anchorRow, sel.anchorCol, null);
         return;
-      case "Delete":
-      case "Backspace":
-        // Internal selection ALWAYS wins over object delete (explicit guard).
-        swallow();
-        void clearLocalSelectionCells(sel.frId);
-        return;
+      // The BARE Delete and Backspace are NOT this listener's: they go through the
+      // keybinding registry (lib/frKeyRouting.ts), whose window-capture
+      // dispatcher runs first and would otherwise hand Delete to the grid's
+      // clear-contents over Core's hidden cell -- while this listener, on the
+      // same target, cleared the range's cell as well.
       default:
         // Type-to-edit: a printable character opens the editor seeded with it.
         if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -978,15 +1214,26 @@ export function handleFrKeyDown(e: KeyboardEvent): void {
         return;
     }
   }
+}
 
-  // Object selected, NO local cell selection: Delete removes the OBJECT
-  // (confirmed — delete ends the undo history).
-  const objId = getSelectedFloatingRange();
-  if (objId && (e.key === "Delete" || e.key === "Backspace")) {
-    e.preventDefault();
-    e.stopPropagation();
-    void confirmAndDeleteFr(objId);
+/**
+ * The range's Delete (and Backspace), run by the registry binding
+ * (lib/frKeyRouting.ts): the LOCAL cell selection always wins -- its cells are
+ * cleared; with only the OBJECT selected, the object is deleted (confirmed,
+ * because delete ends the undo history). Exported for the unit tier.
+ */
+export function deleteFrSelection(): void {
+  const sel = getLocalSelection();
+  if (sel) {
+    if (!getFloatingRangeById(sel.frId)) {
+      clearLocalSelection();
+      return;
+    }
+    void clearLocalSelectionCells(sel.frId);
+    return;
   }
+  const objId = getSelectedFloatingRange();
+  if (objId) void confirmAndDeleteFr(objId);
 }
 
 // ============================================================================
@@ -1033,16 +1280,23 @@ function activate(context: ExtensionContext): void {
     window.removeEventListener("keydown", handleFrKeyDown, true),
   );
 
-  // 3b. Design mode gates move/resize (the BUTTON rule — see
-  // syncFloatingRangeRegions). The flags live on the published regions, so a
-  // toggle must re-publish them or the change waits for the next unrelated
-  // sync; the redraw repaints the frames so any design-only chrome follows.
+  // 3a. The grid's selection-acting keys and commands while the range owns
+  //     the selection: Delete/Backspace are the range's, copy/cut/paste/fill/
+  //     format/merge are refused, the grid commands' other doors are guarded
+  //     -- none may act on Core's hidden active cell (lib/frKeyRouting.ts).
   cleanupFns.push(
-    onDesignModeChange(() => {
-      syncFloatingRangeRegions();
-      requestOverlayRedraw();
+    installFrKeyRouting({
+      extensionId: "calcula.floating-range",
+      deleteSelection: deleteFrSelection,
     }),
   );
+
+  // 3b. The published flags (movable / resizable / bodyGrab, see
+  // syncFloatingRangeRegions) follow Design Mode, the layout surface
+  // (subscribe, detach, lock, a canvas store that loads after the ranges) and
+  // the object selection. Each re-publishes on its own signal, or the change
+  // would wait for the next unrelated sync.
+  cleanupFns.push(installFrRegionResyncs());
 
   // 4. Insert menu.
   context.ui.menus.registerItem("insert", {
@@ -1062,27 +1316,35 @@ function activate(context: ExtensionContext): void {
   //    never registered one, so its menu — Properties… included — could not be
   //    reached by right-clicking the object at all.
   //
-  //    DESIGN MODE gates it, for the same reason it gates move and resize: the
-  //    items here are AUTHORING acts on the object (grow it, rename it, delete
-  //    it, change its chrome), while run mode treats the range as a working
-  //    surface whose cells select and edit.
+  //    EDITABILITY gates it, not Design Mode (owner decision 2026-09-27): the
+  //    items are AUTHORING acts on the object (grow it, rename it, delete it,
+  //    change its chrome), so the menu opens wherever the range may be
+  //    authored -- a worksheet, or a canvas that is not subscribed
+  //    (`frObjectEditable`) -- and its SIZE items only where its geometry may
+  //    change (`frGeometryEditable`: not on a range the canvas locks). The
+  //    cells stay the working surface in every mode; the menu is a right-click.
   const menuHandlers: FrContextMenuHandlers = {
     addRow: (frId) => {
       const entry = getFloatingRangeById(frId);
-      if (entry) void resizeFr(frId, entry.rows + 1, entry.cols);
+      if (entry) void resizeFr(frId, entry.rows + 1, entry.cols).catch(reportGeometryFailure);
     },
     addColumn: (frId) => {
       const entry = getFloatingRangeById(frId);
-      if (entry) void resizeFr(frId, entry.rows, entry.cols + 1);
+      if (entry) void resizeFr(frId, entry.rows, entry.cols + 1).catch(reportGeometryFailure);
     },
     deleteLastRow: (frId) => {
       const entry = getFloatingRangeById(frId);
-      if (entry && entry.rows > 1) void resizeFr(frId, entry.rows - 1, entry.cols);
+      if (entry && entry.rows > 1) {
+        void resizeFr(frId, entry.rows - 1, entry.cols).catch(reportGeometryFailure);
+      }
     },
     deleteLastColumn: (frId) => {
       const entry = getFloatingRangeById(frId);
-      if (entry && entry.cols > 1) void resizeFr(frId, entry.rows, entry.cols - 1);
+      if (entry && entry.cols > 1) {
+        void resizeFr(frId, entry.rows, entry.cols - 1).catch(reportGeometryFailure);
+      }
     },
+    canEditGeometry: (frId) => frGeometryEditable(frId),
     rename: (frId) => {
       void (async () => {
         const entry = getFloatingRangeById(frId);
@@ -1122,8 +1384,12 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => context.ui.overlays.unregister(FR_CONTEXT_MENU_ID));
 
   const handleFrContextMenu = (e: MouseEvent) => {
+    // A formula is picking a reference on ANOTHER sheet (an edit parked
+    // there, or the grid's own cross-sheet edit): nothing of this sheet's
+    // ranges is on screen. The frame lookup below reads the store, not the
+    // (suppressed) regions, so it would open an invisible range's menu.
+    if (isPointModeOnForeignSheet()) return;
     if (e.shiftKey) return; // Shift+right-click = the browser's own menu
-    if (!getDesignMode()) return;
 
     // The listener is on `window`, so it sees right-clicks in dialogs and side
     // panels too. Those have client coordinates that can map INTO an FR's
@@ -1153,6 +1419,10 @@ function activate(context: ExtensionContext): void {
     const topId = top ? frIdOf(top) : null;
     const entry = (topId ? getFloatingRangeById(topId) : null) ?? frameAtCanvasPoint(point.x, point.y);
     if (!entry) return;
+    // A range on a SUBSCRIBED canvas is the publisher's: no authoring menu,
+    // whatever Design Mode says (the right-click still falls through to what
+    // any right-click on a read-only object does).
+    if (!frObjectEditable(entry.id)) return;
 
     // preventDefault ALSO satisfies Core's `defaultPrevented` check, so the
     // grid's handler stands down even before its own floating-region test.
@@ -1225,22 +1495,91 @@ function activate(context: ExtensionContext): void {
       const sig = sel
         ? `${sel.type ?? ""}:${sel.startRow},${sel.startCol},${sel.endRow},${sel.endCol}`
         : "none";
-      if (sig !== lastSelectionSig) {
-        lastSelectionSig = sig;
-        // Same commit-before-select rule, for the click that lands on an
-        // ORDINARY grid cell: that mousedown is preventDefault'd too, so the
-        // editor would otherwise sit open over a grid the user has moved on
-        // from. Never while a reference is being picked — that click is
-        // FEEDING the editor, and the grid selection does not move for it.
-        if (isFrEditorOpen() && !externalTargetExpecting()) {
-          void commitFrEditor(null);
-        }
-        deselectAllFloatingRanges();
-        clearLocalSelection();
-        requestOverlayRedraw();
-      }
+      if (sig === lastSelectionSig) return;
+      // ALWAYS recorded, point mode included: a change skipped below must not
+      // be replayed as a "genuine" one by the next, unrelated emit.
+      lastSelectionSig = sig;
+      // No grid selection is a CANVAS surface, not a grid click -- in
+      // particular the return to a canvas host at the end of a point-mode
+      // edit, whose Enter move reads this range's cell selection only after
+      // its write lands.
+      if (sel === null) return;
+      // Point mode: the grid selection moved because the grid shows ANOTHER
+      // sheet (the edit is parked there) or the click FED a reference. The
+      // edit, the object and its cell all stay.
+      if (isFrEditorOpen() && (externalTargetExpecting() || isExternalSessionParked())) return;
+      // Same commit-before-select rule, for the click that lands on an
+      // ORDINARY grid cell: that mousedown is preventDefault'd too, so the
+      // editor would otherwise sit open over a grid the user has moved on
+      // from.
+      if (isFrEditorOpen()) void commitFrEditor(null);
+      deselectAllFloatingRanges();
+      clearLocalSelection();
+      requestOverlayRedraw();
     }),
   );
+
+  // 8a. A PRESS on a grid cell -- not a changed selection -- ends the range's
+  //     selection. Listener 8 dedupes identical selections, so a click on the
+  //     cell Core ALREADY had active (the one the range's cell hid) changed
+  //     nothing it could see: the range kept its cell, the Name Box went on
+  //     naming it, and the formula bar -- the edit's other view -- wrote the
+  //     next entry into the floating cell instead of the cell just clicked.
+  //     Core's cell-click interceptors run for exactly that press: an
+  //     unclaimed cell press (never over a floating object, never the fill
+  //     handle), and never while any edit is live (a pick or the commit-
+  //     before-select owns those). Observe and decline: Core selects as usual.
+  //     WORKSHEETS only: a canvas has no cells, and its background press is
+  //     announced separately (the canvas marquee), where a Shift/Ctrl press
+  //     ADDS to the selection -- dropping the range there would break that.
+  cleanupFns.push(
+    registerCellClickInterceptor(async () => {
+      leaveForGridCellPress();
+      return false;
+    }),
+  );
+
+  // 8c. The same rule AFTER the press, from Core's own announcement
+  //     (`onGridCellPressed`, @api/cellClickInterceptors). The interceptors
+  //     above stand down while an edit is live -- a pick or the commit-before-
+  //     select owns that press -- so with a BAR session open (not picking) a
+  //     press on Core's already-active cell committed the session and then
+  //     left this range's cell selected: the formula bar went on targeting the
+  //     floating cell. Core announces the press only after its commit-before-
+  //     select and its selection, so the edit is already written by then.
+  cleanupFns.push(onGridCellPressed(() => leaveForGridCellPress()));
+
+  // 8b. A GENUINE sheet switch is starting (a tab click, the Name Box, a new
+  //     sheet, an undo that follows its sheet; a point-mode switch never
+  //     announces this). The edit is COMMITTED -- a plain value typed and left
+  //     by a tab click is Excel's commit, never a discard -- and the cell
+  //     selection is dropped at once, so the formula bar and the Name Box stop
+  //     showing this range's cell before the new sheet arrives, not after the
+  //     queued re-sync below.
+  //
+  //     PARKED is not this listener's to end. A parked edit is a formula
+  //     picking a reference on the viewed sheet; its end returns to the host
+  //     first (the seam's `endExternalFormulaSession`), which this synchronous
+  //     listener cannot do without racing the caller's own switch -- a commit
+  //     here wrote the half-typed "=SUM(" into the cell as literal text
+  //     without ever going back. The DOORS refuse to navigate instead: the
+  //     Name Box -- a typed address AND a pick from its name list -- through
+  //     this extension's resolver (lib/frFormulaBar.ts), and Undo/Redo, which
+  //     Core refuses while any external edit is live (the keyboard in
+  //     api/keybindings.ts; the command -- ribbon, Quick Access Toolbar,
+  //     menu -- in useSpreadsheetSelection). A door that still switches
+  //     regardless is a genuine switch, and its SHEET_CHANGED commits below
+  //     as any genuine switch does.
+  const onBeforeSheetSwitch = () => {
+    if (isExternalSessionParked() && isFrEditorOpen()) return;
+    if (isFrEditorOpen()) void commitFrEditor(null);
+    if (getLocalSelection()) {
+      clearLocalSelection();
+      requestOverlayRedraw();
+    }
+  };
+  window.addEventListener("sheet:beforeSwitch", onBeforeSheetSwitch);
+  cleanupFns.push(() => window.removeEventListener("sheet:beforeSwitch", onBeforeSheetSwitch));
 
   // 9. Document lifecycle — ONE serialized queue (Controls precedent): the
   //    startup load is the first link, so a reload can never race it.
@@ -1252,7 +1591,25 @@ function activate(context: ExtensionContext): void {
     console.error("[FloatingRange] Initial load failed:", err);
   });
 
+  // 8c. The formula bar and the Name Box (@api/externalEdit): the selected
+  //     cell is published for the bar to show and edit, an edit never
+  //     outlives its cell's selection, and the Name Box accepts "Float1!B2"
+  //     -- after the queue above, so a re-sync the box's own sheet switch
+  //     queued cannot wipe the selection it sets.
+  cleanupFns.push(installFrFormulaBarPublisher());
+  cleanupFns.push(registerExternalAddressResolver(createFrAddressResolver(() => reloadQueue)));
+
   const reloadForNewDocument = () => {
+    // The document is already REPLACED: an edit still open belongs to the OLD
+    // one. End it NOW, before anything is queued -- the SHEET_CHANGED
+    // {sheetIndex: 0} that the replacement announces next, synchronously
+    // (file-api's announceBackendStateReplaced), would otherwise read as a
+    // genuine switch and COMMIT the old document's text into the NEW one (a
+    // re-opened copy carries the same range ids, so the write lands). A
+    // discard, never a commit: the old document is gone. The queued pair below
+    // stays as a harmless no-op.
+    cancelFrEditor();
+    resetFrSelection();
     reloadQueue = reloadQueue
       .then(async () => {
         cancelFrEditor();
@@ -1272,12 +1629,39 @@ function activate(context: ExtensionContext): void {
     cleanupFns.push(context.events.on(evt, reloadForNewDocument));
   }
 
-  const resyncForSheetChange = () => {
+  /**
+   * SHEET_CHANGED. Two kinds arrive here: a GENUINE switch (it names the new
+   * sheet) and a detail-less STRUCTURAL announcement (the Shell fans the
+   * `sheets` refresh domain out to it: a script, MCP, an undo, an application
+   * pull, "Detach all") that usually leaves the active sheet where it was.
+   * "Did the sheet change" decides everything:
+   *   - a genuine switch COMMITS an open edit at once, before any await --
+   *     never cancels it (a plain value left by a tab click is Excel's
+   *     commit), and never a half-typed formula on a background pull;
+   *   - while an edit is PARKED the backend's active sheet is the VIEWED one
+   *     by design: the ranges are re-read but the host sheet is kept, or the
+   *     host's ranges would be re-filtered away under the parked edit.
+   */
+  const resyncForSheetChange = (payload?: unknown) => {
+    const detail = (payload ?? {}) as { sheetIndex?: unknown };
+    const shown = getParkedViewSheetIndex() ?? getFrActiveSheetIndex();
+    if (typeof detail.sheetIndex === "number" && detail.sheetIndex !== shown) {
+      if (isFrEditorOpen()) void commitFrEditor(null);
+      clearLocalSelection();
+    }
     reloadQueue = reloadQueue
       .then(async () => {
         const next = await getActiveSheet();
+        const viewed = getParkedViewSheetIndex();
+        if (viewed !== null && next === viewed) {
+          await loadFloatingRangesFromBackend();
+          invalidateAllFrExtents();
+          syncFloatingRangeRegions();
+          requestOverlayRedraw();
+          return;
+        }
         if (next === getFrActiveSheetIndex()) return;
-        cancelFrEditor();
+        if (isFrEditorOpen()) void commitFrEditor(null);
         resetFrSelection();
         setFrActiveSheetIndex(next);
         // Store holds ALL sheets (Charts model) — a switch only re-filters.
@@ -1303,9 +1687,27 @@ function activate(context: ExtensionContext): void {
     reloadQueue = reloadQueue
       .then(async () => {
         await loadFloatingRangesFromBackend();
-        setFrActiveSheetIndex(await getActiveSheet());
+        // While an edit is PARKED the backend's active sheet is the VIEWED
+        // one: keep the host, or the host's ranges (the parked edit's among
+        // them) would be re-filtered to the viewed sheet and never
+        // re-published on the way back (the return emits no SHEET_CHANGED).
+        // The park is read AFTER the await: read before it, a point-mode tab
+        // click whose set_active_sheet the backend answered first parked the
+        // edit while this call was in flight, and the VIEWED sheet then
+        // replaced the host.
+        const next = await getActiveSheet();
+        if (getParkedViewSheetIndex() === null) setFrActiveSheetIndex(next);
         // Prune id-keyed side state for rows that no longer exist.
         const live = new Set(getAllFloatingRanges().map((e) => e.id));
+        // An edit of a range that is gone is DISCARDED (returning to its
+        // sheet first when parked); the write would only be refused.
+        const editing = getFrEditorCell();
+        if (editing && !live.has(editing.frId)) {
+          await endExternalFormulaSession("cancel");
+          // The external slot may hold another editor (a pick-only chart
+          // text editor), in which case the call above found no session.
+          if (getFrEditorCell()?.frId === editing.frId) cancelFrEditor();
+        }
         const selectedId = getSelectedFloatingRange();
         if (selectedId && !live.has(selectedId)) deselectAllFloatingRanges();
         const sel = getLocalSelection();
@@ -1316,6 +1718,9 @@ function activate(context: ExtensionContext): void {
         invalidateAllFrCaches();
         syncFloatingRangeRegions();
         requestOverlayRedraw();
+        // A script write, an undo or a pull may have changed the selected
+        // cell's content while its selection survived.
+        refreshFrFormulaBarContent();
       })
       .catch((err) => {
         console.error("[FloatingRange] Backend-change reload failed:", err);
@@ -1345,26 +1750,35 @@ function activate(context: ExtensionContext): void {
             any = true;
           }
         }
-        if (any) requestOverlayRedraw();
+        if (any) {
+          requestOverlayRedraw();
+          // The formula bar shows a selected cell's content too.
+          refreshFrFormulaBarContent();
+        }
       },
     ),
   );
 
   // Coarse safety net: any cell change anywhere stales every FR cache (the
-  // refetch is lazy and only for on-screen FRs).
+  // refetch is lazy and only for on-screen FRs). A cell commit announces
+  // itself here (`updateFloatingRangeCell`), so this also refreshes what the
+  // formula bar shows for the selected cell.
   cleanupFns.push(
     context.events.on(AppEvents.CELLS_UPDATED, () => {
       if (getAllFloatingRanges().length === 0) return;
       invalidateAllFrCaches();
       requestOverlayRedraw();
+      refreshFrFormulaBarContent();
     }),
   );
 
-  // grid:refresh = "re-fetch cell content" — stale-all + redraw.
+  // grid:refresh = "re-fetch cell content" — stale-all + redraw. A rename and
+  // a formula rewrite announce themselves only here.
   const onGridDataRefresh = () => {
     if (getAllFloatingRanges().length === 0) return;
     invalidateAllFrCaches();
     requestOverlayRedraw();
+    refreshFrFormulaBarContent();
   };
   window.addEventListener("grid:refresh", onGridDataRefresh);
   cleanupFns.push(() => window.removeEventListener("grid:refresh", onGridDataRefresh));

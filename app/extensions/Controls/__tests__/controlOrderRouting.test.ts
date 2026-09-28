@@ -30,6 +30,9 @@ vi.mock("@api/gridOverlays", async () => {
   const actual = await vi.importActual<typeof import("@api/gridOverlays")>("@api/gridOverlays");
   return {
     getGridRegions: () => publishedRegions,
+    // The paint/hit view of the same list (empty only in cross-sheet point mode).
+    getLiveGridRegions: () => publishedRegions,
+    onPointModeViewChanged: () => () => undefined,
     floatingHitOrder: actual.floatingHitOrder,
     replaceGridRegionsByType: (_type: string, regions: unknown[]) => {
       publishedRegions = regions;

@@ -162,16 +162,24 @@ pub(crate) fn create_floating_range_inner(
 
     // The host is the sheet the user is looking at — never an object sheet by
     // the activate_sheet invariant.
-    let host_sheet_id = {
+    let (host_index, host_sheet_id) = {
         let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
-        state
+        let id = state
             .sheet_ids
             .read()
             .map_err(|e| e.to_string())?
             .get(active)
             .copied()
-            .ok_or_else(|| "Active sheet has no id".to_string())?
+            .ok_or_else(|| "Active sheet has no id".to_string())?;
+        (active, id)
     };
+    // The host's own gates, holding nothing and before the effect: a pulled
+    // (subscribed) canvas is the publisher's read-only layout, and a protected
+    // host without "Edit objects" takes no new object -- a chart's insert
+    // (`save_chart`) asks the same. A refused create leaves the document clean
+    // and nothing half-applied.
+    ensure_sheet_layout_editable(state, host_index)?;
+    ensure_host_objects_editable(state, host_index, "insert a floating range")?;
 
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let created = {
@@ -324,6 +332,129 @@ fn validate_size_map(
     Ok(())
 }
 
+/// Refuse a geometry/window patch on a floating range whose HOST is a
+/// SUBSCRIBED CANVAS: a canvas pulled from a Collaboration application is the
+/// publisher's layout and is read-only until detached
+/// (docs/design/canvas-sheets.md section 2), and a subscriber who could move
+/// its grid would be editing a copy the next refresh silently puts back.
+///
+/// The frontend already refuses the GESTURES there (the layout surface's
+/// `editable`, which every floating-range door reads through
+/// `frGeometryEditable`); this is the same rule where it cannot be skipped --
+/// a script, the CLI, a compromised renderer. The rule is the canvas's, not
+/// the subscription's alone: a subscribed WORKSHEET stays editable by design
+/// (its edits are tracked by the override ledger), and the frontend offers
+/// the gestures there, so refusing them here would be a UI the backend
+/// contradicts. A canvas LOCK stays a frontend rule (the lock lives in the
+/// canvas layout, and the backend consults it for no family).
+///
+/// LOCK ORDER: reads `sheet_ids`, `sheet_kinds`, then the provenance snapshot
+/// (`sheet_ids`, `sheet_names`, `subscriptions`), each released before it
+/// returns. Called holding nothing -- in particular NOT the row store, whose
+/// order against `subscriptions` no code path establishes.
+fn ensure_host_layout_editable(state: &AppState, row: &FloatingRange) -> Result<(), String> {
+    let host_index = sheet_index_of(state, row.host_sheet_id)
+        .ok_or_else(|| "Floating range host sheet is missing".to_string())?;
+    ensure_sheet_layout_editable(state, host_index)
+}
+
+/// The sheet-index form of `ensure_host_layout_editable`: refuse when the sheet
+/// at `host_index` is a SUBSCRIBED CANVAS. CREATE asks it of the active sheet
+/// before anything is decided -- a range appended to a pulled canvas could
+/// never be sized, moved or opened afterwards (every later patch is refused
+/// here), and a script's create-then-resize used to leave exactly that half-
+/// applied, non-undoable residue. Same lock discipline as the row form.
+fn ensure_sheet_layout_editable(state: &AppState, host_index: usize) -> Result<(), String> {
+    let on_canvas = {
+        let kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
+        crate::sheets::is_canvas_sheet(&kinds, host_index)
+    };
+    if !on_canvas {
+        return Ok(());
+    }
+    let provenance = crate::sheets::SheetProvenance::snapshot(state)?;
+    match provenance.origin(host_index) {
+        None => Ok(()),
+        Some(origin) => Err(format!(
+            "Cannot change a floating range on canvas '{}': it came from the \
+             application '{}' and is read-only while it is connected to it. Detach it \
+             first (right-click the tab > Detach from '{}').",
+            origin.sheet_name, origin.package_name, origin.package_name
+        )),
+    }
+}
+
+/// SHEET PROTECTION for a floating range (Excel parity, 2026-09-27 review): a
+/// floating range is an OBJECT on its HOST sheet, so every authoring act on it
+/// -- insert, move, resize, rescale, chrome, rename, delete -- needs the host's
+/// "Edit objects" permission, exactly like a chart (chart_commands.rs), a
+/// control (controls.rs), a slicer or a timeline. Before this, a title-bar drag
+/// with Design Mode off moved a range on a protected sheet whose charts refused
+/// the same drag. "editObjects" is an object-scope action
+/// (`CANVAS_OBJECT_SCOPE_ACTIONS`), so a canvas host is refused only when it is
+/// protected without that option. The CELLS keep their own per-cell gate
+/// (`update_cell_on_sheets_inner`), which is the backing sheet's, not this one.
+///
+/// LOCK ORDER: `check_sheet_action` takes `sheet_kinds`/`sheet_protection` read
+/// guards and releases them; called holding nothing, before any effect.
+fn ensure_host_objects_editable(state: &AppState, host_index: usize, what: &str) -> Result<(), String> {
+    crate::protection::check_sheet_action(state, host_index, "editObjects", what)
+}
+
+/// The host sheet's CURRENT index for a row (the SheetId is the authority).
+fn host_index_of(state: &AppState, row: &FloatingRange) -> Result<usize, String> {
+    sheet_index_of(state, row.host_sheet_id)
+        .ok_or_else(|| "Floating range host sheet is missing".to_string())
+}
+
+/// Whether two rows differ in anything a `FloatingRangePatch` can change.
+/// (`FloatingRange` carries no `PartialEq`; this names exactly the patchable
+/// fields, so a no-op patch is recognised before any effect is built.)
+fn patchable_fields_differ(a: &FloatingRange, b: &FloatingRange) -> bool {
+    a.x != b.x
+        || a.y != b.y
+        || a.row_count != b.row_count
+        || a.col_count != b.col_count
+        || a.show_title != b.show_title
+        || a.show_column_headers != b.show_column_headers
+        || a.show_row_headers != b.show_row_headers
+        || a.col_widths != b.col_widths
+        || a.row_heights != b.row_heights
+}
+
+/// Apply `patch` to a copy of `row` (absent fields are left alone).
+fn patched(row: &FloatingRange, patch: &FloatingRangePatch) -> FloatingRange {
+    let mut next = row.clone();
+    if let Some(x) = patch.x {
+        next.x = x;
+    }
+    if let Some(y) = patch.y {
+        next.y = y;
+    }
+    if let Some(rc) = patch.row_count {
+        next.row_count = rc;
+    }
+    if let Some(cc) = patch.col_count {
+        next.col_count = cc;
+    }
+    if let Some(v) = patch.show_title {
+        next.show_title = v;
+    }
+    if let Some(v) = patch.show_column_headers {
+        next.show_column_headers = v;
+    }
+    if let Some(v) = patch.show_row_headers {
+        next.show_row_headers = v;
+    }
+    if let Some(widths) = patch.col_widths.clone() {
+        next.col_widths = widths;
+    }
+    if let Some(heights) = patch.row_heights.clone() {
+        next.row_heights = heights;
+    }
+    next
+}
+
 pub(crate) fn update_floating_range_inner(
     state: &AppState,
     file_state: &FileState,
@@ -373,60 +504,56 @@ pub(crate) fn update_floating_range_inner(
         MAX_FLOATING_RANGE_ROW_H,
     )?;
 
-    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    // GATES FIRST, EFFECT LAST (CLAUDE.md, DocumentEffect). The id lookup and
+    // the subscribed-canvas refusal both run before anything is decided: a bad
+    // id, or a range on a pulled canvas, must leave the document exactly as
+    // clean as it was. (The lookup used to sit AFTER `DocumentEffect::mutates`,
+    // so a stale id dirtied the document it then refused to change.) Then the
+    // host's sheet protection: every patchable field -- position, window,
+    // cell sizes, chrome -- is an object edit.
+    let row = find_row(state, id)?;
+    ensure_host_layout_editable(state, &row)?;
+    ensure_host_objects_editable(
+        state,
+        host_index_of(state, &row)?,
+        "move or resize a floating range",
+    )?;
+
     let (previous, updated) = {
-        let mut rows = state.floating_ranges.write(&effect).unwrap();
-        let row = rows
-            .iter_mut()
-            .find(|fr| fr.id == id)
+        // Held from the lookup to the write: the row the patch is computed
+        // from is the row it lands on (a concurrent delete between the gate
+        // above and here is refused, still before any effect exists).
+        let pending = state.floating_ranges.lock_pending().map_err(|_| {
+            "The floating range store is unavailable".to_string()
+        })?;
+        let index = pending
+            .iter()
+            .position(|fr| fr.id == id)
             .ok_or_else(|| format!("No floating range with id {id}"))?;
-        let previous = row.clone();
-        if let Some(x) = patch.x {
-            row.x = x;
+        let previous = pending[index].clone();
+        let updated = patched(&previous, &patch);
+        if !patchable_fields_differ(&previous, &updated) {
+            // A patch that changes nothing is not an edit: no dirty flag, no
+            // undo entry, no write.
+            drop(pending);
+            return info_for(state, updated);
         }
-        if let Some(y) = patch.y {
-            row.y = y;
-        }
-        if let Some(rc) = patch.row_count {
-            row.row_count = rc;
-        }
-        if let Some(cc) = patch.col_count {
-            row.col_count = cc;
-        }
-        if let Some(v) = patch.show_title {
-            row.show_title = v;
-        }
-        if let Some(v) = patch.show_column_headers {
-            row.show_column_headers = v;
-        }
-        if let Some(v) = patch.show_row_headers {
-            row.show_row_headers = v;
-        }
-        if let Some(widths) = patch.col_widths.clone() {
-            row.col_widths = widths;
-        }
-        if let Some(heights) = patch.row_heights.clone() {
-            row.row_heights = heights;
-        }
-        (previous, row.clone())
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut rows = pending.authorize(&effect);
+        rows[index] = updated.clone();
+        (previous, updated)
     };
 
     // UNDOABLE — recorded after the store guard is released (`undo_stack`
-    // precedes the state locks in the canonical order). No entry for a
-    // no-op patch: a step that restores the state it is already in reads,
+    // precedes the state locks in the canonical order). A no-op patch already
+    // returned above: a step that restores the state it is already in reads,
     // from the keyboard, as a swallowed undo.
     let chrome_changed = previous.show_title != updated.show_title
         || previous.show_column_headers != updated.show_column_headers
         || previous.show_row_headers != updated.show_row_headers;
     let sizes_changed =
         previous.col_widths != updated.col_widths || previous.row_heights != updated.row_heights;
-    if previous.x != updated.x
-        || previous.y != updated.y
-        || previous.row_count != updated.row_count
-        || previous.col_count != updated.col_count
-        || chrome_changed
-        || sizes_changed
-    {
+    if patchable_fields_differ(&previous, &updated) {
         let description = if previous.row_count != updated.row_count
             || previous.col_count != updated.col_count
         {
@@ -624,6 +751,10 @@ pub(crate) fn rename_floating_range_inner(
     let row = find_row(state, id)?;
     let backing_index = sheet_index_of(state, row.backing_sheet_id)
         .ok_or_else(|| "Floating range backing sheet is missing".to_string())?;
+    // An object's name is an object edit on its HOST (a chart's title rides
+    // `update_chart`'s gate the same way); before the rename machinery, which
+    // decides nothing until it passes its own gates either.
+    ensure_host_objects_editable(state, host_index_of(state, &row)?, "rename a floating range")?;
     crate::sheets::rename_sheet_inner(state, file_state, pivot_state, backing_index, new_name, true)?;
     info_for(state, row)
 }
@@ -646,7 +777,7 @@ pub fn delete_floating_range(
     timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     id: identity::EntityId,
 ) -> Result<(), String> {
-    delete_floating_range_inner(
+    delete_floating_range_impl(
         &state,
         &file_state,
         &pivot_state,
@@ -655,6 +786,42 @@ pub fn delete_floating_range(
         &ribbon_filter_state,
         &slicer_state,
         &timeline_state,
+        id,
+    )
+}
+
+/// The USER's delete (the command, a script, the object menu): the host's
+/// "Edit objects" permission first, then the delete itself -- `delete_chart`'s
+/// gate. Deliberately NOT inside `delete_floating_range_inner`: the Sheet ->
+/// FloatingRange cascade (`delete_floating_ranges_for_host`) calls that when
+/// the HOST sheet itself is deleted, which workbook-structure protection
+/// governs, not the dying host's object option -- a gate there would strand
+/// the cascade halfway through deleting a protected sheet. Named `_impl` (the
+/// command's own delegate), so the object-deps census reads it as part of the
+/// command and still sees the cascade `delete_floating_range_inner` runs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn delete_floating_range_impl(
+    state: &AppState,
+    file_state: &FileState,
+    pivot_state: &PivotState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    id: identity::EntityId,
+) -> Result<(), String> {
+    let row = find_row(state, id)?;
+    ensure_host_objects_editable(state, host_index_of(state, &row)?, "delete objects")?;
+    delete_floating_range_inner(
+        state,
+        file_state,
+        pivot_state,
+        user_files_state,
+        pane_control_state,
+        ribbon_filter_state,
+        slicer_state,
+        timeline_state,
         id,
     )
 }

@@ -28,10 +28,9 @@ import {
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import { surfacePivotNotices } from "@api/pivotNotices";
 import { emitAppEvent, AppEvents } from "@api";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmAsync } from "@api/dialogs";
+import { pivotOverwriteQuestion, takeBackPivotOverwrite } from "@api/pivotOverwrite";
 import type { BiHierarchyMeta } from "@api/backend";
-import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
-import { CALC_GROUP_TABLE } from "@api/pivotTypes";
 
 /**
  * Pipeline stages (total = 4):
@@ -55,34 +54,55 @@ function clearLoading(pivotId: string): void {
 }
 
 /**
- * Check if a pivot operation overwrote existing cell data.
- * If so, ask the user for confirmation. On cancel, revert the pivot
- * to its previous state and trigger a full grid + pivot refresh.
- * Returns true if the operation should proceed, false if cancelled.
+ * The ONE "a PivotTable report will overwrite existing data" question, asked
+ * after a command whose response reports `overwrittenCellCount > 0` -- the
+ * backend's count is the only trigger; no door asks BEFORE the command. The
+ * backend counts 0 for a canvas pivot and for a BI pivot's own output
+ * (including a reopened one, via its saved output extent), so a refresh of
+ * those never asks.
  *
- * Uses `revertPivotOperation` instead of `undo()` because the undo
- * system deadlocks when the pivot CustomRestore handler re-acquires
- * locks already held by the undo transaction processor.
+ * Through `confirmAsync`, awaited: it FAILS CLOSED. The dialog plugin's `ask`,
+ * called directly here before, THREW when the dialog could not be shown, and
+ * every caller's catch then skipped `undo_pivot_overwrite` -- the user's cells
+ * stayed overwritten without consent. Now a dialog that cannot be shown is a
+ * refusal, and the overwrite is undone.
+ */
+function confirmPivotOverwrite(): Promise<boolean> {
+  return confirmAsync(
+    pivotOverwriteQuestion(0),
+    { title: "Calcula", kind: "warning", okLabel: "OK", cancelLabel: "Cancel" },
+  );
+}
+
+/**
+ * The undo step a response names for its overwritten cells, as the list
+ * `undo_pivot_overwrite` takes. Empty when the command recorded none -- and
+ * then a Cancel takes NOTHING back (it used to pop whatever unrelated step was
+ * on top) and the seam tells the user.
+ */
+function overwriteTokensOf(response: PivotViewResponse): number[] {
+  return typeof response.overwriteToken === "number" ? [response.overwriteToken] : [];
+}
+
+/**
+ * Check if a pivot operation overwrote existing cell data.
+ * If so, ask the user for confirmation. On cancel, take back exactly the
+ * command's own overwrite step (by its token, through `@api/pivotOverwrite`)
+ * and trigger a full grid + pivot refresh.
+ * Returns true if the operation should proceed, false if cancelled.
  */
 async function confirmOverwriteOrUndo(response: PivotViewResponse): Promise<boolean> {
   if (!response.overwrittenCellCount || response.overwrittenCellCount <= 0) {
     return true;
   }
-  const confirmed = await ask(
-    "A PivotTable report will overwrite existing data. Do you want to continue?",
-    { title: "Calcula", kind: "warning", okLabel: "OK", cancelLabel: "Cancel" }
-  );
+  const confirmed = await confirmPivotOverwrite();
   if (confirmed) {
     return true;
   }
-  // Undo the pivot operation by popping the undo entry and restoring the
-  // previous definition directly (bypasses the general undo system which
-  // deadlocks when the pivot restore handler re-acquires held locks)
-  try {
-    await apiUndoPivotOverwrite(response.pivotId);
-  } catch (e) {
-    console.warn("[pivot] undo_pivot_overwrite failed:", e);
-  }
+  // Take back EXACTLY this command's overwrite step -- the one its token
+  // names -- through the shared seam, which refuses (and says so) rather than
+  // undo anything else, and announces what came back.
+  await takeBackPivotOverwrite(response.pivotId, overwriteTokensOf(response));
   emitAppEvent(AppEvents.GRID_REFRESH);
   window.dispatchEvent(new CustomEvent("pivot:refresh"));
   requestOverlayRedraw();
@@ -133,7 +153,6 @@ import {
   getPivotCellWindow as apiGetPivotCellWindow,
   cancelPivotOperation as apiCancelPivotOperation,
   revertPivotOperation as apiRevertPivotOperation,
-  undoPivotOverwrite as apiUndoPivotOverwrite,
   changePivotDataSource as apiChangePivotDataSource,
   addCalculatedField as apiAddCalculatedField,
   updateCalculatedField as apiUpdateCalculatedField,
@@ -193,15 +212,12 @@ export async function updatePivotFields(
     }
     // Check if the pivot overwrote existing cell data
     if (result.overwrittenCellCount && result.overwrittenCellCount > 0) {
-      const confirmed = await ask(
-        "A PivotTable report will overwrite existing data. Do you want to continue?",
-        { title: "Calcula", kind: "warning", okLabel: "OK", cancelLabel: "Cancel" }
-      );
+      const confirmed = await confirmPivotOverwrite();
       if (!confirmed) {
         restorePreviousView(request.pivotId);
-        apiUndoPivotOverwrite(request.pivotId).catch((e) =>
-          console.warn("[pivot] undo_pivot_overwrite after overwrite cancel failed:", e)
-        );
+        // Takes back THIS command's step (its token) and nothing else; a
+        // refusal is told to the user by the seam.
+        void takeBackPivotOverwrite(request.pivotId, overwriteTokensOf(result));
         emitAppEvent(AppEvents.GRID_REFRESH);
         throw new Error("Pivot operation cancelled - would overwrite data");
       }
@@ -336,15 +352,10 @@ export async function refreshPivotCache(pivotId: PivotId): Promise<PivotViewResp
     }
     // Check if refreshing overwrote existing cell data
     if (result.overwrittenCellCount && result.overwrittenCellCount > 0) {
-      const confirmed = await ask(
-        "A PivotTable report will overwrite existing data. Do you want to continue?",
-        { title: "Calcula", kind: "warning", okLabel: "OK", cancelLabel: "Cancel" }
-      );
+      const confirmed = await confirmPivotOverwrite();
       if (!confirmed) {
         restorePreviousView(pivotId);
-        apiUndoPivotOverwrite(pivotId).catch((e) =>
-          console.warn("[pivot] undo_pivot_overwrite after overwrite cancel failed:", e)
-        );
+        void takeBackPivotOverwrite(pivotId, overwriteTokensOf(result));
         emitAppEvent(AppEvents.GRID_REFRESH);
         throw new Error("Pivot operation cancelled - would overwrite data");
       }
@@ -1048,15 +1059,12 @@ export async function updateBiFields(
     }
     // Check if the pivot overwrote existing cell data
     if (result.overwrittenCellCount && result.overwrittenCellCount > 0) {
-      const confirmed = await ask(
-        "A PivotTable report will overwrite existing data. Do you want to continue?",
-        { title: "Calcula", kind: "warning", okLabel: "OK", cancelLabel: "Cancel" }
-      );
+      const confirmed = await confirmPivotOverwrite();
       if (!confirmed) {
         restorePreviousView(request.pivotId);
-        apiUndoPivotOverwrite(request.pivotId).catch((e) =>
-          console.warn("[pivot] undo_pivot_overwrite after overwrite cancel failed:", e)
-        );
+        // Takes back THIS command's step (its token) and nothing else; a
+        // refusal is told to the user by the seam.
+        void takeBackPivotOverwrite(request.pivotId, overwriteTokensOf(result));
         emitAppEvent(AppEvents.GRID_REFRESH);
         throw new Error("Pivot operation cancelled - would overwrite data");
       }
@@ -1191,14 +1199,6 @@ export interface ValidatePivotDslResult {
   };
 }
 
-/** Result from applying DSL text to a pivot. */
-export interface ApplyPivotDslResult {
-  /** The pivot view after applying the DSL layout. */
-  view: PivotViewResponse;
-  /** Any warnings produced during compilation. */
-  warnings: DslError[];
-}
-
 /**
  * Helper: get PivotRegionInfo for a pivot by ID.
  * Looks up the pivot's region on the current sheet, then fetches full info.
@@ -1210,6 +1210,25 @@ async function getPivotRegionById(pivotId: PivotId): Promise<PivotRegionInfo> {
   const info = await getPivotAtCell(region.startRow, region.startCol);
   if (!info) throw new Error(`Pivot ${pivotId} region info not available`);
   return info;
+}
+
+/**
+ * The field configuration of a pivot on the ACTIVE sheet (or canvas) -- its
+ * zones, each field with the items it hides -- read now from the stored
+ * definition. Null when the active sheet shows no such pivot (the pane only
+ * edits a pivot the user is looking at). For a canvas pivot the region's
+ * anchor is its hidden-grid anchor, which `get_pivot_at_cell` resolves on the
+ * canvas exactly as the pane's own open does.
+ */
+export async function getPivotFieldConfiguration(
+  pivotId: PivotId,
+): Promise<PivotFieldConfiguration | null> {
+  const regions = await getPivotRegionsForSheet();
+  const region = regions.find((r) => r.pivotId === pivotId);
+  if (!region) return null;
+  const info = await getPivotAtCell(region.startRow, region.startCol);
+  if (!info || info.pivotId !== pivotId) return null;
+  return info.fieldConfiguration;
 }
 
 /**
@@ -1347,122 +1366,12 @@ export async function validatePivotDsl(
   };
 }
 
-/**
- * Apply DSL text to a pivot table.
- *
- * Parses, validates, and compiles the DSL, then updates the pivot's field
- * configuration. Handles both regular and BI-backed pivots.
- *
- * Throws if the DSL contains hard parse/validation errors.
- */
-export async function applyPivotDsl(
-  pivotId: PivotId,
-  dslText: string,
-): Promise<ApplyPivotDslResult> {
-  const info = await getPivotRegionById(pivotId);
-  const ctx = await buildCompileContext(info, true);
-  const result = processDsl(dslText, ctx);
-
-  // Reject if there are hard errors
-  const hardErrors = result.errors.filter(e => e.severity === 'error');
-  if (hardErrors.length > 0) {
-    const messages = hardErrors.map(e => `Line ${e.location.line}: ${e.message}`);
-    throw new Error(`DSL has ${hardErrors.length} error(s):\n${messages.join('\n')}`);
-  }
-
-  const warnings = result.errors.filter(e => e.severity !== 'error');
-
-  // Build the update request from compiled zone state (mirrors buildUpdateRequest logic)
-  const rowFields: PivotFieldConfig[] = result.rows.map(f => ({
-    sourceIndex: f.sourceIndex,
-    name: f.name,
-  }));
-
-  const columnFields: PivotFieldConfig[] = result.columns.map(f => ({
-    sourceIndex: f.sourceIndex,
-    name: f.name,
-  }));
-
-  const regularValues: ValueFieldConfig[] = [];
-  const calcFields: CalculatedFieldDef[] = result.calculatedFields;
-  const columnOrder: ValueColumnRefDef[] = result.valueColumnOrder;
-
-  for (const f of result.values) {
-    const aggregation = f.aggregation ?? (f.isNumeric ? 'sum' : 'count');
-    const isBiField = f.sourceIndex === -1;
-    const displayName = isBiField
-      ? (f.customName || f.name)
-      : (f.customName || f.name);
-    regularValues.push({
-      sourceIndex: f.sourceIndex,
-      name: displayName,
-      aggregation,
-      numberFormat: f.numberFormat,
-      showValuesAs: f.showValuesAs as ShowValuesAs | undefined,
-      customName: f.customName || undefined,
-    });
-  }
-
-  const filterFields: PivotFieldConfig[] = result.filters.map(f => ({
-    sourceIndex: f.sourceIndex,
-    name: f.name,
-    hiddenItems: f.hiddenItems,
-  }));
-
-  let view: PivotViewResponse;
-
-  if (info.biModel) {
-    // BI pivot: convert to BI-specific request. Calculation groups place as
-    // dimension entries carrying the plain group name — they map to the
-    // CALC_GROUP_TABLE pseudo ref.
-    const biTableNames = info.biModel.tables.map((t) => t.name);
-    const calcGroupNames = new Set(
-      (info.biModel.calculationGroups ?? []).map((g) => g.name),
-    );
-    const toBiRef = (name: string, isLookup?: boolean, hiddenItems?: string[]): BiFieldRef => {
-      if (calcGroupNames.has(name)) {
-        return { table: CALC_GROUP_TABLE, column: name, hiddenItems };
-      }
-      const { table, column } = splitBiFieldKey(name, biTableNames);
-      return { table, column, isLookup, hiddenItems };
-    };
-    const toBiValueRef = (name: string, customName?: string): BiValueFieldRef => {
-      const measureName = name.startsWith('[') && name.endsWith(']')
-        ? name.substring(1, name.length - 1) : name;
-      return { measureName, customName };
-    };
-    const isRealBiField = (f: { name: string }) =>
-      f.name.includes('.') || calcGroupNames.has(f.name);
-
-    const biRequest: UpdateBiPivotFieldsRequest = {
-      pivotId,
-      rowFields: rowFields.filter(isRealBiField).map(f => toBiRef(f.name, result.rows.find(r => r.name === f.name)?.isLookup, f.hiddenItems)),
-      columnFields: columnFields.filter(isRealBiField).map(f => toBiRef(f.name, result.columns.find(c => c.name === f.name)?.isLookup, f.hiddenItems)),
-      valueFields: regularValues.map(f => toBiValueRef(f.name, f.customName)),
-      filterFields: filterFields.filter(isRealBiField).map(f => toBiRef(f.name, undefined, f.hiddenItems)),
-      layout: result.layout,
-      lookupColumns: result.lookupColumns,
-      calculatedFields: calcFields.length > 0 ? calcFields : undefined,
-      valueColumnOrder: columnOrder.length > 0 ? columnOrder : undefined,
-    };
-    view = await updateBiFields(biRequest);
-  } else {
-    // Regular pivot
-    const request: UpdatePivotFieldsRequest = {
-      pivotId,
-      rowFields,
-      columnFields,
-      valueFields: regularValues,
-      filterFields,
-      layout: result.layout,
-      calculatedFields: calcFields.length > 0 ? calcFields : undefined,
-      valueColumnOrder: columnOrder.length > 0 ? columnOrder : undefined,
-    };
-    view = await updatePivotFields(request);
-  }
-
-  return { view, warnings };
-}
+// (A whole-text `applyPivotDsl` lived here until 2026-09-28. It had no caller,
+// and it could not express the three-state hidden items a BI request needs:
+// a DSL text alone cannot tell "the user removed this NOT IN" from "this text
+// never knew about a slicer's filter on the field". The editor's path --
+// usePivotEditorState.setAllZones -> biFieldsRequest.ts -- compares with the
+// zones it replaces, which is what makes that distinction possible.)
 
 // The Pivot contract types now live in the API facade (@api/pivotTypes) so the
 // facade does not import this extension. Imported for local use and re-exported

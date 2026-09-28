@@ -1174,6 +1174,7 @@ fn the_filter_object_snapshot_reads_slicers_and_timelines() {
             source_id: pivot_a,
         }],
         filter_level: 1,
+        data_source_id: None,
     };
     let slicer = crate::persistence::saved_slicer_to_slicer_at(&saved, 2);
     slicer_state.slicers.write(&seed).unwrap().insert(slicer.id, slicer);
@@ -1588,6 +1589,7 @@ fn a_pruned_pivot_is_named_with_the_sheet_that_kept_it_home() {
         computed_properties: Vec::new(),
         connected_sources: Vec::new(),
         filter_level: 1,
+        data_source_id: None,
     }];
     wb.timeline_slicers = vec![::persistence::SavedTimelineSlicer {
         id: new_entity(),

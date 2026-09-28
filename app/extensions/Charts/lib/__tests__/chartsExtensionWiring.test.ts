@@ -136,3 +136,36 @@ describe("the chart context menu does not steal a right-click that is not the ch
     expect(occluded).toBeLessThan(body.indexOf("hover?.chartId"));
   });
 });
+
+describe("the chart store's reload window opens at the request, not when the chain reaches it", () => {
+  /** `requestChartsReload`, read out of index.ts at test time. */
+  function requestSource(): string {
+    const source = chartsIndexSource();
+    const start = source.indexOf("const requestChartsReload = (kind: ChartReloadKind): void => {");
+    expect(start, "requestChartsReload is not where this test looks").toBeGreaterThan(-1);
+    return source.slice(start, source.indexOf("\n  };", start));
+  }
+
+  it("marks the reload pending BEFORE the microtask, and finished only after reloadCharts settles", () => {
+    // A sheet delete announces `sheets` and `objects` in ONE synchronous
+    // fan-out, and the table-definitions handler in that same fan-out
+    // invalidates every chart and repaints. The render it starts must already
+    // see the reload as pending, or the chart the delete took with it is
+    // reported as broken (chartRenderReloadWindow.test.ts has the renderer's
+    // half; this is the half that opens the window).
+    const body = requestSource();
+    const opened = body.indexOf("beginChartStoreReload()");
+    expect(opened, "a requested reload never marks the store as behind").toBeGreaterThan(-1);
+    expect(opened).toBeLessThan(body.indexOf("queueMicrotask("));
+    const chained = body.indexOf("reloadCharts(next)");
+    const closed = body.indexOf(".finally(reloadFinished)");
+    expect(closed, "the reload window is never closed").toBeGreaterThan(chained);
+  });
+
+  it("a SHEET_DELETED asks for the reload itself, ahead of the fan-out it precedes", () => {
+    const source = chartsIndexSource();
+    const at = source.indexOf("context.events.on(AppEvents.SHEET_DELETED,");
+    expect(at, "SHEET_DELETED does not request a chart reload").toBeGreaterThan(-1);
+    expect(source.slice(at, at + 120)).toContain('requestChartsReload("sheets")');
+  });
+});

@@ -12,6 +12,7 @@ import {
   isPointerClaimed,
 } from "@api";
 import { registerGroupingController } from "@api/groupingService";
+import { isEditKeystroke } from "@api/editing";
 import { GroupSettingsDialog } from "./components/GroupSettingsDialog";
 import { renderOutlineBar, buttonPosForLevel } from "./rendering/outlineBarRenderer";
 import {
@@ -230,6 +231,14 @@ function handleKeyDown(event: KeyboardEvent): void {
   // core/lib/globalInputListeners.ts (a new global listener adds a row).
   if (isKeyClaimed(event)) return;
   if (!currentSelection) return;
+  if (!event.altKey || !event.shiftKey) return;
+  if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+  // Not while a cell edit owns the keyboard: Core's in-cell editor, the
+  // formula bar, any text field, or a floating grid's live cell edit (whose
+  // keyboard can sit on the grid container while it picks a reference).
+  // Excel ignores this key in edit mode, and here it acted on Core's
+  // selection -- during a floating-grid edit, a HIDDEN one.
+  if (isEditKeystroke(event)) return;
 
   // Alt+Shift+Right = Group (Excel shortcut) - auto-detect rows vs columns
   if (event.altKey && event.shiftKey && event.key === "ArrowRight") {

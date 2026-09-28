@@ -1,7 +1,13 @@
 //! FILENAME: app/extensions/Slicer/lib/slicerStore.ts
 // PURPOSE: Frontend cache for slicer state + grid region synchronization.
 
-import type { Slicer, CreateSlicerParams, UpdateSlicerParams, SlicerItem } from "./slicerTypes";
+import type {
+  Slicer,
+  CreateSlicerParams,
+  UpdateSlicerParams,
+  SlicerItem,
+  SlicerConnection,
+} from "./slicerTypes";
 import {
   replaceGridRegionsByType,
   removeGridRegionsByType,
@@ -11,10 +17,22 @@ import {
 import { getGridStateSnapshot } from "@api/state";
 import * as api from "./slicer-api";
 import { SlicerEvents } from "./slicerEvents";
-import { ensureBiFieldInPivotCache } from "./slicerFilterBridge";
+import {
+  applySlicerFilter,
+  connectionsToExistingPivots,
+  listPivotSlicerItemsFromModel,
+  reportSlicerFilterFailures,
+  type SlicerFilterFailure,
+} from "./slicerFilterBridge";
+import {
+  selectionAfterClear,
+  selectionAfterItemClick,
+  type SlicerSelectionChange,
+} from "./slicerClickSelection";
 import { emitAppEvent, AppEvents } from "@api/events";
 import { runInUndoTransaction } from "@api/objectGeometry";
 import { showToast } from "@api/notifications";
+import { runStepThenConfirmOverwrite, type PivotOverwriteTally } from "@api/pivotOverwrite";
 
 // ============================================================================
 // Module-level cache
@@ -67,26 +85,115 @@ export async function createSlicerAsync(
   }
 }
 
+/**
+ * Delete one slicer. The BACKEND takes the slicer's filter off everything it
+ * filtered -- a model slicer's page, a pivot slicer's connections, any pin it
+ * set, a table slicer's AutoFilter column -- in the same undo step as the
+ * delete (owner decision 3, 2026-09-27: deleting ANY slicer removes its
+ * filter, one Ctrl+Z restores slicer and filter). So this route never clears
+ * anything itself; it only refreshes the views the backend just changed.
+ */
 export async function deleteSlicerAsync(slicerId: string): Promise<boolean> {
   try {
+    const effect = deleteEffect(cachedSlicers.find((s) => s.id === slicerId));
     await api.deleteSlicer(slicerId);
     // SLICER_DELETED is NOT dispatched here. `refreshCache` diffs the id set
     // and announces every slicer that went away, whatever removed it — see its
     // doc comment for the defect that split (§3cd).
     await refreshCache();
-    // §3bn: ribbon filters name canvas slicers in crossFilterSlicerTargets, and
-    // the backend just pruned this one out of them. The Controls pane caches
-    // those filters, so without the announcement it keeps a cross-link to a
-    // slicer that no longer exists and re-resolves it on every selection.
-    emitAppEvent(AppEvents.MUTATION_REFRESH, {
-      domains: ["ribbonFilter"],
-      source: "commit",
-    });
+    announceSlicersDeleted(effect);
     return true;
   } catch (err) {
     console.error("[Slicer] Failed to delete slicer:", err);
     return false;
   }
+}
+
+/**
+ * Delete several slicers as ONE undo step labelled `label` (the backend's
+ * per-slicer delete joins the open transaction), one after another -- never
+ * concurrently, so each delete's own filter clear sees the store as the
+ * previous one left it. Resolves the ids that could not be deleted.
+ */
+export async function deleteSlicersAsync(
+  slicerIds: readonly string[],
+  label = "Delete Slicers",
+): Promise<string[]> {
+  if (slicerIds.length === 0) return [];
+  const failed: string[] = [];
+  const effect: SlicerDeleteEffect = { pivots: false, tableFilter: false };
+  await runInUndoTransaction(label, async () => {
+    for (const slicerId of slicerIds) {
+      const doomed = deleteEffect(cachedSlicers.find((s) => s.id === slicerId));
+      try {
+        await api.deleteSlicer(slicerId);
+        effect.pivots = effect.pivots || doomed.pivots;
+        effect.tableFilter = effect.tableFilter || doomed.tableFilter;
+      } catch (err) {
+        console.error("[Slicer] Failed to delete slicer:", slicerId, err);
+        failed.push(slicerId);
+      }
+    }
+  });
+  await refreshCache();
+  announceSlicersDeleted(effect);
+  return failed;
+}
+
+/** What the backend's clear changes when a slicer is deleted. */
+interface SlicerDeleteEffect {
+  /** It filtered pivots: the backend re-wrote them. */
+  pivots: boolean;
+  /** It filtered a table: the backend cleared the table's AutoFilter column. */
+  tableFilter: boolean;
+}
+
+/**
+ * What deleting `slicer` changes besides the slicer store. Only a slicer WITH
+ * a selection filters anything (an idle slicer's delete clears nothing, and
+ * must not). A slicer can reach tables and pivots at once through Report
+ * Connections, so both are read off its connections, not its source type.
+ */
+function deleteEffect(slicer: Slicer | undefined): SlicerDeleteEffect {
+  if (!slicer || slicer.selectedItems === null) return { pivots: false, tableFilter: false };
+  const kinds = new Set<string>([
+    slicer.sourceType,
+    ...(slicer.connectedSources ?? []).map((c) => c.sourceType),
+  ]);
+  return {
+    pivots: kinds.has("pivot") || kinds.has("biConnection"),
+    tableFilter: kinds.has("table"),
+  };
+}
+
+/** What a slicer delete disturbs outside the slicer store (the cascade
+ *  census follows this helper by its `announce` name). */
+function announceSlicersDeleted(effect: SlicerDeleteEffect): void {
+  // §3bn: ribbon filters name canvas slicers in crossFilterSlicerTargets, and
+  // the backend just pruned this one out of them. The Controls pane caches
+  // those filters, so without the announcement it keeps a cross-link to a
+  // slicer that no longer exists and re-resolves it on every selection.
+  emitAppEvent(AppEvents.MUTATION_REFRESH, {
+    domains: ["ribbonFilter"],
+    source: "commit",
+  });
+  if (effect.tableFilter) {
+    // The backend cleared the table's AutoFilter column: the rows it hid are
+    // visible again. The AutoFilter owner re-reads its filter and pushes the
+    // hidden-row set into the grid on the "objects" domain -- the domain the
+    // backend reports when an undo restores that same AutoFilter, so the
+    // delete and its Ctrl+Z refresh the view the same way. A redraw alone
+    // (GRID_REFRESH) left the un-hidden rows off screen.
+    emitAppEvent(AppEvents.MUTATION_REFRESH, {
+      domains: ["objects"],
+      source: "commit",
+    });
+  }
+  if (effect.pivots) {
+    // The backend re-wrote the pivots the slicer filtered: repaint them.
+    window.dispatchEvent(new Event("pivot:refresh"));
+  }
+  if (effect.pivots || effect.tableFilter) emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
 export async function updateSlicerAsync(
@@ -194,16 +301,66 @@ export async function commitSlicerGeometryAsync(
   return false;
 }
 
+/**
+ * A slicer click: the new selection AND the filter it puts on every pivot /
+ * table the slicer reaches, as ONE undo step. `update_slicer_selection`, a
+ * server-side ensure and a table's AutoFilter write all record undo JOINING
+ * the open transaction (a plain level-1 pivot mask records none -- the
+ * reconcile re-derives it after an undo), so a single Ctrl+Z restores the
+ * slicer and its targets together. The apply runs INSIDE the transaction for
+ * exactly that reason: outside it, a click that had to add the column to a
+ * pivot recorded a second step, and the first Ctrl+Z un-filtered the pivot
+ * while the slicer still showed the selection.
+ *
+ * A user click comes through {@link queueSlicerClick}, never straight here:
+ * this holds the transaction open for the whole apply.
+ *
+ * OVERWRITE (`askBeforeOverwrite`, a user click): a pivot the click grows over
+ * the user's cells records a step holding them INSIDE the click's step. Once
+ * that step has committed, the user is asked ONCE for the whole click (every
+ * pivot it filtered, how many cells) -- through `@api/pivotOverwrite`, failing
+ * closed -- and a decline takes back THE WHOLE CLICK, never another step: the
+ * selection comes back with its pivots, and the reconcile that the take-back's
+ * refresh triggers re-derives the level-1 masks the step did not carry. A
+ * click that JOINED someone else's open transaction -- the frontend's, or a
+ * script batch's opened on the backend directly -- never asks: it cannot take
+ * back only its own part, and Ctrl+Z restores the cells with that step.
+ *
+ * A declined click resolves only once the store holds the RESTORED selection
+ * again ({@link settleAfterTakeBack}): the next queued click computes its
+ * selection from the cache, and a Ctrl+click queued behind the declined one
+ * used to toggle the DECLINED selection -- re-applying the very item the user
+ * had refused, and asking about the same overwrite a second time.
+ */
 export async function updateSlicerSelectionAsync(
   slicerId: string,
   selectedItems: string[] | null,
+  options: { askBeforeOverwrite?: boolean } = {},
 ): Promise<void> {
   try {
-    await api.updateSlicerSelection(slicerId, selectedItems);
-    // Update local cache
-    const slicer = cachedSlicers.find((s) => s.id === slicerId);
-    if (slicer) {
-      slicer.selectedItems = selectedItems;
+    // Counted BEFORE the gesture: a take-back's announcement starts a
+    // reconcile after this point, and the decline below waits for it.
+    const reconcilesBefore = reconcilesStarted;
+    const writeAndApply = async (overwrites?: PivotOverwriteTally): Promise<void> => {
+      await api.updateSlicerSelection(slicerId, selectedItems);
+      // Update local cache
+      const slicer = cachedSlicers.find((s) => s.id === slicerId);
+      if (slicer) {
+        slicer.selectedItems = selectedItems;
+        await applySlicerFilter(slicer, { overwrites });
+      }
+    };
+    if (options.askBeforeOverwrite) {
+      const { outcome } = await runStepThenConfirmOverwrite("Slicer Selection", writeAndApply);
+      if (outcome === "undone") {
+        // Nothing about THIS selection is true any more, so nothing is
+        // announced for it; the store is brought back to what came back.
+        await settleAfterTakeBack(reconcilesBefore);
+        requestOverlayRedraw();
+        return;
+      }
+    } else {
+      await runInUndoTransaction("Slicer Selection", () => writeAndApply());
     }
     // Refresh items to update selection state
     await refreshSlicerItems(slicerId);
@@ -216,6 +373,67 @@ export async function updateSlicerSelectionAsync(
   } catch (err) {
     console.error("[Slicer] Failed to update selection:", err);
   }
+}
+
+// ============================================================================
+// User clicks: one at a time
+// ============================================================================
+
+/** The tail of the user-click queue. Never rejects. */
+let clickQueue: Promise<void> = Promise.resolve();
+
+/**
+ * Run a USER click on a slicer (an item, the Clear button, Select All, the
+ * context menu) after every earlier click has COMMITTED its undo step, and
+ * compute the new selection from `change` only then -- from the committed
+ * selection and items, not from what was on screen when the button went down.
+ * `change` returns the new selection, or `undefined` for "nothing to do".
+ *
+ * Why a queue: a click holds the undo transaction open while its filter is
+ * applied, and on a model or pinned slicer that apply is a BI query that can
+ * take seconds. A second click in that window JOINED the first click's
+ * transaction (the frontend transaction joins whatever is open), so two
+ * gestures became one Ctrl+Z; and a Ctrl+click toggle read the selection
+ * before the first click had written it, so it dropped the first item.
+ *
+ * Only user clicks are queued. A caller that opened a transaction on purpose
+ * (a script batch setting several slicers) calls
+ * {@link updateSlicerSelectionAsync} directly and joins its own transaction;
+ * queuing it behind a click whose commit waits for that same caller would
+ * deadlock.
+ */
+export function queueSlicerClick(
+  slicerId: string,
+  change: (slicer: Slicer, items: SlicerItem[] | undefined) => SlicerSelectionChange,
+): Promise<void> {
+  const run = clickQueue.then(async () => {
+    // An outside change (an undo, a declined click's take-back) brings the
+    // store back through a RECONCILE, whose re-read is an IPC round trip.
+    // Compute from what it restores, not from the cache it is replacing --
+    // and never race its mask re-derive with this click's own apply.
+    await reconcilesSettled;
+    const slicer = cachedSlicers.find((s) => s.id === slicerId);
+    if (!slicer) return;
+    const next = change(slicer, itemsCache.get(slicerId));
+    if (next === undefined) return;
+    await updateSlicerSelectionAsync(slicerId, next, { askBeforeOverwrite: true });
+  });
+  clickQueue = run.catch((err) => {
+    console.error("[Slicer] A slicer click failed:", err);
+  });
+  return clickQueue;
+}
+
+/** A click on one item (Ctrl held or not), queued. */
+export function clickSlicerItem(slicerId: string, itemValue: string, ctrlHeld: boolean): Promise<void> {
+  return queueSlicerClick(slicerId, (slicer, items) =>
+    selectionAfterItemClick(slicer, items, itemValue, ctrlHeld),
+  );
+}
+
+/** Clear the slicer's filter (Clear button, Select All, the context menu), queued. */
+export function clickSlicerClearFilter(slicerId: string): Promise<void> {
+  return queueSlicerClick(slicerId, (slicer) => selectionAfterClear(slicer));
 }
 
 /**
@@ -266,22 +484,27 @@ export async function refreshSlicerItems(slicerId: string): Promise<SlicerItem[]
     itemsCache.set(slicerId, items);
     return items;
   } catch (err) {
-    // If field not found in cache (BI pivot), auto-add it and retry
+    // A PIVOT slicer whose column left its BI pivot (dragged out of Rows, or
+    // a Clear followed by a layout edit): list its items from the pivot's
+    // MODEL. This path is a READ -- every sheet switch comes through here --
+    // so it never puts the column back; the next click does, inside its own
+    // undo step. (It used to re-add the column right here: a BI re-query, a
+    // dirty document and a standalone undo step on a sheet-tab click.)
+    // Model slicers never come here: their items are read from the model.
     const slicer = cachedSlicers.find((s) => s.id === slicerId);
     if (
       slicer &&
       slicer.sourceType === "pivot" &&
       String(err).includes("not found in pivot cache")
     ) {
-      const added = await ensureBiFieldInPivotCache(slicer.cacheSourceId, slicer.fieldName);
-      if (added) {
-        try {
-          const items = await api.getSlicerItems(slicerId);
+      try {
+        const items = await listPivotSlicerItemsFromModel(slicer);
+        if (items) {
           itemsCache.set(slicerId, items);
           return items;
-        } catch (retryErr) {
-          console.error("[Slicer] Retry failed for slicer", slicerId, retryErr);
         }
+      } catch (modelErr) {
+        console.error("[Slicer] Could not list slicer", slicerId, "from its model:", modelErr);
       }
     }
     console.error("[Slicer] Failed to get items for slicer", slicerId, err);
@@ -335,9 +558,202 @@ export async function refreshCache(): Promise<void> {
   }
 }
 
+// ============================================================================
+// Reconcile after an outside change (undo / redo / pull / computed property)
+// ============================================================================
+
+/** The part of a slicer that decides what it filters: its selection, its
+ *  level, and WHAT it reaches (its Report Connections). */
+export type SlicerFilterState = Pick<Slicer, "id" | "selectedItems" | "filterLevel"> & {
+  connectedSources?: readonly SlicerConnection[];
+};
+
+function filterSignature(s: SlicerFilterState): string {
+  return JSON.stringify([s.selectedItems ?? null, s.filterLevel ?? 1]);
+}
+
+function connectionKey(c: SlicerConnection): string {
+  return `${c.sourceType}:${c.sourceId}`;
+}
+
+/**
+ * What an outside change did to a slicer's Report Connections: the
+ * connections it had `before` and has no more (`dropped`), and the ones it
+ * has now and did not have (`added`). Pure.
+ */
+export function connectionChanges(
+  before: Pick<SlicerFilterState, "connectedSources">,
+  after: Pick<SlicerFilterState, "connectedSources">,
+): { dropped: SlicerConnection[]; added: SlicerConnection[] } {
+  const was = before.connectedSources ?? [];
+  const now = after.connectedSources ?? [];
+  const wasKeys = new Set(was.map(connectionKey));
+  const nowKeys = new Set(now.map(connectionKey));
+  return {
+    dropped: was.filter((c) => !nowKeys.has(connectionKey(c))),
+    added: now.filter((c) => !wasKeys.has(connectionKey(c))),
+  };
+}
+
+/**
+ * The slicers whose filter must be RE-APPLIED after the store re-read the
+ * backend: those present BOTH before and after, ORDINARY (level 1) on both
+ * sides, whose selection changed -- or whose Report Connections changed while
+ * the slicer filters something (fix round 5 review: an undone, or declined,
+ * Report Connections save restored the connection list, but the level-1 mask
+ * it had put on an ADDED pivot recorded nothing, so that pivot stayed
+ * filtered by a slicer no longer connected to it, and a REMOVED pivot whose
+ * mask the save had taken off stayed unfiltered though it was connected
+ * again). Pure.
+ *
+ * Why level 1 only: an ordinary PIVOT filter is a host-side mask that records
+ * no undo of its own, so an undone click restores the slicer and leaves the
+ * pivot filtered -- it has to be re-derived here (and only the masks are: the
+ * reconcile passes `masksOnly`, because a TABLE target's AutoFilter write
+ * records undo in the click's own step, so the undo already restored it).
+ *
+ * A PINNED filter (level 2+) is part of the pivot's query: applying,
+ * re-routing or dropping one re-queries the pivot, and the backend records
+ * that step with the pivot's PRE-mutation definition and cache --
+ * `apply_pivot_filter_core` / `clear_pivot_filter_core` snapshot them before
+ * the pinned, pin-drop or calculation-group branch re-queries (pinned by
+ * `undoing_a_pinned_apply_restores_the_pre_pin_definition` and
+ * `undoing_a_level_change_to_pinned_restores_the_mask` in
+ * app/src-tauri/src/slicer/model_slicer_tests.rs). So undoing a pinned click,
+ * or a level change to or from pinned, already puts the pivot back as it was,
+ * pin and mask included. Re-applying here would only re-query again: a fresh
+ * undo step that wipes the redo stack. Hence a slicer that is pinned on
+ * EITHER side is skipped.
+ *
+ * A slicer that VANISHED is deliberately absent: every route that removes a
+ * slicer has already taken its filter off on the backend -- `delete_slicer`
+ * in the delete's own undo step (owner decision 3), and `delete_sheet` for
+ * every slicer on the deleted sheet (sheets.rs: host-side masks cleared in
+ * the command, a dropped pin re-queried in the background; a sheet delete ends
+ * the undo history, so there is no step to restore). A frontend clear here
+ * would be a second clear, and keyed by the cached sheet index it would hit
+ * the wrong page once a sheet delete has renumbered the sheets (it would wipe
+ * the NEXT canvas's own filter). A slicer that APPEARED (an undone delete) is
+ * absent too: the same undo step put its targets back.
+ */
+export function slicersWhoseFilterChanged(
+  before: readonly SlicerFilterState[],
+  after: readonly Slicer[],
+): Slicer[] {
+  const prior = new Map(before.map((s) => [s.id, s]));
+  return after.filter((s) => {
+    const was = prior.get(s.id);
+    if (!was) return false;
+    if ((was.filterLevel ?? 1) !== 1 || (s.filterLevel ?? 1) !== 1) return false;
+    if (filterSignature(was) !== filterSignature(s)) return true;
+    // Same selection: only the connections can have moved it, and a slicer
+    // that filters nothing put nothing on any of them.
+    if (s.selectedItems === null) return false;
+    const { dropped, added } = connectionChanges(was, s);
+    return dropped.length > 0 || added.length > 0;
+  });
+}
+
+/**
+ * Re-read the store after a mutation the frontend did not make itself (the
+ * `slicers:refresh` fan-out: undo, redo, a pull, a computed property) and
+ * re-apply the PIVOT MASKS of every ordinary slicer whose selection changed
+ * (see {@link slicersWhoseFilterChanged}). An undone click restores the
+ * slicer's selection on the backend, but a plain pivot filter records no undo
+ * of its own -- without this the pivot kept the filter the user had just
+ * undone. Table targets are never written from here (`masksOnly`): their
+ * AutoFilter write was part of the undone step. Never called for the initial
+ * load (the pivots' hidden items are persisted with the document). Resolves
+ * the slicers it re-applied. One Ctrl+Z is one gesture: a pivot that refuses
+ * a re-apply is told in ONE toast for all the slicers re-applied here.
+ *
+ * CONNECTIONS. A slicer whose Report Connections the outside change moved
+ * (see {@link slicersWhoseFilterChanged}) has its mask taken OFF the pivots it
+ * no longer reaches -- only those that still exist: a pivot disconnected
+ * because it was DELETED has nothing left to clear -- and put ON the ones it
+ * reaches again. Every one of these is a reconcile write (`masksOnly`, so
+ * `reconcile: true`): it records nothing.
+ *
+ * The before-state is captured SYNCHRONOUSLY at the call (the Shell's fan-out
+ * calls this inside the announcement), so a caller that changed the cache
+ * just before announcing -- a declined click -- is diffed against what it
+ * wrote. Every call is tracked ({@link reconcilesSettled}): a user click waits
+ * for the reconciles in flight before it reads the store.
+ */
+export function refreshCacheAndReapplyChangedFilters(): Promise<Slicer[]> {
+  const run = reconcileAfterOutsideChange();
+  reconcilesStarted += 1;
+  reconcilesSettled = Promise.allSettled([reconcilesSettled, run]).then(() => undefined);
+  return run;
+}
+
+/** How many reconciles have started (monotonic). */
+let reconcilesStarted = 0;
+/** Settles once every reconcile started so far has settled. Never rejects. */
+let reconcilesSettled: Promise<void> = Promise.resolve();
+
+async function reconcileAfterOutsideChange(): Promise<Slicer[]> {
+  const before: SlicerFilterState[] = cachedSlicers.map((s) => ({
+    id: s.id,
+    selectedItems: s.selectedItems === null ? null : [...s.selectedItems],
+    filterLevel: s.filterLevel,
+    connectedSources: (s.connectedSources ?? []).map((c) => ({ ...c })),
+  }));
+  await refreshCache();
+  const changed = slicersWhoseFilterChanged(before, cachedSlicers);
+  const prior = new Map(before.map((s) => [s.id, s]));
+  const failures: SlicerFilterFailure[] = [];
+  for (const slicer of changed) {
+    const was = prior.get(slicer.id);
+    if (!was) continue;
+    const { dropped, added } = connectionChanges(was, slicer);
+    // 1. This slicer's mask OFF the pivots it no longer reaches (it put one
+    //    there only when it filtered something).
+    if (was.selectedItems !== null && dropped.length > 0) {
+      let stillThere: SlicerConnection[] = [];
+      try {
+        stillThere = await connectionsToExistingPivots(dropped);
+      } catch (err) {
+        failures.push({ slicer: slicer.name, target: "pivot", clearing: true, message: describeError(err) });
+      }
+      if (stillThere.length > 0) {
+        await applySlicerFilter(
+          { ...slicer, connectedSources: stillThere, selectedItems: null },
+          { masksOnly: true, failures },
+        );
+      }
+    }
+    // 2. The selection ON what it reaches now: every target when the
+    //    selection changed, else only the ones it reaches again.
+    if (filterSignature(was) !== filterSignature(slicer)) {
+      await applySlicerFilter(slicer, { masksOnly: true, failures });
+    } else if (added.length > 0) {
+      await applySlicerFilter({ ...slicer, connectedSources: added }, { masksOnly: true, failures });
+    }
+  }
+  reportSlicerFilterFailures(failures);
+  return changed;
+}
+
+/**
+ * After a declined click was taken back: bring the store to the RESTORED
+ * selection before anything reads it. The take-back announced the "slicer"
+ * domain, and the Shell's fan-out started a reconcile INSIDE that
+ * announcement -- capturing the declined selection as its before-state,
+ * which is what makes it re-derive the masks the step did not carry -- whose
+ * re-read is an IPC round trip. Wait for it; if the take-back started none
+ * (it announced no slicer change), run one here.
+ */
+async function settleAfterTakeBack(reconcilesBefore: number): Promise<void> {
+  if (reconcilesStarted > reconcilesBefore) await reconcilesSettled;
+  else await refreshCacheAndReapplyChangedFilters();
+}
+
 export function resetStore(): void {
   cachedSlicers = [];
   itemsCache.clear();
+  clickQueue = Promise.resolve();
+  reconcilesSettled = Promise.resolve();
   removeGridRegionsByType("slicer");
 }
 

@@ -27,6 +27,8 @@ vi.mock("@api/gridOverlays", () => ({
   // what the store announces on either side of a publication.
   replaceGridRegionsByType: () => undefined,
   removeGridRegionsByType: () => undefined,
+  // The renderer subscribes to Core's cross-sheet point-mode signal at module scope.
+  onPointModeViewChanged: () => () => undefined,
 }));
 vi.mock("@api", () => ({
   getShapeBitmap: () => null,

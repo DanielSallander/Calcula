@@ -35,6 +35,7 @@ import {
   isKeyClaimed,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
+import { isEditKeystroke } from "@api/editing";
 import {
   SCRIPT_BOOKMARK_MUTATIONS_EVENT,
   getWorkbookScript,
@@ -105,6 +106,78 @@ const STATUS_BAR_ID = "calcula.statusbar.bookmarks";
 
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
+
+// ============================================================================
+// Keyboard shortcuts
+// ============================================================================
+
+/**
+ * Ctrl+Shift+B (toggle a bookmark on the active cell), Ctrl+] / Ctrl+[ (next /
+ * previous bookmark) and Ctrl+Shift+V (save the current view). A window
+ * BUBBLE-phase listener, installed by activate(); module level and exported
+ * so its guards can be tested without activating the whole extension.
+ */
+export function handleBookmarkKeyDown(e: KeyboardEvent): void {
+  // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
+  // field, a shape's declared hit rectangle -- is not this extension's.
+  // This handler had no focus guard at all, and a longer tag list would only
+  // be a census of the widget types that exist today.
+  // See core/lib/pointerClaims.ts, and the census in
+  // core/lib/globalInputListeners.ts (a new global listener adds a row).
+  if (isKeyClaimed(e)) return;
+  const isBookmarkKey =
+    e.ctrlKey &&
+    (e.shiftKey ? e.key === "B" || e.key === "V" : e.key === "]" || e.key === "[");
+  if (!isBookmarkKey) return;
+  // Not while a cell edit owns the keyboard (Core's in-cell editor, the
+  // formula bar, any text field, or a floating grid's live cell edit): each
+  // key here acts on Core's selection -- bookmarks it, or moves it -- and
+  // Ctrl+Shift+V in a text field is the native paste-as-text, which this
+  // listener used to cancel to open Save View. The registry's bookmark
+  // bindings are "not-editing" too, so in an edit this bubble-phase listener
+  // is no longer shadowed by them and must decline on its own.
+  if (isEditKeystroke(e)) return;
+
+  // Ctrl+Shift+B: Toggle add/remove bookmark
+  if (e.ctrlKey && e.shiftKey && e.key === "B") {
+    e.preventDefault();
+    const state = getGridStateSnapshot();
+    if (!state?.selection) return;
+    const { startRow, startCol } = state.selection;
+    const { activeSheetIndex, activeSheetName } = state.sheetContext;
+    if (hasBookmarkAt(startRow, startCol)) {
+      removeBookmark(startRow, startCol, activeSheetIndex);
+      showToast("Bookmark removed", { variant: "info" });
+    } else {
+      addBookmark(startRow, startCol, activeSheetIndex, activeSheetName);
+      showToast("Bookmark added", { variant: "success" });
+    }
+  }
+
+  // Ctrl+]: Next bookmark
+  if (e.ctrlKey && !e.shiftKey && e.key === "]") {
+    e.preventDefault();
+    const target = navigateToNextBookmark();
+    if (!target) {
+      showToast("No bookmarks", { variant: "info" });
+    }
+  }
+
+  // Ctrl+[: Previous bookmark
+  if (e.ctrlKey && !e.shiftKey && e.key === "[") {
+    e.preventDefault();
+    const target = navigateToPrevBookmark();
+    if (!target) {
+      showToast("No bookmarks", { variant: "info" });
+    }
+  }
+
+  // Ctrl+Shift+V: Save current view
+  if (e.ctrlKey && e.shiftKey && e.key === "V") {
+    e.preventDefault();
+    showOverlay(VIEW_CREATE_OVERLAY_ID, {});
+  }
+}
 
 // ============================================================================
 // Lifecycle
@@ -329,59 +402,9 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unregDblClick);
 
-  // ---- 12. Keyboard shortcuts ----
-  const handleKeyDown = (e: KeyboardEvent) => {
-    // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
-    // field, a shape's declared hit rectangle -- is not this extension's.
-    // This handler had no focus guard at all, and a longer tag list would only
-    // be a census of the widget types that exist today.
-    // See core/lib/pointerClaims.ts, and the census in
-    // core/lib/globalInputListeners.ts (a new global listener adds a row).
-    if (isKeyClaimed(e)) return;
-
-    // Ctrl+Shift+B: Toggle add/remove bookmark
-    if (e.ctrlKey && e.shiftKey && e.key === "B") {
-      e.preventDefault();
-      const state = getGridStateSnapshot();
-      if (!state?.selection) return;
-      const { startRow, startCol } = state.selection;
-      const { activeSheetIndex, activeSheetName } = state.sheetContext;
-      if (hasBookmarkAt(startRow, startCol)) {
-        removeBookmark(startRow, startCol, activeSheetIndex);
-        showToast("Bookmark removed", { variant: "info" });
-      } else {
-        addBookmark(startRow, startCol, activeSheetIndex, activeSheetName);
-        showToast("Bookmark added", { variant: "success" });
-      }
-    }
-
-    // Ctrl+]: Next bookmark
-    if (e.ctrlKey && !e.shiftKey && e.key === "]") {
-      e.preventDefault();
-      const target = navigateToNextBookmark();
-      if (!target) {
-        showToast("No bookmarks", { variant: "info" });
-      }
-    }
-
-    // Ctrl+[: Previous bookmark
-    if (e.ctrlKey && !e.shiftKey && e.key === "[") {
-      e.preventDefault();
-      const target = navigateToPrevBookmark();
-      if (!target) {
-        showToast("No bookmarks", { variant: "info" });
-      }
-    }
-
-    // Ctrl+Shift+V: Save current view
-    if (e.ctrlKey && e.shiftKey && e.key === "V") {
-      e.preventDefault();
-      showOverlay(VIEW_CREATE_OVERLAY_ID, {});
-    }
-  };
-
-  window.addEventListener("keydown", handleKeyDown);
-  cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown));
+  // ---- 12. Keyboard shortcuts (handleBookmarkKeyDown, above) ----
+  window.addEventListener("keydown", handleBookmarkKeyDown);
+  cleanupFns.push(() => window.removeEventListener("keydown", handleBookmarkKeyDown));
 
   // ---- 12b. Persistence: write-through on every mutation ----
   //      NOT a BEFORE_SAVE listener. AppEvents handlers are not awaited by the

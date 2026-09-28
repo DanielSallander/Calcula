@@ -8,6 +8,7 @@ import type { Selection } from "@api";
 import { CoreCommands } from "@api/commands";
 import { ExtensionRegistry, IconFormatPainter, IconLock } from "@api";
 import { registerMenuItem } from "@api/ui";
+import { isEditKeystroke } from "@api/editing";
 import { activateFormatPainter, deactivateFormatPainter } from "./formatPainterLogic";
 import { isFormatPainterActive } from "./formatPainterState";
 
@@ -53,6 +54,14 @@ function activate(context: ExtensionContext): void {
   const handleKeyDown = (e: KeyboardEvent) => {
     // Ctrl+Shift+C: Activate Format Painter (single-use)
     if (e.ctrlKey && e.shiftKey && e.key === "C") {
+      // This listener checked NOTHING, not even a text field: Ctrl+Shift+C
+      // typed in the formula bar picked up Core's selection's format.
+      // Not while a cell edit owns the keyboard: Core's in-cell editor, the
+      // formula bar, any text field, or a floating grid's live cell edit (whose
+      // keyboard can sit on the grid container while it picks a reference).
+      // Excel ignores this key in edit mode, and here it acted on Core's
+      // selection -- during a floating-grid edit, a HIDDEN one.
+      if (isEditKeystroke(e)) return;
       e.preventDefault();
       context.commands.execute(CoreCommands.FORMAT_PAINTER);
       return;

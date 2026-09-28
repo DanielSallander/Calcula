@@ -12,7 +12,7 @@
 //          left-click works.
 
 import {
-  getGridRegions,
+  getLiveGridRegions,
   floatingHitOrder,
   type GridRegion,
   type OverlayHitTestContext,
@@ -92,6 +92,10 @@ function floatingCanvasBounds(
  * hit test (a shape is not its rectangle); an object of ANOTHER family whose
  * rectangle covers the point stops the walk, because a control underneath it
  * is not what the user right-clicked (that family owns its own menu).
+ *
+ * Over the LIVE regions (`getLiveGridRegions`): while a formula picks a
+ * reference on another sheet, the published controls are not on screen and
+ * must not answer a right-click there.
  */
 export function floatingControlRegionAtClientPoint(
   clientX: number,
@@ -100,7 +104,7 @@ export function floatingControlRegionAtClientPoint(
   const point = clientToCanvas(clientX, clientY);
   if (!point) return null;
 
-  for (const region of floatingHitOrder(getGridRegions())) {
+  for (const region of floatingHitOrder(getLiveGridRegions())) {
     const bounds = floatingCanvasBounds(region);
     if (!bounds) continue;
     if (region.type !== FLOATING_CONTROL_REGION_TYPE) {

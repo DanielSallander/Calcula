@@ -11,6 +11,8 @@ import {
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
   overlaySheetToCanvas,
+  onPointModeViewChanged,
+  requestOverlayRedraw,
 } from "@api/gridOverlays";
 import { emitAppEvent } from "@api/events";
 import { showToast } from "@api/notifications";
@@ -442,6 +444,20 @@ export function releaseAllShapeHtmlOverlays(): void {
 // place before there is anything to release — and it stays in place across a
 // deactivate/activate cycle, exactly like the maps it sweeps.
 onFloatingControlRegionsPublished(releaseUnpaintedShapeOverlays);
+
+// CROSS-SHEET POINT MODE, same module-scope reasoning. A formula picking a
+// reference on another sheet switches the grid WITHOUT a SHEET_CHANGED, so the
+// control store keeps publishing the edit's sheet and nothing above runs; the
+// grid simply stops painting those regions (`getLiveGridRegions`). A frame and
+// its shims are DOM, not paint: left alone they stay over the other sheet and
+// swallow the very click meant to pick a reference there. So on the flip in
+// every html shape is parked exactly as an unpainted one is (an empty painted
+// set), and on the flip out a redraw lets the next paint rebuild frame and shims
+// from the declaration.
+onPointModeViewChanged((foreign) => {
+  if (foreign) releaseUnpaintedShapeOverlays(new Set());
+  else requestOverlayRedraw();
+});
 
 /**
  * Migrate every id-keyed piece of shape state to a control's NEW id.

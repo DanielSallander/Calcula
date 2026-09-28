@@ -12,7 +12,12 @@ import React, { useEffect, useRef } from "react";
 import { css } from "@emotion/css";
 import type { OverlayProps } from "@api/uiTypes";
 import { getFloatingRangeById } from "../lib/floatingRangeStore";
-import type { FrMenuItem } from "../lib/frContextMenu";
+import { noteFrContextMenuMounted, type FrMenuItem } from "../lib/frContextMenu";
+
+// The open-menu state lives with the item model (lib/frContextMenu.ts), where
+// the range's selection provider can read it; re-exported for this file's
+// existing importers.
+export { isFrContextMenuOpen } from "../lib/frContextMenu";
 
 const styles = {
   menu: css`
@@ -98,13 +103,27 @@ export function FloatingRangeContextMenu({
     };
   }, [onClose]);
 
+  // Escape closes THIS MENU and nothing else. Capture phase on `document`, so
+  // the key is stopped before it reaches the focused element: with an edit
+  // live and the grid's container holding the keyboard (a right-press on the
+  // range during a formula-bar edit leaves it there), the container's fallback
+  // door heard the same Escape and CANCELLED THE WHOLE EDIT. The range's own
+  // window-capture listener (index.ts handleFrKeyDown) runs earlier and asks
+  // isFrContextMenuOpen(), so it does not drop the cell selection either.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
     };
     document.addEventListener("keydown", handler, true);
     return () => document.removeEventListener("keydown", handler, true);
   }, [onClose]);
+
+  // Open while mounted (a count: a re-open mounts the new one before the old
+  // one's cleanup runs).
+  useEffect(() => noteFrContextMenuMounted(), []);
 
   const entry = frId ? getFloatingRangeById(frId) : null;
   if (!entry || screenX === null || screenY === null) return null;

@@ -37,7 +37,8 @@ import { getColumnHeaderOverride } from "../../../api/columnHeaderOverrides";
 import { getCellCursorOverride } from "../../lib/cellClickInterceptors";
 import { getColumnWidth } from "../../lib/gridRenderer/layout/dimensions";
 import { createEmptyDimensionOverrides } from "../../types";
-import { getGridRegions, getOverlayRegistration } from "../../../api/gridOverlays";
+import { getLiveGridRegions, getOverlayRegistration } from "../../../api/gridOverlays";
+import { isPointModeOnForeignSheet } from "../../lib/pointModeView";
 import { getGridStateSnapshot } from "../../state/GridContext";
 import { rowHeaderGutter } from "../../lib/gridRenderer/layout/headerVisibility";
 
@@ -464,8 +465,15 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         return;
       }
 
-      // Priority 1.5: Check for overlay (table/chart) resize handle
-      if (overlayResizeHandlers.handleOverlayResizeMouseDown(mouseX, mouseY, event)) {
+      // Priority 1.5: Check for overlay (table/chart) resize handle. Not while
+      // cross-sheet point mode shows a sheet the published objects do not
+      // belong to: their handles are not painted there, so they must not
+      // catch the press either (the gate lives HERE because the resize
+      // handlers scan the full published list).
+      if (
+        !isPointModeOnForeignSheet() &&
+        overlayResizeHandlers.handleOverlayResizeMouseDown(mouseX, mouseY, event)
+      ) {
         return;
       }
 
@@ -689,7 +697,10 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
           // Only when NOT editing a formula
           setCursorStyle("move");
           setHoveringOverReferenceBorder(false);
-        } else if (overlayResizeHandlers.checkOverlayResizeHandle(mouseX, mouseY)) {
+        } else if (
+          !isPointModeOnForeignSheet() &&
+          overlayResizeHandlers.checkOverlayResizeHandle(mouseX, mouseY)
+        ) {
           // Check if over an overlay (table/chart) resize handle
           setCursorStyle("nwse-resize");
           setHoveringOverReferenceBorder(false);
@@ -754,7 +765,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
                   if (cell) {
                     // Check if the cell is within a non-floating overlay that provides a cursor
                     let overlayCursor: string | null = null;
-                    for (const region of getGridRegions()) {
+                    for (const region of getLiveGridRegions()) {
                       if (region.floating) continue;
                       if (
                         cell.row >= region.startRow && cell.row <= region.endRow &&

@@ -3,6 +3,7 @@
 //! CONTEXT: Manages slicer state and bridges to table/pivot data sources.
 
 use crate::pivot::PivotState;
+use crate::pivot::commands::PivotCmdCtx;
 use crate::slicer::types::*;
 use crate::{format_cell_value, AppState};
 use std::collections::HashMap;
@@ -15,13 +16,61 @@ use crate::log_debug;
 // ============================================================================
 
 /// Create a new slicer.
+///
+/// A MODEL slicer (`sourceType: "biConnection"`) is validated like a ribbon
+/// filter before anything is written: the connection must exist, and a
+/// package connection's stable data-source id is stamped so the slicer
+/// re-binds after reload / re-pull. Its Report Connections are always its own
+/// connection (page scope) whatever the caller sent.
 #[tauri::command]
 pub fn create_slicer(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
     params: CreateSlicerParams,
 ) -> Result<Slicer, String> {
+    create_slicer_core(&state, &file_state, &slicer_state, &bi_state, params)
+}
+
+/// [`create_slicer`] over plain references, for the unit tier.
+pub(crate) fn create_slicer_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    slicer_state: &SlicerState,
+    bi_state: &crate::bi::types::BiState,
+    params: CreateSlicerParams,
+) -> Result<Slicer, String> {
+    // Every refusal before the effect: a refused create leaves the document
+    // clean. The connections lock is released before the slicer store is
+    // written (the ribbon-filter recipe).
+    let data_source_id = if params.source_type == SlicerSourceType::BiConnection {
+        let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
+        match connections.get(&params.cache_source_id) {
+            Some(conn) => conn.package_data_source_id.clone(),
+            None => {
+                return Err(format!(
+                    "Calcula model connection {} not found — a model slicer must be sourced from a loaded model connection",
+                    params.cache_source_id
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    let filter_level = match params.filter_level {
+        Some(level) => {
+            crate::slicer::types::validate_filter_level(level)?;
+            level
+        }
+        None => crate::slicer::types::default_filter_level(),
+    };
+    let connected_sources = if params.source_type == SlicerSourceType::BiConnection {
+        Slicer::model_slicer_connections(params.cache_source_id)
+    } else {
+        params.connected_sources
+    };
+
     let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
 
     let slicer = Slicer {
@@ -52,14 +101,9 @@ pub fn create_slicer(
         autogrid: true,
         item_padding: 0.0,
         button_radius: 2.0,
-        connected_sources: params.connected_sources,
-        filter_level: match params.filter_level {
-            Some(level) => {
-                crate::slicer::types::validate_filter_level(level)?;
-                level
-            }
-            None => crate::slicer::types::default_filter_level(),
-        },
+        connected_sources,
+        filter_level,
+        data_source_id,
     };
 
     log_debug!(
@@ -73,18 +117,21 @@ pub fn create_slicer(
 
     let result = slicer.clone();
     // Slicers are persisted (`workbook.slicers`); creating one is a document change.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     slicer_state.slicers.write(&effect).unwrap().insert(id, slicer);
 
-    // Record undo for slicer creation (undo = delete the slicer)
+    // Record undo for slicer creation (undo = delete the slicer). A MEMBER of
+    // an open transaction, so an insert that also places the slicer (or a
+    // canvas insert flow) stays one Ctrl+Z; on its own it is its own step.
     {
         #[derive(serde::Serialize)]
         struct SlicerCreateSnapshot { slicer_id: identity::EntityId }
         let data = serde_json::to_vec(&SlicerCreateSnapshot { slicer_id: id }).unwrap_or_default();
-        let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Create slicer");
-        undo_stack.record_custom_restore("slicer_create".to_string(), data, "Create slicer");
-        undo_stack.commit_transaction();
+        crate::undo_commands::record_restores_joining_open_transaction(
+            state,
+            "Create slicer",
+            vec![("slicer_create", data)],
+        );
     }
 
     Ok(result)
@@ -98,76 +145,488 @@ pub fn create_slicer(
 /// on re-evaluating cross-filter candidacy against an id that resolved to
 /// nothing. The prune is [`crate::object_deps::cascade_deleted_slicers`], and
 /// its restores go into the same transaction as the slicer's own.
+///
+/// OWNER DECISION 3 (2026-09-27): deleting ANY slicer -- model, pivot or
+/// table -- removes its filter from what it filtered (the pivots, or the
+/// table's AutoFilter column), and ONE Ctrl+Z brings back the slicer AND the
+/// filter. The clear happens here, on the server, where the
+/// slicer's sheet is still the sheet it lives on; a frontend reconcile that
+/// cleared "the pivots on the slicer's cached sheet index" after the fact
+/// would hit the wrong page once a sheet delete had shifted the indices.
 #[tauri::command]
-pub fn delete_slicer(
-    state: State<AppState>,
+pub async fn delete_slicer(
+    state: State<'_, AppState>,
     file_state: State<'_, crate::persistence::FileState>,
-    slicer_state: State<SlicerState>,
+    slicer_state: State<'_, SlicerState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
+    slicer_id: identity::EntityId,
+) -> Result<(), String> {
+    let ctx = PivotCmdCtx {
+        state: &state,
+        file_state: &file_state,
+        pivot_state: &pivot_state,
+        pane_control_state: &pane_control_state,
+        ribbon_filter_state: &ribbon_filter_state,
+        user_files_state: &user_files_state,
+        bi_state: &bi_state,
+        slicer_state: &slicer_state,
+        record_undo: true,
+    };
+    delete_slicer_core(&ctx, slicer_id).await
+}
+
+/// One pivot whose filter a slicer set, and how to name the field on it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SlicerFilterTarget {
+    pub pivot_id: identity::EntityId,
+    pub field_index: usize,
+    /// The model column key, for a BI pivot (so a pin matches by column).
+    pub bi_field_key: Option<String>,
+}
+
+/// The pivots a slicer's filter currently sits on, resolved against the live
+/// stores: a MODEL slicer's page (every BI pivot of its connection on its
+/// sheet), a PIVOT slicer's Report Connections, plus any pivot carrying a pin
+/// this slicer set. A slicer with no selection and no pin filtered nothing, so
+/// it has no targets -- its delete must not wipe a filter someone else set on
+/// the same column. Table slicers filter tables, not pivots: none here (their
+/// AutoFilter columns are [`table_slicer_filter_targets`]).
+pub(crate) fn slicer_filter_targets(
+    state: &AppState,
+    pivot_state: &PivotState,
+    slicer: &Slicer,
+) -> Vec<SlicerFilterTarget> {
+    let slicer_key = slicer.id.to_string();
+    // Candidate pivots, resolved BEFORE the stores are read below (the helper
+    // takes the same locks).
+    let mut candidates: Vec<identity::EntityId> = match slicer.source_type {
+        SlicerSourceType::BiConnection => {
+            crate::pivot::commands::bi_pivots_for_connection(state, pivot_state, slicer.cache_source_id)
+                .into_iter()
+                .filter(|p| p.sheet_index == slicer.sheet_index)
+                .map(|p| p.id)
+                .collect()
+        }
+        SlicerSourceType::Pivot => slicer
+            .connected_sources
+            .iter()
+            .filter(|c| c.source_type == SlicerSourceType::Pivot)
+            .map(|c| c.source_id)
+            .collect(),
+        SlicerSourceType::Table => Vec::new(),
+    };
+
+    // CANONICAL LOCK ORDER: pivot_tables before bi_metadata.
+    let Ok(pivot_tables) = pivot_state.pivot_tables.read() else { return Vec::new() };
+    let Ok(bi_meta) = pivot_state.bi_metadata.read() else { return Vec::new() };
+    for (pivot_id, (definition, _)) in pivot_tables.iter() {
+        if definition.engine_filters.iter().any(|ef| ef.slicer_id.as_deref() == Some(slicer_key.as_str()))
+            && !candidates.contains(pivot_id)
+        {
+            candidates.push(*pivot_id);
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+
+    let mut out = Vec::new();
+    for pivot_id in candidates {
+        let Some((definition, cache)) = pivot_tables.get(&pivot_id) else { continue };
+        let own_pin = definition
+            .engine_filters
+            .iter()
+            .find(|ef| ef.slicer_id.as_deref() == Some(slicer_key.as_str()));
+        if slicer.selected_items.is_none() && own_pin.is_none() {
+            continue;
+        }
+        let meta = bi_meta.get(&pivot_id);
+        let resolved: Option<(usize, Option<String>)> = match meta {
+            Some(meta) => {
+                let by_key = crate::pivot::commands::split_model_column_key(&slicer.field_name, meta)
+                    .ok()
+                    .or_else(|| own_pin.map(|ef| (ef.table.clone(), ef.column.clone())));
+                by_key.and_then(|(table, column)| {
+                    crate::pivot::commands::resolve_bi_field_index(definition, cache, meta, &table, &column)
+                        .map(|idx| (idx, Some(format!("{table}.{column}"))))
+                })
+            }
+            None => cache
+                .fields
+                .iter()
+                .position(|f| field_name_matches(&f.name, &slicer.field_name))
+                .map(|idx| (idx, None)),
+        };
+        if let Some((field_index, bi_field_key)) = resolved {
+            out.push(SlicerFilterTarget { pivot_id, field_index, bi_field_key });
+        }
+    }
+    out
+}
+
+/// One AutoFilter column a TABLE slicer's selection set: the table's sheet,
+/// the filter that table owns, and the column index relative to that filter.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TableSlicerFilterTarget {
+    pub sheet: usize,
+    pub filter_id: identity::EntityId,
+    pub column_index: u32,
+}
+
+/// The AutoFilter columns a TABLE slicer filters right now -- the same mapping
+/// the slicer's click makes (`applyTableFilterForSource`): the table's column
+/// named like the slicer's field, translated into the sheet's ONE AutoFilter,
+/// which must be the one this table owns. A slicer with no selection filtered
+/// nothing, and a column that carries no criteria has nothing to clear, so
+/// neither is a target: deleting an idle slicer must not wipe a filter the
+/// user set from the table's own dropdown.
+///
+/// LOCKS: `tables` then `auto_filters` (the order `create_table` uses), both
+/// released on return.
+pub(crate) fn table_slicer_filter_targets(state: &AppState, slicer: &Slicer) -> Vec<TableSlicerFilterTarget> {
+    if slicer.source_type != SlicerSourceType::Table || slicer.selected_items.is_none() {
+        return Vec::new();
+    }
+    let mut table_ids: Vec<identity::EntityId> = slicer
+        .connected_sources
+        .iter()
+        .filter(|c| c.source_type == SlicerSourceType::Table)
+        .map(|c| c.source_id)
+        .collect();
+    if table_ids.is_empty() {
+        table_ids.push(slicer.cache_source_id);
+    }
+    table_ids.sort();
+    table_ids.dedup();
+
+    let Ok(tables) = state.tables.read() else { return Vec::new() };
+    let Ok(auto_filters) = state.auto_filters.read() else { return Vec::new() };
+    let mut out = Vec::new();
+    for table_id in table_ids {
+        let Some((sheet, table)) = tables
+            .iter()
+            .find_map(|(sheet, by_id)| by_id.get(&table_id).map(|t| (*sheet, t)))
+        else {
+            continue;
+        };
+        let Some(offset) = table.columns.iter().position(|c| c.name == slicer.field_name) else { continue };
+        let Some(af) = auto_filters.get(&sheet) else { continue };
+        if table.auto_filter_id != Some(af.id) {
+            continue; // the sheet's filter belongs to another table
+        }
+        let abs_col = table.start_col + offset as u32;
+        if abs_col < af.start_col || abs_col > af.end_col {
+            continue;
+        }
+        let column_index = abs_col - af.start_col;
+        if af.column_filters.contains_key(&column_index) {
+            out.push(TableSlicerFilterTarget { sheet, filter_id: af.id, column_index });
+        }
+    }
+    out
+}
+
+/// [`delete_slicer`] over borrowed state.
+///
+/// THE UNDO STEP IS RECORDED ONCE, AT THE END. The pivot clears may re-query
+/// the BI engine (a pinned filter lives inside the query), which can take
+/// seconds; the undo stack is ONE global slot and Tauri dispatches commands on
+/// a thread pool, so a transaction held open across that await swallowed a
+/// concurrent cell edit into "Delete slicer", or had a concurrent paste COMMIT
+/// it half-built -- after which one Ctrl+Z brought the slicer back over
+/// unfiltered pivots. Instead the pre-delete state is snapshotted in memory,
+/// the clears run with their own undo recording switched off, and every
+/// restore -- pivots, the table's AutoFilter, the ribbon-filter cross-links,
+/// the slicer -- goes onto the stack in ONE critical section that joins a
+/// caller's open transaction (a multi-delete) or is a step of its own.
+pub(crate) async fn delete_slicer_core(
+    ctx: &PivotCmdCtx<'_>,
     slicer_id: identity::EntityId,
 ) -> Result<(), String> {
     log_debug!("SLICER", "delete_slicer id={}", slicer_id);
 
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let removed = {
-        let mut slicers = slicer_state.slicers.write(&effect).unwrap();
-        slicers
-            .remove(&slicer_id)
-            .ok_or_else(|| format!("Slicer {} not found", slicer_id))?
-    };
+    // Refusal first: an unknown id leaves the document clean and the undo
+    // stack untouched.
+    let slicer = ctx
+        .slicer_state
+        .slicers
+        .read()
+        .map_err(|e| e.to_string())?
+        .get(&slicer_id)
+        .cloned()
+        .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+    let targets = slicer_filter_targets(ctx.state, ctx.pivot_state, &slicer);
+    // OWNER DECISION 3 covers TABLE slicers too: the AutoFilter column its
+    // selection set is cleared in this same step.
+    let table_targets = table_slicer_filter_targets(ctx.state, &slicer);
 
-    // Filters that cross-filtered this slicer, pruned before the transaction
-    // opens (it takes the filter lock; the undo lock is never held across one).
-    let pruned_filters = crate::object_deps::cascade_deleted_slicers(
-        &ribbon_filter_state,
-        &effect,
-        &[slicer_id],
-    );
+    // 1. Every target pivot's pre-clear definition AND records, in memory.
+    //    Replayed LAST on undo, so it supersedes whatever the clears did.
+    //    Encoded after the clears (step 3b), because each restore must also
+    //    carry the user's cells its clear grew the pivot over.
+    let mut pre_clear: Vec<(identity::EntityId, pivot_engine::PivotDefinition, pivot_engine::PivotCache, usize)> =
+        Vec::new();
+    for target in &targets {
+        let snapshot = {
+            let pivot_tables = ctx.pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
+            pivot_tables.get(&target.pivot_id).map(|(def, cache)| (def.clone(), cache.clone()))
+        };
+        let Some((definition, cache)) = snapshot else { continue };
+        // Resolved with the pivot lock RELEASED: `delete_sheet` takes
+        // sheet_names before pivot_tables, so reading names under it is the
+        // reverse order.
+        let dest_sheet = crate::pivot::operations::resolve_dest_sheet_index(ctx.state, &definition);
+        pre_clear.push((target.pivot_id, definition, cache, dest_sheet));
+    }
 
-    // Record undo for slicer deletion (undo = recreate the slicer), with the
-    // pruned filters in the SAME transaction: one Ctrl+Z brings back the slicer
-    // AND the cross-filter links that named it.
-    {
+    // 2. The slicer itself -- BEFORE the clears: a pinned clear re-queries,
+    //    and the re-query folds in the page's model slicers, which would put
+    //    this slicer's pin straight back if it were still in the store.
+    let effect = crate::document_effect::DocumentEffect::mutates(ctx.file_state);
+    let removed = ctx.slicer_state.slicers.write(&effect).unwrap().remove(&slicer_id);
+
+    // 3. Take the slicer's filter off every pivot it sat on, recording
+    //    nothing (the snapshot above is this gesture's undo). A clear that
+    //    fails is logged and the delete goes on: the user asked for the
+    //    slicer to go.
+    let quiet = PivotCmdCtx { record_undo: false, ..*ctx };
+    let mut overwritten: std::collections::HashMap<identity::EntityId, Vec<crate::pivot::operations::SavedCell>> =
+        std::collections::HashMap::new();
+    for target in &targets {
+        let request = crate::pivot::types::ClearPivotFilterRequest {
+            pivot_id: target.pivot_id,
+            field_index: Some(target.field_index),
+            bi_field_key: target.bi_field_key.clone(),
+            filter_type: None,
+            reconcile: false,
+        };
+        match crate::pivot::commands::clear_pivot_filter_core_keeping(&quiet, request).await {
+            Ok((_, cells)) => overwritten.entry(target.pivot_id).or_default().extend(cells),
+            Err(e) => crate::log_warn!(
+                "SLICER",
+                "delete_slicer {}: could not clear its filter on pivot {}: {}",
+                slicer_id,
+                target.pivot_id,
+                e
+            ),
+        }
+    }
+
+    // The pivot restores (step 1), each carrying the cells its clear grew
+    // over -- a worksheet pivot that grew when its filter came off wrote over
+    // the user's cells, and undoing the delete must put them back.
+    let mut restores: Vec<(&'static str, Vec<u8>)> = Vec::new();
+    for (pivot_id, definition, cache, dest_sheet) in pre_clear {
+        restores.push((
+            crate::undo_commands::PIVOT_DEFINITION_RESTORE_KIND,
+            crate::undo_commands::encode_pivot_definition_snapshot(
+                pivot_id,
+                definition,
+                overwritten.remove(&pivot_id).unwrap_or_default(),
+                dest_sheet,
+                Some(cache),
+            ),
+        ));
+    }
+
+    // 3b. A table slicer's AutoFilter column (synchronous; no lock is held).
+    let mut table_filter_cleared = false;
+    for target in &table_targets {
+        if let Some(previous) = crate::autofilter::clear_column_criteria_on_sheet(
+            ctx.state,
+            &effect,
+            target.sheet,
+            target.filter_id,
+            target.column_index,
+        ) {
+            restores.push(crate::undo_commands::encode_autofilter_restore(target.sheet, Some(previous)));
+            table_filter_cleared = true;
+        }
+    }
+
+    if let Some(removed) = removed {
+        // Filters that cross-filtered this slicer, pruned before the undo
+        // lock is taken (it takes the filter lock; the undo lock is never
+        // held across one).
+        let pruned_filters = crate::object_deps::cascade_deleted_slicers(
+            ctx.ribbon_filter_state,
+            &effect,
+            &[slicer_id],
+        );
+        restores.extend(crate::object_deps::encode_filter_prune_restores(&pruned_filters));
+
+        // LAST in the batch, so the reverse replay restores the SLICER first,
+        // then the filters that point at it, then the AutoFilter and pivots.
         #[derive(serde::Serialize)]
         struct SlicerSnapshot {
             slicer_id: identity::EntityId,
             previous: Slicer,
         }
         let data = serde_json::to_vec(&SlicerSnapshot { slicer_id, previous: removed }).unwrap_or_default();
-        {
-            let mut undo_stack = state.undo_stack.lock().unwrap();
-            undo_stack.begin_transaction("Delete slicer");
-        }
-        // Recorded first, so the reverse replay restores the SLICER first and
-        // the filters that point at it second.
-        crate::object_deps::record_filter_prune_undo(
-            &state,
-            &pruned_filters,
-            "Restore filter cross-links",
+        restores.push(("slicer_delete", data));
+
+        // Computed properties belong to the slicer outright — one helper,
+        // shared with the cascade, so "remove a slicer" means the same thing
+        // on both paths.
+        crate::object_deps::drop_slicer_computed_properties(ctx.slicer_state, &effect, slicer_id);
+
+        // C10: a deleted slicer must not leave its object script mounted/persisted.
+        crate::scripting::object_script_commands::prune_scripts_for_instance(
+            ctx.state,
+            &effect,
+            &slicer_id.to_string(),
         );
-        let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.record_custom_restore("slicer_delete".to_string(), data, "Delete slicer");
-        undo_stack.commit_transaction();
     }
+    // (`removed` is None only when the slicer was deleted concurrently since
+    // the refusal check: the pivot and AutoFilter restores are still ONE step.)
 
-    // Computed properties belong to the slicer outright — one helper, shared
-    // with the cascade, so "remove a slicer" means the same thing on both paths.
-    crate::object_deps::drop_slicer_computed_properties(&slicer_state, &effect, slicer_id);
+    // ONE critical section on the undo stack for the whole gesture.
+    crate::undo_commands::record_restores_joining_open_transaction(ctx.state, "Delete slicer", restores);
 
-    // `workbook.slicers` and the pruned object script are both persisted.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    // C10: a deleted slicer must not leave its object script mounted/persisted.
-    crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &effect, &slicer_id.to_string());
+    // Un-hidden table rows change what SUBTOTAL/AGGREGATE-style formulas see.
+    if table_filter_cleared {
+        if let Err(e) = crate::calculation::recalc_visibility_dependents_core(
+            ctx.state,
+            ctx.user_files_state,
+            ctx.pivot_state,
+            Some((ctx.pane_control_state, ctx.ribbon_filter_state)),
+        ) {
+            crate::log_warn!("SLICER", "visibility recalc after deleting slicer {} failed: {}", slicer_id, e);
+        }
+    }
 
     Ok(())
 }
 
+/// The pivot filters a slicer that is about to be removed WITH ITS SHEET holds
+/// on pivots that survive the delete.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DoomedSlicerFilters {
+    pub slicer_id: identity::EntityId,
+    pub targets: Vec<SlicerFilterTarget>,
+}
+
+/// Owner decision 3 on the sheet-delete path, part 1: the targets of every
+/// slicer on sheet `sheet`, resolved BEFORE the sheet goes -- while the
+/// indices still name the sheets they named when the user clicked (a model
+/// slicer's page is "its sheet index", which the delete renumbers) and before
+/// the slicers are dropped from the store. Pivots whose destination IS the
+/// doomed sheet die with it and are left out.
+///
+/// LOCKS: each store alone, in turn; the caller holds none.
+pub(crate) fn filter_targets_of_slicers_on_sheet(
+    state: &AppState,
+    pivot_state: &PivotState,
+    slicer_state: &SlicerState,
+    sheet: usize,
+) -> Vec<DoomedSlicerFilters> {
+    let on_sheet: Vec<Slicer> = match slicer_state.slicers.read() {
+        Ok(slicers) => slicers.values().filter(|s| s.sheet_index == sheet).cloned().collect(),
+        Err(_) => return Vec::new(),
+    };
+    if on_sheet.is_empty() {
+        return Vec::new();
+    }
+    let doomed_name: Option<String> = state.sheet_names.read().ok().and_then(|n| n.get(sheet).cloned());
+    let dying: std::collections::HashSet<identity::EntityId> = match pivot_state.pivot_tables.read() {
+        Ok(pivots) => pivots
+            .iter()
+            .filter(|(_, (def, _))| doomed_name.is_some() && def.destination_sheet == doomed_name)
+            .map(|(id, _)| *id)
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<DoomedSlicerFilters> = on_sheet
+        .iter()
+        .map(|slicer| DoomedSlicerFilters {
+            slicer_id: slicer.id,
+            targets: slicer_filter_targets(state, pivot_state, slicer)
+                .into_iter()
+                .filter(|t| !dying.contains(&t.pivot_id))
+                .collect(),
+        })
+        .filter(|d| !d.targets.is_empty())
+        .collect();
+    out.sort_by(|a, b| a.slicer_id.cmp(&b.slicer_id));
+    out
+}
+
+/// Owner decision 3 on the sheet-delete path, part 2, run after the delete
+/// with every lock released: take each removed slicer's filter off the pivots
+/// it held. The host-side masks are cleared here, synchronously -- a
+/// level-1 slicer filter on a column in no zone has no visible filter row, so
+/// left behind it filtered the pivot with nothing on screen to show or clear
+/// it, and every later field-list edit KEPT it. A clear that also dropped a pin
+/// (or a calculation group's item state) changes the engine query; those
+/// pivots are returned for a BI re-query. Records no undo: a sheet delete ends
+/// the history.
+pub(crate) fn clear_filters_of_deleted_slicers(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    pivot_state: &PivotState,
+    recalc: crate::pivot::operations::PivotRecalcStates<'_>,
+    doomed: &[DoomedSlicerFilters],
+) -> Vec<identity::EntityId> {
+    let mut requery: Vec<identity::EntityId> = Vec::new();
+    for d in doomed {
+        for target in &d.targets {
+            let model_key: Option<(String, String)> = target.bi_field_key.as_deref().and_then(|key| {
+                let bi_meta = pivot_state.bi_metadata.read().ok()?;
+                let meta = bi_meta.get(&target.pivot_id)?;
+                crate::pivot::commands::split_model_column_key(key, meta).ok()
+            });
+            match crate::pivot::commands::clear_pivot_filter_local(
+                state,
+                file_state,
+                pivot_state,
+                recalc,
+                target.pivot_id,
+                target.field_index,
+                model_key.as_ref(),
+            ) {
+                // A sheet delete ends the history: an overwrite step would
+                // have nothing to join, so it is dropped with the rest.
+                Ok(crate::pivot::commands::FilterStep::Local(..)) => {}
+                // No undo: the pre-clear state it carries is not recorded.
+                Ok(crate::pivot::commands::FilterStep::Requery { .. }) => requery.push(target.pivot_id),
+                Err(e) => crate::log_warn!(
+                    "SLICER",
+                    "slicer {} removed with its sheet: could not clear its filter on pivot {}: {}",
+                    d.slicer_id,
+                    target.pivot_id,
+                    e
+                ),
+            }
+        }
+    }
+    requery.sort();
+    requery.dedup();
+    requery
+}
+
 /// Update slicer properties (name, header, columns, style).
+///
+/// A MODEL slicer's Report Connections are its page, not a list: a request
+/// that tries to change them is refused before anything is written.
 #[tauri::command]
 pub fn update_slicer(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
     slicer_state: State<SlicerState>,
+    slicer_id: identity::EntityId,
+    params: UpdateSlicerParams,
+) -> Result<Slicer, String> {
+    update_slicer_core(&state, &file_state, &slicer_state, slicer_id, params)
+}
+
+/// [`update_slicer`] over plain references, for the unit tier.
+pub(crate) fn update_slicer_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    slicer_state: &SlicerState,
     slicer_id: identity::EntityId,
     params: UpdateSlicerParams,
 ) -> Result<Slicer, String> {
@@ -179,85 +638,101 @@ pub fn update_slicer(
         crate::slicer::types::validate_filter_level(level)?;
     }
 
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut slicers = slicer_state.slicers.write(&effect).unwrap();
-    let slicer = slicers
-        .get_mut(&slicer_id)
+    // Resolve and gate under ONE hold of the store, so the pre-edit clone that
+    // becomes the undo payload is exactly what the write replaces.
+    let pending = slicer_state.slicers.lock_pending().map_err(|e| e.to_string())?;
+    let before = pending
+        .get(&slicer_id)
+        .cloned()
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
-
-    // Record undo snapshot before property changes
-    {
-        #[derive(serde::Serialize)]
-        struct SlicerSnapshot {
-            slicer_id: identity::EntityId,
-            previous: Slicer,
+    if before.is_model_slicer() {
+        if let Some(requested) = &params.connected_sources {
+            let canonical = Slicer::model_slicer_connections(before.cache_source_id);
+            let same = requested.len() == canonical.len()
+                && requested
+                    .iter()
+                    .zip(canonical.iter())
+                    .all(|(a, b)| a.source_type == b.source_type && a.source_id == b.source_id);
+            if !same {
+                return Err(
+                    "A model slicer filters every pivot of its model on its own sheet; its report connections cannot be edited"
+                        .to_string(),
+                );
+            }
         }
-        let data = serde_json::to_vec(&SlicerSnapshot { slicer_id, previous: slicer.clone() }).unwrap_or_default();
-        let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Update slicer");
-        undo_stack.record_custom_restore("slicer".to_string(), data, "Update slicer");
-        undo_stack.commit_transaction();
     }
 
-    if let Some(name) = params.name {
-        slicer.name = name;
-    }
-    if let Some(header_text) = params.header_text {
-        slicer.header_text = header_text;
-    }
-    if let Some(show_header) = params.show_header {
-        slicer.show_header = show_header;
-    }
-    if let Some(columns) = params.columns {
-        slicer.columns = columns.clamp(1, 20);
-    }
-    if let Some(style_preset) = params.style_preset {
-        slicer.style_preset = style_preset;
-    }
-    if let Some(selection_mode) = params.selection_mode {
-        slicer.selection_mode = selection_mode;
-    }
-    if let Some(hide_no_data) = params.hide_no_data {
-        slicer.hide_no_data = hide_no_data;
-    }
-    if let Some(indicate_no_data) = params.indicate_no_data {
-        slicer.indicate_no_data = indicate_no_data;
-    }
-    if let Some(sort_no_data_last) = params.sort_no_data_last {
-        slicer.sort_no_data_last = sort_no_data_last;
-    }
-    if let Some(force_selection) = params.force_selection {
-        slicer.force_selection = force_selection;
-    }
-    if let Some(show_select_all) = params.show_select_all {
-        slicer.show_select_all = show_select_all;
-    }
-    if let Some(arrangement) = params.arrangement {
-        slicer.arrangement = arrangement;
-    }
-    if let Some(rows) = params.rows {
-        slicer.rows = rows;
-    }
-    if let Some(item_gap) = params.item_gap {
-        slicer.item_gap = item_gap.max(0.0).min(50.0);
-    }
-    if let Some(autogrid) = params.autogrid {
-        slicer.autogrid = autogrid;
-    }
-    if let Some(item_padding) = params.item_padding {
-        slicer.item_padding = item_padding.max(0.0).min(30.0);
-    }
-    if let Some(button_radius) = params.button_radius {
-        slicer.button_radius = button_radius.max(0.0).min(20.0);
-    }
-    if let Some(connected_sources) = params.connected_sources {
-        slicer.connected_sources = connected_sources;
-    }
-    if let Some(filter_level) = params.filter_level {
-        slicer.filter_level = filter_level;
-    }
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let updated = {
+        let mut slicers = pending.authorize(&effect);
+        let slicer = slicers
+            .get_mut(&slicer_id)
+            .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
 
-    Ok(slicer.clone())
+        if let Some(name) = params.name {
+            slicer.name = name;
+        }
+        if let Some(header_text) = params.header_text {
+            slicer.header_text = header_text;
+        }
+        if let Some(show_header) = params.show_header {
+            slicer.show_header = show_header;
+        }
+        if let Some(columns) = params.columns {
+            slicer.columns = columns.clamp(1, 20);
+        }
+        if let Some(style_preset) = params.style_preset {
+            slicer.style_preset = style_preset;
+        }
+        if let Some(selection_mode) = params.selection_mode {
+            slicer.selection_mode = selection_mode;
+        }
+        if let Some(hide_no_data) = params.hide_no_data {
+            slicer.hide_no_data = hide_no_data;
+        }
+        if let Some(indicate_no_data) = params.indicate_no_data {
+            slicer.indicate_no_data = indicate_no_data;
+        }
+        if let Some(sort_no_data_last) = params.sort_no_data_last {
+            slicer.sort_no_data_last = sort_no_data_last;
+        }
+        if let Some(force_selection) = params.force_selection {
+            slicer.force_selection = force_selection;
+        }
+        if let Some(show_select_all) = params.show_select_all {
+            slicer.show_select_all = show_select_all;
+        }
+        if let Some(arrangement) = params.arrangement {
+            slicer.arrangement = arrangement;
+        }
+        if let Some(rows) = params.rows {
+            slicer.rows = rows;
+        }
+        if let Some(item_gap) = params.item_gap {
+            slicer.item_gap = item_gap.max(0.0).min(50.0);
+        }
+        if let Some(autogrid) = params.autogrid {
+            slicer.autogrid = autogrid;
+        }
+        if let Some(item_padding) = params.item_padding {
+            slicer.item_padding = item_padding.max(0.0).min(30.0);
+        }
+        if let Some(button_radius) = params.button_radius {
+            slicer.button_radius = button_radius.max(0.0).min(20.0);
+        }
+        if let Some(connected_sources) = params.connected_sources {
+            slicer.connected_sources = connected_sources;
+        }
+        if let Some(filter_level) = params.filter_level {
+            slicer.filter_level = filter_level;
+        }
+        slicer.clone()
+    };
+
+    // The store guard is dropped before the undo stack is taken (never both).
+    // A member of an open transaction, like every other slicer recorder.
+    crate::undo_commands::record_slicer_undo(state, slicer_id, before, "Update slicer");
+    Ok(updated)
 }
 
 /// Update slicer position and size (called after drag/resize, and by a
@@ -329,6 +804,13 @@ pub(crate) fn update_slicer_position_core(
 }
 
 /// Update slicer selection (which items are checked).
+///
+/// A MEMBER of an open transaction: a slicer click is the selection plus one
+/// `apply_pivot_filter` per target pivot (and, when a pivot lacked the column,
+/// that apply's ensure step), and the frontend wraps them in ONE undo
+/// transaction so a single Ctrl+Z restores the slicer and the pivots together.
+/// The plain begin/commit this used to record closed that outer transaction
+/// early and split the click into several steps.
 #[tauri::command]
 pub fn update_slicer_selection(
     state: State<AppState>,
@@ -337,6 +819,20 @@ pub fn update_slicer_selection(
     slicer_id: identity::EntityId,
     selected_items: Option<Vec<String>>,
 ) -> Result<(), String> {
+    update_slicer_selection_core(&state, &file_state, &slicer_state, slicer_id, selected_items, "Slicer filter change")
+}
+
+/// [`update_slicer_selection`] (and [`clear_slicer_filter`]) over plain
+/// references. Refusal-first, and a no-op (the selection is already that)
+/// leaves the document clean and records no step.
+pub(crate) fn update_slicer_selection_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    slicer_state: &SlicerState,
+    slicer_id: identity::EntityId,
+    selected_items: Option<Vec<String>>,
+    description: &str,
+) -> Result<(), String> {
     log_debug!(
         "SLICER",
         "update_slicer_selection id={} items={:?}",
@@ -344,27 +840,24 @@ pub fn update_slicer_selection(
         selected_items.as_ref().map(|v| v.len())
     );
 
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut slicers = slicer_state.slicers.write(&effect).unwrap();
-    let slicer = slicers
-        .get_mut(&slicer_id)
+    let pending = slicer_state.slicers.lock_pending().map_err(|e| e.to_string())?;
+    let before = pending
+        .get(&slicer_id)
+        .cloned()
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
-
-    // Record undo snapshot before selection change
-    {
-        #[derive(serde::Serialize)]
-        struct SlicerSnapshot {
-            slicer_id: identity::EntityId,
-            previous: Slicer,
-        }
-        let data = serde_json::to_vec(&SlicerSnapshot { slicer_id, previous: slicer.clone() }).unwrap_or_default();
-        let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Slicer filter change");
-        undo_stack.record_custom_restore("slicer".to_string(), data, "Slicer filter change");
-        undo_stack.commit_transaction();
+    if before.selected_items == selected_items {
+        return Ok(());
     }
 
-    slicer.selected_items = selected_items;
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    {
+        let mut slicers = pending.authorize(&effect);
+        if let Some(slicer) = slicers.get_mut(&slicer_id) {
+            slicer.selected_items = selected_items;
+        }
+    }
+    // The store guard is dropped before the undo stack is taken (never both).
+    crate::undo_commands::record_slicer_undo(state, slicer_id, before, description);
     Ok(())
 }
 
@@ -388,6 +881,7 @@ pub fn get_slicer(
 }
 
 /// Clear all filter selections on a slicer (set all items to selected).
+/// Joins an open transaction, like [`update_slicer_selection`].
 #[tauri::command]
 pub fn clear_slicer_filter(
     state: State<AppState>,
@@ -395,130 +889,81 @@ pub fn clear_slicer_filter(
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
 ) -> Result<(), String> {
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut slicers = slicer_state.slicers.write(&effect).unwrap();
-    let slicer = slicers
-        .get_mut(&slicer_id)
-        .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
-
-    // Record undo snapshot
-    {
-        #[derive(serde::Serialize)]
-        struct SlicerSnapshot {
-            slicer_id: identity::EntityId,
-            previous: Slicer,
-        }
-        let data = serde_json::to_vec(&SlicerSnapshot { slicer_id, previous: slicer.clone() }).unwrap_or_default();
-        let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Clear slicer filter");
-        undo_stack.record_custom_restore("slicer".to_string(), data, "Clear slicer filter");
-        undo_stack.commit_transaction();
-    }
-
-    slicer.selected_items = None;
-    Ok(())
+    update_slicer_selection_core(&state, &file_state, &slicer_state, slicer_id, None, "Clear slicer filter")
 }
 
 /// Toggle a single item's selection state within a slicer.
 /// If the slicer currently has all items selected (selectedItems = null),
 /// toggling an item OFF creates a selection list with all items except that one.
 /// If toggling an item ON completes the full set, clears the filter (null).
+///
+/// A MODEL slicer's full item list comes from its model (the same path its
+/// items do), so unchecking one item while all are selected works for it too
+/// -- the old branch worked only on the current list and did nothing there.
 #[tauri::command]
-pub fn set_slicer_item_selected(
-    state: State<AppState>,
+pub async fn set_slicer_item_selected(
+    state: State<'_, AppState>,
     pivot_state: State<'_, crate::pivot::PivotState>,
     file_state: State<'_, crate::persistence::FileState>,
-    slicer_state: State<SlicerState>,
+    slicer_state: State<'_, SlicerState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
     slicer_id: identity::EntityId,
     value: String,
     selected: bool,
 ) -> Result<(), String> {
-    // Record undo snapshot before any selection change
-    {
-        let slicers = slicer_state.slicers.read().unwrap();
-        if let Some(slicer) = slicers.get(&slicer_id) {
-            #[derive(serde::Serialize)]
-            struct SlicerSnapshot {
-                slicer_id: identity::EntityId,
-                previous: Slicer,
-            }
-            let data = serde_json::to_vec(&SlicerSnapshot { slicer_id, previous: slicer.clone() }).unwrap_or_default();
-            let mut undo_stack = state.undo_stack.lock().unwrap();
-            undo_stack.begin_transaction("Slicer item toggle");
-            undo_stack.record_custom_restore("slicer".to_string(), data, "Slicer item toggle");
-            undo_stack.commit_transaction();
-        }
-    }
-
-    // Get the full item list to know when all are selected
-    let all_items: Vec<String> = {
-        let slicers = slicer_state.slicers.read().unwrap();
-        let slicer = slicers
-            .get(&slicer_id)
-            .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
-
-        if slicer.source_type == SlicerSourceType::BiConnection {
-            // Can't get items synchronously for BI — work with current selection
-            let mut current = slicer.selected_items.clone().unwrap_or_default();
-            if selected {
-                if !current.contains(&value) {
-                    current.push(value.clone());
-                }
-            } else {
-                current.retain(|v| v != &value);
-            }
-            drop(slicers);
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut slicers = slicer_state.slicers.write(&effect).unwrap();
-            let slicer = slicers.get_mut(&slicer_id).unwrap();
-            slicer.selected_items = if current.is_empty() { None } else { Some(current) };
-            return Ok(());
-        }
-
-        let source_type = slicer.source_type;
-        let cache_source_id = slicer.cache_source_id;
-        let field_name = slicer.field_name.clone();
-        drop(slicers);
-
-        match source_type {
-            SlicerSourceType::Table => {
-                get_table_column_values(&state, cache_source_id, &field_name)
-                    .unwrap_or_default()
-            }
-            SlicerSourceType::Pivot => {
-                get_pivot_field_values(&pivot_state, cache_source_id, &field_name)
-                    .unwrap_or_default()
-            }
-            SlicerSourceType::BiConnection => unreachable!(),
-        }
-    };
-
-    // Own commit point: the early-return branch above mints its own token.
-    let toggle_effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut slicers = slicer_state.slicers.write(&toggle_effect).unwrap();
-    let slicer = slicers
-        .get_mut(&slicer_id)
+    // Phase 1: the slicer, cloned (no guard may live across the await).
+    let slicer = slicer_state
+        .slicers
+        .read()
+        .map_err(|e| e.to_string())?
+        .get(&slicer_id)
+        .cloned()
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
 
-    let mut current_selected: std::collections::HashSet<String> = match &slicer.selected_items {
-        None => all_items.iter().cloned().collect(),
-        Some(items) => items.iter().cloned().collect(),
+    // Phase 2: its full item list.
+    let all_items: Vec<String> = match slicer.source_type {
+        SlicerSourceType::Table => {
+            get_table_column_values(&state, slicer.cache_source_id, &slicer.field_name).unwrap_or_default()
+        }
+        SlicerSourceType::Pivot => {
+            get_pivot_field_values(&pivot_state, slicer.cache_source_id, &slicer.field_name).unwrap_or_default()
+        }
+        SlicerSourceType::BiConnection => model_slicer_values(&bi_state, &slicer).await?,
     };
 
+    // Phase 3: decide, then write through the one selection path.
+    let next = toggled_selection(&all_items, slicer.selected_items.as_deref(), &value, selected);
+    update_slicer_selection_core(&state, &file_state, &slicer_state, slicer_id, next, "Slicer item toggle")
+}
+
+/// The selection after toggling one item: `None` (no filter) once every item
+/// is selected, otherwise the selected items in the list's own order. Pure.
+pub(crate) fn toggled_selection(
+    all_items: &[String],
+    current: Option<&[String]>,
+    value: &str,
+    selected: bool,
+) -> Option<Vec<String>> {
+    let mut set: std::collections::HashSet<&str> = match current {
+        None => all_items.iter().map(|s| s.as_str()).collect(),
+        Some(items) => items.iter().map(|s| s.as_str()).collect(),
+    };
     if selected {
-        current_selected.insert(value);
+        set.insert(value);
     } else {
-        current_selected.remove(&value);
+        set.remove(value);
     }
-
-    // If all items are selected, clear the filter
-    if current_selected.len() >= all_items.len() {
-        slicer.selected_items = None;
-    } else {
-        slicer.selected_items = Some(current_selected.into_iter().collect());
+    if !all_items.is_empty() && all_items.iter().all(|v| set.contains(v.as_str())) {
+        return None;
     }
-
-    Ok(())
+    let mut out: Vec<String> = all_items.iter().filter(|v| set.contains(v.as_str())).cloned().collect();
+    // A selected value the list does not (yet) contain is kept, not dropped.
+    for v in set {
+        if !all_items.iter().any(|a| a == v) {
+            out.push(v.to_string());
+        }
+    }
+    Some(out)
 }
 
 /// Get all slicers.
@@ -551,6 +996,103 @@ pub fn get_slicers_for_sheet(
         .collect()
 }
 
+/// A ribbon filter with a selection, pre-resolved for cross-filter candidacy
+/// BEFORE the slicer lock is taken.
+#[derive(Debug, Clone)]
+pub(crate) struct RibbonCrossCandidate {
+    pub field_name: String,
+    pub selection: Vec<String>,
+    /// `crossFilterSlicerTargets` names the slicer asking.
+    pub explicit: bool,
+    pub connection_id: identity::EntityId,
+    pub mode: crate::ribbon_filter::ConnectionMode,
+    pub sheets: Vec<usize>,
+    /// The filter's effective target pivots (mode-aware).
+    pub targets: std::collections::HashSet<identity::EntityId>,
+}
+
+/// The cross filters a MODEL slicer's has-data shading honours -- PAGE
+/// scoped, and the REPLACEMENT for the generic sibling path (which would make
+/// every model slicer of the same connection on ANY sheet a sibling, because
+/// they all carry the same `[{biConnection, C}]` connection):
+/// - other model slicers of the same connection on the SAME sheet with a
+///   selection;
+/// - ribbon filters of the same connection with a selection that reach this
+///   page: they name this slicer, or run in Workbook mode, or By-sheet with
+///   this sheet, or Manual with a target pivot on this sheet.
+/// A filter on the slicer's own column is skipped (it is not a cross filter).
+/// Pure.
+pub(crate) fn model_slicer_cross_filters<'s, I>(
+    slicer: &Slicer,
+    slicers: I,
+    ribbon: &[RibbonCrossCandidate],
+    pivots_on_page: &std::collections::HashSet<identity::EntityId>,
+) -> Vec<(String, Vec<String>)>
+where
+    I: IntoIterator<Item = &'s Slicer>,
+{
+    use crate::ribbon_filter::ConnectionMode;
+    let same_connection = |other: &Slicer| {
+        other.cache_source_id == slicer.cache_source_id
+            || (slicer.data_source_id.is_some() && other.data_source_id == slicer.data_source_id)
+    };
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for other in slicers {
+        if other.id == slicer.id
+            || !other.is_model_slicer()
+            || other.sheet_index != slicer.sheet_index
+            || !same_connection(other)
+            || other.field_name == slicer.field_name
+        {
+            continue;
+        }
+        if let Some(selection) = &other.selected_items {
+            out.push((other.field_name.clone(), selection.clone()));
+        }
+    }
+    for r in ribbon {
+        if r.connection_id != slicer.cache_source_id || r.field_name == slicer.field_name {
+            continue;
+        }
+        let reaches = r.explicit
+            || match r.mode {
+                ConnectionMode::Workbook => true,
+                ConnectionMode::BySheet => r.sheets.contains(&slicer.sheet_index),
+                ConnectionMode::Manual => r.targets.iter().any(|p| pivots_on_page.contains(p)),
+            };
+        if reaches {
+            out.push((r.field_name.clone(), r.selection.clone()));
+        }
+    }
+    out
+}
+
+/// The model tables of a connection's engine, for splitting "Table.Column"
+/// keys (table names can contain dots).
+async fn model_table_names(
+    bi_state: &crate::bi::types::BiState,
+    connection_id: identity::EntityId,
+) -> Result<Vec<String>, String> {
+    let engine_arc = crate::bi::commands::get_engine_arc(bi_state, connection_id)?;
+    let engine = engine_arc.lock().await;
+    Ok(engine.model().tables().iter().map(|t| t.name().to_string()).collect())
+}
+
+/// Every value of a MODEL slicer's column, read from the model (never from a
+/// pivot cache, so the domain cannot collapse to what a filtered pivot shows).
+async fn model_slicer_values(
+    bi_state: &crate::bi::types::BiState,
+    slicer: &Slicer,
+) -> Result<Vec<String>, String> {
+    let tables = model_table_names(bi_state, slicer.cache_source_id).await?;
+    let (table, column) =
+        crate::pivot::commands::split_bi_field_key(&slicer.field_name, tables.iter().map(|t| t.as_str()));
+    if table.is_empty() {
+        return Err(format!("'{}' is not a model column", slicer.field_name));
+    }
+    crate::bi::commands::bi_get_column_values_core(bi_state, slicer.cache_source_id, &table, &column).await
+}
+
 /// Get the unique items for a slicer (reads from the data source).
 /// Returns items with their selection state and data availability.
 /// Cross-filtering: checks other slicers AND ribbon filters that share
@@ -564,13 +1106,25 @@ pub async fn get_slicer_items(
     bi_state: State<'_, crate::bi::types::BiState>,
     slicer_id: identity::EntityId,
 ) -> Result<Vec<SlicerItem>, String> {
+    get_slicer_items_core(&state, &pivot_state, &slicer_state, &ribbon_filter_state, &bi_state, slicer_id).await
+}
+
+/// [`get_slicer_items`] over borrowed state.
+pub(crate) async fn get_slicer_items_core(
+    state: &AppState,
+    pivot_state: &PivotState,
+    slicer_state: &SlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    bi_state: &crate::bi::types::BiState,
+    slicer_id: identity::EntityId,
+) -> Result<Vec<SlicerItem>, String> {
     // Pre-resolve each active ribbon filter's cross-filter candidacy BEFORE
     // taking the slicer lock: its field + selection, whether it explicitly
     // targets this slicer, and its effective target-pivot set. Targets are
     // mode-aware — manual uses the stored list; bySheet/workbook resolve to
     // the pivots of the filter's model connection (mirrors the frontend
     // bridge's resolveTargetPivots, which is where filters actually apply).
-    let ribbon_candidates: Vec<(String, Vec<String>, bool, std::collections::HashSet<identity::EntityId>)> = {
+    let ribbon_candidates: Vec<RibbonCrossCandidate> = {
         use crate::ribbon_filter::ConnectionMode;
         let snapshot: Vec<_> = {
             let filters = ribbon_filter_state.filters.read().unwrap();
@@ -590,36 +1144,63 @@ pub async fn get_slicer_items(
         };
         snapshot
             .into_iter()
-            .map(|(field, selection, explicit, conn_id, mode, pivots, sheets)| {
+            .map(|(field_name, selection, explicit, connection_id, mode, pivots, sheets)| {
                 let targets: std::collections::HashSet<identity::EntityId> = match mode {
                     ConnectionMode::Manual => pivots.into_iter().collect(),
                     ConnectionMode::Workbook => {
-                        crate::pivot::commands::bi_pivots_for_connection(&state, &pivot_state, conn_id)
+                        crate::pivot::commands::bi_pivots_for_connection(state, pivot_state, connection_id)
                             .into_iter()
                             .map(|p| p.id)
                             .collect()
                     }
                     ConnectionMode::BySheet => {
-                        let sheet_set: std::collections::HashSet<usize> = sheets.into_iter().collect();
-                        crate::pivot::commands::bi_pivots_for_connection(&state, &pivot_state, conn_id)
+                        let sheet_set: std::collections::HashSet<usize> = sheets.iter().copied().collect();
+                        crate::pivot::commands::bi_pivots_for_connection(state, pivot_state, connection_id)
                             .into_iter()
                             .filter(|p| sheet_set.contains(&p.sheet_index))
                             .map(|p| p.id)
                             .collect()
                     }
                 };
-                (field, selection, explicit, targets)
+                RibbonCrossCandidate { field_name, selection, explicit, connection_id, mode, sheets, targets }
             })
             .collect()
     };
 
+    // A MODEL slicer's page: the BI pivots of its connection on its sheet,
+    // resolved before the slicer lock too (the helper takes the pivot locks).
+    let model_page: Option<std::collections::HashSet<identity::EntityId>> = {
+        let head = slicer_state
+            .slicers
+            .read()
+            .unwrap()
+            .get(&slicer_id)
+            .filter(|s| s.is_model_slicer())
+            .map(|s| (s.cache_source_id, s.sheet_index));
+        head.map(|(conn, sheet)| {
+            crate::pivot::commands::bi_pivots_for_connection(state, pivot_state, conn)
+                .into_iter()
+                .filter(|p| p.sheet_index == sheet)
+                .map(|p| p.id)
+                .collect()
+        })
+    };
+
     // Everything lock-holding happens in this block (the command is async —
     // no guard may live across an await). Clones what phase 2 needs.
-    let (slicer, unique_values_sync, has_data_set, pinned_bi) = {
+    let (slicer, unique_values_sync, has_data_set, pinned_bi, model_cross) = {
     let slicers = slicer_state.slicers.read().unwrap();
     let slicer = slicers
         .get(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+
+    if slicer.is_model_slicer() {
+        // Items come from the MODEL (phase 2); cross filters are page scoped
+        // and REPLACE the generic sibling path below.
+        let page = model_page.clone().unwrap_or_default();
+        let cross = model_slicer_cross_filters(slicer, slicers.values(), &ribbon_candidates, &page);
+        (slicer.clone(), None, None, None, Some(cross))
+    } else {
 
     // Items always come from the cache source (the data model), regardless of
     // which pivots the slicer filters via Report Connections.
@@ -648,10 +1229,8 @@ pub async fn get_slicer_items(
     {
         let ribbon_siblings: Vec<(String, Vec<String>)> = ribbon_candidates
             .iter()
-            .filter(|(_, _, explicit, targets)| {
-                *explicit || targets.iter().any(|p| slicer_connected.contains(p))
-            })
-            .map(|(field, selection, _, _)| (field.clone(), selection.clone()))
+            .filter(|r| r.explicit || r.targets.iter().any(|p| slicer_connected.contains(p)))
+            .map(|r| (r.field_name.clone(), r.selection.clone()))
             .collect();
         sibling_filters.extend(ribbon_siblings);
     }
@@ -692,12 +1271,9 @@ pub async fn get_slicer_items(
         None // fetched async in phase 2
     } else {
         Some(match slicer.source_type {
-            SlicerSourceType::Table => get_table_column_values(&state, reference_source_id, &slicer.field_name)?,
-            SlicerSourceType::Pivot => get_pivot_field_values(&pivot_state, reference_source_id, &slicer.field_name)?,
-            SlicerSourceType::BiConnection => {
-                // BI connection items are fetched async via bi_get_column_values on the frontend
-                return Err("BiConnection source: use bi_get_column_values instead".to_string());
-            }
+            SlicerSourceType::Table => get_table_column_values(state, reference_source_id, &slicer.field_name)?,
+            SlicerSourceType::Pivot => get_pivot_field_values(pivot_state, reference_source_id, &slicer.field_name)?,
+            SlicerSourceType::BiConnection => unreachable!("model slicers take the branch above"),
         })
     };
 
@@ -710,33 +1286,74 @@ pub async fn get_slicer_items(
     } else {
         match slicer.source_type {
             SlicerSourceType::Table => {
-                Some(get_table_available_values(&state, reference_source_id, &slicer.field_name, &sibling_filters)?)
+                Some(get_table_available_values(state, reference_source_id, &slicer.field_name, &sibling_filters)?)
             }
             SlicerSourceType::Pivot => {
-                Some(get_pivot_available_values(&pivot_state, reference_source_id, &slicer.field_name, &sibling_filters)?)
+                Some(get_pivot_available_values(pivot_state, reference_source_id, &slicer.field_name, &sibling_filters)?)
             }
-            SlicerSourceType::BiConnection => {
-                return Err("BiConnection source: use bi_get_column_available_values instead".to_string());
-            }
+            SlicerSourceType::BiConnection => unreachable!("model slicers take the branch above"),
         }
     };
 
-    (slicer.clone(), unique_values, has_data_set, pinned_bi)
+    (slicer.clone(), unique_values, has_data_set, pinned_bi, None)
+    }
     }; // locks drop here — phase 2 may await
 
-    let unique_values: Vec<String> = match (unique_values_sync, &pinned_bi) {
-        (Some(values), _) => values,
-        (None, Some((conn_id, table, column))) => {
-            crate::bi::commands::bi_get_column_values(
-                bi_state,
-                *conn_id,
-                table.clone(),
-                column.clone(),
-            )
-            .await?
-        }
-        (None, None) => Vec::new(),
-    };
+    // Phase 2 (async): model reads.
+    let (unique_values, has_data_set): (Vec<String>, Option<std::collections::HashSet<String>>) =
+        match (&model_cross, unique_values_sync, &pinned_bi) {
+            (Some(cross), _, _) => {
+                let tables = model_table_names(bi_state, slicer.cache_source_id).await?;
+                let split = |key: &str| {
+                    crate::pivot::commands::split_bi_field_key(key, tables.iter().map(|t| t.as_str()))
+                };
+                let (table, column) = split(&slicer.field_name);
+                if table.is_empty() {
+                    return Err(format!("'{}' is not a model column", slicer.field_name));
+                }
+                let values = crate::bi::commands::bi_get_column_values_core(
+                    bi_state,
+                    slicer.cache_source_id,
+                    &table,
+                    &column,
+                )
+                .await?;
+                let cross_filters: Vec<crate::bi::types::BiCrossFilter> = cross
+                    .iter()
+                    .filter_map(|(key, values)| {
+                        let (t, c) = split(key);
+                        (!t.is_empty()).then(|| crate::bi::types::BiCrossFilter {
+                            table: t,
+                            column: c,
+                            values: values.clone(),
+                        })
+                    })
+                    .collect();
+                let available = if cross_filters.is_empty() {
+                    None
+                } else {
+                    Some(
+                        crate::bi::commands::bi_get_column_available_values_core(
+                            bi_state,
+                            slicer.cache_source_id,
+                            &table,
+                            &column,
+                            &cross_filters,
+                        )
+                        .await?
+                        .into_iter()
+                        .collect(),
+                    )
+                };
+                (values, available)
+            }
+            (None, Some(values), _) => (values, has_data_set),
+            (None, None, Some((conn_id, table, column))) => (
+                crate::bi::commands::bi_get_column_values_core(bi_state, *conn_id, table, column).await?,
+                has_data_set,
+            ),
+            (None, None, None) => (Vec::new(), has_data_set),
+        };
 
     // Build items with selection state and data availability
     let mut items: Vec<SlicerItem> = unique_values
@@ -791,7 +1408,7 @@ fn field_name_matches(cache_name: &str, slicer_name: &str) -> bool {
 }
 
 /// Get unique values from a table column.
-fn get_table_column_values(state: &State<AppState>, source_id: identity::EntityId, field_name: &str) -> Result<Vec<String>, String> {
+fn get_table_column_values(state: &AppState, source_id: identity::EntityId, field_name: &str) -> Result<Vec<String>, String> {
     // CANONICAL LOCK ORDER: `grids` first (see the note in
     // `state_digest_lock_order_tests`). The recalculation pass holds both grid
     // locks and then takes `tables` on a background thread.
@@ -847,7 +1464,7 @@ fn get_table_column_values(state: &State<AppState>, source_id: identity::EntityI
 /// Get values from a table column that still have data given cross-slicer filters.
 /// Scans the table rows and checks each row against filters from sibling slicers.
 fn get_table_available_values(
-    state: &State<AppState>,
+    state: &AppState,
     source_id: identity::EntityId,
     field_name: &str,
     sibling_filters: &[(String, Vec<String>)],
@@ -930,7 +1547,7 @@ fn get_table_available_values(
 
 /// Get unique values from a pivot table field.
 fn get_pivot_field_values(
-    pivot_state: &State<'_, PivotState>,
+    pivot_state: &PivotState,
     source_id: identity::EntityId,
     field_name: &str,
 ) -> Result<Vec<String>, String> {
@@ -994,7 +1611,7 @@ fn get_pivot_field_values(
 /// Get values from a pivot field that still have data given cross-slicer filters.
 /// Scans the cache records and checks each record against sibling slicer filters.
 fn get_pivot_available_values(
-    pivot_state: &State<'_, PivotState>,
+    pivot_state: &PivotState,
     source_id: identity::EntityId,
     field_name: &str,
     sibling_filters: &[(String, Vec<String>)],

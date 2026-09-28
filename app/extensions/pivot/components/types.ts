@@ -122,7 +122,15 @@ export interface BiFieldRef {
   column: string;
   /** When true, this field is a lookup column (resolved post-aggregation). */
   isLookup?: boolean;
-  /** Items to hide from the filter. Only relevant for filter fields. */
+  /** Items to hide -- honoured on EVERY zone (rows, columns, filters, slicer
+   *  fields), and THREE-state (mirrors `BiFieldRef` in @api/pivotTypes):
+   *  - ABSENT: keep what this Table.Column hides on the pivot NOW. The editor
+   *    sends this for every real field whose item filter it did not edit --
+   *    a chip's own list is a display copy that a slicer, the header dropdown
+   *    or a ribbon filter may have changed since (see biFieldsRequest.ts).
+   *  - a non-empty list: exactly these are hidden.
+   *  - `[]`: the filter was REMOVED (e.g. a deleted `NOT IN` clause).
+   *  A calculation-group pseudo ref always carries its chip's item subset. */
   hiddenItems?: string[];
 }
 
@@ -147,8 +155,13 @@ export interface UpdateBiPivotFieldsRequest {
   columnFields: BiFieldRef[];
   valueFields: BiValueFieldRef[];
   filterFields: BiFieldRef[];
-  /** Fields needed only by slicers — included in the query but not shown as visible filter rows */
-  slicerFields?: BiFieldRef[];
+  /** Fields needed only by slicers — included in the query but not shown as
+   *  visible filter rows. ABSENT (or null) = KEEP the slicer fields the pivot
+   *  already carries, with their hidden items; `[]` = clear them all; a list =
+   *  exactly these (mirrors `UpdateBiPivotFieldsRequest` in @api/pivotTypes).
+   *  The field-list editor never sends it, so a layout edit keeps every slicer
+   *  and ribbon filter on the pivot. */
+  slicerFields?: BiFieldRef[] | null;
   /** Hierarchies placed on the row axis (drill-down). */
   rowHierarchies?: BiHierarchyFieldRef[];
   /** Hierarchies placed on the column axis (drill-down). */

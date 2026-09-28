@@ -53,6 +53,7 @@ import {
   updateSlicerAsync,
   commitSlicerGeometryAsync,
   deleteSlicerAsync,
+  deleteSlicersAsync,
 } from "../lib/slicerStore";
 import {
   SLICER_SETTINGS_DIALOG_ID,
@@ -610,8 +611,14 @@ export function SlicerActionsSection(_props: PanelSectionProps): React.ReactElem
   const isMulti = slicers.length > 1;
   const primary = slicers[slicers.length - 1];
 
+  // The backend takes each slicer's filter off its pivots in the delete's own
+  // undo step (owner decision 3); several slicers are deleted as ONE step.
   const handleDelete = async () => {
-    await Promise.all(slicers.map((s) => deleteSlicerAsync(s.id)));
+    if (slicers.length === 1) {
+      await deleteSlicerAsync(slicers[0].id);
+    } else {
+      await deleteSlicersAsync(slicers.map((s) => s.id), "Delete Slicers");
+    }
     clearSnapshot();
   };
 

@@ -605,14 +605,154 @@ pub fn delete_sheet(state: State<AppState>) -> Result<SheetsResult, String> {
     );
 }
 
+// ---------------------------------------------------------------------------
+// THE ADD-PATH CENSUS (fix round 5, the review of round 4's B4)
+//
+// `sheets::append_user_sheet` is the ONE path by which a command adds a user
+// sheet, and it ends NOTHING: its caller ends the undo history and, when it
+// switched to the new sheet, rebuilds the dependency maps for it. Round 4 made
+// the drill-through and Show Report Filter Pages callers, and none of their
+// three calls had a test -- a reviewer removed all three and the whole suite
+// stayed green. The undo reset protects DATA: with a floating range in the
+// workbook the new sheet takes the object sheet's index, so a queued step
+// recorded on the object sheet replays onto the new sheet. The behavioural
+// tests live beside the two pivot commands (`drill_lock_order_tests`); this
+// census makes a NEW caller that forgets fail here, by name.
+// ---------------------------------------------------------------------------
+
+const ADD_PATH: &str = "append_user_sheet(";
+const DEPENDENCY_REBUILD: &str = "rebuild_all_dependencies(";
+
+/// Every free function in `text` that calls the add path, with what its CODE
+/// leaves undone. Comments are stripped first: a comment naming the call is
+/// not the call.
+fn add_path_callers(text: &str) -> Vec<(String, Vec<&'static str>)> {
+    crate::formula_serialisation_tests::free_function_bodies(text)
+        .into_iter()
+        .filter_map(|(name, body)| {
+            let code: String = body
+                .lines()
+                .map(|l| l.split("//").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if name == "append_user_sheet" || !code.contains(ADD_PATH) {
+                return None;
+            }
+            let mut missing: Vec<&'static str> = Vec::new();
+            if !code.contains(INVALIDATOR) {
+                missing.push("ends the undo history (`invalidate_undo_history_for_sheet_structure`)");
+            }
+            if code.contains("activate: true") && !code.contains(DEPENDENCY_REBUILD) {
+                missing.push(
+                    "rebuilds the dependency maps for the sheet it switched to (`rebuild_all_dependencies`)",
+                );
+            }
+            Some((name, missing))
+        })
+        .collect()
+}
+
+#[test]
+fn every_caller_of_the_one_add_path_ends_what_the_add_path_leaves_to_it() {
+    let mut callers: Vec<String> = Vec::new();
+    let mut offenders: Vec<String> = Vec::new();
+    for (path, text) in crate::formula_serialisation_tests::crate_sources() {
+        let file = path.file_name().unwrap().to_string_lossy().to_string();
+        if file.ends_with("_tests.rs") {
+            continue;
+        }
+        let full = path.to_string_lossy().replace('\\', "/");
+        let rel = full.rsplit_once("/src/").map(|(_, r)| r.to_string()).unwrap_or(full.clone());
+        for (function, missing) in add_path_callers(&text) {
+            callers.push(format!("{rel}::{function}"));
+            if !missing.is_empty() {
+                offenders.push(format!("{rel}::{function} never {}", missing.join(", and never ")));
+            }
+        }
+    }
+    callers.sort();
+    // Non-vacuity: the three callers this census exists for are the ones it sees.
+    for expected in [
+        "sheets.rs::add_sheet_inner",
+        "pivot/commands.rs::drill_through_to_sheet_core",
+        "pivot/commands.rs::show_report_filter_pages_core",
+    ] {
+        assert!(
+            callers.iter().any(|c| c == expected),
+            "the census does not see `{expected}` call the add path -- it is reading the wrong thing; \
+             it saw {callers:?}"
+        );
+    }
+    assert!(
+        offenders.is_empty(),
+        "these functions add a user sheet through `sheets::append_user_sheet`, which ends nothing \
+         itself, and leave undone what it leaves to them:\n  {}\n\nEvery queued undo step names its \
+         sheet by INDEX, and a new user sheet is rotated in front of any floating range's object \
+         sheet, so a step recorded there replays onto the new sheet (Excel parity, BUG-0005). And the \
+         single-sheet dependency maps describe the ACTIVE sheet, so a command that switches to its new \
+         sheet must rebuild them (BUG-0016). Call both after the add, with no other lock held -- \
+         `add_sheet_inner` is the worked example.",
+        offenders.join("\n  ")
+    );
+}
+
+#[test]
+fn the_add_path_census_can_see_a_caller_that_forgets() {
+    // TEETH, and the three shapes it must tell apart: a caller whose only
+    // mention of the undo reset is a COMMENT; a caller that stays on its sheet
+    // (no rebuild owed); and a caller that switches over a struct literal
+    // written across lines and never rebuilds.
+    const SABOTAGED: &str = r#"
+pub(crate) async fn drills(state: &AppState) -> Result<(), String> {
+    let added = crate::sheets::append_user_sheet(state, file_state, NewUserSheet { name, kind, cells, activate: true }, "x")?;
+    // crate::sheets::invalidate_undo_history_for_sheet_structure(state, "x");
+    crate::undo_commands::rebuild_all_dependencies(state);
+    Ok(())
+}
+
+pub(crate) fn pages(state: &AppState) -> Result<(), String> {
+    crate::sheets::append_user_sheet(state, file_state, NewUserSheet { name, kind, cells, activate: false }, "x")?;
+    crate::sheets::invalidate_undo_history_for_sheet_structure(state, "x");
+    Ok(())
+}
+
+pub(super) async fn switches(state: &AppState) -> Result<(), String> {
+    crate::sheets::append_user_sheet(
+        state,
+        file_state,
+        NewUserSheet {
+            name,
+            kind,
+            cells: None,
+            activate: true,
+        },
+        "x",
+    )?;
+    crate::sheets::invalidate_undo_history_for_sheet_structure(state, "x");
+    Ok(())
+}
+"#;
+    let found = add_path_callers(SABOTAGED);
+    let names: Vec<&str> = found.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["drills", "pages", "switches"], "the census does not see every caller: {found:?}");
+    assert_eq!(found[0].1.len(), 1, "a commented-out undo reset read as the call: {found:?}");
+    assert!(found[0].1[0].contains("undo history"), "{found:?}");
+    assert!(found[1].1.is_empty(), "a caller that stays on its sheet owes no rebuild: {found:?}");
+    assert_eq!(found[2].1.len(), 1, "a caller that switches and never rebuilds was passed: {found:?}");
+    assert!(found[2].1[0].contains("dependency maps"), "{found:?}");
+}
+
 #[test]
 fn the_two_commands_that_hold_their_guards_release_them_before_ending_the_history() {
-    // LOCK ORDER, and it is not decorative. The crate's canonical order takes
-    // `undo_stack` BEFORE `grid`/`grids` (`undo_commands::apply_changes`), and
-    // the recalculation pass holds the grid pair on a BACKGROUND thread — so a
-    // sheet command that clears the history while still holding a grid guard
-    // closes exactly the cycle `state_digest_lock_order_tests` exists for, and
-    // the symptom is a silent, unlogged hang rather than a panic.
+    // LOCK ORDER. `invalidate_undo_history_for_sheet_structure` runs with
+    // nothing else held, so clearing the history adds no edge to the lock
+    // order. (This comment used to call `undo_stack` BEFORE `grid`/`grids` the
+    // crate's canonical order; the lock-order census showed the opposite --
+    // every cell writer takes the stack while it holds the grid locks -- and
+    // `undo_commands::apply_changes` was turned round to match in fix round 4.
+    // The contract stays: a guard held across the stack is how the one
+    // recorded inversion around it happened, and it would be a silent,
+    // unlogged hang rather than a panic.)
     //
     // `move_sheet` and `copy_sheet` are the two whose guards are function-level
     // bindings that live to the end, so each releases them explicitly first.

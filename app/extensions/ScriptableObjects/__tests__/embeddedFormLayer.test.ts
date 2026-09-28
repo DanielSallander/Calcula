@@ -39,6 +39,22 @@ const hoisted = vi.hoisted(() => ({
   listeners: new Map<string, Set<(detail: unknown) => void>>(),
   emitted: [] as Array<{ name: string; detail: unknown }>,
   designModeListeners: new Set<() => void>(),
+  /** Core's cross-sheet point-mode signal, as the layer subscribed to it. */
+  pointModeListener: null as null | ((foreign: boolean) => void),
+}));
+
+// Everything of `@api/gridOverlays` is real except the point-mode SIGNAL, which
+// is captured so the last describe can flip it by hand (what flips it for real
+// -- a parked floating-grid edit, a Core cross-sheet edit -- is Core's, tested
+// in src/core/lib/__tests__/pointModeView.test.ts).
+vi.mock("@api/gridOverlays", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@api/gridOverlays")>()),
+  onPointModeViewChanged: (listener: (foreign: boolean) => void) => {
+    hoisted.pointModeListener = listener;
+    return () => {
+      if (hoisted.pointModeListener === listener) hoisted.pointModeListener = null;
+    };
+  },
 }));
 
 vi.mock("@api", () => ({
@@ -744,5 +760,52 @@ describe("an orphan's card does not eat the right-click its own sentence asks fo
       region.floating,
       `a right-click on this card must still reach the grid's cell menu, because the remedy is: ${EMBEDDED_FORM_ORPHAN_REMEDY}`,
     ).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-sheet point mode (2026-09-27)
+// ---------------------------------------------------------------------------
+// A formula picking a reference on another sheet switches the grid WITHOUT a
+// SHEET_CHANGED -- the edit must survive the trip -- so this layer still holds
+// the edit's sheet and its regions stay published. The grid stops painting
+// them (`getLiveGridRegions`), which means the render pass above never runs for
+// them again: a DOM host left alone stayed over the OTHER sheet, opaque and
+// claiming the very click meant to pick a reference there.
+
+describe("cross-sheet point mode hides every card and brings them back", () => {
+  it("hides on the flip in (no SHEET_CHANGED, nothing republished) and repaints on the flip out", async () => {
+    const p = placeEmbeddedForm({ scriptId: "form-a", sheetIndex: 0, anchorRow: 0, anchorCol: 0 });
+    layer = installEmbeddedFormLayer(bridge);
+    await flush();
+    paintAll();
+    const el = hostEl(p.id);
+    expect(el!.style.display).toBe("block");
+    const seen = watchVisibility();
+
+    expect(hoisted.pointModeListener).not.toBeNull();
+    hoisted.pointModeListener!(true);
+
+    expect(el!.style.display).toBe("none");
+    // Hidden means not claiming: a display:none element is never an event target.
+    expect(seen).toEqual([[p.id, false]]);
+    // Still published: the placement belongs to this sheet, which is only not
+    // the one on SCREEN right now.
+    expect(publishedIds()).toEqual([p.id]);
+
+    const marker = hoisted.emitted.length;
+    hoisted.pointModeListener!(false);
+    expect(refreshedSince(marker)).toBe(true);
+    paintAll();
+    expect(el!.style.display).toBe("block");
+  });
+
+  it("the subscription goes with the layer", async () => {
+    layer = installEmbeddedFormLayer(bridge);
+    await flush();
+    expect(hoisted.pointModeListener).not.toBeNull();
+    layer.dispose();
+    layer = null;
+    expect(hoisted.pointModeListener).toBeNull();
   });
 });

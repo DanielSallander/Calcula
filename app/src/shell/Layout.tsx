@@ -38,10 +38,20 @@ import {
   emitAppEvent,
   checkLifecycleGuards,
 } from "../api";
-import { updateWindowTitle, isFileModified, saveFile } from "../core/lib/file-api";
+import {
+  updateWindowTitle,
+  isFileModified,
+  saveFile,
+  getCurrentFilePath,
+} from "../core/lib/file-api";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ask } from "@tauri-apps/plugin-dialog";
+// The close prompt goes through the sanctioned dialog wrapper, never the
+// plugin's raw `message` (lint-banned outside src/core/lib/dialogs.ts). It
+// asks Excel's THREE-button question -- Save / Don't Save / Cancel -- because
+// only an explicit "Don't Save" may discard: X, Escape and a failure to ask
+// all keep the window open.
+import { askSaveDiscardCancelAsync } from "../api/dialogs";
 import type { ViewMode } from "../core/types";
 // Extension management
 import { useExtensionInitializer, useExtensions } from "./hooks/useExtensions";
@@ -263,8 +273,9 @@ function LayoutInner(): React.ReactElement {
     return () => cleanups.forEach((fn) => fn());
   }, []);
 
-  // Window close handler: ask the lifecycle guards, emit BEFORE_CLOSE, then
-  // prompt for unsaved changes.
+  // Window close handler: ask the close guards, then -- over unsaved changes --
+  // Save / Don't Save / Cancel, and broadcast BEFORE_CLOSE only once the close
+  // is DECIDED.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     // `onCloseRequested` registers ASYNCHRONOUSLY, so a cleanup that runs before the
@@ -295,8 +306,16 @@ function LayoutInner(): React.ReactElement {
           return;
         }
 
-        // Emit BEFORE_CLOSE so extensions can prepare (e.g., persist state)
-        emitAppEvent(AppEvents.BEFORE_CLOSE);
+        // BEFORE_CLOSE is not a notice that a close was REQUESTED; it is the
+        // workbook's teardown. On it every object script is unmounted (and with
+        // it every onBeforeClose / onBeforeSave veto its host registered), the
+        // scheduler stops, script panes and forms close and drop pending bound
+        // text, capability grants are forgotten, a macro recording ends and the
+        // Animation driver unloads -- and nothing re-establishes any of that
+        // short of reopening the file. So it goes out only on a path that really
+        // closes the window. It used to go out HERE, ahead of the question, and
+        // Cancel / X / Escape then left the window open over a workbook whose
+        // scripts were all gone.
 
         // Check for unsaved changes and prompt the user
         let dirty = false;
@@ -306,56 +325,123 @@ function LayoutInner(): React.ReactElement {
           // If check fails, allow close
         }
 
-        if (dirty) {
-          // Prevent close while we show the dialog
-          event.preventDefault();
+        if (!dirty) {
+          // Nothing to ask: the window closes natively once this returns.
+          emitAppEvent(AppEvents.BEFORE_CLOSE);
+          return;
+        }
 
-          if (prompting) return;
-          prompting = true;
+        // Prevent close while we show the dialog
+        event.preventDefault();
 
-          let shouldSave: boolean;
+        if (prompting) return;
+        prompting = true;
+
+        // Three buttons, as in Excel. The two-button box this replaced read
+        // X and Escape as its refusing button, "Don't Save", and destroyed
+        // the window over the unsaved document.
+        const answer = await askSaveDiscardCancelAsync(
+          "Do you want to save changes before closing?",
+          {
+            title: "Calcula",
+            kind: "warning",
+            saveLabel: "Save",
+            discardLabel: "Don't Save",
+            cancelLabel: "Cancel",
+          }
+        );
+        // Only an explicit Save or Don't Save goes on to close. "cancel" (the
+        // Cancel button, X, Escape) and "unavailable" (no answer at all) keep
+        // the window open. NEVER fall through to destroy() on those: that
+        // discards unsaved work the user did not agree to discard. Keeping the
+        // window open costs the user one repeated click; closing costs them
+        // the document. Nothing has been torn down on this path.
+        if (answer !== "save" && answer !== "discard") {
+          if (answer === "unavailable") {
+            console.error(
+              "[Layout] Could not show the unsaved-changes prompt; keeping the window open."
+            );
+          }
+          prompting = false;
+          return;
+        }
+
+        if (answer === "save") {
+          // Before-Save veto, asked HERE, while the scripts are still mounted.
+          // saveFile() asks the same guards, but only after the BEFORE_CLOSE
+          // below has unmounted every script and disposed its guard with it, so
+          // left to saveFile a script's onBeforeSave ("fill in the total
+          // first") never ran on this path, though the same script vetoes a
+          // Ctrl+S. Excel fires Workbook_BeforeSave for the close prompt's Save
+          // too, and BEFORE the Save As dialog (SaveAsUI) -- hence the untitled
+          // workbook is asked as a "saveAs" with no path yet. The detail
+          // mirrors saveFile's own. Each script is asked once: by the time
+          // saveFile asks again, only the trusted extension guards are left.
+          let refused: unknown;
           try {
-            shouldSave = await ask(
-              "Do you want to save changes before closing?",
-              {
-                title: "Calcula",
-                kind: "warning",
-                okLabel: "Save",
-                cancelLabel: "Don't Save",
-              }
+            const path = await getCurrentFilePath();
+            refused = await checkLifecycleGuards(
+              "save",
+              path ? { path, kind: "save" } : { kind: "saveAs" }
             );
           } catch (error) {
-            // The prompt could not be shown. NEVER fall through to destroy(): that
-            // discards unsaved work at exactly the moment we failed to ask about it.
-            // Keeping the window open costs the user one repeated click; closing
-            // costs them the document.
             console.error(
-              "[Layout] Could not show the unsaved-changes prompt; keeping the window open:",
+              "[Layout] Could not prepare the save during close; keeping the window open:",
               error
             );
             prompting = false;
             return;
           }
-
-          if (shouldSave) {
-            try {
-              await saveFile();
-            } catch (error) {
-              // The save the user asked for failed. Same rule: do not close over
-              // unsaved work.
-              console.error(
-                "[Layout] Save failed during close; keeping the window open:",
-                error
-              );
-              prompting = false;
-              return;
-            }
+          // A veto keeps everything: the window, the scripts, the document.
+          // checkLifecycleGuards has already told the user who refused and why.
+          if (refused) {
+            prompting = false;
+            return;
           }
 
-          // User has responded and any save succeeded — now close
-          await getCurrentWindow().destroy();
+          // The close is decided. The teardown goes out BEFORE the write, not
+          // after it: the macro recorder stores the recording it was taking,
+          // the Animation driver restores its transient frame, and the script
+          // host re-protects any sheet a script had lifted protection from --
+          // all of which belong in the file. (Those subscribers start async
+          // work they are not awaited on; the human wait on the old prompt used
+          // to hide that. Nothing on this side can await an event.)
+          emitAppEvent(AppEvents.BEFORE_CLOSE);
+
+          let savedPath: string | null;
+          try {
+            savedPath = await saveFile();
+          } catch (error) {
+            // The save the user asked for failed. Same rule: do not close over
+            // unsaved work.
+            console.error(
+              "[Layout] Save failed during close; keeping the window open:",
+              error
+            );
+            prompting = false;
+            return;
+          }
+          // `null` is saveFile's "not saved": the Save As picker was cancelled
+          // (an untitled workbook) or the lossy-save warning was declined. The
+          // scripts' Before-Save vetoes were asked above; only a trusted
+          // extension guard could refuse in there. Nothing reached disk, so
+          // closing now would discard the document exactly as "Don't Save"
+          // does. KNOWN RESIDUE: BEFORE_CLOSE has already gone out, so the
+          // window stays open over a torn-down script realm. Closing that gap
+          // needs saveFile split into "resolve the destination and every
+          // consent" and "write", so every step that can still refuse runs
+          // before the teardown.
+          if (savedPath === null) {
+            prompting = false;
+            return;
+          }
+        } else {
+          // "Don't Save": the close is decided, nothing is written.
+          emitAppEvent(AppEvents.BEFORE_CLOSE);
         }
-        // If not dirty, don't preventDefault — window closes normally
+
+        // User has responded and any save succeeded — now close
+        await getCurrentWindow().destroy();
       })
       .then((fn) => {
         // The effect was already torn down while this registration was in flight:

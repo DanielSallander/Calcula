@@ -982,7 +982,7 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     // -----------------------------------------------------------------------
     DependencyRule {
         owner: ObjectKind::BiConnection,
-        dependent: "ribbonFilter.connectionId / biPivot / report.dataSourceId",
+        dependent: "ribbonFilter.connectionId / modelSlicer.cacheSourceId / biPivot / report.dataSourceId",
         dependent_kind: None,
         policy: DeletePolicy::WarnAndKeep,
         implemented_by: "",
@@ -1830,6 +1830,19 @@ pub fn record_source_cascade_undo_into(
 }
 
 /// Push a restore for every ribbon filter a prune edited.
+/// The restores [`record_filter_prune_undo`] records, as payloads, for a caller
+/// that records a whole gesture in ONE call (`delete_slicer_core`).
+pub(crate) fn encode_filter_prune_restores(previous: &[RibbonFilter]) -> Vec<(&'static str, Vec<u8>)> {
+    previous
+        .iter()
+        .map(|filter| {
+            let data = serde_json::to_vec(&RibbonFilterSnapshotOut { filter_id: filter.id, previous: filter })
+                .unwrap_or_default();
+            ("ribbon_filter", data)
+        })
+        .collect()
+}
+
 pub fn record_filter_prune_undo(state: &AppState, previous: &[RibbonFilter], description: &str) {
     if previous.is_empty() {
         return;
@@ -1917,6 +1930,32 @@ pub fn list_object_dependents(
     object_kind: String,
     object_id: String,
 ) -> Vec<ObjectDependent> {
+    list_object_dependents_core(
+        &state,
+        &slicer_state,
+        &timeline_state,
+        &ribbon_filter_state,
+        &pane_control_state,
+        &pivot_state,
+        &object_kind,
+        &object_id,
+    )
+}
+
+/// [`list_object_dependents`] over plain references, for the unit tier.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn list_object_dependents_core(
+    state: &AppState,
+    slicer_state: &SlicerState,
+    timeline_state: &TimelineSlicerState,
+    ribbon_filter_state: &RibbonFilterState,
+    pane_control_state: &PaneControlState,
+    pivot_state: &crate::pivot::PivotState,
+    object_kind: &str,
+    object_id: &str,
+) -> Vec<ObjectDependent> {
+    let object_id = object_id.to_string();
+    let object_kind = object_kind.to_string();
     let mut out: Vec<ObjectDependent> = Vec::new();
     let id = EntityId::parse(&object_id);
 
@@ -2083,11 +2122,35 @@ pub fn list_object_dependents(
                 });
             }
             drop(filters);
+            // MODEL slicers read their items from the connection itself
+            // (`cacheSourceId` IS the connection id). They stay, like every
+            // dependent of a connection, and are named so the confirm can say
+            // they will come up empty.
+            {
+                let slicers = slicer_state.slicers.read().unwrap();
+                for slicer in slicers.values() {
+                    if !slicer.is_model_slicer() || slicer.cache_source_id != id {
+                        continue;
+                    }
+                    out.push(ObjectDependent {
+                        kind: ObjectKind::Slicer.wire_name().to_string(),
+                        id: slicer.id.to_string(),
+                        name: slicer.name.clone(),
+                        policy: policy_wire_name(DeletePolicy::WarnAndKeep).to_string(),
+                        via: "cacheSourceId".to_string(),
+                    });
+                }
+            }
             // BI-backed pivots. Their connection id lives in `bi_metadata`, not
             // in the definition, which is why this cannot be answered from the
             // pivot list alone.
+            //
+            // CANONICAL LOCK ORDER: pivot_tables BEFORE bi_metadata (the order
+            // `bi_pivots_for_connection` and every refresh path take them).
+            // This used to take bi_metadata first -- the reverse, an ABBA pair
+            // with any writer waiting on one of them.
+            let names = pivot_state.pivot_tables.read().ok();
             if let Ok(meta) = pivot_state.bi_metadata.read() {
-                let names = pivot_state.pivot_tables.read().ok();
                 for (pivot_id, m) in meta.iter() {
                     if m.connection_id != id {
                         continue;

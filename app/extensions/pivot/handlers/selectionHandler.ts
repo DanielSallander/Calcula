@@ -519,7 +519,10 @@ export function buildPivotPaneData(pivotInfo: PivotRegionInfo): PivotEditorViewD
       }
     }
 
-    // Add non-hierarchy fields
+    // Add non-hierarchy fields -- with their hidden items, like the flat
+    // path below: a calculation group's chip is the ONLY place its item
+    // subset lives, so a chip seeded without it sent "every item" on the
+    // next edit of a pivot that also had a hierarchy placed.
     for (let i = 0; i < fields.length; i++) {
       if (skipIndices.has(i)) continue;
       const f = fields[i];
@@ -529,13 +532,20 @@ export function buildPivotPaneData(pivotInfo: PivotRegionInfo): PivotEditorViewD
         isNumeric: f.isNumeric,
         customName: isBiPivot ? f.name : undefined,
         isLookup: f.isLookup || false,
+        hiddenItems: f.hiddenItems,
       });
     }
     return result;
   };
 
-  // hiddenItems ride along on row/column chips too (a placed calculation
-  // group's item subset lives there like a field filter).
+  // hiddenItems ride along on row/column chips too: a placed calculation
+  // group's item subset lives there, and the Pivot Layout DSL shows a real
+  // field's as NOT IN (...). For a real field of a MODEL pivot this is a
+  // DISPLAY snapshot of the definition, never sent back as if the user had
+  // edited it: a slicer, the header dropdown or a ribbon filter can change
+  // the pivot after the pane mounts. The editor re-reads the definition after
+  // each view change (usePivotEditorState), but asynchronously
+  // (biFieldsRequest.ts).
   const initialRows: ZoneField[] = isBiPivot && hierarchyConfigs.length > 0
     ? reconstitute(config.rowFields, true)
     : config.rowFields.map((f) => ({

@@ -6,10 +6,27 @@
 // FIX: Parses formula references on selection change for passive highlighting
 // REFACTOR: Imports from api layer instead of core internals
 // FEATURE: Expanded (multi-line) mode — one <textarea> instead of the <input>
+// FEATURE (2026-09-27): EXTERNAL cells. A selected floating-grid cell is the
+//          active cell: the bar shows its formula, and editing it here edits
+//          THAT cell through its owner's session (core/lib/formulaEditTarget.ts,
+//          read only through `resolveFormulaBarSource`). Before this, on a
+//          worksheet the bar showed -- and Enter silently WROTE -- Core's last
+//          active cell, hidden under the floating grid. Precedence: a Core edit >
+//          an external session > a chart SERIES formula > a selected external
+//          cell > the Core selection.
 
-import React, { useCallback, useRef, useEffect } from "react";
+import React, { useCallback, useRef, useEffect, useSyncExternalStore } from "react";
 import { useGridContext, getCell, getMergeInfo, isSheetProtected, getCellProtection, checkRangeGuards, getSpillRanges } from "../../api";
 import { useEditing, setGlobalIsEditing, getGlobalEditingValue, setGlobalCursorPosition, getGlobalCursorPosition, setChartSeriesRefMode } from "../../api/editing";
+// The SUBPATH, not `api/editing`: this component's tests double `api/editing`
+// with a fixed export list, and the external-edit store must stay REAL in them.
+import {
+  subscribeExternalEdit,
+  getExternalEditVersion,
+  resolveFormulaBarSource,
+  endExternalFormulaSession,
+  type FormulaBarSource,
+} from "../../api/externalEdit";
 import { toggleReferenceAtCursor } from "../../core/lib/formulaRefToggle";
 import { parseFormulaReferences } from "../../core/lib/formulaRefParser";
 import { formulaA1ToR1C1 } from "../../core/lib/r1c1";
@@ -26,6 +43,16 @@ import * as S from './FormulaInput.styles';
  * input-only or textarea-only member.
  */
 type FormulaEditorElement = HTMLInputElement | HTMLTextAreaElement;
+
+/** "No external source" -- also what a CORE edit reads as: a Core edit wins over everything. */
+const NO_SOURCE: FormulaBarSource = Object.freeze({ kind: "none" as const });
+
+/** Whether focus has fallen to nowhere, or to the grid (a reference pick took it there). */
+function focusIsLostToGrid(): boolean {
+  const active = document.activeElement;
+  if (active === null || active === document.body) return true;
+  return typeof active.closest === "function" && active.closest('[data-focus-container="spreadsheet"]') !== null;
+}
 
 interface FormulaInputProps {
   /** Multi-line mode: the bar has been expanded (chevron or Ctrl+Shift+U). */
@@ -60,6 +87,28 @@ export function FormulaInput({
       setDisplayValue(editing.value);
     }
   }
+
+  // The EXTERNAL source (a floating grid's selected cell or its edit session).
+  // `extVersion` re-renders on every change of the store; the source itself is
+  // re-resolved each render (it is a new object -- never a snapshot). A CORE
+  // edit wins over everything: a click on Core's already-active cell does not
+  // clear a floating grid's selection, so both can exist, and the edit that is
+  // actually open is the one the bar must show and write.
+  const extVersion = useSyncExternalStore(subscribeExternalEdit, getExternalEditVersion);
+  const ext: FormulaBarSource = editing ? NO_SOURCE : resolveFormulaBarSource();
+  const externalKind = ext.kind;
+  // A canvas with nothing selected has nothing the bar could edit: focusing it
+  // must not raise the global editing flag (it used to, and nothing lowered it,
+  // which left the grid's and the floating grid's keyboards dead).
+  const nothingToEdit =
+    !editing && ext.kind === "none" && !state.selection && state.surface === "canvas";
+  const shownValue =
+    editing ? displayValue
+    : ext.kind === "session" ? ext.session.getText()
+    : chartSeriesFormula !== null ? displayValue
+    // content null = the read is in flight: show nothing, never another cell's text.
+    : ext.kind === "cell" ? (ext.cell.content ?? "")
+    : displayValue;
 
   /**
    * WHAT THE SELECTION FETCH WRITES, AND WHY IT IS CANCELLED
@@ -99,6 +148,19 @@ export function FormulaInput({
   useEffect(() => {
     // Skip cell content fetch when chart series formula is displayed
     if (chartSeriesFormula) return;
+
+    // An EXTERNAL cell is the active cell: the Core cell underneath (on a
+    // worksheet, Core's last active cell) is not the subject, so neither its
+    // text nor its precedent boxes may show. Runs on TRANSITIONS only
+    // (`externalKind` is a dep), never per keystroke -- a dispatch re-renders
+    // every GridContext consumer. And withdrawing the external cell with the
+    // Core selection unchanged re-runs this effect, which re-fetches the grid
+    // cell.
+    if (externalKind !== "none") {
+      setIsSpillRef(false);
+      dispatch(clearFormulaReferences());
+      return;
+    }
 
     if (!editing && state.selection) {
       const { startRow, startCol, endRow, endCol } = state.selection;
@@ -225,7 +287,29 @@ export function FormulaInput({
       setDisplayValue("");
       setIsSpillRef(false);
     }
-  }, [editing, state.selection, state.surface, state.referenceStyle, dispatch, chartSeriesFormula]);
+  }, [editing, state.selection, state.surface, state.referenceStyle, dispatch, chartSeriesFormula, externalKind]);
+
+  // A SESSION hosted by the bar: keep the keyboard and the caret here. A
+  // reference pick (a grid click, a floating-grid click) must not leave focus on
+  // the grid -- the pointer door already refuses to move it, and this is the
+  // fallback if something else did -- and the caret follows the session's (a
+  // pick inserts text at it without any input event here). No loop:
+  // setSelectionRange -> onSelect -> setCursor never notifies.
+  useEffect(() => {
+    if (editing) return;
+    const src = resolveFormulaBarSource();
+    if (src.kind !== "session" || src.session.getView() !== "bar") return;
+    const session = src.session;
+    const frame = requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      if (document.activeElement !== el && focusIsLostToGrid()) el.focus();
+      if (document.activeElement !== el) return;
+      const caret = Math.min(session.getCursor(), el.value.length);
+      if (el.selectionStart !== caret) el.setSelectionRange(caret, caret);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [extVersion, editing]);
 
   // Listen for chart selection changes to show SERIES formula
   useEffect(() => {
@@ -269,6 +353,22 @@ export function FormulaInput({
   React.useEffect(() => {
     const handleAccepted = (e: Event) => {
       const { newValue, newCursorPosition } = (e as CustomEvent).detail;
+      // An external SESSION: ONE owner per view. ACCEPTED carries no source, and
+      // the floating grid's own editor hears it too -- so the bar applies it
+      // only while the BAR is focused (the owner applies it only while ITS view
+      // is), and never writes another dialog's formula into the session.
+      if (!editing) {
+        const src = resolveFormulaBarSource();
+        if (src.kind === "session") {
+          if (document.activeElement === inputRef.current) {
+            src.session.setText(newValue, newCursorPosition);
+            requestAnimationFrame(() => {
+              inputRef.current?.setSelectionRange(newCursorPosition, newCursorPosition);
+            });
+          }
+          return;
+        }
+      }
       setDisplayValue(newValue);
       if (editing) {
         updateValue(newValue);
@@ -316,6 +416,19 @@ export function FormulaInput({
   const handleChange = useCallback(
     (e: React.ChangeEvent<FormulaEditorElement>) => {
       const newValue = e.target.value;
+      // An EXTERNAL cell or session: the text goes to the owner's session
+      // (opening one if an input arrives without a focus), and to nothing of
+      // Core's -- `updateValue` and the global caret are the grid editor's.
+      if (!editing) {
+        const src = resolveFormulaBarSource();
+        if (src.kind === "session" || (src.kind === "cell" && chartSeriesFormula === null)) {
+          const caret = inputRef.current?.selectionStart ?? newValue.length;
+          const session = src.kind === "session" ? src.session : src.cell.beginEdit();
+          if (session) session.setText(newValue, caret);
+          emitAutocompleteInput(newValue, caret);
+          return;
+        }
+      }
       setDisplayValue(newValue);
       if (editing) {
         updateValue(newValue);
@@ -327,10 +440,59 @@ export function FormulaInput({
 
       emitAutocompleteInput(newValue, cursorPos);
     },
-    [editing, updateValue, emitAutocompleteInput]
+    [editing, updateValue, emitAutocompleteInput, chartSeriesFormula]
   );
 
   const handleFocus = useCallback(async () => {
+    // EXTERNAL FIRST, ahead of the spill and range-guard blurs below: those
+    // describe a Core cell that is not the subject (on a worksheet, Core's last
+    // active cell, hidden under the floating grid -- a pivot at A1 was enough
+    // to blur the bar the moment it was focused for a floating-grid edit). And
+    // never the Core branch: `startEdit` there opened an edit of THAT hidden
+    // cell, and Enter wrote the user's formula into it.
+    if (!editing) {
+      const src = resolveFormulaBarSource();
+      if (src.kind === "session") {
+        // A live session (typed in the floating grid, or parked on another
+        // sheet): the bar becomes its view. No global flag, no Core edit.
+        src.session.adoptBarView();
+        setIsFocused(true);
+        const el = inputRef.current;
+        if (el) {
+          const caret = el.selectionStart ?? el.value.length;
+          src.session.setCursor(caret);
+          if (el.value.startsWith("=")) emitAutocompleteInput(el.value, caret);
+        }
+        return;
+      }
+      if (src.kind === "cell" && chartSeriesFormula === null) {
+        if (src.cell.readOnly) {
+          inputRef.current?.blur();
+          return;
+        }
+        // Opens the owner's session WITHOUT taking focus (the bar has it).
+        const session = src.cell.beginEdit();
+        if (!session) {
+          inputRef.current?.blur();
+          return;
+        }
+        setIsFocused(true);
+        const el = inputRef.current;
+        if (el) {
+          const caret = el.selectionStart ?? el.value.length;
+          session.setCursor(caret);
+          if (el.value.startsWith("=")) emitAutocompleteInput(el.value, caret);
+        }
+        return;
+      }
+      // A canvas with nothing selected: nothing to edit, and no global flag
+      // (it used to be raised here and never lowered).
+      if (src.kind === "none" && !state.selection && state.surface === "canvas") {
+        setIsFocused(true);
+        return;
+      }
+    }
+
     // Block editing in spill ref cells (non-origin spill cells are read-only)
     if (isSpillRef) {
       if (inputRef.current) inputRef.current.blur();
@@ -365,7 +527,7 @@ export function FormulaInput({
     if (inputEl && inputEl.value.startsWith("=")) {
       emitAutocompleteInput(inputEl.value, inputEl.selectionStart ?? inputEl.value.length);
     }
-  }, [editing, state.selection, startEdit, isSpillRef, emitAutocompleteInput]);
+  }, [editing, state.selection, state.surface, startEdit, isSpillRef, emitAutocompleteInput, chartSeriesFormula]);
 
   const handleBlur = useCallback(() => {
     setIsFocused(false);
@@ -387,11 +549,23 @@ export function FormulaInput({
     const inputEl = inputRef.current;
     if (!inputEl) return;
     const cursorPos = inputEl.selectionStart ?? inputEl.value.length;
+    // An external SESSION owns its caret: "is it expecting a reference" is
+    // judged at the SESSION's caret, and a stale one made a pick insert at the
+    // wrong offset -- or judged a pick not to be one and committed the
+    // half-typed formula. The global caret is the grid editor's.
+    if (!editing) {
+      const src = resolveFormulaBarSource();
+      if (src.kind === "session") {
+        src.session.setCursor(cursorPos);
+        if (inputEl.value.startsWith("=")) emitAutocompleteInput(inputEl.value, cursorPos);
+        return;
+      }
+    }
     setGlobalCursorPosition(cursorPos);
     if (inputEl.value.startsWith("=")) {
       emitAutocompleteInput(inputEl.value, cursorPos);
     }
-  }, [emitAutocompleteInput]);
+  }, [editing, emitAutocompleteInput]);
 
   /**
    * THE TEXTAREA TRAP. Expanded, this runs on a <textarea>, where Enter inserts
@@ -417,6 +591,76 @@ export function FormulaInput({
               detail: { key: e.key },
             })
           );
+          return;
+        }
+      }
+
+      // An EXTERNAL SESSION (a floating grid's cell edit hosted by the bar):
+      // every key that ends or reshapes the entry goes through the session and
+      // the one Core helper that ends it -- which returns to the floating
+      // grid's sheet first when the edit is parked on another one. Never Core's
+      // commitEdit/cancelEdit, and never `formulaBar:commitComplete`: its
+      // listener moves CORE's active cell, which on a worksheet host is a
+      // second, unrelated move.
+      if (!editing) {
+        const src = resolveFormulaBarSource();
+        if (src.kind === "session") {
+          const session = src.session;
+          // Blur ONLY when no session is open once the commit/cancel has
+          // settled. The awaited commit spans the owner's write (IPC plus
+          // recalc), and a key typed into the bar in that window opens a NEW
+          // session on the next cell (the owner moved its selection before the
+          // write). That session's view IS this bar: blurred, it was left live
+          // with no view holding the keyboard, and every key went nowhere
+          // until the user clicked back into the bar.
+          const blurIfFocused = (): void => {
+            if (resolveFormulaBarSource().kind === "session") return;
+            if (document.activeElement === inputRef.current) inputRef.current?.blur();
+          };
+          if (e.key === "Enter" && e.altKey && !e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            const caret = inputRef.current?.selectionStart ?? session.getCursor();
+            const text = session.getText();
+            session.setText(text.slice(0, caret) + "\n" + text.slice(caret), caret + 1);
+            requestAnimationFrame(() => {
+              inputRef.current?.setSelectionRange(caret + 1, caret + 1);
+            });
+            return;
+          }
+          if (e.key === "Enter") {
+            e.preventDefault();
+            await endExternalFormulaSession("commit", e.shiftKey ? "up" : "down");
+            blurIfFocused();
+            return;
+          }
+          if (e.key === "Tab") {
+            e.preventDefault();
+            await endExternalFormulaSession("commit", e.shiftKey ? "left" : "right");
+            blurIfFocused();
+            return;
+          }
+          if (e.key === "Escape") {
+            e.preventDefault();
+            await endExternalFormulaSession("cancel");
+            blurIfFocused();
+            return;
+          }
+          if (e.key === "F4") {
+            const text = session.getText();
+            if (text.startsWith("=")) {
+              e.preventDefault();
+              const caret = inputRef.current?.selectionStart ?? session.getCursor();
+              const result = toggleReferenceAtCursor(text, caret);
+              if (result.formula !== text) {
+                session.setText(result.formula, result.cursorPos);
+                requestAnimationFrame(() => {
+                  inputRef.current?.setSelectionRange(result.cursorPos, result.cursorPos);
+                });
+              }
+            }
+            return;
+          }
+          // Anything else types into the input, and onChange hands it on.
           return;
         }
       }
@@ -495,7 +739,7 @@ export function FormulaInput({
         }
       }
     },
-    [commitEdit, cancelEdit, updateValue]
+    [editing, commitEdit, cancelEdit, updateValue]
   );
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -511,7 +755,13 @@ export function FormulaInput({
     : false;
 
   // Read-only when showing chart series formula, protected cell, or spill ref
-  const isReadOnly = isProtectedCell || chartSeriesFormula !== null || isSpillRef;
+  // An external SESSION is never read-only here, whatever the Core cell under
+  // it is (Sheet1's protected range must not lock a floating grid's formula);
+  // a selected external cell says for itself.
+  const isReadOnly =
+    !editing && ext.kind === "session" ? false
+    : !editing && ext.kind === "cell" && chartSeriesFormula === null ? ext.cell.readOnly
+    : nothingToEdit || isProtectedCell || chartSeriesFormula !== null || isSpillRef;
 
   /**
    * One ref for two element types. A callback ref takes the union without the
@@ -528,7 +778,7 @@ export function FormulaInput({
    * find the bar.
    */
   const editorProps = {
-    value: displayValue,
+    value: shownValue,
     onChange: handleChange,
     onFocus: handleFocus,
     onBlur: handleBlur,

@@ -7,13 +7,18 @@
 //          reach it through the facade — Core stays importable by Shell and Core
 //          itself without inventing a core->api edge. The raw globals are banned
 //          by the dialog-globals block in eslint.boundaries.js; this file and its
-//          @api re-export are the only exemptions.
+//          @api re-export are the only exemptions. So is importing `ask`,
+//          `confirm` or `message` from @tauri-apps/plugin-dialog: this file is
+//          the one module allowed to, because a raw `ask` THROWS when its dialog
+//          cannot be shown, and a caller that did not catch it failed OPEN
+//          (Pivot's overwrite prompt skipped its undo that way until
+//          2026-09-28).
 //
 // =============================================================================
 // WHY THIS MODULE EXISTS — the defect it retires
 // =============================================================================
 // tauri-plugin-dialog injects an init script into every webview that REPLACES two
-// of the three globals (verbatim, tauri-plugin-dialog-2.7.0/src/init-iife.js):
+// of the three globals (verbatim, tauri-plugin-dialog-2.6.0/src/init-iife.js):
 //
 //   window.alert   = function (m) { invoke("plugin:dialog|message", {...}) }
 //   window.confirm = async function (m) { return await invoke("plugin:dialog|confirm", {...}) }
@@ -87,6 +92,64 @@ function hasTauriBridge(): boolean {
 }
 
 /**
+ * What a yes/no question came back with, when "I could not ask" must not be
+ * read as "no": `"confirmed"` (an explicit affirmative), `"declined"` (the
+ * refusing button, or the box dismissed), `"unavailable"` (no window, no
+ * dialog surface, an IPC error -- there is no answer at all).
+ */
+export type ConfirmOutcome = "confirmed" | "declined" | "unavailable";
+
+/**
+ * Ask a yes/no question and WAIT for one of THREE outcomes.
+ *
+ * For the question where BOTH buttons act, so the refusing value is not safe
+ * to assume: a helper that folded "could not ask" into "no" would run the
+ * "no" action at exactly the moment it failed to ask about it. The caller
+ * decides what "unavailable" means. For an ordinary guard, use
+ * `confirmAsync`, which is this with "unavailable" read as "no".
+ *
+ * NOT for "Save changes before closing?". A two-button box cannot offer
+ * Cancel, and closing it with X or Escape comes back as "declined" -- the
+ * close prompt used this until 2026-09-28 and destroyed the window WITHOUT
+ * saving when the user dismissed the box. Use `askSaveDiscardCancelAsync`.
+ *
+ * NEVER call this without awaiting it; the return value is the whole point.
+ */
+export async function confirmOutcomeAsync(
+  message: string,
+  options?: ConfirmOptions,
+): Promise<ConfirmOutcome> {
+  if (typeof window === "undefined") return "unavailable";
+
+  if (hasTauriBridge()) {
+    try {
+      // Native modal via the plugin. Returns a real boolean.
+      const answer = await tauriConfirm(message, {
+        title: options?.title,
+        kind: options?.kind,
+        okLabel: options?.okLabel,
+        cancelLabel: options?.cancelLabel,
+      });
+      return answer === true ? "confirmed" : "declined";
+    } catch {
+      // The dialog could not be shown. We have no answer.
+      return "unavailable";
+    }
+  }
+
+  // jsdom (unit tests) and the browser-only visual smoke: the platform's own
+  // synchronous confirm. Awaiting a boolean is harmless and keeps one code path.
+  // eslint-disable-next-line no-restricted-properties, no-restricted-globals
+  if (typeof window.confirm !== "function") return "unavailable";
+  try {
+    // eslint-disable-next-line no-restricted-properties, no-restricted-globals
+    return (await window.confirm(message)) === true ? "confirmed" : "declined";
+  } catch {
+    return "unavailable";
+  }
+}
+
+/**
  * Ask a yes/no question and WAIT for the answer.
  *
  * Resolves `true` only on an explicit affirmative. Anything else — Cancel, a
@@ -95,39 +158,133 @@ function hasTauriBridge(): boolean {
  *
  *     if (!(await confirmAsync("Delete this?"))) return;
  *
+ * When "no" also ACTS (and so cannot be assumed on a failure), use
+ * `confirmOutcomeAsync` instead.
+ *
  * NEVER call this without awaiting it; the return value is the whole point.
  */
 export async function confirmAsync(message: string, options?: ConfirmOptions): Promise<boolean> {
-  if (typeof window === "undefined") return false;
+  // Fail closed: "unavailable" is not consent.
+  return (await confirmOutcomeAsync(message, options)) === "confirmed";
+}
 
-  if (hasTauriBridge()) {
-    try {
-      // Native modal via the plugin. Returns a real boolean.
-      return (
-        (await tauriConfirm(message, {
-          title: options?.title,
-          kind: options?.kind,
-          okLabel: options?.okLabel,
-          cancelLabel: options?.cancelLabel,
-        })) === true
-      );
-    } catch {
-      // The dialog could not be shown. We have no answer, so we do not have
-      // consent. Fail closed rather than guess.
-      return false;
-    }
+// =============================================================================
+// askSaveDiscardCancelAsync -- "Save changes?" with a real Cancel
+// =============================================================================
+// Excel's close prompt has THREE buttons: Save, Don't Save, Cancel. Ours had
+// two (okLabel "Save" / cancelLabel "Don't Save" on the plugin's `confirm`), so
+// the X button and Escape -- which a user reaches for to mean "wait, not yet"
+// -- came back as the refusing button, "Don't Save", and the window was
+// destroyed over the unsaved document.
+//
+// WHAT THE PLUGIN RESOLVES TO. Read 2026-09-28 against the pinned versions
+// (@tauri-apps/plugin-dialog 2.6.0 in node_modules; tauri-plugin-dialog 2.6.0
+// and rfd 0.16.0 in app/src-tauri/Cargo.lock; paths below are in the cargo
+// registry unless they start with node_modules):
+//
+//   - JS `message(m, { buttons: { yes, no, cancel } })` sends
+//     `{ YesNoCancelCustom: [yes, no, cancel] }`
+//     (node_modules/@tauri-apps/plugin-dialog/dist-js/index.js:19-22).
+//   - The Rust command returns the dialog's `MessageDialogResult`
+//     (tauri-plugin-dialog-2.6.0/src/commands.rs:291-306), whose
+//     `Custom(String)` variant is `#[serde(untagged)]` (models.rs:77-78): a
+//     custom button reaches JS as its bare LABEL string.
+//   - On Windows the plugin builds rfd with `common-controls-v6` (plugin
+//     Cargo.toml:104-107), so the box is a TaskDialog with three CUSTOM
+//     buttons (rfd-0.16.0/src/backend/win_cid/message_dialog.rs:87-90 and
+//     117-124) and `TDF_ALLOW_DIALOG_CANCELLATION` (:138). That flag is what
+//     lets the X button, Escape and Alt+F4 close the box, and each of them
+//     reports IDCANCEL, which rfd reads as `Cancel` (:182). A TaskDialog that
+//     failed to open is `Cancel` too (:175-176), and so is an unrecognised
+//     button id (:198).
+//   - The plugin then rewrites rfd's Yes / No / Cancel into the matching
+//     custom LABEL (tauri-plugin-dialog-2.6.0/src/desktop.rs:240-251).
+//
+// So on Windows the promise resolves to exactly one of the three labels:
+// Save -> the save label; Don't Save -> the discard label; Cancel, X, Escape,
+// Alt+F4 and a box that never opened -> the cancel label. This helper maps on
+// those strings and nothing else. Anything it does not recognise is
+// "unavailable", never "discard".
+
+/**
+ * What a "save before you lose it?" question came back with.
+ *
+ * - `"save"`: the save button.
+ * - `"discard"`: the discard button ("Don't Save"), clicked explicitly. ONLY
+ *   this outcome may throw the user's work away.
+ * - `"cancel"`: the Cancel button, the X button, Escape or Alt+F4.
+ * - `"unavailable"`: there is no answer. No Tauri bridge, the dialog could
+ *   not be shown, it resolved to something unrecognised, or the three labels
+ *   cannot be told apart.
+ */
+export type SaveDiscardCancelOutcome = "save" | "discard" | "cancel" | "unavailable";
+
+/** Presentation options for `askSaveDiscardCancelAsync`. */
+export interface SaveDiscardCancelOptions extends DialogTextOptions {
+  /** Label of the button that saves. Default "Save". */
+  saveLabel?: string;
+  /** Label of the button that DISCARDS. Default "Don't Save". */
+  discardLabel?: string;
+  /** Label of the button that does neither. Default "Cancel". */
+  cancelLabel?: string;
+}
+
+/** How a dismissed box is spelled before the plugin relabels it (rfd's and the
+ *  plugin's `Cancel`; see the comment block above). */
+const DISMISSED_SPELLING = "Cancel";
+
+/**
+ * Ask "save, discard, or neither?" and WAIT for one of FOUR outcomes.
+ *
+ * The caller must act only on `"save"` and `"discard"`; `"cancel"` and
+ * `"unavailable"` both mean "keep everything as it is". Outside Tauri
+ * (jsdom, the browser-only smoke) there is no native three-button box, and a
+ * two-button fallback could not ask this question honestly, so the answer is
+ * `"unavailable"`.
+ *
+ * NEVER call this without awaiting it; the return value is the whole point.
+ */
+export async function askSaveDiscardCancelAsync(
+  message: string,
+  options?: SaveDiscardCancelOptions,
+): Promise<SaveDiscardCancelOutcome> {
+  const saveLabel = options?.saveLabel ?? "Save";
+  const discardLabel = options?.discardLabel ?? "Don't Save";
+  const cancelLabel = options?.cancelLabel ?? "Cancel";
+
+  // The answer IS a label, so labels that collide cannot be answered. And only
+  // the cancel button may be spelled like a dismissal: a discard button
+  // labelled "Cancel" would turn a box closed with X into a discard.
+  if (
+    saveLabel === discardLabel ||
+    saveLabel === cancelLabel ||
+    discardLabel === cancelLabel ||
+    saveLabel === DISMISSED_SPELLING ||
+    discardLabel === DISMISSED_SPELLING
+  ) {
+    return "unavailable";
   }
 
-  // jsdom (unit tests) and the browser-only visual smoke: the platform's own
-  // synchronous confirm. Awaiting a boolean is harmless and keeps one code path.
-  // eslint-disable-next-line no-restricted-properties, no-restricted-globals
-  if (typeof window.confirm !== "function") return false;
+  if (typeof window === "undefined" || !hasTauriBridge()) return "unavailable";
+
+  let answer: unknown;
   try {
-    // eslint-disable-next-line no-restricted-properties, no-restricted-globals
-    return (await window.confirm(message)) === true;
+    answer = await tauriMessage(message, {
+      title: options?.title,
+      kind: options?.kind,
+      buttons: { yes: saveLabel, no: discardLabel, cancel: cancelLabel },
+    });
   } catch {
-    return false;
+    // The dialog could not be shown. We have no answer.
+    return "unavailable";
   }
+
+  if (answer === discardLabel) return "discard";
+  if (answer === saveLabel) return "save";
+  if (answer === cancelLabel || answer === DISMISSED_SPELLING) return "cancel";
+  // Not one of our labels: the plugin's own "Yes" / "No" / "Ok", an empty
+  // string, undefined. We do not know what the user meant, so nobody acts.
+  return "unavailable";
 }
 
 /**

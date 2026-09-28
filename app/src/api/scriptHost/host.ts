@@ -5224,38 +5224,8 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     //      undoable, recalculating off-sheet edit path; delete ends the undo
     //      history exactly like deleting a sheet, which the row's desc says.
     //      The setState aspect door refuses this kind by name (vSetState).
-    case "api.createFloatingRange": {
-      const [options] = args as [
-        { name?: string; x?: number; y?: number; rows?: number; cols?: number } | undefined,
-      ];
-      const { invokeBackend } = await import("../backend");
-      const created = await invokeBackend<FloatingRangeWire>("create_floating_range", {
-        name: options?.name ?? null,
-        x: options?.x ?? 40,
-        y: options?.y ?? 40,
-      });
-      if (!created) {
-        throw new BrokerError("HostError", "create_floating_range returned nothing");
-      }
-      let info = created;
-      const rows = options?.rows ?? 1;
-      const cols = options?.cols ?? 1;
-      if (rows > 1 || cols > 1) {
-        info =
-          (await invokeBackend<FloatingRangeWire>("update_floating_range", {
-            id: created.id,
-            patch: { rowCount: rows, colCount: cols },
-          })) ?? created;
-      }
-      announceFloatingRangesChanged();
-      return floatingRangeToRef({
-        id: info.id,
-        name: info.name,
-        hostSheetIndex: info.hostSheetIndex,
-        rowCount: info.rowCount,
-        colCount: info.colCount,
-      });
-    }
+    case "api.createFloatingRange":
+      return executeCreateFloatingRange(args);
     case "api.deleteFloatingRange": {
       const [id] = args as [string];
       const { invokeBackend } = await import("../backend");
@@ -5263,23 +5233,8 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       announceFloatingRangesChanged();
       return undefined;
     }
-    case "api.floatingRangeResize": {
-      const [id, rows, cols] = args as [string, number, number];
-      const { invokeBackend } = await import("../backend");
-      const info = await invokeBackend<FloatingRangeWire>("update_floating_range", {
-        id,
-        patch: { rowCount: rows, colCount: cols },
-      });
-      if (!info) throw new BrokerError("ValidationError", `No floating range with id "${id}"`);
-      announceFloatingRangesChanged();
-      return floatingRangeToRef({
-        id: info.id,
-        name: info.name,
-        hostSheetIndex: info.hostSheetIndex,
-        rowCount: info.rowCount,
-        colCount: info.colCount,
-      });
-    }
+    case "api.floatingRangeResize":
+      return executeFloatingRangeResize(args);
     case "api.floatingRangeSetCells": {
       const [id, startRow, startCol, values] = args as [
         string,
@@ -12315,6 +12270,85 @@ interface FloatingRangeWire {
  *  reload event plus grid:refresh (grid formulas reading the range refetch). */
 function announceFloatingRangesChanged(): void {
   emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["floatingRanges"] });
+}
+
+/**
+ * `api.createFloatingRange`: create, then (for a window larger than 1x1) size
+ * it. The announcement is in a `finally`: a resize the backend REFUSES after a
+ * create that succeeded must still tell the extension the row exists -- the
+ * create is not undoable, and an unannounced row stayed invisible until some
+ * later reload. Exported for the unit tier.
+ */
+export async function executeCreateFloatingRange(args: unknown[]): Promise<ScriptObjectRef> {
+  const [options] = args as [
+    { name?: string; x?: number; y?: number; rows?: number; cols?: number } | undefined,
+  ];
+  const { invokeBackend } = await import("../backend");
+  const created = await invokeBackend<FloatingRangeWire>("create_floating_range", {
+    name: options?.name ?? null,
+    x: options?.x ?? 40,
+    y: options?.y ?? 40,
+  });
+  if (!created) {
+    throw new BrokerError("HostError", "create_floating_range returned nothing");
+  }
+  let info = created;
+  const rows = options?.rows ?? 1;
+  const cols = options?.cols ?? 1;
+  try {
+    if (rows > 1 || cols > 1) {
+      info =
+        (await invokeBackend<FloatingRangeWire>("update_floating_range", {
+          id: created.id,
+          patch: { rowCount: rows, colCount: cols },
+        })) ?? created;
+    }
+  } finally {
+    announceFloatingRangesChanged();
+  }
+  return floatingRangeToRef({
+    id: info.id,
+    name: info.name,
+    hostSheetIndex: info.hostSheetIndex,
+    rowCount: info.rowCount,
+    colCount: info.colCount,
+  });
+}
+
+/**
+ * `api.floatingRangeResize`: THROUGH THE OWNING EXTENSION'S SEAM
+ * (@api/floatingRangeService), never the backend directly. The extension's
+ * `resize` asks the one per-range geometry answer (`frGeometryEditable`: a
+ * range its canvas LOCKS, or one on a subscribed canvas, is refused -- the
+ * lock is a frontend rule the backend never consults) and keeps the store,
+ * the regions and the caches in step. Straight at `update_floating_range`, a
+ * script grew a locked range that every pointer, menu and Properties door
+ * refused to touch. Exported for the unit tier.
+ */
+export async function executeFloatingRangeResize(args: unknown[]): Promise<ScriptObjectRef> {
+  const [id, rows, cols] = args as [string, number, number];
+  const { getFloatingRangeProvider } = await import("../floatingRangeService");
+  const provider = getFloatingRangeProvider();
+  if (!provider) {
+    throw new BrokerError(
+      "HostError",
+      "Floating ranges are unavailable: the FloatingRange extension is not loaded.",
+    );
+  }
+  let info;
+  try {
+    info = await provider.resize(id, rows, cols);
+  } catch (err) {
+    throw new BrokerError("ValidationError", err instanceof Error ? err.message : String(err));
+  }
+  announceFloatingRangesChanged();
+  return floatingRangeToRef({
+    id: info.id,
+    name: info.name,
+    hostSheetIndex: info.hostSheetIndex,
+    rowCount: info.rowCount,
+    colCount: info.colCount,
+  });
 }
 
 /**

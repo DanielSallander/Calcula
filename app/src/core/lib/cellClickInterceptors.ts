@@ -74,6 +74,63 @@ export async function checkCellClickInterceptors(
 }
 
 // ============================================================================
+// Grid Cell Press (announced AFTER Core handled it)
+// ============================================================================
+
+/**
+ * A grid cell press Core has HANDLED as a selection gesture: the press was not
+ * taken by a floating object, a fill handle or an interceptor, it was not a
+ * reference pick, commit-before-select has already run (an open edit -- Core's
+ * own or an external session -- is committed), and the cell is now selected.
+ */
+export interface GridCellPress {
+  row: number;
+  col: number;
+  /** 0 = primary, 2 = secondary (a right-press outside the selection). */
+  button: number;
+  shiftKey: boolean;
+  ctrlKey: boolean;
+}
+
+/** Hears every handled grid cell press. Synchronous; a throw is logged and ignored. */
+export type GridCellPressListener = (press: GridCellPress) => void;
+
+const pressListeners = new Set<GridCellPressListener>();
+
+/**
+ * Listen for handled grid cell presses. WHY THIS EXISTS: a selection-change
+ * listener cannot see a press that leaves Core's selection UNCHANGED -- a
+ * click on the cell Core already had active. An object that keeps its own
+ * cell selection over the grid (a floating grid's selected cell, which leaves
+ * Core's active cell where it was, hidden underneath) never learnt that the
+ * user clicked back onto the sheet, so the formula bar and the Name Box went
+ * on targeting the object's cell. The interceptors run BEFORE the press and
+ * stand down while an edit is live; this runs AFTER it, always.
+ * @returns A cleanup function that removes the listener.
+ */
+export function onGridCellPressed(listener: GridCellPressListener): () => void {
+  pressListeners.add(listener);
+  return () => {
+    pressListeners.delete(listener);
+  };
+}
+
+/**
+ * CORE ONLY (the cell-selection mouse handler): announce a handled press.
+ * Deliberately NOT re-exported through @api -- an extension must not be able
+ * to fake the user's click.
+ */
+export function notifyGridCellPressed(press: GridCellPress): void {
+  for (const listener of [...pressListeners]) {
+    try {
+      listener(press);
+    } catch (error) {
+      console.error("Error in grid cell press listener:", error);
+    }
+  }
+}
+
+// ============================================================================
 // Cell Cursor Interceptors
 // ============================================================================
 

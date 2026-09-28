@@ -46,6 +46,7 @@ import {
 
 import {
   refreshCache,
+  refreshCacheAndReapplyChangedFilters,
   resetStore,
   getSlicerById,
   getAllSlicers,
@@ -53,6 +54,8 @@ import {
   deleteSlicerAsync,
   commitSlicerGeometryAsync,
   updateSlicerSelectionAsync,
+  clickSlicerItem,
+  clickSlicerClearFilter,
   getCachedItems,
   updateCachedSlicerPosition,
   updateCachedSlicerBounds,
@@ -72,7 +75,6 @@ import {
   getMaxScrollOffset,
   resetScrollOffsets,
 } from "./rendering/slicerRenderer";
-import { applySlicerFilter } from "./lib/slicerFilterBridge";
 import { SlicerEvents } from "./lib/slicerEvents";
 import { slicerBackend } from "./lib/slicerBackend";
 import {
@@ -488,6 +490,9 @@ function activate(context: ExtensionContext): void {
   // Filter bridge: apply filters when slicer selection changes
   // -----------------------------------------------------------------------
 
+  // The filter itself is applied by `updateSlicerSelectionAsync`, INSIDE the
+  // click's undo transaction (one Ctrl+Z restores slicer and pivots). This
+  // listener only refreshes the cross-filtered items of the siblings.
   const handleSelectionChanged = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     const slicerId = detail?.slicerId as string;
@@ -495,26 +500,24 @@ function activate(context: ExtensionContext): void {
 
     const slicer = getSlicerById(slicerId);
     if (slicer) {
-      applySlicerFilter(slicer).then(() => {
-        // Cross-slicer filtering: refresh items for sibling slicers
-        // (same source) so they show updated has_data state.
-        // Siblings are slicers that share at least one connected source
-        const slicerConnectedKeys = new Set(
-          (slicer.connectedSources ?? []).map((c) => `${c.sourceType}:${c.sourceId}`),
-        );
-        const siblings = getAllSlicers().filter(
-          (s) =>
-            s.id !== slicerId &&
-            (s.connectedSources ?? []).some((c) =>
-              slicerConnectedKeys.has(`${c.sourceType}:${c.sourceId}`),
-            ),
-        );
-        return Promise.all(
-          siblings.map((s) => refreshSlicerItems(s.id)),
-        );
-      }).then(() => {
-        requestOverlayRedraw();
-      }).catch(console.error);
+      // Cross-slicer filtering: refresh items for sibling slicers
+      // (same source) so they show updated has_data state.
+      // Siblings are slicers that share at least one connected source
+      const slicerConnectedKeys = new Set(
+        (slicer.connectedSources ?? []).map((c) => `${c.sourceType}:${c.sourceId}`),
+      );
+      const siblings = getAllSlicers().filter(
+        (s) =>
+          s.id !== slicerId &&
+          (s.connectedSources ?? []).some((c) =>
+            slicerConnectedKeys.has(`${c.sourceType}:${c.sourceId}`),
+          ),
+      );
+      Promise.all(siblings.map((s) => refreshSlicerItems(s.id)))
+        .then(() => {
+          requestOverlayRedraw();
+        })
+        .catch(console.error);
     }
   };
   window.addEventListener(SlicerEvents.SLICER_SELECTION_CHANGED, handleSelectionChanged);
@@ -565,8 +568,13 @@ function activate(context: ExtensionContext): void {
   // Slicer computed property refresh (triggered when cell changes affect slicers)
   // -----------------------------------------------------------------------
 
+  // Also the UNDO/REDO fan-out ("slicer" domain): re-read, then re-apply the
+  // PIVOT MASK of every ordinary (level-1) slicer whose selection the backend
+  // changed -- an undone click restores the slicer, and a level-1 pivot mask
+  // records no undo, so it follows the slicer here. Tables and pins are not
+  // re-applied: their writes recorded undo in the click's own step.
   const handleSlicerRefresh = () => {
-    refreshCache().then(() => {
+    refreshCacheAndReapplyChangedFilters().then(() => {
       requestOverlayRedraw();
     }).catch(console.error);
   };
@@ -644,104 +652,25 @@ function handleSlicerClickAt(
   const hit = getSlicerHitDetail(canvasX, canvasY, bounds, slicerId);
   if (!hit) return;
 
+  // Every user click is QUEUED (lib/slicerStore.queueSlicerClick): it runs
+  // after the previous click committed its undo step, and computes the new
+  // selection from the COMMITTED selection -- never two clicks in one Ctrl+Z,
+  // never a Ctrl+click toggle that drops the item the previous click added.
   switch (hit.type) {
     case "clearButton":
-      // Clear filter (all selected) — only if a filter is active
-      if (slicer.selectedItems !== null) {
-        updateSlicerSelectionAsync(slicerId, null).catch(console.error);
-      }
-      break;
-
     case "selectAll":
-      // Toggle all selected
-      updateSlicerSelectionAsync(slicerId, null).catch(console.error);
+      // Clear the filter (all selected) -- a no-op when nothing is filtered.
+      clickSlicerClearFilter(slicerId).catch(console.error);
       break;
 
     case "item":
-      handleItemClick(slicerId, hit.itemIndex!, hit.itemValue!, ctrlHeld);
+      clickSlicerItem(slicerId, hit.itemValue!, ctrlHeld).catch(console.error);
       break;
 
     case "header":
     case "body":
       // Just selection (already handled above via selectSlicer)
       break;
-  }
-}
-
-/**
- * Handle click on a slicer item.
- * Behavior depends on the slicer's selectionMode:
- * - "standard": click = exclusive, Ctrl+click = toggle
- * - "single": click = exclusive only, Ctrl+click ignored
- * - "multi": click = toggle (like Ctrl+click in standard mode)
- */
-function handleItemClick(
-  slicerId: string,
-  _itemIndex: number,
-  itemValue: string,
-  ctrlHeld: boolean,
-): void {
-  const slicer = getSlicerById(slicerId);
-  if (!slicer) return;
-
-  const items = getCachedItems(slicerId);
-  if (!items) return;
-
-  const mode = slicer.selectionMode ?? "standard";
-
-  // Determine if this is a toggle (multi-select) action
-  const isToggle =
-    mode === "multi" || (mode === "standard" && ctrlHeld);
-
-  if (isToggle) {
-    // Toggle this item in the current selection
-    if (slicer.selectedItems === null) {
-      // All selected -> deselect this one item (select all except this one)
-      const allValues = items.map((i) => i.value);
-      const newSelection = allValues.filter((v) => v !== itemValue);
-      updateSlicerSelectionAsync(slicerId, newSelection).catch(console.error);
-    } else {
-      const isCurrentlySelected = slicer.selectedItems.includes(itemValue);
-      if (isCurrentlySelected) {
-        // Deselect this item
-        const newSelection = slicer.selectedItems.filter((v) => v !== itemValue);
-        if (newSelection.length === 0) {
-          if (slicer.forceSelection) {
-            // Force selection: can't deselect last item
-            return;
-          }
-          // All deselected -> select all (clear filter)
-          updateSlicerSelectionAsync(slicerId, null).catch(console.error);
-        } else {
-          updateSlicerSelectionAsync(slicerId, newSelection).catch(console.error);
-        }
-      } else {
-        // Add this item to selection
-        const newSelection = [...slicer.selectedItems, itemValue];
-        // If all items are now selected, set to null (all selected)
-        if (newSelection.length >= items.length) {
-          updateSlicerSelectionAsync(slicerId, null).catch(console.error);
-        } else {
-          updateSlicerSelectionAsync(slicerId, newSelection).catch(console.error);
-        }
-      }
-    }
-  } else {
-    // Exclusive select: only this item
-    if (
-      slicer.selectedItems !== null &&
-      slicer.selectedItems.length === 1 &&
-      slicer.selectedItems[0] === itemValue
-    ) {
-      if (slicer.forceSelection) {
-        // Force selection: can't clear when only one item selected
-        return;
-      }
-      // Clicking the only selected item again -> select all (clear filter)
-      updateSlicerSelectionAsync(slicerId, null).catch(console.error);
-    } else {
-      updateSlicerSelectionAsync(slicerId, [itemValue]).catch(console.error);
-    }
   }
 }
 

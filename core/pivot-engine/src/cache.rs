@@ -166,6 +166,17 @@ pub struct FieldCache {
     /// When present, get_value_label uses this map instead of the raw CacheValue display.
     #[serde(default)]
     pub label_map: HashMap<ValueId, String>,
+
+    /// The source's own identity for this column when its display NAME is not
+    /// unique: a BI model pivot's cache is named from the query's Arrow schema,
+    /// which is the BARE column name, so Customers.name and Products.name are
+    /// both "name". The host stamps "Table.Column" here when it builds such a
+    /// cache, and it travels with the records (clones AND the serialized undo
+    /// snapshots, so it must never be `serde(skip)`), so "which table's column
+    /// is this?" never has to be guessed from the name. `None` for a
+    /// grid-sourced cache, whose header names are all it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_key: Option<String>,
 }
 
 impl FieldCache {
@@ -178,6 +189,7 @@ impl FieldCache {
             sorted_ids_asc: Vec::new(),
             sort_dirty: true,
             label_map: HashMap::new(),
+            model_key: None,
         }
     }
     
@@ -1810,5 +1822,49 @@ mod total_override_tests {
             .expect("grand total slot")[1]
             .compute(AggregationType::Sum);
         assert_eq!(gt_pct, 0.1 + 0.2);
+    }
+}
+#[cfg(test)]
+mod model_key_tests {
+    use super::*;
+    use crate::definition::PivotId;
+
+    fn pid() -> PivotId {
+        PivotId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3])
+    }
+
+    /// The host restores a BI pivot's records from a JSON undo snapshot
+    /// (`encode_pivot_definition_snapshot`). A column's "Table.Column" identity
+    /// must come back with them: without it, a redo hands the host two columns
+    /// called "name" and no way to tell whose they are.
+    #[test]
+    fn a_columns_model_key_survives_the_json_undo_snapshot() {
+        let mut cache = PivotCache::new(pid(), 2);
+        cache.set_field_name(0, "name".to_string());
+        cache.set_field_name(1, "name".to_string());
+        cache.fields[0].model_key = Some("Customers.name".to_string());
+        cache.fields[1].model_key = Some("Products.name".to_string());
+        cache.add_record(0, &[
+            engine::CellValue::Text("Acme".to_string()),
+            engine::CellValue::Text("Widget".to_string()),
+        ]);
+
+        let bytes = serde_json::to_vec(&cache).expect("serialize");
+        let back: PivotCache = serde_json::from_slice(&bytes).expect("deserialize");
+        assert_eq!(back.fields[0].model_key.as_deref(), Some("Customers.name"));
+        assert_eq!(back.fields[1].model_key.as_deref(), Some("Products.name"));
+        assert_eq!(back.fields[0].name, "name");
+    }
+
+    /// A grid-sourced cache has no key and serializes exactly as before, and a
+    /// snapshot written before the key existed still reads (as `None`).
+    #[test]
+    fn a_cache_without_model_keys_serializes_no_key_and_old_snapshots_read() {
+        let mut cache = PivotCache::new(pid(), 1);
+        cache.set_field_name(0, "Region".to_string());
+        let json = serde_json::to_string(&cache).expect("serialize");
+        assert!(!json.contains("model_key"), "an absent key must not be written: {json}");
+        let back: PivotCache = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.fields[0].model_key, None);
     }
 }

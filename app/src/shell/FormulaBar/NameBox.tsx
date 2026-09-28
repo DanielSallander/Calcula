@@ -46,7 +46,7 @@
 //      renders `displayName` verbatim, so the pane header and the box moved
 //      together with that one function.
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useSyncExternalStore } from "react";
 import {
   useGridContext,
   setSelection,
@@ -79,6 +79,16 @@ import {
   onObjectLabelChanged,
   type ObjectLabelSnapshot,
 } from "../../api/objectSelectionLabel";
+// And for an EXTERNAL cell (a selected floating-grid cell, or its open edit):
+// the address it publishes, and the resolver its owner registers so that what
+// this box displays ("Float1!B2") it also accepts. Dependency-free store; the
+// subpath keeps it out of this box's own `api/editing` double.
+import {
+  subscribeExternalEdit,
+  getExternalEditVersion,
+  getExternalNameBoxAddress,
+  resolveExternalAddress,
+} from "../../api/externalEdit";
 import type { NamedRange } from "../../api";
 import { resolveNamedRangeCoords } from "../../api/lib";
 import type { NamedRangeCoords } from "../../api/lib";
@@ -224,6 +234,25 @@ export function NameBox(): React.ReactElement {
    * the input sync waits for.
    */
   const [objectLabel, setObjectLabel] = useState<ObjectLabelSnapshot>(EMPTY_OBJECT_LABEL);
+
+  /**
+   * The EXTERNAL cell's address ("Float1!A1", "Float1!A1:B3", "'My Float'!A1"):
+   * a selected floating-grid cell, or the cell its open edit belongs to. A
+   * CORE edit wins: the address of the cell actually being edited is Core's.
+   *
+   * SUBSCRIBED BY THE STORE'S VERSION, READ DURING RENDER -- never with the
+   * address itself as the snapshot. This component sets state DURING render
+   * (the `prevDisplay` sync below), and a render-phase update makes React
+   * re-run the render without keeping useSyncExternalStore's record of the
+   * snapshot it just rendered. With the address as the snapshot, that record
+   * stayed at the value BEFORE the publish, so withdrawing the address (back to
+   * that same value) looked like "no change" and the box went on showing
+   * "Float1!B3" after the floating-grid cell was gone. The version never
+   * repeats, so a stale record still compares as changed. (Measured in
+   * nameBoxExternalAddress.test.tsx.)
+   */
+  useSyncExternalStore(subscribeExternalEdit, getExternalEditVersion);
+  const shownExternal = state.editing ? null : getExternalNameBoxAddress();
 
   const displayAddress = state.selection
     ? formatSelectionAddress(
@@ -431,11 +460,19 @@ export function NameBox(): React.ReactElement {
   // pivot box or control), for the same reason. One exception reorders the two:
   // a MULTI-selection's "3 objects" beats the chart label, because a chart's
   // rung ("Series 1") names one member of the selection, not the selection.
+  //
+  // An EXTERNAL cell's address sits between the chart rung and the object
+  // label: a selected floating-grid CELL is more specific than the floating
+  // grid's own name ("Float1!B3" beats "Float1"), and on a worksheet it is the
+  // only true answer -- the grid address is Core's last active cell, hidden
+  // under the floating grid. With the object selected and no cell selected,
+  // the object label stays.
   const objectText = objectLabel.text !== "" ? objectLabel.text : null;
   const multiObjectText = objectLabel.count > 1 ? objectText : null;
   const displayValue =
     multiObjectText ??
     (chartLabel !== "" ? chartLabel : null) ??
+    shownExternal ??
     objectText ??
     matchedName ??
     matchedTable ??
@@ -751,6 +788,41 @@ export function NameBox(): React.ReactElement {
     inputRef.current?.select();
   }, []);
 
+  /**
+   * Branch 0 of EVERY navigation this box makes -- a typed entry and a pick
+   * from the name list alike: ask the extension that owns external addresses
+   * first. "none": nobody claimed the text, the box goes on with its own
+   * branches. "done": the owner selected its cells. "refused": the owner said
+   * why not, and the box has shown it.
+   *
+   * One helper for both doors ON PURPOSE. The owner is also where the box's
+   * refusal during an edit lives: while a floating grid's formula picks a
+   * reference (or is parked on another sheet) the floating-range resolver
+   * claims EVERY entry and refuses it ("Finish the formula ... first"), because
+   * navigating would end that edit through `sheet:beforeSwitch`, which cannot
+   * return to the edit's sheet -- the half-typed formula was stored as text.
+   * The list pick skipped this branch, so picking a defined name on another
+   * sheet did exactly that.
+   */
+  const goToExternalAddress = useCallback(
+    async (text: string): Promise<"none" | "done" | "refused"> => {
+      const external = resolveExternalAddress(text);
+      if (!external) return "none";
+      // On another sheet the box switches there first with its own
+      // `switchToSheet` (a canvas host included).
+      if (external.hostSheetIndex !== state.sheetContext.activeSheetIndex) {
+        await switchToSheet(external.hostSheetIndex);
+      }
+      const problem = await external.go();
+      if (problem) {
+        reportProblem(problem);
+        return "refused";
+      }
+      return "done";
+    },
+    [reportProblem, switchToSheet, state.sheetContext.activeSheetIndex],
+  );
+
   const handleKeyDown = useCallback(
     async (e: React.KeyboardEvent<HTMLInputElement>) => {
       e.stopPropagation();
@@ -760,6 +832,19 @@ export function NameBox(): React.ReactElement {
         const value = inputValue.trim();
         if (!value) {
           setInputValue(displayValue);
+          return;
+        }
+
+        // 0. An EXTERNAL address ("Float1!B2"): a floating grid's cell, claimed
+        //    by the extension that owns it. First, because it has the SHAPE of
+        //    a sheet-qualified address and branch 1 would refuse it with "There
+        //    is no sheet named Float1" -- the text this box itself displays for
+        //    a selected floating-grid cell. (See goToExternalAddress: the
+        //    list pick asks the same question.)
+        const external = await goToExternalAddress(value);
+        if (external === "refused") return;
+        if (external === "done") {
+          finishEditing();
           return;
         }
 
@@ -852,6 +937,19 @@ export function NameBox(): React.ReactElement {
         //    a refusal (duplicate name, name that shadows a table) now reaches
         //    the user instead of console.warn, where a rejected definition
         //    looked exactly like a successful one.
+        //
+        //    NOT while the box shows an EXTERNAL cell: "the current selection"
+        //    would be Core's, which on a worksheet is a cell hidden under the
+        //    floating grid the user is looking at -- a silent definition over
+        //    the wrong cells. Refused out loud until a name can refer to a
+        //    floating-grid cell from here.
+        if (isValidName(value) && shownExternal !== null) {
+          reportProblem(
+            `"${value}" was not defined: a name cannot yet be defined over a floating-grid cell ` +
+              "from the Name Box (it would have been defined over a worksheet cell you are not looking at).",
+          );
+          return;
+        }
         if (isValidName(value) && state.selection) {
           const sel = state.selection;
           const refersTo = buildRefersTo(
@@ -895,6 +993,7 @@ export function NameBox(): React.ReactElement {
     [
       inputValue,
       displayValue,
+      goToExternalAddress,
       goToAddress,
       goToNamedRange,
       goToStructuredReference,
@@ -902,6 +1001,8 @@ export function NameBox(): React.ReactElement {
       reportProblem,
       state.selection,
       state.sheetContext,
+      switchToSheet,
+      shownExternal,
     ]
   );
 
@@ -974,6 +1075,10 @@ export function NameBox(): React.ReactElement {
   const handleDropdownSelect = useCallback(
     async (nr: NamedRange) => {
       setShowDropdown(false);
+      // Branch 0 first, exactly as for a typed entry: while a floating grid's
+      // formula picks a reference (or is parked), its owner refuses every
+      // navigation -- a list pick included.
+      if ((await goToExternalAddress(nr.name)) !== "none") return;
       // A table row goes through the table route: `resolve_named_range_coords`
       // knows nothing about tables and would refuse it, which would read as the
       // list offering something it cannot open.
@@ -989,7 +1094,7 @@ export function NameBox(): React.ReactElement {
       const problem = await goToNamedRange(nr);
       if (problem) reportProblem(problem);
     },
-    [dropdownTableNames, goToNamedRange, goToStructuredReference, reportProblem]
+    [dropdownTableNames, goToExternalAddress, goToNamedRange, goToStructuredReference, reportProblem]
   );
 
   const handleDropdownClose = useCallback(() => {

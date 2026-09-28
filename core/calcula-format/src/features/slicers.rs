@@ -61,6 +61,12 @@ pub struct SlicerDef {
     /// a measure's bare CLEAR/RESET).
     #[serde(default = "default_filter_level")]
     pub filter_level: u8,
+    /// MODEL slicers on a package connection: the stable package data-source
+    /// id they re-bind by. Absent for every other slicer. The "slicers"
+    /// feature id already covers the section, and dropping the field loses a
+    /// re-bind visibly rather than misreading the document, so no version link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_source_id: Option<String>,
 }
 
 /// JSON-friendly slicer connection (Report Connection) for the .cala format.
@@ -164,6 +170,7 @@ impl From<&SavedSlicer> for SlicerDef {
                 }
             }).collect(),
             filter_level: s.filter_level,
+            data_source_id: s.data_source_id.clone(),
         }
     }
 }
@@ -228,6 +235,71 @@ impl From<&SlicerDef> for SavedSlicer {
                 }
             }).collect(),
             filter_level: s.filter_level,
+            data_source_id: s.data_source_id.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model_slicer(data_source_id: Option<&str>) -> SavedSlicer {
+        let conn = EntityId::from_bytes(identity::generate_uuid_v7());
+        SavedSlicer {
+            id: EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: "Region".to_string(),
+            header_text: None,
+            sheet_id: SheetId::from_bytes(identity::generate_uuid_v7()),
+            x: 0.0,
+            y: 0.0,
+            width: 180.0,
+            height: 240.0,
+            source_type: SavedSlicerSourceType::BiConnection,
+            cache_source_id: conn,
+            field_name: "Sales.region".to_string(),
+            selected_items: Some(vec!["East".to_string()]),
+            show_header: true,
+            columns: 1,
+            style_preset: "SlicerStyleLight1".to_string(),
+            selection_mode: SavedSlicerSelectionMode::Standard,
+            hide_no_data: false,
+            indicate_no_data: true,
+            sort_no_data_last: true,
+            force_selection: false,
+            show_select_all: false,
+            arrangement: SavedSlicerArrangement::Vertical,
+            rows: 0,
+            item_gap: 4.0,
+            autogrid: true,
+            item_padding: 0.0,
+            button_radius: 2.0,
+            computed_properties: Vec::new(),
+            connected_sources: vec![SavedSlicerConnection {
+                source_type: SavedSlicerSourceType::BiConnection,
+                source_id: conn,
+            }],
+            filter_level: 1,
+            data_source_id: data_source_id.map(|s| s.to_string()),
+        }
+    }
+
+    /// A MODEL slicer's stable data-source id survives the `.cala` round trip
+    /// as camelCase `dataSourceId`, and is absent (not null) when there is
+    /// none -- an older reader then sees exactly the shape it always did.
+    #[test]
+    fn a_model_slicers_data_source_id_round_trips_through_the_cala_def() {
+        let saved = model_slicer(Some("ds-1"));
+        let json = serde_json::to_string(&SlicerDef::from(&saved)).unwrap();
+        assert!(json.contains("\"dataSourceId\":\"ds-1\""), "{json}");
+        let back = SavedSlicer::from(&serde_json::from_str::<SlicerDef>(&json).unwrap());
+        assert_eq!(back.data_source_id.as_deref(), Some("ds-1"));
+        assert!(matches!(back.source_type, SavedSlicerSourceType::BiConnection));
+
+        let json = serde_json::to_string(&SlicerDef::from(&model_slicer(None))).unwrap();
+        assert!(!json.contains("dataSourceId"), "None must be omitted: {json}");
+        // An older file (no field at all) still reads.
+        let back = SavedSlicer::from(&serde_json::from_str::<SlicerDef>(&json).unwrap());
+        assert_eq!(back.data_source_id, None);
     }
 }

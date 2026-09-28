@@ -355,6 +355,33 @@ fn only_a_comment() {
     );
 }
 
+/// Every function-start spelling ends the previous body and names its own (fix
+/// round 5, the review of round 4's B6).
+#[test]
+fn the_lock_census_detector_sees_every_function_start_spelling() {
+    // A LITERAL list, not the constant: a spelling dropped from the constant
+    // must fail here, not silently leave the loop.
+    for start in [
+        "fn ",
+        "pub fn ",
+        "pub(crate) fn ",
+        "pub(super) fn ",
+        "async fn ",
+        "pub async fn ",
+        "pub(crate) async fn ",
+        "pub(super) async fn ",
+    ] {
+        let src = format!(
+            "fn quiet() {{\n    let x = 1;\n}}\n\n{start}deadlocks() {{\n    let map = state.spill_ranges.read().unwrap();\n    let t = crate::name_resolution::eval_ast(ast, &ctx);\n}}\n"
+        );
+        assert_eq!(
+            functions_holding_and_resolving(&src),
+            vec!["deadlocks".to_string()],
+            "`{start}` is not read as the start of a function: the deadlock was named after the one before it"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Census plumbing
 // ---------------------------------------------------------------------------
@@ -396,13 +423,10 @@ fn functions_holding_and_resolving(text: &str) -> Vec<String> {
     let mut current: Option<(String, bool, bool)> = None;
     for raw in text.lines() {
         let code = raw.split("//").next().unwrap_or("");
-        if raw.starts_with("fn ")
-            || raw.starts_with("pub fn ")
-            || raw.starts_with("pub(crate) fn ")
-            || raw.starts_with("pub(super) fn ")
-            || raw.starts_with("async fn ")
-            || raw.starts_with("pub async fn ")
-        {
+        // The crate's ONE list of function-start spellings: this walk kept its
+        // own and lacked both async `pub(..)` forms (fix round 5), so a
+        // deadlock declared that way was named after its neighbour.
+        if crate::formula_serialisation_tests::starts_a_function(raw) {
             if let Some((name, holds, resolves)) = current.take() {
                 if holds && resolves {
                     out.push(name);

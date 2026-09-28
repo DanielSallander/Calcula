@@ -1281,6 +1281,69 @@ pub(crate) fn apply_auto_filter_inner(
     result
 }
 
+/// Remove the criteria of AutoFilter column `column_index` (relative to the
+/// filter's start column) on sheet `sheet` -- ANY sheet, not only the active
+/// one -- and recompute its hidden rows. Returns the filter as it was BEFORE,
+/// for the caller's undo record, or `None` when there was nothing to clear
+/// (no filter on that sheet, a different filter than `expected_filter_id`,
+/// no criteria on that column) or the sheet's protection forbids AutoFilter
+/// use. Nothing is written in those cases.
+///
+/// For a caller that already holds its `DocumentEffect` (deleting a table
+/// slicer clears the filter it set, in the same command and undo step).
+/// LOCKS: the CF rules and sheet names are snapshotted and released first,
+/// then `grids` BEFORE `auto_filters` (the canonical order); the gate and the
+/// write stay in one critical section. The caller holds no lock and runs the
+/// visibility recalculation afterwards.
+pub(crate) fn clear_column_criteria_on_sheet(
+    state: &AppState,
+    effect: &DocumentEffect,
+    sheet: usize,
+    expected_filter_id: identity::EntityId,
+    column_index: u32,
+) -> Option<AutoFilter> {
+    if crate::protection::check_sheet_action(state, sheet, "autoFilter", "use AutoFilter").is_err() {
+        crate::log_warn!(
+            "AUTOFILTER",
+            "sheet {} is protected against AutoFilter use; column {} left filtered",
+            sheet,
+            column_index
+        );
+        return None;
+    }
+    let cf_rules_for_filter = crate::conditional_formatting::rules_snapshot(state, sheet);
+    let cf_sheet_names_for_filter = state
+        .sheet_names
+        .read()
+        .map(|n| n.clone())
+        .unwrap_or_default();
+
+    let grids = state.grids.read().ok()?;
+    let auto_filters = state.auto_filters.lock_pending().ok()?;
+    let previous = auto_filters.get(&sheet).cloned()?;
+    if previous.id != expected_filter_id || !previous.column_filters.contains_key(&column_index) {
+        return None;
+    }
+    let mut auto_filters = auto_filters.authorize(effect);
+    let auto_filter = auto_filters.get_mut(&sheet)?;
+    auto_filter.column_filters.remove(&column_index);
+    if sheet < grids.len() {
+        let style_registry = state.style_registry.read().ok()?;
+        let locale = state.locale.lock().ok()?;
+        let theme = state.theme.read().ok()?;
+        let filter_icons = resolve_filter_icons(
+            &grids[sheet],
+            &grids,
+            &cf_sheet_names_for_filter,
+            sheet,
+            &cf_rules_for_filter,
+            auto_filter,
+        );
+        recompute_hidden_rows(&grids[sheet], &style_registry, &theme, auto_filter, &locale, &filter_icons);
+    }
+    Some(previous)
+}
+
 /// Clear filter criteria for a specific column.
 #[tauri::command]
 pub fn clear_column_criteria(
@@ -1320,8 +1383,13 @@ fn clear_column_criteria_inner(
     // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
     // this sheet") and must leave the document clean, so the dirty decision
     // belongs INSIDE the branch -- which is exactly what this guard postpones.
-    let auto_filters = state.auto_filters.lock_pending().unwrap();
+    // CANONICAL LOCK ORDER: `grids` BEFORE `auto_filters` -- the order of
+    // `apply_auto_filter_inner`, `clear_column_criteria_on_sheet` and the
+    // structural row/column edits (which hold `grids` while they shift the
+    // sheet's filter). Taking the two the other way round is an ABBA hang
+    // against any of them (see `autofilter_lock_order_tests`).
     let grids = state.grids.read().unwrap();
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
     let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
@@ -1470,8 +1538,13 @@ pub(crate) fn reapply_auto_filter_inner(
     // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
     // this sheet") and must leave the document clean, so the dirty decision
     // belongs INSIDE the branch -- which is exactly what this guard postpones.
-    let auto_filters = state.auto_filters.lock_pending().unwrap();
+    // CANONICAL LOCK ORDER: `grids` BEFORE `auto_filters` -- the order of
+    // `apply_auto_filter_inner`, `clear_column_criteria_on_sheet` and the
+    // structural row/column edits (which hold `grids` while they shift the
+    // sheet's filter). Taking the two the other way round is an ABBA hang
+    // against any of them (see `autofilter_lock_order_tests`).
     let grids = state.grids.read().unwrap();
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
     let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
@@ -1867,8 +1940,13 @@ fn set_column_filter_values_inner(
     // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
     // this sheet") and must leave the document clean, so the dirty decision
     // belongs INSIDE the branch -- which is exactly what this guard postpones.
-    let auto_filters = state.auto_filters.lock_pending().unwrap();
+    // CANONICAL LOCK ORDER: `grids` BEFORE `auto_filters` -- the order of
+    // `apply_auto_filter_inner`, `clear_column_criteria_on_sheet` and the
+    // structural row/column edits (which hold `grids` while they shift the
+    // sheet's filter). Taking the two the other way round is an ABBA hang
+    // against any of them (see `autofilter_lock_order_tests`).
     let grids = state.grids.read().unwrap();
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
     let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
@@ -1986,8 +2064,13 @@ fn set_column_custom_filter_inner(
     // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
     // this sheet") and must leave the document clean, so the dirty decision
     // belongs INSIDE the branch -- which is exactly what this guard postpones.
-    let auto_filters = state.auto_filters.lock_pending().unwrap();
+    // CANONICAL LOCK ORDER: `grids` BEFORE `auto_filters` -- the order of
+    // `apply_auto_filter_inner`, `clear_column_criteria_on_sheet` and the
+    // structural row/column edits (which hold `grids` while they shift the
+    // sheet's filter). Taking the two the other way round is an ABBA hang
+    // against any of them (see `autofilter_lock_order_tests`).
     let grids = state.grids.read().unwrap();
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
     let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
@@ -2098,8 +2181,13 @@ fn set_column_top_bottom_filter_inner(
     // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
     // this sheet") and must leave the document clean, so the dirty decision
     // belongs INSIDE the branch -- which is exactly what this guard postpones.
-    let auto_filters = state.auto_filters.lock_pending().unwrap();
+    // CANONICAL LOCK ORDER: `grids` BEFORE `auto_filters` -- the order of
+    // `apply_auto_filter_inner`, `clear_column_criteria_on_sheet` and the
+    // structural row/column edits (which hold `grids` while they shift the
+    // sheet's filter). Taking the two the other way round is an ABBA hang
+    // against any of them (see `autofilter_lock_order_tests`).
     let grids = state.grids.read().unwrap();
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
     let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
@@ -2798,8 +2886,13 @@ fn set_column_dynamic_filter_inner(
     // `lock_pending`: the `else` arm below is a refusal ("no AutoFilter on
     // this sheet") and must leave the document clean, so the dirty decision
     // belongs INSIDE the branch -- which is exactly what this guard postpones.
-    let auto_filters = state.auto_filters.lock_pending().unwrap();
+    // CANONICAL LOCK ORDER: `grids` BEFORE `auto_filters` -- the order of
+    // `apply_auto_filter_inner`, `clear_column_criteria_on_sheet` and the
+    // structural row/column edits (which hold `grids` while they shift the
+    // sheet's filter). Taking the two the other way round is an ABBA hang
+    // against any of them (see `autofilter_lock_order_tests`).
     let grids = state.grids.read().unwrap();
+    let auto_filters = state.auto_filters.lock_pending().unwrap();
     let style_registry = state.style_registry.read().unwrap();
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.read().unwrap();
@@ -2861,5 +2954,127 @@ fn set_column_dynamic_filter_inner(
             hidden_rows: Vec::new(),
             visible_rows: Vec::new(),
         }
+    }
+}
+
+/// Every AutoFilter command that holds BOTH `grids` and `auto_filters` takes
+/// `grids` FIRST. `apply_auto_filter_inner`, `clear_column_criteria_on_sheet`
+/// (a table slicer's delete) and the structural row/column edits (which hold
+/// `grids` while they shift the sheet's filter) all do; six commands here took
+/// `auto_filters` first, so e.g. a table-slicer delete racing a slicer click or
+/// a header filter could hang both threads -- with no panic and no log line.
+///
+/// Each command runs on its own thread while this thread holds `grids`, the
+/// way a canonical holder does. A command in the canonical order waits for
+/// `grids` holding NOTHING, so a probe can still take `auto_filters`; a command
+/// in the inverted order holds `auto_filters` while it waits, and the probe
+/// times out (it is not left hanging: releasing `grids` lets everyone finish).
+#[cfg(test)]
+mod autofilter_lock_order_tests {
+    use super::*;
+    use crate::document_effect::test_seed_effect;
+    use std::time::Duration;
+
+    /// Sheet 0: a header and four rows in A1:A5, under an AutoFilter.
+    fn filtered_sheet() -> AppState {
+        let state = crate::create_app_state();
+        let seed = test_seed_effect();
+        {
+            let mut grids = state.grids.write(&seed).unwrap();
+            let mut grid = state.grid.write(&seed).unwrap();
+            for (row, text) in ["Region", "East", "West", "East", "North"].iter().enumerate() {
+                grids[0].set_cell(row as u32, 0, engine::Cell::new_text(text.to_string()));
+                grid.set_cell(row as u32, 0, engine::Cell::new_text(text.to_string()));
+            }
+        }
+        let mut af = AutoFilter::new(0, 0, 4, 0);
+        af.column_filters.insert(
+            0,
+            ColumnFilter {
+                column_index: 0,
+                criteria: FilterCriteria {
+                    filter_on: FilterOn::Values,
+                    values: vec!["East".to_string()],
+                    ..Default::default()
+                },
+            },
+        );
+        state.auto_filters.write(&seed).unwrap().insert(0, af);
+        state
+    }
+
+    /// Run `command` while `grids` is held; can another thread still take
+    /// `auto_filters` while the command waits?
+    fn auto_filters_stay_reachable(command: &(dyn Fn(&AppState, &FileState) + Sync)) -> bool {
+        let state = filtered_sheet();
+        let file = FileState::default();
+        std::thread::scope(|scope| {
+            let grids_guard = state.grids.read().unwrap();
+            let runner = scope.spawn(|| command(&state, &file));
+            std::thread::sleep(Duration::from_millis(250)); // the command now waits on `grids`
+            let (tx, rx) = std::sync::mpsc::channel();
+            let state_ref = &state;
+            let probe = scope.spawn(move || {
+                let _af = state_ref.auto_filters.read().unwrap();
+                let _ = tx.send(());
+            });
+            let reached = rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            drop(grids_guard); // let everyone finish, whatever happened
+            runner.join().unwrap();
+            probe.join().unwrap();
+            reached
+        })
+    }
+
+    #[test]
+    fn every_autofilter_command_takes_grids_before_auto_filters() {
+        let commands: Vec<(&str, Box<dyn Fn(&AppState, &FileState) + Sync>)> = vec![
+            ("clear_column_criteria", Box::new(|s, f| {
+                clear_column_criteria_inner(s, f, 0);
+            })),
+            ("reapply_auto_filter", Box::new(|s, f| {
+                reapply_auto_filter_inner(s, f);
+            })),
+            ("set_column_filter_values", Box::new(|s, f| {
+                set_column_filter_values_inner(s, f, 0, vec!["West".to_string()], false);
+            })),
+            ("set_column_custom_filter", Box::new(|s, f| {
+                set_column_custom_filter_inner(s, f, 0, "=East".to_string(), None, None);
+            })),
+            ("set_column_top_bottom_filter", Box::new(|s, f| {
+                set_column_top_bottom_filter_inner(s, f, 0, FilterOn::TopItems, 2);
+            })),
+            ("set_column_dynamic_filter", Box::new(|s, f| {
+                set_column_dynamic_filter_inner(s, f, 0, DynamicFilterCriteria::AboveAverage);
+            })),
+            ("clear_column_criteria_on_sheet", Box::new(|s, f| {
+                let id = s.auto_filters.read().unwrap()[&0].id;
+                clear_column_criteria_on_sheet(s, &DocumentEffect::mutates(f), 0, id, 0);
+            })),
+            ("apply_auto_filter", Box::new(|s, f| {
+                apply_auto_filter_inner(
+                    s,
+                    f,
+                    ApplyAutoFilterParams {
+                        start_row: 0,
+                        start_col: 0,
+                        end_row: 4,
+                        end_col: 0,
+                        column_index: None,
+                        criteria: None,
+                    },
+                );
+            })),
+        ];
+        let inverted: Vec<&str> = commands
+            .iter()
+            .filter(|(_, command)| !auto_filters_stay_reachable(command.as_ref()))
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            inverted.is_empty(),
+            "these AutoFilter commands hold `auto_filters` while they wait for `grids` (ABBA against \
+             every holder of the canonical order): {inverted:?}"
+        );
     }
 }

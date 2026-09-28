@@ -132,6 +132,9 @@ import {
 // doubles `@api` must still be measuring the REAL one, the same way M3b's shim
 // reaches it.
 import { claimPointer, releasePointerClaim } from "@api/pointerClaims";
+// The subpath for the same reason: the point-mode signal is Core's, and a test
+// that doubles `@api` must still see the real one.
+import { onPointModeViewChanged } from "@api/gridOverlays";
 import {
   listEmbeddedFormPlacementsForSheet,
   orphanEmbeddedFormsForSheet,
@@ -567,6 +570,24 @@ export function installEmbeddedFormLayer(hostBridge: {
       adoptActiveSheet(() =>
         typeof d.sheetIndex === "number" ? d.sheetIndex : hostBridge.activeSheetIndex(),
       );
+    }),
+  );
+  offs.push(
+    // CROSS-SHEET POINT MODE. A formula picking a reference on another sheet
+    // switches the grid WITHOUT a SHEET_CHANGED (the edit must survive), so
+    // `activeSheet` above still names the edit's sheet and its regions stay
+    // published. The grid stops painting them (`getLiveGridRegions`), which
+    // means `renderRegion` is no longer called -- and a DOM host that is not
+    // repainted stays exactly where it was, visible over the other sheet and
+    // claiming its clicks. So every host is hidden on the flip in, and a
+    // refresh on the flip out lets the paint put them back.
+    onPointModeViewChanged((foreign) => {
+      if (disposed) return;
+      if (foreign) {
+        for (const [placementId, host] of hosts) hideHost(placementId, host);
+      } else {
+        emitAppEvent(AppEvents.GRID_REFRESH);
+      }
     }),
   );
   offs.push(

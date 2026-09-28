@@ -1750,6 +1750,7 @@ mod tests {
             // Pinned: exercises both the filterLevel round-trip and the
             // conditional v8 stamp (asserted below).
             filter_level: 2,
+            data_source_id: None,
         });
 
         let dir = tempfile::tempdir().unwrap();
@@ -2004,6 +2005,7 @@ mod tests {
             computed_properties: Vec::new(),
             connected_sources: Vec::new(),
             filter_level: 1,
+            data_source_id: None,
         });
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ordinary-slicer.cala");

@@ -6727,6 +6727,69 @@ pub fn bi_model_source_secrets(
     }
 }
 
+/// The model a pipeline edit installs: `table`'s steps replaced, its columns
+/// re-derived by the engine, and the WHOLE model validated.
+///
+/// ONE function for the edit (`set`) and for its dry runs (`deriveSchema`,
+/// `fromScript`, through [`model_level_diagnostic`]), so the editor's live
+/// diagnostics and Apply cannot disagree about what the model refuses. They
+/// did: the dry run ran only the per-step derivation, and reported a lookup
+/// into a DirectQuery table -- or one that closed a cycle -- as clean while
+/// `set` refused it.
+fn model_with_pipeline(
+    base: &bi_engine::DataModel,
+    table: &str,
+    steps: Vec<bi_engine::TransformStep>,
+) -> Result<bi_engine::DataModel, bi_engine::EngineError> {
+    let edited = bi_engine::with_table_transformations(base, table, steps)?;
+    edited.validate()?;
+    Ok(edited)
+}
+
+/// What [`model_with_pipeline`] -- and therefore `set` -- refuses in a
+/// candidate pipeline whose every step DERIVES: the rules that span tables
+/// (a lookup cycle, a lookup into a DirectQuery or calculated table, a measure
+/// or relationship stranded by a removed column). `None` when `set` would
+/// accept it.
+///
+/// Placed on a step like every other diagnostic. When the model names a step
+/// of THIS pipeline, that step. Otherwise (a cycle, a stranded measure, another
+/// table's pipeline) the first step at which the model refuses the candidate
+/// with this same error -- found by validating the pipeline's prefixes, which
+/// is paid only when the candidate is already refused.
+fn model_level_diagnostic(
+    base: &bi_engine::DataModel,
+    table: &str,
+    steps: &[bi_engine::TransformStep],
+) -> Option<TransformDiagnosticDto> {
+    let error = model_with_pipeline(base, table, steps.to_vec()).err()?;
+    let names_own_step = matches!(
+        &error,
+        bi_engine::EngineError::InvalidTransform { table: named, .. }
+            | bi_engine::EngineError::TransformFailed { table: named, .. }
+            if named.eq_ignore_ascii_case(table)
+    );
+    let mut diagnostic = transform_diagnostic(&error, steps);
+    if !names_own_step {
+        let refused = error.to_string();
+        diagnostic.index = (1..steps.len())
+            .find(|&k| {
+                model_with_pipeline(base, table, steps[..k].to_vec())
+                    .err()
+                    .is_some_and(|e| e.to_string() == refused)
+            })
+            .map(|k| k - 1)
+            .unwrap_or(steps.len().saturating_sub(1));
+        diagnostic.step_type = steps
+            .get(diagnostic.index)
+            .map(|s| s.type_name().to_string())
+            .unwrap_or_default();
+        // The whole message: a step of ANOTHER table is named by its table.
+        diagnostic.message = refused;
+    }
+    Some(diagnostic)
+}
+
 /// Replace a table's pipeline and return the resulting overview.
 ///
 /// Shared by the Tauri command and the script gateway so the two can never
@@ -6752,13 +6815,26 @@ async fn set_transformations_inner(
     // steps IS the schema change, and re-deriving it here would be a second
     // source of truth — but that half is I/O-free and model-level, so the
     // closure calls it directly rather than standing up a scratch engine.
+    //
+    // AND THEN VALIDATES (`model_with_pipeline`, which the dry runs share),
+    // as `with_table_transformations` requires of its
+    // callers ("the returned model is NOT validated; callers run
+    // DataModel::validate") and as every sibling edit here does. Deriving only
+    // checks that each step applies to the rows reaching it; the rules that
+    // span TABLES live in model validation: a lookup CYCLE (no refresh order
+    // exists), a lookup into a DirectQuery or calculated table (its rows are
+    // never there to join), a measure or relationship stranded by a removed
+    // column. `build_combined_model` validates only when the connection has
+    // calculated measures, so without this every one of those was installed
+    // silently -- the cycle was accepted, and a lookup into a freshly imported
+    // (DirectQuery) table failed at REFRESH with "unknown lookup table" instead
+    // of saying, at the edit, to set the target to Import storage.
     let overview = mutate_and_overview(
         bi_state,
         file_state,
         connection_id,
         move |base, _calculated| {
-            bi_engine::with_table_transformations(base, &table_for_edit, steps.clone())
-                .map_err(|e| e.to_string())
+            model_with_pipeline(base, &table_for_edit, steps.clone()).map_err(|e| e.to_string())
         },
     )
     .await?;
@@ -6789,7 +6865,9 @@ async fn set_transformations_inner(
 ///   table's columns are re-derived by the engine and the whole model is
 ///   revalidated before anything is installed. Passing `steps: []` clears it.
 /// - `deriveSchema` — dry run: the columns a **candidate** pipeline would
-///   produce, plus diagnostics. No model mutation, no undo entry, no I/O.
+///   produce, plus diagnostics -- including what `set` would refuse in the
+///   model it makes (`model_level_diagnostic`). No model mutation, no undo
+///   entry, no I/O.
 /// - `previewStep` — run a candidate pipeline over a bounded source sample,
 ///   optionally stopping after `asOfStep` steps. Cancel with
 ///   `bi_model_cancel_query` using the same `queryId`.
@@ -6926,7 +7004,19 @@ pub async fn bi_model_transform(
                     let (columns, diagnostics) =
                         match bi_engine::validate_steps(&table, &source_columns, &parsed, &schemas)
                         {
-                            Ok(columns) => (transform_columns_to_dto(&columns), Vec::new()),
+                            // Every step derives; what `set` would still refuse
+                            // in the model is placed on its statement's line.
+                            Ok(columns) => {
+                                let diagnostics = model_level_diagnostic(&base, &table, &parsed)
+                                    .map(|mut diagnostic| {
+                                        diagnostic.line = lines.get(diagnostic.index).copied();
+                                        diagnostic.column = diagnostic.line.map(|_| 1);
+                                        diagnostic
+                                    })
+                                    .into_iter()
+                                    .collect();
+                                (transform_columns_to_dto(&columns), diagnostics)
+                            }
                             Err(error) => {
                                 let mut diagnostic = transform_diagnostic(&error, &parsed);
                                 // A step index cannot be placed in a buffer;
@@ -7026,9 +7116,13 @@ pub async fn bi_model_transform(
             let schemas = bi_engine::ModelTableSchemas::new(base.tables());
             let result = match bi_engine::validate_steps(&table, &source_columns, &parsed, &schemas)
             {
+                // Every step derives -- and still `set` may refuse the MODEL
+                // it makes. Say so now, not at Apply.
                 Ok(columns) => TransformSchemaResult {
                     columns: transform_columns_to_dto(&columns),
-                    diagnostics: Vec::new(),
+                    diagnostics: model_level_diagnostic(&base, &table, &parsed)
+                        .into_iter()
+                        .collect(),
                 },
                 Err(error) => {
                     let diagnostic = transform_diagnostic(&error, &parsed);
@@ -11711,6 +11805,215 @@ mod tests {
         )
         .unwrap();
         assert!(upsert_writeback_column_model(&writeback_host_model(), None, bad).is_err());
+    }
+
+    // =======================================================================
+    // A pipeline edit is VALIDATED like every other model edit
+    // =======================================================================
+    //
+    // `set_transformations_inner` derived the table's new columns and installed
+    // the model WITHOUT `DataModel::validate` (which `with_table_transformations`
+    // leaves to its caller, and which `build_combined_model` runs only when the
+    // connection has calculated measures). So the model-level lookup rules never
+    // ran on the app's edit path: a lookup CYCLE was accepted, and a lookup into
+    // a freshly imported -- DirectQuery -- table was accepted and then failed at
+    // refresh with "unknown lookup table" (journey model-transform.spec.ts, "looks
+    // up another table, and refuses a cycle").
+
+    /// Two tables bound to one source: `orders` (InMemory) and `customers` in
+    /// the given storage mode.
+    fn lookup_model(customers_mode: StorageMode) -> DataModel {
+        DataModel::builder()
+            .add_source(bi_engine::PersistedSource::new(
+                "src",
+                bi_engine::SourceKind::InMemory,
+                bi_engine::PersistedConnection::default(),
+                bi_engine::PersistedAuthKind::Integrated,
+            ))
+            .add_table(
+                Table::new(
+                    "orders",
+                    vec![Column::new("id", DataType::Int64), Column::new("status", DataType::String)],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory)
+                .with_source_binding(bi_engine::TableSourceBinding::new("src", "csv", "orders")),
+            )
+            .add_table(
+                Table::new(
+                    "customers",
+                    vec![Column::new("cid", DataType::Int64), Column::new("customer", DataType::String)],
+                )
+                .unwrap()
+                .with_storage_mode(customers_mode)
+                .with_source_binding(bi_engine::TableSourceBinding::new("src", "csv", "customers")),
+            )
+            .build()
+            .unwrap()
+    }
+
+    fn lookup_into(target: &str, host_key: &str, target_key: &str, take: &str) -> bi_engine::TransformStep {
+        bi_engine::TransformStep::LookupColumn {
+            table: target.into(),
+            keys: vec![bi_engine::LookupKey::new(host_key, target_key)],
+            takes: vec![bi_engine::LookupTake::new(take)],
+        }
+    }
+
+    fn steps_of(bi_state: &BiState, connection_id: ConnectionId, table: &str) -> usize {
+        let conns = bi_state.connections.lock().unwrap();
+        let base = conns.get(&connection_id).unwrap().base_model.clone().unwrap();
+        base.table(table)
+            .unwrap()
+            .source_binding()
+            .map(|b| b.transformations.len())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn a_pipeline_that_looks_up_a_directquery_table_is_refused_at_the_edit() {
+        let (bi, conn) = test_bi_state("unit-test-lookup-directquery", &lookup_model(StorageMode::DirectQuery));
+        let file = FileState::default();
+
+        let refused = set_transformations_inner(
+            &bi,
+            &file,
+            conn,
+            "orders",
+            vec![lookup_into("customers", "id", "cid", "customer")],
+        )
+        .await;
+        let message = refused.expect_err("a lookup into a DirectQuery table must be refused at the edit");
+        assert!(message.contains("DirectQuery"), "the refusal must say why: {message}");
+        assert_eq!(steps_of(&bi, conn, "orders"), 0, "a refused edit installs nothing");
+        assert!(!file.is_dirty(), "a refused edit must not dirty the document");
+        assert_eq!(undo_depth(&bi, conn), 0, "a refused edit records no undo step");
+
+        // POSITIVE CONTROL: the same step into an IMPORT table is a legal edit, so
+        // the refusal above is about the target's KIND, not about lookups.
+        let (bi, conn) = test_bi_state("unit-test-lookup-import", &lookup_model(StorageMode::InMemory));
+        set_transformations_inner(
+            &bi,
+            &file,
+            conn,
+            "orders",
+            vec![lookup_into("customers", "id", "cid", "customer")],
+        )
+        .await
+        .expect("a lookup into an Import table is allowed");
+        assert_eq!(steps_of(&bi, conn, "orders"), 1);
+        assert!(file.is_dirty());
+    }
+
+    #[tokio::test]
+    async fn a_pipeline_that_closes_a_lookup_cycle_is_refused_at_the_edit() {
+        let (bi, conn) = test_bi_state("unit-test-lookup-cycle", &lookup_model(StorageMode::InMemory));
+        let file = FileState::default();
+        set_transformations_inner(
+            &bi,
+            &file,
+            conn,
+            "orders",
+            vec![lookup_into("customers", "id", "cid", "customer")],
+        )
+        .await
+        .expect("fixture: orders looks up customers");
+
+        // customers looking back at orders: neither could ever be refreshed first.
+        let refused = set_transformations_inner(
+            &bi,
+            &file,
+            conn,
+            "customers",
+            vec![lookup_into("orders", "cid", "id", "status")],
+        )
+        .await;
+        let message = refused.expect_err("a lookup cycle must be refused at the edit");
+        assert!(message.to_lowercase().contains("cycle"), "the refusal must name the cycle: {message}");
+        assert_eq!(steps_of(&bi, conn, "customers"), 0, "the refused pipeline is not installed");
+        assert_eq!(steps_of(&bi, conn, "orders"), 1, "the valid pipeline is still installed");
+    }
+
+    // -----------------------------------------------------------------------
+    // ... and the DRY RUNS say so before Apply
+    // -----------------------------------------------------------------------
+    //
+    // `deriveSchema` and `fromScript` ran only the per-step derivation
+    // (`validate_steps`), so once `set` validated the model they reported a
+    // candidate as clean that Apply then refused: the Model Editor enabled Apply
+    // on a lookup into a DirectQuery table, and on a cycle.
+
+    /// The steps derive: `validate_steps` against the model's own schemas is clean.
+    fn derives(model: &DataModel, table: &str, steps: &[bi_engine::TransformStep]) -> bool {
+        let t = model.table(table).unwrap();
+        let source_columns = t
+            .source_binding()
+            .filter(|b| !b.source_columns.is_empty())
+            .map(|b| b.source_columns.clone())
+            .unwrap_or_else(|| t.columns().to_vec());
+        let schemas = bi_engine::ModelTableSchemas::new(model.tables());
+        bi_engine::validate_steps(table, &source_columns, steps, &schemas).is_ok()
+    }
+
+    #[test]
+    fn the_dry_run_reports_a_directquery_lookup_target_on_the_lookup_step() {
+        let steps = vec![
+            bi_engine::TransformStep::RenameColumns {
+                renames: vec![bi_engine::ColumnRename::new("status", "state")],
+            },
+            lookup_into("customers", "id", "cid", "customer"),
+        ];
+        let dq = lookup_model(StorageMode::DirectQuery);
+        assert!(derives(&dq, "orders", &steps), "fixture: every step derives, so only the MODEL refuses it");
+
+        let diagnostic = model_level_diagnostic(&dq, "orders", &steps)
+            .expect("the dry run must report what `set` refuses");
+        assert!(
+            diagnostic.message.starts_with("'customers' is a DirectQuery table"),
+            "the step's own reason, as every step diagnostic reads (the editor names the step itself): {}",
+            diagnostic.message
+        );
+        assert_eq!(diagnostic.index, 1, "on the lookup step, not the rename before it");
+        assert_eq!(diagnostic.step_type, "lookupColumn");
+        assert_eq!(diagnostic.severity, "error", "Apply must be disabled for it");
+        assert!(model_with_pipeline(&dq, "orders", steps.clone()).is_err(), "the edit refuses the same candidate");
+
+        // POSITIVE CONTROL: into an IMPORT table the same candidate is clean, in
+        // the dry run as in the edit.
+        let import = lookup_model(StorageMode::InMemory);
+        assert!(model_level_diagnostic(&import, "orders", &steps).is_none());
+        assert!(model_with_pipeline(&import, "orders", steps).is_ok());
+    }
+
+    #[test]
+    fn the_dry_run_reports_a_lookup_cycle_on_the_step_that_closes_it() {
+        let base = model_with_pipeline(
+            &lookup_model(StorageMode::InMemory),
+            "orders",
+            vec![lookup_into("customers", "id", "cid", "customer")],
+        )
+        .expect("fixture: orders looks up customers");
+        // customers looks back at orders (step 0), then renames what it took
+        // (step 1). The cycle names no step, so the dry run finds the first step
+        // at which the model refuses the candidate: the lookup -- not the last
+        // step, which is where an unplaced model error would otherwise land.
+        let steps = vec![
+            lookup_into("orders", "cid", "id", "status"),
+            bi_engine::TransformStep::RenameColumns {
+                renames: vec![bi_engine::ColumnRename::new("status", "order_status")],
+            },
+        ];
+        assert!(derives(&base, "customers", &steps), "fixture: every step derives, so only the MODEL refuses it");
+
+        let diagnostic = model_level_diagnostic(&base, "customers", &steps)
+            .expect("the dry run must report the cycle `set` refuses");
+        assert!(diagnostic.message.to_lowercase().contains("cycle"), "{}", diagnostic.message);
+        assert_eq!(diagnostic.index, 0, "on the lookup that closes the cycle");
+        assert_eq!(diagnostic.step_type, "lookupColumn");
+
+        // POSITIVE CONTROL: the same candidate while orders looks nothing up
+        // closes no cycle, and is clean -- the report is about the loop.
+        assert!(model_level_diagnostic(&lookup_model(StorageMode::InMemory), "customers", &steps).is_none());
     }
 }
 

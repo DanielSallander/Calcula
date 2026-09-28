@@ -66,7 +66,9 @@ vi.mock("@api/events", () => ({
 }));
 
 vi.mock("../slicerFilterBridge", () => ({
-  ensureBiFieldInPivotCache: vi.fn(async () => false),
+  applySlicerFilter: vi.fn(async () => undefined),
+  listPivotSlicerItemsFromModel: vi.fn(async () => null),
+  reportSlicerFilterFailures: vi.fn(),
 }));
 
 vi.mock("../../manifest", () => ({

@@ -14,6 +14,7 @@ import {
   isKeyClaimed,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
+import { isEditKeystroke } from "@api/editing";
 
 // ============================================================================
 // Core Logic
@@ -149,10 +150,10 @@ function activate(_context: ExtensionContext): void {
     // core/lib/globalInputListeners.ts (a new global listener adds a row).
     if (isKeyClaimed(e)) return;
     if (e.altKey && e.key === ";") {
-      const target = e.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) {
-        return;
-      }
+      // Not while a text field is focused or any cell edit is in progress
+      // (the tag list this replaced could not see a floating grid's live cell
+      // edit parked with the keyboard on the grid): it moves Core's selection.
+      if (isEditKeystroke(e)) return;
       e.preventDefault();
       selectVisibleCells();
     }

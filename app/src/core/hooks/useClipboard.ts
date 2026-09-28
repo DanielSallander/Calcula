@@ -6,7 +6,6 @@
 // Updated: Copy source remains active after paste (only cut clears clipboard).
 
 import { useCallback, useRef } from "react";
-import { ask } from "@tauri-apps/plugin-dialog";
 import { writeText as tauriWriteText, readText as tauriReadText, writeHtml as tauriWriteHtml } from "@tauri-apps/plugin-clipboard-manager";
 import { useGridContext } from "../state/GridContext";
 import {
@@ -35,7 +34,11 @@ import { setClipboard, clearClipboard, setSelection } from "../state/gridActions
 import type { Selection, CellData, ClipboardMode, Comment, DataValidation } from "../types";
 import { checkRangeGuards } from "../lib/editGuards";
 import { captureClipboardCells, pasteRowDeltas } from "../lib/clipboardVisibility";
-import { alertAsync } from "../lib/dialogs";
+// confirmAsync, never the plugin's raw `ask` (lint-banned outside
+// lib/dialogs.ts): `ask` THROWS when its dialog cannot be shown, and each
+// "replace the destination?" guard below then rejected unobserved instead of
+// answering. confirmAsync resolves false instead -- no answer, no overwrite.
+import { alertAsync, confirmAsync } from "../lib/dialogs";
 
 /**
  * Internal clipboard data structure.
@@ -795,7 +798,7 @@ export function useClipboard(): UseClipboardReturn {
       // Check if destination area has content (excluding source overlap) and confirm
       const hasContent = await hasContentInRange(targetRow, targetCol, destEndRow, destEndCol);
       if (hasContent) {
-        const confirmed = await ask(
+        const confirmed = await confirmAsync(
           "There is data in the destination area. Do you want to replace it?",
           { title: "Calcula", kind: "warning", okLabel: "Yes", cancelLabel: "No" }
         );
@@ -1008,7 +1011,7 @@ export function useClipboard(): UseClipboardReturn {
 
       const hasContent = await hasContentInRange(targetRow, 0, targetEndRow, config.totalCols - 1);
       if (hasContent) {
-        const confirmed = await ask(
+        const confirmed = await confirmAsync(
           "There is data in the destination area. Do you want to replace it?",
           { title: "Calcula", kind: "warning", okLabel: "Yes", cancelLabel: "No" }
         );
@@ -1146,7 +1149,7 @@ export function useClipboard(): UseClipboardReturn {
 
       const hasContent = await hasContentInRange(0, targetCol, config.totalRows - 1, targetEndCol);
       if (hasContent) {
-        const confirmed = await ask(
+        const confirmed = await confirmAsync(
           "There is data in the destination area. Do you want to replace it?",
           { title: "Calcula", kind: "warning", okLabel: "Yes", cancelLabel: "No" }
         );
@@ -1283,7 +1286,7 @@ export function useClipboard(): UseClipboardReturn {
 
       const hasContent = await hasContentInRange(targetRow, targetCol, destEndRow, destEndCol);
       if (hasContent) {
-        const confirmed = await ask(
+        const confirmed = await confirmAsync(
           "There is data in the destination area. Do you want to replace it?",
           { title: "Calcula", kind: "warning", okLabel: "Yes", cancelLabel: "No" }
         );
@@ -1394,7 +1397,7 @@ export function useClipboard(): UseClipboardReturn {
 
       const hasContent = await hasContentInRange(targetRow, 0, targetEndRow, config.totalCols - 1);
       if (hasContent) {
-        const confirmed = await ask(
+        const confirmed = await confirmAsync(
           "There is data in the destination area. Do you want to replace it?",
           { title: "Calcula", kind: "warning", okLabel: "Yes", cancelLabel: "No" }
         );
@@ -1479,7 +1482,7 @@ export function useClipboard(): UseClipboardReturn {
 
       const hasContent = await hasContentInRange(0, targetCol, config.totalRows - 1, targetEndCol);
       if (hasContent) {
-        const confirmed = await ask(
+        const confirmed = await confirmAsync(
           "There is data in the destination area. Do you want to replace it?",
           { title: "Calcula", kind: "warning", okLabel: "Yes", cancelLabel: "No" }
         );

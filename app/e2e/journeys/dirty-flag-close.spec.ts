@@ -1,9 +1,9 @@
 /**
  * THE CLOSE PROMPT, for real.
  *
- * The unsaved-changes prompt is a NATIVE dialog (`ask()` -> rfd -> Win32
- * TaskDialog), and the handler that raises it ends in
- * `getCurrentWindow().destroy()`. Tauri defines its whole IPC surface with
+ * The unsaved-changes prompt is a NATIVE dialog (`message()` with Save /
+ * Don't Save / Cancel -> rfd -> Win32 TaskDialog), and the handler that raises
+ * it ends in `getCurrentWindow().destroy()` on Save or Don't Save. Tauri defines its whole IPC surface with
  * `Object.defineProperty(window.__TAURI_INTERNALS__, 'invoke', { value })` —
  * writable:false, configurable:false — and `__TAURI_INTERNALS__` itself is
  * defined the same way on `window`. So the dialog CANNOT be stubbed, answered or
@@ -14,8 +14,9 @@
  *   - does a NEW native top-level window appear (the prompt), and
  *   - does the app process survive the close request (blocked) or exit (closed)?
  *
- * Answering the prompt always ends in `destroy()`, so each case consumes one app
- * lifetime. The case is selected by CLOSE_CASE=dirty|clean and the runner
+ * Cancel, the title-bar X and Escape keep the window open (proved by
+ * zy-close-prompt-cancel.spec.ts); this spec's cases end the app, so each
+ * consumes one app lifetime. The case is selected by CLOSE_CASE=dirty|clean and the runner
  * relaunches the app between them.
  *
  *   CLOSE_CASE=dirty  a CF rule added through the real dialog -> prompt appears,

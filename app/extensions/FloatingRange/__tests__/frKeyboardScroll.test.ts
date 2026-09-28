@@ -4,7 +4,8 @@
 //            and scrolls the new cell into view; the extent's end still clamps;
 //          - F2 / type-to-edit on an active cell that was scrolled away bring it
 //            back into view before the editor opens over it;
-//          - Delete over a selection that reaches past the window clears what
+//          - Delete (the registry binding's command, lib/frKeyRouting.ts) over a
+//            selection that reaches past the window clears what
 //            the backend accepts and REPORTS what it refuses (until the
 //            backend's write gate follows the extent, cells past the window are
 //            refused) -- never a silent partial clear.
@@ -18,6 +19,7 @@ vi.mock("../editor/frEditor", () => ({
   cancelFrEditor: vi.fn(),
   commitFrEditor: vi.fn(),
   getFrEditorCell: vi.fn(() => null),
+  getFrEditorSession: vi.fn(() => null),
   isFrEditorOpen: vi.fn(() => false),
   destroyFrEditor: vi.fn(),
 }));
@@ -69,7 +71,7 @@ vi.mock("@api", async (importOriginal) => ({
   showToast: (...args: unknown[]) => showToast(...args),
 }));
 
-import { handleFrKeyDown } from "../index";
+import { handleFrKeyDown, deleteFrSelection } from "../index";
 import { upsertFromInfo, resetFloatingRangeStore } from "../lib/floatingRangeStore";
 import { getLocalSelection, setLocalSelection, clearLocalSelection } from "../lib/frSelection";
 import { getFrScroll, setFrScroll } from "../lib/frScroll";
@@ -182,7 +184,7 @@ describe("Delete past the window", () => {
   it("clears what the backend accepts and reports what it refuses, once", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     setLocalSelection({ frId: FR_ID, anchorRow: 0, anchorCol: 0, endRow: 7, endCol: 0 });
-    handleFrKeyDown(key("Delete"));
+    deleteFrSelection();
     await flush();
 
     // Every non-empty cell of the EXTENT-wide selection was attempted...
@@ -196,7 +198,7 @@ describe("Delete past the window", () => {
 
   it("says nothing when every cell cleared", async () => {
     setLocalSelection({ frId: FR_ID, anchorRow: 0, anchorCol: 0, endRow: 3, endCol: 2 });
-    handleFrKeyDown(key("Delete"));
+    deleteFrSelection();
     await flush();
     expect(updateFloatingRangeCell).toHaveBeenCalledTimes(12);
     expect(showToast).not.toHaveBeenCalled();

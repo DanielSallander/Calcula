@@ -30,6 +30,7 @@ import {
   type HyperlinkIndicator,
 } from "@api/backend";
 import { setActiveSheet, getSheets } from "@api/lib";
+import { isEditKeystroke } from "@api/editing";
 import { InsertHyperlinkDialog } from "./InsertHyperlinkDialog";
 
 // ============================================================================
@@ -174,7 +175,8 @@ function openEditDialog(row: number, col: number): void {
 
 let keydownHandler: ((e: KeyboardEvent) => void) | null = null;
 
-async function handleKeyDown(e: KeyboardEvent): Promise<void> {
+/** The window-capture Ctrl+K listener (exported for tests). */
+export async function handleKeyDown(e: KeyboardEvent): Promise<void> {
   // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
   // field, a shape's declared hit rectangle -- is not this extension's.
   // The tag list below cannot see a <select> or a <button>; the claim can.
@@ -183,16 +185,10 @@ async function handleKeyDown(e: KeyboardEvent): Promise<void> {
   if (isKeyClaimed(e)) return;
   // Ctrl+K: Insert/Edit Hyperlink
   if (e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k") {
-    // Don't intercept if an input/textarea/contenteditable is focused
-    const active = document.activeElement;
-    if (
-      active &&
-      (active.tagName === "INPUT" ||
-        active.tagName === "TEXTAREA" ||
-        (active as HTMLElement).isContentEditable)
-    ) {
-      return;
-    }
+    // Don't intercept while a text field is focused or any cell edit is in
+    // progress -- the tag list this replaced could not see a floating grid's
+    // live cell edit parked with the keyboard on the grid.
+    if (isEditKeystroke(e)) return;
 
     e.preventDefault();
     e.stopPropagation();

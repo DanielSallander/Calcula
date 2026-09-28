@@ -680,6 +680,7 @@ pub(crate) fn view_to_response(
             window_start_row: Some(0),
             row_descriptors,
             overwritten_cell_count: 0,
+            overwrite_token: None,
             // Filled after the fact by the producer that has something to say,
             // exactly as `overwritten_cell_count` is.
             notices: Vec::new(),
@@ -704,6 +705,7 @@ pub(crate) fn view_to_response(
             window_start_row: None,
             row_descriptors: Vec::new(),
             overwritten_cell_count: 0,
+            overwrite_token: None,
             notices: Vec::new(),
         }
     }
@@ -864,10 +866,30 @@ pub(crate) fn is_bi_cosmetic_only_change(
         }
     }
 
-    // Slicer fields: if the request includes slicer_fields, the caller wants
-    // to add/update slicer GROUP BY columns, which requires a full BI query.
-    if !request.slicer_fields.is_empty() {
+    // Hidden items travel in the request on every zone now: a request whose
+    // only change is a zone field's hidden-item subset is a FILTER change, and
+    // the cosmetic path (which only renames and re-lays out) would drop it.
+    // ABSENT means "keep"; a sent list -- an EMPTY one is an explicit clear --
+    // counts whenever it differs from what the field hides now.
+    let hidden_changed = |def_f: &pivot_engine::PivotField, req_f: &BiFieldRef| match &req_f.hidden_items {
+        Some(hidden) => &def_f.hidden_items != hidden,
+        None => false,
+    };
+    if definition.row_fields.iter().zip(request.row_fields.iter()).any(|(d, r)| hidden_changed(d, r))
+        || definition.column_fields.iter().zip(request.column_fields.iter()).any(|(d, r)| hidden_changed(d, r))
+        || definition.filter_fields.iter().zip(request.filter_fields.iter()).any(|(d, r)| hidden_changed(&d.field, r))
+    {
         return false;
+    }
+
+    // Slicer fields: an explicit non-empty list asks to add/update slicer
+    // GROUP BY columns, and an explicit EMPTY list clears the pivot's slicer
+    // filters -- both need a full BI query unless there is nothing to clear.
+    // `None` keeps what the pivot carries, which a cosmetic change does.
+    match &request.slicer_fields {
+        Some(list) if !list.is_empty() => return false,
+        Some(_) if !definition.slicer_filters.is_empty() => return false,
+        _ => {}
     }
 
     // Hierarchy fields: if the request has hierarchies but the definition doesn't

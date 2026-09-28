@@ -17,6 +17,8 @@ import { getCellFromPixel } from "../../../lib/gridRenderer";
 import { rowHeaderGutter, colHeaderGutter } from "../../../lib/gridRenderer/layout/headerVisibility";
 import { getLayoutSurface, applySurfaceToResize, edgesOfCorner, isRegionLocked } from "../../../lib/layoutSurface";
 import { getGridStateSnapshot } from "../../../state/GridContext";
+import { isGlobalFormulaMode } from "../../useEditing";
+import { getExternalFormulaTarget } from "../../../lib/formulaEditTarget";
 
 /** The layout surface of the sheet being edited (null = unconstrained). */
 function activeLayoutSurface() {
@@ -38,6 +40,36 @@ function floatingResizeAllowed(): boolean {
 function floatingResizable(region: GridRegion): boolean {
   if (region.data?.resizable === false) return false;
   return !isRegionLocked(activeLayoutSurface(), region);
+}
+
+/**
+ * Whether a formula is PICKING a reference right now -- in the grid's own
+ * editor, or in an extension's external editor (a floating grid's cell
+ * editor, @api/editing). A press on a floating object then belongs to the
+ * object's reference pick, which only its owner's `claimsBodyDrag` knows
+ * how to make; the resize scan runs BEFORE the move path, so a live corner
+ * box would swallow the pick and start a resize instead.
+ */
+function referencePickActive(): boolean {
+  return isGlobalFormulaMode() || getExternalFormulaTarget()?.isExpectingReference() === true;
+}
+
+/**
+ * Whether a press landed on a real, editable DOM control stacked on the
+ * canvas (the floating grid's cell editor <textarea> is the live example).
+ * The corner boxes are pure GEOMETRY and never look at what the mouse landed
+ * on; claiming such a press would preventDefault the control's own caret
+ * placement. The same rule `handleOverlayMoveMouseDown` applies.
+ */
+function isEditableTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el || typeof el.tagName !== "string") return false;
+  return (
+    el.tagName === "INPUT" ||
+    el.tagName === "TEXTAREA" ||
+    el.tagName === "SELECT" ||
+    el.isContentEditable === true
+  );
 }
 
 /** Size of the resize handle hit area in pixels */
@@ -249,7 +281,10 @@ export function createOverlayResizeHandlers(
     mouseY: number,
   ): GridRegion | null => {
     const regions = getGridRegions();
-    const floatingAllowed = floatingResizeAllowed();
+    // No floating handle is live in consume mode, nor while a formula is
+    // picking a reference (the hover cursor must not promise a resize the
+    // press will not start).
+    const floatingAllowed = floatingResizeAllowed() && !referencePickActive();
 
     // Stacking order in force: floating handles topmost first, occlusion
     // respected; then the cell-anchored regions, scanned exactly as before.
@@ -312,8 +347,11 @@ export function createOverlayResizeHandlers(
     const regions = getGridRegions();
 
     // Check floating overlays first (all 4 corners). None is live in consume
-    // mode (a subscribed canvas, or design mode off).
-    const floatingAllowed = floatingResizeAllowed();
+    // mode (a subscribed canvas), while a formula is picking a reference, or
+    // for a press that landed on an editable control stacked on the canvas --
+    // the last two mirror the move path, which the resize scan runs BEFORE.
+    const floatingAllowed =
+      floatingResizeAllowed() && !referencePickActive() && !isEditableTarget(event.target);
 
     // Stacking order in force: topmost first, and a handle covered by another
     // object is not grabbable through it (findStackedFloatingHandle). The

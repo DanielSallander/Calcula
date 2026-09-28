@@ -71,6 +71,7 @@ fn slicer(name: &str, source_type: SlicerSourceType, cache: EntityId, connected:
         item_padding: 0.0,
         button_radius: 2.0,
         filter_level: 1,
+        data_source_id: None,
         connected_sources: connected
             .into_iter()
             .map(|source_id| SlicerConnection { source_type, source_id })
@@ -845,4 +846,46 @@ fn a_cascaded_slicer_delete_drops_its_computed_properties_too() {
          re-evaluated forever against a slicer that does not exist, and they \
          are PERSISTED, so a save writes them"
     );
+}
+
+// ---------------------------------------------------------------------------
+// (BiConnection, model slicer) -- WarnAndKeep
+// ---------------------------------------------------------------------------
+
+/// A MODEL slicer reads its items straight from the connection
+/// (`cacheSourceId` IS the connection id), so deleting the connection must
+/// NAME it in the confirm, like the ribbon filters and BI pivots it already
+/// named -- and keep it. A pivot slicer whose cache id happens to equal the
+/// connection id is not a dependent of the connection.
+#[test]
+fn bi_connection_dependents_name_model_slicers() {
+    let e = effect();
+    let conn = id();
+    let slicer_state = SlicerState::new();
+    let model = slicer("Region", SlicerSourceType::BiConnection, conn, vec![conn]);
+    let model_id = model.id;
+    let other_model = slicer("Elsewhere", SlicerSourceType::BiConnection, id(), vec![]);
+    let pivot_slicer = slicer("Pivot slicer", SlicerSourceType::Pivot, conn, vec![conn]);
+    {
+        let mut slicers = slicer_state.slicers.write(&e).unwrap();
+        for s in [model, other_model, pivot_slicer] {
+            slicers.insert(s.id, s);
+        }
+    }
+
+    let out = list_object_dependents_core(
+        &app_state(),
+        &slicer_state,
+        &TimelineSlicerState::new(),
+        &RibbonFilterState::new(),
+        &PaneControlState::new(),
+        &crate::pivot::PivotState::new(),
+        "biConnection",
+        &conn.to_string(),
+    );
+    let slicers: Vec<&ObjectDependent> = out.iter().filter(|d| d.kind == "slicer").collect();
+    assert_eq!(slicers.len(), 1, "exactly the model slicer of this connection: {out:?}");
+    assert_eq!(slicers[0].id, model_id.to_string());
+    assert_eq!(slicers[0].policy, "warnAndKeep");
+    assert_eq!(slicers[0].via, "cacheSourceId");
 }

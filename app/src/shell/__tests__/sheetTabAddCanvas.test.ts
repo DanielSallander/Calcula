@@ -12,6 +12,7 @@
 import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
+import { resolveTabClick } from "../SheetTabs/resolveTabClick";
 
 const SHELL = path.resolve(__dirname, "..");
 const TABS = fs.readFileSync(path.join(SHELL, "SheetTabs/SheetTabs.tsx"), "utf8");
@@ -68,14 +69,37 @@ describe("the split add control", () => {
 });
 
 describe("sheet groups", () => {
+  // A group replicates cell edits, clears and formats; the backend refuses all
+  // of them on a canvas for the WHOLE group. Since 2026-09-27 what a tab click
+  // means is decided by the pure `resolveTabClick`, so the rule is asserted
+  // there BEHAVIOURALLY, and the strip is asserted to act on its answer only.
+  const ctrlClick = (targetIsCanvas: boolean, activeIsCanvas: boolean) =>
+    resolveTabClick({
+      index: 1,
+      activeIndex: 0,
+      targetIsCanvas,
+      activeIsCanvas,
+      ctrlKey: true,
+      shiftKey: false,
+      dragging: false,
+      coreFormulaMode: false,
+      session: null,
+    });
+
   it("a canvas never joins a Ctrl+click group, from either end", () => {
-    // A group replicates cell edits, clears and formats; the backend refuses
-    // all of them on a canvas for the WHOLE group.
-    const branch = CODE.slice(CODE.indexOf("if (event?.ctrlKey && !isCurrentlyFormulaMode)"));
-    const guard = branch.slice(0, 600);
-    expect(guard).toMatch(/sheetAt\(sheets, index\)\?\.kind === "canvas"/);
-    expect(guard).toMatch(/sheetAt\(sheets, activeIndex\)\?\.kind === "canvas"/);
-    expect(guard.indexOf('kind === "canvas"')).toBeLessThan(guard.indexOf("toggleSheetInGroup("));
+    expect(ctrlClick(false, false)).toBe("group");
+    expect(ctrlClick(true, false)).toBe("ignore");
+    expect(ctrlClick(false, true)).toBe("ignore");
+  });
+
+  it("the strip toggles a group ONLY on the resolver's 'group' answer", () => {
+    const click = CODE.slice(CODE.indexOf("const handleSheetClick = useCallback("));
+    expect(click).toMatch(/const action = resolveTabClick\(\{/);
+    const branch = click.slice(click.indexOf('if (action === "group")'));
+    expect(branch.indexOf('if (action === "group")')).toBe(0);
+    expect(branch.slice(0, 300)).toContain("toggleSheetInGroup(");
+    // ...and nowhere else in the handler.
+    expect(click.split("toggleSheetInGroup(").length - 1).toBe(1);
   });
 });
 

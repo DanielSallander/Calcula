@@ -6,6 +6,8 @@ pub mod commands;
 pub mod computed;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod model_slicer_tests;
 
 pub use types::*;
 pub use commands::*;

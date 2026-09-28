@@ -41,26 +41,36 @@ type CommandHandler = () => void | Promise<void>;
  */
 export type CommandGuard = (selection: Selection | null) => boolean | string;
 
+/**
+ * Every grid command, ONCE. The type below is derived from this list, and
+ * @api re-exports both (api/extensions.ts) -- never a copy. The @api side used
+ * to be a hand-written union "that MUST match exactly" and had fallen to 8 of
+ * these 18, so an extension could not even NAME the fill, merge or clear-
+ * formatting doors, let alone guard them.
+ */
+export const GRID_COMMANDS = [
+  "cut",
+  "copy",
+  "paste",
+  "clearContents",
+  "clearFormatting",
+  "clearComments",
+  "clearHyperlinks",
+  "clearAll",
+  "insertRow",
+  "insertColumn",
+  "deleteRow",
+  "deleteColumn",
+  "mergeCells",
+  "unmergeCells",
+  "fillDown",
+  "fillRight",
+  "fillUp",
+  "fillLeft",
+] as const;
+
 /** Available command names */
-export type GridCommand =
-  | "cut"
-  | "copy"
-  | "paste"
-  | "clearContents"
-  | "clearFormatting"
-  | "clearComments"
-  | "clearHyperlinks"
-  | "clearAll"
-  | "insertRow"
-  | "insertColumn"
-  | "deleteRow"
-  | "deleteColumn"
-  | "mergeCells"
-  | "unmergeCells"
-  | "fillDown"
-  | "fillRight"
-  | "fillUp"
-  | "fillLeft";
+export type GridCommand = (typeof GRID_COMMANDS)[number];
 
 /** Command registry for direct handler invocation */
 class GridCommandRegistry {

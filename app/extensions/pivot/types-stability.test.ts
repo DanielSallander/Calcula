@@ -158,6 +158,7 @@ describe("CompileResult structure contract", () => {
       lookupColumns: [],
       calculatedFields: [],
       valueColumnOrder: [],
+      unresolvedInclusions: [],
       errors: [],
     };
 
@@ -169,6 +170,7 @@ describe("CompileResult structure contract", () => {
     expect(result.lookupColumns).toEqual([]);
     expect(result.calculatedFields).toEqual([]);
     expect(result.valueColumnOrder).toEqual([]);
+    expect(result.unresolvedInclusions).toEqual([]);
     expect(result.errors).toEqual([]);
   });
 
@@ -183,6 +185,7 @@ describe("CompileResult structure contract", () => {
       calculatedFields: [],
       valueColumnOrder: [],
       saveAs: "MyLayout",
+      unresolvedInclusions: [],
       errors: [],
     };
 

@@ -379,16 +379,11 @@ fn strip_cfg_test_items(text: &str) -> String {
 /// positive costs an argument; a false negative costs an app that stops
 /// answering with nothing in the log.
 fn inverted_grid_lock_holders(file: &str, text: &str) -> Vec<InvertedHolder> {
-    const FN_STARTS: &[&str] = &[
-        "fn ",
-        "pub fn ",
-        "pub(crate) fn ",
-        "pub(super) fn ",
-        "async fn ",
-        "pub async fn ",
-        "pub(crate) async fn ",
-    ];
-    let stripped = strip_cfg_test_items(text);
+    // The crate's ONE list of function-start spellings: this census kept its
+    // own and lacked `pub(super) async fn` (fix round 5).
+    use crate::formula_serialisation_tests::starts_a_function;
+    // Literals blanked FIRST: see `blank_literals` for the brace it hid.
+    let stripped = blank_literals(&strip_cfg_test_items(text));
     let lines: Vec<&str> = stripped.lines().collect();
     // Code only: a census that reads comments accepts a commented-out call.
     let code: Vec<&str> = lines
@@ -403,7 +398,7 @@ fn inverted_grid_lock_holders(file: &str, text: &str) -> Vec<InvertedHolder> {
     let mut pending: Option<i32> = None;
 
     for (i, raw) in lines.iter().enumerate() {
-        if FN_STARTS.iter().any(|p| raw.starts_with(p)) {
+        if starts_a_function(raw) {
             current = raw
                 .split("fn ")
                 .nth(1)
@@ -412,11 +407,24 @@ fn inverted_grid_lock_holders(file: &str, text: &str) -> Vec<InvertedHolder> {
             pending = None;
         }
         let line = code[i];
-        let grids_at = line.find("state.grids.read(").into_iter()
-            .chain(line.find("state.grids.write("))
+        // A chain continuation (`state\n    .grids\n    .read()`) is read as
+        // its whole statement, and a call counts on the line its METHOD is on
+        // (`chain_prefix`). `lock_pending` waits for the lock like `write`.
+        let prefix = chain_prefix(&code, i);
+        let joined = format!("{}{}", prefix, if prefix.is_empty() { line } else { line.trim_start() });
+        let on_this_line = |needle: &str| {
+            joined
+                .match_indices(needle)
+                .map(|(at, _)| at)
+                .find(|at| at + needle.len() > prefix.len())
+        };
+        let grids_at = on_this_line("state.grids.read(").into_iter()
+            .chain(on_this_line("state.grids.write("))
+            .chain(on_this_line("state.grids.lock_pending("))
             .min();
-        let grid_at = line.find("state.grid.read(").into_iter()
-            .chain(line.find("state.grid.write("))
+        let grid_at = on_this_line("state.grid.read(").into_iter()
+            .chain(on_this_line("state.grid.write("))
+            .chain(on_this_line("state.grid.lock_pending("))
             .min();
 
         if pending.is_some() {
@@ -897,6 +905,12 @@ const CONSUMING: &[&str] = &[
     ".to_vec()",
     ".as_ref()",
     ".and_then(",
+    // `map.remove(k)` hands back the REMOVED VALUE, never the guard, so
+    // `let saved = state.x.lock().unwrap().remove(&k);` binds an owned value
+    // and the guard dies at the `;`. Missing here, it read as a held guard as
+    // soon as the census could see split chains (fix round 4:
+    // `anim_restore_inner`'s snapshot take, written over five lines).
+    ".remove(",
 ];
 
 fn trailing_ident(text: &str) -> &str {
@@ -911,6 +925,260 @@ fn trailing_ident(text: &str) -> &str {
         }
     }
     &text[start..]
+}
+
+/// BLANK THE INSIDE OF EVERY LITERAL, keeping the text's shape.
+///
+/// The census counts braces to know when a guard's block ends, and it counted
+/// them in string and char literals too. `format!("Pivot table {} not found",
+/// id)` is one `{` and one `}` on one line; closes are applied before opens
+/// (see `grid_locks_taken_while_holding`), so the depth dipped below the
+/// guard's own block for a moment and the guard it was tracking was
+/// FORGOTTEN. That is how `get_pivot_source_data` held `pivot_tables` while it
+/// took `grids` -- a direct ABBA against the calculation pass -- with this
+/// census green (fix round 3, review finding 3). A string can also hold
+/// `state.grids.read(` or `//` (a URL), which read as an acquisition and as a
+/// comment start.
+///
+/// So the inside of every string, raw string (`r#"..."#`), byte string and
+/// char literal (`'{'`, `'"'`, `'\''`) becomes spaces, and so does every block
+/// comment. Delimiters, line comments (the callers strip those themselves) and
+/// EVERY NEWLINE stay, so line numbers and column positions are unchanged. A
+/// lifetime (`'a`, `'static`) is not a char literal and is left alone; a quote
+/// inside a line comment (`// don't`) opens nothing.
+fn blank_literals(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(text.len());
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let blank = |c: char| if c == '\n' || c == '\r' { c } else { ' ' };
+    let mut i = 0usize;
+    while i < n {
+        let c = chars[i];
+        // A line comment: copied through verbatim, so a quote in it opens nothing.
+        if c == '/' && i + 1 < n && chars[i + 1] == '/' {
+            while i < n && chars[i] != '\n' {
+                out.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
+        // A block comment (they nest): blanked.
+        if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+            let mut depth = 0i32;
+            while i < n {
+                if chars[i] == '/' && i + 1 < n && chars[i + 1] == '*' {
+                    depth += 1;
+                    out.push_str("  ");
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == '*' && i + 1 < n && chars[i + 1] == '/' {
+                    depth -= 1;
+                    out.push_str("  ");
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                out.push(blank(chars[i]));
+                i += 1;
+            }
+            continue;
+        }
+        // A raw string: `r"..."`, `r#"..."#`, `br"..."`. `r#ident` (a raw
+        // identifier) has no quote after its hashes and falls through.
+        let starts_word = i == 0 || !is_ident(chars[i - 1]) || (chars[i - 1] == 'b' && (i < 2 || !is_ident(chars[i - 2])));
+        if c == 'r' && starts_word {
+            let mut j = i + 1;
+            let mut hashes = 0usize;
+            while j < n && chars[j] == '#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < n && chars[j] == '"' {
+                for &k in &chars[i..=j] {
+                    out.push(k);
+                }
+                i = j + 1;
+                while i < n {
+                    if chars[i] == '"' && (0..hashes).all(|h| i + 1 + h < n && chars[i + 1 + h] == '#') {
+                        out.push('"');
+                        for _ in 0..hashes {
+                            out.push('#');
+                        }
+                        i += 1 + hashes;
+                        break;
+                    }
+                    out.push(blank(chars[i]));
+                    i += 1;
+                }
+                continue;
+            }
+        }
+        // An ordinary (or byte) string, with its escapes.
+        if c == '"' {
+            out.push('"');
+            i += 1;
+            while i < n {
+                if chars[i] == '\\' && i + 1 < n {
+                    out.push(' ');
+                    out.push(blank(chars[i + 1]));
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == '"' {
+                    out.push('"');
+                    i += 1;
+                    break;
+                }
+                out.push(blank(chars[i]));
+                i += 1;
+            }
+            continue;
+        }
+        // A char literal -- or a lifetime / loop label, which is left alone.
+        if c == '\'' {
+            if i + 1 < n && chars[i + 1] == '\\' {
+                // `'\n'`, `'\''`, `'\u{7F}'`: the escaped char is skipped, then
+                // the literal ends at the next quote on this line.
+                let mut j = i + 3;
+                while j < n && chars[j] != '\'' && chars[j] != '\n' {
+                    j += 1;
+                }
+                if j < n && chars[j] == '\'' {
+                    out.push('\'');
+                    for &k in &chars[i + 1..j] {
+                        out.push(blank(k));
+                    }
+                    out.push('\'');
+                    i = j + 1;
+                    continue;
+                }
+            } else if i + 2 < n && chars[i + 2] == '\'' && chars[i + 1] != '\n' {
+                out.push_str("' '");
+                i += 3;
+                continue;
+            }
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// The text a METHOD-CHAIN continuation line belongs to.
+///
+/// ```text
+/// let bi_meta = pivot_state
+///     .bi_metadata
+///     .read()
+/// ```
+///
+/// Judged alone, the third line has no receiver: the name before `.read(` is
+/// empty, `acquisitions_in` skipped it, and the guard -- bound, and alive for
+/// the rest of the block -- was invisible (fix round 3: the grid-backed
+/// drill-through held `pivot_tables` and `bi_metadata`, both taken this way,
+/// while it read `grids`). For a line whose code starts with `.`, this returns
+/// the lines above it back to the chain's head (the first line that does not
+/// start with `.`), the head with its indentation and every link trimmed, so
+/// `prefix + line.trim_start()` reads as the one-line statement. Empty for a
+/// line that continues nothing.
+fn chain_prefix(code: &[&str], i: usize) -> String {
+    if !code[i].trim_start().starts_with('.') {
+        return String::new();
+    }
+    let mut pieces: Vec<&str> = Vec::new();
+    let mut head: Option<usize> = None;
+    let mut j = i;
+    let mut steps = 0;
+    while j > 0 && steps < 8 {
+        j -= 1;
+        steps += 1;
+        let prev = code[j];
+        let t = prev.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t.ends_with(';') || t.ends_with('{') || t.ends_with('}') {
+            // A finished statement or a block edge: nothing to continue.
+            break;
+        }
+        if t.starts_with('.') {
+            pieces.push(t);
+            continue;
+        }
+        pieces.push(prev.trim_end());
+        head = Some(j);
+        break;
+    }
+    pieces.reverse();
+    // The chain's head can itself follow a `let` split after its `=`
+    // (`let_head_above`): then the statement starts there.
+    let above = head.map(|h| let_head_above(code, h)).unwrap_or_default();
+    format!("{}{}", above, pieces.concat())
+}
+
+/// The `let` head of a statement split RIGHT AFTER ITS `=`.
+///
+/// ```text
+/// let sheet_names_for_the_whole_workbook_guard =
+///     state.sheet_names.read().unwrap();
+/// ```
+///
+/// rustfmt breaks a long binding exactly there. Judged alone, the second line
+/// has no `let` and nothing before its receiver, so the guard read as a
+/// temporary that died at the `;` -- and whatever it was held across was
+/// invisible to all three censuses (fix round 5, the review of round 4: the
+/// same split-statement class as blind spot (c); ten statements in the crate
+/// have the shape, every one consuming its guard today). For line `i`, when
+/// the nearest code line above it is a `let` ending in a BARE `=` (not `==`,
+/// `<=`, `+=` or another operator ending in one), returns that line trimmed
+/// at the end plus a space, so `head + line.trim_start()` reads as the
+/// one-line statement. Empty otherwise.
+fn let_head_above(code: &[&str], i: usize) -> String {
+    const OPERATORS_ENDING_IN_EQUALS: [&str; 12] =
+        ["==", "!=", "<=", ">=", "+=", "-=", "*=", "/=", "%=", "^=", "|=", "&="];
+    let mut j = i;
+    while j > 0 {
+        j -= 1;
+        let t = code[j].trim();
+        if t.is_empty() {
+            continue;
+        }
+        let bare_equals = t.ends_with('=') && !OPERATORS_ENDING_IN_EQUALS.iter().any(|op| t.ends_with(op));
+        if bare_equals && t.contains("let ") {
+            return format!("{} ", code[j].trim_end());
+        }
+        return String::new();
+    }
+    String::new()
+}
+
+/// Every acquisition on line `i` of `code`, read as the whole statement when
+/// the line continues a method chain (`chain_prefix`), plus that statement's
+/// text (for the caller's `let` question). Only a call whose method is ON this
+/// line counts, so a chain is never counted once per link.
+fn acquisitions_at(code: &[&str], i: usize, tail: &str) -> (Vec<Acquisition>, String) {
+    let mut prefix = chain_prefix(code, i);
+    if prefix.is_empty() {
+        // Not a chain continuation, but perhaps the right-hand side of a `let`
+        // split after its `=` (`let_head_above`).
+        prefix = let_head_above(code, i);
+    }
+    if prefix.is_empty() {
+        return (acquisitions_in(code[i], tail), code[i].to_string());
+    }
+    let joined = format!("{}{}", prefix, code[i].trim_start());
+    let found = acquisitions_in(&joined, tail)
+        .into_iter()
+        .filter(|a| a.col >= prefix.len())
+        .collect();
+    (found, joined)
 }
 
 /// Every lock acquisition on one line of code, in source order.
@@ -929,7 +1197,15 @@ fn trailing_ident(text: &str) -> &str {
 /// like it takes the same lock twice while holding it.
 fn acquisitions_in(line: &str, tail: &str) -> Vec<Acquisition> {
     let mut out = Vec::new();
-    for method in [".read(", ".write(", ".lock("] {
+    // `.lock_pending(` WAITS FOR THE LOCK exactly as `.write(` does -- it is
+    // the same `Mutex::lock` with the dirty decision postponed -- and it was
+    // missing here, so every guard taken that way was invisible to all three
+    // censuses (fix round 4: `drill_through_to_sheet` took `sheet_names`,
+    // `grids` and `active_sheet` that way and then waited for `grid`, and
+    // `rename_sheet_inner` held `sheet_names` the same way while it took both
+    // grid locks). `.lock(` does not match inside `.lock_pending(`, so the two
+    // can never double-count one call.
+    for method in [".read(", ".write(", ".lock(", ".lock_pending("] {
         let mut from = 0usize;
         while let Some(rel) = line[from..].find(method) {
             let at = from + rel;
@@ -1002,17 +1278,11 @@ fn acquisitions_in(line: &str, tail: &str) -> Vec<Acquisition> {
 ///     `if sheet_index == active_sheet { grid } else { grids }` reads as one
 ///     arm holding the other arm's guards.
 fn grid_locks_taken_while_holding(file: &str, text: &str) -> Vec<GridLockHolder> {
-    const FN_STARTS: &[&str] = &[
-        "fn ",
-        "pub fn ",
-        "pub(crate) fn ",
-        "pub(super) fn ",
-        "async fn ",
-        "pub async fn ",
-        "pub(crate) async fn ",
-        "pub(super) async fn ",
-    ];
-    let stripped = strip_cfg_test_items(text);
+    // The crate's ONE list of function-start spellings: this census kept its
+    // own and lacked `pub(super) async fn` (fix round 5).
+    use crate::formula_serialisation_tests::starts_a_function;
+    // Literals blanked FIRST: see `blank_literals` for the brace it hid.
+    let stripped = blank_literals(&strip_cfg_test_items(text));
     let lines: Vec<&str> = stripped.lines().collect();
     // Code only: a census that reads comments accepts a commented-out call.
     let code: Vec<&str> = lines
@@ -1038,7 +1308,7 @@ fn grid_locks_taken_while_holding(file: &str, text: &str) -> Vec<GridLockHolder>
     let mut spawn_until: Option<i32> = None;
 
     for (i, raw) in lines.iter().enumerate() {
-        if FN_STARTS.iter().any(|p| raw.starts_with(p)) {
+        if starts_a_function(raw) {
             current = raw
                 .split("fn ")
                 .nth(1)
@@ -1070,10 +1340,10 @@ fn grid_locks_taken_while_holding(file: &str, text: &str) -> Vec<GridLockHolder>
                 break;
             }
         }
-        let acquisitions = if spawn_until.is_some() {
-            Vec::new()
+        let (acquisitions, statement) = if spawn_until.is_some() {
+            (Vec::new(), line.to_string())
         } else {
-            acquisitions_in(line, &tail)
+            acquisitions_at(&code, i, &tail)
         };
         for acq in acquisitions {
             if held_named.iter().any(|(f, _, _)| *f == acq.field) {
@@ -1120,7 +1390,7 @@ fn grid_locks_taken_while_holding(file: &str, text: &str) -> Vec<GridLockHolder>
                 // its six guards that way) as clean, and passed against a tree
                 // with the defect deliberately re-introduced. The statement
                 // being a `let` is what tells them apart.
-                let is_let_binding = line.trim_start().starts_with("let ");
+                let is_let_binding = statement.trim_start().starts_with("let ");
                 let scope = if !is_let_binding && line.trim_end().ends_with('{') {
                     depth + 1
                 } else {
@@ -1458,17 +1728,11 @@ struct PairInversion {
 /// analysis the grid census already has to get right — including the `.ok()`
 /// correction, which is the whole reason this pair got through.
 fn pair_inversions(file: &str, text: &str, held: &str, then: &str) -> Vec<PairInversion> {
-    const FN_STARTS: &[&str] = &[
-        "fn ",
-        "pub fn ",
-        "pub(crate) fn ",
-        "pub(super) fn ",
-        "async fn ",
-        "pub async fn ",
-        "pub(crate) async fn ",
-        "pub(super) async fn ",
-    ];
-    let stripped = strip_cfg_test_items(text);
+    // The crate's ONE list of function-start spellings: this census kept its
+    // own and lacked `pub(super) async fn` (fix round 5).
+    use crate::formula_serialisation_tests::starts_a_function;
+    // Literals blanked FIRST: see `blank_literals` for the brace it hid.
+    let stripped = blank_literals(&strip_cfg_test_items(text));
     let lines: Vec<&str> = stripped.lines().collect();
     let code: Vec<&str> = lines
         .iter()
@@ -1483,7 +1747,7 @@ fn pair_inversions(file: &str, text: &str, held: &str, then: &str) -> Vec<PairIn
     let mut spawn_until: Option<i32> = None;
 
     for (i, raw) in lines.iter().enumerate() {
-        if FN_STARTS.iter().any(|p| raw.starts_with(p)) {
+        if starts_a_function(raw) {
             current = raw
                 .split("fn ")
                 .nth(1)
@@ -1505,10 +1769,10 @@ fn pair_inversions(file: &str, text: &str, held: &str, then: &str) -> Vec<PairIn
                 break;
             }
         }
-        let acquisitions = if spawn_until.is_some() {
-            Vec::new()
+        let (acquisitions, statement) = if spawn_until.is_some() {
+            (Vec::new(), line.to_string())
         } else {
-            acquisitions_in(line, &tail)
+            acquisitions_at(&code, i, &tail)
         };
         for acq in acquisitions {
             // A MOMENTARY acquisition deadlocks exactly as a held one does: the
@@ -1523,7 +1787,7 @@ fn pair_inversions(file: &str, text: &str, held: &str, then: &str) -> Vec<PairIn
                 }
             }
             if acq.field == held && acq.live {
-                let is_let_binding = line.trim_start().starts_with("let ");
+                let is_let_binding = statement.trim_start().starts_with("let ");
                 let scope = if !is_let_binding && line.trim_end().ends_with('{') {
                     depth + 1
                 } else {
@@ -1788,5 +2052,529 @@ fn the_tables_probe_itself_can_fail_the_way_the_defect_did() {
         "the probe reported `tables` as reachable while a thread was holding it \
          and waiting for `sheet_names` — it cannot detect the defect it exists \
          for, and the test above is vacuous"
+    );
+}
+
+// ===========================================================================
+// FIX ROUND 4: THE THREE BLIND SPOTS ROUND 3 DEMONSTRATED
+// ===========================================================================
+//
+// Each was a real acquisition this census could not see, and each hid a real
+// inversion while the gate stayed green:
+//
+//   (a) `lock_pending()` was not an acquisition at all (`drill_through_to_sheet`
+//       took `sheet_names`, `grids` and `active_sheet` that way and then waited
+//       for `grid`);
+//   (b) a `{}` inside a string literal dipped the brace depth and made the scan
+//       forget the guard it was tracking (`get_pivot_source_data` held
+//       `pivot_tables` while it took `grids`);
+//   (c) a method chain split over lines left `.read()` with no name before it
+//       (the grid-backed drill-through held `pivot_tables` and `bi_metadata`,
+//       both taken that way, while it read `grids`).
+//
+// Each fixture below is the defect's own shape; the census must FLAG it.
+
+#[test]
+fn the_census_sees_a_lock_pending_acquisition() {
+    let held_then_grids = "pub fn f(state: &AppState) {\n    let n = state.sheet_names.lock_pending().unwrap();\n    let g = state.grids.lock_pending().unwrap();\n}\n";
+    let found = grid_locks_taken_while_holding("planted.rs", held_then_grids);
+    assert_eq!(
+        found.len(),
+        1,
+        "the grid census cannot see a guard taken with lock_pending(): {:?}",
+        found
+    );
+    assert_eq!(found[0].holding, vec!["sheet_names".to_string()], "{:?}", found);
+
+    let pair = "pub fn f(state: &AppState) {\n    let t = state.tables.lock_pending().unwrap();\n    let n = state.sheet_names.lock_pending().unwrap();\n}\n";
+    assert_eq!(
+        pair_inversions("planted.rs", pair, "tables", "sheet_names").len(),
+        1,
+        "the pair census cannot see a guard taken with lock_pending()"
+    );
+
+    let inverted = "pub fn f(state: &AppState) {\n    let gs = state.grids.lock_pending().unwrap();\n    let g = state.grid.lock_pending().unwrap();\n}\n";
+    assert_eq!(
+        inverted_grid_lock_holders("planted.rs", inverted).len(),
+        1,
+        "the grid/grids census cannot see a guard taken with lock_pending()"
+    );
+}
+
+#[test]
+fn a_brace_or_quote_inside_a_literal_does_not_hide_a_held_guard() {
+    let cases: &[(&str, &str)] = &[
+        (
+            // `get_pivot_source_data` as it stood.
+            "a format string's {}",
+            r##"pub fn f(state: &AppState, pivot_state: &PivotState) {
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+    let d = pivot_tables.get(&id).ok_or_else(|| format!("Pivot table {} not found", id))?;
+    let grids = state.grids.read().unwrap();
+}
+"##,
+        ),
+        (
+            "a lone closing brace in a string",
+            r##"pub fn f(state: &AppState, pivot_state: &PivotState) {
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+    log("}");
+    let grids = state.grids.read().unwrap();
+}
+"##,
+        ),
+        (
+            "a closing brace char literal",
+            r##"pub fn f(state: &AppState, pivot_state: &PivotState) {
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+    let close = '}';
+    let grids = state.grids.read().unwrap();
+}
+"##,
+        ),
+        (
+            "a raw string holding braces and quotes",
+            r###"pub fn f(state: &AppState, pivot_state: &PivotState) {
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+    let json = r#"{"a": "}}"}"#;
+    let grids = state.grids.read().unwrap();
+}
+"###,
+        ),
+        (
+            "an escaped quote before a brace",
+            r##"pub fn f(state: &AppState, pivot_state: &PivotState) {
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+    let s = "\"}";
+    let grids = state.grids.read().unwrap();
+}
+"##,
+        ),
+        (
+            // Lexed as a string opener, `'"'` would swallow everything up to the
+            // next quote -- the grids acquisition with it.
+            "a quote char literal opens no string",
+            r##"pub fn f(state: &AppState) {
+    let n = state.sheet_names.read().unwrap();
+    let q = '"';
+    let g = state.grids.read().unwrap();
+    let r = '"';
+}
+"##,
+        ),
+        (
+            // Same, for a quote inside a comment.
+            "a quote inside a comment opens no string",
+            r##"pub fn f(state: &AppState) {
+    // a 5" gap
+    let n = state.sheet_names.read().unwrap();
+    let g = state.grids.read().unwrap();
+    log("x");
+}
+"##,
+        ),
+    ];
+    for (label, src) in cases {
+        let found = grid_locks_taken_while_holding("planted.rs", src);
+        assert_eq!(
+            found.len(),
+            1,
+            "the census lost track of a held guard on the `{}` shape: {:?}",
+            label,
+            found
+        );
+        assert_eq!(found[0].acquiring, "grids", "`{}`: {:?}", label, found);
+    }
+    // The pair census shares the brace walk.
+    let pair = r##"pub fn f(state: &AppState) {
+    let t = state.tables.read().unwrap();
+    let m = format!("{} tables", t.len());
+    let n = state.sheet_names.read().unwrap();
+}
+"##;
+    assert_eq!(
+        pair_inversions("planted.rs", pair, "tables", "sheet_names").len(),
+        1,
+        "the pair census lost track of a guard after a format string's braces"
+    );
+}
+
+#[test]
+fn the_census_sees_a_lock_taken_through_a_method_chain_split_over_lines() {
+    // The grid-backed drill-through as it stood: the held guard taken through a
+    // chain, and the grid lock too.
+    let chained = r##"pub fn f(state: &AppState, pivot_state: &PivotState) {
+    let bi_meta = pivot_state
+        .bi_metadata
+        .read()
+        .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+    let grids = state
+        .grids
+        .read()
+        .map_err(|e| format!("grids lock poisoned: {}", e))?;
+}
+"##;
+    let found = grid_locks_taken_while_holding("planted.rs", chained);
+    assert_eq!(found.len(), 1, "a lock taken through a split method chain is invisible: {:?}", found);
+    assert_eq!(found[0].acquiring, "grids", "{:?}", found);
+    assert_eq!(found[0].holding, vec!["bi_metadata".to_string()], "{:?}", found);
+
+    // The receiver on its own line too, and `lock_pending` through a chain.
+    let receiver_split = "pub fn f(state: &AppState) {\n    let n = state\n        .sheet_names\n        .lock_pending()\n        .unwrap();\n    let g = state\n        .grid\n        .lock_pending()\n        .unwrap();\n}\n";
+    let found = grid_locks_taken_while_holding("planted.rs", receiver_split);
+    assert_eq!(found.len(), 1, "{:?}", found);
+    assert_eq!(found[0].acquiring, "grid", "{:?}", found);
+
+    let pair = "pub fn f(state: &AppState) {\n    let t = state\n        .tables\n        .read()\n        .unwrap();\n    let n = state\n        .sheet_names\n        .read()\n        .unwrap();\n}\n";
+    assert_eq!(
+        pair_inversions("planted.rs", pair, "tables", "sheet_names").len(),
+        1,
+        "the pair census cannot see a split method chain"
+    );
+
+    let inverted = "pub fn f(state: &AppState) {\n    let gs = state\n        .grids\n        .read()\n        .unwrap();\n    let g = state\n        .grid\n        .read()\n        .unwrap();\n}\n";
+    assert_eq!(
+        inverted_grid_lock_holders("planted.rs", inverted).len(),
+        1,
+        "the grid/grids census cannot see a split method chain"
+    );
+}
+
+/// FIX ROUND 5 (the review of round 4, finding 3). rustfmt splits a long
+/// binding right after its `=`, which leaves the lock call on a line with no
+/// `let` before it; the census read that guard as a temporary, so everything
+/// it was held across was invisible. The reviewer's fixture first, then the
+/// same split over a method chain and over a `match`, then the pair and the
+/// re-entrancy questions, which read guards the same way.
+#[test]
+fn the_census_sees_a_guard_whose_let_is_split_after_the_equals_sign() {
+    let split = "pub fn f(state: &AppState) {\n    let sheet_names_for_the_whole_workbook_guard =\n        state.sheet_names.read().unwrap();\n    let g = state.grids.read().unwrap();\n}\n";
+    let found = grid_locks_taken_while_holding("planted.rs", split);
+    assert_eq!(found.len(), 1, "a guard bound by a `let` split after its `=` read as a temporary: {:?}", found);
+    assert_eq!(found[0].acquiring, "grids", "{:?}", found);
+    assert_eq!(found[0].holding, vec!["sheet_names".to_string()], "{:?}", found);
+
+    let split_chain = "pub fn f(state: &AppState, pivot_state: &PivotState) {\n    let bi_meta =\n        pivot_state\n            .bi_metadata\n            .read()\n            .unwrap();\n    let grids = state.grids.read().unwrap();\n}\n";
+    let found = grid_locks_taken_while_holding("planted.rs", split_chain);
+    assert_eq!(found.len(), 1, "a split `let` over a method chain read as a temporary: {:?}", found);
+    assert_eq!(found[0].holding, vec!["bi_metadata".to_string()], "{:?}", found);
+
+    let split_match = "pub fn f(state: &AppState) {\n    let names =\n        match state.sheet_names.read() {\n            Ok(n) => n,\n            Err(_) => return,\n        };\n    let g = state.grid.read().unwrap();\n}\n";
+    let found = grid_locks_taken_while_holding("planted.rs", split_match);
+    assert_eq!(found.len(), 1, "a split `let ... = match` read as a temporary: {:?}", found);
+
+    let pair = "pub fn f(state: &AppState) {\n    let t =\n        state.tables.read().unwrap();\n    let n = state.sheet_names.read().unwrap();\n}\n";
+    assert_eq!(
+        pair_inversions("planted.rs", pair, "tables", "sheet_names").len(),
+        1,
+        "the pair census cannot see a guard whose `let` is split after its `=`"
+    );
+
+    let twice = "pub fn f(state: &AppState) {\n    let first =\n        state.tables.read().unwrap();\n    let second = state.tables.read().unwrap();\n}\n";
+    assert!(
+        grid_locks_taken_while_holding("planted.rs", twice).iter().any(|h| h.reentrant),
+        "the re-entrancy census cannot see a guard whose `let` is split after its `=`"
+    );
+}
+
+/// ...and the split form stays quiet wherever the one-line form is quiet.
+#[test]
+fn a_split_let_that_consumes_releases_or_orders_its_guard_correctly_holds_nothing() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "consumed on the same line",
+            "pub fn f(state: &AppState) {\n    let count =\n        state.sheet_names.read().unwrap().len();\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            "consumed on the next line",
+            "pub fn f(state: &AppState) {\n    let names =\n        state.sheet_names.read().unwrap()\n            .clone();\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            "released by name",
+            "pub fn f(state: &AppState) {\n    let names =\n        state.sheet_names.read().unwrap();\n    drop(names);\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            "the canonical order",
+            "pub fn f(state: &AppState) {\n    let g =\n        state.grid.read().unwrap();\n    let gs =\n        state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            // Only a BARE `=` binds: a comparison split after `==` does not.
+            "a comparison split after `==`",
+            "pub fn f(state: &AppState) {\n    let same = expected ==\n        state.sheet_names.read().unwrap();\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+    ];
+    for (label, src) in cases {
+        let found = grid_locks_taken_while_holding("planted.rs", src);
+        assert!(found.is_empty(), "the census fired on the `{}` shape, which is CORRECT code: {:?}", label, found);
+    }
+}
+
+/// FIX ROUND 5 (the review of round 4, finding 4). Every census in this file
+/// recognises a function start by the crate's ONE list
+/// (`formula_serialisation_tests::FN_START_SPELLINGS`). The grid/grids census
+/// kept its own and lacked `pub(super) async fn` -- the crate declares
+/// `bi/model_editor.rs` functions that way -- so an inversion declared so was
+/// charged to the function before it.
+#[test]
+fn every_lock_census_sees_every_function_start_spelling() {
+    // A LITERAL list, not the constant: a spelling dropped from the constant
+    // must fail here, not silently leave the loop.
+    for start in [
+        "fn ",
+        "pub fn ",
+        "pub(crate) fn ",
+        "pub(super) fn ",
+        "async fn ",
+        "pub async fn ",
+        "pub(crate) async fn ",
+        "pub(super) async fn ",
+    ] {
+        let quiet = "pub fn before(state: &AppState) {\n    let n = 1;\n}\n\n";
+        let inverted = format!(
+            "{quiet}{start}offender(state: &AppState) {{\n    let gs = state.grids.read().unwrap();\n    let g = state.grid.read().unwrap();\n}}\n"
+        );
+        assert_eq!(
+            inverted_grid_lock_holders("planted.rs", &inverted),
+            vec![InvertedHolder { file: "planted.rs".to_string(), function: "offender".to_string() }],
+            "the grid/grids census does not read `{start}` as the start of a function"
+        );
+        let holder = format!(
+            "{quiet}{start}offender(state: &AppState) {{\n    let n = state.sheet_names.read().unwrap();\n    let g = state.grids.read().unwrap();\n}}\n"
+        );
+        let named: Vec<String> =
+            grid_locks_taken_while_holding("planted.rs", &holder).into_iter().map(|h| h.function).collect();
+        assert_eq!(named, vec!["offender".to_string()], "the grid census does not read `{start}` as the start of a function");
+        let pair = format!(
+            "{quiet}{start}offender(state: &AppState) {{\n    let t = state.tables.read().unwrap();\n    let n = state.sheet_names.read().unwrap();\n}}\n"
+        );
+        let named: Vec<String> =
+            pair_inversions("planted.rs", &pair, "tables", "sheet_names").into_iter().map(|h| h.function).collect();
+        assert_eq!(named, vec!["offender".to_string()], "the pair census does not read `{start}` as the start of a function");
+    }
+}
+
+#[test]
+fn the_sharpened_census_stays_quiet_on_correct_code() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "lifetimes are not char literals",
+            r##"pub fn f<'a>(state: &'a AppState) -> &'a str {
+    let g = state.grid.read().unwrap();
+    let gs = state.grids.read().unwrap();
+    let n = state.sheet_names.read().unwrap();
+    ""
+}
+"##,
+        ),
+        (
+            "an acquisition spelled inside a string is not code",
+            r##"pub fn f(state: &AppState) {
+    let n = state.sheet_names.read().unwrap();
+    log("never state.grids.read() here");
+}
+"##,
+        ),
+        (
+            "a chain consumed on a later line holds nothing",
+            "pub fn f(state: &AppState) {\n    let n = state\n        .sheet_names\n        .read()\n        .map(|s| s.len())\n        .unwrap_or(0);\n    let g = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            // A chain is ONE acquisition, not one per link: counted twice, the
+            // second would read as `grid` taken while `grid` is held.
+            "a chain is counted once",
+            "pub fn f(state: &AppState) {\n    let g = state.grid.read()\n        .unwrap();\n    let gs = state.grids.read().unwrap();\n}\n",
+        ),
+        (
+            "canonical order through lock_pending",
+            "pub fn f(state: &AppState) {\n    let g = state.grid.lock_pending().unwrap();\n    let gs = state.grids.lock_pending().unwrap();\n    let n = state.sheet_names.lock_pending().unwrap();\n}\n",
+        ),
+    ];
+    for (label, src) in cases {
+        let found = grid_locks_taken_while_holding("planted.rs", src);
+        assert!(found.is_empty(), "the census fired on the `{}` shape, which is CORRECT code: {:?}", label, found);
+    }
+}
+
+#[test]
+fn a_guard_consumed_by_remove_holds_nothing() {
+    // `anim_restore_inner`'s snapshot take, as it is written: a chain over five
+    // lines ending in `.remove(..)`, which binds the REMOVED VALUE. Before
+    // `.remove(` was in CONSUMING, the sharpened census read the guard as held
+    // across the grid locks taken below it.
+    let src = "pub(crate) fn f(state: &AppState) {\n    let saved = state\n        .animation_snapshots\n        .lock()\n        .unwrap()\n        .remove(&params.token);\n    let mut grid = state.grid.write(&effect).unwrap();\n    let mut grids = state.grids.write(&effect).unwrap();\n}\n";
+    let found = grid_locks_taken_while_holding("planted.rs", src);
+    assert!(found.is_empty(), "a guard consumed by .remove() read as held: {:?}", found);
+    // ...while a guard BOUND and then used for a remove is still held.
+    let held = "pub(crate) fn f(state: &AppState) {\n    let mut snaps = state.animation_snapshots.lock().unwrap();\n    let saved = snaps.remove(&params.token);\n    let mut grid = state.grid.write(&effect).unwrap();\n}\n";
+    assert_eq!(grid_locks_taken_while_holding("planted.rs", held).len(), 1, "a bound guard must stay held");
+}
+
+/// NON-VACUITY for `blank_literals` over the REAL crate: blanking must keep
+/// every file's line count (so line numbers and spans still mean what they
+/// meant), and it must never swallow a line of RUST code into a literal. A
+/// mis-lexed quote -- a char literal read as a string opener, a lifetime read
+/// as a char literal -- would silently blank everything up to the next quote,
+/// and this census would then report "no violations" for code it never read.
+/// The only lines blanked are literal contents; the JavaScript embedded in
+/// `calp_commands.rs` and `script_frame.rs` is exactly that, and none of it
+/// starts the way a Rust statement does.
+#[test]
+fn blanking_literals_swallows_no_rust_code_anywhere_in_the_crate() {
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rs_files(&src_root, &mut files);
+    assert!(files.len() > 50, "the walk is not finding the crate");
+    let mut offenders: Vec<String> = Vec::new();
+    let mut blanked_any = 0usize;
+    for path in &files {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if name.ends_with("_tests.rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let rel = path
+            .strip_prefix(&src_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let stripped = strip_cfg_test_items(&text);
+        let blanked = blank_literals(&stripped);
+        let before: Vec<&str> = stripped.lines().collect();
+        let after: Vec<&str> = blanked.lines().collect();
+        if before.len() != after.len() {
+            offenders.push(format!("  {}: {} lines became {}", rel, before.len(), after.len()));
+            continue;
+        }
+        for (i, (was, now)) in before.iter().zip(after.iter()).enumerate() {
+            let code = was.split("//").next().unwrap_or("").trim();
+            if code.is_empty() || !now.trim().is_empty() {
+                continue;
+            }
+            blanked_any += 1;
+            let rust_statement = ["let ", "let mut ", "pub fn ", "pub(crate) fn ", "fn ", "match ", "state."]
+                .iter()
+                .any(|p| code.starts_with(p))
+                && (code.ends_with(';') || code.ends_with('{'));
+            if rust_statement {
+                offenders.push(format!("  {}:{}: {}", rel, i + 1, code));
+            }
+        }
+    }
+    assert!(
+        blanked_any > 0,
+        "nothing in the crate was blanked -- the multi-line literals it carries were not recognised"
+    );
+    assert!(
+        offenders.is_empty(),
+        "blank_literals swallowed Rust code into a literal, so every census built on it \
+         cannot see these lines:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// FIX ROUND 4. `apply_changes` (the body of Undo and Redo) took `undo_stack`
+/// FIRST and then waited for `grid`. The comment beside it called that the
+/// crate's canonical order; the sharpened census showed the opposite -- every
+/// cell writer (update_cell, clear_range, sort_range, fill_range,
+/// set_cell_style, merge_cells, the structural edits, the MCP formatting tool:
+/// some forty functions) records its undo step while it HOLDS the grid locks.
+/// The MCP server's tools run off the main thread, so a Ctrl+Z overlapping one
+/// of them could leave each holding what the other waited for.
+///
+/// This thread plays the writer mid-command: it holds `grid` and takes
+/// `undo_stack` next. The restore runs on another thread and must wait for
+/// `grid` holding NOTHING the writer needs.
+#[test]
+fn undoing_never_holds_the_undo_stack_while_it_waits_for_a_grid_lock() {
+    let state = crate::create_app_state();
+    let file = crate::persistence::FileState::default();
+    let files = crate::persistence::UserFilesState::default();
+    let pivots = PivotState::new();
+    let slicers = SlicerState::new();
+    let filters = RibbonFilterState::new();
+    let pane = crate::pane_control::PaneControlState::new();
+    let timelines = crate::timeline_slicer::TimelineSlicerState::new();
+    let mut transaction = crate::Transaction::new("Edit A1");
+    transaction.add_change(crate::CellChange::SetCell { sheet: 0, row: 0, col: 0, previous: None });
+
+    let (parked, reached, result) = std::thread::scope(|scope| {
+        let writer_holds_grid = state.grid.write(&test_seed_effect()).unwrap();
+        let runner = scope.spawn(|| {
+            crate::undo_commands::apply_changes(
+                &state, &file, &files, &pivots, &slicers, &filters, &pane, &timelines, transaction, true,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        // The restore needs `grid`, so it cannot have finished.
+        let parked = !runner.is_finished();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let state_ref = &state;
+        let taker = scope.spawn(move || {
+            let _g = state_ref.undo_stack.lock().unwrap();
+            let _ = tx.send(());
+        });
+        let reached = rx.recv_timeout(Duration::from_secs(3)).is_ok();
+        drop(writer_holds_grid); // let everyone finish, whatever happened
+        let result = runner.join().unwrap();
+        taker.join().unwrap();
+        (parked, reached, result)
+    });
+    assert!(parked, "fixture: the restore did not wait for grid");
+    assert!(result.success, "fixture: the restore ran");
+    assert!(
+        reached,
+        "apply_changes held undo_stack while it waited for grid -- the reverse of every cell writer, \
+         which records its undo step while it holds the grid locks"
+    );
+}
+
+/// FIX ROUND 4. The two pivot stores are both `Persisted` -- a Mutex, so even
+/// a read is exclusive -- and every filter command takes them `pivot_tables`
+/// then `bi_metadata` (`apply_pivot_filter_core`, `clear_pivot_filter_core`,
+/// the hierarchy and unique-value reads). `drill_through_to_sheet_core`, an
+/// async command like the filter apply, took them the other way round, so a
+/// drill-through overlapping a slicer click could leave each holding what the
+/// other waited for. Nothing asked about this pair; now the census does.
+#[test]
+fn no_function_holds_bi_metadata_while_acquiring_pivot_tables() {
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rs_files(&src_root, &mut files);
+    assert!(files.len() > 50, "the census walked {} files — it is not finding the crate", files.len());
+    let mut offenders: Vec<String> = Vec::new();
+    let mut canonical = 0usize;
+    for path in &files {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if name.ends_with("_tests.rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let rel = path
+            .strip_prefix(&src_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        for hit in pair_inversions(&rel, &text, "bi_metadata", "pivot_tables") {
+            offenders.push(format!("  {}::{} holds `bi_metadata` and then takes `pivot_tables`", hit.file, hit.function));
+        }
+        canonical += pair_inversions(&rel, &text, "pivot_tables", "bi_metadata").len();
+    }
+    offenders.sort();
+    offenders.dedup();
+    // Non-vacuity: the order this census enforces is the one the crate uses.
+    assert!(
+        canonical >= 5,
+        "only {canonical} functions take `pivot_tables` then `bi_metadata` -- the census is not seeing \
+         the filter commands, or the crate's order has changed and this census enforces the wrong one"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these functions hold `bi_metadata` while they wait for `pivot_tables`; the filter commands take \
+         the two the other way round, so the pair can deadlock:\n{}",
+        offenders.join("\n")
     );
 }

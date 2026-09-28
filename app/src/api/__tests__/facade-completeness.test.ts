@@ -420,6 +420,41 @@ describe("API Facade Completeness", () => {
       expect(typeof mod.notifyObjectSelectionChanged).toBe("function");
     });
 
+    it("external edit API is available (a floating grid's cell edit, two views)", async () => {
+      const mod = await import("../externalEdit");
+      for (const fn of [
+        "subscribeExternalEdit",
+        "getExternalEditVersion",
+        "notifyExternalEditChanged",
+        "getExternalEditSession",
+        "isExternalEditLive",
+        "isExternalSessionParked",
+        "getParkedViewSheetIndex",
+        "isCrossSheetPointMode",
+        "getCrossSheetPointModeKey",
+        "publishExternalCellTarget",
+        "getExternalCellTarget",
+        "resolveFormulaBarSource",
+        "getExternalNameBoxAddress",
+        "registerExternalAddressResolver",
+        "resolveExternalAddress",
+        "isFormulaBarElement",
+        "switchSheetForPointMode",
+        "endExternalFormulaSession",
+        "focusFormulaBar",
+        "focusExternalSessionView",
+      ]) {
+        expect(typeof (mod as Record<string, unknown>)[fn], fn).toBe("function");
+      }
+    });
+
+    it("grid overlay point-mode view is available", async () => {
+      const mod = await import("../gridOverlays");
+      expect(typeof mod.getLiveGridRegions).toBe("function");
+      expect(typeof mod.isPointModeOnForeignSheet).toBe("function");
+      expect(typeof mod.onPointModeViewChanged).toBe("function");
+    });
+
     it("object label API is available", async () => {
       const mod = await import("../objectSelectionLabel");
       expect(typeof mod.publishObjectLabel).toBe("function");
