@@ -1111,6 +1111,7 @@ fn protected_regions_do_not_survive_the_document_that_registered_them() {
         start_col: 0,
         end_row: 4,
         end_col: 4,
+        reserved_only: false,
     });
     assert_eq!(
         s.state.protected_regions.lock().unwrap().len(),

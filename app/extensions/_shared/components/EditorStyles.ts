@@ -1,5 +1,5 @@
 //! FILENAME: app/extensions/_shared/components/EditorStyles.ts
-// PURPOSE: Shared editor styles for Pivot and Tablix field editors.
+// PURPOSE: Shared editor styles for the pivot field editor (FieldList, DropZone, ZoneFieldItem, AggregationMenu, ...).
 // CONTEXT: Emotion CSS-in-JS styles for the field list, drop zones, and related UI.
 // DESIGN: Windows 11 Fluent Design with Segoe UI, 4px/8px radii, subtle hover states.
 //

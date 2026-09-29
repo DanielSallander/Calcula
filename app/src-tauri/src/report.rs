@@ -356,6 +356,7 @@ pub fn reregister_report_region(state: &AppState, r: &SavedReport) {
         start_col: r.anchor_col,
         end_row: r.end_row,
         end_col: r.end_col,
+        reserved_only: false,
     });
 }
 
@@ -584,6 +585,7 @@ fn write_report_to_grid(
         start_col: dest_col,
         end_row,
         end_col,
+        reserved_only: false,
     });
 }
 

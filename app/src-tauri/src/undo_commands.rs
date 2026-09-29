@@ -1784,7 +1784,7 @@ fn r_note(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterSt
 fn r_hyperlink(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_hyperlink_restore(s, e, d, inv); }
 fn r_default_dim(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_default_dimension_restore(s, e, k, d, inv); }
 fn r_pivot_definition(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { if let Some(sheet) = apply_pivot_definition_restore(s, p, rf, pc, uf, e, d, inv) { rp.wrote_sheet(sheet); } }
-fn r_pivot_create(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_create_restore(s, p, d, inv, e); }
+fn r_pivot_create(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, rp: &mut RestoreReport) { if let Some(sheet) = apply_pivot_create_restore(s, p, d, inv, e) { rp.wrote_sheet(sheet); } }
 fn r_pivot_delete(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_delete_restore(s, p, rf, pc, uf, d, inv, e); }
 fn r_slicer(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_slicer_restore(sl, e, d, inv); }
 fn r_slicer_create(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_slicer_create_restore(sl, e, d, inv); }
@@ -3181,6 +3181,29 @@ struct PivotFullSnapshot {
     pivot_id: pivot_engine::PivotId,
     definition: PivotDefinition,
     cache: pivot_engine::PivotCache,
+    /// For a `pivot_create` restore: the user's cells the created pivot wrote
+    /// over, put back when the create is undone (empty for an empty pivot,
+    /// which writes nothing, and for every `pivot_delete` payload).
+    #[serde(default)]
+    overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
+}
+
+/// The `pivot_create` restore payload -- the create door's and the redo's --
+/// built through the ONE struct the restore arm deserializes (BUG-0054), with
+/// the cells the created pivot wrote over.
+pub(crate) fn pivot_create_snapshot_bytes(
+    pivot_id: pivot_engine::PivotId,
+    definition: &PivotDefinition,
+    cache: &pivot_engine::PivotCache,
+    overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
+) -> Vec<u8> {
+    serde_json::to_vec(&PivotFullSnapshot {
+        pivot_id,
+        definition: definition.clone(),
+        cache: cache.clone(),
+        overwritten_cells,
+    })
+    .unwrap_or_default()
 }
 
 /// The `pivot_delete` restore payload, built through the ONE struct the restore
@@ -3196,6 +3219,7 @@ pub(crate) fn pivot_delete_snapshot_bytes(
         pivot_id,
         definition: definition.clone(),
         cache: cache.clone(),
+        overwritten_cells: Vec::new(),
     })
     .unwrap_or_default()
 }
@@ -3325,20 +3349,25 @@ fn apply_pivot_definition_restore(
 }
 
 /// Undo pivot creation: remove the pivot and clear its grid region.
+///
+/// Returns the sheet whose cells it changed (cleared the pivot's output, or put
+/// back the user's cells the create wrote over), for the caller's
+/// `RestoreReport`, so their dependents are recalculated.
 fn apply_pivot_create_restore(
     state: &AppState,
     pivot_state: &PivotState,
     data: &[u8],
     inverse_transaction: &mut Transaction,
     effect: &crate::document_effect::DocumentEffect,
-) {
+) -> Option<usize> {
     let snapshot: PivotFullSnapshot = match serde_json::from_slice(data) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[undo] Failed to deserialize pivot create snapshot: {}", e);
-            return;
+            return None;
         }
     };
+    let mut wrote_sheet = None;
 
     let pivot_id = snapshot.pivot_id;
 
@@ -3365,21 +3394,17 @@ fn apply_pivot_create_restore(
     // Save current state for redo (redo = re-create the pivot)
     let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();
     if let Some((definition, cache)) = pivot_tables.get(&pivot_id) {
-        let redo_snapshot = PivotFullSnapshot {
-            pivot_id,
-            definition: definition.clone(),
-            cache: cache.clone(),
-        };
-        let redo_data = serde_json::to_vec(&redo_snapshot).unwrap_or_default();
+        let redo_data = pivot_delete_snapshot_bytes(pivot_id, definition, cache);
         inverse_transaction.add_change(CellChange::CustomRestore {
             kind: "pivot_delete".to_string(),
             data: redo_data,
         });
 
-        // Clear the pivot grid region. Its sheet was resolved above; `None`
+        // Clear the block the pivot WROTE. Its sheet was resolved above; `None`
         // only if the pivot appeared after that read, and then no grid holds
-        // anything of it to clear.
-        let old_region = get_pivot_region(state, pivot_id);
+        // anything of it to clear. An empty pivot's placeholder wrote nothing:
+        // the cells under it are the user's (`pivot_written_region`).
+        let old_region = crate::pivot::operations::pivot_written_region(state, pivot_id);
         if let (Some(dest_sheet_idx), Some(region)) = (dest_sheet_idx, old_region.as_ref()) {
             // `grid` and `grids` were acquired at the top of the function -- see
             // the lock-order note there.
@@ -3402,6 +3427,24 @@ fn apply_pivot_create_restore(
                     }
                     grid.recalculate_bounds();
                 }
+                wrote_sheet = Some(dest_sheet_idx);
+            }
+        }
+        // The user's cells the create wrote over go back, after the clear.
+        if let Some(dest_sheet_idx) = dest_sheet_idx.filter(|_| !snapshot.overwritten_cells.is_empty()) {
+            if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
+                let active_sheet = *state.active_sheet.read().unwrap();
+                for saved in &snapshot.overwritten_cells {
+                    dest_grid.set_cell(saved.row, saved.col, saved.cell.clone());
+                    if dest_sheet_idx == active_sheet {
+                        grid.set_cell(saved.row, saved.col, saved.cell.clone());
+                    }
+                }
+                dest_grid.recalculate_bounds();
+                if dest_sheet_idx == active_sheet {
+                    grid.recalculate_bounds();
+                }
+                wrote_sheet = Some(dest_sheet_idx);
             }
         }
     }
@@ -3420,6 +3463,7 @@ fn apply_pivot_create_restore(
     // Remove pivot region tracking
     let mut regions = state.protected_regions.lock().unwrap();
     regions.retain(|r| !(r.region_type == "pivot" && r.owner_id == pivot_id));
+    wrote_sheet
 }
 
 /// Undo pivot deletion: re-create the pivot from the snapshot.
@@ -3445,17 +3489,9 @@ fn apply_pivot_delete_restore(
     let definition = snapshot.definition;
     let mut cache = snapshot.cache;
 
-    // Save for redo (redo = delete it again)
-    let redo_snapshot = PivotFullSnapshot {
-        pivot_id,
-        definition: definition.clone(),
-        cache: cache.clone(),
-    };
-    let redo_data = serde_json::to_vec(&redo_snapshot).unwrap_or_default();
-    inverse_transaction.add_change(CellChange::CustomRestore {
-        kind: "pivot_create".to_string(),
-        data: redo_data,
-    });
+    // The inverse step's CLEAN cache, taken before the calculation below
+    // fills it (a post-calc cache does not serialize).
+    let clean_cache = cache.clone();
 
     // Recalculate view
     let view = safe_calculate_pivot(&definition, &mut cache);
@@ -3463,6 +3499,17 @@ fn apply_pivot_delete_restore(
 
     let destination = definition.destination;
     let dest_sheet_idx = resolve_dest_sheet_index(state, &definition);
+
+    // Save for redo (redo = delete it again), with the user's cells the
+    // re-created pivot is about to write over -- saved while the pivot has no
+    // region, so none is skipped as its own -- so that step puts them back.
+    let overwritten_cells =
+        crate::pivot::operations::save_overwritten_cells(state, pivot_id, dest_sheet_idx, destination, &view);
+    let redo_data = pivot_create_snapshot_bytes(pivot_id, &definition, &clean_cache, overwritten_cells);
+    inverse_transaction.add_change(CellChange::CustomRestore {
+        kind: "pivot_create".to_string(),
+        data: redo_data,
+    });
 
     // Restore pivot
     let mut pivot_tables = pivot_state.pivot_tables.write(effect).unwrap();

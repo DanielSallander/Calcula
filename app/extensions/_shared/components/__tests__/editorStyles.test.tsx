@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/_shared/components/__tests__/editorStyles.test.tsx
 // PURPOSE: The shared field-editor chrome (EditorStyles.ts + FieldList.tsx,
-//          used by the Pivot and Tablix field editors) paints with theme
+//          used by the Pivot field editor) paints with theme
 //          tokens only — no Primer hex literal survives, in any state class
 //          (hover, dragging, drag-over, selected) — so the editors follow the
 //          Dark skin and an organisation's skin like the rest of the chrome.

@@ -57,6 +57,7 @@ fn seed_pivot_with_slicer(wb: &Workbook, sheet_index: usize) -> (EntityId, Entit
         start_col: 0,
         end_row: 15,
         end_col: 3,
+        reserved_only: false,
     });
 
     let sid = EntityId::from_bytes(identity::generate_uuid_v7());

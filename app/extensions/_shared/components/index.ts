@@ -1,5 +1,5 @@
 //! FILENAME: app/extensions/_shared/components/index.ts
-// PURPOSE: Barrel export for shared editor components used by Pivot and Tablix.
+// PURPOSE: Barrel export for the shared pivot field-editor components.
 
 // Types
 export type {

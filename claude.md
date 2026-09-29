@@ -328,6 +328,12 @@ list. `docs/design/open-decisions-2026-08.md` is the 18k-line narrative ARCHIVE 
 it for WHY a decision was made, never as a live status (its own S35a measured its "still open"
 claims as roughly a third stale in the already-fixed direction). Defects with a reproduction go
 in `tests/regression/bug-ledger.json` via its allocator, which assigns ids and rejects duplicates.
+**Code that nothing builds cannot have a defect.** Before filing or fixing, confirm the code is
+compiled: a Rust crate must be a `members` entry (`core/Cargo.toml`, `model-engine-lib/Cargo.toml`)
+or a path dependency of `app/src-tauri/Cargo.toml`; a TypeScript file must be imported.
+`core/tablix-engine/` is the decommissioned Tablix feature (March 2026, see its `DECOMMISSIONED.md`):
+a review wave filed a sort defect against it on 2026-09-28. Never file, fix or re-enable it --
+cargo's hint to add it to `workspace.members` is the wrong fix.
 
 **Four environment rules that cost a run each when broken** (verified 2026-08-16):
 

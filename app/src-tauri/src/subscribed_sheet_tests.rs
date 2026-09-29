@@ -1098,6 +1098,7 @@ fn a_slicers_table_sheet_and_a_timelines_pivot_sheet_come_along() {
         start_col: 0,
         end_row: 5,
         end_col: 3,
+        reserved_only: false,
     });
     let links = crate::calp_commands::FilterObjectLinks {
         objects: vec![

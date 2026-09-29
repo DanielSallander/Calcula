@@ -16,7 +16,7 @@ import type {
   ValueColumnRefDef,
 } from '../../_shared/components/types';
 
-// Re-export shared types used by both Pivot and Tablix
+// Re-export the shared field-editor types from _shared/components/types
 export type {
   FieldIndex,
   AggregationType,

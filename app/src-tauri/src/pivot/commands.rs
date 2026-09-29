@@ -779,13 +779,36 @@ pub(crate) fn create_pivot_core(
         ensure_canvas_pivot_fits_block(pivot_id, destination, &view)?;
     }
 
+    // The WHOLE block the pivot is about to take -- its first view, or an empty
+    // pivot's placeholder -- may not cover its own source (BUG-0226). The anchor
+    // gate above passes a source a few rows below the destination, which a
+    // configured create then wrote over and an empty create's placeholder
+    // claimed as a protected region.
+    check_pivot_extent_excludes_source(
+        source_sheet_idx,
+        source_start,
+        source_end,
+        dest_sheet_idx,
+        destination,
+        pivot_extent(&view),
+        PivotExtentDoor::Create,
+    )?;
+
     // Creating a pivot: every refusal is behind us -- destination kind, frame,
     // protection, ranges, overlap, source, field names and width -- so the
     // command commits here.
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
 
     store_view(pivot_state, pivot_id, &view);
-    let response = view_to_response(&view, &definition, &mut cache_mut);
+    let mut response = view_to_response(&view, &definition, &mut cache_mut);
+
+    // The user's cells a CONFIGURED create writes over (an empty create writes
+    // nothing), saved BEFORE the region exists so none is skipped as the
+    // pivot's own. They ride in the create's undo step: undo puts them back.
+    // Nothing counted or saved them, so undoing a create cleared its region and
+    // lost them for good.
+    let overwritten_cells = save_overwritten_cells(state, pivot_id, dest_sheet_idx, destination, &view);
+    response.overwritten_cell_count = overwritten_cells.len() as u32;
 
     // Update pivot region tracking (tracks even empty pivots with reserved space)
     update_pivot_region(state, pivot_id, dest_sheet_idx, destination, &view);
@@ -855,21 +878,13 @@ pub(crate) fn create_pivot_core(
     let mut active = pivot_state.active_pivot_id.lock().unwrap();
     *active = Some(pivot_id);
 
-    // Record undo snapshot for pivot creation (undo = delete the pivot)
+    // Record undo snapshot for pivot creation (undo = delete the pivot), built
+    // through the ONE payload the restore arm reads (BUG-0054), with the cells
+    // the create wrote over.
     {
-        #[derive(serde::Serialize)]
-        struct PivotFullSnapshot {
-            pivot_id: PivotId,
-            definition: PivotDefinition,
-            cache: PivotCache,
-        }
         let (def, _post_calc_cache) = pivot_tables.get(&pivot_id).unwrap();
-        let snapshot = PivotFullSnapshot {
-            pivot_id,
-            definition: def.clone(),
-            cache: undo_cache, // clean pre-calc cache (serializable; redo recomputes)
-        };
-        let data = serde_json::to_vec(&snapshot).unwrap_or_default();
+        // The clean pre-calc cache (serializable; redo recomputes).
+        let data = crate::undo_commands::pivot_create_snapshot_bytes(pivot_id, def, &undo_cache, overwritten_cells);
         let mut undo_stack = state.undo_stack.lock().unwrap();
         let owned_txn = undo_stack.begin_owned_transaction("Create pivot table");
         undo_stack.record_custom_restore("pivot_create".to_string(), data, "Create pivot table");
@@ -1898,8 +1913,9 @@ pub fn delete_pivot_table(
     drop(pivot_tables);
     let dest_sheet_idx = dest_ref.resolve(&state);
     
-    // Get the region to clear
-    let old_region = get_pivot_region(&state, pivot_id);
+    // The block to clear: what the pivot WROTE. An empty pivot's placeholder
+    // wrote nothing, and the cells under it are the user's.
+    let old_region = pivot_written_region(&state, pivot_id);
     
     // Clear the pivot area from the grid
     if let Some(ref region) = old_region {
@@ -4377,6 +4393,34 @@ pub(crate) fn change_pivot_data_source_core(
         let (fresh_cache, _headers) = build_cache_from_grid(grid, source_start, source_end, has_headers)?;
         fresh_cache
     };
+
+    // ...and the output it WILL hold may not cover the new range either
+    // (BUG-0226). The gate above judges the output the pivot holds NOW, so a
+    // range a few rows below a small pivot passed it, and the re-grown pivot
+    // then wrote over its own new source. The new layout is calculated on
+    // CLONES (the definition with the new range, the fresh records): nothing
+    // stored moves before the refusal, and the post-calc cache stays clean.
+    {
+        let probe_definition = {
+            let pivot_tables = pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
+            let (definition, _) =
+                pivot_tables.get(&pivot_id).ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+            let mut probe = definition.clone();
+            probe.source_start = source_start;
+            probe.source_end = source_end;
+            probe
+        };
+        let prospective = safe_calculate_pivot(&probe_definition, &mut fresh_cache.clone());
+        check_pivot_extent_excludes_source(
+            source_sheet_idx,
+            source_start,
+            source_end,
+            dest_sheet_idx,
+            destination,
+            pivot_extent(&prospective),
+            PivotExtentDoor::ChangeDataSource,
+        )?;
+    }
 
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
     // token, so a refused command leaves the document clean.

@@ -854,6 +854,7 @@ mod tests {
             start_col: 0,
             end_row: 10,
             end_col: 1,
+            reserved_only: false,
         });
         state
     }

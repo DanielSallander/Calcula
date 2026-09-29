@@ -1,5 +1,5 @@
 //! FILENAME: app/extensions/_shared/components/types.ts
-// PURPOSE: Shared types for the field editor UI (used by Pivot and Tablix).
+// PURPOSE: Shared types for the pivot field editor UI, plus the BI-model metadata types that Reports and Charts (design query) also read.
 // CONTEXT: Drag-and-drop types, field representations, and aggregation helpers.
 
 // The perspective / culture display-metadata types live beside their pure
@@ -71,8 +71,6 @@ export interface ZoneField {
   showValuesAs?: string;
   // For filter fields
   hiddenItems?: string[];
-  // For tablix data fields
-  mode?: string;
   // For BI pivot fields: whether this is a LOOKUP (attribute) rather than GROUP
   isLookup?: boolean;
   // For calculated fields in the VALUES zone

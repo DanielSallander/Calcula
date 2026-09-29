@@ -14,6 +14,12 @@
 //!             field-list edit on a RANGE pivot reset sort order, grouping,
 //!             subtotals and show-all-items, and an absent hidden-items list
 //!             read as CLEAR.
+//!   BUG-0226  a source just BELOW the pivot passed both self-overlap gates:
+//!             create checks only the anchor and Change Data Source only the
+//!             output the pivot holds NOW, so the grown output (or an empty
+//!             pivot's 18 x 3 placeholder) covered its own source. Reproduced
+//!             and fixed 2026-09-29: both doors now judge the block the pivot
+//!             WILL take (`check_pivot_extent_excludes_source`).
 //!   open-items 2.af "the pivot listing has no sheet": `get_all_pivot_tables`
 //!             now says which sheet each pivot is on.
 
@@ -1385,4 +1391,539 @@ fn the_values_zone_carries_show_values_as_with_its_base_and_the_number_format() 
     // A field that shows its values as they are carries no rule.
     def.value_fields[0].show_values_as = pivot_engine::ShowValuesAs::Normal;
     assert!(super::commands::value_zone_fields(&def, &cache)[0].show_as.is_none());
+}
+
+// ============================================================================
+// BUG-0226: a source just BELOW the output and the self-overlap gates. They
+// judge the source against the pivot's ANCHOR (create) and against the output
+// the pivot holds NOW (Change Data Source) -- never against the block the pivot
+// is about to claim. Fixed 2026-09-29: `check_pivot_extent_excludes_source`
+// judges that block (`pivot_extent`, the rule the region registration uses).
+// ============================================================================
+
+/// Region / Product / Sales with SEVEN regions R1..R7 (Sales 1..7, total 28).
+/// A Region-on-rows pivot over it is NINE rows (the header row, seven items,
+/// the Grand Total) by two columns, where SALES gives four rows.
+const SEVEN_REGIONS: &[&[&str]] = &[
+    &["Region", "Product", "Sales"],
+    &["R1", "Apples", "1"],
+    &["R2", "Apples", "2"],
+    &["R3", "Apples", "3"],
+    &["R4", "Apples", "4"],
+    &["R5", "Apples", "5"],
+    &["R6", "Apples", "6"],
+    &["R7", "Apples", "7"],
+];
+
+/// `rows` written into sheet `sheet` with their top-left cell at `top`, ADDED
+/// to what the sheet already holds (`put` replaces the sheet), and into the
+/// mirror too when the sheet is active.
+fn put_at(fx: &Fx, sheet: usize, top: (u32, u32), rows: &[&[&str]]) {
+    let active = *fx.state.active_sheet.read().unwrap() == sheet;
+    let seed = test_seed_effect();
+    // CANONICAL LOCK ORDER: `grid`, then `grids`.
+    let mut mirror = fx.state.grid.write(&seed).unwrap();
+    let mut grids = fx.state.grids.write(&seed).unwrap();
+    for (r, row) in rows.iter().enumerate() {
+        for (c, v) in row.iter().enumerate() {
+            let cell = match v.parse::<f64>() {
+                Ok(n) => engine::Cell::new_number(n),
+                Err(_) => engine::Cell::new_text(v.to_string()),
+            };
+            let (row, col) = (top.0 + r as u32, top.1 + c as u32);
+            grids[sheet].set_cell(row, col, cell.clone());
+            if active {
+                mirror.set_cell(row, col, cell);
+            }
+        }
+    }
+}
+
+fn cell_a1(row: u32, col: u32) -> String {
+    format!("{}{}", super::utils::col_index_to_letter(col), row + 1)
+}
+
+/// Sheet 0's `start..=end` block as `A1=value` entries, read where both doors
+/// read a source from (`grids[0]`).
+fn values_of(fx: &Fx, start: (u32, u32), end: (u32, u32)) -> Vec<String> {
+    let grids = fx.state.grids.read().unwrap();
+    let mut out = Vec::new();
+    for row in start.0..=end.0 {
+        for col in start.1..=end.1 {
+            let value = match grids[0].get_cell(row, col) {
+                Some(cell) => format!("{:?}", cell.value),
+                None => "empty".to_string(),
+            };
+            out.push(format!("{}={}", cell_a1(row, col), value));
+        }
+    }
+    out
+}
+
+/// The entries of one block that differ between two reads, as `A1=old -> new`.
+fn changed_values(before: &[String], after: &[String]) -> Vec<String> {
+    before
+        .iter()
+        .zip(after)
+        .filter(|(b, a)| b != a)
+        .map(|(b, a)| format!("{b} -> {}", a.split_once('=').map_or(a.as_str(), |(_, v)| v)))
+        .collect()
+}
+
+/// Every pivot region registered, as `sheet: A1:B2`.
+fn pivot_regions(fx: &Fx) -> Vec<String> {
+    fx.state
+        .protected_regions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.region_type == "pivot")
+        .map(|r| {
+            format!("{}: {}:{}", r.sheet_index, cell_a1(r.start_row, r.start_col), cell_a1(r.end_row, r.end_col))
+        })
+        .collect()
+}
+
+/// The source cells of sheet 0's `start..=end` block that lie inside a pivot
+/// region (cells an edit is then refused on).
+fn source_cells_in_a_pivot_region(fx: &Fx, start: (u32, u32), end: (u32, u32)) -> Vec<String> {
+    let mut out = Vec::new();
+    for row in start.0..=end.0 {
+        for col in start.1..=end.1 {
+            if fx.state.get_region_at_cell(0, row, col).is_some_and(|r| r.region_type == "pivot") {
+                out.push(cell_a1(row, col));
+            }
+        }
+    }
+    out
+}
+
+/// `create_pivot_core` -- the create door itself -- with the source and the
+/// destination both on Sheet1. `rows` and `values` empty is the UI's create
+/// (the fields come after); set, it is the MCP `create_pivot` tool's, which
+/// configures the pivot in the same step.
+fn create_on_sheet1(
+    fx: &Fx,
+    source: &str,
+    destination: &str,
+    rows: &[&str],
+    values: &[(&str, AggregationType)],
+) -> Result<super::types::PivotViewResponse, String> {
+    let pane = crate::pane_control::PaneControlState::new();
+    let ribbon = crate::ribbon_filter::RibbonFilterState::new();
+    let user_files = crate::persistence::UserFilesState::default();
+    super::commands::create_pivot_core(
+        &fx.state,
+        &fx.file,
+        &fx.pivots,
+        super::operations::PivotRecalcStates { pane: &pane, ribbon: &ribbon, user_files: &user_files },
+        super::types::CreatePivotRequest {
+            source_range: source.to_string(),
+            destination_cell: destination.to_string(),
+            source_sheet: Some(0),
+            destination_sheet: Some(0),
+            has_headers: Some(true),
+            name: None,
+            source_table_name: None,
+            canvas_frame: None,
+        },
+        rows.iter().map(|r| r.to_string()).collect(),
+        values.iter().map(|(field, agg)| (field.to_string(), *agg)).collect(),
+    )
+}
+
+/// Undo the top step through the REAL restore path (`apply_changes`, the body
+/// the `undo` command runs), after checking it is the step named `expected`.
+fn undo_top_step(fx: &Fx, expected: &str) {
+    let tx = fx.state.undo_stack.lock().unwrap().pop_undo().expect("a step to undo");
+    assert_eq!(tx.description, expected, "fixture: the top undo step");
+    crate::undo_commands::apply_changes(
+        &fx.state,
+        &fx.file,
+        &crate::persistence::UserFilesState::default(),
+        &fx.pivots,
+        &crate::slicer::SlicerState::new(),
+        &crate::ribbon_filter::RibbonFilterState::new(),
+        &crate::pane_control::PaneControlState::new(),
+        &crate::timeline_slicer::TimelineSlicerState::new(),
+        tx,
+        true,
+    );
+}
+
+/// Found 2026-09-29 reading the self-overlap gates (BUG-0226): Change Data
+/// Source, the ledger's own case. The pivot at Sheet1!E1 over SALES holds
+/// E1:F4, and the new source, SEVEN_REGIONS, sits just BELOW it at E6:G13. The
+/// Z1 gate (`check_change_source_excludes_own_output`) compares the range with
+/// E1:F4 -- the output the pivot holds NOW -- and with the anchor, and passes
+/// it. But seven regions make the re-grown pivot nine rows, E1:F9, which lands
+/// on E6:F9: the new source's header and its first three records. A
+/// PivotTable may not overlap its own source (the rule both gates exist for),
+/// so the change is refused before the effect: the document clean, and the
+/// definition and every source cell as they were.
+#[test]
+fn change_data_source_refuses_a_range_below_the_output_that_the_regrown_pivot_would_cover() {
+    let (fx, id) = pivot_beside_its_source();
+    put_at(&fx, 0, (5, 4), SEVEN_REGIONS); // E6:G13
+    let region = get_pivot_region(&fx.state, id).expect("fixture: the region");
+    assert_eq!(
+        (region.start_row, region.start_col, region.end_row, region.end_col),
+        (0, 4, 3, 5),
+        "fixture: the output is E1:F4, clear of E6:G13"
+    );
+    crate::document_effect::mark_saved(&fx.file);
+    let source_before = recorded_source(&fx, id);
+    let cells_before = values_of(&fx, (5, 4), (12, 6));
+
+    let result = change_source(&fx, id, "Sheet1!E6:G13");
+
+    let written = changed_values(&cells_before, &values_of(&fx, (5, 4), (12, 6)));
+    match result {
+        Ok(response) => {
+            let grown = get_pivot_region(&fx.state, id).expect("the region");
+            let (start, end) = {
+                let tables = fx.pivots.pivot_tables.read().unwrap();
+                (tables[&id].0.source_start, tables[&id].0.source_end)
+            };
+            let next_refresh_fields = {
+                let grids = fx.state.grids.read().unwrap();
+                build_cache_from_grid(&grids[0], start, end, true).map(|(_, headers)| headers)
+            };
+            panic!(
+                "BUG-0226: Change Data Source to Sheet1!E6:G13 was ACCEPTED. The pivot grew from E1:F4 to {}:{} over \
+                 its own new source {}:{}, and wrote {} of its cells: {:?}. The command counted {} cell(s) as \
+                 ordinary 'existing data' (undo token {:?}), and the next refresh reads its fields as {:?}",
+                cell_a1(grown.start_row, grown.start_col),
+                cell_a1(grown.end_row, grown.end_col),
+                cell_a1(start.0, start.1),
+                cell_a1(end.0, end.1),
+                written.len(),
+                written,
+                response.overwritten_cell_count,
+                response.overwrite_token,
+                next_refresh_fields
+            );
+        }
+        Err(err) => {
+            assert!(err.contains("own output"), "refused for another reason: {err}");
+            assert!(!fx.file.is_dirty(), "a refused change dirtied the document");
+            assert_eq!(recorded_source(&fx, id), source_before, "the refused change moved the source");
+            assert!(written.is_empty(), "the refused change wrote the source: {written:?}");
+        }
+    }
+}
+
+/// The control for the Change Data Source case: the same SEVEN_REGIONS one row
+/// past what the re-grown pivot reaches (E10:G17, the row after E1:F9) applies
+/// -- the pivot reads it, overwrites nothing and leaves the source intact.
+#[test]
+fn change_data_source_to_a_range_just_clear_of_the_regrown_output_applies() {
+    let (fx, id) = pivot_beside_its_source();
+    put_at(&fx, 0, (9, 4), SEVEN_REGIONS); // E10:G17
+    let before = values_of(&fx, (9, 4), (16, 6));
+
+    let response = change_source(&fx, id, "Sheet1!E10:G17").expect("E10:G17 is clear of E1:F9");
+
+    let region = get_pivot_region(&fx.state, id).expect("the region");
+    assert_eq!(
+        (region.start_row, region.start_col, region.end_row, region.end_col),
+        (0, 4, 8, 5),
+        "nine rows by two: E1:F9"
+    );
+    assert_eq!(response.overwritten_cell_count, 0, "nothing of the user's lay in E5:F9");
+    assert_eq!(getpivotdata(&fx, "Sheet1", (0, 4), &[]), Some(28.0), "the pivot reads SEVEN_REGIONS");
+    assert_eq!(values_of(&fx, (9, 4), (16, 6)), before, "the source is intact");
+}
+
+/// Found 2026-09-29 reading the self-overlap gates (BUG-0226): create, with its
+/// fields sent up front (the MCP `create_pivot` tool). The destination
+/// Sheet1!A1 lies outside the source A6:C13, so the anchor-only gate
+/// (`check_pivot_source_destination_overlap`) passes it -- and the nine-row
+/// output, A1:B9, lands on A6:B9: the source's header and its first three
+/// records. The create door counts nothing, so no "replace existing data?" is
+/// asked either. Refused before the effect instead: no pivot, no region, the
+/// source intact, the document clean.
+#[test]
+fn a_configured_create_whose_output_would_cover_its_source_below_is_refused() {
+    let fx = fx(1);
+    put_at(&fx, 0, (5, 0), SEVEN_REGIONS); // A6:C13
+    crate::document_effect::mark_saved(&fx.file);
+    let before = values_of(&fx, (5, 0), (12, 2));
+
+    let result =
+        create_on_sheet1(&fx, "Sheet1!A6:C13", "Sheet1!A1", &["Region"], &[("Sales", AggregationType::Sum)]);
+
+    let written = changed_values(&before, &values_of(&fx, (5, 0), (12, 2)));
+    match result {
+        Ok(response) => {
+            let report = format!(
+                "BUG-0226: the configured create at Sheet1!A1 over A6:C13 was ACCEPTED. It claims {:?} and wrote {} \
+                 of its own source's cells: {:?}. It counted {} overwritten cell(s) (undo token {:?}), so nobody \
+                 was asked",
+                pivot_regions(&fx),
+                written.len(),
+                written,
+                response.overwritten_cell_count,
+                response.overwrite_token
+            );
+            undo_top_step(&fx, "Create pivot table");
+            let after_undo = changed_values(&before, &values_of(&fx, (5, 0), (12, 2)));
+            panic!(
+                "{report}. After undoing the create, {} source cell(s) are still not what they were: {:?}",
+                after_undo.len(),
+                after_undo
+            );
+        }
+        Err(err) => {
+            assert!(err.contains("source"), "refused for another reason: {err}");
+            assert!(!fx.file.is_dirty(), "a refused create dirtied the document");
+            assert!(fx.pivots.pivot_tables.read().unwrap().is_empty(), "a refused create stored a pivot");
+            assert!(pivot_regions(&fx).is_empty(), "a refused create claimed a region: {:?}", pivot_regions(&fx));
+            assert!(written.is_empty(), "a refused create wrote the source: {written:?}");
+        }
+    }
+}
+
+/// The control for the configured create: the same source one row past the
+/// output (A10:C17, the row after A1:B9) applies and is left intact.
+#[test]
+fn a_configured_create_just_clear_of_its_source_applies() {
+    let fx = fx(1);
+    put_at(&fx, 0, (9, 0), SEVEN_REGIONS); // A10:C17
+    let before = values_of(&fx, (9, 0), (16, 2));
+
+    let response =
+        create_on_sheet1(&fx, "Sheet1!A10:C17", "Sheet1!A1", &["Region"], &[("Sales", AggregationType::Sum)])
+            .expect("A1:B9 stops above A10");
+
+    let region = get_pivot_region(&fx.state, response.pivot_id).expect("the region");
+    assert_eq!(
+        (region.start_row, region.start_col, region.end_row, region.end_col),
+        (0, 0, 8, 1),
+        "nine rows by two: A1:B9"
+    );
+    assert_eq!(getpivotdata(&fx, "Sheet1", (0, 0), &[]), Some(28.0), "the pivot reads SEVEN_REGIONS");
+    assert_eq!(values_of(&fx, (9, 0), (16, 2)), before, "the source is intact");
+}
+
+/// Found 2026-09-29 reading the self-overlap gates (BUG-0226): create from the
+/// UI, which is EMPTY (the fields come after). An empty pivot claims the 18 x 3
+/// placeholder -- A1:C18 at Sheet1!A1 -- and that covers a source at A6:C13,
+/// which the anchor-only gate passes. Nothing is written yet, but the source
+/// cells now lie inside a protected pivot region (an edit there is refused),
+/// and undoing the create clears the pivot's whole region, the source's cells
+/// with it. A PivotTable may not overlap its own source. Whether the create is
+/// refused before the effect or the placeholder claims none of the source is
+/// the owner's call, so this pins what both must give: no source cell inside
+/// the pivot's region, and an undo of the create that leaves every source cell
+/// as it was.
+#[test]
+fn an_empty_create_whose_placeholder_covers_its_source_below_leaves_the_source_alone() {
+    let fx = fx(1);
+    put_at(&fx, 0, (5, 0), SEVEN_REGIONS); // A6:C13
+    crate::document_effect::mark_saved(&fx.file);
+    let before = values_of(&fx, (5, 0), (12, 2));
+
+    match create_on_sheet1(&fx, "Sheet1!A6:C13", "Sheet1!A1", &[], &[]) {
+        Err(err) => {
+            assert!(err.contains("source"), "refused for another reason: {err}");
+            assert!(!fx.file.is_dirty(), "a refused create dirtied the document");
+            assert!(fx.pivots.pivot_tables.read().unwrap().is_empty(), "a refused create stored a pivot");
+            assert!(pivot_regions(&fx).is_empty(), "a refused create claimed a region: {:?}", pivot_regions(&fx));
+            assert_eq!(values_of(&fx, (5, 0), (12, 2)), before, "a refused create wrote the source");
+        }
+        Ok(_) => {
+            let regions = pivot_regions(&fx);
+            let claimed = source_cells_in_a_pivot_region(&fx, (5, 0), (12, 2));
+            let written = changed_values(&before, &values_of(&fx, (5, 0), (12, 2)));
+            undo_top_step(&fx, "Create pivot table");
+            let lost = changed_values(&before, &values_of(&fx, (5, 0), (12, 2)));
+            assert!(
+                claimed.is_empty() && written.is_empty() && lost.is_empty(),
+                "BUG-0226: the empty create at Sheet1!A1 over A6:C13 was ACCEPTED with the region {:?}. {} source \
+                 cell(s) became part of the pivot's protected region ({:?}), {} were written by the create, and \
+                 undoing the create changed {} of them: {:?}",
+                regions,
+                claimed.len(),
+                claimed,
+                written.len(),
+                lost.len(),
+                lost
+            );
+        }
+    }
+}
+
+/// The control for the empty create: a source one row past the placeholder
+/// (A19:C26, the row after A1:C18) applies, and undoing the create leaves the
+/// source as it was.
+#[test]
+fn an_empty_create_whose_placeholder_stops_above_its_source_applies() {
+    let fx = fx(1);
+    put_at(&fx, 0, (18, 0), SEVEN_REGIONS); // A19:C26
+    let before = values_of(&fx, (18, 0), (25, 2));
+
+    let response =
+        create_on_sheet1(&fx, "Sheet1!A19:C26", "Sheet1!A1", &[], &[]).expect("A1:C18 stops above A19");
+
+    let region = get_pivot_region(&fx.state, response.pivot_id).expect("the region");
+    assert_eq!(
+        (region.start_row, region.start_col, region.end_row, region.end_col),
+        (0, 0, 17, 2),
+        "fixture: the 18 x 3 placeholder, A1:C18"
+    );
+    assert!(source_cells_in_a_pivot_region(&fx, (18, 0), (25, 2)).is_empty(), "the source is outside it");
+    undo_top_step(&fx, "Create pivot table");
+    assert_eq!(values_of(&fx, (18, 0), (25, 2)), before, "undoing the create left the source alone");
+}
+
+// ============================================================================
+// An EMPTY pivot's placeholder RESERVES 18 x 3 cells but writes none of them
+// (found 2026-09-29 beside BUG-0226). Every door that cleared "the pivot's
+// region", or skipped it as "the pivot's own cells" when counting what a write
+// overwrites, treated the placeholder as written -- and erased the user's cells
+// under it. A configured create also wrote over the user's cells without
+// counting or saving them, so undoing it lost them.
+// ============================================================================
+
+/// Redo the top step through the REAL restore path, after checking its name.
+fn redo_top_step(fx: &Fx, expected: &str) {
+    let tx = fx.state.undo_stack.lock().unwrap().pop_redo().expect("a step to redo");
+    assert_eq!(tx.description, expected, "fixture: the top redo step");
+    crate::undo_commands::apply_changes(
+        &fx.state,
+        &fx.file,
+        &crate::persistence::UserFilesState::default(),
+        &fx.pivots,
+        &crate::slicer::SlicerState::new(),
+        &crate::ribbon_filter::RibbonFilterState::new(),
+        &crate::pane_control::PaneControlState::new(),
+        &crate::timeline_slicer::TimelineSlicerState::new(),
+        tx,
+        false,
+    );
+}
+
+/// SALES at A1:C4, then the user's own cells: G10 (under an E1 pivot's 18 x 3
+/// placeholder E1:G18, beyond its first output E1:F4) and F3 (under that output).
+fn sales_with_user_cells() -> Fx {
+    let fx = fx(1);
+    put(&fx, 0, SALES);
+    put_at(&fx, 0, (9, 6), &[&["keep"]]); // G10
+    put_at(&fx, 0, (2, 5), &[&["mine"]]); // F3
+    fx
+}
+
+#[test]
+fn an_empty_pivots_first_field_change_keeps_the_users_cells_under_its_placeholder() {
+    let fx = sales_with_user_cells();
+    let g10 = values_of(&fx, (9, 6), (9, 6));
+    let id = create_on_sheet1(&fx, "Sheet1!A1:C4", "Sheet1!E1", &[], &[]).expect("the empty create").pivot_id;
+    assert_eq!(values_of(&fx, (9, 6), (9, 6)), g10, "fixture: the empty create writes nothing");
+
+    // The first field change, through the functions `update_pivot_fields` runs:
+    // save what the new output covers, then write it over the old block.
+    let effect = test_seed_effect();
+    let view = {
+        let mut tables = fx.pivots.pivot_tables.write(&effect).unwrap();
+        let (def, cache) = tables.get_mut(&id).expect("the pivot");
+        def.row_fields.push(PivotField::new(0, "Region".to_string()));
+        def.value_fields.push(ValueField::new(2, "Sum of Sales".to_string(), AggregationType::Sum));
+        safe_calculate_pivot(def, cache)
+    };
+    let saved = super::operations::save_overwritten_cells(&fx.state, id, 0, (0, 4), &view);
+    let count = super::operations::count_overwritten_cells(&fx.state, id, 0, (0, 4), &view);
+    super::operations::update_pivot_in_grid(&fx.state, &effect, id, 0, (0, 4), &view, false).expect("the write");
+    super::operations::update_pivot_region(&fx.state, id, 0, (0, 4), &view);
+
+    assert_eq!(
+        values_of(&fx, (9, 6), (9, 6)),
+        g10,
+        "the first field change erased G10, a user cell under the empty pivot's placeholder that the new output does not cover"
+    );
+    let saved_at: Vec<String> = saved.iter().map(|s| cell_a1(s.row, s.col)).collect();
+    assert_eq!(saved_at, vec!["F3".to_string()], "F3, the user's cell the new output covers, is saved for undo");
+    assert_eq!(count, 1, "and counted, so the overwrite question is asked");
+}
+
+#[test]
+fn undoing_an_empty_create_keeps_the_users_cells_under_its_placeholder() {
+    let fx = sales_with_user_cells();
+    let before = values_of(&fx, (0, 4), (17, 6)); // E1:G18, the placeholder
+    create_on_sheet1(&fx, "Sheet1!A1:C4", "Sheet1!E1", &[], &[]).expect("the empty create");
+    undo_top_step(&fx, "Create pivot table");
+    let after = values_of(&fx, (0, 4), (17, 6));
+    assert!(
+        changed_values(&before, &after).is_empty(),
+        "undoing the empty create changed the user's cells under its placeholder: {:?}",
+        changed_values(&before, &after)
+    );
+    assert!(pivot_regions(&fx).is_empty(), "the undone pivot still holds a region: {:?}", pivot_regions(&fx));
+}
+
+#[test]
+fn undoing_a_configured_create_puts_back_the_cells_it_wrote_over_and_redo_undo_still_does() {
+    let fx = sales_with_user_cells();
+    let f3 = values_of(&fx, (2, 5), (2, 5));
+    let response = create_on_sheet1(&fx, "Sheet1!A1:C4", "Sheet1!E1", &["Region"], &[("Sales", AggregationType::Sum)])
+        .expect("the configured create");
+    assert_eq!(response.overwritten_cell_count, 1, "the create counts the one user cell it wrote over (F3)");
+    assert_ne!(values_of(&fx, (2, 5), (2, 5)), f3, "fixture: the output covers F3");
+
+    undo_top_step(&fx, "Create pivot table");
+    assert_eq!(values_of(&fx, (2, 5), (2, 5)), f3, "undoing the create did not put back F3, the user's cell it wrote over");
+    assert!(pivot_regions(&fx).is_empty(), "the undone pivot still holds a region");
+
+    redo_top_step(&fx, "Create pivot table");
+    assert_eq!(pivot_regions(&fx), vec!["0: E1:F4".to_string()], "redo re-created the pivot");
+    assert_ne!(values_of(&fx, (2, 5), (2, 5)), f3, "redo wrote the pivot over F3 again");
+
+    undo_top_step(&fx, "Create pivot table");
+    assert_eq!(values_of(&fx, (2, 5), (2, 5)), f3, "after a redo, undoing the create no longer puts back F3");
+}
+
+/// Every door that clears a pivot's block clears only what the pivot WROTE:
+/// the ones a unit test cannot drive (`delete_pivot_table` takes Tauri state;
+/// a pull's withdrawn pivots) read `pivot_written_region` / `reserved_only`.
+#[test]
+fn every_door_that_clears_a_pivots_block_clears_only_what_it_wrote() {
+    let strip = |src: &str| -> String {
+        src.replace("\r\n", "\n")
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let fn_body = |code: &str, head: &str| -> String {
+        let start = code.find(head).unwrap_or_else(|| panic!("test out of date: {head} not found"));
+        let body = &code[start..];
+        body[..body.find("\n}\n").expect("test out of date: the fn's end")].to_string()
+    };
+    let commands = strip(include_str!("commands.rs"));
+    let delete = fn_body(&commands, "pub fn delete_pivot_table(");
+    assert!(
+        delete.contains("let old_region = pivot_written_region(&state, pivot_id);"),
+        "delete_pivot_table no longer clears only what the pivot wrote: deleting an empty pivot erases the user's cells under its placeholder"
+    );
+    let operations = strip(include_str!("operations.rs"));
+    for head in [
+        "pub(crate) fn update_pivot_in_grid(",
+        "pub(crate) fn save_overwritten_cells(",
+        "pub(crate) fn count_overwritten_cells(",
+    ] {
+        let body = fn_body(&operations, head);
+        assert!(body.contains("pivot_written_region(state, pivot_id)"), "{head} no longer reads only the block the pivot wrote");
+        assert!(!body.contains("get_pivot_region("), "{head} reads the whole region again, placeholder included");
+    }
+    let undo = strip(include_str!("../undo_commands.rs"));
+    let create_restore = fn_body(&undo, "fn apply_pivot_create_restore(");
+    assert!(create_restore.contains("pivot_written_region(state, pivot_id)"), "undo of a create clears the whole region again");
+    let calp = strip(include_str!("../calp_commands.rs"));
+    assert!(
+        calp.contains("if !region.reserved_only {"),
+        "a pull's withdrawn pivot clears its placeholder again, erasing the subscriber's cells under it"
+    );
 }

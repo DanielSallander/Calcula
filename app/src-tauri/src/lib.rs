@@ -338,6 +338,12 @@ pub struct ProtectedRegion {
     pub start_col: u32,
     pub end_row: u32,
     pub end_col: u32,
+    /// The owner RESERVES this block but has written nothing into it -- an
+    /// empty pivot's placeholder. Its cells are still the USER's: a write that
+    /// grows over them counts and saves them like any other cell, and clearing
+    /// the owner's block leaves them alone (`pivot::operations::pivot_written_region`).
+    /// False for every block its owner has written.
+    pub reserved_only: bool,
 }
 
 pub struct AppState {

@@ -3643,6 +3643,7 @@ pub async fn bi_insert_result(
             start_col,
             end_row,
             end_col,
+            reserved_only: false,
         });
     }
 

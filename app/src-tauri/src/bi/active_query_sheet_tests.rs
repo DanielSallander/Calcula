@@ -94,6 +94,7 @@ fn book(names: &[&str], on: usize) -> Book {
         start_col: 0,
         end_row: 2,
         end_col: 1,
+        reserved_only: false,
     });
     Book {
         state,

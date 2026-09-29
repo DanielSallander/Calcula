@@ -84,7 +84,7 @@ pub const VALUE_ID_EMPTY: ValueId = u32::MAX;
 /// and every row / column descriptor's `group_values`.
 ///
 /// A record stores a blank as [`VALUE_ID_EMPTY`], and every RECORD reader --
-/// hidden items, page filters, slicers, timelines, the tablix engine -- keeps
+/// hidden items, page filters, slicers, timelines -- keeps
 /// reading it that way. A group key cannot: there `VALUE_ID_EMPTY` is the
 /// "all values" padding, so a blank member keyed by it WAS the total one
 /// level up. The (blank) row showed the grand total, a rolled-up total

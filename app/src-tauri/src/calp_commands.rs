@@ -19497,8 +19497,11 @@ pub(crate) fn apply_refreshed_pivots(
     // nothing behind it.
     for id_str in &withdrawn {
         let Some(pivot_id) = identity::EntityId::parse(id_str) else { continue };
+        // The block the withdrawn pivot WROTE; a placeholder wrote nothing and
+        // the cells under it are the subscriber's. Its region is forgotten below
+        // either way.
         let Some(region) = get_pivot_region(state, pivot_id) else { continue };
-        {
+        if !region.reserved_only {
             // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
             let mut grid = match state.grid.write(effect) {
                 Ok(g) => g,

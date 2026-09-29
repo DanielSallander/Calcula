@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 258 | Open: 5 | Triaged: 0 | Fixed: 253 | Other: 0
+Total: 263 | Open: 8 | Triaged: 0 | Fixed: 255 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -2549,7 +2549,7 @@ A COLLISION-RENAMED WORKING COPY PUSHED UN-RENAMED BASE FORMULAS (hold-back) and
 **Repro:** See the named wave item's tests in scratchpad reports.
 **Fix:** fixed
 
-## BUG-0226 `[open]`
+## BUG-0226 `[fixed]`
 
 **Found:** 2026-09-29 (manual)
 **Oracle:** pivot-data-source
@@ -2557,6 +2557,7 @@ A COLLISION-RENAMED WORKING COPY PUSHED UN-RENAMED BASE FORMULAS (hold-back) and
 NOT DEMONSTRATED: Change Data Source and create let a new source placed BELOW the output pass the overlap check even when the re-grown pivot would write over it.
 
 **Repro:** NOT DEMONSTRATED: Change Data Source and create let a new source placed BELOW the output pass the overlap check even when the re-grown pivot would write over it.
+**Fix:** fixed
 
 ## BUG-0227 `[fixed]`
 
@@ -2875,3 +2876,49 @@ OWNER DECISION NEEDED: a working copy is sanitised like a subscription, so pushi
 A TIMELINE RANGE CANNOT BE SELECTED BY DRAGGING: a press on a timeline is Core's floating-object press (select, and move on drag).
 
 **Repro:** A TIMELINE RANGE CANNOT BE SELECTED BY DRAGGING: a press on a timeline is Core's floating-object press (select, and move on drag).
+
+## BUG-0259 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-placeholder-data-loss
+
+AN EMPTY PIVOT'S 18x3 PLACEHOLDER ERASED THE USER'S CELLS UNDER IT: on its first field change (skipped by the overwrite count/save as 'the pivot's own', then cleared), on undo of its create, on its delete, and on a pull's withdrawal -- all with no prompt and no undo. A configured create also wrote over user cells without counting or saving them, so undoing it lost them.
+
+**Repro:** Empty pivot at E1 with a user value at G10 (inside E1:G18); add a row field, or Ctrl+Z the create -> G10 erased.
+**Fix:** fixed
+
+## BUG-0260 `[open]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** distributed-code-confused-deputy
+
+AN IN-CELL BUTTON (calcula.button cell type) FROM A COLLABORATION APPLICATION CAN RUN THE SUBSCRIBER'S -- OR, AT CHECKOUT, THE DEVELOPER'S -- OWN LOCAL MACRO: cell-type actions travel unsanitised ({kind:'script', scriptId, functionName} naming any module by id, {kind:'command'} naming any extension command), a click resolves the id with local modules winning, and a local module runs unlocked with an appended call. The same cross-package shape got macroRef stripped from Controls buttons.
+
+**Repro:** Code path: calp_commands.rs cellType materialisation (~6061-6087, ~9676) -> CellTypes/types/button.ts:91-135 -> _shared/lib/buttonScriptRun.ts:448-508.
+
+## BUG-0261 `[open]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** calp-push-leak
+
+A WORKING-COPY PUSH RE-PUBLISHES CODE THAT IS NOT THE APPLICATION'S under the developer's key: every object script in the workbook ships, including Distributed(X) object scripts of OTHER applications the workbook subscribes to (provenance scrubbed at publish), and the merged Custom Functions library (the developer's own UDFs, possibly with net.fetch, plus the application's) ships whole.
+
+**Repro:** calp_commands.rs:859-863 (object scripts), publish.rs:1115-1118 and :1879-1885 (provenance scrub), calp_commands.rs:2657-2668 and :2766 (UDF library id).
+
+## BUG-0262 `[open]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** calp-checkout-trust
+
+CHECKOUT DOES NOT VERIFY WHO SIGNED THE VERSION: it opens with VerifyOnly and never compares the signer with the application's authorised publishers; the Checkout dialog discards the trust status; root_key_of returns 'no root' when the lowest listed version is unsigned, which the authorised-key check treats as nothing to enforce; a push merge applies a new head without the signer check.
+
+**Repro:** CheckoutDialog.tsx:114-121 (void result); publishers.rs:132-134; publish.rs:108-121; calp_merge.rs:151ff.
+
+## BUG-0263 `[open]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** calp-checkout-strip
+
+CHECKOUT ALSO STRIPS WHAT THE APPLICATION OWNS (siblings of BUG-0257): every slicer's computed properties are emptied (sanitize_distributed_slicers), so an untouched working-copy push republishes slicers without them; and values over 64 KiB are cleared by the distributed clamp, which the .cala load deliberately refuses for a user's own workbook.
+
+**Repro:** calp_commands.rs:6190-6198 and 4278-4301; media.rs:560-629, :672.

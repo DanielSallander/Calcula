@@ -481,6 +481,7 @@ fn restoring_the_partition_re_anchors_the_index_field_objects_of_a_moved_sheet()
         start_col: 0,
         end_row: 3,
         end_col: 3,
+        reserved_only: false,
     });
     // An object on the sheet that does NOT move: must stay exactly where it is.
     let sheet1_chart = identity::EntityId::from_bytes(identity::generate_uuid_v7());

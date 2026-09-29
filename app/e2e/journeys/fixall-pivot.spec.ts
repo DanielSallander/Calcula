@@ -1087,6 +1087,110 @@ test.describe("C. Change Data Source", () => {
       await newFile(page);
     }
   });
+
+  test("BUG-0226: a source just BELOW the pivot is refused by both doors -- Change Data Source (the re-grown output would cover it) and Insert > PivotTable (the new pivot's block would cover it); the source is intact, nothing is created, a clean document stays clean", async ({
+    appPage: page,
+    grid,
+  }) => {
+    const file = path.join(TMP, `fixall-pivot-0226-${Date.now()}.cala`);
+    // Seven regions: a Region-on-rows pivot over them is NINE rows (header, 7 items, total).
+    const seven = (top: number, left: number): Array<[number, number, string]> => {
+      const rows: string[][] = [["Region", "Product", "Sales"], ...[1, 2, 3, 4, 5, 6, 7].map((i) => [`R${i}`, "Apples", String(i)])];
+      return rows.flatMap((r, dr) => r.map((v, dc) => [top + dr, left + dc, v] as [number, number, string]));
+    };
+    try {
+      await newFile(page);
+      await writeTable(page, CDS_DATA);
+      // A pivot at E1 over Sheet1!A1:C5 (four regions): E1:F6.
+      const pid = await createRangePivot(page, { sourceRange: "Sheet1!A1:C5", destinationCell: "E1", sourceSheet: 0, destinationSheet: 0 });
+      await configurePivot(page, { pivotId: pid, rowFields: [{ sourceIndex: 0, name: "Region" }], valueFields: [SUM_SALES] });
+      expect(await grandTotal(page, pid), "precondition: the four regions").toBe("15");
+      const own = (await pivotRegions(page)).find((r) => String(r.pivotId) === pid)!;
+      expect({ r0: own.startRow, c0: own.startCol, r1: own.endRow, c1: own.endCol }, "precondition: the pivot holds E1:F6").toEqual({ r0: 0, c0: 4, r1: 5, c1: 5 });
+      // Seven regions at E8:G15, clear of E1:F6 -- but inside the E1:F9 the pivot would grow to.
+      await writeCells(page, seven(7, 4));
+      // Seven regions at I6:K13, for the create door (an empty pivot at I1 reserves I1:K18).
+      await writeCells(page, seven(5, 8));
+      const cdsBlock = await displayGrid(page, 0, 7, 4, 14, 6);
+      const createBlock = await displayGrid(page, 0, 5, 8, 12, 10);
+      expect(cdsBlock[0], "precondition: the E8 block").toEqual(["Region", "Product", "Sales"]);
+      await saveClean(page, file);
+
+      // --- Change Data Source to E8:G15: refused in the dialog, naming the pivot's own output.
+      await openChangeDataSource(page, grid, "E2");
+      await cdsApply(page, "Sheet1!E8:G15");
+      await page.waitForTimeout(1200);
+      await expect(cdsDialog(page), "the dialog stays open on a range the re-grown pivot would cover").toBeVisible();
+      expect(await dialogError(cdsDialog(page)), "the refusal says the pivot's own output would cover the range").toMatch(/own output would\s+grow to E1:F9/i);
+      await cdsDialog(page).getByRole("button", { name: /^Cancel$/ }).click();
+      expect(await grandTotal(page, pid), "the pivot still reads its old source").toBe("15");
+      expect((await pivotInfo(page, pid)).sourceRange, "the stored source did not move").toMatch(/A\$?1:\$?C\$?5/);
+      expect(await displayGrid(page, 0, 7, 4, 14, 6), "the E8:G15 source is intact").toEqual(cdsBlock);
+      expect(await isDirty(page), "a refused change leaves a clean document clean").toBe(false);
+
+      // --- Insert > PivotTable over I6:K13 at I1: the empty pivot's I1:K18 would cover it -- refused.
+      const before = await allPivotIds(page);
+      await grid.clickCell("M20");
+      await openCreatePivotDialog(page);
+      await createDialog(page).locator('[data-testid="pivot-worksheet-source-range"]').fill("Sheet1!I6:K13");
+      await createDialog(page).locator('input[type="radio"][value="existing"]').check();
+      await createDialog(page).locator('input[placeholder="e.g., Sheet2!F1"]').fill("Sheet1!I1");
+      await createDialog(page).getByRole("button", { name: /^OK$/ }).click();
+      await page.waitForTimeout(1200);
+      await expect(createDialog(page), "the dialog stays open on a destination whose pivot would cover its source").toBeVisible();
+      expect(await dialogError(createDialog(page)), "the refusal says the pivot would cover its own source").toMatch(/covers its own\s+source data \(I6:K13\)/i);
+      await createDialog(page).getByRole("button", { name: /^Cancel$/ }).click();
+      expect(await allPivotIds(page), "no pivot was created").toEqual(before);
+      expect((await pivotRegions(page)).some((r) => r.startRow === 0 && r.startCol === 8), "no pivot region at I1").toBe(false);
+      expect(await displayGrid(page, 0, 5, 8, 12, 10), "the I6:K13 source is intact").toEqual(createBlock);
+      expect(await isDirty(page), "a refused create leaves a clean document clean").toBe(false);
+
+      // --- Positive control: the same create one row clear of the placeholder (I1 over I19:K26) is made.
+      await writeCells(page, seven(18, 8));
+      await openCreatePivotDialog(page);
+      await createDialog(page).locator('[data-testid="pivot-worksheet-source-range"]').fill("Sheet1!I19:K26");
+      await createDialog(page).locator('input[type="radio"][value="existing"]').check();
+      await createDialog(page).locator('input[placeholder="e.g., Sheet2!F1"]').fill("Sheet1!I1");
+      await createDialog(page).getByRole("button", { name: /^OK$/ }).click();
+      await expect(createDialog(page), "a create clear of its source is made").toHaveCount(0, { timeout: 10_000 });
+      await eventually(() => allPivotIds(page), (a) => a.length === before.length + 1, "the control create made no pivot");
+    } finally {
+      await newFile(page);
+      fs.rmSync(file, { force: true });
+    }
+  });
+
+  test("placeholder (beside BUG-0226): an empty pivot over the user's cells writes none of them -- Ctrl+Z of its create keeps them, and its first field change leaves every one its output does not cover", async ({
+    appPage: page,
+  }) => {
+    try {
+      await newFile(page);
+      await writeTable(page, CDS_DATA);
+      // The user's cells inside the 18 x 3 placeholder an empty pivot at E1 reserves (E1:G18), below
+      // the E1:F6 its first output (four regions) will take.
+      await writeCells(page, [[9, 4, "keep E10"], [12, 6, "keep G13"], [17, 5, "keep F18"]]);
+      const mine = await displayGrid(page, 0, 0, 4, 17, 6);
+      expect(mine[9][0], "precondition: E10").toBe("keep E10");
+
+      // Empty create, then Ctrl+Z: the user's cells are untouched.
+      const p1 = await createRangePivot(page, { sourceRange: "Sheet1!A1:C5", destinationCell: "E1", sourceSheet: 0, destinationSheet: 0 });
+      const reg1 = await eventually(() => pivotRegions(page), (r) => r.some((x) => String(x.pivotId) === p1), "the empty pivot registered no placeholder");
+      const ph = reg1.find((x) => String(x.pivotId) === p1)!;
+      expect({ r1: ph.endRow, c1: ph.endCol }, "precondition: the placeholder reaches G18").toEqual({ r1: 17, c1: 6 });
+      await pressUndo(page);
+      await eventually(() => allPivotIds(page), (a) => !a.includes(p1), "Ctrl+Z did not undo the empty create");
+      expect(await displayGrid(page, 0, 0, 4, 17, 6), "undoing the empty create erased the user's cells under its placeholder").toEqual(mine);
+
+      // Empty create again, then its first field change: E1:F6 is written, the three cells stay.
+      const p2 = await createRangePivot(page, { sourceRange: "Sheet1!A1:C5", destinationCell: "E1", sourceSheet: 0, destinationSheet: 0 });
+      await configurePivot(page, { pivotId: p2, rowFields: [{ sourceIndex: 0, name: "Region" }], valueFields: [SUM_SALES] });
+      expect(await grandTotal(page, p2), "the pivot summarises the four regions").toBe("15");
+      const after = await displayGrid(page, 0, 0, 4, 17, 6);
+      expect([after[9][0], after[12][2], after[17][1]], "the first field change erased the user's cells under the placeholder").toEqual(["keep E10", "keep G13", "keep F18"]);
+    } finally {
+      await newFile(page);
+    }
+  });
 });
 
 // ===========================================================================

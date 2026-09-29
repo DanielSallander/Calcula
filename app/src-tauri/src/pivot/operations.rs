@@ -1157,6 +1157,85 @@ pub(crate) fn check_change_source_excludes_own_output(
     ))
 }
 
+/// The block (rows, cols) a pivot showing `view` occupies: the view's own size,
+/// or the placeholder an EMPTY pivot reserves. The ONE rule: the region
+/// [`update_pivot_region`] registers and the rectangle the self-overlap gates
+/// judge before a change ([`check_pivot_extent_excludes_source`]) come from
+/// here, so the two cannot drift apart.
+pub(crate) fn pivot_extent(view: &PivotView) -> (u32, u32) {
+    if view.row_count > 0 && view.col_count > 0 {
+        // Count all rows in the view (headers + data)
+        (view.row_count as u32, view.col_count as u32)
+    } else {
+        // Empty pivot - reserve minimum space for placeholder
+        (EMPTY_PIVOT_ROWS, EMPTY_PIVOT_COLS)
+    }
+}
+
+/// Which door is asking [`check_pivot_extent_excludes_source`] -- it words the
+/// refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PivotExtentDoor {
+    Create,
+    ChangeDataSource,
+}
+
+/// Reject a pivot whose output block -- the rectangle it WILL occupy, from
+/// [`pivot_extent`] of the view it is about to show -- covers its own source
+/// (BUG-0226). The anchor gate ([`check_pivot_source_destination_overlap`])
+/// and the Change Data Source gate ([`check_change_source_excludes_own_output`])
+/// judged only the anchor and the output the pivot holds NOW, so a source a few
+/// rows BELOW a small pivot passed both: Change Data Source re-grew the pivot
+/// over its new source (the damage counted as ordinary "existing data"), a
+/// configured create wrote straight over it with nothing counted and an undo
+/// that could not put it back, and an empty create's 18x3 placeholder claimed
+/// the source as a protected region whose undo erased it.
+///
+/// A PivotTable may not overlap its own source. Only meaningful when both live
+/// on the same sheet; called before the document effect, so a refusal leaves
+/// the document clean.
+pub(crate) fn check_pivot_extent_excludes_source(
+    source_sheet: usize,
+    source_start: (u32, u32),
+    source_end: (u32, u32),
+    dest_sheet: usize,
+    destination: (u32, u32),
+    extent: (u32, u32),
+    door: PivotExtentDoor,
+) -> Result<(), String> {
+    if source_sheet != dest_sheet {
+        return Ok(());
+    }
+    let (sr, sc) = source_start;
+    let (er, ec) = source_end;
+    // Normalize, so a caller passing the corners in either order still works.
+    let (r0, r1) = if sr <= er { (sr, er) } else { (er, sr) };
+    let (c0, c1) = if sc <= ec { (sc, ec) } else { (ec, sc) };
+    let (top, left) = destination;
+    let bottom = top.saturating_add(extent.0.saturating_sub(1));
+    let right = left.saturating_add(extent.1.saturating_sub(1));
+    if !(top <= r1 && bottom >= r0 && left <= c1 && right >= c0) {
+        return Ok(());
+    }
+    let a1 = |row: u32, col: u32| format!("{}{}", col_index_to_letter(col), row + 1);
+    let block = format!("{}:{}", a1(top, left), a1(bottom, right));
+    let source = format!("{}:{}", a1(r0, c0), a1(r1, c1));
+    Err(match door {
+        PivotExtentDoor::Create => format!(
+            "Cannot create pivot table: at this destination it would take {}, which covers its own \
+             source data ({}), so the pivot would overwrite the data it reads. Choose a destination \
+             outside the source (or put it on another sheet).",
+            block, source
+        ),
+        PivotExtentDoor::ChangeDataSource => format!(
+            "Cannot change the data source: with the new range this PivotTable's own output would \
+             grow to {}, over the new range ({}), so the pivot would overwrite the data it reads. \
+             Choose a range clear of the PivotTable (or move the PivotTable to another sheet).",
+            block, source
+        ),
+    })
+}
+
 /// Updates the pivot region tracking for a pivot table.
 pub(crate) fn update_pivot_region(
     state: &AppState,
@@ -1166,14 +1245,19 @@ pub(crate) fn update_pivot_region(
     view: &PivotView,
 ) {
     // Calculate region size - use actual view size or minimum reserved size for empty pivots
-    let (rows, cols) = if view.row_count > 0 && view.col_count > 0 {
-        // Count all rows in the view (headers + data)
-        (view.row_count as u32, view.col_count as u32)
-    } else {
-        // Empty pivot - reserve minimum space for placeholder
-        (EMPTY_PIVOT_ROWS, EMPTY_PIVOT_COLS)
-    };
+    let (rows, cols) = pivot_extent(view);
     register_pivot_region(state, pivot_id, sheet_index, destination, rows, cols, view.row_count == 0);
+}
+
+/// The block a pivot has WRITTEN: its registered region, unless that region is
+/// only RESERVED -- an empty pivot's 18 x 3 placeholder, which wrote nothing.
+/// THE rule for every door that clears "the pivot's cells" or skips them as
+/// "the pivot's own" when counting what a write overwrites. Reading the whole
+/// region there erased the user's cells under an empty pivot: on its first
+/// field change (skipped by the save, then cleared), on undo of its create and
+/// on its delete (found 2026-09-29 beside BUG-0226).
+pub(crate) fn pivot_written_region(state: &AppState, pivot_id: PivotId) -> Option<ProtectedRegion> {
+    get_pivot_region(state, pivot_id).filter(|region| !region.reserved_only)
 }
 
 /// Register a pivot's protected region as an explicit block of `rows` x
@@ -1221,6 +1305,7 @@ fn register_pivot_region(
         start_col: dest_col,
         end_row,
         end_col,
+        reserved_only: empty,
     });
     
     log_debug!(
@@ -1469,8 +1554,9 @@ pub(crate) fn update_pivot_in_grid(
         return Err(refusal);
     }
 
-    // Get old region before writing new data
-    let old_region = get_pivot_region(state, pivot_id);
+    // The block the pivot WROTE before this write -- never a placeholder's,
+    // whose cells are the user's (`pivot_written_region`).
+    let old_region = pivot_written_region(state, pivot_id);
 
     // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else
     // (the style registry included). The recalculation pass holds both grid
@@ -1984,7 +2070,8 @@ pub(crate) fn count_overwritten_cells(
     let new_end_row = dest_row + visible_row_count - 1;
     let new_end_col = dest_col + view.col_count as u32 - 1;
 
-    let old_region = get_pivot_region(state, pivot_id);
+    // Only cells the pivot WROTE are its own; a placeholder's are the user's.
+    let old_region = pivot_written_region(state, pivot_id);
 
     let grids = state.grids.read().unwrap();
     let grid = match grids.get(dest_sheet_idx) {
@@ -2053,7 +2140,8 @@ pub(crate) fn save_overwritten_cells(
     let new_end_row = dest_row + visible_row_count - 1;
     let new_end_col = dest_col + view.col_count as u32 - 1;
 
-    let old_region = get_pivot_region(state, pivot_id);
+    // Only cells the pivot WROTE are its own; a placeholder's are the user's.
+    let old_region = pivot_written_region(state, pivot_id);
 
     let grids = state.grids.read().unwrap();
     let grid = match grids.get(dest_sheet_idx) {
@@ -2415,6 +2503,7 @@ mod dest_sheet_tests {
             start_col: 7,
             end_row: 9,
             end_col: 9,
+            reserved_only: false,
         });
         let no_name_no_region = full_definition(None);
 

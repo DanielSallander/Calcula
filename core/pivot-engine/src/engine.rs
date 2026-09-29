@@ -3496,8 +3496,8 @@ pub fn record_value_at(
 
 /// [`record_value_at`] as a MEMBER id -- the id an axis item and a group key
 /// carry (a blank value is `VALUE_ID_BLANK`; see `crate::cache::member_id`).
-/// `record_value_at` itself keeps the record's own spelling: the tablix
-/// engine reads it.
+/// `record_value_at` itself keeps the record's own spelling: its callers
+/// (lookup-attribute labels, sort-by-column values) read RECORD values.
 fn record_member_at(
     record: &crate::cache::CacheRecord,
     record_idx: usize,
