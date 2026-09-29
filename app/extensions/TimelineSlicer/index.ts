@@ -11,6 +11,7 @@ import {
   isPointerClaimed,
 } from "@api";
 import {
+  getGridRegions,
   requestOverlayRedraw,
   type OverlayRenderContext,
 } from "@api/gridOverlays";
@@ -51,9 +52,15 @@ import {
   updateCachedTimelinePosition,
   updateCachedTimelineBounds,
   refreshTimelineData,
+  refreshCacheAndReconcile,
+  isTimelineGestureLanding,
   type TimelineGeometryWrite,
 } from "./lib/timelineSlicerStore";
-import { registerObjectGeometryProvider } from "@api/objectGeometry";
+import {
+  coMovedMemberRect,
+  refuseUndoWhileAGestureLands,
+  registerObjectGeometryProvider,
+} from "@api/objectGeometry";
 import { createTimelineGeometryProvider } from "./lib/timelineGeometry";
 
 import {
@@ -66,7 +73,6 @@ import {
   getMaxScrollOffset,
   resetScrollOffsets,
 } from "./rendering/timelineSlicerRenderer";
-import { applyTimelineFilter } from "./lib/timelineSlicerFilterBridge";
 import { timelineBackend } from "./lib/timelineBackend";
 import { TimelineSlicerEvents } from "./lib/timelineSlicerEvents";
 import type { TimelineLevel } from "./lib/timelineSlicerTypes";
@@ -90,13 +96,6 @@ let gridContainer: HTMLElement | null = null;
 let lastMousedownCtrl = false;
 let dragStartPositions: Map<string, { x: number; y: number }> | null = null;
 
-/** Track period-drag state for range selection. */
-let periodDragState: {
-  timelineId: string;
-  startPeriodIndex: number;
-  currentPeriodIndex: number;
-} | null = null;
-
 // ============================================================================
 // Activation
 // ============================================================================
@@ -110,6 +109,10 @@ function activate(context: ExtensionContext): void {
 
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(TimelineSlicerManifest);
+
+  // A keyboard Ctrl+Z / Ctrl+Y while a timeline selection's filter LANDS is
+  // refused by the backend (W4); the keyboard says why, once.
+  cleanupFunctions.push(refuseUndoWhileAGestureLands(isTimelineGestureLanding));
 
   // Register the timeline store service so scriptable timeline (date-range
   // slicer) contexts can read/write the selected range without importing this
@@ -212,6 +215,27 @@ function activate(context: ExtensionContext): void {
     window.removeEventListener("floatingObject:selected", handleFloatingSelected);
   });
 
+  // Where a timeline this drag CO-MOVES goes (a member of the selection, not
+  // the pressed lead): the rule a Core-led canvas group drag applies
+  // (@api/objectGeometry `coMovedMemberRect`) -- its press-time position
+  // shifted by the lead's snapped delta, KEPT ON THE PAGE on a canvas, and a
+  // LOCKED member stays put. It used to be clamped at 0 only.
+  const coMovedTimelineAt = (
+    tl: { id: string; sheetIndex: number; width: number; height: number },
+    startPos: { x: number; y: number },
+    dx: number,
+    dy: number,
+  ): { x: number; y: number } => {
+    const region = getGridRegions().find((r) => r.id === `timeline-slicer-${tl.id}`) ?? null;
+    const at = coMovedMemberRect(
+      tl.sheetIndex,
+      { x: startPos.x, y: startPos.y, width: tl.width, height: tl.height },
+      { dx, dy },
+      region,
+    );
+    return { x: at.x, y: at.y };
+  };
+
   // Handle floating object move completion
   const handleMoveComplete = (e: Event) => {
     const detail = (e as CustomEvent).detail;
@@ -239,9 +263,10 @@ function activate(context: ExtensionContext): void {
       for (const [id, startPos] of dragStartPositions!) {
         const tl = getTimelineById(id);
         if (!tl) continue;
-        const newX = Math.max(0, startPos.x + dx);
-        const newY = Math.max(0, startPos.y + dy);
-        writes.push({ timelineId: id, x: newX, y: newY, width: tl.width, height: tl.height });
+        // The lead is where Core put it; every other member follows the
+        // Core-led group-drag rule.
+        const at = id === primaryId ? { x: detail.x, y: detail.y } : coMovedTimelineAt(tl, startPos, dx, dy);
+        writes.push({ timelineId: id, x: at.x, y: at.y, width: tl.width, height: tl.height });
       }
     }
 
@@ -271,7 +296,10 @@ function activate(context: ExtensionContext): void {
       const dx = detail.x - primaryStart.x;
       const dy = detail.y - primaryStart.y;
       for (const [id, startPos] of dragStartPositions!) {
-        updateCachedTimelinePosition(id, Math.max(0, startPos.x + dx), Math.max(0, startPos.y + dy));
+        const tl = getTimelineById(id);
+        if (!tl) continue;
+        const at = id === primaryId ? { x: detail.x, y: detail.y } : coMovedTimelineAt(tl, startPos, dx, dy);
+        updateCachedTimelinePosition(id, at.x, at.y);
       }
     }
 
@@ -321,13 +349,6 @@ function activate(context: ExtensionContext): void {
   // -----------------------------------------------------------------------
 
   const handleMouseUp = (e: MouseEvent) => {
-    // Finish any period drag
-    if (periodDragState) {
-      finishPeriodDrag();
-      periodDragState = null;
-      return;
-    }
-
     const pendingClick = takePendingTimelineClick();
     if (!pendingClick) return;
 
@@ -356,61 +377,14 @@ function activate(context: ExtensionContext): void {
     window.removeEventListener("mouseup", handleMouseUp);
   });
 
-  // -----------------------------------------------------------------------
-  // Mousemove handler: period drag for range selection
-  // -----------------------------------------------------------------------
-
-  const handleMouseMove = (e: MouseEvent) => {
-    if (!periodDragState) return;
-
-    if (!gridContainer) {
-      gridContainer = document.querySelector("[data-grid-area]") as HTMLElement | null;
-    }
-    if (!gridContainer) return;
-
-    const rect = gridContainer.getBoundingClientRect();
-    const gridState = getGridStateSnapshot();
-    if (!gridState) return;
-
-    const zoom = gridState.zoom ?? 1.0;
-    const canvasX = (e.clientX - rect.left) / zoom;
-
-    const tl = getTimelineById(periodDragState.timelineId);
-    if (!tl) return;
-
-    const data = getCachedTimelineData(periodDragState.timelineId);
-    if (!data || data.periods.length === 0) return;
-
-    // The gutters Core PAINTED (lib/timelineCanvasGeometry.ts).
-    const bounds = timelineCanvasBounds(tl);
-    if (!bounds) return;
-
-    const hit = getTimelineHitDetail(canvasX, (e.clientY - rect.top) / zoom, bounds, periodDragState.timelineId);
-    if (hit?.type === "period" && hit.periodIndex != null) {
-      periodDragState.currentPeriodIndex = hit.periodIndex;
-
-      // Live preview: update selection
-      const startIdx = Math.min(periodDragState.startPeriodIndex, periodDragState.currentPeriodIndex);
-      const endIdx = Math.max(periodDragState.startPeriodIndex, periodDragState.currentPeriodIndex);
-      const startPeriod = data.periods[startIdx];
-      const endPeriod = data.periods[endIdx];
-
-      if (startPeriod && endPeriod) {
-        // Update locally for visual feedback
-        tl.selectionStart = startPeriod.startDate;
-        tl.selectionEnd = endPeriod.endDate;
-        // Mark periods as selected for rendering
-        for (const p of data.periods) {
-          p.isSelected = p.index >= startIdx && p.index <= endIdx;
-        }
-        requestOverlayRedraw();
-      }
-    }
-  };
-  window.addEventListener("mousemove", handleMouseMove);
-  cleanupFunctions.push(() => {
-    window.removeEventListener("mousemove", handleMouseMove);
-  });
+  // No period DRAG. A period is selected by the pending click, which completes
+  // on MOUSEUP -- and it used to arm a "range drag" right there, with no
+  // button held: hovering afterwards grew the selection, and the NEXT mouseup
+  // anywhere (a click on a cell) committed it -- re-applying a period the user
+  // had just undone (found live 2026-09-29, e2e fixall-pivot WF-D3). A press
+  // on a timeline is Core's floating-object press (select, and move on drag),
+  // so a drag-to-select range needs Core to leave the period strip to the
+  // timeline first; recorded in docs/design/open-items.md.
 
   // -----------------------------------------------------------------------
   // Context menu
@@ -497,30 +471,11 @@ function activate(context: ExtensionContext): void {
     }),
   );
 
-  // -----------------------------------------------------------------------
-  // Filter bridge: apply filters when timeline selection changes
-  // -----------------------------------------------------------------------
-
-  const handleSelectionChanged = (e: Event) => {
-    const detail = (e as CustomEvent).detail;
-    const timelineId = detail?.timelineId as string;
-    if (timelineId == null) return;
-
-    const tl = getTimelineById(timelineId);
-    if (tl) {
-      applyTimelineFilter(tl).catch(console.error);
-    }
-  };
-  window.addEventListener(
-    TimelineSlicerEvents.TIMELINE_SELECTION_CHANGED,
-    handleSelectionChanged,
-  );
-  cleanupFunctions.push(() => {
-    window.removeEventListener(
-      TimelineSlicerEvents.TIMELINE_SELECTION_CHANGED,
-      handleSelectionChanged,
-    );
-  });
+  // The filter a timeline selection puts on its pivots is applied by
+  // `updateTimelineSelectionAsync` itself, as part of the same gesture (one
+  // undo step for the pivots, one overwrite question). It used to be applied
+  // here, fire-and-forget, from TIMELINE_SELECTION_CHANGED -- outside every
+  // undo step and never asked about (BUG-0200).
 
   // -----------------------------------------------------------------------
   // Timeline deleted: deselect the deleted timeline so the contextual
@@ -562,9 +517,17 @@ function activate(context: ExtensionContext): void {
   // well as "slicers:refresh"; until this listener existed, the domain's promise
   // held only by accident, because every route that announced "slicer" happened
   // to announce "pivot" too.
-  window.addEventListener("timelineslicers:refresh", handlePivotRefresh);
+  //
+  // It is also how an UNDO or REDO of a timeline selection reaches here, and a
+  // plain re-read left the pivots filtered by the range just undone (a level-1
+  // mask records no undo of its own): the re-read RECONCILES, re-deriving the
+  // masks of every timeline the change moved and recording nothing.
+  const handleTimelineRefresh = () => {
+    refreshCacheAndReconcile().then(() => requestOverlayRedraw()).catch(console.error);
+  };
+  window.addEventListener("timelineslicers:refresh", handleTimelineRefresh);
   cleanupFunctions.push(() => {
-    window.removeEventListener("timelineslicers:refresh", handlePivotRefresh);
+    window.removeEventListener("timelineslicers:refresh", handleTimelineRefresh);
   });
 
   // -----------------------------------------------------------------------
@@ -604,7 +567,6 @@ function deactivate(): void {
   gridContainer = null;
   clearPendingTimelineClick();
   dragStartPositions = null;
-  periodDragState = null;
 
   // Unregister from extension registries
   ExtensionRegistry.unregisterAddIn(TimelineSlicerManifest.id);
@@ -635,7 +597,7 @@ function handleTimelineClickAt(
   switch (hit.type) {
     case "clearButton":
       if (tl.selectionStart !== null) {
-        updateTimelineSelectionAsync(timelineId, null, null).catch(console.error);
+        updateTimelineSelectionAsync(timelineId, null, null, { askBeforeOverwrite: true }).catch(console.error);
       }
       break;
 
@@ -667,40 +629,14 @@ function handlePeriodClick(timelineId: string, periodIndex: number): void {
 
   const period = data.periods[periodIndex];
 
-  // Start period drag for range selection
-  periodDragState = {
-    timelineId,
-    startPeriodIndex: periodIndex,
-    currentPeriodIndex: periodIndex,
-  };
-
-  // Immediate single-period selection
+  // Single-period selection -- and NO drag state: this runs on the mouseup
+  // that completed the click (see the note where the mousemove handler was).
   updateTimelineSelectionAsync(
     timelineId,
     period.startDate,
     period.endDate,
+    { askBeforeOverwrite: true },
   ).catch(console.error);
-}
-
-function finishPeriodDrag(): void {
-  if (!periodDragState) return;
-
-  const { timelineId, startPeriodIndex, currentPeriodIndex } = periodDragState;
-  const data = getCachedTimelineData(timelineId);
-  if (!data) return;
-
-  const startIdx = Math.min(startPeriodIndex, currentPeriodIndex);
-  const endIdx = Math.max(startPeriodIndex, currentPeriodIndex);
-  const startPeriod = data.periods[startIdx];
-  const endPeriod = data.periods[endIdx];
-
-  if (startPeriod && endPeriod) {
-    updateTimelineSelectionAsync(
-      timelineId,
-      startPeriod.startDate,
-      endPeriod.endDate,
-    ).catch(console.error);
-  }
 }
 
 // ============================================================================

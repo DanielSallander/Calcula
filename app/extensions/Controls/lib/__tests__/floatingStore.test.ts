@@ -35,6 +35,7 @@ import {
   moveGroupControls,
   resizeGroupControls,
   getAllGroups,
+  removeFloatingControlsNotOnSheet,
   type FloatingControl,
 } from "../floatingStore";
 
@@ -70,6 +71,23 @@ describe("floatingStore", () => {
     it("generates expected format", () => {
       expect(makeFloatingControlId(0, 5, 3)).toBe("control-0-5-3");
       expect(makeFloatingControlId(2, 0, 0)).toBe("control-2-0-0");
+    });
+  });
+
+  describe("one sheet at a time (found live 2026-09-29, LIVE-1)", () => {
+    it("purges every control not on the next sheet and reports which sheets went", () => {
+      addFloatingControl(makeCtrl("a", { sheetIndex: 0 }));
+      addFloatingControl(makeCtrl("b", { sheetIndex: 1 }));
+      addFloatingControl(makeCtrl("c", { sheetIndex: 2 }));
+      addFloatingControl(makeCtrl("d", { sheetIndex: 1 }));
+      expect(removeFloatingControlsNotOnSheet(1).sort()).toEqual([0, 2]);
+      expect(getAllFloatingControls().map((c) => c.id).sort()).toEqual(["b", "d"]);
+    });
+
+    it("purges nothing when the store already holds only that sheet", () => {
+      addFloatingControl(makeCtrl("b", { sheetIndex: 1 }));
+      expect(removeFloatingControlsNotOnSheet(1)).toEqual([]);
+      expect(getAllFloatingControls().map((c) => c.id)).toEqual(["b"]);
     });
   });
 

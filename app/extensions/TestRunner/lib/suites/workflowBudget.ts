@@ -18,6 +18,8 @@ import {
   DEFAULT_PROMPT,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
+  ownUndoTransaction,
 } from "@api";
 import { evaluateConditionalFormats } from "@api/backend";
 
@@ -153,7 +155,10 @@ export const workflowBudgetSuite: TestSuite = {
       name: "Budget undo restores state",
       description: "Undo transaction reverts entire budget creation.",
       run: async (ctx) => {
-        await beginUndoTransaction("budget creation");
+        const tx = ownUndoTransaction(await beginUndoTransaction("budget creation"), {
+          commitUndoTransaction,
+          cancelUndoTransaction,
+        });
 
         // finally-commit: a failing setCells must not leave the transaction
         // open — every later test's edits would silently join it.
@@ -165,7 +170,7 @@ export const workflowBudgetSuite: TestSuite = {
             { row: A.row + 1, col: A.col + 1, value: "1000" },
           ]);
         } finally {
-          await commitUndoTransaction();
+          await tx.commit();
         }
         await ctx.settle();
 

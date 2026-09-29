@@ -244,8 +244,9 @@ and the chart re-filters).
 - **name** (required) — referenced as \`[Name]\`; must not be a reserved name
   (\`value\`, \`$category\`, \`$index\`, \`$value\`).
 - **value** — literal default (used when there is no \`cellRef\`, or the cell is empty).
-- **cellRef** — a single same-sheet cell (e.g. \`"=B1"\`); cross-sheet refs are not
-  supported and fall back to the default.
+- **cellRef** — a single cell (e.g. \`"=B1"\`) on the sheet the chart reads: the sheet it
+  is on, or for a chart on a canvas sheet (which has no cells) the sheet its data
+  comes from. Sheet-qualified refs are not supported and fall back to the default.
 
 Params resolve once per read and only affect \`filter\`/\`calculate\` expressions
 (not the legacy shorthand like \`"> 100"\` — write a full predicate to use a param).
@@ -281,7 +282,8 @@ persists):
   categories (not just highlights), empty selection = full data. (on:category.)
 - **sharedAs** \`"key"\` — **cross-chart linking**: charts whose select params share
   the same key mirror each other's selection (click one, the others follow).
-- **writeTo** \`"=B1"\` — **write back** the clicked label to a same-sheet cell, so
+- **writeTo** \`"=B1"\` — **write back** the clicked label to a cell (the same sheet
+  rule as **cellRef**), so
   formulas and other charts react. (Written as normal cell input — a label that
   looks like a number/formula is interpreted as such.)
 

@@ -19,7 +19,7 @@ import {
   refreshConnection,
   updateConnection,
 } from "../../_shared/lib/bi-api";
-import { createModelPivot } from "../lib/modelPivot";
+import { createModelPivot, modelPivotDestinationAtSelection } from "../lib/modelPivot";
 import { summarizeRefresh } from "../lib/refreshOutcome";
 import { MODEL_DIALOG_ID } from "../manifest";
 import type { ConnectionInfo } from "../types";
@@ -390,16 +390,15 @@ ${dependents.length} object(s) read this connection ` +
 
   const handleNewPivot = useCallback(
     async (connectionId: string) => {
+      // Refused, once, while Core's active cell is hidden under something else
+      // that owns the selection (lib/modelPivot.ts).
+      const destination = modelPivotDestinationAtSelection(gridState);
+      if (destination === null) return;
       try {
         setLoadingId(connectionId);
         setStatus("Creating pivot table...");
 
-        const sel = gridState.selection;
-        await createModelPivot(connectionId, {
-          row: sel ? sel.startRow : 0,
-          col: sel ? sel.startCol : 0,
-          sheetIndex: gridState.sheetContext?.activeSheetIndex,
-        });
+        await createModelPivot(connectionId, destination);
 
         setStatus(`Pivot table created from connection`, "success");
       } catch (err) {

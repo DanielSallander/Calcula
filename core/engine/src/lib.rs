@@ -220,7 +220,7 @@ pub use typed_entry::{
     entry_format_at, is_text_format, parse_cell_input, parse_cell_input_in_format,
     parse_cell_input_invariant, parse_cell_input_invariant_in_format, parse_cell_input_with_format,
 };
-pub use undo::{UndoStack, Transaction, CellChange, UndoMergeRegion, GridSnapshot};
+pub use undo::{UndoStack, Transaction, CellChange, UndoMergeRegion, GridSnapshot, OwnedTransaction};
 
 #[cfg(test)]
 mod tests {

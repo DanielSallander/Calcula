@@ -31,6 +31,11 @@
 //          A calculation-group chip is the exception: its item subset lives
 //          ONLY on the chip (the backend reads it off the placement, and an
 //          absent list there means every item), so it always sends the chip's.
+//
+//          A RANGE pivot's `update_pivot_fields` follows the same rule since
+//          BUG-0184 (`rangeRequestWithHiddenItemEdits` below): it used to read
+//          an absent list as CLEAR, so the editor had to echo every chip's list,
+//          and the same stale-echo race applied.
 
 import type {
   BiFieldRef,
@@ -38,8 +43,10 @@ import type {
   BiValueFieldRef,
   CalculatedFieldDef,
   LayoutConfig,
+  PivotFieldConfig,
   PivotId,
   UpdateBiPivotFieldsRequest,
+  UpdatePivotFieldsRequest,
   ValueColumnRefDef,
 } from './types';
 import { CALC_GROUP_TABLE } from './types';
@@ -169,6 +176,34 @@ export function buildBiUpdateRequest(
   };
 }
 
+/**
+ * The `update_pivot_fields` request a RANGE pivot's editor sends: the zones as
+ * built, with a row, column or filter field carrying hidden items ONLY when
+ * `edits` names it (the user changed its item filter in this editor; `[]` =
+ * removed) -- the model pivot's rule. Every other field has NO `hiddenItems`
+ * key, which the backend reads as "keep what the pivot hides now" (BUG-0184:
+ * it used to read it as CLEAR, so every chip's display list was echoed, and a
+ * filter changed elsewhere within one round trip came silently back).
+ */
+export function rangeRequestWithHiddenItemEdits(
+  request: UpdatePivotFieldsRequest,
+  edits: HiddenItemEdits,
+): UpdatePivotFieldsRequest {
+  const zone = (fields: PivotFieldConfig[] | undefined): PivotFieldConfig[] | undefined =>
+    fields?.map((field) => {
+      const sent: PivotFieldConfig = { ...field };
+      delete sent.hiddenItems; // the chip's list is display, never an edit
+      const edited = edits.get(field.name);
+      return edited === undefined ? sent : { ...sent, hiddenItems: [...edited] };
+    });
+  return {
+    ...request,
+    rowFields: zone(request.rowFields),
+    columnFields: zone(request.columnFields),
+    filterFields: zone(request.filterFields),
+  };
+}
+
 // ============================================================================
 // Which item filters the user changed
 // ============================================================================
@@ -258,10 +293,10 @@ export interface PivotHiddenItemsSnapshot {
  * the context menu, a slicer and a ribbon filter all change a pivot's filters
  * without going through the editor. A stale list is wrong twice over: the DSL
  * shows a `NOT IN` the pivot no longer has (and a cut/paste of that line sends
- * it back), and a RANGE pivot's request echoes every chip's list -- for
- * `update_pivot_fields` an absent list means CLEAR, so the editor cannot just
- * omit it -- which silently re-applied a filter cleared elsewhere (review3
- * finding 1, the range half of review2 slicerbe finding 4).
+ * it back), and -- before BUG-0184, when `update_pivot_fields` read an absent
+ * list as CLEAR and the editor had to echo every chip's -- a RANGE pivot's
+ * request silently re-applied a filter cleared elsewhere (review3 finding 1,
+ * the range half of review2 slicerbe finding 4).
  *
  * A range chip (sourceIndex >= 0) is matched by source index, a model or
  * calculation-group chip (-1) by name, a hierarchy chip never. A chip with a

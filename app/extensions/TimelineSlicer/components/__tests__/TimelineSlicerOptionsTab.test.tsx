@@ -252,7 +252,8 @@ describe("Timeline sections — behaviour", () => {
     const clear = buttonByText("Clear Filter");
     expect(clear.disabled).toBe(false);
     await clickAsync(clear);
-    expect(mockUpdateSelection).toHaveBeenCalledWith("tl-1", null, null);
+    // A user gesture: it asks before a clear that overwrites (the review of S2).
+    expect(mockUpdateSelection).toHaveBeenCalledWith("tl-1", null, null, { askBeforeOverwrite: true });
   });
 
   it("Clear Filter is really disabled when the timeline has no filter", () => {

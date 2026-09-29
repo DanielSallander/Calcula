@@ -265,9 +265,9 @@ fn an_omitted_expected_seq_is_an_ordinary_undo() {
 #[test]
 fn the_hold_back_claims_its_undo_id_rather_than_observing_it() {
     let body = body_of(CALP_SRC, "pub fn calp_hold_back_cells(");
-    let begin = at(&body, "undo.begin_transaction(", "the transaction this command owns");
+    let begin = at(&body, "undo.begin_owned_transaction(", "the transaction this command owns");
     let apply = at(&body, "apply_script_modified_grids(", "the write");
-    let commit = at(&body, "undo.commit_transaction()", "the commit that stamps the id");
+    let commit = at(&body, "undo.commit_owned(owned_txn)", "the commit that stamps the id");
     assert!(
         begin < apply && apply < commit,
         "the command must open the transaction, write inside it, and commit it \
@@ -278,7 +278,7 @@ fn the_hold_back_claims_its_undo_id_rather_than_observing_it() {
         "observing the top of the stack is the race this design removes"
     );
     assert!(
-        body.contains("undo_seq = {") && body.contains("undo.commit_transaction()"),
+        body.contains("undo_seq = {") && body.contains("undo.commit_owned(owned_txn)"),
         "the id must come FROM the commit"
     );
 }
@@ -289,21 +289,21 @@ fn the_hold_back_claims_its_undo_id_rather_than_observing_it() {
 /// makes — it is the hazard `apply_script_modified_grids_core`'s own "ALWAYS
 /// commit" comment names.
 ///
-/// SABOTAGE: move the `begin_transaction` above `open_verified_content`, or
+/// SABOTAGE: move the `begin_owned_transaction` above `open_verified_content`, or
 /// change `let applied = ...;` back to `...?;`.
 #[test]
 fn the_hold_backs_transaction_cannot_dangle() {
     let body = body_of(CALP_SRC, "pub fn calp_hold_back_cells(");
     let verify = at(&body, "open_verified_content(", "the workspace verification");
     let no_sheet = at(&body, "CALP_HOLDBACK_NO_SHEET", "the missing-sheet refusal");
-    let begin = at(&body, "undo.begin_transaction(", "the transaction");
+    let begin = at(&body, "undo.begin_owned_transaction(", "the transaction");
     assert!(
         verify < begin && no_sheet < begin,
         "every refusal must precede the transaction"
     );
 
     let apply = at(&body, "let applied = crate::scripting", "the non-propagating write");
-    let commit = at(&body, "undo.commit_transaction()", "the commit");
+    let commit = at(&body, "undo.commit_owned(owned_txn)", "the commit");
     let propagate = at(&body, "applied?;", "the deferred error propagation");
     assert!(
         apply < commit && commit < propagate,

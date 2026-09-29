@@ -29,6 +29,11 @@ import {
   relocateCellReferences,
 } from "../lib/tauri-api";
 import type { CellUpdateInput, FormulaShiftInput } from "../lib/tauri-api";
+import {
+  ownUndoTransaction,
+  type OwnedUndoTransaction,
+  type UndoTransactionCloses,
+} from "../lib/undoTransactionOwnership";
 import { cellEvents } from "../lib/cellEvents";
 import { setClipboard, clearClipboard, setSelection } from "../state/gridActions";
 import type { Selection, CellData, ClipboardMode, Comment, DataValidation } from "../types";
@@ -108,6 +113,19 @@ export interface UseClipboardReturn {
   /** Copy columns to target position (Ctrl+Drag, source stays intact) */
   copyColumnsDrag: (sourceStartCol: number, sourceEndCol: number, targetCol: number) => Promise<void>;
 }
+
+/**
+ * The closes every gesture here makes, bound to the begin's answer by
+ * ownUndoTransaction: a gesture closes ONLY the undo transaction its own begin
+ * OPENED. Inside a script's open batch (or a command-line run) the begin JOINS,
+ * the gesture's writes become part of that holder's step, and the holder
+ * closes it -- a paste that committed or cancelled unconditionally ended the
+ * script's batch halfway, or dropped its undo record (wave E, Y7).
+ */
+const UNDO_CLOSES: UndoTransactionCloses = {
+  commitUndoTransaction: (...ticket) => commitUndoTransaction(...ticket),
+  cancelUndoTransaction: (...ticket) => cancelUndoTransaction(...ticket),
+};
 
 // Module-level clipboard storage (persists across hook instances)
 let internalClipboard: ClipboardData | null = null;
@@ -578,12 +596,17 @@ export function useClipboard(): UseClipboardReturn {
       }
     }
 
+    // The paste's hold lives OUTSIDE the try, so every exit -- the outer catch
+    // included -- can close the step the paste opened: anything that threw
+    // after the write, the commit itself included, used to leave it OPEN, and
+    // every later edit silently joined it (wave F, Z8).
+    let tx: OwnedUndoTransaction | null = null;
     try {
       // Begin undo transaction so all paste changes are a single undo entry
       const transactionDesc = wasCutOperation
         ? `Cut and paste ${pasteHeight * pasteWidth} cells`
         : `Paste ${pasteHeight * pasteWidth} cells`;
-      await beginUndoTransaction(transactionDesc);
+      tx = ownUndoTransaction(await beginUndoTransaction(transactionDesc), UNDO_CLOSES);
 
       // Build batch updates array (single IPC call instead of one per cell)
       const perfPasteStart = performance.now();
@@ -620,7 +643,7 @@ export function useClipboard(): UseClipboardReturn {
         // Close the transaction opened above — a rejected paste (e.g. into a
         // protected pivot/report region) must not leave it dangling, or the
         // user's NEXT edits would silently merge into one undo entry.
-        await cancelUndoTransaction().catch(() => {});
+        await tx.cancel().catch(() => {});
         const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
         void alertAsync(msg);
         return;
@@ -674,7 +697,7 @@ export function useClipboard(): UseClipboardReturn {
       }
 
       // Commit the undo transaction
-      await commitUndoTransaction();
+      await tx.commit();
 
       // Refresh grid after paste (single viewport refresh for all pasted cells)
       window.dispatchEvent(new CustomEvent("grid:refresh"));
@@ -701,6 +724,9 @@ export function useClipboard(): UseClipboardReturn {
       });
     } catch (error) {
       console.error("[Clipboard] Paste failed:", error);
+      // Close what THIS paste opened (a no-op after a commit that landed, or
+      // after a join -- a script's batch is its holder's to close).
+      await tx?.cancel().catch(() => {});
     }
   }, [selection, config.totalRows, config.totalCols, dispatch]);
 
@@ -805,9 +831,10 @@ export function useClipboard(): UseClipboardReturn {
         if (!confirmed) return;
       }
 
+      let tx: OwnedUndoTransaction | null = null;
       try {
         // Begin undo transaction for the entire move operation
-        await beginUndoTransaction(`Move ${height * width} cells`);
+        tx = ownUndoTransaction(await beginUndoTransaction(`Move ${height * width} cells`), UNDO_CLOSES);
 
         // 1. Read source cells
         const sourceCells = await getViewportCells(srcMinRow, srcMinCol, srcMaxRow, srcMaxCol);
@@ -889,7 +916,7 @@ export function useClipboard(): UseClipboardReturn {
               // Newly load-bearing: a mid-range write can now be refused by
               // sheet protection, so this path went from near-unreachable to
               // routine.
-              await cancelUndoTransaction().catch(() => {});
+              await tx.cancel().catch(() => {});
               void alertAsync(msg);
               return;
             }
@@ -950,7 +977,7 @@ export function useClipboard(): UseClipboardReturn {
         }
 
         // Commit the undo transaction
-        await commitUndoTransaction();
+        await tx.commit();
 
         // Refresh style cache so the canvas picks up styles from moved cells
         window.dispatchEvent(new CustomEvent("styles:refresh"));
@@ -977,7 +1004,7 @@ export function useClipboard(): UseClipboardReturn {
         console.log("[Clipboard] Move cells complete");
       } catch (error) {
         console.error("[Clipboard] Move cells failed:", error);
-        await cancelUndoTransaction().catch(() => {});
+        await tx?.cancel().catch(() => {});
         void alertAsync(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
@@ -1018,8 +1045,9 @@ export function useClipboard(): UseClipboardReturn {
         if (!confirmed) return;
       }
 
+      let tx: OwnedUndoTransaction | null = null;
       try {
-        await beginUndoTransaction(`Move ${count} rows`);
+        tx = ownUndoTransaction(await beginUndoTransaction(`Move ${count} rows`), UNDO_CLOSES);
 
         // 1. Read all cell data from source rows (sparse)
         const sourceCells = await getCellsInRows(minRow, maxRow);
@@ -1090,7 +1118,7 @@ export function useClipboard(): UseClipboardReturn {
           console.error("[Clipboard] Failed to relocate cell references:", err);
         }
 
-        await commitUndoTransaction();
+        await tx.commit();
 
         // 5. Emit change event to trigger grid refresh
         cellEvents.emit({
@@ -1114,7 +1142,7 @@ export function useClipboard(): UseClipboardReturn {
       } catch (error) {
         // Close the "Move N rows" transaction — left open, every subsequent
         // edit silently joins it and collapses into one Ctrl+Z step.
-        await cancelUndoTransaction().catch(() => {});
+        await tx?.cancel().catch(() => {});
         const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
         void alertAsync(msg);
       }
@@ -1156,8 +1184,9 @@ export function useClipboard(): UseClipboardReturn {
         if (!confirmed) return;
       }
 
+      let tx: OwnedUndoTransaction | null = null;
       try {
-        await beginUndoTransaction(`Move ${count} columns`);
+        tx = ownUndoTransaction(await beginUndoTransaction(`Move ${count} columns`), UNDO_CLOSES);
 
         // 1. Read all cell data from source columns (sparse)
         const sourceCells = await getCellsInCols(minCol, maxCol);
@@ -1228,7 +1257,7 @@ export function useClipboard(): UseClipboardReturn {
           console.error("[Clipboard] Failed to relocate cell references:", err);
         }
 
-        await commitUndoTransaction();
+        await tx.commit();
 
         // 5. Emit change event to trigger grid refresh
         cellEvents.emit({
@@ -1250,7 +1279,7 @@ export function useClipboard(): UseClipboardReturn {
 
         console.log("[Clipboard] Move columns complete");
       } catch (error) {
-        await cancelUndoTransaction().catch(() => {});
+        await tx?.cancel().catch(() => {});
         const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
         void alertAsync(msg);
       }
@@ -1293,8 +1322,9 @@ export function useClipboard(): UseClipboardReturn {
         if (!confirmed) return;
       }
 
+      let tx: OwnedUndoTransaction | null = null;
       try {
-        await beginUndoTransaction(`Copy ${height * width} cells`);
+        tx = ownUndoTransaction(await beginUndoTransaction(`Copy ${height * width} cells`), UNDO_CLOSES);
 
         const sourceCells = await getViewportCells(srcMinRow, srcMinCol, srcMaxRow, srcMaxCol);
         const cellMap = new Map<string, CellData>();
@@ -1342,7 +1372,7 @@ export function useClipboard(): UseClipboardReturn {
               // Newly load-bearing: a mid-range write can now be refused by
               // sheet protection, so this path went from near-unreachable to
               // routine.
-              await cancelUndoTransaction().catch(() => {});
+              await tx.cancel().catch(() => {});
               void alertAsync(msg);
               return;
             }
@@ -1351,7 +1381,7 @@ export function useClipboard(): UseClipboardReturn {
 
         // No source clearing - this is a copy, not a move
 
-        await commitUndoTransaction();
+        await tx.commit();
 
         window.dispatchEvent(new CustomEvent("styles:refresh"));
         window.dispatchEvent(new CustomEvent("grid:refresh"));
@@ -1367,7 +1397,7 @@ export function useClipboard(): UseClipboardReturn {
         console.log("[Clipboard] Copy cells (drag) complete");
       } catch (error) {
         console.error("[Clipboard] Copy cells (drag) failed:", error);
-        await cancelUndoTransaction().catch(() => {});
+        await tx?.cancel().catch(() => {});
         void alertAsync(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
@@ -1404,8 +1434,9 @@ export function useClipboard(): UseClipboardReturn {
         if (!confirmed) return;
       }
 
+      let tx: OwnedUndoTransaction | null = null;
       try {
-        await beginUndoTransaction(`Copy ${count} rows`);
+        tx = ownUndoTransaction(await beginUndoTransaction(`Copy ${count} rows`), UNDO_CLOSES);
 
         const sourceCells = await getCellsInRows(minRow, maxRow);
         await clearRange(targetRow, 0, targetEndRow, config.totalCols - 1);
@@ -1431,7 +1462,7 @@ export function useClipboard(): UseClipboardReturn {
 
         // No source clearing - this is a copy
 
-        await commitUndoTransaction();
+        await tx.commit();
 
         cellEvents.emit({
           row: -1,
@@ -1452,7 +1483,7 @@ export function useClipboard(): UseClipboardReturn {
         console.log("[Clipboard] Copy rows (drag) complete");
       } catch (error) {
         console.error("[Clipboard] Copy rows (drag) failed:", error);
-        await cancelUndoTransaction().catch(() => {});
+        await tx?.cancel().catch(() => {});
         void alertAsync(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
@@ -1489,8 +1520,9 @@ export function useClipboard(): UseClipboardReturn {
         if (!confirmed) return;
       }
 
+      let tx: OwnedUndoTransaction | null = null;
       try {
-        await beginUndoTransaction(`Copy ${count} columns`);
+        tx = ownUndoTransaction(await beginUndoTransaction(`Copy ${count} columns`), UNDO_CLOSES);
 
         const sourceCells = await getCellsInCols(minCol, maxCol);
         await clearRange(0, targetCol, config.totalRows - 1, targetEndCol);
@@ -1516,7 +1548,7 @@ export function useClipboard(): UseClipboardReturn {
 
         // No source clearing - this is a copy
 
-        await commitUndoTransaction();
+        await tx.commit();
 
         cellEvents.emit({
           row: -1,
@@ -1537,7 +1569,7 @@ export function useClipboard(): UseClipboardReturn {
         console.log("[Clipboard] Copy columns (drag) complete");
       } catch (error) {
         console.error("[Clipboard] Copy columns (drag) failed:", error);
-        await cancelUndoTransaction().catch(() => {});
+        await tx?.cancel().catch(() => {});
         void alertAsync(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },

@@ -17,13 +17,18 @@ import {
 
 const EDIT_OVERLAY_ID = "bookmark-editor";
 
+/** Every grid right-click item this module registers (and its cleanup removes). */
+const CONTEXT_ITEM_IDS = ["bookmarks.context.add", "bookmarks.context.remove", "bookmarks.context.edit"] as const;
+
 /**
- * Register bookmark context menu items for the grid right-click menu.
+ * Register bookmark context menu items for the grid right-click menu. Returns
+ * the cleanup that removes them (a deactivated Cell Bookmarks kept offering
+ * Add / Remove / Edit Bookmark; D3 review).
  */
-export function registerBookmarkContextMenuItems(): void {
+export function registerBookmarkContextMenuItems(): () => void {
   gridExtensions.registerContextMenuItems([
     {
-      id: "bookmarks.context.add",
+      id: CONTEXT_ITEM_IDS[0],
       label: "Add Bookmark",
       group: GridMenuGroups.EDIT,
       order: 90,
@@ -40,7 +45,7 @@ export function registerBookmarkContextMenuItems(): void {
       },
     },
     {
-      id: "bookmarks.context.remove",
+      id: CONTEXT_ITEM_IDS[1],
       label: "Remove Bookmark",
       group: GridMenuGroups.EDIT,
       order: 91,
@@ -57,7 +62,7 @@ export function registerBookmarkContextMenuItems(): void {
       },
     },
     {
-      id: "bookmarks.context.edit",
+      id: CONTEXT_ITEM_IDS[2],
       label: "Edit Bookmark...",
       group: GridMenuGroups.EDIT,
       order: 92,
@@ -76,4 +81,7 @@ export function registerBookmarkContextMenuItems(): void {
       },
     },
   ]);
+  return () => {
+    for (const id of CONTEXT_ITEM_IDS) gridExtensions.unregisterContextMenuItem(id);
+  };
 }

@@ -40,6 +40,11 @@ import {
   getAllRowHeights,
   getDefaultDimensions,
 } from "../../lib/tauri-api";
+import {
+  ownUndoTransaction,
+  type OwnedUndoTransaction,
+  type UndoTransactionCloses,
+} from "../../lib/undoTransactionOwnership";
 import type { UndoResult } from "../../lib/tauri-api";
 import type { FormattingOptions } from "../../types";
 import { measureOptimalColumnWidth, measureOptimalRowHeight } from "../../lib/gridRenderer";
@@ -58,15 +63,40 @@ import {
   setSelection as setSelectionAction,
   clearFormulaReferences,
 } from "../../state/gridActions";
-import { getExternalFormulaTarget, isExternalEditLive } from "../../lib/formulaEditTarget";
+import {
+  getExternalFormulaTarget,
+  isExternalEditLive,
+} from "../../lib/formulaEditTarget";
+import { qualifyInterceptedCellRef } from "../../lib/formulaReferenceInterceptors";
+import {
+  columnToReference,
+  columnRangeToReference,
+  rowToReference,
+  rowRangeToReference,
+} from "../../lib/gridRenderer/references/conversion";
 import { applyRowsHidden, applyColsHidden, refreshUserHidden } from "../../lib/hiddenRowsCols";
 import { primeSheetSwitch } from "../../lib/sheetSwitchPrefetch";
 import { cellEvents, cellToChange } from "../../lib/cellEvents";
 import { gridCommands } from "../../lib/gridCommands";
 import { CommandRegistry, CoreCommands } from "../../../api/commands";
+import { executeCommandAnywhere } from "../../../api/commandDispatch";
 import { emitAppEvent, AppEvents, type MutationDomain } from "../../../api/events";
+import { showToast } from "../../../api/notifications";
 import type { GridCanvasHandle } from "../Grid";
 import { alertAsync } from "../../lib/dialogs";
+
+/**
+ * The closes the resize / auto-fit / hide gestures make, bound to the begin's
+ * answer by ownUndoTransaction: a gesture closes ONLY the undo transaction its
+ * own begin OPENED. Inside a script's open batch the begin JOINS, the
+ * gesture's writes become part of that batch's step, and the script closes it
+ * -- an unconditional commit ended the batch halfway, and a cancel dropped its
+ * undo record (wave E, Y7).
+ */
+const UNDO_CLOSES: UndoTransactionCloses = {
+  commitUndoTransaction: (...ticket) => commitUndoTransaction(...ticket),
+  cancelUndoTransaction: (...ticket) => cancelUndoTransaction(...ticket),
+};
 
 type GridState = ReturnType<typeof useGridState>;
 type GridDispatch = ReturnType<typeof useGridContext>["dispatch"];
@@ -82,6 +112,22 @@ interface UseSpreadsheetSelectionProps {
   isFocused: boolean;
   onCommitBeforeSelect: () => Promise<void>;
 }
+
+/**
+ * Show the backend's refusal of an undo or redo, if it gave one (W15). True
+ * when it did: the history did not move.
+ */
+function announceHistoryRefusal(result: UndoResult | null | undefined): boolean {
+  const refusal = result?.refusal;
+  if (typeof refusal !== "string" || refusal.trim() === "") return false;
+  showToast(refusal, { variant: "info" });
+  return true;
+}
+
+// The pick-text qualifier moved to the interceptor module (W14): Core's own
+// edit parked on another sheet needs it too (useEditing.insertFormulaText).
+// Re-exported here, where the unit tier has always imported it from.
+export { qualifyInterceptedCellRef };
 
 export function useSpreadsheetSelection({
   canvasRef,
@@ -360,8 +406,9 @@ export function useSpreadsheetSelection({
         columnsToFit.push(col);
       }
 
+      let tx: OwnedUndoTransaction | null = null;
       try {
-        await beginUndoTransaction("Auto-fit columns");
+        tx = ownUndoTransaction(await beginUndoTransaction("Auto-fit columns"), UNDO_CLOSES);
         const styles = await getAllStyles();
         const activeTheme = getActiveGridTheme();
         const theme = { cellFontFamily: activeTheme.cellFontFamily, cellFontSize: activeTheme.cellFontSize };
@@ -383,16 +430,16 @@ export function useSpreadsheetSelection({
         }
 
         if (appliedCount > 0) {
-          await commitUndoTransaction();
+          await tx.commit();
         } else {
-          await cancelUndoTransaction();
+          await tx.cancel();
         }
       } catch (err) {
         console.error("Failed to auto-fit columns:", err);
         // Never leave the transaction open — later edits would silently be
         // folded into it
         try {
-          await cancelUndoTransaction();
+          await tx?.cancel();
         } catch {
           // already closed
         }
@@ -434,8 +481,9 @@ export function useSpreadsheetSelection({
         rowsToFit.push(row);
       }
 
+      let tx: OwnedUndoTransaction | null = null;
       try {
-        await beginUndoTransaction("Auto-fit rows");
+        tx = ownUndoTransaction(await beginUndoTransaction("Auto-fit rows"), UNDO_CLOSES);
         const styles = await getAllStyles();
         const activeTheme = getActiveGridTheme();
         const theme = { cellFontFamily: activeTheme.cellFontFamily, cellFontSize: activeTheme.cellFontSize };
@@ -463,13 +511,13 @@ export function useSpreadsheetSelection({
           });
         }
 
-        await commitUndoTransaction();
+        await tx.commit();
       } catch (err) {
         console.error("Failed to auto-fit rows:", err);
         // Never leave the transaction open — later edits would silently be
         // folded into it
         try {
-          await cancelUndoTransaction();
+          await tx?.cancel();
         } catch {
           // already closed
         }
@@ -485,19 +533,20 @@ export function useSpreadsheetSelection({
   // -------------------------------------------------------------------------
   const handleBatchColumnResize = useCallback(
     async (cols: number[], width: number) => {
+      let tx: OwnedUndoTransaction | null = null;
       try {
-        await beginUndoTransaction("Resize columns");
+        tx = ownUndoTransaction(await beginUndoTransaction("Resize columns"), UNDO_CLOSES);
         for (const col of cols) {
           dispatch(setColumnWidth(col, width));
           await setColumnWidthApi(col, width);
         }
-        await commitUndoTransaction();
+        await tx.commit();
       } catch (err) {
         console.error("Failed to batch resize columns:", err);
         // Close the transaction (left open, later edits silently join it) and
         // surface the refusal — the optimistic dispatches above are re-synced
         // by the redraw path on the next dimension fetch.
-        try { await cancelUndoTransaction(); } catch { /* already closed */ }
+        try { await tx?.cancel(); } catch { /* already closed */ }
         void alertAsync(err instanceof Error ? err.message : String(err));
       }
       canvasRef.current?.redraw();
@@ -507,16 +556,17 @@ export function useSpreadsheetSelection({
 
   const handleBatchRowResize = useCallback(
     async (rows: number[], height: number) => {
+      let tx: OwnedUndoTransaction | null = null;
       try {
-        await beginUndoTransaction("Resize rows");
+        tx = ownUndoTransaction(await beginUndoTransaction("Resize rows"), UNDO_CLOSES);
         for (const row of rows) {
           dispatch(setRowHeight(row, height));
           await setRowHeightApi(row, height);
         }
-        await commitUndoTransaction();
+        await tx.commit();
       } catch (err) {
         console.error("Failed to batch resize rows:", err);
-        try { await cancelUndoTransaction(); } catch { /* already closed */ }
+        try { await tx?.cancel(); } catch { /* already closed */ }
         void alertAsync(err instanceof Error ? err.message : String(err));
       }
       canvasRef.current?.redraw();
@@ -539,7 +589,7 @@ export function useSpreadsheetSelection({
           // One undo step for the whole gesture: the drag left the column at
           // ~0 width, so restore a sane width (it would come back as a 1px
           // sliver on unhide) and hide it inside the same transaction.
-          await beginUndoTransaction("Hide columns");
+          const tx = ownUndoTransaction(await beginUndoTransaction("Hide columns"), UNDO_CLOSES);
           try {
             for (const col of cols) {
               dispatch(setColumnWidth(col, config.defaultCellWidth));
@@ -551,7 +601,7 @@ export function useSpreadsheetSelection({
             // Commit even on a partial failure: cancelling would DISCARD the
             // undo entries for writes that already landed, leaving them
             // permanently un-undoable. An empty transaction commits to nothing.
-            await commitUndoTransaction();
+            await tx.commit();
           }
         } catch (err) {
           console.error("Failed to hide columns:", err);
@@ -569,7 +619,7 @@ export function useSpreadsheetSelection({
         try {
           // See handleHideColumns — restore the dragged-away height and hide in
           // ONE undo step.
-          await beginUndoTransaction("Hide rows");
+          const tx = ownUndoTransaction(await beginUndoTransaction("Hide rows"), UNDO_CLOSES);
           try {
             for (const row of rows) {
               dispatch(setRowHeight(row, config.defaultCellHeight));
@@ -577,7 +627,7 @@ export function useSpreadsheetSelection({
             }
             await applyRowsHidden(rows, true, dispatch);
           } finally {
-            await commitUndoTransaction();
+            await tx.commit();
           }
         } catch (err) {
           console.error("Failed to hide rows:", err);
@@ -964,11 +1014,21 @@ export function useSpreadsheetSelection({
   // followed its sheet ended a parked edit through `sheet:beforeSwitch`,
   // storing the half-typed formula as text. Refused silently, as a disabled
   // command is; `undefined` is the refusal the CLI already reports.
+  //
+  // A refusal FROM THE BACKEND (`UndoResult.refusal`: the history does not
+  // move while a gesture that pushes its step when it lands is in flight) is
+  // SHOWN, once, whichever door asked (W15): the buttons, Edit > Undo and the
+  // CLI used to drop it, and the Undo button simply did nothing. The keyboard
+  // hears the frontend's own refusal first while such a gesture lands
+  // (@api/objectGeometry refuseUndoWhileAGestureLands), which runs no command,
+  // so there is never a second toast. The history did not move: nothing to
+  // apply to the view, and the result still reaches the caller.
   const handleUndo = useCallback(async (): Promise<UndoResult | undefined> => {
     if (isExternalEditLive()) return undefined;
     console.log("[useSpreadsheetSelection] Undo requested");
     try {
       const result = await undoApi();
+      if (announceHistoryRefusal(result)) return result;
       console.log(`[useSpreadsheetSelection] Undo complete - ${result.updatedCells.length} cells updated, structural=${result.structuralRestore}`);
       await applyRestoreToTheView(result, "undo");
       return result;
@@ -986,6 +1046,7 @@ export function useSpreadsheetSelection({
     console.log("[useSpreadsheetSelection] Redo requested");
     try {
       const result = await redoApi();
+      if (announceHistoryRefusal(result)) return result;
       console.log(`[useSpreadsheetSelection] Redo complete - ${result.updatedCells.length} cells updated, structural=${result.structuralRestore}`);
       await applyRestoreToTheView(result, "redo");
       return result;
@@ -1052,6 +1113,95 @@ export function useSpreadsheetSelection({
     [insertRangeReference, dispatch, sheetContext.activeSheetName]
   );
 
+  // HEADER and GETPIVOTDATA picks go to an expecting external target too (E2).
+  // They used to reach Core's own editor only, so a floating grid's formula got
+  // nothing from a column/row header, the select-all corner or a pivot cell
+  // (whose pick is a GETPIVOTDATA call, not a reference). The text is built
+  // HERE, sheet-qualified -- the target's formula lives outside this sheet's A1
+  // space -- and handed over whole (`insertText`); a target that cannot take
+  // text keeps the historical behaviour.
+  // The text comes from Core's plain reference builders with the viewed sheet
+  // as the target and no "current" sheet, so it is always qualified -- and the
+  // builders spell the prefix by the PARSER's rule since W13 (they used to
+  // leave "Q1-2026" bare, and `Q1-2026!C:C` does not parse).
+  const externalSheet = sheetContext.activeSheetName;
+
+  const externalTextTarget = useCallback((): ((text: string) => void) | null => {
+    const target = getExternalFormulaTarget();
+    if (!target?.isExpectingReference() || !target.insertText) return null;
+    return (text: string) => {
+      target.insertText!(text);
+      dispatch(clearFormulaReferences());
+    };
+  }, [dispatch]);
+
+  const handleInsertColumnReference = useCallback(
+    (col: number) => {
+      const insert = externalTextTarget();
+      if (insert) insert(columnToReference(col, externalSheet, null));
+      else insertColumnReference(col);
+    },
+    [insertColumnReference, externalTextTarget, externalSheet]
+  );
+
+  const handleInsertColumnRangeReference = useCallback(
+    (startCol: number, endCol: number) => {
+      const insert = externalTextTarget();
+      if (insert) insert(columnRangeToReference(startCol, endCol, externalSheet, null));
+      else insertColumnRangeReference(startCol, endCol);
+    },
+    [insertColumnRangeReference, externalTextTarget, externalSheet]
+  );
+
+  const handleInsertRowReference = useCallback(
+    (row: number) => {
+      const insert = externalTextTarget();
+      if (insert) insert(rowToReference(row, externalSheet, null));
+      else insertRowReference(row);
+    },
+    [insertRowReference, externalTextTarget, externalSheet]
+  );
+
+  const handleInsertRowRangeReference = useCallback(
+    (startRow: number, endRow: number) => {
+      const insert = externalTextTarget();
+      if (insert) insert(rowRangeToReference(startRow, endRow, externalSheet, null));
+      else insertRowRangeReference(startRow, endRow);
+    },
+    [insertRowRangeReference, externalTextTarget, externalSheet]
+  );
+
+  // A pick an interceptor REPLACED with formula text (GETPIVOTDATA over a pivot
+  // cell). For an external target the text's own cell reference must name this
+  // sheet; when it cannot be found in the text, the pick falls back to the
+  // plain qualified cell reference rather than insert a formula pointing at
+  // the wrong sheet.
+  const handleInsertFormulaText = useCallback(
+    (text: string, highlightRow: number, highlightCol: number) => {
+      const target = getExternalFormulaTarget();
+      if (target?.isExpectingReference()) {
+        const qualified = target.insertText
+          ? qualifyInterceptedCellRef(text, highlightRow, highlightCol, sheetContext.activeSheetName)
+          : null;
+        if (qualified !== null) {
+          target.insertText!(qualified);
+        } else {
+          target.insertReference({
+            sheetName: sheetContext.activeSheetName,
+            startRow: highlightRow,
+            startCol: highlightCol,
+            endRow: highlightRow,
+            endCol: highlightCol,
+          });
+        }
+        dispatch(clearFormulaReferences());
+        return;
+      }
+      insertFormulaText(text, highlightRow, highlightCol);
+    },
+    [insertFormulaText, dispatch, sheetContext.activeSheetName]
+  );
+
   const {
     isDragging,
     isFormulaDragging,
@@ -1088,12 +1238,12 @@ export function useSpreadsheetSelection({
     onScroll: handleScrollUpdate,
     onDragEnd: handleDragEnd,
     onInsertReference: handleInsertReference,
-    onInsertFormulaText: insertFormulaText,
+    onInsertFormulaText: handleInsertFormulaText,
     onInsertRangeReference: handleInsertRangeReference,
-    onInsertColumnReference: insertColumnReference,
-    onInsertColumnRangeReference: insertColumnRangeReference,
-    onInsertRowReference: insertRowReference,
-    onInsertRowRangeReference: insertRowRangeReference,
+    onInsertColumnReference: handleInsertColumnReference,
+    onInsertColumnRangeReference: handleInsertColumnRangeReference,
+    onInsertRowReference: handleInsertRowReference,
+    onInsertRowRangeReference: handleInsertRowRangeReference,
     onUpdatePendingReference: updatePendingReference,
     onUpdatePendingColumnReference: updatePendingColumnReference,
     onUpdatePendingRowReference: updatePendingRowReference,
@@ -1685,18 +1835,26 @@ export function useSpreadsheetSelection({
         break;
       }
 
-      // Insert Chart (F11) - emit command for Charts extension to handle
-      case 'insert.chart':
-        await CommandRegistry.execute('charts.insertChart');
-        break;
-
       // Toggle Ribbon minimize (Ctrl+F1)
       case 'view.toggleRibbon':
         emitAppEvent(AppEvents.RIBBON_TOGGLE_MINIMIZE);
         break;
 
-      default:
-        console.warn(`[useSpreadsheetSelection] Unknown command: ${command}`);
+      default: {
+        // Not one of Core's own: run it from whichever registry holds it. The
+        // bare-Space fallback sends "checkbox.toggle", which the Checkbox
+        // extension registers with the EXTENSION registry -- this switch had
+        // no such case, so Space never toggled a legacy checkbox (wave E, Y9).
+        // F11 sends "insert.chart", which the Charts extension registers:
+        // Core names no extension's command (it used to forward F11 to
+        // `charts.insertChart`, which nothing registered -- wave F, Z9).
+        // coreCommandDoorsRegistered.test.ts pins that every id a key sends
+        // here is answered by some registry.
+        const outcome = await executeCommandAnywhere(command);
+        if (outcome === "unregistered") {
+          console.warn(`[useSpreadsheetSelection] Unknown command: ${command}`);
+        }
+      }
     }
   }, [toggleFormatProperty, applyFormattingToSelection, handleInsertDate, handleInsertTime, handleFillDown, handleFillRight, handleFillUp, handleFillLeft, state.showFormulas, state.displayZeros, canvasRef]);
 

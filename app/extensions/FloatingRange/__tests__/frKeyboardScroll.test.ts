@@ -178,6 +178,24 @@ describe("editing a scrolled-away active cell", () => {
     expect(getFrScroll(FR_ID).top).toBe(0);
     expect(openFrEditor).toHaveBeenCalledWith(FR_ID, 0, 0, "7");
   });
+
+  // E13: Windows reports AltGr as Ctrl+Alt; on sv-SE "@" is AltGr+2.
+  it("an AltGr character (Ctrl+Alt, as Windows reports it) types too", () => {
+    selectCell(0, 0);
+    const e = key("@", { ctrlKey: true, altKey: true });
+    handleFrKeyDown(e);
+    expect(e.defaultPrevented).toBe(true);
+    expect(openFrEditor).toHaveBeenCalledWith(FR_ID, 0, 0, "@");
+  });
+
+  it("control: a Ctrl+Alt LETTER is a shortcut, and a key the dispatcher already took is not typed", () => {
+    selectCell(0, 0);
+    handleFrKeyDown(key("v", { ctrlKey: true, altKey: true }));
+    const taken = key("[", { ctrlKey: true, altKey: true });
+    taken.preventDefault();
+    handleFrKeyDown(taken);
+    expect(openFrEditor).not.toHaveBeenCalled();
+  });
 });
 
 describe("Delete past the window", () => {

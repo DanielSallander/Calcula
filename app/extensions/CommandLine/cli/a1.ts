@@ -6,7 +6,11 @@
 // CONTEXT: Deliberately local — the CLI must not deep-import core's reference
 //          machinery (the Facade Rule), and the shapes it needs are tiny.
 //          try* variants return null; the strict variants throw a plain Error
-//          (callers wrap into CliError with the command's line number).
+//          (callers wrap into CliError with the command's line number). The
+//          one rule shared rather than re-derived is the sheet-name quoting a
+//          label prints (`quoteSheetNameForFormula`, @api/externalEdit).
+
+import { quoteSheetNameForFormula } from "@api/externalEdit";
 
 export interface CellRef {
   row: number;
@@ -157,11 +161,16 @@ export function isSingleCell(r: RangeRef): boolean {
   return r.startRow === r.endRow && r.startCol === r.endCol;
 }
 
-/** Label a qualified range for output ("Sheet2!A1:B2", quoting spaced names). */
+/**
+ * Label a qualified range for output ("Sheet2!A1:B2", "'Q1-2026'!A1"), the
+ * sheet spelled exactly as a FORMULA must spell it (`quoteSheetNameForFormula`,
+ * the backend lexer's own rule): a label the user copies into a cell must
+ * name the same sheet there. Quoting only whitespace and `'` left `2024`,
+ * `2024Budget`, `TRUE` and `Q1-2026` bare, which a formula reads as a number,
+ * a boolean or a subtraction. The CLI's own parser reads either spelling.
+ */
 export function formatQualified(q: QualifiedRange): string {
   const range = formatRange(q.range);
   if (q.sheet === undefined) return range;
-  const needsQuotes = /[\s']/.test(q.sheet);
-  const sheet = needsQuotes ? `'${q.sheet.replace(/'/g, "''")}'` : q.sheet;
-  return `${sheet}!${range}`;
+  return `${quoteSheetNameForFormula(q.sheet)}!${range}`;
 }

@@ -5,11 +5,12 @@
 import React from "react";
 import {
   registerMenuItem,
+  unregisterMenuItem,
   showDialog,
   gridExtensions,
   GridMenuGroups,
 } from "@api";
-import type { GridMenuContext } from "@api";
+import type { GridMenuContext, GridContextMenuItem } from "@api";
 import { addWatch, removeWatch, refreshWatches, getItems } from "../lib/watchStore";
 
 const DIALOG_ID = "watch-window";
@@ -31,7 +32,9 @@ function WatchIcon() {
 // Formulas menu item
 // ---------------------------------------------------------------------------
 
-export function registerWatchWindowMenuItem(): void {
+/** Returns the cleanup for deactivation: it takes back this extension's OWN
+ *  items, never the Formulas menu, which Tracing builds (wave E, Y14). */
+export function registerWatchWindowMenuItem(): () => void {
   registerMenuItem("formulas", {
     id: "formulas:watchWindow:separator",
     label: "",
@@ -46,14 +49,21 @@ export function registerWatchWindowMenuItem(): void {
       showDialog(DIALOG_ID);
     },
   });
+
+  return () => {
+    unregisterMenuItem("formulas", "formulas:watchWindow:separator");
+    unregisterMenuItem("formulas", "formulas:watchWindow");
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Grid context menu item: "Add Watch"
 // ---------------------------------------------------------------------------
 
-export function registerWatchWindowContextMenu(): void {
-  gridExtensions.registerContextMenuItems([
+/** Returns the cleanup for deactivation: it takes back exactly the right-click
+ *  items registered here, their ids read from the list itself (wave E, Y14). */
+export function registerWatchWindowContextMenu(): () => void {
+  const items: GridContextMenuItem[] = [
     {
       id: "watch:addWatch",
       label: "Add Watch",
@@ -106,5 +116,11 @@ export function registerWatchWindowContextMenu(): void {
         }
       },
     },
-  ]);
+  ];
+  gridExtensions.registerContextMenuItems(items);
+
+  const ownIds = items.map((item) => item.id);
+  return () => {
+    for (const id of ownIds) gridExtensions.unregisterContextMenuItem(id);
+  };
 }

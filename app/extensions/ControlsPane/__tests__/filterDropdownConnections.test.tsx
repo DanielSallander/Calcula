@@ -37,6 +37,16 @@ vi.mock("@api", () => ({
 vi.mock("@api/pivotNotices", () => ({ surfacePivotNotices: vi.fn() }));
 vi.mock("@api/objectGeometry", () => ({
   runInUndoTransaction: async (_label: string, fn: () => Promise<unknown>) => fn(),
+  // The Save's own step (nothing else holds one open here, so it opens it).
+  openUndoTransaction: (_label: string) => ({
+    joined: false,
+    run: async (fn: () => Promise<unknown>) => fn(),
+    commit: async () => undefined,
+    openedBackend: async () => true,
+  }),
+  // The Save is ONE step asked about through @api/pivotOverwrite (wave B).
+  isUndoTransactionOpen: () => false,
+  undoCommitsSettled: () => Promise.resolve(),
 }));
 vi.mock("../lib/filterPaneBackend", () => ({
   filterPaneBackend: {

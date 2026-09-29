@@ -10,7 +10,8 @@
 
 import type { ChartSpec, ParamSpec, ChartSelectionMap, AxisSpec } from "../types";
 import type { FormulaValue } from "./chartFormula";
-import { resolveParamCell } from "./dataSourceResolver";
+import { resolveParamCell, type ParamCellHost } from "./dataSourceResolver";
+import { getChartById } from "./chartStore";
 import { parseDisplayNumber } from "./chartFieldTypes";
 import { getWidgetValue } from "../handlers/chartWidgetValues";
 
@@ -79,7 +80,7 @@ export function validateParams(params: ParamSpec[] | undefined): string[] {
     }
     seen.add(name);
     if (p.cellRef && p.cellRef.includes("!")) {
-      issues.push(`Param "${name}" cellRef "${p.cellRef}" is cross-sheet; only same-sheet refs are supported — the default value is used.`);
+      issues.push(`Param "${name}" cellRef "${p.cellRef}" is cross-sheet; only an unqualified cell (on the sheet the chart reads: its own, or on a canvas its data sheet) is supported — the default value is used.`);
     }
   }
   return issues;
@@ -148,11 +149,17 @@ export function selectionFilterCategories(
  * expression that references it never throws #NAME?. Empty map when the spec
  * declares no params. Precedence: live bound-widget value (chartId) > cellRef >
  * literal default.
+ *
+ * A cell-bound param reads its cell on the sheet the CHART reads (the placed
+ * chart named by `chartId`: its own sheet, or on a canvas its data sheet --
+ * `locateParamCell`); with no placed chart, the active sheet.
  */
 export async function resolveParams(spec: ChartSpec, chartId?: string): Promise<Map<string, FormulaValue>> {
   const out = new Map<string, FormulaValue>();
   const params = spec.params;
   if (!params || params.length === 0) return out;
+  const placed = chartId !== undefined ? getChartById(chartId) : undefined;
+  const host: ParamCellHost | null = placed ? { sheetIndex: placed.sheetIndex, spec } : null;
 
   for (const p of params) {
     const name = (p.name ?? "").trim();
@@ -165,10 +172,10 @@ export async function resolveParams(spec: ChartSpec, chartId?: string): Promise<
     if (widget !== undefined) {
       resolved = widget;
     } else if (p.cellRef) {
-      // A same-sheet (ACTIVE-sheet) cell ref is read live; cross-sheet/empty
-      // falls back to default. See resolveParamCell for why "same sheet" is the
-      // active one rather than the data's sheet.
-      const display = await resolveParamCell(p.cellRef);
+      // An unqualified cell ref is read live on the sheet the chart reads
+      // (locateParamCell); a sheet-qualified or empty one falls back to the
+      // default.
+      const display = await resolveParamCell(p.cellRef, host);
       resolved = display !== null ? coerceCellValue(display) : coerceToFormulaValue(p.value ?? "");
     } else {
       resolved = coerceToFormulaValue(p.value ?? "");

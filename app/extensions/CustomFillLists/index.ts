@@ -6,6 +6,7 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   DialogExtensions,
   registerMenuItem,
+  unregisterMenuItem,
   IconCustomLists,
 } from "@api";
 import { CustomFillListsDialog } from "./components/CustomFillListsDialog";
@@ -40,6 +41,8 @@ function activate(_context: ExtensionContext): void {
       DialogExtensions.openDialog("custom-fill-lists");
     },
   });
+  // Its OWN item back on deactivate (wave E, Y14): the Edit menu is Standard Menus'.
+  cleanupFns.push(() => unregisterMenuItem("edit", "customFillLists"));
 
   console.log("[CustomFillLists] Activated successfully.");
 }

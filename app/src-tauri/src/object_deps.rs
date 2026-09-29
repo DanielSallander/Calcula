@@ -1562,6 +1562,108 @@ impl SheetObjectCascade {
     }
 }
 
+/// Bound on `concat` nesting the chart-range remap walks -- the same bound as
+/// `calp::chart_refs` (`MAX_WALK_DEPTH`) and chartSheetRefs.ts
+/// (`MAX_STAMP_DEPTH`).
+const MAX_CHART_CONCAT_DEPTH: usize = 16;
+
+/// Re-aim every INDEX-ONLY data range of one stored chart record through
+/// `remap` (wave C, W9). Returns the rewritten record, or `None` when nothing
+/// changed (the stored bytes are then kept) or the text is not JSON.
+///
+/// A chart range names its sheet by `sheetId` (the stable id, which WINS) or,
+/// written by a script or an MCP client, by `sheetIndex` alone. The cascade
+/// re-anchored the CHART to its sheet's new index but never the ranges inside
+/// it, so after a delete or a move an index-only range read whichever sheet
+/// inherited its number -- silently the wrong data. Now: a range whose sheet
+/// moved gets the new index; a range whose sheet was DELETED is pinned to
+/// `calp::chart_refs::UNRESOLVABLE_SHEET_ID`, an id no sheet answers to, so the
+/// chart says "the source sheet no longer exists" rather than charting another
+/// sheet. A range already carrying an id is left to its id.
+///
+/// The SAME four places as `calp::chart_refs` and chartSheetRefs.ts: a spec's
+/// `data`, each `layers[].data`, a `lookup` transform's `from`, and the
+/// `concat.charts[]` children, recursively (pinned against the calp walk by
+/// `sheet_structure_repair_tests`).
+pub(crate) fn remap_chart_index_ranges(
+    spec_json: &str,
+    remap: &dyn Fn(usize) -> Option<usize>,
+) -> Option<String> {
+    use serde_json::Value;
+
+    fn visit(source: Option<&mut Value>, remap: &dyn Fn(usize) -> Option<usize>) -> bool {
+        let Some(Value::Object(range)) = source else { return false };
+        if !range.contains_key("startRow") {
+            return false;
+        }
+        if matches!(range.get("sheetId"), Some(Value::String(id)) if !id.is_empty()) {
+            return false;
+        }
+        let Some(old) = range.get("sheetIndex").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()) else {
+            return false;
+        };
+        match remap(old) {
+            Some(new) if new == old => false,
+            Some(new) => {
+                range.insert("sheetIndex".to_string(), Value::from(new as u64));
+                true
+            }
+            None => {
+                range.insert(
+                    "sheetId".to_string(),
+                    Value::String(calp::chart_refs::UNRESOLVABLE_SHEET_ID.to_string()),
+                );
+                true
+            }
+        }
+    }
+
+    fn walk(spec: &mut Value, remap: &dyn Fn(usize) -> Option<usize>, depth: usize) -> bool {
+        let Value::Object(spec) = spec else { return false };
+        let mut changed = visit(spec.get_mut("data"), remap);
+        if let Some(Value::Array(layers)) = spec.get_mut("layers") {
+            for layer in layers.iter_mut() {
+                if let Value::Object(layer) = layer {
+                    changed |= visit(layer.get_mut("data"), remap);
+                }
+            }
+        }
+        if let Some(Value::Array(transforms)) = spec.get_mut("transform") {
+            for t in transforms.iter_mut() {
+                if let Value::Object(t) = t {
+                    if t.get("type").and_then(Value::as_str) == Some("lookup") {
+                        changed |= visit(t.get_mut("from"), remap);
+                    }
+                }
+            }
+        }
+        if depth < MAX_CHART_CONCAT_DEPTH {
+            if let Some(Value::Object(concat)) = spec.get_mut("concat") {
+                if let Some(Value::Array(children)) = concat.get_mut("charts") {
+                    for child in children.iter_mut() {
+                        changed |= walk(child, remap, depth + 1);
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    let mut record: Value = serde_json::from_str(spec_json).ok()?;
+    // The ChartDefinition envelope's `spec` when it is an object, else the
+    // record itself (a bare spec) -- `calp::chart_refs`' own rule.
+    let changed = if matches!(record.get("spec"), Some(Value::Object(_))) {
+        walk(record.get_mut("spec")?, remap, 0)
+    } else {
+        walk(&mut record, remap, 0)
+    };
+    if changed {
+        serde_json::to_string(&record).ok()
+    } else {
+        None
+    }
+}
+
 /// Re-anchor (or remove) every object that names its sheet by INDEX and is not
 /// covered by `remap_sheet_keyed_stores`.
 ///
@@ -1633,6 +1735,10 @@ pub fn cascade_sheet_removed(
                 Some(new_index) => {
                     let mut chart = chart;
                     chart.sheet_index = new_index;
+                    // ...and the sheets its DATA lives on (wave C, W9).
+                    if let Some(remapped) = remap_chart_index_ranges(&chart.spec_json, remap) {
+                        chart.spec_json = remapped;
+                    }
                     kept.push(chart);
                 }
                 None => out.deleted_charts.push(chart),

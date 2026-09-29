@@ -20,6 +20,7 @@ import { emitAppEvent, onAppEvent } from '@api';
 import { PivotEvents } from '../../_shared/lib/pivotEvents';
 import { registerDragOutRemoval } from '../../_shared/components/useDragDrop';
 import type { ValueFieldSettings } from './ValueFieldSettingsModal';
+import { showAsRuleFor } from '../lib/showAsRule';
 import {
   diffHiddenItemEdits,
   reconcileChipHiddenItems,
@@ -301,14 +302,13 @@ export function usePivotEditorState({
   // fields (isCalculated=true). We separate them and build the unified ordering.
   const buildUpdateRequest = useCallback((): UpdatePivotFieldsRequest => {
     // Row/column fields carry hiddenItems too (a placed calculation group's
-    // item subset rides on its chip like a field filter). For a BI pivot
-    // these are the chips' DISPLAY lists: PivotEditor's BI request sends a
-    // real field's list only when it was edited here (biFieldsRequest.ts).
-    // A RANGE pivot's `update_pivot_fields` reads an absent list as CLEAR,
-    // so it must send every chip's list -- which is why the chips re-read the
-    // pivot's definition after each view change (syncHiddenItemsFromPivot):
-    // a list the header dropdown or a slicer changed is echoed as it is now,
-    // not as it was when the pane mounted.
+    // item subset rides on its chip like a field filter). These are the
+    // chips' DISPLAY lists: PivotEditor sends a real field's list only when
+    // it was edited here -- a model pivot through `buildBiUpdateRequest`, a
+    // RANGE pivot through `rangeRequestWithHiddenItemEdits` (biFieldsRequest.ts;
+    // `update_pivot_fields` keeps an unsent list since BUG-0184). The chips
+    // still re-read the pivot's definition after each view change
+    // (syncHiddenItemsFromPivot) so the DSL shows what the pivot hides now.
     const rowFields: PivotFieldConfig[] = rows.map((f) => ({
       sourceIndex: f.sourceIndex,
       name: f.name,
@@ -345,12 +345,18 @@ export function usePivotEditorState({
         const displayName = isBiField
           ? f.name
           : (f.customName || getValueFieldDisplayName(f.name, aggregation));
+        // A calculation relative to a BASE (Running Total In, Difference
+        // From, % Of, ...) travels as the `showAs` rule: the plain string has
+        // no room for the base, and without one the backend left every value
+        // as it was (e2e fixall-pivot X1).
+        const showAs = showAsRuleFor(f.showValuesAs, f.baseField, f.baseItem);
         regularValues.push({
           sourceIndex: f.sourceIndex,
           name: displayName,
           aggregation,
           numberFormat: f.numberFormat,
           showValuesAs: f.showValuesAs as ShowValuesAs | undefined,
+          ...(showAs ? { showAs } : {}),
           customName: f.customName || undefined,
         });
         columnOrder.push({ type: 'value', index: valIdx });
@@ -649,6 +655,10 @@ export function usePivotEditorState({
                 customName: settings.customName,
                 showValuesAs: settings.showValuesAs,
                 numberFormat: settings.numberFormat,
+                // The base the calculation is relative to (kept, and sent as
+                // the showAs rule; it was dropped here, e2e fixall-pivot X1).
+                baseField: settings.baseField,
+                baseItem: settings.baseItem,
               }
             : f
         )
@@ -813,6 +823,8 @@ export function usePivotEditorState({
           }
           field.numberFormat = undefined;
           field.showValuesAs = undefined;
+          field.baseField = undefined;
+          field.baseItem = undefined;
         }
 
         toSetter((prev) => [...prev, field]);

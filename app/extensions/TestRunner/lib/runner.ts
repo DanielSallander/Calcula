@@ -10,6 +10,7 @@ import {
   CoreCommands,
   dispatchGridAction,
 } from "@api";
+import { executeCommandAnywhere } from "@api/commandDispatch";
 import { getGridStateSnapshot } from "@api/grid";
 import { setSelection } from "@api/grid";
 import type { CellData } from "@api/types";
@@ -104,8 +105,22 @@ function createTestContext(logs: string[]): { ctx: TestContext; internals: Conte
   };
 
   const ctx: TestContext = {
+    // A command runs from WHICHEVER registry holds it: CommandRegistry, or the
+    // extension registry (`ExtensionRegistry.registerCommand`) -- the Checkbox
+    // extension's `checkbox.toggle` lives in the latter, and through
+    // CommandRegistry.execute alone the checkbox suite toggled nothing. A
+    // command NO registry holds fails LOUDLY, as ctx.undo does: a silently
+    // swallowed command is indistinguishable from a working one (wave E, Y9).
     async executeCommand(id: string, args?: unknown): Promise<void> {
-      await CommandRegistry.execute(id, args);
+      const outcome = await executeCommandAnywhere(id, args);
+      if (outcome === "unregistered") {
+        throw new Error(
+          `ctx.executeCommand: no command "${id}" is registered (neither CommandRegistry nor the extension registry)`,
+        );
+      }
+      if (outcome === "disabled") {
+        throw new Error(`ctx.executeCommand: command "${id}" is disabled for the current selection`);
+      }
     },
 
     async getCell(row: number, col: number) {

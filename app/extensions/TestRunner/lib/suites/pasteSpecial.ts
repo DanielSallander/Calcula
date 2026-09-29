@@ -5,6 +5,7 @@
 import type { TestSuite } from "../types";
 import { expectCellValue, expectCellEmpty, expectCellFormula } from "../assertions";
 import { CoreCommands } from "@api/commands";
+import { applyFormatting } from "@api/lib";
 import { AREA_PASTE_SPECIAL } from "../testArea";
 
 const A = AREA_PASTE_SPECIAL;
@@ -110,7 +111,9 @@ export const pasteSpecialSuite: TestSuite = {
 
         // Apply bold formatting to source
         await selectRange(ctx, A.row, A.col, A.row, A.col);
-        await ctx.executeCommand("formatting.bold");
+        // Formatting through @api/lib: `formatting.bold` / `.italic` are command
+        // ids NO registry holds -- they did nothing, silently (wave E, Y9).
+        await applyFormatting([A.row], [A.col], { bold: true });
         await ctx.settle();
 
         // Get source style index

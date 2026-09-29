@@ -1,6 +1,7 @@
 //! FILENAME: app/extensions/Print/index.ts
 // PURPOSE: Print extension entry point. ExtensionModule lifecycle pattern.
-// CONTEXT: Registers Page Setup dialog, File menu items, Ctrl+P shortcut, PDF export,
+// CONTEXT: Registers Page Setup dialog, File menu items, the Print command the
+//          keybinding registry's Ctrl+P runs, PDF export,
 //          page break preview overlay, page break management commands,
 //          print area/titles commands from selection.
 
@@ -52,6 +53,7 @@ import {
   refreshPageBreakData,
 } from "./lib/pageBreakOverlay";
 import { alertAsync } from "@api/dialogs";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 // ============================================================================
 // State
@@ -60,6 +62,14 @@ import { alertAsync } from "@api/dialogs";
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
 let currentSelection: Selection | null = null;
+
+/**
+ * Print -- the command the keybinding registry's `ext.print` (Ctrl+P) runs.
+ * The registry named this id long before anything registered it; Ctrl+P
+ * worked only through a window listener here, which a remap in Settings could
+ * not move (BUG-0183 class).
+ */
+export const PRINT_COMMAND = "print.preview";
 
 // ============================================================================
 // Selection tracking
@@ -160,8 +170,15 @@ async function handleExportPdf(): Promise<void> {
 // ============================================================================
 // Page Break Management
 // ============================================================================
+//
+// The insert/remove page-break items and the Set Print Area / print-title
+// items below take their row, column or range from Core's SELECTION -- HIDDEN
+// while something else owns the selection (a floating grid's selected cell) --
+// so each refuses, once, while it does (D4, BUG-0185 class). Clear Print Area,
+// Reset All Page Breaks and the title clears are sheet-level and stay allowed.
 
 async function handleInsertRowPageBreak(): Promise<void> {
+  if (refuseIfSelectionOwned("Insert Page Break")) return;
   try {
     const row = getSelectedRow();
     if (row === null || row <= 0) {
@@ -177,6 +194,7 @@ async function handleInsertRowPageBreak(): Promise<void> {
 }
 
 async function handleRemoveRowPageBreak(): Promise<void> {
+  if (refuseIfSelectionOwned("Remove Page Break")) return;
   try {
     const row = getSelectedRow();
     if (row === null) return;
@@ -189,6 +207,7 @@ async function handleRemoveRowPageBreak(): Promise<void> {
 }
 
 async function handleInsertColPageBreak(): Promise<void> {
+  if (refuseIfSelectionOwned("Insert Page Break")) return;
   try {
     const col = getSelectedCol();
     if (col === null || col <= 0) {
@@ -204,6 +223,7 @@ async function handleInsertColPageBreak(): Promise<void> {
 }
 
 async function handleRemoveColPageBreak(): Promise<void> {
+  if (refuseIfSelectionOwned("Remove Page Break")) return;
   try {
     const col = getSelectedCol();
     if (col === null) return;
@@ -263,6 +283,7 @@ function getSelectedCol(): number | null {
 // ============================================================================
 
 async function handleSetPrintArea(): Promise<void> {
+  if (refuseIfSelectionOwned("Set Print Area")) return;
   try {
     const bounds = getSelectionBounds();
     if (!bounds) {
@@ -293,6 +314,7 @@ async function handleClearPrintArea(): Promise<void> {
 }
 
 async function handleSetPrintTitleRows(): Promise<void> {
+  if (refuseIfSelectionOwned("Print Titles")) return;
   try {
     const bounds = getSelectionBounds();
     if (!bounds) {
@@ -321,6 +343,7 @@ async function handleClearPrintTitleRows(): Promise<void> {
 }
 
 async function handleSetPrintTitleCols(): Promise<void> {
+  if (refuseIfSelectionOwned("Print Titles")) return;
   try {
     const bounds = getSelectionBounds();
     if (!bounds) {
@@ -426,16 +449,11 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  // 4. Register Ctrl+P keyboard shortcut
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === "p") {
-      e.preventDefault();
-      e.stopPropagation();
-      handlePrint();
-    }
-  };
-  window.addEventListener("keydown", handleKeyDown, true);
-  cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
+  // 4. The Print command the registry's Ctrl+P runs (the one keyboard path;
+  //    the dispatcher's preventDefault also keeps the browser's own print
+  //    dialog away).
+  context.commands.register(PRINT_COMMAND, () => handlePrint());
+  cleanupFns.push(() => context.commands.unregister(PRINT_COMMAND));
 
   // 5. Register page break preview overlay
   const unregOverlay = context.grid.overlays.register({
@@ -559,6 +577,17 @@ function activate(context: ExtensionContext): void {
         action: handleClearPrintTitleCols,
       },
     ],
+  });
+
+  // 9. Take back the menu items above on deactivate -- this extension's OWN
+  //    ids (a submenu's children go with it), never the File or View menu,
+  //    which Standard Menus builds and others add to (wave E, Y14).
+  cleanupFns.push(() => {
+    for (const id of ["file.print-separator", "file.print", "file.export-pdf", "file.page-setup"]) {
+      context.ui.menus.unregisterItem("file", id);
+    }
+    context.ui.menus.unregisterItem("view", "view.pageBreaks");
+    context.ui.menus.unregisterItem("view", "view.printArea");
   });
 
   isActivated = true;

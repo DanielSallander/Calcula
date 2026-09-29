@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 205 | Open: 26 | Triaged: 0 | Fixed: 179 | Other: 0
+Total: 258 | Open: 5 | Triaged: 0 | Fixed: 253 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1626,7 +1626,7 @@ In every dev build (React 18 StrictMode, i.e. every E2E run and `tauri dev`) the
 **Fix:** fixed — Removed the unmount-only disconnect effects from SectionCell and useSectionFit; the callback refs' own null call is the unmount path (React calls it). Verified live: the diagnostic's three Table Design mounts all fit the band and every cluster reported its real natural width.
   Files: app/src/shell/components/SectionCell.tsx, app/src/shell/components/useSectionFit.ts, app/src/shell/components/__tests__/sectionWidthProbe.test.tsx
 
-## BUG-0134 `[open]`
+## BUG-0134 `[fixed]`
 
 **Found:** 2026-09-25 (manual)
 **Oracle:** workspace-open-creates-directories
@@ -1634,6 +1634,7 @@ In every dev build (React 18 StrictMode, i.e. every E2E run and `tauri dev`) the
 LocalWorkspace::open (core/calp/src/workspace.rs) calls fs::create_dir_all on ANY path that does not exist. It runs on READ paths — the Application Inspector's typed location, calp_browse_workspace behind Subscribe and Open for Editing — so a mistyped path in a strictly read-only window creates an empty directory on the user's disk or a shared drive, and the browse then reports 'No applications found' about a folder the product just made. The same file's own rule, on ensure_marker, says `open` must not write because it runs on read paths too; it writes the directory itself.
 
 **Repro:** Collaboration > Application Inspector..., type C:\Temp\no-such-workspace in the location field, press Enter. The folder now exists and is empty. Fix direction: split `open` (must exist, for read paths) from an explicit create used only by the publish routes and calp_add_workspace.
+**Fix:** fixed
 
 ## BUG-0135 `[fixed]`
 
@@ -1668,7 +1669,7 @@ NOTEBOOK REWIND INSTALLED A CHECKPOINT OVER A DIFFERENT SHEET STRUCTURE. noteboo
 **Fix:** fixed — The rewind is refused when the checkpoint's sheet count differs from the workbook's, and every CANVAS slot keeps its live grid. A same-count REORDER is still installed by position (recorded as open follow-up in open-items).
   Files: app/src-tauri/src/scripting/notebook_commands.rs (notebook_rewind_internal: sheet-count gate before the effect; canvas slots keep their live grid)
 
-## BUG-0138 `[open]`
+## BUG-0138 `[fixed]`
 
 **Found:** 2026-09-25 (manual)
 **Oracle:** sheet-keyed-store-remap
@@ -1676,6 +1677,7 @@ NOTEBOOK REWIND INSTALLED A CHECKPOINT OVER A DIFFERENT SHEET STRUCTURE. noteboo
 BI QUERY RESULT BLOCKS ARE NEVER REMAPPED ON A SHEET MOVE OR DELETE. Each connection's active_queries entry stores the sheet_index its block was inserted on; nothing in sheets.rs (or anywhere) remaps it. After a move or delete, bi_refresh_connection clears and rewrites the block on WHICHEVER sheet inherited the index, overwriting that sheet's cells.
 
 **Repro:** Insert a BI query result on Sheet2, move Sheet2 to the front, Refresh the connection: the block is written onto the sheet now at index 1.
+**Fix:** fixed
 
 ## BUG-0139 `[fixed]`
 
@@ -1747,7 +1749,7 @@ GETPIVOTDATA IGNORES THE SHEET OF ITS PIVOT REFERENCE. lookup_pivot_data answers
 **Repro:** Pivot at Sheet1!A1 and a canvas pivot (block 0, A1); =GETPIVOTDATA("Sum of Units";Sheet1!A1) returns either pivot's total depending on hash order.
 **Fix:** fixed
 
-## BUG-0146 `[open]`
+## BUG-0146 `[fixed]`
 
 **Found:** 2026-09-25 (manual)
 **Oracle:** getpivotdata-fields
@@ -1755,8 +1757,9 @@ GETPIVOTDATA IGNORES THE SHEET OF ITS PIVOT REFERENCE. lookup_pivot_data answers
 GETPIVOTDATA WITH FIELD/ITEM PAIRS RETURNS #REF! EVEN WHEN FIRST ENTERED. =GETPIVOTDATA("Sum of Sales";E1;"Region";"North") gives #REF! in the backend test harness while the grand-total form gives the right number.
 
 **Repro:** Harness pivot with a Region row field; enter the field/item form of GETPIVOTDATA: #REF!.
+**Fix:** fixed
 
-## BUG-0147 `[open]`
+## BUG-0147 `[fixed]`
 
 **Found:** 2026-09-25 (manual)
 **Oracle:** pivot-load
@@ -1764,8 +1767,9 @@ GETPIVOTDATA WITH FIELD/ITEM PAIRS RETURNS #REF! EVEN WHEN FIRST ENTERED. =GETPI
 restore_pivot_definitions RESOLVES THE DESTINATION BY EXACT NAME WITH unwrap_or(0) AND NEVER STORES THE VIEW. A case-only mismatch writes the pivot's region onto sheet 0, and GETPIVOTDATA answers #REF! after a load until something fetches the pivot's view.
 
 **Repro:** Save a workbook with =GETPIVOTDATA(..) on Sheet1 reading a pivot on Sheet2; reopen without visiting Sheet2: #REF!.
+**Fix:** fixed
 
-## BUG-0148 `[open]`
+## BUG-0148 `[fixed]`
 
 **Found:** 2026-09-25 (manual)
 **Oracle:** undo-completeness
@@ -1773,8 +1777,9 @@ restore_pivot_definitions RESOLVES THE DESTINATION BY EXACT NAME WITH unwrap_or(
 UNDOING A PIVOT CREATE LEAVES ITS MERGED CELLS. apply_pivot_create_restore clears the cells and region but does not remove the merges the create wrote.
 
 **Repro:** Create a pivot whose layout merges a filter row; Ctrl+Z: the merged range remains.
+**Fix:** fixed
 
-## BUG-0149 `[open]`
+## BUG-0149 `[fixed]`
 
 **Found:** 2026-09-25 (manual)
 **Oracle:** dialog-input-honoured
@@ -1782,8 +1787,9 @@ UNDOING A PIVOT CREATE LEAVES ITS MERGED CELLS. apply_pivot_create_restore clear
 THE WORKSHEET-MODE CREATE PIVOT DIALOG IGNORES A TYPED SHEET PREFIX. Typing 'Sheet2!A1:D9' as the source sends sourceSheet = the sheet that was active when the dialog opened, so the pivot is built from the wrong sheet's cells.
 
 **Repro:** On Sheet1, Insert > PivotTable, type Sheet2!A1:D9: the pivot summarises Sheet1!A1:D9.
+**Fix:** fixed
 
-## BUG-0150 `[open]`
+## BUG-0150 `[fixed]`
 
 **Found:** 2026-09-25 (manual)
 **Oracle:** calp-preview-fidelity
@@ -1791,8 +1797,9 @@ THE WORKSHEET-MODE CREATE PIVOT DIALOG IGNORES A TYPED SHEET PREFIX. Typing 'She
 THE PUSH PREVIEW AND THE MERGE ANALYSIS CANNOT SEE THE FRONTEND'S DISTRIBUTABLE OBJECTS. custom_objects/... artifacts (model overlay, reports) are merged in by calp_publish from frontend params the preview and merge commands never receive, so they are reported as REMOVED in both. (The minAppVersion line this also caused is reconciled.)
 
 **Repro:** Publish an application with a model overlay; open the push preview: the overlay artifact is listed as removed.
+**Fix:** fixed
 
-## BUG-0151 `[open]`
+## BUG-0151 `[fixed]`
 
 **Found:** 2026-09-25 (manual)
 **Oracle:** calp-collision-rename
@@ -1800,8 +1807,9 @@ THE PUSH PREVIEW AND THE MERGE ANALYSIS CANNOT SEE THE FRONTEND'S DISTRIBUTABLE 
 A COLLISION RENAME ON PULL DOES NOT REWRITE NAME-BOUND REFERENCES IN THE PULLED CONTENT. When a pulled 'Data' arrives as 'Data (2)', formulas on the pulled sheets (object/backing sheets included), named-range refers_to and chart string sources still say 'Data' and read the subscriber's OWN sheet.
 
 **Repro:** Subscriber has 'Data'; subscribe to an application whose 'Report' has =Data!A1: the pulled Report reads the subscriber's Data.
+**Fix:** fixed
 
-## BUG-0152 `[open]`
+## BUG-0152 `[fixed]`
 
 **Found:** 2026-09-25 (manual)
 **Oracle:** calp-active-mirror
@@ -1809,8 +1817,9 @@ A COLLISION RENAME ON PULL DOES NOT REWRITE NAME-BOUND REFERENCES IN THE PULLED 
 SUSPECTED: restore_pulled_pivots WRITES grids ONLY. On checkout the first application sheet is active and its mirror is synced before the pivots are written, so a pulled pivot on the active sheet could be erased by the next recalculation copying the stale mirror back.
 
 **Repro:** Open Application for Editing where the first sheet holds a pivot; edit any cell: check whether the pivot's cells survive.
+**Fix:** fixed
 
-## BUG-0153 `[open]`
+## BUG-0153 `[fixed]`
 
 **Found:** 2026-09-25 (manual)
 **Oracle:** calp-detach
@@ -1818,8 +1827,9 @@ SUSPECTED: restore_pulled_pivots WRITES grids ONLY. On checkout the first applic
 AFTER A SHEET IS DETACHED, (a) distributed object scripts bound to its controls are orphaned by the next refresh (the script swap replaces the package's set and rebinds through a map that excludes detached sheets), and (b) a sheet-scoped named range on it is upserted by refresh with sheet_index None and silently becomes workbook-scoped.
 
 **Repro:** (a) Detach a pulled sheet with a scripted button, Refresh: the button's script is gone. (b) Detach a sheet with a sheet-scoped name, Refresh: the name is workbook-scoped.
+**Fix:** fixed
 
-## BUG-0154 `[open]`
+## BUG-0154 `[fixed]`
 
 **Found:** 2026-09-25 (manual)
 **Oracle:** sheet-name-unique
@@ -1827,8 +1837,9 @@ AFTER A SHEET IS DETACHED, (a) distributed object scripts bound to its controls 
 THE DEV PULL HAS NO SHEET-NAME COLLISION RESOLUTION: pulling a source sheet named like an existing sheet yields two sheets with the same name.
 
 **Repro:** Dev subscribe to a source folder whose sheet is named Sheet1 into a workbook that has Sheet1.
+**Fix:** fixed
 
-## BUG-0155 `[open]`
+## BUG-0155 `[fixed]`
 
 **Found:** 2026-09-25 (manual)
 **Oracle:** document-replaced-cache
@@ -1836,6 +1847,7 @@ THE DEV PULL HAS NO SHEET-NAME COLLISION RESOLUTION: pulling a source sheet name
 SUSPECTED: THE GRID CELL CACHE IS NOT INVALIDATED WHEN THE DOCUMENT IS REPLACED WITHOUT A RELOAD. GridCanvas keeps its fetched cells and needsFetch() finds the viewport covered, so after a no-reload document replacement (announceBackendStateReplaced: calp_checkout, and the E2E newFile helper) the previous document's cells can stay painted. File > New in the product reloads the window and is not affected.
 
 **Repro:** E2E: create a canvas pivot, call file-api newFile() without a reload: the new Sheet1 shows the pivot's cells although get_cells_in_rows returns none.
+**Fix:** fixed
 
 ## BUG-0156 `[fixed]`
 
@@ -2107,7 +2119,7 @@ DELETE AND BACKSPACE WITH A MODIFIER CLEARED THE SELECTION (Shift/Ctrl+Delete, C
 **Repro:** Select A1:B2 with values, press Ctrl+Backspace: the cells are cleared.
 **Fix:** fixed
 
-## BUG-0183 `[open]`
+## BUG-0183 `[fixed]`
 
 **Found:** 2026-09-27 (manual)
 **Oracle:** keybinding-dead
@@ -2115,8 +2127,9 @@ DELETE AND BACKSPACE WITH A MODIFIER CLEARED THE SELECTION (Shift/Ctrl+Delete, C
 CTRL+SHIFT+B (TOGGLE BOOKMARK) DOES NOTHING. The registry's ext.bookmarks.toggle points at the unregistered command bookmarks.toggle; the dispatcher matches it in the capture phase and stops propagation, so CellBookmarks' own bubble-phase listener never runs.
 
 **Repro:** Select a cell, press Ctrl+Shift+B: no bookmark.
+**Fix:** fixed
 
-## BUG-0184 `[open]`
+## BUG-0184 `[fixed]`
 
 **Found:** 2026-09-27 (manual)
 **Oracle:** pivot-field-rebuild
@@ -2124,8 +2137,9 @@ CTRL+SHIFT+B (TOGGLE BOOKMARK) DOES NOTHING. The registry's ext.bookmarks.toggle
 TRACED, NOT RUN: update_pivot_fields rebuilds every field it is sent through PivotField::new and keeps only collapse state, so any field-list edit on a RANGE pivot resets sort order, grouping, subtotals and show-all-items on the fields it sends; it also reads an absent hidden-items list as CLEAR, so a filter changed elsewhere within one IPC round trip of a field-list edit is reverted.
 
 **Repro:** Range pivot, sort a row field descending, drag another field into Columns: the sort is back to ascending (expected per the trace).
+**Fix:** fixed
 
-## BUG-0185 `[open]`
+## BUG-0185 `[fixed]`
 
 **Found:** 2026-09-27 (manual)
 **Oracle:** fr-wrong-cell
@@ -2133,8 +2147,9 @@ TRACED, NOT RUN: update_pivot_fields rebuilds every field it is sent through Piv
 RIBBON AND MENU FORMATTING ACT ON CORE'S HIDDEN CELL WHILE A FLOATING-GRID CELL IS SELECTED (Home tab font/fill/number/alignment/styles, Format Cells, Format menu, mini toolbar, Format Painter, Paste Special, Conditional Formatting). There is no single choke point; each door reads Core's selection itself.
 
 **Repro:** Worksheet with A1 selected; select a floating-grid cell; click Bold on the Home tab: A1 turns bold.
+**Fix:** fixed
 
-## BUG-0186 `[open]`
+## BUG-0186 `[fixed]`
 
 **Found:** 2026-09-27 (manual)
 **Oracle:** external-edit-session
@@ -2142,8 +2157,9 @@ RIBBON AND MENU FORMATTING ACT ON CORE'S HIDDEN CELL WHILE A FLOATING-GRID CELL 
 TWO SELECTIONS CAN STAY VISIBLE AFTER A GRID HEADER OR RIGHT PRESS: re-clicking an already-selected row/column header, or right-pressing inside Core's hidden selection, does not drop a floating grid's selection (only cell presses announce onGridCellPressed), so the grid context menu opens on Core's cell while the floating grid still shows its own.
 
 **Repro:** Select a floating-grid cell on a worksheet whose A1 is selected; right-click A1: the grid menu opens, the floating-grid cell stays selected.
+**Fix:** fixed
 
-## BUG-0187 `[open]`
+## BUG-0187 `[fixed]`
 
 **Found:** 2026-09-27 (manual)
 **Oracle:** undo-completeness
@@ -2151,6 +2167,7 @@ TWO SELECTIONS CAN STAY VISIBLE AFTER A GRID HEADER OR RIGHT PRESS: re-clicking 
 A SLICER CLICK'S UNDO TRANSACTION STAYS OPEN ACROSS THE MODEL RE-QUERY, so an unrelated edit made during a slow click joins the click's Ctrl+Z step, and a Ctrl+Z pressed mid-click loses redo. User clicks are queued (so two clicks never merge); the window remains for other edits and for script setSelectedItems.
 
 **Repro:** Slow model; click a slicer item and immediately type into a cell; Ctrl+Z undoes both.
+**Fix:** fixed
 
 ## BUG-0188 `[fixed]`
 
@@ -2232,7 +2249,7 @@ ON A CANVAS, ESCAPE WITH A FLOATING-GRID CONTEXT MENU OPEN CLEARED THE OBJECT SE
 **Repro:** Canvas, select a floating grid, right-click it, press Escape: the menu stays, the selection is gone.
 **Fix:** fixed
 
-## BUG-0196 `[open]`
+## BUG-0196 `[fixed]`
 
 **Found:** 2026-09-27 (manual)
 **Oracle:** paint-hit-agreement
@@ -2240,8 +2257,9 @@ ON A CANVAS, ESCAPE WITH A FLOATING-GRID CONTEXT MENU OPEN CLEARED THE OBJECT SE
 ON A CANVAS, ESCAPE WITH A CHART, AXIS, CONTROL OR SLICER CONTEXT MENU OPEN deselects the object and leaves the menu open (same class as the fixed floating-grid case): none of those families claims Escape while its menu is open.
 
 **Repro:** Canvas, right-click a chart, press Escape.
+**Fix:** fixed
 
-## BUG-0197 `[open]`
+## BUG-0197 `[fixed]`
 
 **Found:** 2026-09-27 (manual)
 **Oracle:** design-query-filter
@@ -2249,8 +2267,9 @@ ON A CANVAS, ESCAPE WITH A CHART, AXIS, CONTROL OR SLICER CONTEXT MENU OPEN dese
 CHARTS AND REPORTS SILENTLY DROP A DESIGN-QUERY INCLUSION FILTER. compileDesignQuery passes no filterUniqueValues, so Field = ("a") in a chart or report design query cannot be inverted and runs UNFILTERED with no warning.
 
 **Repro:** Chart design query with Region = ("East"): the chart shows every region.
+**Fix:** fixed
 
-## BUG-0198 `[open]`
+## BUG-0198 `[fixed]`
 
 **Found:** 2026-09-27 (manual)
 **Oracle:** report-filter-pages
@@ -2258,8 +2277,9 @@ CHARTS AND REPORTS SILENTLY DROP A DESIGN-QUERY INCLUSION FILTER. compileDesignQ
 SHOW REPORT FILTER PAGES SKIPS A VALUE WHOSE CLEANED SHEET NAME COLLIDES with another value's page in the same run (' 'x and x' ' both become x; a/b and a_b; East and east), with no page and no error.
 
 **Repro:** Report filter over values East and east: one page.
+**Fix:** fixed
 
-## BUG-0199 `[open]`
+## BUG-0199 `[fixed]`
 
 **Found:** 2026-09-27 (manual)
 **Oracle:** keybinding-dead
@@ -2267,8 +2287,9 @@ SHOW REPORT FILTER PAGES SKIPS A VALUE WHOSE CLEANED SHEET NAME COLLIDES with an
 KEYBOARD LEFTOVERS: the FloatingRange refusals are bound to the default combos, so a user who remaps Copy away from Ctrl+C copies the hidden cell with the new key; Format Painter starts twice on Ctrl+Shift+C with the grid focused (registry binding plus its own listener); the shortcut capture box runs an already-bound combo instead of recording it; a stuck Core edit flag now also stands down Ctrl+Z / Ctrl+Y until a key reaches the grid container.
 
 **Repro:** Settings > Keyboard, remap Copy to Ctrl+Shift+Q; select a floating-grid cell on a worksheet; press Ctrl+Shift+Q.
+**Fix:** fixed
 
-## BUG-0200 `[open]`
+## BUG-0200 `[fixed]`
 
 **Found:** 2026-09-27 (manual)
 **Oracle:** undo-completeness
@@ -2276,6 +2297,7 @@ KEYBOARD LEFTOVERS: the FloatingRange refusals are bound to the default combos, 
 A SCRIPT BATCH CAN JOIN A GESTURE'S UNDO STEP: if a script calls beginBatch after a slicer click or ribbon filter has opened its step, the backend begin is a no-op and the script's writes join the gesture's step, so the gesture's decline (or a Ctrl+Z) takes the script's writes back too. Also: the ribbon backend records the selection as its own step and closes any open transaction; the FilterDropdown level-change and connections saves record an overwrite step but do not ask; a close-then-Save races async BEFORE_CLOSE work (a recording taken just before may not reach the file); a Save whose Save As picker is cancelled leaves the window open over torn-down scripts.
 
 **Repro:** Script: await delay(0) inside a slicer click's re-query, beginBatch, write A1; decline the overwrite prompt: A1 reverts.
+**Fix:** fixed
 
 ## BUG-0201 `[fixed]`
 
@@ -2307,7 +2329,7 @@ A MODEL PIPELINE EDIT NEVER VALIDATED THE MODEL. set_transformations_inner (bi/m
 **Repro:** e2e/journeys/model-transform.spec.ts Probe 1b: a lookup into DirectQuery 'customers' is accepted.
 **Fix:** fixed
 
-## BUG-0204 `[open]`
+## BUG-0204 `[fixed]`
 
 **Found:** 2026-09-28 (manual)
 **Oracle:** chart-sheet-identity
@@ -2315,8 +2337,9 @@ A MODEL PIPELINE EDIT NEVER VALIDATED THE MODEL. set_transformations_inner (bi/m
 HYPOTHESIS, NOT REPRODUCED: if a sheet is added, deleted or moved within the ~300 ms between a load and the chart sheet-id stamp, the stamp is refused (it no longer names the sheet at that index), and the NEXT load stamps the stored old index against the new sheet list, which could point the chart at the wrong sheet.
 
 **Repro:** Open a workbook with index-only chart ranges and delete a sheet before the charts finish loading; save; reopen.
+**Fix:** fixed
 
-## BUG-0205 `[open]`
+## BUG-0205 `[fixed]`
 
 **Found:** 2026-09-28 (manual)
 **Oracle:** e2e-harness
@@ -2324,3 +2347,531 @@ HYPOTHESIS, NOT REPRODUCED: if a sheet is added, deleted or moved within the ~30
 E2E CLEANUPS THAT CALL THE BACKEND'S new_file DIRECTLY LEAVE FRONTEND STORES STALE: the chart store reloads only on AFTER_OPEN / AFTER_NEW, which the app's own newFile emits and a raw invoke does not, so a chart from the previous spec keeps painting over the next spec's grid. floating-range.spec.ts's pixel probe also assumes nothing else is painted at (420,180) and does not reset first, so a leftover object fails it as 'the floating frame never painted'.
 
 **Repro:** Run dirty-flag.spec.ts then floating-range.spec.ts with the old raw new_file cleanup.
+**Fix:** fixed
+
+## BUG-0206 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-blank-member
+
+A PIVOT'S (blank) ROW SHOWED THE GRAND TOTAL AND TOTALS COUNTED BLANK ROWS TWICE: VALUE_ID_EMPTY was both the blank member's id and the subtotal padding, in every pivot with a blank member on rows or columns.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0207 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-blank-member
+
+HIDING (blank) IN ANY PIVOT FILTER DID NOTHING (the engine never resolved the blank item), and slicer/ribbon masks kept blank rows under any selection.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0208 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-show-values-as
+
+SHOW VALUES AS (Running Total, Rank, Difference previous/next) WALKED ITEMS ASCENDING whatever the field's sort, and skipped the blank member.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0209 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-sort-order
+
+MANUAL AND DATA-SOURCE SORT ORDERS SHOWED ITEMS IN HASH ORDER (calculation-group items out of declaration order).
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0210 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-data-source
+
+CHANGE DATA SOURCE (a) ignored a typed sheet prefix, (b) guessed a BI model from the text (quoted/digit-leading sheets, table names), (c) refused a table source, and (d) accepted a range covering the pivot's own output.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0211 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-getpivotdata-pick
+
+A POINT-MODE GETPIVOTDATA PICK IGNORED THE SHEET and described another sheet's pivot at the same address; a pivot with values on rows and no row field gave cells a bogus group path.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0212 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** lock-order
+
+MORE LOCK-ORDER INVERSIONS: undo apply_changes vs ~40 writers (a Ctrl+Z overlapping an MCP formatting call could hang), rename_sheet_inner and apply_names_to_formulas vs F9, the save path vs F9, drill-through bi_metadata vs pivot_tables, get_pivot_source_data (two-party deadlock).
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0213 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** undo-completeness
+
+GESTURES AND COMMANDS COMMITTED WHATEVER UNDO STEP WAS OPEN, closing a script's beginBatch halfway (paste, fill, edit commit, AutoFilter, Format Painter, Paste Special, named styles, CLI runs, eight dialog doors), and a script batch could join and be taken back with a user's gesture.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0214 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** undo-completeness
+
+UNDO AND REDO RAN UNDER AN IN-FLIGHT SLICER/RIBBON/TIMELINE GESTURE OR PIVOT FILTER COMMAND, leaving slicer and pivot disagreeing and losing redo; apply_changes replayed cell restores before deferred pivot restores.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0215 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** timeline-undo
+
+A TIMELINE SELECTION COMMITTED THE FRONTEND'S OPEN STEP EARLY (split steps), its delete had no protection gate, Ctrl+Z/Ctrl+Y left its pivots stale, and a decline re-applied the declined selection unrecorded.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0216 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** canvas-stacking-undo
+
+CANVAS BRING TO FRONT / SEND TO BACK / LOCK WERE NOT UNDOABLE, and an unchanged layout patch marked the document modified.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0217 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** canvas-multi-selection
+
+A CANVAS MULTI-SELECTION'S DELETE / COPY / PASTE / DUPLICATE ACTED ONLY ON EACH FAMILY'S OWN MEMBER; group drags led by a control, slicer or timeline did not snap or page-clamp their co-moved members; a pasted control inherited a deleted control's lock and z slot.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0218 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** protection-gate-parity
+
+SLICER, PIVOT, TIMELINE AND CONTROL CREATE/DELETE/PROPERTY DOORS SKIPPED editObjects PROTECTION (a canvas-wide Delete removed slicers on a protected sheet while charts were refused).
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0219 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** sheet-rename-delete-refs
+
+SHEET RENAMES AND DELETES MISSED REFERENCES: conditional-format, data-validation, control and pane-dropdown formulas, .calp override formulas, 3D references inside wrapper nodes, and index-only chart ranges on later sheets; a dropdown whose source named an unknown sheet read the active sheet.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0220 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** formula-quoting
+
+SHEET NAMES LIKE Q1-2026, 2024Budget, TRUE AND `Q1.` WERE WRITTEN UNQUOTED by Core's reference builders, header/GETPIVOTDATA picks, the floating grid's picks, the chart text editor, series formulas, data-validation list sources and the renderer, so the formula did not parse.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0221 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** keybinding-edit-context
+
+KEYBOARD LAYOUT AND EDIT-MODE GAPS: sv-SE Alt+;, Ctrl+[ ], Ctrl+; and the Ctrl+Shift number formats were dead; modified Delete/Backspace cleared cells; AltGr characters could not start an entry; Ctrl+Backspace / Shift+Backspace did nothing.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0222 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** extension-lifecycle
+
+EXTENSIONS LEFT MENUS AND COMMANDS BEHIND ON DEACTIVATE (Standard Menus, Data/Review/Insert contributors, 27 extensions' items, Scenario Manager even deleted the shared What-If parent), and @api had no unregisterMenu or unregisterCommand.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0223 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** command-dispatch
+
+COMMANDS NOBODY RAN: Space never toggled a legacy checkbox (unknown command), the TestRunner suites and the ribbon executeCommand never reached extension commands, F11 Insert Chart ran an unregistered command, a refused Space toggle was an unhandled rejection.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0224 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** close-lifecycle
+
+CLOSE-THEN-SAVE RACED ASYNC BEFORE_CLOSE WORK (a recording taken just before could miss the file) and a cancelled Save As picker left the window over torn-down scripts.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0225 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** calp-rename-roundtrip
+
+A COLLISION-RENAMED WORKING COPY PUSHED UN-RENAMED BASE FORMULAS (hold-back) and re-serialised untouched chart specs, showing false changes and conflicts; the diff keyed sheet-scoped names by id.
+
+**Repro:** See the named wave item's tests in scratchpad reports.
+**Fix:** fixed
+
+## BUG-0226 `[open]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-data-source
+
+NOT DEMONSTRATED: Change Data Source and create let a new source placed BELOW the output pass the overlap check even when the re-grown pivot would write over it.
+
+**Repro:** NOT DEMONSTRATED: Change Data Source and create let a new source placed BELOW the output pass the overlap check even when the re-grown pivot would write over it.
+
+## BUG-0227 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** undo-completeness
+
+THIRTY RUST COMMANDS BEGAN AND COMMITTED THEIR UNDO STEP UNCONDITIONALLY (clear range x3, sort x2, remove duplicates, replace x3, insert/delete rows/columns, off-sheet structural edits, formatting on sheets, MCP formatting, pane controls x4, create pivot x2, cell protection, reports, tables x4, calp hold-back/reset): inside a script batch or a command-line run the commit closed the caller's step halfway -- a script's createNamedStyle split its batch live.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0228 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** timeline-undo
+
+A TIMELINE PERIOD CLICK ARMED A PHANTOM RANGE DRAG ON ITS MOUSEUP: hovering afterwards grew the selection with no button held, and the next click anywhere re-applied a period the user had undone; a click also fired two selections.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0229 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** serde-wire
+
+ENUM VARIANT FIELDS CROSSED THE WIRE IN snake_case: the Data Validation dialog's list-from-range rule was refused (missing field start_row), and a manual grouping's ungroupedName was dropped.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0230 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** formula-locale
+
+THE sv-SE LOCALISER MANGLED A BARE SHEET NAME WITH DIGITS AROUND A DOT (Q1.2026!C3 became Q1,2026!C3).
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0231 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** controls-sheet
+
+FLOATING CONTROLS ALWAYS LOADED SHEET 0'S CONTROLS (GridConfig.activeSheet was never set): a canvas or a second sheet showed the first sheet's buttons, and an undo re-published controls on the wrong sheet.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0232 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** undo-completeness
+
+THE COMMAND LINE'S add / rename / delete sheet ENDED ITS RUN'S UNDO STEP: the set-cell lines after it became separate steps.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0233 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** command-line
+
+THE COMMAND LINE COULD NOT BE REOPENED WITH ITS TOGGLE AFTER ITS X CLOSED IT (a mirrored isOpen flag the unmounted panel never cleared).
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0234 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** color-picker
+
+THE COLOUR POPOVER'S HEX FIELD APPLIED A COLOUR TWICE ON ENTER (two undo steps): the blur the close caused committed the same draft again.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0235 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** chart-source
+
+A CHART OVER A SHEET WHOSE NAME HOLDS AN ESCAPED QUOTE (Rock'!Roll) NEVER PLOTTED: the A1 parser left the doubled quote doubled.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0236 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** calp-checkout
+
+AN UNTOUCHED WORKING COPY'S PUSH PREVIEW LISTED EVERY BUTTON AS MODIFIED: the checkout's sanitiser stripped the empty onSelect every button carries.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0237 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** sheet-rename-delete-refs
+
+A 3D REFERENCE LOSING AN ENDPOINT READ =SUM(MID:Mid!B1) IN MANAGE RULES: the kept endpoint kept the lexer's upper-cased spelling.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0238 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-getpivotdata-pick
+
+A GETPIVOTDATA PICK ON A PIVOT ON ANOTHER SHEET INSERTED A PLAIN REFERENCE: the interceptor gated on the EDIT sheet's cached regions.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0239 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** contextual-tabs
+
+THE TABLE DESIGN AND PIVOT TABLE TABS FOLLOWED THE CELL'S COORDINATES, NOT THE SHEET: B2 on another sheet kept the old tab.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0240 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** undo-repaint
+
+UNDOING A COLUMN RESIZE OR A ROW HEIGHT LEFT THE OLD SIZE ON SCREEN: the restore announced no dimensions domain.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0241 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** format-painter
+
+AFTER Ctrl+Shift+C THE FORMAT PAINTER'S FIRST CLICK PAINTED NOTHING: it skipped a 'first selection callback' the registry never sends.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0242 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** scrolling
+
+THE MOUSE WHEEL CRAWLED ONE ROW PER NOTCH PAST THE USED RANGE: it clamped to the scrollbar thumb's extent.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0243 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** bi-direct-query
+
+A DIRECTQUERY TABLE ON A FETCH-ONLY CONNECTOR (CSV, Parquet, in-memory, REST) RETURNED RAW ROWS AS AGGREGATES: grouped by Region, one row per record; grouped by Year, the Region column -- a Year slicer listed regions.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0244 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-values-on-rows
+
+VALUES ON ROWS SHOWED EVERY VALUE IN EVERY VALUE ROW with no column field, and with a column field every value row showed the FIRST value field's numbers (the Count row repeated the Sums).
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0245 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-show-values-as
+
+SHOW VALUES AS COULD NOT BE SET IN THE VALUE FIELD SETTINGS DIALOG (no Base field or Base item was offered), and the dialog reopened on Normal.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0246 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** timeline-dates
+
+A TIMELINE OVER TYPED DATES LISTED YEAR -2688 (the pivot cache's own serial arithmetic), and number columns such as Sales were offered as date fields.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0247 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pane-controls
+
+A PANE DROPDOWN SOURCED FROM A FLOATING RANGE LISTED NOTHING: getSheets() never lists a floating range's backing sheet.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0248 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** canvas-marquee
+
+AFTER AN INSTANT CLICK ON THE EMPTY CANVAS PAGE THE MARQUEE BAND FOLLOWED THE BARE POINTER, and the next click selected everything between.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0249 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** protection-gate-parity
+
+INSERT > CONTROLS > BUTTON ON A SHEET PROTECTED AGAINST OBJECT EDITS FAILED SILENTLY.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0250 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** test-runner
+
+THE TESTRUNNER'S CHECKBOX SUITE WAS WRITTEN BUT NEVER REGISTERED.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0251 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-sort-order
+
+PIVOT TEXT SORTED BY BYTES: every capital before every lower-case letter ("YTD" before "YoY"), in row order and in item lists; Excel ignores case.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0252 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** undo-completeness
+
+runStepThenConfirmOverwrite DECIDED 'joined' WITH A PROBE TAKEN BEFORE ITS BEGIN: a script batch opened in between was joined, the gesture was still asked, and a decline took the script's writes back too.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0253 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** sheet-switch
+
+SHEET SWITCHES OUTSIDE THE TAB STRIP WERE HALF A SWITCH: Next/Previous Bookmark and a view bookmark announced the switch before the backend had made it (SheetTabs' re-read dispatched the old sheet back, so a jump from a canvas left the grid on the canvas and the bookmarked cell unselected), and the Application Explorer, Go To (Tracing), CSV import to a new sheet and a notebook's Send to grid switched only the BACKEND -- the grid, the tab strip and the new sheet's cells never followed.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0254 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** undo-completeness
+
+UNDO FROM THE RIBBON, THE EDIT MENU OR THE QUICK ACCESS TOOLBAR WHILE A SLICER CLICK OR RIBBON FILTER CHANGE WAS STILL LANDING WAS NOT REFUSED: only the keyboard asked the command refusals.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0255 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-getpivotdata
+
+=GETPIVOTDATA("Count of Sales";E1) WITHOUT FIELD/ITEM PAIRS READ #REF! BESIDE THE VERY COUNT IT NAMES when the values are on rows with no row field and row grand totals off: only a GrandTotal cell was accepted.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0256 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** pivot-show-values-as
+
+SHOW VALUES AS WITH A BASE (Running Total In, Difference From, % Of, % Difference From) CHANGED NOTHING: the editor kept neither the Base field nor the Base item and sent only the plain string. And a REOPENED editor cleared every value field's Show Values As and number format on its first change: its seed carried neither, and the update replaces the value fields.
+
+**Repro:** See the named test in the fix.
+**Fix:** fixed
+
+## BUG-0257 `[open]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** calp-checkout
+
+OWNER DECISION NEEDED: a working copy is sanitised like a subscription, so pushing an UNTOUCHED working copy strips every button's onSelect / macroRef wiring from the published application.
+
+**Repro:** OWNER DECISION NEEDED: a working copy is sanitised like a subscription, so pushing an UNTOUCHED working copy strips every button's onSelect / macroRef wiring from the published application.
+
+## BUG-0258 `[open]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** timeline-range
+
+A TIMELINE RANGE CANNOT BE SELECTED BY DRAGGING: a press on a timeline is Core's floating-object press (select, and move on drag).
+
+**Repro:** A TIMELINE RANGE CANNOT BE SELECTED BY DRAGGING: a press on a timeline is Core's floating-object press (select, and move on drag).

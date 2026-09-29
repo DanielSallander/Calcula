@@ -3,12 +3,14 @@
 // CONTEXT: Core component that orchestrates the spreadsheet experience
 // REFACTOR: Removed legacy Find/Replace event listeners (logic moved to Extensions)
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
 // FIX: Removed openFind import to resolve SyntaxError
 import { setViewportDimensions, setAllDimensions, setSelection, setZoom, setSplitConfig, setSplitViewport, setFreezeConfig, updateConfig, setDisplayGridlines, setDisplayZeros, setShowFormulas, setViewMode, setDisplayHeadings, scrollToPosition } from "../../state/gridActions";
 import { refreshUserHidden } from "../../lib/hiddenRowsCols";
 import { loadSheetViewState, persistSheetZoom, loadSheetDisplayFlags } from "../../lib/sheetViewState";
+import type { SheetDisplayFlags, SheetViewState } from "../../lib/sheetViewState";
+import { takePrefetchedSheetView } from "../../lib/sheetSwitchPrefetch";
 import { invoke } from "@tauri-apps/api/core";
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP } from "../../types";
 import type { Selection, Viewport, VirtualBounds, ViewMode } from "../../types";
@@ -40,6 +42,11 @@ import {
   cancelUndoTransaction,
   setSplitWindow as backendSetSplitWindow,
 } from "../../lib/tauri-api";
+import {
+  ownUndoTransaction,
+  type OwnedUndoTransaction,
+  type UndoTransactionCloses,
+} from "../../lib/undoTransactionOwnership";
 import { cellEvents } from "../../lib/cellEvents";
 import { getCellFromPixel } from "../../lib/gridRenderer";
 import { calculateFreezePaneLayout, calculateVisibleRange } from "../../lib/gridRenderer/layout/viewport";
@@ -62,6 +69,12 @@ import type { GridMenuContext } from "../../lib/gridCommands";
 import * as S from "./Spreadsheet.styles";
 import { alertAsync } from "../../lib/dialogs";
 import { rowHeaderGutter, colHeaderGutter, effectiveGridConfig, paintedDisplayHeadings } from "../../lib/gridRenderer/layout/headerVisibility";
+
+/** Clear All's closes, read when the close runs (see ownUndoTransaction). */
+const UNDO_CLOSES: UndoTransactionCloses = {
+  commitUndoTransaction: (...ticket) => commitUndoTransaction(...ticket),
+  cancelUndoTransaction: (...ticket) => cancelUndoTransaction(...ticket),
+};
 
 const SCROLLBAR_SIZE = GRID_SCROLLBAR_GUTTER_PX;
 const SPLIT_BAR_SIZE = 4;
@@ -342,16 +355,16 @@ function SpreadsheetContent({
   // so they must be re-read on mount AND on every sheet switch -- exactly like zoom
   // and the split bars. Hydrating only at startup is the bug that made a freeze on
   // sheet 2 show sheet 1's panes.
-  const hydrateSheetDisplayFlags = useCallback(async () => {
-    const flags = await loadSheetDisplayFlags();
+  // Apply ONE read of the flags / the view. Split from the reads so the
+  // switch's primed copy (below) and an async hydration apply them the same way.
+  const applySheetDisplayFlags = useCallback((flags: SheetDisplayFlags) => {
     dispatch(setDisplayZeros(flags.displayZeros));
     dispatch(setShowFormulas(flags.showFormulas));
     dispatch(setViewMode(flags.viewMode as ViewMode));
     dispatch(setDisplayHeadings(flags.displayHeadings));
   }, [dispatch]);
 
-  const hydrateSheetView = useCallback(async () => {
-    const view = await loadSheetViewState();
+  const applySheetView = useCallback((view: SheetViewState) => {
     lastSyncedZoomFactorRef.current = view.zoomFactor;
     dispatch(setZoom(view.zoomFactor));
     dispatch(setSplitConfig(view.splitRow, view.splitCol));
@@ -361,28 +374,55 @@ function SpreadsheetContent({
     dispatch(setFreezeConfig(view.freezeRow, view.freezeCol));
   }, [dispatch]);
 
+  const hydrateSheetDisplayFlags = useCallback(async () => {
+    applySheetDisplayFlags(await loadSheetDisplayFlags());
+  }, [applySheetDisplayFlags]);
+
+  const hydrateSheetView = useCallback(async () => {
+    applySheetView(await loadSheetViewState());
+  }, [applySheetView]);
+
   // PER-SHEET VIEW STATE FOLLOWS THE ACTIVE SHEET, whichever route moved it:
   // the tab strip, a script's api.setActiveSheet, a bookmark, an internal
   // hyperlink, a backend-driven switch. Keyed on the NAME as well as the index,
   // because deleting the active sheet can leave the index unchanged while a
   // different sheet takes it. The mount effect below hydrates the first sheet,
   // so the first run here is skipped.
+  //
+  // IN THE SWITCH'S OWN FLUSH when the switch primed it. A switch initiator
+  // that awaited `primeSheetSwitch` (the tab strip, the Name Box, undo/redo's
+  // follow) has already read the target's gridlines, flags, zoom, split and
+  // freeze; a LAYOUT effect applies them before the browser paints, so the
+  // first frame of a worksheet reached from a canvas has its own headings,
+  // gridlines and zoom instead of the canvas's (the one-frame flash). A route
+  // that did not prime -- a script, a bookmark, a hyperlink -- finds no
+  // payload and hydrates as before.
   const activeSheetIndexForView = gridState.sheetContext.activeSheetIndex;
   const activeSheetNameForView = gridState.sheetContext.activeSheetName;
   const viewHydratedOnceRef = useRef(false);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!viewHydratedOnceRef.current) {
       viewHydratedOnceRef.current = true;
       return;
+    }
+    const primed = takePrefetchedSheetView(activeSheetIndexForView);
+    if (primed) {
+      applySheetView(primed.view);
+      applySheetDisplayFlags(primed.flags);
+      if (primed.showGridlines !== null) {
+        dispatch(setDisplayGridlines(primed.showGridlines));
+        return;
+      }
     }
     invoke<boolean>("get_show_gridlines")
       .then((show) => {
         dispatch(setDisplayGridlines(show));
       })
       .catch(() => {});
+    if (primed) return;
     void hydrateSheetView();
     void hydrateSheetDisplayFlags();
-  }, [activeSheetIndexForView, activeSheetNameForView, hydrateSheetView, hydrateSheetDisplayFlags, dispatch]);
+  }, [activeSheetIndexForView, activeSheetNameForView, hydrateSheetView, hydrateSheetDisplayFlags, applySheetView, applySheetDisplayFlags, dispatch]);
 
   // Write zoom back to the authority whenever the user actually changes it.
   // Guarded by lastSyncedZoomFactorRef so hydration (mount / sheet switch)
@@ -720,18 +760,21 @@ function SpreadsheetContent({
     const minCol = Math.min(selection.startCol, selection.endCol);
     const maxCol = Math.max(selection.startCol, selection.endCol);
 
+    // Closes ONLY the undo transaction its own begin opened: inside a script's
+    // open batch it joins, and the script closes that step (wave E, Y7).
+    let tx: OwnedUndoTransaction | null = null;
     try {
-      await beginUndoTransaction("Clear all");
+      tx = ownUndoTransaction(await beginUndoTransaction("Clear all"), UNDO_CLOSES);
       await clearRangeWithOptions(minRow, minCol, maxRow, maxCol, "all");
       await clearCommentsInRange(minRow, minCol, maxRow, maxCol);
       await clearHyperlinksInRange(minRow, minCol, maxRow, maxCol);
-      await commitUndoTransaction();
+      await tx.commit();
       cellEvents.emit({ row: minRow, col: minCol, oldValue: undefined, newValue: "", formula: null }, "clear");
     } catch (error) {
       // clearRangeWithOptions can now be refused by sheet protection, which
       // skips the commit and leaves the transaction open for later edits to
       // join. Cancel it, and surface the reason instead of failing silently.
-      await cancelUndoTransaction().catch(() => {});
+      await tx?.cancel().catch(() => {});
       console.error("[Spreadsheet] Failed to clear all:", error);
       const msg = typeof error === "string" ? error : (error as Error)?.message;
       if (msg) void alertAsync(msg);
@@ -1294,10 +1337,10 @@ function SpreadsheetContent({
           if (isInTopPane || isInLeftPane) {
             // Mouse is in a split pane - update splitViewport
             const newSvpScrollX = isInLeftPane
-              ? Math.max(0, Math.min(scrollbarMetrics.maxScrollX, splitViewport.scrollX + deltaX))
+              ? Math.max(0, Math.min(scrollbarMetrics.wheelMaxScrollX, splitViewport.scrollX + deltaX))
               : splitViewport.scrollX;
             const newSvpScrollY = isInTopPane
-              ? Math.max(0, Math.min(scrollbarMetrics.maxScrollY, splitViewport.scrollY + deltaY))
+              ? Math.max(0, Math.min(scrollbarMetrics.wheelMaxScrollY, splitViewport.scrollY + deltaY))
               : splitViewport.scrollY;
 
             if (newSvpScrollX !== splitViewport.scrollX || newSvpScrollY !== splitViewport.scrollY) {
@@ -1306,7 +1349,7 @@ function SpreadsheetContent({
 
             // If in top pane but NOT in left pane, also scroll main viewport horizontally
             if (isInTopPane && !isInLeftPane) {
-              const newMainScrollX = Math.max(0, Math.min(scrollbarMetrics.maxScrollX, gridState.viewport.scrollX + deltaX));
+              const newMainScrollX = Math.max(0, Math.min(scrollbarMetrics.wheelMaxScrollX, gridState.viewport.scrollX + deltaX));
               if (newMainScrollX !== gridState.viewport.scrollX) {
                 const syntheticEvent = {
                   currentTarget: { scrollLeft: newMainScrollX, scrollTop: gridState.viewport.scrollY },
@@ -1317,7 +1360,7 @@ function SpreadsheetContent({
 
             // If in left pane but NOT in top pane, also scroll main viewport vertically
             if (isInLeftPane && !isInTopPane) {
-              const newMainScrollY = Math.max(0, Math.min(scrollbarMetrics.maxScrollY, gridState.viewport.scrollY + deltaY));
+              const newMainScrollY = Math.max(0, Math.min(scrollbarMetrics.wheelMaxScrollY, gridState.viewport.scrollY + deltaY));
               if (newMainScrollY !== gridState.viewport.scrollY) {
                 const syntheticEvent = {
                   currentTarget: { scrollLeft: gridState.viewport.scrollX, scrollTop: newMainScrollY },
@@ -1334,14 +1377,14 @@ function SpreadsheetContent({
       const newScrollX = Math.max(
         0,
         Math.min(
-          scrollbarMetrics.maxScrollX,
+          scrollbarMetrics.wheelMaxScrollX,
           gridState.viewport.scrollX + deltaX
         )
       );
       const newScrollY = Math.max(
         0,
         Math.min(
-          scrollbarMetrics.maxScrollY,
+          scrollbarMetrics.wheelMaxScrollY,
           gridState.viewport.scrollY + deltaY
         )
       );

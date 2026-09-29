@@ -559,9 +559,12 @@ export interface UnlockedAPI {
    * @param description Human-readable description shown in the Undo menu.
    */
   beginBatch(description: string): Promise<void>;
-  /** Commit the current batch, finalizing it as a single undo entry. */
+  /** Commit the current batch, finalizing it as a single undo entry. A batch
+   *  that JOINED another caller's step commits nothing: its opener does. */
   commitBatch(): Promise<void>;
-  /** Cancel the current batch, discarding all changes since beginBatch(). */
+  /** Close the current batch with NO undo step: its writes STAY in the sheet
+   *  (not a rollback) and its undo record is dropped. A batch that JOINED
+   *  another caller's step cancels nothing. */
   cancelBatch(): Promise<void>;
 
   // ---- Formatting (B2) ----

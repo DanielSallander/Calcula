@@ -357,6 +357,25 @@ describe("reload after a sheet-list change", () => {
     expect(reloaded.x).toBe(250);
   });
 
+  it("never stamps an index-only range against the sheet list a structural change just produced (BUG-0204)", async () => {
+    // A chart some path wrote by INDEX (a script, an MCP client, a pull): its
+    // range still says sheet 1. The sheet list has just changed (a sheet moved,
+    // so index 1 is now ANOTHER sheet) and the backend renumbered placements --
+    // but not the index inside the range. Stamping now would pin the chart to
+    // the sheet that took the old index, permanently.
+    invokeBackend.mockImplementation(async (cmd: string) =>
+      cmd === "get_charts" ? [entry("c1", 0, 0, spec({ data: r(1) }))] : undefined,
+    );
+    await reloadChartsAfterSheetListChange();
+    await flushPendingChartSaves();
+    expect(
+      invokeBackend.mock.calls.filter((c) => c[0] === "update_chart"),
+      "the reload stamped a stale index against the new sheet list",
+    ).toHaveLength(0);
+    expect((getChartById("c1")!.spec.data as DataRangeRef).sheetId).toBeUndefined();
+    expect(h.getSheets).not.toHaveBeenCalled();
+  });
+
   it("drops a pending save for a chart that went with its sheet (no spurious error)", async () => {
     let stored = [entry("c1", 1, 1, spec({ data: r(1, "id-1") }))];
     invokeBackend.mockImplementation(async (cmd: string) => {

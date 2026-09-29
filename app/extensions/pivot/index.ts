@@ -11,8 +11,8 @@ import {
   gridCommands,
   registerFormulaReferenceInterceptor,
   registerMenuItem,
+  unregisterMenuItem,
   notifyMenusChanged,
-  columnToLetter,
   registerPivotStoreService,
   getBiConnectionService,
   openTaskPane,
@@ -76,6 +76,7 @@ import {
   updateCachedRegions,
   resetSelectionHandlerState,
   forceRecheck,
+  recheckSelectionAfterSheetChange,
   getCachedRegions,
   findPivotRegionAtCell,
   shiftCachedRegionsForColInsert,
@@ -87,7 +88,7 @@ import {
   getSelectedVisualPivotId,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData, PivotEditorViewData, BiPivotModelInfo } from "./types";
-import { getPivotRegionsForSheet, getPivotAtCell, getPivotDataFormula, getPivotView, getPivotCellWindow, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies } from "./lib/pivot-api";
+import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, getPivotCellWindow, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies } from "./lib/pivot-api";
 import {
   togglePivotHeaderAt,
   openPivotReportFilterAt,
@@ -1160,7 +1161,7 @@ let cleanupFunctions: Array<() => void> = [];
 const pivotFieldsCache = new Map<string, { rows: string[]; columns: string[]; values: string[]; filters: string[] }>();
 
 import { isGenerateGetPivotDataEnabled, setGenerateGetPivotData } from "./lib/getPivotDataToggle";
-import { getLocaleSettings } from "@api/locale";
+import { getPivotDataPick } from "./lib/getPivotDataPick";
 
 // ============================================================================
 // Activation
@@ -1284,35 +1285,7 @@ function activate(context: ExtensionContext): void {
 
   // Register formula reference interceptor for GETPIVOTDATA generation
   cleanupFunctions.push(
-    registerFormulaReferenceInterceptor(async (row, col) => {
-      if (!isGenerateGetPivotDataEnabled()) return null;
-
-      // Quick check: is this cell in a cached pivot region?
-      const region = findPivotRegionAtCell(row, col);
-      if (!region) return null;
-
-      // Ask the backend for the GETPIVOTDATA formula arguments
-      const result = await getPivotDataFormula(row, col);
-      if (!result) return null;
-
-      // Build the GETPIVOTDATA formula text using locale-aware separator.
-      // The editing pipeline will delocalize the formula before storing it,
-      // so we must use the locale's list separator (e.g., ";" for Swedish).
-      const locale = await getLocaleSettings();
-      const sep = locale.listSeparator;
-      const cellRef = "$" + columnToLetter(col) + "$" + (row + 1);
-      let formula = `GETPIVOTDATA("${result.dataField}"${sep}${cellRef}`;
-      for (const [fieldName, itemValue] of result.fieldItemPairs) {
-        formula += `${sep}"${fieldName}"${sep}"${itemValue}"`;
-      }
-      formula += ")";
-
-      return {
-        text: formula,
-        highlightRow: row,
-        highlightCol: col,
-      };
-    })
+    registerFormulaReferenceInterceptor((row, col) => getPivotDataPick(row, col))
   );
 
   // Register "Generate GetPivotData" toggle in the Formulas menu
@@ -1326,6 +1299,8 @@ function activate(context: ExtensionContext): void {
       notifyMenusChanged();
     },
   });
+  // Its OWN item back on deactivate (wave E, Y14): the Formulas menu is Tracing's.
+  cleanupFunctions.push(() => unregisterMenuItem("formulas", "pivot.generateGetPivotData"));
 
   // Register structural command guards - block insert/delete that would affect pivot regions
   const pivotStructuralGuardMessage = "We can't make this change for the selected cells because it will affect a PivotTable. Use the field list to change the report. If you are trying to insert or delete cells, move the PivotTable and try again.";
@@ -1955,7 +1930,10 @@ function activate(context: ExtensionContext): void {
   // renders instantly instead of waiting for an IPC round-trip.
   cleanupFunctions.push(
     context.events.on(AppEvents.SHEET_CHANGED, () => {
-      refreshPivotRegions(false, /* allowCachedHit */ true);
+      // THEN re-derive the contextual tabs for the cell the new sheet shows:
+      // the selection handler's same-cell skip cannot tell B2 here from B2
+      // on the sheet just left.
+      void refreshPivotRegions(false, /* allowCachedHit */ true).then(() => recheckSelectionAfterSheetChange());
     })
   );
 

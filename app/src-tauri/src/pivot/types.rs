@@ -711,6 +711,82 @@ pub struct ClearPivotFilterRequest {
     pub reconcile: bool,
 }
 
+/// One pivot filter write of a GESTURE (a slicer click, a ribbon filter
+/// change): exactly one of `apply` / `clear`. The gesture's command runs them
+/// in order with its own recording switched off and records ONE step at the
+/// end (BUG-0187).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotFilterWrite {
+    #[serde(default)]
+    pub apply: Option<ApplyPivotFilterRequest>,
+    #[serde(default)]
+    pub clear: Option<ClearPivotFilterRequest>,
+}
+
+/// How a gesture's ONE undo step lands (see
+/// `undo_commands::GestureStepMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FilterGestureStep {
+    /// A step of its own, even while someone else's transaction is open that
+    /// has recorded nothing yet (a user click); one that already holds
+    /// changes is JOINED, marked shared, so undoing replays in time order.
+    Own,
+    /// Join the open transaction (a script batch), marking it shared; its
+    /// own step when none is open.
+    Join,
+    // No "left open" modes any more (W2): a slicer click filters its TABLE
+    // targets inside the same backend command, so no step is ever left open
+    // across frontend writes for anything else to join.
+}
+
+/// The pivot writes of one gesture and how its step lands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotFilterGesture {
+    pub writes: Vec<PivotFilterWrite>,
+    pub step: FilterGestureStep,
+}
+
+/// A write of a gesture that the backend refused (the others still ran).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotFilterWriteFailure {
+    pub pivot_id: PivotId,
+    /// True when the write was a clear.
+    pub clearing: bool,
+    pub message: String,
+}
+
+/// Where a gesture's step went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FilterGestureStepOutcome {
+    /// Nothing changed that records.
+    Nothing,
+    /// A step of its own (`stepSeq` names it).
+    Pushed,
+    /// Recorded into the caller's open transaction.
+    Joined,
+}
+
+/// What a gesture did: every write's response (in order; a response whose
+/// write overwrote the user's cells carries the gesture's `overwriteToken`),
+/// the writes that refused, and where its ONE step went.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotFilterGestureResponse {
+    pub responses: Vec<PivotViewResponse>,
+    pub failures: Vec<PivotFilterWriteFailure>,
+    pub step: FilterGestureStepOutcome,
+    /// The history id of the step, when it was pushed as its own.
+    pub step_seq: Option<u64>,
+    /// The token of the gesture's overwrite step, when some write grew a
+    /// pivot over the user's cells and the step records them.
+    pub overwrite_token: Option<u64>,
+}
+
 /// Request to sort a pivot field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -877,9 +953,12 @@ pub struct UpdatePivotPropertiesRequest {
 pub struct ChangePivotDataSourceRequest {
     /// Pivot table ID
     pub pivot_id: PivotId,
-    /// New source range in A1 notation (e.g., "Sheet1!A1:D100")
+    /// New source range in A1 notation (e.g., "Sheet1!A1:D100"), or a table's
+    /// name ("Table1"), which reads the table and links the pivot to it
+    /// (`change_source_table`); a range unlinks a table pivot.
     pub source_range: String,
-    /// Source sheet index (optional, defaults to active sheet)
+    /// Source sheet index (optional). The sheet the range NAMES wins; without
+    /// either, the pivot's own source sheet (`change_source_sheet_index`).
     pub source_sheet: Option<usize>,
 }
 
@@ -1162,6 +1241,25 @@ pub struct PivotTableInfo {
     pub source_table_name: Option<String>,
 }
 
+/// One row of the `get_all_pivot_tables` IPC listing: a pivot's info and the
+/// sheet it is ON. The Insert Slicers dialog lists pivots from every sheet
+/// and labels each with its sheet; without this it could only say
+/// "PivotTable1 (PivotTable)" for a pivot on any of them.
+///
+/// A wrapper rather than a field of [`PivotTableInfo`]: that struct is also
+/// what the MCP inventory formats, and a pivot's info is the same wherever it
+/// is listed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotTableListing {
+    #[serde(flatten)]
+    pub info: PivotTableInfo,
+    /// The sheet the pivot's output is on: its destination sheet, found by
+    /// name ignoring case (the resolver every pivot write uses). `None` when
+    /// the destination names no sheet of this workbook -- never a guess.
+    pub sheet_index: Option<usize>,
+}
+
 /// A BI-backed pivot belonging to a specific model connection
 /// (returned by get_pivots_for_bi_connection).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1317,6 +1415,16 @@ pub struct ZoneFieldInfo {
     /// User-provided custom display name override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_name: Option<String>,
+    /// A VALUE field's number format (None on every other zone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number_format: Option<String>,
+    /// A VALUE field's Show Values As, with its base field and base item (None
+    /// on every other zone, and for "No Calculation"). The editor seeds its
+    /// Values zone from this list and sends the whole list back on its next
+    /// change, and the update REPLACES the value fields -- so a setting that is
+    /// not read here is cleared by the first edit after the editor reopens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_as: Option<ShowAsRule>,
 }
 
 /// Current field configuration for the pivot editor
@@ -1451,8 +1559,12 @@ pub struct ExpandCollapseAllRequest {
 }
 
 /// Grouping configuration for a field (sent from frontend).
+///
+/// `rename_all_fields` too: without it `ManualGrouping { ungrouped_name }` read
+/// the frontend's `ungroupedName` as absent, so a custom name for the
+/// ungrouped items was silently dropped. Pinned by `serde_enum_field_case_tests`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "type")]
 pub enum FieldGroupingConfig {
     /// No grouping
     None,

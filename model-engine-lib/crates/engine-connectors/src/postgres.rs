@@ -349,8 +349,9 @@ impl PostgresConnector {
         for in_filter in &request.in_filters {
             if in_filter.values.is_empty() {
                 // An empty IN set matches nothing — restrict to zero rows
-                // rather than dropping the constraint (would return all rows).
-                conditions.push(sql_builder::FALSE_PREDICATE.to_string());
+                // rather than dropping the constraint (would return all rows)
+                // — or only the NULL rows when it names the BLANK member.
+                conditions.push(sql_builder::empty_in_condition(&PostgresDialect, in_filter));
                 continue;
             }
             if in_filter.values.len() > threshold {
@@ -362,11 +363,15 @@ impl PostgresConnector {
                     .await
                 {
                     Some(temp_name) => {
-                        conditions.push(sql_builder::temp_in_condition(
+                        conditions.push(sql_builder::with_null_match(
                             &PostgresDialect,
-                            &in_filter.column,
-                            &temp_name,
-                            kind,
+                            in_filter,
+                            sql_builder::temp_in_condition(
+                                &PostgresDialect,
+                                &in_filter.column,
+                                &temp_name,
+                                kind,
+                            ),
                         ));
                         temp_tables.push(temp_name);
                     }
@@ -1024,6 +1029,7 @@ mod tests {
             column: column.into(),
             values: values.iter().map(|v| v.to_string()).collect(),
             kind,
+            include_null: false,
         }
     }
 

@@ -21,6 +21,8 @@ const h = vi.hoisted(() => ({
   undoState: vi.fn((): Promise<unknown> => Promise.resolve({ undoSeqs: [], transactionOpen: false })),
   /** The FRONTEND's own transaction flag (`isUndoTransactionOpen`). */
   frontendOpen: false,
+  /** What the step's backend BEGIN answers: true = it opened the transaction. */
+  beginOpens: true,
   /** What happened, in order: "open", "body", "commit", "ask". */
   order: [] as string[],
 }));
@@ -35,13 +37,20 @@ vi.mock("../notifications", () => ({ showToast: (...a: unknown[]) => h.toast(...
 vi.mock("../../core/lib/tauri-api", () => ({ getUndoState: () => h.undoState() }));
 vi.mock("../objectGeometry", () => ({
   isUndoTransactionOpen: () => h.frontendOpen,
-  runInUndoTransaction: async (_label: string, fn: () => Promise<unknown>) => {
+  undoCommitsSettled: () => Promise.resolve(),
+  // The handle's shape: a joined handle (the frontend's own transaction is
+  // open) never opened; otherwise the BEGIN's answer decides.
+  openUndoTransaction: (_label: string) => {
     h.order.push("open");
-    try {
-      return await fn();
-    } finally {
-      h.order.push("commit");
-    }
+    const joined = h.frontendOpen;
+    return {
+      joined,
+      run: async (fn: () => Promise<unknown>) => fn(),
+      commit: async () => {
+        h.order.push("commit");
+      },
+      openedBackend: async () => !joined && h.beginOpens,
+    };
   },
 }));
 
@@ -50,9 +59,7 @@ import {
   createPivotOverwriteTally,
   isAnyUndoTransactionOpen,
   pivotOverwriteQuestion,
-  runNamingItsUndoStep,
   runStepThenConfirmOverwrite,
-  undoStepPushedBetween,
   PIVOT_OVERWRITE_NOT_TAKEN_BACK,
 } from "../pivotOverwrite";
 import type { PivotViewResponse } from "../pivotTypes";
@@ -69,6 +76,7 @@ beforeEach(() => {
   h.toast.mockClear();
   h.undoState.mockReset().mockImplementation(() => Promise.resolve({ undoSeqs: [], transactionOpen: false }));
   h.frontendOpen = false;
+  h.beginOpens = true;
   h.order.length = 0;
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
@@ -115,12 +123,25 @@ describe("one gesture as one step, asked about once it committed", () => {
     expect(result).toBe("result");
     expect(outcome).toBe("undone");
     expect(h.order).toEqual(["open", "body", "commit", "ask"]);
-    expect(h.undo).toHaveBeenCalledWith("pA", [21], undefined);
+    expect(h.undo).toHaveBeenCalledWith("pA", [21]);
   });
 
   it("a gesture that JOINS a script's backend batch never asks and takes nothing back", async () => {
-    h.undoState.mockImplementation(() => Promise.resolve({ undoSeqs: [], transactionOpen: true }));
+    h.beginOpens = false;
     const { outcome } = await runStepThenConfirmOverwrite("Slicer Selection", overwriting);
+    expect(outcome).toBe("joined");
+    expect(h.confirm).not.toHaveBeenCalled();
+    expect(h.undo).not.toHaveBeenCalled();
+  });
+
+  // The Z3 race (wave F backlog B5): a probe taken BEFORE the begin said
+  // "nothing open", a script's batch opened in between, and the begin JOINED
+  // it -- the gesture was still asked, and a decline took the script's writes
+  // back with its own. The begin's own answer decides now.
+  it("a begin that JOINS a batch opened after any earlier probe is joined: never asked", async () => {
+    h.undoState.mockImplementation(() => Promise.resolve({ undoSeqs: [], transactionOpen: false }));
+    h.beginOpens = false;
+    const { outcome } = await runStepThenConfirmOverwrite("Slicer Settings", overwriting);
     expect(outcome).toBe("joined");
     expect(h.confirm).not.toHaveBeenCalled();
     expect(h.undo).not.toHaveBeenCalled();
@@ -170,13 +191,13 @@ describe("confirmPivotOverwriteOrUndo", () => {
     expect(h.undo).not.toHaveBeenCalled();
   });
 
-  it("a decline hands the backend exactly the gesture's tokens (and the named step), then announces what came back", async () => {
+  it("a decline hands the backend exactly the gesture's tokens -- and names no other step -- then announces what came back", async () => {
     const t = createPivotOverwriteTally();
     t.note(response("pA", 2, 11));
     t.note(response("pB", 3, 12));
-    await expect(confirmPivotOverwriteOrUndo(t, { thenUndoSeq: 77 })).resolves.toBe("undone");
+    await expect(confirmPivotOverwriteOrUndo(t)).resolves.toBe("undone");
     expect(h.undo).toHaveBeenCalledTimes(1);
-    expect(h.undo).toHaveBeenCalledWith("pA", [11, 12], 77);
+    expect(h.undo.mock.calls[0]).toEqual(["pA", [11, 12]]);
     const refresh = h.emit.mock.calls.find((c) => c[0] === "app:mutation-refresh");
     expect(refresh?.[1]).toMatchObject({ source: "undo" });
     expect((refresh?.[1] as { domains: string[] }).domains).toEqual(expect.arrayContaining(["pivot", "slicer"]));
@@ -187,7 +208,7 @@ describe("confirmPivotOverwriteOrUndo", () => {
     const t = createPivotOverwriteTally();
     t.note(response("pA", 2, 11));
     await expect(confirmPivotOverwriteOrUndo(t)).resolves.toBe("undone");
-    expect(h.undo).toHaveBeenCalledWith("pA", [11], undefined);
+    expect(h.undo.mock.calls[0]).toEqual(["pA", [11]]);
   });
 
   it("with NO token it takes nothing back -- never 'whatever is on top' -- and says so", async () => {
@@ -205,46 +226,5 @@ describe("confirmPivotOverwriteOrUndo", () => {
     await expect(confirmPivotOverwriteOrUndo(t)).resolves.toBe("refused");
     expect(h.toast).toHaveBeenCalledWith(PIVOT_OVERWRITE_NOT_TAKEN_BACK, expect.objectContaining({ type: "error" }));
     expect(h.emit).not.toHaveBeenCalled();
-  });
-});
-
-describe("naming the one step a write pushed", () => {
-  it("names the new top only when exactly one entry appeared on the old top", () => {
-    expect(undoStepPushedBetween([1, 2], [1, 2, 3])).toBe(3);
-    expect(undoStepPushedBetween([], [5])).toBe(5);
-    // At the history cap the oldest entry drops: still exactly one new entry.
-    expect(undoStepPushedBetween([1, 2, 3], [2, 3, 4])).toBe(4);
-    // Two entries (someone else's landed too), nothing new, a cleared history.
-    expect(undoStepPushedBetween([1, 2], [1, 2, 3, 4])).toBeNull();
-    expect(undoStepPushedBetween([1, 2], [1, 2])).toBeNull();
-    expect(undoStepPushedBetween([1, 2], [])).toBeNull();
-    expect(undoStepPushedBetween([1, 2], [9])).toBeNull();
-  });
-
-  it("names the write's step from the history before and after it", async () => {
-    const states = [
-      { undoSeqs: [4], transactionOpen: false },
-      { undoSeqs: [4, 5], transactionOpen: false },
-    ];
-    h.undoState.mockImplementation(() => Promise.resolve(states.shift()));
-    const write = vi.fn(() => Promise.resolve("done"));
-    await expect(runNamingItsUndoStep(write)).resolves.toEqual({ result: "done", seq: 5 });
-    expect(write).toHaveBeenCalledTimes(1);
-  });
-
-  it("names nothing while a transaction is open (the write joins someone else's step)", async () => {
-    const states = [
-      { undoSeqs: [4], transactionOpen: true },
-      { undoSeqs: [4, 5], transactionOpen: false },
-    ];
-    h.undoState.mockImplementation(() => Promise.resolve(states.shift()));
-    await expect(runNamingItsUndoStep(() => Promise.resolve(1))).resolves.toEqual({ result: 1, seq: null });
-  });
-
-  it("names nothing when the history cannot be read, and still runs the write", async () => {
-    h.undoState.mockImplementation(() => Promise.reject(new Error("no backend")));
-    const write = vi.fn(() => Promise.resolve(2));
-    await expect(runNamingItsUndoStep(write)).resolves.toEqual({ result: 2, seq: null });
-    expect(write).toHaveBeenCalledTimes(1);
   });
 });

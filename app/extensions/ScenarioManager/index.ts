@@ -46,8 +46,8 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.dialogs.unregister("scenario-summary"));
 
-  // 2. Register menu items in Data menu
-  registerScenarioMenuItems(context);
+  // 2. Register menu items in Data menu (taken back on deactivate)
+  cleanupFns.push(registerScenarioMenuItems(context));
 
   // 3. Track current selection
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {

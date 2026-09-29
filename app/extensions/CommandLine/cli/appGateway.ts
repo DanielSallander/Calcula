@@ -49,12 +49,14 @@ import type { ClearApplyTo, Table } from "@api/backend";
 import type { CellData, UsedRangeResult } from "@api/types";
 import { navigateToRange } from "@api/grid";
 import { CommandRegistry, CoreCommands } from "@api/commands";
+import { commandRefusalFor } from "@api/commandRefusals";
 import { listWorkbookScripts } from "@api/workbookScripts";
 import { macroEntriesFrom } from "./macroProvenance";
 import type { MacroEntry } from "./macroProvenance";
 import { hasMacroRunProvider, requireMacroRunProvider } from "@api/macroRunService";
 import type { MacroRunOutcome } from "@api/macroRunService";
 import type { PivotTableInfo } from "@api/pivotTypes";
+import type { UndoTransactionTicket } from "@api/undoTicket";
 
 /** Everything the app CLI domain may do to the workbook. */
 export interface AppCliGateway {
@@ -120,8 +122,12 @@ export interface AppCliGateway {
   // --- Undo ------------------------------------------------------------------
   undo(): Promise<UndoResult>;
   redo(): Promise<UndoResult>;
-  beginUndoTransaction(description: string): Promise<void>;
-  commitUndoTransaction(): Promise<void>;
+  /** Resolves a TICKET when THIS begin OPENED the transaction (null: it
+   *  joined one another caller holds open, and that caller commits it). */
+  beginUndoTransaction(description: string): Promise<UndoTransactionTicket | null>;
+  /** With the opening begin's ticket: commits only while the backend still
+   *  holds THAT transaction (a sheet change in between ends it). */
+  commitUndoTransaction(ticket?: UndoTransactionTicket | null): Promise<void>;
 
   // --- Navigation ------------------------------------------------------------
   navigateToRange(startRow: number, startCol: number, endRow: number, endCol: number): void;
@@ -180,6 +186,13 @@ async function throughCommand(
   label: string
 ): Promise<UndoResult> {
   if (!CommandRegistry.has(commandId)) return fallback();
+  // A REFUSED command (an Undo while a slicer click or ribbon filter change is
+  // still landing) fails with the refusal's own sentence, which the prompt
+  // prints in red. execute() refuses it too, but says so in a toast the
+  // command line does not show and returns nothing -- read here as a bare
+  // "Undo failed" (found live 2026-09-29, e2e fixall-calp X10).
+  const refusal = commandRefusalFor(commandId);
+  if (refusal !== null) throw new Error(refusal);
   const result = (await CommandRegistry.execute(commandId)) as UndoResult | undefined;
   if (!result) throw new Error(`${label} failed`);
   return result;
@@ -248,7 +261,8 @@ export function createLiveAppGateway(): AppCliGateway {
     undo: () => throughCommand(CoreCommands.UNDO, undo, "Undo"),
     redo: () => throughCommand(CoreCommands.REDO, redo, "Redo"),
     beginUndoTransaction: (description: string) => beginUndoTransaction(description),
-    commitUndoTransaction: () => commitUndoTransaction(),
+    commitUndoTransaction: (ticket?: UndoTransactionTicket | null) =>
+      ticket === undefined || ticket === null ? commitUndoTransaction() : commitUndoTransaction(ticket),
 
     navigateToRange: (startRow: number, startCol: number, endRow: number, endCol: number) =>
       navigateToRange(startRow, startCol, endRow, endCol),

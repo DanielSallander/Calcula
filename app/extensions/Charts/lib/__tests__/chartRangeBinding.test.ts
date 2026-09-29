@@ -170,3 +170,61 @@ describe("splitting and quoting", () => {
     expect(formatSheetQualifiedRange("Bob's data", "A1:B2")).toBe("'Bob''s data'!A1:B2");
   });
 });
+
+// X15 (wave D; wave C core fix-up, suspected): `formatSheetQualifiedRange`
+// leaves `2024`, `2024Budget`, `TRUE` and `FALSE` bare, which the FORMULA
+// parser would not read as sheet names. Verified NOT to matter: the text is
+// the chart dialog's own display, read back only by `bindRangeText` (which
+// takes any name before the LAST "!", bare or quoted) and stored as a
+// DataRangeRef -- it never reaches the formula parser. Both halves are pinned
+// here, so a caller that starts handing the text anywhere else is caught and
+// has to use the parser's rule (`quoteSheetNameForFormula`, @api/externalEdit).
+describe("X15: the display text round-trips through the dialog's own reader", () => {
+  const PARSER_HOSTILE: SheetInfo[] = ["2024", "2024Budget", "TRUE", "false", "Q1.", "Q1-2026", "A1"].map(
+    (name, index) => ({ index, name, sheetId: `id-${name}`, visibility: "visible" as const }),
+  );
+  const ctx: RangeBindingContext = {
+    sheets: PARSER_HOSTILE,
+    currentSheetIndex: 0,
+    currentSheetName: "2024",
+    currentIsCanvas: false,
+  };
+
+  for (const sheet of PARSER_HOSTILE) {
+    it(`"${sheet.name}" binds back to its own sheet`, () => {
+      const ref = { sheetIndex: sheet.index, sheetId: sheet.sheetId, startRow: 1, startCol: 2, endRow: 5, endCol: 3 };
+      const text = rangeRefDisplayText(ref, PARSER_HOSTILE, null);
+      const b = bindRangeText(text, ctx);
+      expect(b.ok, `"${text}" did not bind`).toBe(true);
+      expect(b.ok && b.ref).toEqual(ref);
+    });
+  }
+
+  it("the formatters' only callers are the binding module and the dialog (which puts the text in its field)", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const root = path.resolve(__dirname, "../../../..");
+    const callers: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name === "node_modules" || entry.name === "__tests__") continue;
+          walk(full);
+        } else if (/\.(ts|tsx)$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) {
+          const text = fs.readFileSync(full, "utf8");
+          if (/\b(formatSheetQualifiedRange|rangeRefDisplayText)\b/.test(text)) {
+            callers.push(path.relative(root, full).split(path.sep).join("/"));
+          }
+        }
+      }
+    };
+    walk(path.join(root, "src"));
+    walk(path.join(root, "extensions"));
+    expect(
+      callers.sort(),
+      "a new caller of the chart dialog's range formatter: if its text can reach the formula parser, " +
+        "quote with quoteSheetNameForFormula (@api/externalEdit) instead",
+    ).toEqual(["extensions/Charts/components/CreateChartDialog.tsx", "extensions/Charts/lib/chartRangeBinding.ts"]);
+  });
+});

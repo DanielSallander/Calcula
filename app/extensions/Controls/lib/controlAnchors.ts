@@ -24,6 +24,7 @@
 //          runs "decide the anchor, write the control" as one step on a FIFO
 //          queue, so the next allocation always sees the previous write.
 
+import { idsNamedByLayout } from "@api/objectSelection";
 import { getAllControls } from "./controlApi";
 
 // ============================================================================
@@ -94,9 +95,30 @@ export function pickFreeAnchorCell(occupied: readonly AnchorCell[]): AnchorCell 
 }
 
 /**
+ * The anchors of controls the sheet's LAYOUT still names -- a canvas's
+ * `locked` and `zOrder` refs (`control:<row>:<col>`), live or dead
+ * (@api/objectSelection `idsNamedByLayout`). [] on a worksheet.
+ */
+export function anchorsNamedByLayout(sheetIndex: number): AnchorCell[] {
+  const out: AnchorCell[] = [];
+  for (const id of idsNamedByLayout(sheetIndex, "control")) {
+    const m = /^(\d+):(\d+)$/.exec(id);
+    if (m) out.push({ row: Number(m[1]), col: Number(m[2]) });
+  }
+  return out;
+}
+
+/**
  * The next free anchor cell on a sheet, read from the backend — which holds
  * EVERY control on the sheet (in-cell buttons included), not just the floating
  * ones the store has loaded.
+ *
+ * An anchor the sheet's layout still NAMES is not free either, although no
+ * control holds it: a canvas keeps a deleted control's lock and paint-order
+ * ref (so Ctrl+Z of the delete restores both), and a control's ref IS its
+ * anchor. Handing that anchor to a new control -- the newest control's anchor
+ * is exactly the one the allocator frees -- made a pasted copy of a deleted,
+ * locked shape come back locked and in the dead shape's slot (wave C review).
  *
  * Call it only from inside `withControlAnchor` (or `runControlCreation`): on its
  * own it is a read that a concurrent create can invalidate before the caller
@@ -104,7 +126,7 @@ export function pickFreeAnchorCell(occupied: readonly AnchorCell[]): AnchorCell 
  */
 export async function findFreeAnchorCell(sheetIndex: number): Promise<AnchorCell> {
   const controls = await getAllControls(sheetIndex);
-  return pickFreeAnchorCell(controls);
+  return pickFreeAnchorCell([...controls, ...anchorsNamedByLayout(sheetIndex)]);
 }
 
 // ============================================================================

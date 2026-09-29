@@ -18,6 +18,8 @@
 
 import {
   getSelectedObjectRegions,
+  type ObjectPasteResult,
+  type ObjectPasteTarget,
   type ObjectSelectionKey,
   type ObjectSelectionProvider,
 } from "@api/objectSelection";
@@ -34,6 +36,7 @@ import {
   isChartSelected,
   selectChart,
 } from "../handlers/selectionHandler";
+import { isChartMenuOpen } from "./chartMenuState";
 
 /** The side effects a selection change needs, injected by activate(). */
 export interface ChartObjectSelectionDeps {
@@ -48,6 +51,30 @@ export interface ChartObjectSelectionDeps {
    * Left/Right at chart level while it has any). Absent = none.
    */
   cueCountOf?: (chartId: string) => number;
+  /**
+   * THE chart delete (index.ts `performChartDelete`) for each id, resolving
+   * when every backend delete has landed -- to the charts the backend REFUSED
+   * (put back in the store), each with its reason; empty when all landed.
+   * Present = the provider can take part in a canvas-wide Delete
+   * (`deleteSelectedObjects`, @api/objectSelection).
+   */
+  deleteCharts?: (chartIds: readonly string[]) => Promise<ChartDeleteRefusal[]>;
+  /**
+   * Snapshot one chart for the object clipboard (lib/chartCopy.ts
+   * `snapshotChart`), or null when it is gone. Present together with
+   * `pasteCharts` = charts take part in a canvas multi-selection's Copy,
+   * Paste and Duplicate (@api/objectClipboard).
+   */
+  copyChart?: (chartId: string) => unknown | null;
+  /** Create charts from clipboard snapshots (lib/chartCopy.ts `pasteChartSnapshots`). */
+  pasteCharts?: (snapshots: ReadonlyArray<unknown>, target: ObjectPasteTarget) => Promise<ObjectPasteResult>;
+}
+
+/** A chart whose delete the backend refused (it is back in the store). */
+export interface ChartDeleteRefusal {
+  chartId: string;
+  /** The backend's reason, as the user should read it. */
+  reason: string;
 }
 
 /** The modifiers of a plain arrow keystroke (what a nudge row without Shift is). */
@@ -115,9 +142,12 @@ export function chartIdOfRegion(region: GridRegion): string | null {
 /**
  * Whether the chart's INNER selection owns `key` right now.
  *
- * Escape belongs to a chart whose sub-selection is below chart level (a series,
- * a point, an axis, an element): it steps up one rung first, exactly as the
- * chart's own Escape handler does (`escapeLevelUp`). At chart level Escape is
+ * Escape belongs to Charts while one of its right-click menus (the chart menu,
+ * the axis menu) is open: the menu closes itself on it (lib/chartMenuState.ts,
+ * BUG-0196). Otherwise it belongs to a chart whose sub-selection is below
+ * chart level (a series, a point, an axis, an element): it steps up one rung
+ * first, exactly as the chart's own Escape handler does (`escapeLevelUp`),
+ * which stands down for an open menu too. At chart level Escape is
  * not the chart's -- the object cycler deselects the object. Tab is never the
  * chart's: a chart has no inner Tab order. The arrows follow
  * {@link chartOwnsArrows}.
@@ -128,13 +158,14 @@ export function chartOwnsObjectKey(
 ): boolean {
   if (key === "Arrow") return chartOwnsArrows(cueCountOf);
   if (key !== "Escape") return false;
+  if (isChartMenuOpen()) return true;
   if (getCurrentChartId() === null) return false;
   return escapeLevelUp(getSubSelection()) !== null;
 }
 
 /** Build the provider registered for region type "chart". */
 export function createChartObjectSelectionProvider(deps: ChartObjectSelectionDeps): ObjectSelectionProvider {
-  return {
+  const provider: ObjectSelectionProvider = {
     types: ["chart"],
 
     isSelected(region: GridRegion): boolean {
@@ -184,4 +215,39 @@ export function createChartObjectSelectionProvider(deps: ChartObjectSelectionDep
       return typeof name === "string" && name !== "" ? name : null;
     },
   };
+  // A canvas-wide Delete hands Charts its share of the selection -- the chart
+  // Charts holds AND the ones the selection set holds for it (a second chart,
+  // open-items 2.af row 1) -- through THE chart delete.
+  //
+  // A REFUSED delete rejects, as the seam's contract asks ("rejects when the
+  // family refused -- the objects stay"): THE chart delete never rejects (it
+  // puts the chart back and resolves), so resolving here counted a refused
+  // chart as deleted, and the seam then DESELECTED the chart that came back
+  // (wave A review). The rejection carries the backend's reason; the seam keeps
+  // the chart selected and names it in its one toast.
+  const deleteCharts = deps.deleteCharts;
+  if (deleteCharts) {
+    provider.deleteObjects = async (regions: readonly GridRegion[]) => {
+      const refused = await deleteCharts(
+        regions.map(chartIdOfRegion).filter((id): id is string => id !== null),
+      );
+      if (refused.length > 0) {
+        throw new Error(Array.from(new Set(refused.map((r) => r.reason))).join(" "));
+      }
+    };
+  }
+  // A canvas multi-selection's Copy / Paste / Duplicate (@api/objectClipboard,
+  // W25): every chart in it -- the set-held ones too -- is snapshotted by
+  // THE chart copy and re-created by it, inside the seam's one undo step.
+  const copyChart = deps.copyChart;
+  const pasteCharts = deps.pasteCharts;
+  if (copyChart && pasteCharts) {
+    provider.copyObjects = (regions: readonly GridRegion[]) =>
+      regions.map((r) => {
+        const id = chartIdOfRegion(r);
+        return id === null ? null : copyChart(id);
+      });
+    provider.pasteObjects = (snapshots, target) => pasteCharts(snapshots, target);
+  }
+  return provider;
 }

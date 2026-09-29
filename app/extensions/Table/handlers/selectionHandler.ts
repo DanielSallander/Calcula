@@ -13,6 +13,8 @@ import {
 } from "@api";
 import type { ColumnHeaderOverride, ColumnHeaderClickResult } from "@api";
 import { registerPanel, unregisterPanel } from "@api/ui";
+import { getGridStateSnapshot } from "@api/grid";
+import { isSelectionOwned } from "@api/selectionOwner";
 import { getTableAtCell, getAllTables, type Table } from "../lib/tableStore";
 import { tableBands } from "../lib/tableBands";
 import { TableDesignPanelDefinition, TABLE_DESIGN_TAB_ID } from "../manifest";
@@ -36,6 +38,29 @@ let headerOverrideCleanup: (() => void) | null = null;
 
 /** Cleanup function for the column header click interceptor. */
 let clickInterceptorCleanup: (() => void) | null = null;
+
+// ============================================================================
+// The contextual tab
+// ============================================================================
+
+/**
+ * Show or hide the contextual Table Design tab. It is shown for the table
+ * under Core's ACTIVE cell -- and never while something else owns the
+ * selection (a floating grid's selected cell, @api/selectionOwner): that cell
+ * is then hidden under the owner, and a tab for a table nobody can see, whose
+ * buttons act on it, is not Excel's rule (W22).
+ */
+function showDesignTab(show: boolean): void {
+  if (show && !isSelectionOwned()) {
+    if (!designTabRegistered) {
+      registerPanel(TableDesignPanelDefinition);
+      designTabRegistered = true;
+    }
+  } else if (designTabRegistered) {
+    unregisterPanel(TABLE_DESIGN_TAB_ID);
+    designTabRegistered = false;
+  }
+}
 
 // ============================================================================
 // Selection Handler
@@ -69,11 +94,9 @@ export function handleSelectionChange(
     currentTableId = table.id;
     addTaskPaneContextKey("table");
 
-    // Register the contextual panel if not already registered
-    if (!designTabRegistered) {
-      registerPanel(TableDesignPanelDefinition);
-      designTabRegistered = true;
-    }
+    // Register the contextual panel if not already registered (and not while
+    // a selection owner holds the selection: showDesignTab).
+    showDesignTab(true);
 
     // Set column header override provider to show table field names
     // when the header row scrolls above the viewport
@@ -101,11 +124,59 @@ export function handleSelectionChange(
     // the tab off again. Excel's rule is a function of the CURRENT state, not
     // of how the tab was switched on: the active cell is not in a table, so the
     // contextual tab is not shown.
-    if (designTabRegistered) {
-      unregisterPanel(TABLE_DESIGN_TAB_ID);
-      designTabRegistered = false;
-    }
+    showDesignTab(false);
   }
+}
+
+/**
+ * Re-derive the contextual tab after a selection owner's claim started or
+ * ended (@api/selectionOwner onSelectionOwnershipChanged). Core's selection
+ * did not move -- the floating grid's cell took the selection, or a press on
+ * the very cell Core already had ended it -- so the selection handler was
+ * never asked; this asks it again for Core's active cell (W22): the grid's own
+ * state, else the cell the handler checked last. Not that cache alone: a table
+ * CREATE shows the tab (ensureDesignTabRegistered) although the handler may
+ * never have heard Core's selection -- it was set before this extension
+ * listened -- and the tab then stayed hidden after the claim ended (wave C
+ * review, the Sparkline finding's class).
+ */
+export function syncDesignTabToSelectionOwner(): void {
+  const sel = getGridStateSnapshot()?.selection;
+  const cell = sel ? { row: sel.endRow, col: sel.endCol } : lastCheckedSelection;
+  lastCheckedSelection = null;
+  if (cell) {
+    handleSelectionChange({ endRow: cell.row, endCol: cell.col });
+  } else if (isSelectionOwned()) {
+    showDesignTab(false);
+  }
+}
+
+/**
+ * Re-derive the contextual tab after the ACTIVE SHEET changed, once the new
+ * sheet's tables are cached (tableStore refreshCache).
+ *
+ * `handleSelectionChange` skips the cell it checked last, and that key is the
+ * row and column ALONE. Coming back to B2 on another sheet -- the same
+ * coordinates, a different cell -- asked nothing, so Sheet1's Table Design tab
+ * stayed up on a pivot's sheet, every button on it addressing a table on a
+ * sheet the user had left (found live 2026-09-29, e2e fixall-pivot CTX). This
+ * asks again for Core's active cell on the sheet now shown; with no cell
+ * selection at all (a canvas), nothing is in a table.
+ */
+export function recheckDesignTabAfterSheetChange(): void {
+  lastCheckedSelection = null;
+  const sel = getGridStateSnapshot()?.selection;
+  if (sel) {
+    handleSelectionChange({ endRow: sel.endRow, endCol: sel.endCol });
+    return;
+  }
+  if (currentTableId !== null) {
+    currentTableId = null;
+    removeTaskPaneContextKey("table");
+    clearTableHeaderOverride();
+    window.dispatchEvent(new Event("table:deselected"));
+  }
+  showDesignTab(false);
 }
 
 /**
@@ -146,10 +217,7 @@ export function syncDesignTabToTables(): void {
  * Called after table creation so the tab appears immediately.
  */
 export function ensureDesignTabRegistered(): void {
-  if (!designTabRegistered) {
-    registerPanel(TableDesignPanelDefinition);
-    designTabRegistered = true;
-  }
+  showDesignTab(true);
 }
 
 /**

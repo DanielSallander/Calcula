@@ -35,6 +35,7 @@ import {
   useTaskPaneOpenPaneIds,
 } from "@api";
 import type { PanelSection, PanelSectionProps } from "@api/uiTypes";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 import {
   Stack,
   ControlRow,
@@ -296,6 +297,11 @@ export function PropertiesSection(_props: PanelSectionProps): React.ReactElement
     );
 
   const handleResize = useCallback(async () => {
+    // Resize reads Core's selection -- HIDDEN while something else owns the
+    // selection (a floating grid's selected cell) -- so refuse, once (D4,
+    // BUG-0185 class). The other Table Design actions act on the table this
+    // tab names, not on the selection.
+    if (refuseIfSelectionOwned("Resize Table")) return;
     if (!table || !selRange) return;
     setRenameError(null);
     const updated = await resizeTableAsync(

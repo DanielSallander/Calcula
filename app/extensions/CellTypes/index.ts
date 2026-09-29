@@ -21,6 +21,8 @@ import { progressCellType, PROGRESS_TYPE_ID } from "./types/progress";
 import { buttonCellType, BUTTON_TYPE_ID, type ButtonAction } from "./types/button";
 import { ButtonActionDialog } from "./components/ButtonActionDialog";
 import { alertAsync } from "@api/dialogs";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { ownUndoTransaction } from "@api/undoTicket";
 
 const BUTTON_DIALOG_ID = "cellTypes.buttonAction";
 
@@ -37,6 +39,18 @@ interface CellRange {
   maxRow: number;
   minCol: number;
   maxCol: number;
+}
+
+/**
+ * Core's selection as the target range of an Insert > Cell Type item or a
+ * cellTypes.* command -- or null, refused and announced once, while something
+ * else owns the selection (a floating grid's selected cell): Core's selection
+ * is HIDDEN under it then (D4, BUG-0185 class). The grid context menu passes
+ * the range it was opened on instead, which the user pointed at.
+ */
+function selectionRangeUnlessOwned(action: string): CellRange | null {
+  if (refuseIfSelectionOwned(action)) return null;
+  return selectionRange();
 }
 
 function selectionRange(): CellRange | null {
@@ -61,12 +75,18 @@ async function applyTypeToRange(
   initializeEmptyTo?: string
 ): Promise<void> {
   const { setCellTypeRange } = await import("../../src/api/cellTypes");
-  const { beginUndoTransaction, commitUndoTransaction, getCell, updateCellsBatch } = await import(
-    "../../src/api/lib"
-  );
+  const lib = await import("../../src/api/lib");
+  const { beginUndoTransaction, getCell, updateCellsBatch } = lib;
   const { restoreFocusToGrid } = await import("../../src/api/events");
 
-  await beginUndoTransaction("Insert cell type");
+  // Closes ONLY what its own begin opened: inside a script's open batch the
+  // insert JOINS, and the script closes that step (wave F, Z6).
+  // The closes are read when a close runs, not here (a module without a
+  // cancel is never touched unless a cancel is needed).
+  const tx = ownUndoTransaction(await beginUndoTransaction("Insert cell type"), {
+    commitUndoTransaction: (...ticket) => lib.commitUndoTransaction(...ticket),
+    cancelUndoTransaction: (...ticket) => lib.cancelUndoTransaction(...ticket),
+  });
   try {
     await setCellTypeRange(range.minRow, range.minCol, range.maxRow, range.maxCol, typeId, params);
 
@@ -86,11 +106,12 @@ async function applyTypeToRange(
     }
   } catch (err) {
     // Surface backend refusals (sheet protection, most commonly); the commit
-    // in `finally` still closes the transaction so nothing is left open.
+    // in `finally` still closes OUR transaction so nothing is left open (a
+    // joined insert closes nothing: its holder does).
     void alertAsync(err instanceof Error ? err.message : String(err));
     throw err;
   } finally {
-    await commitUndoTransaction();
+    await tx.commit();
   }
   window.dispatchEvent(new CustomEvent("grid:refresh"));
   restoreFocusToGrid();
@@ -107,20 +128,17 @@ async function clearTypeOnRange(range: CellRange): Promise<void> {
 // Insert actions
 // ============================================================================
 
-async function insertCheckbox(range: CellRange | null = selectionRange()): Promise<void> {
+async function insertCheckbox(range: CellRange | null): Promise<void> {
   if (!range) return;
   await applyTypeToRange(range, CHECKBOX_TYPE_ID, {}, "FALSE");
 }
 
-async function insertProgress(
-  max: number,
-  range: CellRange | null = selectionRange()
-): Promise<void> {
+async function insertProgress(max: number, range: CellRange | null): Promise<void> {
   if (!range) return;
   await applyTypeToRange(range, PROGRESS_TYPE_ID, max === 1 ? {} : { max });
 }
 
-function insertButton(range: CellRange | null = selectionRange()): void {
+function insertButton(range: CellRange | null): void {
   if (!range || !extensionContext) return;
   extensionContext.ui.dialogs.show(BUTTON_DIALOG_ID, {
     onApply: (action: ButtonAction, label: string) => {
@@ -129,7 +147,7 @@ function insertButton(range: CellRange | null = selectionRange()): void {
   });
 }
 
-async function clearCellTypes(range: CellRange | null = selectionRange()): Promise<void> {
+async function clearCellTypes(range: CellRange | null): Promise<void> {
   if (!range) return;
   await clearTypeOnRange(range);
 }
@@ -157,27 +175,36 @@ function activate(context: ExtensionContext): void {
     })
   );
 
-  // 4. Commands (also usable from buttons/scripts/keyboard customization).
-  ExtensionRegistry.registerCommand({
-    id: "cellTypes.insertCheckbox",
-    name: "Insert Checkbox Cells",
-    execute: async () => insertCheckbox(),
-  });
-  ExtensionRegistry.registerCommand({
-    id: "cellTypes.insertProgress",
-    name: "Insert Progress Bar Cells",
-    execute: async () => insertProgress(1),
-  });
-  ExtensionRegistry.registerCommand({
-    id: "cellTypes.insertButton",
-    name: "Insert Button Cell",
-    execute: async () => insertButton(),
-  });
-  ExtensionRegistry.registerCommand({
-    id: "cellTypes.clear",
-    name: "Clear Cell Type",
-    execute: async () => clearCellTypes(),
-  });
+  // 4. Commands (also usable from buttons/scripts/keyboard customization),
+  //    taken back on deactivate: a button bound to one must not go on running
+  //    this extension after it is disabled (X20).
+  const commands = [
+    {
+      id: "cellTypes.insertCheckbox",
+      name: "Insert Checkbox Cells",
+      execute: async () => insertCheckbox(selectionRangeUnlessOwned("Insert Checkbox")),
+    },
+    {
+      id: "cellTypes.insertProgress",
+      name: "Insert Progress Bar Cells",
+      execute: async () => insertProgress(1, selectionRangeUnlessOwned("Insert Progress Bar")),
+    },
+    {
+      id: "cellTypes.insertButton",
+      name: "Insert Button Cell",
+      execute: async () => insertButton(selectionRangeUnlessOwned("Insert Button")),
+    },
+    {
+      id: "cellTypes.clear",
+      name: "Clear Cell Type",
+      execute: async () => clearCellTypes(selectionRangeUnlessOwned("Clear Cell Type")),
+    },
+  ];
+  for (const command of commands) {
+    ExtensionRegistry.registerCommand(command);
+    // The object, not the id: never another extension's command of that id.
+    cleanupFns.push(() => ExtensionRegistry.unregisterCommand(command));
+  }
 
   // 5. Button-action dialog.
   context.ui.dialogs.register({
@@ -197,30 +224,32 @@ function activate(context: ExtensionContext): void {
         id: "insert.cellTypes.checkbox",
         label: "Checkbox",
         icon: IconCheckbox,
-        action: () => void insertCheckbox(),
+        action: () => void insertCheckbox(selectionRangeUnlessOwned("Insert Checkbox")),
       },
       {
         id: "insert.cellTypes.progress",
         label: "Progress Bar (values 0–1)",
-        action: () => void insertProgress(1),
+        action: () => void insertProgress(1, selectionRangeUnlessOwned("Insert Progress Bar")),
       },
       {
         id: "insert.cellTypes.progress100",
         label: "Progress Bar (values 0–100)",
-        action: () => void insertProgress(100),
+        action: () => void insertProgress(100, selectionRangeUnlessOwned("Insert Progress Bar")),
       },
       {
         id: "insert.cellTypes.button",
         label: "Button…",
-        action: () => insertButton(),
+        action: () => insertButton(selectionRangeUnlessOwned("Insert Button")),
       },
       {
         id: "insert.cellTypes.clear",
         label: "Clear Cell Type",
-        action: () => void clearCellTypes(),
+        action: () => void clearCellTypes(selectionRangeUnlessOwned("Clear Cell Type")),
       },
     ],
   });
+  // The whole Cell Type submenu is this extension's own (no one else adds to it).
+  cleanupFns.push(() => context.ui.menus.unregisterItem("insert", "insert.cellTypes"));
 
   // 7. Grid context menu.
   gridExtensions.registerContextMenuItems([

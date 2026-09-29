@@ -331,9 +331,9 @@ fn record_report_undo(
     let snapshot = ReportUndoSnapshot { sheet_index: sheet_idx, cells, definitions, merges };
     let data = serde_json::to_vec(&snapshot).unwrap_or_default();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    undo_stack.begin_transaction(description);
+    let owned_txn = undo_stack.begin_owned_transaction(description);
     undo_stack.record_custom_restore("report_restore".to_string(), data, description);
-    undo_stack.commit_transaction();
+    undo_stack.commit_owned(owned_txn);
 }
 
 /// Union of two inclusive regions (used to snapshot both the old and new report

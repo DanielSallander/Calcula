@@ -101,6 +101,7 @@ vi.mock("../../../_shared/components/CellStylesGallery", () => ({
 }));
 
 import { HomeTabGroupComponent } from "../components/HomeTabGroupComponent";
+import { CommandRegistry, CoreCommands } from "@api/commands";
 
 // --- Harness ----------------------------------------------------------------
 
@@ -260,9 +261,18 @@ describe("Home > Number dropdown: applying", () => {
   });
 
   it("opens Format Cells on the Number tab and applies nothing", async () => {
+    // Through the FORMAT_CELLS command, the one door to the dialog (it refuses
+    // while a selection owner holds the selection -- homeTabFormatCellsDoors).
+    const formatCells = vi.fn();
+    CommandRegistry.register(CoreCommands.FORMAT_CELLS, formatCells);
     const trigger = await render();
-    await choose(trigger, MORE_NUMBER_FORMATS_VALUE);
-    expect(openDialog).toHaveBeenCalledWith("format-cells", { tab: "number" });
+    try {
+      await choose(trigger, MORE_NUMBER_FORMATS_VALUE);
+    } finally {
+      CommandRegistry.unregister(CoreCommands.FORMAT_CELLS);
+    }
+    expect(formatCells).toHaveBeenCalledWith({ tab: "number" });
+    expect(openDialog, "the row opened the dialog past the command").not.toHaveBeenCalled();
     expect(handleNumberFormatChange).not.toHaveBeenCalled();
     // The box stays on the cell's own format: the sentinel is never a value.
     expect(trigger.textContent).toBe("General");

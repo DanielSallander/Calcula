@@ -8,10 +8,6 @@ import {
   detectDataRegion,
   getViewportCells,
   indexToCol,
-  updateCellsBatch,
-  beginUndoTransaction,
-  commitUndoTransaction,
-  cancelUndoTransaction,
 } from "@api";
 import type { CellUpdateInput } from "@api";
 import {
@@ -29,6 +25,7 @@ import {
   applyFormats,
   createDefaultConfig,
 } from "../lib/parser";
+import { writeSplitAsOneStep } from "../lib/writeSplit";
 import type {
   TextToColumnsConfig,
   DelimitedConfig,
@@ -583,8 +580,6 @@ export function TextToColumnsDialog(props: DialogProps): React.ReactElement | nu
 
     // Execute the write
     try {
-      await beginUndoTransaction("Text to Columns");
-
       const updates: CellUpdateInput[] = [];
 
       for (let rowIdx = 0; rowIdx < finalRows.length; rowIdx++) {
@@ -606,8 +601,9 @@ export function TextToColumnsDialog(props: DialogProps): React.ReactElement | nu
         }
       }
 
-      await updateCellsBatch(updates);
-      await commitUndoTransaction();
+      // ONE undo step that closes only what it opened -- the same write the
+      // script door runs (wave F, Z6).
+      await writeSplitAsOneStep(updates);
 
       // Refresh grid - dispatch grid:refresh to refetch cell data and redraw canvas
       window.dispatchEvent(new CustomEvent("grid:refresh"));
@@ -615,10 +611,9 @@ export function TextToColumnsDialog(props: DialogProps): React.ReactElement | nu
       onClose();
     } catch (err) {
       console.error("[TextToColumns] Execution error:", err);
-      // Close the transaction — left open, later edits silently join it —
-      // and show the BACKEND's reason, which names the refusing cell; a
-      // generic message hid exactly the part the user can act on.
-      try { await cancelUndoTransaction(); } catch { /* already closed */ }
+      // writeSplitAsOneStep already closed its own step. Show the BACKEND's
+      // reason, which names the refusing cell; a generic message hid exactly
+      // the part the user can act on.
       setError(err instanceof Error ? err.message : String(err));
     }
   }, [source, config, confirmOverwrite, onClose]);

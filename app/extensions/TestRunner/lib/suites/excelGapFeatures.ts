@@ -86,6 +86,7 @@ import {
   setMoveAfterReturn,
   setMoveDirection,
 } from "@api/editingPreferences";
+import { getGridStateSnapshot } from "@api/grid";
 
 const A = AREA_EXCEL_GAP;
 
@@ -410,8 +411,8 @@ export const excelGapFeaturesSuite: TestSuite = {
     // 4. DisplayZeros toggle
     // ======================================================================
     {
-      name: "DisplayZeros: toggle state via command",
-      description: "Toggling displayZeros changes the grid state.",
+      name: "DisplayZeros: toggle state through the View menu's door",
+      description: "Toggling displayZeros changes the grid state, and toggling again puts it back.",
       async run(ctx) {
         // Set a cell to 0 for context
         await ctx.setCells([{ row: A.row, col: A.col, value: "0" }]);
@@ -421,15 +422,30 @@ export const excelGapFeaturesSuite: TestSuite = {
         const before = await ctx.getCell(A.row, A.col);
         expectCellValue(before, "0", A.ref(0, 0));
 
-        // Toggle displayZeros off
-        await ctx.executeCommand("view.toggleDisplayZeros");
-        await ctx.settle();
+        // The View menu's door (ViewMenu.ts): the DISPLAY_ZEROS_TOGGLED event,
+        // which the shell applies to the grid state and persists per sheet
+        // (Layout.tsx). NOT `view.toggleDisplayZeros`: that is a case of Core's
+        // keyboard switch only, no registry holds it, and the runner refuses
+        // an id no registry holds. The test used to run it anyway and assert
+        // only the stored "0" -- which a render flag can never change -- so it
+        // passed while toggling nothing.
+        const initial = getGridStateSnapshot()?.displayZeros;
+        assertTrue(typeof initial === "boolean", "the grid state has no displayZeros flag (grid not mounted?)");
 
-        // Toggle it back on (cleanup)
-        await ctx.executeCommand("view.toggleDisplayZeros");
+        emitAppEvent(AppEvents.DISPLAY_ZEROS_TOGGLED, { displayZeros: !initial });
         await ctx.settle();
+        const toggled = getGridStateSnapshot()?.displayZeros;
 
-        // Cell should still be "0" with displayZeros back on
+        // Put the user's setting back BEFORE asserting, so a failure never
+        // leaves the zeros hidden.
+        emitAppEvent(AppEvents.DISPLAY_ZEROS_TOGGLED, { displayZeros: initial });
+        await ctx.settle();
+        const restored = getGridStateSnapshot()?.displayZeros;
+
+        assertTrue(toggled === !initial, `displayZeros did not flip: ${initial} -> ${toggled}`);
+        assertTrue(restored === initial, `displayZeros was not put back: ${toggled} -> ${restored}`);
+
+        // A display flag never touches the stored value.
         const after = await ctx.getCell(A.row, A.col);
         expectCellValue(after, "0", A.ref(0, 0));
       },

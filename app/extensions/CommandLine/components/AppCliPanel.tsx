@@ -10,7 +10,7 @@
 //          calcula.modelEditor.cli.* keys are untouched).
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { hideDialog, onAppEvent, showDialog } from "@api";
+import { onAppEvent } from "@api";
 import { createCliEngine } from "../../_shared/cli/engine";
 import type { CliEngine } from "../../_shared/cli/engine";
 import {
@@ -31,20 +31,8 @@ import { createAppCliSession } from "../cli/appSession";
 import type { AppCliSession } from "../cli/appSession";
 import { createLiveAppGateway } from "../cli/appGateway";
 
-const DIALOG_ID = "command-line-panel";
 const APP_CLI_LANGUAGE_ID = "calcula-app-cli";
 const STORAGE_PREFIX = "calcula.app.cli";
-
-// ---------------------------------------------------------------------------
-// Open/close toggle (used by the command + keybinding + menu item)
-// ---------------------------------------------------------------------------
-
-let panelOpen = false;
-
-export function toggleAppCliPanel(): void {
-  if (panelOpen) hideDialog(DIALOG_ID);
-  else showDialog(DIALOG_ID);
-}
 
 // ---------------------------------------------------------------------------
 // Panel
@@ -94,7 +82,6 @@ export function AppCliPanel(props: {
   useEffect(() => onCliDomainProvidersChanged(() => setProviderTick((t) => t + 1)), []);
 
   useEffect(() => {
-    panelOpen = isOpen;
     if (!isOpen) return;
     void appSession.refresh();
     if (modelProvider) {

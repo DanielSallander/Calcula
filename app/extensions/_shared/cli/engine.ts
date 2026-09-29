@@ -250,7 +250,9 @@ export function createCliEngine(
           io.print(
             outcome === "rolled-back"
               ? "All changes from this run were rolled back."
-              : `The ${completedWrites} completed edit(s) were kept as ONE undo step — run 'undo' to revert them.`,
+              : outcome === "joined"
+                ? `The ${completedWrites} completed edit(s) were kept inside the undo step a script or gesture still holds open — they are undone with that step, not on their own.`
+                : `The ${completedWrites} completed edit(s) were kept as ONE undo step — run 'undo' to revert them.`,
             "info",
           );
         } catch (recoveryErr) {

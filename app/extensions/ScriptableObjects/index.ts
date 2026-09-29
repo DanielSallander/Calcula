@@ -1315,6 +1315,16 @@ async function activate(context: ExtensionContext): Promise<void> {
   cleanupFunctions.push(() => context.ui.dialogs.unregister("scriptable-objects.marketplace"));
 
   // ---- Register Developer menu items ----
+  // Each is taken back on deactivate (the D3 class, found in wave C beside
+  // W21): the four items below outlived the extension.
+  for (const [menuId, itemId] of [
+    ["developer", "scriptable-objects.manage"],
+    ["developer", "scriptable-objects.templates"],
+    ["developer", "scriptable-objects.marketplace"],
+    ["insert", "insert.form"],
+  ] as const) {
+    cleanupFunctions.push(() => context.ui.menus.unregisterItem(menuId, itemId));
+  }
   context.ui.menus.registerItem("developer", {
     id: "scriptable-objects.manage",
     label: "Object Scripts...",

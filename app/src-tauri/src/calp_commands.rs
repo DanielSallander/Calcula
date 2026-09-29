@@ -84,6 +84,229 @@ impl From<FrontendCustomObject> for calp::publish::PublishCustomObject {
     }
 }
 
+/// Undo a working copy's collision renames in the REFERENCES its carrier
+/// ships (BUG-0151, the push half).
+///
+/// A checkout is additive, so an application sheet whose name the author's
+/// workbook already has arrives renamed ("Data" -> "Data (2)"), and every
+/// pulled reference to it was rewritten to follow (`materialize_pull_result`).
+/// `assemble_publish_workbook` restores the TAB name the application knows the
+/// sheet by; this restores the references the same way -- the formulas on the
+/// published sheets, every defined name's `refers_to`, every chart's string
+/// sources -- simultaneously (a chain of collision names moves one step each).
+/// A reference to the author's OWN same-named sheet is untouched: in the
+/// package that name means the package's sheet, exactly as before.
+///
+/// `renamed_for_publish` is the assembly's LOWERCASED local name -> published
+/// name map; matching is case-insensitive either way.
+pub(crate) fn restore_published_sheet_references(
+    workbook: &mut persistence::Workbook,
+    sheet_indices: &[usize],
+    renamed_for_publish: &std::collections::HashMap<String, String>,
+) -> calp::sheet_renames::RenameCounts {
+    let renames = calp::sheet_renames::SheetRenames::new(renamed_for_publish.iter());
+    let mut counts = calp::sheet_renames::RenameCounts::default();
+    if renames.is_empty() {
+        return counts;
+    }
+    for &idx in sheet_indices {
+        if let Some(sheet) = workbook.sheets.get_mut(idx) {
+            counts.cell_formulas += renames.rename_sheet_formulas(sheet);
+        }
+    }
+    for nr in workbook.named_ranges.iter_mut() {
+        if let Some(restored) = renames.rename_formula(&nr.refers_to) {
+            nr.refers_to = restored;
+            counts.named_ranges += 1;
+        }
+    }
+    for chart in workbook.charts.iter_mut() {
+        if let Some(restored) =
+            calp::chart_refs::rename_chart_spec_sheet_names(&chart.spec_json, &renames)
+        {
+            chart.spec_json = restored;
+            counts.charts += 1;
+        }
+    }
+    // The RULE payloads on the published sheets (wave-B B4): a checkout renamed
+    // their references with the rest of the pull (`rename_pulled_rules`), so a
+    // push must put them back or the application ships "Data (2)" in its
+    // conditional formats, validations and control formulas. Pane controls are
+    // workbook-scoped and published whole.
+    let published: std::collections::HashSet<SheetId> =
+        sheet_indices.iter().filter_map(|&i| workbook.sheets.get(i).map(|s| s.id)).collect();
+    for cf in workbook.conditional_formats.iter_mut().filter(|c| published.contains(&c.sheet_id)) {
+        counts.conditional_formats += renames.rename_conditional_format_rules(&mut cf.rules);
+    }
+    for dv in workbook.data_validations.iter_mut().filter(|d| published.contains(&d.sheet_id)) {
+        counts.data_validations += renames.rename_validation_ranges(&mut dv.ranges);
+    }
+    for sheet in workbook.controls.iter_mut().filter(|c| published.contains(&c.sheet_id)) {
+        counts.controls += renames.rename_control_entries(&mut sheet.controls);
+    }
+    for pane in workbook.pane_controls.iter_mut() {
+        counts.pane_controls += renames.rename_pane_control_config(&mut pane.config);
+    }
+    counts
+}
+
+/// A SUBSCRIBER's renames of `package_name`'s sheets, as the LOWERCASED local
+/// name -> the name `base` publishes the sheet under, for every application
+/// sheet whose tab here is named differently (BUG-0151). Empty for a workbook
+/// that does not subscribe to it.
+///
+/// THE RESET'S OWN RESOLVER, inverted. The subscriber diff ("View changes",
+/// the reset preview) and the reset must agree about what a reset would
+/// change, and the reset renames the re-pulled references through
+/// `resolve_refresh_sheet_names` (`rename_pulled_references_for_reset`). A map
+/// walked by hand over the TRACKED sheets alone left out a DETACHED sheet the
+/// subscriber still has -- which the resolver maps to its local copy -- so a
+/// report reading the detached "Data (2)" was listed as changed with a Reset
+/// checkbox, and the reset then wrote back exactly what was there.
+pub(crate) fn subscriber_published_names(
+    state: &AppState,
+    package_name: &str,
+    base: &calp::manifest::VersionManifest,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let sheet_names: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+    let name_of = |local: SheetId| -> Option<String> {
+        sheet_ids
+            .iter()
+            .position(|id| *id == local)
+            .and_then(|i| sheet_names.get(i).cloned())
+    };
+    let mut out = std::collections::HashMap::new();
+    for sub in subs.subscriptions.iter().filter(|s| s.package_name == package_name) {
+        // The same inputs the reset hands the resolver: the version's sheets,
+        // in its order, against every name in the workbook.
+        let mut names: Vec<(SheetId, String)> =
+            base.sheets.iter().map(|p| (p.sheet_id, p.name.clone())).collect();
+        let mut taken = sheet_names.clone();
+        let resolved =
+            calp::refresh::resolve_refresh_sheet_names(Some(sub), &mut names, &name_of, &mut taken);
+        // A sheet NEW to the subscription resolves to a name nothing here
+        // carries (the collision pass picks an untaken one), so its inverse
+        // entry can never match a reference; only real local sheets matter.
+        for (published, local) in &resolved.local_names {
+            if !local.eq_ignore_ascii_case(published) {
+                out.insert(local.to_lowercase(), published.clone());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A RESET re-materializes the subscribed sheets from the version the
+/// subscriber is on, and the pulled references name the PUBLISHER's sheets:
+/// rename them to this workbook's names through the same resolver a refresh
+/// uses (BUG-0151), or a reset puts back every reference a collision rename
+/// had repaired and the sheet reads the subscriber's own same-named sheet again.
+/// The pulled sheets keep the publisher's names (the reset maps them by id).
+pub(crate) fn rename_pulled_references_for_reset(
+    state: &AppState,
+    sub: &calp::manifest::Subscription,
+    result: &mut calp::pull::PullResult,
+) -> Result<RefreshSheetNames, String> {
+    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let mut taken: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let current = taken.clone();
+    let name_of = |local: SheetId| -> Option<String> {
+        sheet_ids
+            .iter()
+            .position(|id| *id == local)
+            .and_then(|i| current.get(i).cloned())
+    };
+    let mut names: Vec<(SheetId, String)> = result
+        .sheets
+        .iter()
+        .map(|ps| (ps.package_sheet_id, ps.name.clone()))
+        .collect();
+    let resolved =
+        calp::refresh::resolve_refresh_sheet_names(Some(sub), &mut names, &name_of, &mut taken);
+    resolved.renames().rename_pull(result);
+    Ok(resolved)
+}
+
+/// The renames a working copy of `package_name` at `registry_path` carries:
+/// every application sheet whose tab here is named differently from the name
+/// the application publishes it under (a checkout collision rename), as
+/// PUBLISHED name -> local name. Empty for any other workbook.
+pub(crate) fn working_copy_sheet_renames(
+    state: &AppState,
+    registry_path: &str,
+    package_name: &str,
+) -> Result<calp::sheet_renames::SheetRenames, String> {
+    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let sheet_names: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
+    let Some(link) = link.as_ref().filter(|l| l.targets(registry_path, package_name)) else {
+        return Ok(calp::sheet_renames::SheetRenames::default());
+    };
+    Ok(calp::sheet_renames::SheetRenames::new(link.base_sheets.iter().filter_map(|s| {
+        let idx = sheet_ids.iter().position(|id| *id == s.sheet_id)?;
+        Some((s.name.clone(), sheet_names.get(idx)?.clone()))
+    })))
+}
+
+/// The cells at `positions` of one sheet of a PUBLISHED version -- the base a
+/// hold-back rolls back to, the head a merge brings in -- as the cells a
+/// working copy's grid takes: formulas spelled in THIS workbook's sheet names
+/// through `renames` (`working_copy_sheet_renames`, BUG-0151). `None` in a
+/// slot where the version has no cell; `Ok(None)` when it has no such sheet.
+///
+/// THE ONE DOOR both lay-ins go through. The merge learned to rename and the
+/// hold-back did not: an author whose checkout renamed the application's
+/// "Data" to "Data (2)" unticked an edited `='Data (2)'!A1*3` in the push
+/// dialog and got the base's `=Data!A1*2` back -- naming the AUTHOR's own
+/// "Data". The hold-back's recalculation then computed 2000 instead of 42, and
+/// the push shipped that number beside a formula the diff called unchanged;
+/// nothing on a subscriber's machine recalculates to correct it.
+pub(crate) fn published_cells_in_local_names(
+    registry: &dyn calp::transport::WorkspaceTransport,
+    package_name: &str,
+    version: &str,
+    sheet_id: &str,
+    positions: &[(u32, u32)],
+    renames: &calp::sheet_renames::SheetRenames,
+) -> Result<Option<Vec<((u32, u32), Option<persistence::SavedCell>)>>, String> {
+    let Some(bytes) = registry
+        .read_artifact(package_name, version, &format!("sheets/{}/data.json", sheet_id))
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let data: calcula_format::sheet_data::SheetData =
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let cells = calcula_format::sheet_data::sheet_data_to_cells(&data);
+    Ok(Some(
+        positions
+            .iter()
+            .map(|pos| {
+                let cell = cells
+                    .get(pos)
+                    .map(|saved| renames.rename_saved_cell(saved).into_owned());
+                (*pos, cell)
+            })
+            .collect(),
+    ))
+}
+
+/// THE ONE MERGE of a publish's custom objects: the host-collected ones FIRST,
+/// the frontend providers' after. `calp_publish` and the push PREVIEW
+/// (`publish_into_for_preview`) both build theirs here, because a custom
+/// object's artifact path is its POSITION (`custom_objects/{i}.json`) -- two
+/// orders would diff every object as changed.
+pub(crate) fn merge_publish_custom_objects(
+    host: Vec<calp::publish::PublishCustomObject>,
+    frontend: Option<Vec<FrontendCustomObject>>,
+) -> Vec<calp::publish::PublishCustomObject> {
+    let mut all = host;
+    all.extend(frontend.into_iter().flatten().map(Into::into));
+    all
+}
+
 /// Collect the workbook's cell-type assignments (for the selected sheets) as
 /// generic custom objects — one per sheet that has assignments (distribution
 /// brick 4 dogfood). Mirrors how controls travel, but through the open channel.
@@ -327,10 +550,12 @@ pub(crate) struct PublishAssembly {
 /// `published` — i.e. exactly it, or it with a ` (n)` suffix?
 ///
 /// The distinction decides whether a differing name may be restored silently.
-/// A collision rename touches nothing but the sheet's own name, so undoing it
-/// puts every reference back. A deliberate rename has already rewritten every
-/// formula and named range in the workbook, so undoing only the name strands
-/// them — that case is refused instead.
+/// A collision rename is undone WHOLE at push: the name here, and the pulled
+/// references that followed it (`restore_published_sheet_references`, which
+/// maps exactly the collision name back). A deliberate rename has already
+/// rewritten every formula and named range in the workbook under a name that
+/// map does not know, so undoing only the tab name strands them — that case is
+/// refused instead.
 ///
 /// Case-insensitive, like every sheet-name comparison in the product.
 fn is_collision_rename(local: &str, published: &str) -> bool {
@@ -457,10 +682,12 @@ fn assemble_publish_workbook(
 
                 // A COLLISION RENAME IS SAFE TO UNDO; A DELIBERATE ONE IS NOT.
                 //
-                // `resolve_sheet_name_collisions` renames the incoming sheet and
-                // rewrites NOTHING else — no formula, no named range — so
-                // restoring the published name puts every reference back where
-                // it pointed. `rename_sheet_inner` is the opposite: it repairs
+                // `resolve_sheet_name_collisions` renames the incoming sheet, and
+                // the checkout rewrites the PULLED references to follow it
+                // (BUG-0151); restoring the published name here and those
+                // references in `restore_published_sheet_references` below puts
+                // every reference back where it pointed. `rename_sheet_inner` is
+                // the opposite: it repairs
                 // every formula in the workbook (`repair_all_formulas` +
                 // `repair_3d_refs_on_rename`) and every `refers_to`. Restoring
                 // the sheet name after THAT strands them: the package would ship
@@ -491,6 +718,10 @@ fn assemble_publish_workbook(
         }
         renamed
     };
+    // ...AND THE REFERENCES that followed those renames at checkout (BUG-0151):
+    // the checkout rewrote every pulled reference to a renamed sheet, so the
+    // carrier names "Data (2)" wherever the application means "Data".
+    restore_published_sheet_references(&mut workbook, sheet_indices, &renamed_for_publish);
 
     // Standalone module scripts / notebooks live in ScriptState, not AppState.
     // With these present, the publish request's None ("all from the workbook")
@@ -596,6 +827,11 @@ fn assemble_publish_workbook(
     let unpublished_pivots =
         prune_unpublished_pivots(&mut workbook, sheet_indices, &renamed_for_publish);
 
+    // A LIST VALIDATION'S SOURCE LEAVES AS AN APPLICATION POSITION, like a
+    // pivot's grid source above (wave C, W11): the pull resolves the position
+    // to where that sheet landed.
+    canonicalize_validation_list_sources(&mut workbook, sheet_indices);
+
     // A CHART'S SOURCES LEAVE NAMING THEIR SHEET BY ID. A DataRangeRef written
     // by a script, the MCP layer, or a build before sheet ids were stamped
     // carries only the PUBLISHER's `sheetIndex`, and on the subscriber that
@@ -681,6 +917,42 @@ fn assemble_publish_workbook(
         },
         unpublished_pivots,
     ))
+}
+
+/// Canonicalize every published LIST validation's source sheet from the
+/// publisher's WORKBOOK index to the source sheet's POSITION in the
+/// application (wave C, W11) -- the pivot grid source's rule
+/// ([`prune_unpublished_pivots`]), which every pull resolves back to where the
+/// pulled sheet at that position landed (`materialize_pull_result`, the
+/// refresh's validation reset).
+///
+/// A list rule names its source range by sheet INDEX, and the index travelled
+/// verbatim: on any subscriber whose sheets sit elsewhere (every subscriber
+/// with sheets of its own) the dropdown listed the local sheet that happened
+/// to have that number. A source on a sheet the application does NOT carry has
+/// nothing to name on the other side: it leaves as an EMPTY list (every entry
+/// refused, as Excel refuses one against a `#REF!` source). A same-sheet
+/// source (`None`) needs nothing. Payloads with no list source keep their
+/// bytes (re-serialized only when something changed). Pure, so the dry-run
+/// preview and the working-copy diff canonicalize identically.
+pub(crate) fn canonicalize_validation_list_sources(workbook: &mut persistence::Workbook, sheet_indices: &[usize]) {
+    let position_of: std::collections::HashMap<usize, usize> = sheet_indices
+        .iter()
+        .enumerate()
+        .map(|(position, &wb_index)| (wb_index, position))
+        .collect();
+    for entry in workbook.data_validations.iter_mut() {
+        let Ok(mut ranges) =
+            serde_json::from_value::<Vec<crate::data_validation::ValidationRange>>(entry.ranges.clone())
+        else {
+            continue;
+        };
+        if crate::sheets::remap_list_sources(&mut ranges, &|wb_index| position_of.get(&wb_index).copied()) {
+            if let Ok(value) = serde_json::to_value(&ranges) {
+                entry.ranges = value;
+            }
+        }
+    }
 }
 
 /// Drop every pivot whose destination or grid source sheet is not in
@@ -1174,6 +1446,18 @@ pub(crate) fn publish_into_for_preview(
     kind: &str,
     sheet_indices: Vec<usize>,
     include_comments: bool,
+    // The FRONTEND providers' distributable objects (the model overlay, reports),
+    // which `calp_publish` merges in from its params (BUG-0150). `None` = the
+    // caller could not collect them; the preview then cannot see them, and its
+    // diff must be reconciled for that (`reconcile_unknowable_min_app_version`).
+    frontend_custom_objects: Option<Vec<FrontendCustomObject>>,
+    // A SUBSCRIBER's collision renames to undo in the carrier's references
+    // (LOWERCASED local name -> published name; empty for anything else). Its
+    // pulled references were rewritten to the local names (BUG-0151), and the
+    // diff against the published version must compare them in the published
+    // spelling, or every one reads as a change the reset would not make. A
+    // WORKING COPY's renames are undone by the assembly itself.
+    published_names: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     let filter_links =
         FilterObjectLinks::snapshot(slicer_state, timeline_slicer_state, pivot_state)?;
@@ -1195,19 +1479,23 @@ pub(crate) fn publish_into_for_preview(
     )?;
 
     let PublishAssembly {
-        workbook,
+        mut workbook,
         writeback_regions,
         object_scripts,
         data_sources,
         model_writebacks,
         excluded_regions,
     } = assembly;
+    restore_published_sheet_references(&mut workbook, &sheet_indices, published_names);
 
-    // Only the HOST-collected custom objects: the frontend's providers are
-    // merged in by `calp_publish` from its params, which no preview caller
-    // has. That is the one input to the version stamp the preview cannot see;
-    // `reconcile_unknowable_min_app_version` handles it on the diff.
-    let custom_objects = collect_cell_type_custom_objects(state, &sheet_indices)?;
+    // The host's custom objects AND the frontend's, merged exactly as
+    // `calp_publish` merges them (BUG-0150). Without the frontend's, every
+    // model overlay and report the push WOULD carry read as REMOVED in the
+    // push preview and in the merge analysis.
+    let custom_objects = merge_publish_custom_objects(
+        collect_cell_type_custom_objects(state, &sheet_indices)?,
+        frontend_custom_objects,
+    );
 
     let mut request = calp::publish::PublishRequest {
         workbook: &workbook,
@@ -1288,9 +1576,9 @@ pub(crate) fn stamp_min_app_version(request: &mut calp::publish::PublishRequest)
 /// know to be real.
 ///
 /// The preview's working side is stamped by [`stamp_min_app_version`] from
-/// everything it can see. The one input it cannot see is the FRONTEND's
+/// everything it can see. The one input it may not see is the FRONTEND's
 /// distributable objects (the model overlay, reports), which `calp_publish`
-/// merges in from its params and no preview caller carries. So when the base
+/// merges in from its params and a preview caller may not send. So when the base
 /// version is stamped and the working side is not, the stamp may be one the
 /// real push would write too -- and it certainly is when the base carries a
 /// custom object the working side did not produce, which is exactly the
@@ -1298,10 +1586,10 @@ pub(crate) fn stamp_min_app_version(request: &mut calp::publish::PublishRequest)
 /// stamped by content the working side CAN see and no longer carries is a
 /// real change, and it stays.
 ///
-/// Chosen over widening both preview commands (`calp_diff_working_copy`,
-/// `calp_push_merge_analyze`) with a custom-object payload the dialog would
-/// have to collect: that is a new IPC contract for one derived field, and the
-/// merge analysis has no params at all today.
+/// BOTH PREVIEW COMMANDS NOW TAKE THE PAYLOAD (BUG-0150: without it every
+/// frontend object also read as REMOVED, not only the stamp), and each calls
+/// this ONLY when its caller did not send the objects -- a preview that was
+/// handed them saw everything the push carries, and its stamp line is real.
 pub(crate) fn reconcile_unknowable_min_app_version(
     diff: &mut calp::diff::VersionDiff,
     base: &calp::manifest::VersionManifest,
@@ -1573,9 +1861,10 @@ pub fn calp_publish(
     // opaque cell-type assignments. Frontend providers can add more via
     // params.custom_objects (merged in — moved out of params before the request
     // literal consumes its other fields).
-    let frontend_custom_objects = params.custom_objects.unwrap_or_default();
-    let mut custom_objects = collect_cell_type_custom_objects(&state, &sheet_indices)?;
-    custom_objects.extend(frontend_custom_objects.into_iter().map(Into::into));
+    let custom_objects = merge_publish_custom_objects(
+        collect_cell_type_custom_objects(&state, &sheet_indices)?,
+        params.custom_objects,
+    );
 
     let mut request = calp::publish::PublishRequest {
         workbook: &workbook,
@@ -4349,6 +4638,63 @@ pub(crate) fn refresh_local_sheet_id(
         .unwrap_or(pulled.sheet.id)
 }
 
+/// What ONE refresh payload's subscriber has detached (BUG-0153).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct DetachedInPayload {
+    /// Application sheet ids of the payload's sheets that are detached.
+    pub package_sheet_ids: std::collections::HashSet<SheetId>,
+    /// Their POSITIONS in the payload -- the key an application-relative
+    /// control binding (`control-<position>-<row>-<col>`) names a sheet by.
+    pub positions: std::collections::HashSet<usize>,
+    /// The LOCAL indices the detached sheets live at now -- the key a
+    /// materialized control binding names a sheet by.
+    pub local_indices: std::collections::HashSet<usize>,
+}
+
+/// [`DetachedInPayload`] for every payload, aligned with `payloads`.
+/// `sheet_ids` is copied and released before `subscriptions` is read -- the
+/// documented order, never both held.
+pub(crate) fn detached_in_payloads(
+    state: &AppState,
+    payloads: &[calp::refresh::RefreshPayload],
+) -> Result<Vec<DetachedInPayload>, String> {
+    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+    Ok(payloads
+        .iter()
+        .map(|payload| {
+            let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
+                return DetachedInPayload::default();
+            };
+            let mut out = DetachedInPayload::default();
+            for (position, pulled) in payload.pull_result.sheets.iter().enumerate() {
+                if sub.detached_sheets.contains(&pulled.package_sheet_id) {
+                    out.package_sheet_ids.insert(pulled.package_sheet_id);
+                    out.positions.insert(position);
+                }
+            }
+            for d in &sub.detached_local_sheets {
+                if let Some(idx) = sheet_ids.iter().position(|id| *id == d.local_sheet_id) {
+                    out.local_indices.insert(idx);
+                }
+            }
+            out
+        })
+        .collect())
+}
+
+/// The sheet a `control-<sheet>-<row>-<col>` binding names (a position or a
+/// local index, depending on which side of a pull the binding is on); `None`
+/// for anything that is not a derived control id.
+fn control_binding_sheet(instance_id: &str) -> Option<usize> {
+    let sheet = std::cell::Cell::new(None);
+    crate::sheets::remap_control_instance_id(instance_id, &|s| {
+        sheet.set(Some(s));
+        Some(s)
+    })?;
+    sheet.get()
+}
+
 /// For EACH payload, its application sheet ids -> the local sheet INDEX each
 /// lives at now, through `refresh_local_sheet_id`. A sheet that resolves to no
 /// local sheet (a detached one: its fresh id was never materialized) is absent.
@@ -5168,6 +5514,35 @@ pub(crate) fn materialize_pull_result(
             .map(|(orig, ps)| (orig, ps.name.clone()))
             .collect()
     };
+    // THE REFERENCES FOLLOW THE RENAME (BUG-0151). Every formula on a pulled
+    // sheet (object-backed sheets included), every defined name's `refers_to`
+    // and every chart string source that names a renamed sheet names it by the
+    // PUBLISHER's spelling -- so after "Data" arrived as "Data (2)", a pulled
+    // `=Data!A1` read the SUBSCRIBER's own "Data", silently. Rewritten here,
+    // simultaneously (a chain like {A -> "A (2)", "A (2)" -> "A (2) (2)"} moves
+    // each name exactly one step), BEFORE the sheets become grids, so the
+    // dependency edges and every override baseline are built from the local
+    // names. Pivot anchors resolve through the same map below.
+    //
+    // ON CHECKOUT TOO. A checkout is additive, so the author's own "Data" sends
+    // the application's in as "Data (2)" exactly like a subscriber's -- and the
+    // working copy would otherwise compute the application from the author's
+    // sheet while they edit it. The push undoes both halves:
+    // `assemble_publish_workbook` restores the tab name the application knows
+    // the sheet by, and `restore_published_sheet_references` the references.
+    let sheet_renames = calp::sheet_renames::SheetRenames::new(sheet_rename_map.iter());
+    let counts = sheet_renames.rename_pull(&mut result);
+    if counts != calp::sheet_renames::RenameCounts::default() {
+        crate::log_info!(
+            "CALP",
+            "pull of '{}': {} formula(s), {} name(s) and {} chart(s) follow a sheet renamed \
+             on arrival",
+            result.package_name,
+            counts.cell_formulas,
+            counts.named_ranges,
+            counts.charts
+        );
+    }
 
     // Materialize pulled sheets into the workbook.
     // Each pulled sheet has its own local StyleRegistry; we merge styles into
@@ -5531,14 +5906,24 @@ pub(crate) fn materialize_pull_result(
     }
 
     // Materialize pulled data validations onto the (remapped) local sheet index.
+    //
+    // A LIST rule names its source range by sheet INDEX, which publish
+    // canonicalizes to the source sheet's POSITION in the application
+    // (`canonicalize_validation_list_sources`), exactly like a pivot's grid
+    // source: position i resolves to where the i-th pulled sheet landed. It
+    // was materialized verbatim -- the publisher's index -- so the dropdown
+    // listed whatever LOCAL sheet had that number (wave C, W11).
     if !result.data_validations.is_empty() {
         let mut store = state.data_validations.write(&effect).map_err(|e| e.to_string())?;
         for entry in &result.data_validations {
             if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
-                if let Ok(ranges) = serde_json::from_value::<
+                if let Ok(mut ranges) = serde_json::from_value::<
                     Vec<crate::data_validation::ValidationRange>,
                 >(entry.ranges.clone())
                 {
+                    crate::sheets::remap_list_sources(&mut ranges, &|position| {
+                        pulled_indices.get(position).copied()
+                    });
                     store.entry(idx).or_default().extend(ranges);
                 }
             }
@@ -6403,6 +6788,13 @@ pub fn calp_hold_back_cells(
         true,
     )?;
 
+    // The base speaks the APPLICATION's sheet names; a working copy whose
+    // checkout collision-renamed a sheet has its references rewritten to the
+    // local name (BUG-0151), and a held-back cell must say the same or it reads
+    // the author's own same-named sheet. Resolved BEFORE the grids are copied,
+    // like every other read here.
+    let renames =
+        working_copy_sheet_renames(&state, &params.registry_path, &params.package_name)?;
     let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
     let mut grids = state.grids.read().map_err(|e| e.to_string())?.clone();
     let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
@@ -6426,40 +6818,34 @@ pub fn calp_hold_back_cells(
 
         // A sheet the base version does not have cannot hold anything back: the
         // author is ADDING it, and the unit for that is the sheet checkbox.
-        let data = registry
-            .read_artifact(
-                &params.package_name,
-                &base_version,
-                &format!("sheets/{}/data.json", sheet_id),
-            )
-            .map_err(|e| e.to_string())?;
-        let base_cells = match data {
-            Some(bytes) => {
-                let sd: calcula_format::sheet_data::SheetData =
-                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-                calcula_format::sheet_data::sheet_data_to_cells(&sd)
-            }
-            None => std::collections::HashMap::new(),
-        };
+        let base_cells = published_cells_in_local_names(
+            &*registry,
+            &params.package_name,
+            &base_version,
+            sheet_id,
+            positions,
+            &renames,
+        )?
+        .unwrap_or_else(|| positions.iter().map(|pos| (*pos, None)).collect());
 
         let grid = grids
             .get_mut(local_index)
             .ok_or_else(|| "Sheet index out of range while holding cells back.".to_string())?;
 
-        for pos in positions {
-            match base_cells.get(pos) {
+        for (pos, base_cell) in base_cells {
+            match base_cell {
                 // TYPED, never re-parsed from a display string: the base value
                 // goes back as the cell it was. Round-tripping "30.0" through
                 // the input parser would read as TEXT under a locale whose
                 // decimal separator is a comma.
                 Some(saved) => {
-                    grid.cells.insert(*pos, saved.to_cell());
+                    grid.cells.insert(pos, saved.to_cell());
                 }
                 // The base had nothing here — the author ADDED this cell, and
                 // holding that addition back means the cell is empty in the
                 // published version.
                 None => {
-                    grid.cells.remove(pos);
+                    grid.cells.remove(&pos);
                 }
             }
             held += 1;
@@ -6568,13 +6954,15 @@ pub fn calp_hold_back_cells(
     // The pipeline's recalculation passes now run while this transaction is
     // open, which changes nothing: `calculation.rs` never touches the undo
     // stack.
-    {
+    // OWNED: inside a caller's open step this joins it, and the close below
+    // leaves that step for its owner (engine::OwnedTransaction).
+    let owned_txn = {
         let mut undo = state.undo_stack.lock().map_err(|e| e.to_string())?;
-        undo.begin_transaction(format!(
+        undo.begin_owned_transaction(format!(
             "Hold back {} change(s) for the push to {}",
             held, params.package_name
-        ));
-    }
+        ))
+    };
 
     // Through the SAME pipeline a script write and a merge use: dependency maps,
     // recalculation, dirty flag, events. The recalculation is the point — a
@@ -6602,7 +6990,7 @@ pub fn calp_hold_back_cells(
     // reverse.
     let undo_seq = {
         let mut undo = state.undo_stack.lock().map_err(|e| e.to_string())?;
-        undo.commit_transaction()
+        undo.commit_owned(owned_txn)
     };
     // Propagated AFTER the commit, so a partial write is on the stack and
     // recoverable rather than stranded inside an open transaction.
@@ -7528,8 +7916,12 @@ pub fn calp_get_application_objects(
         return Err(format!("No subscription named '{}'", package_name));
     };
 
-    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
-    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+    // COPIED AND RELEASED (C7), not held across the object stores below. The
+    // order here (`sheet_names` before `pivot_tables`) is the canonical one, but
+    // a guard held across nine further acquisitions is a pair with every one of
+    // them; a copy is a pair with none. The lists are a few dozen names.
+    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let sheet_names: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
 
     let sheets: Vec<ApplicationSheetObjectInfo> = sub
         .sheets
@@ -8245,7 +8637,7 @@ pub(crate) fn record_subscription_override_edits(
 
         let restored_baseline = layer
             .get(sheet_id, cell_id)
-            .map(|existing| post_value == existing.baseline);
+            .map(|existing| post_value.same_as(&existing.baseline));
         match restored_baseline {
             Some(true) => {
                 // Consumer restored the upstream value — the override is gone.
@@ -8363,13 +8755,22 @@ pub fn calp_refresh_preview(
     // The LIVE tab names, so the resolver names the sheet the user is looking
     // at. `SubscribedSheet.local_name` is stamped at subscribe and never
     // restamped, and renaming a subscribed sheet is allowed.
-    let local_sheet_names: std::collections::HashMap<SheetId, String> = {
+    //
+    // `taken_names` is every tab name, threaded through ALL workspace groups
+    // below exactly as `prepare_refresh_payloads` threads it through all
+    // payloads: a NEW sheet's collision-resolved name decides which pulled
+    // references the apply rewrites, and the preview must reach the same names
+    // (BUG-0151).
+    let (local_sheet_names, mut taken_names): (std::collections::HashMap<SheetId, String>, Vec<String>) = {
         let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         let names = state.sheet_names.read().map_err(|e| e.to_string())?;
-        ids.iter()
-            .enumerate()
-            .filter_map(|(i, id)| names.get(i).map(|n| (*id, n.clone())))
-            .collect()
+        (
+            ids.iter()
+                .enumerate()
+                .filter_map(|(i, id)| names.get(i).map(|n| (*id, n.clone())))
+                .collect(),
+            names.clone(),
+        )
     };
 
     let mut merged = calp::refresh::RefreshPreview {
@@ -8400,7 +8801,7 @@ pub fn calp_refresh_preview(
             .map(|&i| subs.subscriptions[i].clone())
             .collect();
         let preview =
-            calp::refresh::compute_preview(
+            calp::refresh::compute_preview_with_taken(
                 &registry,
                 &group,
                 // THE SAME ANCHOR THE APPLY USES. A preview resolved against the
@@ -8414,6 +8815,7 @@ pub fn calp_refresh_preview(
                 &layer,
                 &override_positions,
                 &local_sheet_names,
+                &mut taken_names,
             )
             .map_err(|e| format!("Workspace '{}': {}", registry_path, e))?;
 
@@ -8687,44 +9089,17 @@ pub fn calp_refresh_apply(
 /// How one refreshed application's sheet NAMES resolve in this workbook.
 ///
 /// A pivot anchors its destination AND its source by sheet NAME -- the
-/// publisher's name -- so a refresh has to translate every one of them into the
-/// name the same sheet carries HERE before resolving it. Built by
+/// publisher's name -- and so does every cross-sheet formula, defined name and
+/// chart string source the application carries, so a refresh has to translate
+/// every one of them into the name the same sheet carries HERE. Built by
 /// `prepare_refresh_payloads`, consumed by `apply_refreshed_pivots`.
-#[derive(Debug, Default, Clone)]
-pub(crate) struct RefreshSheetNames {
-    /// Publisher's sheet name -> the sheet's CURRENT name in this workbook, for
-    /// every sheet of the payload that has a local counterpart: a tracked sheet
-    /// (through its local id, so a subscriber's rename is followed), a sheet
-    /// returning from a tombstone, a NEW sheet (its collision-resolved name), and
-    /// a DETACHED sheet (a source may still read it).
-    pub local_names: std::collections::HashMap<String, String>,
-    /// Publisher's names of the sheets an application object may NOT be
-    /// written onto here: the DETACHED ones (the subscriber took them) and a
-    /// tracked one whose local sheet no longer exists. A pivot aimed at one is
-    /// skipped -- it used to resolve by the publisher's name, i.e. onto whatever
-    /// sheet of the subscriber's own happened to share it.
-    pub blocked_destinations: std::collections::HashSet<String>,
-}
-
-impl RefreshSheetNames {
-    /// The local name for a publisher's sheet name, case-insensitively (a
-    /// case-only rename updates no pivot definition), or `None` when this
-    /// payload has no sheet by that name.
-    pub(crate) fn local_name(&self, publisher_name: &str) -> Option<&str> {
-        self.local_names
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(publisher_name))
-            .map(|(_, v)| v.as_str())
-    }
-
-    /// May an application object be WRITTEN onto the sheet the publisher
-    /// calls `publisher_name`?
-    pub(crate) fn is_blocked_destination(&self, publisher_name: &str) -> bool {
-        self.blocked_destinations
-            .iter()
-            .any(|n| n.eq_ignore_ascii_case(publisher_name))
-    }
-}
+///
+/// THE CORE TYPE, not a host copy (BUG-0151): the refresh PREVIEW resolves the
+/// same names through the same `calp::refresh::resolve_refresh_sheet_names`,
+/// because the reference rewrite changes the upstream text an override is
+/// compared against, and a preview that resolved names its own way would name
+/// different conflicts than the apply creates.
+pub(crate) type RefreshSheetNames = calp::refresh::RefreshSheetNames;
 
 /// The READ-ONLY half of a refresh that runs BEFORE its `DocumentEffect`:
 /// resolve every pulled sheet's name against this workbook, and refuse a
@@ -8744,6 +9119,15 @@ impl RefreshSheetNames {
 /// tracked, tombstoned and detached alike. A tombstoned sheet coming back used
 /// to be renamed against its OWN tab ("Data" -> "Data (2)"), which then sent its
 /// pivot nowhere.
+///
+/// THE REFERENCES FOLLOW THE NAMES (BUG-0151). Every formula on every pulled
+/// sheet, every defined name's `refers_to` and every chart string source that
+/// names a sheet by the PUBLISHER's name is rewritten -- simultaneously, one
+/// step per name -- to the name that sheet carries here, BEFORE the payload
+/// becomes grids. Otherwise a pulled `=Data!A1` reads the subscriber's own
+/// "Data" whenever the application's arrived as "Data (2)". Rewritten in the
+/// PAYLOAD, not in the grids, so the upstream values the override rebase
+/// compares against are in the same spelling as the live cells.
 ///
 /// LOCKS: `sheet_ids` and `sheet_names` are cloned and released, then
 /// `subscriptions` is read -- the documented `sheet_ids` -> `subscriptions`
@@ -8767,63 +9151,48 @@ pub(crate) fn prepare_refresh_payloads(
     {
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         for payload in payloads.iter_mut() {
-            let mut names = RefreshSheetNames::default();
-            // CAPTURED BEFORE the collision pass: `resolve_sheet_name_collisions`
-            // rewrites `ps.name` IN PLACE (`core/calp/src/pull.rs`) and
-            // `PulledSheet` has only the one name field -- after it runs, the
-            // publisher's spelling is simply gone.
-            let original_names: Vec<String> = payload
+            // THE ONE RESOLVER the preview uses too. A NEW sheet's name comes
+            // back collision-resolved in `resolved`; the publisher's spelling is
+            // kept in the returned map, captured before the pass renames.
+            let mut resolved: Vec<(SheetId, String)> = payload
                 .pull_result
                 .sheets
                 .iter()
-                .map(|ps| ps.name.clone())
+                .map(|ps| (ps.package_sheet_id, ps.name.clone()))
                 .collect();
-            let mut skip: std::collections::HashSet<SheetId> = std::collections::HashSet::new();
-            if let Some(sub) = subs.subscriptions.get(payload.subscription_index) {
-                for (pulled, original) in payload.pull_result.sheets.iter().zip(original_names.iter()) {
-                    let package_sid = pulled.package_sheet_id;
-                    if sub.detached_sheets.contains(&package_sid) {
-                        skip.insert(package_sid);
-                        names.blocked_destinations.insert(original.clone());
-                        if let Some(name) = sub
-                            .detached_local_sheets
-                            .iter()
-                            .find(|d| d.package_sheet_id == package_sid)
-                            .and_then(|d| name_of(d.local_sheet_id))
-                        {
-                            names.local_names.insert(original.clone(), name);
-                        }
-                        continue;
+            let names = calp::refresh::resolve_refresh_sheet_names(
+                subs.subscriptions.get(payload.subscription_index),
+                &mut resolved,
+                &name_of,
+                &mut taken,
+            );
+            // Carry the collision-resolved names onto the pulled sheets and the
+            // incoming ledger, exactly as `resolve_sheet_name_collisions` did.
+            for (pulled, (_, name)) in payload.pull_result.sheets.iter_mut().zip(resolved) {
+                if pulled.name != name {
+                    if let Some(entry) = payload
+                        .pull_result
+                        .subscription
+                        .sheets
+                        .iter_mut()
+                        .find(|s| s.package_sheet_id == pulled.package_sheet_id)
+                    {
+                        entry.local_name = name.clone();
                     }
-                    let tracked = sub.sheets.iter().any(|s| s.package_sheet_id == package_sid)
-                        || sub
-                            .upstream_removed_sheets
-                            .iter()
-                            .any(|s| s.package_sheet_id == package_sid);
-                    if !tracked {
-                        continue; // NEW in this version: the collision pass names it
-                    }
-                    skip.insert(package_sid);
-                    match name_of(refresh_local_sheet_id(sub, pulled)) {
-                        Some(name) => {
-                            names.local_names.insert(original.clone(), name);
-                        }
-                        None => {
-                            names.blocked_destinations.insert(original.clone());
-                        }
-                    }
+                    pulled.name = name;
                 }
             }
-            calp::pull::resolve_sheet_name_collisions(
-                &mut payload.pull_result.sheets,
-                &mut payload.pull_result.subscription.sheets,
-                &mut taken,
-                &skip,
-            );
-            for (pulled, original) in payload.pull_result.sheets.iter().zip(original_names) {
-                if !skip.contains(&pulled.package_sheet_id) {
-                    names.local_names.insert(original, pulled.name.clone());
-                }
+            let counts = names.renames().rename_pull(&mut payload.pull_result);
+            if counts != calp::sheet_renames::RenameCounts::default() {
+                crate::log_info!(
+                    "CALP",
+                    "refresh of '{}': {} formula(s), {} name(s) and {} chart(s) now follow sheets \
+                     whose local name differs from the publisher's",
+                    payload.pull_result.package_name,
+                    counts.cell_formulas,
+                    counts.named_ranges,
+                    counts.charts
+                );
             }
             by_payload.push(names);
         }
@@ -9066,7 +9435,16 @@ pub(crate) fn apply_refresh_payloads(
     // RESET-then-apply stores below.
     let refreshed_indices: std::collections::HashSet<usize> =
         pkg_maps.iter().flat_map(|m| m.values().copied()).collect();
+    // WHAT EACH PAYLOAD'S SUBSCRIBER DETACHED (BUG-0153), one entry per payload.
+    // A detached sheet is in no refresh map -- nothing may be PLACED on it -- and
+    // the two stores below that resolve through those maps used to read "not in
+    // the map" as "not bound to a sheet": a sheet-scoped name came back
+    // WORKBOOK-scoped, and a control script came back bound to nothing while
+    // the swap deleted the one the detached button still used.
+    let detached_by_payload: Vec<DetachedInPayload> = detached_in_payloads(state, &payloads)?;
 
+    // The names each payload's upsert below ACTUALLY applied, for the ledger.
+    let mut applied_names_by_payload: Vec<Vec<(String, String)>> = Vec::new();
     // Materialize refreshed named ranges + CF/DV — the refresh analog of the
     // calp_pull materialization. Without this a refresh delivers v2 sheets/scripts
     // but leaves the subscriber stuck on v1's CF/DV/named ranges. Done before the
@@ -9076,21 +9454,50 @@ pub(crate) fn apply_refresh_payloads(
         // uppercased key (vs calp_pull's skip-if-present at first subscribe).
         // (Cannot distinguish a publisher-removed name from a subscriber's own
         // without provenance, so removals don't propagate — a known limit.)
+        //
+        // A SHEET-SCOPED NAME IS NEVER WIDENED (BUG-0153). Its scope resolves
+        // through the payload's map; a name scoped to a DETACHED sheet is the
+        // subscriber's (left exactly as it is), and one whose sheet resolves
+        // nowhere here is skipped -- it used to land with `sheet_index: None`,
+        // i.e. WORKBOOK-scoped, silently changing what every formula naming it
+        // on every other sheet resolves to. Only applied names are ledgered.
         if payloads.iter().any(|p| !p.pull_result.named_ranges.is_empty()) {
             let mut names = state.named_ranges.write(&effect).map_err(|e| e.to_string())?;
-            for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
+            for ((payload, pkg_to_index), detached) in
+                payloads.iter().zip(pkg_maps.iter()).zip(detached_by_payload.iter())
+            {
+                let mut applied: Vec<(String, String)> = Vec::new();
                 for nr in &payload.pull_result.named_ranges {
+                    let sheet_index = match nr.sheet_id {
+                        None => None,
+                        Some(sid) if detached.package_sheet_ids.contains(&sid) => continue,
+                        Some(sid) => match pkg_to_index.get(&sid).copied() {
+                            Some(idx) => Some(idx),
+                            None => {
+                                crate::log_warn!(
+                                    "CALP",
+                                    "refresh: name '{}' is scoped to a sheet this workbook does not \
+                                     have -- skipped rather than made workbook-scoped",
+                                    nr.name
+                                );
+                                continue;
+                            }
+                        },
+                    };
+                    let key = nr.name.to_uppercase();
                     names.insert(
-                        nr.name.to_uppercase(),
+                        key.clone(),
                         crate::named_ranges::NamedRange {
                             name: nr.name.clone(),
-                            sheet_index: nr.sheet_id.and_then(|sid| pkg_to_index.get(&sid).copied()),
+                            sheet_index,
                             refers_to: nr.refers_to.clone(),
                             comment: None,
                             folder: None,
                         },
                     );
+                    applied.push((key, nr.name.clone()));
                 }
+                applied_names_by_payload.push(applied);
             }
         }
 
@@ -9137,12 +9544,23 @@ pub(crate) fn apply_refresh_payloads(
                 store.remove(idx);
             }
             for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
+                // A list source's application POSITION resolves to the local
+                // sheet the pulled sheet at that position is (W11; the
+                // subscribe twin is in `materialize_pull_result`).
+                let local_at = |position: usize| {
+                    payload
+                        .pull_result
+                        .sheets
+                        .get(position)
+                        .and_then(|pulled| pkg_to_index.get(&pulled.package_sheet_id).copied())
+                };
                 for entry in &payload.pull_result.data_validations {
                     if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
-                        if let Ok(ranges) = serde_json::from_value::<
+                        if let Ok(mut ranges) = serde_json::from_value::<
                             Vec<crate::data_validation::ValidationRange>,
                         >(entry.ranges.clone())
                         {
+                            crate::sheets::remap_list_sources(&mut ranges, &local_at);
                             store.insert(idx, ranges);
                         }
                     }
@@ -9729,10 +10147,10 @@ pub(crate) fn apply_refresh_payloads(
     // notebook) are recorded at their point of ACTUAL application below — the
     // swap/materialize conflict guards can skip entries, and a skipped local
     // script must never be attributed to the application.
-    for payload in &payloads {
+    for (payload, applied) in payloads.iter().zip(applied_names_by_payload.iter()) {
         let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
-        for nr in &payload.pull_result.named_ranges {
-            entries.push(ledger_entry("namedRange", nr.name.to_uppercase(), nr.name.clone()));
+        for (key, name) in applied {
+            entries.push(ledger_entry("namedRange", key.clone(), name.clone()));
         }
     }
 
@@ -9903,10 +10321,18 @@ pub(crate) fn apply_refresh_payloads(
     // the application (publish canonicalizes it), so position i resolves
     // through the i-th pulled sheet; a sheet that resolves nowhere (detached,
     // or not in this version) orphans the binding.
-    let script_updates: Vec<(String, Vec<persistence::SavedObjectScript>)> = payloads
+    //
+    // A CONTROL ON A DETACHED SHEET keeps the script it has (BUG-0153): v2's copy
+    // is left out here (upstream no longer speaks for that sheet, and its binding
+    // could only orphan), and the swap below leaves the existing one -- still
+    // distributed, still restricted, exactly as it was consented to -- in place.
+    // Turning it into a LOCAL script instead would bypass that consent.
+    #[allow(clippy::type_complexity)]
+    let script_updates: Vec<(String, Vec<persistence::SavedObjectScript>, std::collections::HashSet<usize>)> = payloads
         .iter()
         .zip(pkg_maps.iter())
-        .map(|(p, pkg_to_index)| {
+        .zip(detached_by_payload.iter())
+        .map(|((p, pkg_to_index), detached)| {
             let position_to_local: Vec<Option<usize>> = p
                 .pull_result
                 .sheets
@@ -9914,12 +10340,19 @@ pub(crate) fn apply_refresh_payloads(
                 .map(|ps| pkg_to_index.get(&ps.package_sheet_id).copied())
                 .collect();
             let mut scripts = p.pull_result.object_scripts.clone();
+            scripts.retain(|script| {
+                !script
+                    .instance_id
+                    .as_deref()
+                    .and_then(control_binding_sheet)
+                    .is_some_and(|position| detached.positions.contains(&position))
+            });
             for script in scripts.iter_mut() {
                 rebind_pulled_control_script(script, |position| {
                     position_to_local.get(position).copied().flatten()
                 });
             }
-            (p.pull_result.package_name.clone(), scripts)
+            (p.pull_result.package_name.clone(), scripts, detached.local_indices.clone())
         })
         .collect();
 
@@ -10103,10 +10536,17 @@ pub(crate) fn apply_refresh_payloads(
         Vec::new();
     {
         let mut scripts = state.object_scripts.write(&effect).map_err(|e| e.to_string())?;
-        for (package_name, new_scripts) in script_updates {
+        for (package_name, new_scripts, detached_local) in script_updates {
             scripts.retain(|s| {
-                !(matches!(s.provenance, persistence::ScriptProvenance::Distributed)
-                    && s.package_name.as_deref() == Some(package_name.as_str()))
+                let ours = matches!(s.provenance, persistence::ScriptProvenance::Distributed)
+                    && s.package_name.as_deref() == Some(package_name.as_str());
+                // Bound to a control on a sheet the subscriber DETACHED: kept.
+                let on_detached = s
+                    .instance_id
+                    .as_deref()
+                    .and_then(control_binding_sheet)
+                    .is_some_and(|idx| detached_local.contains(&idx));
+                !ours || on_detached
             });
             let orphaned = orphaned_pane_instances.get(&package_name);
             let mut applied: Vec<calp::manifest::SubscribedObject> = Vec::new();
@@ -10979,6 +11419,55 @@ fn repair_dev_partition(
     })
 }
 
+/// The name each sheet of a dev pull carries in THIS workbook, aligned with
+/// `result.sheets` (BUG-0154):
+///
+/// - a sheet this dev subscription already tracks (`tracked_ids`, matched by
+///   id -- a dev pull keeps the source's ids) keeps its current tab name;
+/// - a sheet whose id is already a sheet here that the subscription does NOT
+///   track is `None`: the refresh skips it, and nothing may be renamed after it;
+/// - every other sheet is NEW, and gets the source's name unless that name is
+///   taken, in which case the Excel-style suffix a real pull gives
+///   (`calp::pull::resolve_name_collisions`, the one rule).
+///
+/// Called under the `sheet_names` / `sheet_ids` write guards that append, so
+/// the names it hands out are the names that land.
+fn dev_local_sheet_names(
+    result: &calp::dev_mode::DevPullResult,
+    sheet_names: &[String],
+    sheet_ids: &[SheetId],
+    tracked_ids: &[SheetId],
+) -> Vec<Option<String>> {
+    let mut taken: Vec<String> = sheet_names.to_vec();
+    let mut new_names: Vec<(SheetId, String)> = Vec::new();
+    // Which slots of `out` the collision pass below fills, in order.
+    let mut new_slots: Vec<usize> = Vec::new();
+    let mut out: Vec<Option<String>> = Vec::with_capacity(result.sheets.len());
+    for pulled in &result.sheets {
+        let here = sheet_ids.iter().position(|id| *id == pulled.sheet.id);
+        match here {
+            Some(idx) if tracked_ids.contains(&pulled.sheet.id) => {
+                out.push(sheet_names.get(idx).cloned());
+            }
+            Some(_) => out.push(None),
+            None => {
+                new_slots.push(out.len());
+                new_names.push((pulled.source_sheet_id, pulled.name.clone()));
+                out.push(None);
+            }
+        }
+    }
+    calp::pull::resolve_name_collisions(
+        &mut new_names,
+        &mut taken,
+        &std::collections::HashSet::new(),
+    );
+    for (slot, (_, name)) in new_slots.into_iter().zip(new_names) {
+        out[slot] = Some(name);
+    }
+    out
+}
+
 /// `calp_dev_subscribe` without its window, so the dev path can be tested.
 pub(crate) fn dev_subscribe_inner(
     state: &AppState,
@@ -10991,15 +11480,15 @@ pub(crate) fn dev_subscribe_inner(
     let source = std::path::Path::new(&params.source_path);
     let now = chrono::Utc::now().to_rfc3339();
 
-    let result = calp::dev_mode::pull_dev(source, &params.sheet_names)
+    let mut result = calp::dev_mode::pull_dev(source, &params.sheet_names)
         .map_err(|e| e.to_string())?;
 
     // A dev subscribe materializes application sheets, tables and controls into THIS
     // workbook and records the subscription -- all persisted, and nothing resets
-    // the flag afterwards the way `open_file` does. AFTER the pull, which is the
-    // one step that can refuse: a missing or unreadable source must leave a
-    // clean workbook clean.
-    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    // the flag afterwards the way `open_file` does. Decided AFTER every step
+    // that can refuse -- the pull (a missing or unreadable source) and the
+    // sheet-id gate below -- so a refusal leaves a clean workbook clean.
+    let effect;
 
     let sheets_pulled = result.sheets.len();
 
@@ -11008,15 +11497,59 @@ pub(crate) fn dev_subscribe_inner(
 
     // Materialize pulled sheets into the workbook.
     let dev_map: std::collections::HashMap<SheetId, usize> = {
-        let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
-        let mut sheet_names = state.sheet_names.write(&effect).map_err(|e| e.to_string())?;
-        let mut sheet_ids = state.sheet_ids.write(&effect).map_err(|e| e.to_string())?;
+        let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
+        let sheet_names = state.sheet_names.lock_pending().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.lock_pending().map_err(|e| e.to_string())?;
+
+        // ONE SHEET PER ID (BUG-0154). A dev pull keeps the SOURCE's sheet ids,
+        // so a second dev subscribe to the same source -- or to a Save-As copy
+        // of this very workbook -- brings sheets whose ids are already sheets
+        // here. They were appended anyway, under the source's name: two tabs
+        // called "Sheet1" with ONE id between them, and the source's formulas
+        // reading whichever came first. The dev refresh has always refused to
+        // write over such a sheet or add a second one under its id; the
+        // subscribe now refuses too, under the locks that would append, so
+        // nothing can slip in between the check and the write.
+        if let Some(taken) = result.sheets.iter().find(|p| sheet_ids.contains(&p.sheet.id)) {
+            return Err(format!(
+                "CALP_DEV_SHEET_ALREADY_HERE: the source's sheet '{}' is already a sheet of \
+                 this workbook (it has the same sheet id) -- this workbook already \
+                 dev-subscribes to that source, or is a copy of it. Use Dev Refresh to update \
+                 the existing sheets instead.",
+                taken.name
+            ));
+        }
+        effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut grids = grids.authorize(&effect);
+        let mut sheet_names = sheet_names.authorize(&effect);
+        let mut sheet_ids = sheet_ids.authorize(&effect);
         let mut shared_styles = state.style_registry.write(&effect).map_err(|e| e.to_string())?;
         let mut all_cw = state.all_column_widths.write(&effect).map_err(|e| e.to_string())?;
         let mut all_rh = state.all_row_heights.write(&effect).map_err(|e| e.to_string())?;
 
+        // ONE NAME PER SHEET (BUG-0154). The dev pull appended every sheet under
+        // the source's name with no collision pass, so a source "Sheet1" pulled
+        // into a workbook that has one made two tabs called "Sheet1" -- and every
+        // name lookup (formulas, pivot anchors, the Name Box) then found the
+        // first. The same rule a real pull applies ("Sheet1" -> "Sheet1 (2)"),
+        // decided under the lock that appends, and the source's references to
+        // a renamed sheet follow it (BUG-0151's simultaneous rewrite).
+        //
+        // The pulled sheet keeps the SOURCE's name in `result`: a dev
+        // subscription records it as `local_name`, and `dev_refresh_inner`
+        // re-requests the source's sheets by exactly that name.
+        let local_names = dev_local_sheet_names(&result, &sheet_names, &sheet_ids, &[]);
+        let renames = calp::sheet_renames::SheetRenames::new(
+            result.sheets.iter().zip(local_names.iter()).filter_map(|(p, local)| {
+                local.as_ref().map(|l| (p.name.clone(), l.clone()))
+            }),
+        );
+        for pulled in result.sheets.iter_mut() {
+            renames.rename_sheet_formulas(&mut pulled.sheet);
+        }
+
         let mut map = std::collections::HashMap::new();
-        for pulled in &result.sheets {
+        for (pulled, local_name) in result.sheets.iter().zip(local_names) {
             let (mut grid, local_styles) = pulled.sheet.to_grid();
 
             // Remap local style indices (cells AND row/column tiers) to the
@@ -11026,7 +11559,7 @@ pub(crate) fn dev_subscribe_inner(
 
             map.insert(pulled.source_sheet_id, grids.len());
             grids.push(grid);
-            sheet_names.push(pulled.name.clone());
+            sheet_names.push(local_name.unwrap_or_else(|| pulled.name.clone()));
             sheet_ids.push(pulled.sheet.id);
             all_cw.push(pulled.sheet.column_widths.clone());
             all_rh.push(pulled.sheet.row_heights.clone());
@@ -11236,7 +11769,7 @@ pub(crate) fn dev_refresh_inner(
         )
     };
 
-    let result = calp::dev_mode::pull_dev(source, &sheet_names)
+    let mut result = calp::dev_mode::pull_dev(source, &sheet_names)
         .map_err(|e| e.to_string())?;
 
     // Re-materializes the dev source over this workbook: same reasoning as
@@ -11263,8 +11796,22 @@ pub(crate) fn dev_refresh_inner(
         let mut all_cw = state.all_column_widths.write(&effect).map_err(|e| e.to_string())?;
         let mut all_rh = state.all_row_heights.write(&effect).map_err(|e| e.to_string())?;
 
+        // THE LOCAL NAME OF EVERY PULLED SHEET (BUG-0154): a tracked one keeps
+        // the name its tab carries here, a new one is collision-named against
+        // the workbook, and the source's references follow both.
+        let local_names =
+            dev_local_sheet_names(&result, &sheet_names_state, &sheet_ids, &tracked_ids);
+        let renames = calp::sheet_renames::SheetRenames::new(
+            result.sheets.iter().zip(local_names.iter()).filter_map(|(p, local)| {
+                local.as_ref().map(|l| (p.name.clone(), l.clone()))
+            }),
+        );
+        for pulled in result.sheets.iter_mut() {
+            renames.rename_sheet_formulas(&mut pulled.sheet);
+        }
+
         let mut map = std::collections::HashMap::new();
-        for pulled in &result.sheets {
+        for (pulled, local_name) in result.sheets.iter().zip(local_names) {
             let (mut grid, local_styles) = pulled.sheet.to_grid();
 
             // Remap local style indices (cells AND row/column tiers) to the
@@ -11300,7 +11847,7 @@ pub(crate) fn dev_refresh_inner(
                 // New sheet added since last pull — append.
                 map.insert(pulled.source_sheet_id, grids.len());
                 grids.push(grid);
-                sheet_names_state.push(pulled.name.clone());
+                sheet_names_state.push(local_name.unwrap_or_else(|| pulled.name.clone()));
                 sheet_ids.push(pulled.sheet.id);
                 all_cw.push(pulled.sheet.column_widths.clone());
                 all_rh.push(pulled.sheet.row_heights.clone());
@@ -19122,18 +19669,45 @@ pub(crate) fn restore_pulled_pivots(
         Ok(k) => k.clone(),
         Err(_) => return,
     };
+    // THE SHEET NAMES, snapshotted the same way (C7). This took `sheet_names`
+    // AFTER `grids` and `pivot_tables` and held both while it waited, while
+    // `calp_get_application_objects` -- and every name authority -- takes
+    // `sheet_names` first and `pivot_tables` after: two orders over one pair.
+    // A copy taken before any other lock holds nothing while it waits.
+    let sheet_names: Vec<String> = match state.sheet_names.read() {
+        Ok(sn) => sn.clone(),
+        Err(_) => return,
+    };
+    // The collision renames, looked up CASE-INSENSITIVELY. A pivot's stored
+    // anchor may spell its tab in another case (a case-only rename updates no
+    // definition, and publish compares case-insensitively); an exact lookup
+    // missed "report" -> "Report (2)", and the destination then resolved to the
+    // SUBSCRIBER's own "Report".
+    let sheet_renames = calp::sheet_renames::SheetRenames::new(sheet_rename_map.iter());
+
+    // CANONICAL GRID LOCK ORDER: `grid` (the active sheet's mirror) before
+    // `grids`, both before everything else.
+    //
+    // THE MIRROR IS WRITTEN TOO (BUG-0152). `state.grid` is the ACTIVE sheet's
+    // authoritative copy, and `run_calculation_pass` opens with
+    // `grids[active] = grid.clone()` -- a whole-grid REPLACEMENT. A pivot
+    // written into `grids` alone on the active sheet was erased by the next
+    // recalculation. This path assumed its destination was always a freshly
+    // appended sheet; a destination resolved BY NAME can be any sheet.
+    let mut active_grid = match state.grid.write(effect) {
+        Ok(g) => g,
+        Err(_) => return,
+    };
     let mut grids = match state.grids.write(effect) {
         Ok(g) => g,
         Err(_) => return,
     };
+    // Read under the grid locks: a sheet switch saves the mirror under them, so
+    // the active index cannot move while they are held.
+    let active_sheet = state.active_sheet.read().map(|a| *a).unwrap_or(usize::MAX);
 
     let mut pivot_tables = match pivot_state.pivot_tables.write(effect) {
         Ok(pt) => pt,
-        Err(_) => return,
-    };
-
-    let sheet_names = match state.sheet_names.read() {
-        Ok(sn) => sn,
         Err(_) => return,
     };
 
@@ -19164,17 +19738,13 @@ pub(crate) fn restore_pulled_pivots(
         // renamed the pulled sheet ("Sheet1" -> "Sheet1 (2)"), rewrite the
         // stored anchor so the pivot lands on the application's own sheet — not on
         // the subscriber's same-named sheet (or sheet 0 via the fallback).
-        if let Some(ref dest) = def.destination_sheet {
-            if let Some(renamed) = sheet_rename_map.get(dest) {
-                def.destination_sheet = Some(renamed.clone());
-            }
+        if let Some(renamed) = def.destination_sheet.as_deref().and_then(|d| sheet_renames.target(d)) {
+            def.destination_sheet = Some(renamed.to_string());
         }
         // The SOURCE anchor is a sheet name too, and needs the same remap —
         // otherwise a pulled pivot reads the subscriber's same-named sheet.
-        if let Some(ref src) = def.source_sheet {
-            if let Some(renamed) = sheet_rename_map.get(src) {
-                def.source_sheet = Some(renamed.clone());
-            }
+        if let Some(renamed) = def.source_sheet.as_deref().and_then(|s| sheet_renames.target(s)) {
+            def.source_sheet = Some(renamed.to_string());
         }
 
         // For BI pivots, ensure the source display shows the model name, not a grid range
@@ -19287,9 +19857,15 @@ pub(crate) fn restore_pulled_pivots(
         }
 
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
+            // The active sheet's mirror gets the same cells (see the lock block).
+            let mirror = if dest_sheet_idx == active_sheet {
+                Some(&mut *active_grid)
+            } else {
+                None
+            };
             let merges = write_pivot_to_grid(
                 dest_grid,
-                None, // no active_grid dual-write needed
+                mirror,
                 &view,
                 def.destination,
                 &mut shared_styles,
@@ -19310,9 +19886,9 @@ pub(crate) fn restore_pulled_pivots(
     // EVERY GUARD DROPPED before the merge sets are touched:
     // `with_sheet_merges_mut` takes `active_sheet` and a merge store itself.
     drop(shared_styles);
-    drop(sheet_names);
     drop(pivot_tables);
     drop(grids);
+    drop(active_grid);
     for (dest_sheet_idx, (sr, sc, er, ec), merges) in pending_merges {
         crate::report::with_sheet_merges_mut(state, effect, dest_sheet_idx, |merged| {
             // A merge wholly inside the pivot's box was the old occupant's; the
@@ -20121,7 +20697,7 @@ pub fn calp_reset_subscription(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
     // Locate the subscription and copy what we need (lock released after).
-    let (resolved_version, tracked): (String, Vec<(SheetId, SheetId)>) = {
+    let (resolved_version, tracked, subscription): (String, Vec<(SheetId, SheetId)>, calp::manifest::Subscription) = {
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let sub = subs
             .subscriptions
@@ -20134,6 +20710,7 @@ pub fn calp_reset_subscription(
                 .iter()
                 .map(|s| (s.package_sheet_id, s.local_sheet_id))
                 .collect(),
+            sub.clone(),
         )
     };
 
@@ -20158,7 +20735,7 @@ pub fn calp_reset_subscription(
     // ALREADY-TRUSTED: "Reset to published" restores an application the user
     // subscribed to. Re-pulling the exact resolved version must not be a way to
     // acquire the pin the subscribe step never granted.
-    let result = calp::pull::pull(
+    let mut result = calp::pull::pull(
         &registry,
         &request,
         &scope,
@@ -20166,6 +20743,8 @@ pub fn calp_reset_subscription(
         calp::integrity::PinPolicy::RequirePinned,
     )
     .map_err(|e| e.to_string())?;
+    // The references follow the names this workbook gave the sheets (BUG-0151).
+    rename_pulled_references_for_reset(&state, &subscription, &mut result)?;
 
     // Match pulled sheets to their local workbook indices via the ledger.
     let pkg_to_local: std::collections::HashMap<SheetId, SheetId> =
@@ -20367,15 +20946,19 @@ pub fn calp_reset_subscription(
                 if !pivot_tables.contains_key(&def.id) {
                     return None;
                 }
-                if let Some(ref dest) = def.destination_sheet {
-                    if let Some(local) = pkg_name_to_local.get(dest) {
-                        def.destination_sheet = Some(local.clone());
-                    }
+                // CASE-INSENSITIVELY: a stored anchor may spell its tab in
+                // another case (the pull path's rule, BUG-0152's review).
+                let local_of = |name: &str| {
+                    pkg_name_to_local
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                        .map(|(_, v)| v.clone())
+                };
+                if let Some(local) = def.destination_sheet.as_deref().and_then(local_of) {
+                    def.destination_sheet = Some(local);
                 }
-                if let Some(ref src) = def.source_sheet {
-                    if let Some(local) = pkg_name_to_local.get(src) {
-                        def.source_sheet = Some(local.clone());
-                    }
+                if let Some(local) = def.source_sheet.as_deref().and_then(local_of) {
+                    def.source_sheet = Some(local);
                 }
                 Some((def.id, def))
             })
@@ -20421,7 +21004,7 @@ pub fn calp_reset_subscription(
         let data = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
         let description = format!("Reset '{}' to published state", params.package_name);
         let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
-        undo_stack.begin_transaction(&description);
+        let owned_txn = undo_stack.begin_owned_transaction(&description);
         undo_stack.record_custom_restore("calp_reset".to_string(), data, &description);
         for pivot_snap in current_pivot_snapshots {
             undo_stack.record_custom_restore(
@@ -20430,7 +21013,7 @@ pub fn calp_reset_subscription(
                 &description,
             );
         }
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
     }
 
     // Reset replaces the tracked sheets' cells, pivot definitions and override
@@ -22086,3 +22669,248 @@ pub(crate) const CALP_PUBLISH_COVERAGE: &[(&str, &str)] = &[
          the signed manifest) and this number has no meaning inside one.",
     ),
 ];
+
+#[cfg(test)]
+mod pull_rename_payload_tests {
+    //! Wave-B B4 (BUG-0151 follow-up). A collision rename on pull ('Data'
+    //! arrives as 'Data (2)') must reach the RULE payloads too: conditional
+    //! formats, data validations, the formula properties of cell-anchored
+    //! controls and pane-control dropdown sources. `core/calp` walks them as
+    //! opaque JSON (`SheetRenames::rename_pulled_rules`); these tests build each
+    //! payload from the HOST's own typed structs, so a renamed or added
+    //! formula field in a host type turns a test red here instead of silently
+    //! escaping the rename. And the push half puts every one of them back
+    //! (`restore_published_sheet_references`).
+    use crate::conditional_formatting as cf;
+    use crate::data_validation as dv;
+    use calp::sheet_renames::{PulledRules, SheetRenames};
+
+    fn def(id: u64, rule: cf::ConditionalFormatRule) -> cf::ConditionalFormatDefinition {
+        cf::ConditionalFormatDefinition {
+            id,
+            priority: id as u32,
+            rule,
+            format: cf::ConditionalFormat::default(),
+            ranges: vec![],
+            stop_if_true: false,
+            enabled: true,
+        }
+    }
+
+    fn point(formula: &str) -> cf::ColorScalePoint {
+        cf::ColorScalePoint {
+            value_type: cf::CFValueType::Formula,
+            value: None,
+            formula: Some(formula.to_string()),
+            color: "#ffffff".to_string(),
+        }
+    }
+
+    /// Every CF rule variant that carries a formula, each naming `sheet`.
+    fn cf_rules(sheet: &str) -> Vec<cf::ConditionalFormatDefinition> {
+        let f = |cell: &str| format!("={}!{}", sheet, cell);
+        vec![
+            def(1, cf::ConditionalFormatRule::Expression(cf::ExpressionRule { formula: format!("=A1>{}!$B$1", sheet) })),
+            def(
+                2,
+                cf::ConditionalFormatRule::CellValue(cf::CellValueRule {
+                    operator: cf::CellValueOperator::Between,
+                    value1: f("A1"),
+                    value2: Some(f("A2")),
+                }),
+            ),
+            def(
+                3,
+                cf::ConditionalFormatRule::ColorScale(cf::ColorScaleRule {
+                    min_point: point(&f("C1")),
+                    mid_point: Some(point(&f("C2"))),
+                    max_point: point(&f("C3")),
+                }),
+            ),
+            def(
+                4,
+                cf::ConditionalFormatRule::DataBar(cf::DataBarRule {
+                    min_formula: Some(f("D1")),
+                    max_formula: Some(f("D2")),
+                    ..cf::DataBarRule::default()
+                }),
+            ),
+            def(
+                5,
+                cf::ConditionalFormatRule::IconSet(cf::IconSetRule {
+                    icon_set: cf::IconSetType::default(),
+                    thresholds: vec![cf::IconSetThreshold {
+                        value_type: cf::CFValueType::Formula,
+                        value: 0.0,
+                        operator: cf::ThresholdOperator::default(),
+                        formula: Some(f("E1")),
+                    }],
+                    reverse_icons: false,
+                    show_icon_only: false,
+                }),
+            ),
+        ]
+    }
+
+    /// Every formula string the typed rules carry.
+    fn cf_formulas(defs: &[cf::ConditionalFormatDefinition]) -> Vec<String> {
+        let mut out = Vec::new();
+        for d in defs {
+            match &d.rule {
+                cf::ConditionalFormatRule::Expression(r) => out.push(r.formula.clone()),
+                cf::ConditionalFormatRule::CellValue(r) => {
+                    out.push(r.value1.clone());
+                    out.extend(r.value2.clone());
+                }
+                cf::ConditionalFormatRule::ColorScale(r) => {
+                    out.extend(r.min_point.formula.clone());
+                    out.extend(r.mid_point.as_ref().and_then(|p| p.formula.clone()));
+                    out.extend(r.max_point.formula.clone());
+                }
+                cf::ConditionalFormatRule::DataBar(r) => {
+                    out.extend(r.min_formula.clone());
+                    out.extend(r.max_formula.clone());
+                }
+                cf::ConditionalFormatRule::IconSet(r) => {
+                    out.extend(r.thresholds.iter().filter_map(|t| t.formula.clone()));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn validations(sheet: &str) -> Vec<dv::ValidationRange> {
+        vec![dv::ValidationRange {
+            start_row: 0,
+            start_col: 0,
+            end_row: 9,
+            end_col: 0,
+            validation: dv::DataValidation {
+                rule: dv::DataValidationRule::Custom(dv::CustomRule { formula: format!("=COUNTIF({}!A:A,A1)=1", sheet) }),
+                ..dv::DataValidation::default()
+            },
+        }]
+    }
+
+    fn control_entries(sheet: &str) -> Vec<crate::controls::SavedControlEntry> {
+        let mut properties = std::collections::HashMap::new();
+        properties.insert(
+            "text".to_string(),
+            crate::controls::ControlPropertyValue { value_type: "formula".to_string(), value: format!("={}!A1", sheet) },
+        );
+        vec![crate::controls::SavedControlEntry { row: 1, col: 1, control_type: "button".to_string(), properties }]
+    }
+
+    fn saved_pane(sheet: &str) -> persistence::SavedPaneControl {
+        let config = crate::pane_control::PaneControlConfig::Dropdown {
+            source: crate::pane_control::DropdownSource::CellRange { reference: format!("{}!A1:A5", sheet) },
+            placeholder: None,
+            chart_param_target: None,
+        };
+        persistence::SavedPaneControl {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: "Region".to_string(),
+            control_type: "dropdown".to_string(),
+            config: serde_json::to_value(&config).unwrap(),
+            value: serde_json::Value::Null,
+            order: 0,
+        }
+    }
+
+    /// The four payloads, deserialized back into the host types, as the
+    /// reference texts they carry (a CF entry per formula).
+    fn typed_references(
+        cfs: &persistence::SavedSheetConditionalFormats,
+        dvs: &persistence::SavedSheetDataValidations,
+        controls: &persistence::SavedSheetControls,
+        pane: &persistence::SavedPaneControl,
+    ) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let back: Vec<cf::ConditionalFormatDefinition> = serde_json::from_value(cfs.rules.clone()).unwrap();
+        out.extend(cf_formulas(&back).into_iter().map(|f| ("conditional format".to_string(), f)));
+        let back: Vec<dv::ValidationRange> = serde_json::from_value(dvs.ranges.clone()).unwrap();
+        if let dv::DataValidationRule::Custom(rule) = &back[0].validation.rule {
+            out.push(("data validation".to_string(), rule.formula.clone()));
+        }
+        let back: Vec<crate::controls::SavedControlEntry> = serde_json::from_value(controls.controls.clone()).unwrap();
+        out.push(("control property".to_string(), back[0].properties["text"].value.clone()));
+        let back: crate::pane_control::PaneControlConfig = serde_json::from_value(pane.config.clone()).unwrap();
+        if let crate::pane_control::PaneControlConfig::Dropdown {
+            source: crate::pane_control::DropdownSource::CellRange { reference },
+            ..
+        } = back
+        {
+            out.push(("pane-control dropdown".to_string(), reference));
+        }
+        out
+    }
+
+    fn assert_every_reference_names(refs: &[(String, String)], wanted: &str, count: usize) {
+        assert_eq!(refs.len(), count, "fixture: every payload carries its references: {refs:?}");
+        for (what, text) in refs {
+            assert!(text.contains(wanted), "{what}: `{text}` does not name {wanted}");
+        }
+    }
+
+    #[test]
+    fn a_collision_rename_reaches_every_typed_rule_formula_on_pull() {
+        let sheet = identity::SheetId::from_bytes(identity::generate_uuid_v7());
+        let mut cfs = vec![persistence::SavedSheetConditionalFormats {
+            sheet_id: sheet,
+            rules: serde_json::to_value(cf_rules("Data")).unwrap(),
+        }];
+        let mut dvs = vec![persistence::SavedSheetDataValidations {
+            sheet_id: sheet,
+            ranges: serde_json::to_value(validations("Data")).unwrap(),
+        }];
+        let mut controls = vec![persistence::SavedSheetControls {
+            sheet_id: sheet,
+            controls: serde_json::to_value(control_entries("Data")).unwrap(),
+        }];
+        let mut panes = vec![saved_pane("Data")];
+
+        SheetRenames::new([("Data", "Data (2)")]).rename_pulled_rules(PulledRules {
+            conditional_formats: &mut cfs,
+            data_validations: &mut dvs,
+            controls: &mut controls,
+            pane_controls: &mut panes,
+        });
+
+        // 9 CF formulas + 1 validation + 1 control property + 1 dropdown.
+        assert_every_reference_names(&typed_references(&cfs[0], &dvs[0], &controls[0], &panes[0]), "'Data (2)'!", 12);
+    }
+
+    /// The push half: a working copy whose checkout renamed the application's
+    /// "Data" to "Data (2)" publishes every rule back under "Data".
+    #[test]
+    fn a_push_restores_the_published_name_in_every_rule_payload() {
+        let mut wb = persistence::Workbook::new();
+        wb.sheets = vec![persistence::Sheet::new("Report".to_string()), persistence::Sheet::new("Data (2)".to_string())];
+        let report = wb.sheets[0].id;
+        let local = "'Data (2)'";
+        wb.conditional_formats = vec![persistence::SavedSheetConditionalFormats {
+            sheet_id: report,
+            rules: serde_json::to_value(cf_rules(local)).unwrap(),
+        }];
+        wb.data_validations =
+            vec![persistence::SavedSheetDataValidations { sheet_id: report, ranges: serde_json::to_value(validations(local)).unwrap() }];
+        wb.controls =
+            vec![persistence::SavedSheetControls { sheet_id: report, controls: serde_json::to_value(control_entries(local)).unwrap() }];
+        wb.pane_controls = vec![saved_pane(local)];
+
+        let mut published = std::collections::HashMap::new();
+        published.insert("data (2)".to_string(), "Data".to_string());
+        let counts = super::restore_published_sheet_references(&mut wb, &[0, 1], &published);
+        assert_eq!(
+            (counts.conditional_formats, counts.data_validations, counts.controls, counts.pane_controls),
+            (9, 1, 1, 1),
+            "every rule payload is restored to the published name"
+        );
+        let refs = typed_references(&wb.conditional_formats[0], &wb.data_validations[0], &wb.controls[0], &wb.pane_controls[0]);
+        assert_every_reference_names(&refs, "Data!", 12);
+        for (what, text) in &refs {
+            assert!(!text.contains("Data (2)"), "{what}: the push still ships the local name: `{text}`");
+        }
+    }
+}

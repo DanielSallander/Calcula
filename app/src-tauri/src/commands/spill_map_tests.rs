@@ -1762,7 +1762,14 @@ fn clear_range_still_runs_the_four_phases_this_harness_reproduces() {
     // Order matters: the guard must precede the undo transaction, so a refusal
     // is a clean no-op.
     let guard = body.find("check_spill_protection").expect("guard present");
-    let txn = body.find("begin_transaction").expect("transaction present");
+    // Either spelling of the begin: the owned door (engine::OwnedTransaction)
+    // is what `clear_range` uses now, and "begin_owned_transaction" does not
+    // contain the text "begin_transaction".
+    let txn = ["begin_owned_transaction(", "begin_transaction("]
+        .iter()
+        .filter_map(|needle| body.find(needle))
+        .min()
+        .expect("transaction present");
     assert!(
         guard < txn,
         "`clear_range` opens its undo transaction before the spill guard runs"

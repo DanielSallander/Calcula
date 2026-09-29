@@ -21,10 +21,7 @@ import {
 import { handleAnnotationClick } from "./handlers/clickHandler";
 import { handleSelectionChange } from "./handlers/selectionHandler";
 import { initHoverHandler, destroyHoverHandler, hidePreview } from "./handlers/hoverHandler";
-import {
-  registerKeyboardShortcuts,
-  unregisterKeyboardShortcuts,
-} from "./handlers/keyboardHandler";
+import { registerReviewCommands } from "./handlers/keyboardHandler";
 import {
   registerAnnotationContextMenuItems,
   unregisterAnnotationContextMenuItems,
@@ -181,11 +178,11 @@ function activate(context: ExtensionContext): void {
   registerAnnotationContextMenuItems();
 
   // 9. Register Review menu items (appended to existing Review menu)
-  registerReviewMenuItems();
+  cleanupFns.push(registerReviewMenuItems());
 
-  // 10. Register keyboard shortcuts
-  registerKeyboardShortcuts();
-  cleanupFns.push(unregisterKeyboardShortcuts);
+  // 10. The New Comment / New Note commands the registry's Ctrl+Alt+M and
+  //     Shift+F2 run (the registry is the one keyboard path).
+  cleanupFns.push(registerReviewCommands(context.commands));
 
   // 11. Initial state load
   void requestAnnotationRefresh();

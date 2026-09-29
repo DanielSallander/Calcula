@@ -33,7 +33,7 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => context.ui.dialogs.unregister("data-form"));
 
   // 2. Register menu item in Data menu
-  registerDataFormMenuItem(context);
+  cleanupFns.push(registerDataFormMenuItem(context));
 
   // 3. Track current selection
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {

@@ -2,11 +2,27 @@
 // PURPOSE: Tests for the Checkbox extension toggle behavior.
 // CONTEXT: Verifies checkbox insert, toggle, and value persistence.
 
-import type { TestSuite } from "../types";
-import { expectCellValue } from "../assertions";
+import type { TestSuite, TestContext } from "../types";
+import { applyFormatting, getStyle } from "@api/lib";
+import { assertTrue, expectCellValue } from "../assertions";
 import { AREA_CHECKBOX } from "../testArea";
 
 const A = AREA_CHECKBOX;
+
+/**
+ * Make rows `r0..r1` of column `col` LEGACY style-flag checkboxes -- the kind
+ * the Checkbox extension's `checkbox.toggle` (and a bare Space) toggles: the
+ * `checkbox` style flag plus a FALSE value. No command inserts one any more
+ * (Insert > Cell Type > Checkbox makes a cell-type brick, a different kind);
+ * the suite used to execute `checkbox.insert`, an id registered nowhere, which
+ * did nothing at all -- silently, until the runner learned to fail on it.
+ */
+async function insertLegacyCheckboxes(ctx: TestContext, r0: number, r1: number, col: number): Promise<void> {
+  const rows: number[] = [];
+  for (let r = r0; r <= r1; r++) rows.push(r);
+  await ctx.setCells(rows.map((row) => ({ row, col, value: "FALSE" })));
+  await applyFormatting(rows, [col], { checkbox: true });
+}
 
 export const checkboxSuite: TestSuite = {
   name: "Checkbox",
@@ -44,11 +60,15 @@ export const checkboxSuite: TestSuite = {
         await ctx.settle();
         await ctx.settle();
 
-        await ctx.executeCommand("checkbox.insert");
+        await insertLegacyCheckboxes(ctx, A.row, A.row, A.col);
         await ctx.settle();
 
         const cell = await ctx.getCell(A.row, A.col);
         expectCellValue(cell, "FALSE", A.ref(0, 0));
+        // The FALSE is the setup's own write; what makes the cell a checkbox is
+        // the style flag, so that is what this test checks.
+        const style = await getStyle(cell!.styleIndex);
+        assertTrue(style.checkbox === true, `${A.ref(0, 0)} does not carry the checkbox style flag`);
       },
     },
     {
@@ -62,7 +82,7 @@ export const checkboxSuite: TestSuite = {
         await ctx.settle();
         await ctx.settle();
 
-        await ctx.executeCommand("checkbox.insert");
+        await insertLegacyCheckboxes(ctx, A.row, A.row, A.col);
         await ctx.settle();
 
         // Verify initial state
@@ -87,7 +107,7 @@ export const checkboxSuite: TestSuite = {
         await ctx.settle();
         await ctx.settle();
 
-        await ctx.executeCommand("checkbox.insert");
+        await insertLegacyCheckboxes(ctx, A.row, A.row, A.col);
         await ctx.settle();
 
         // Toggle to TRUE
@@ -116,7 +136,7 @@ export const checkboxSuite: TestSuite = {
         await ctx.settle();
         await ctx.settle();
 
-        await ctx.executeCommand("checkbox.insert");
+        await insertLegacyCheckboxes(ctx, A.row, A.row + 1, A.col);
         await ctx.settle();
 
         // Both should be FALSE

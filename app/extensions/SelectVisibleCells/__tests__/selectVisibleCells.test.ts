@@ -67,7 +67,7 @@ describe("SelectVisibleCells", () => {
     registerMenuItemMock.mockClear();
 
     // Activate extension to register the menu item
-    extension.activate({} as ExtensionContext);
+    extension.activate({ commands: { register: vi.fn(), unregister: vi.fn() } } as unknown as ExtensionContext);
 
     // Extract the action callback
     const call = registerMenuItemMock.mock.calls.find(

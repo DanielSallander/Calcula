@@ -481,13 +481,76 @@ pub struct GridCheckpoint {
     pub grids: Vec<Grid>,
 }
 
+/// One checkpoint and the IDENTITY of every sheet its grids belong to, in the
+/// grids' order (`None`: taken without them -- a rewind to it is refused).
+pub struct StampedCheckpoint {
+    pub checkpoint: GridCheckpoint,
+    pub sheet_ids: Option<Vec<identity::SheetId>>,
+}
+
+/// The notebook's checkpoints, in execution order.
+///
+/// WHY THE SHEET IDS. A checkpoint is a copy of every grid BY POSITION, and a
+/// rewind installed it by position: a sheet MOVE between the checkpoint and the
+/// rewind -- same count, new order -- poured each sheet's snapshot into its
+/// neighbour, and a delete plus an add (same count again) replaced a sheet
+/// with a stranger's cells. Every checkpoint the notebook takes now records
+/// which sheet each grid is, and the rewind installs each snapshot onto the
+/// sheet it came from (`plan_checkpoint_install`).
+pub struct NotebookCheckpoints {
+    entries: Vec<StampedCheckpoint>,
+}
+
+impl NotebookCheckpoints {
+    pub fn new() -> Self {
+        NotebookCheckpoints { entries: Vec::new() }
+    }
+
+    /// A checkpoint WITHOUT its sheet identities. Kept for callers that have no
+    /// sheet list to hand; a rewind to one is refused rather than guessed.
+    pub fn push(&mut self, checkpoint: GridCheckpoint) {
+        self.entries.push(StampedCheckpoint { checkpoint, sheet_ids: None });
+    }
+
+    /// A checkpoint with the id of the sheet each of its grids belongs to.
+    pub fn push_stamped(&mut self, checkpoint: GridCheckpoint, sheet_ids: Vec<identity::SheetId>) {
+        self.entries.push(StampedCheckpoint { checkpoint, sheet_ids: Some(sheet_ids) });
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Drop the oldest checkpoint (the LRU bound).
+    pub fn evict_oldest(&mut self) {
+        if !self.entries.is_empty() {
+            self.entries.remove(0);
+        }
+    }
+
+    /// The FIRST checkpoint taken for `cell_id` (a rewind goes back to the
+    /// state before the cell's first run in this session).
+    pub fn first_for_cell(&self, cell_id: &str) -> Option<&StampedCheckpoint> {
+        self.entries.iter().find(|e| e.checkpoint.cell_id == cell_id)
+    }
+}
+
 /// Runtime bookkeeping for an active notebook session.
 /// Not persisted — exists only while the notebook is open.
 /// The QuickJS session itself is owned by the executor thread
 /// (notebook_executor.rs), never stored here, so no unsafe Send is needed.
 pub struct NotebookRuntime {
-    /// Grid snapshots taken before each cell execution, in execution order.
-    pub checkpoints: Vec<GridCheckpoint>,
+    /// Grid snapshots taken before each cell execution, in execution order,
+    /// each with its sheets' identities.
+    pub checkpoints: NotebookCheckpoints,
     /// Grid state before any notebook cell ran (for full rewind).
     pub baseline: Option<Vec<Grid>>,
     /// Monotonic counter for cell execution indices.
@@ -499,7 +562,7 @@ pub struct NotebookRuntime {
 impl NotebookRuntime {
     pub fn new() -> Self {
         NotebookRuntime {
-            checkpoints: Vec::new(),
+            checkpoints: NotebookCheckpoints::new(),
             baseline: None,
             execution_counter: 0,
             max_checkpoints: 50,

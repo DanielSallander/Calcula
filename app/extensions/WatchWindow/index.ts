@@ -40,10 +40,10 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => context.ui.dialogs.unregister(DIALOG_ID));
 
   // 2. Register Formulas menu item
-  registerWatchWindowMenuItem();
+  cleanupFns.push(registerWatchWindowMenuItem());
 
   // 3. Register grid context menu items
-  registerWatchWindowContextMenu();
+  cleanupFns.push(registerWatchWindowContextMenu());
 
   // 4. Refresh watches on data changes (even when dialog is closed)
   const unsubData = context.events.on(AppEvents.DATA_CHANGED, () => {

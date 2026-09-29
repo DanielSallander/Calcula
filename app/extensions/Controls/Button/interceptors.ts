@@ -160,7 +160,7 @@ async function executeButtonAction(row: number, col: number): Promise<void> {
   // Get the active sheet index
   const { getGridStateSnapshot } = await import("../../../src/api/grid");
   const gridState = getGridStateSnapshot();
-  const sheetIndex = gridState?.config?.activeSheet ?? 0;
+  const sheetIndex = gridState?.sheetContext?.activeSheetIndex ?? 0;
 
   const metadata = await getControlMetadata(sheetIndex, row, col);
   if (!metadata) return;
@@ -223,7 +223,7 @@ export async function handleButtonCellChange(
     const { removeControlMetadata } = await import("../lib/controlApi");
     const { getGridStateSnapshot } = await import("../../../src/api/grid");
     const gridState = getGridStateSnapshot();
-    const sheetIndex = gridState?.config?.activeSheet ?? 0;
+    const sheetIndex = gridState?.sheetContext?.activeSheetIndex ?? 0;
     await removeControlMetadata(sheetIndex, row, col);
 
     await refreshStyleCache();

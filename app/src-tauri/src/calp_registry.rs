@@ -540,6 +540,36 @@ mod tests {
         assert_eq!(a.label, base);
     }
 
+    /// BUG-0134 at the choke point every read command goes through
+    /// (`calp_browse_workspace`, the Application Inspector): opening a typed
+    /// location that does not exist creates nothing, and listing it is an error
+    /// that says so. Both spellings (the folder, and the `workspace.calcula`
+    /// pointer inside it) behave the same.
+    #[test]
+    fn opening_a_missing_location_on_a_read_path_creates_no_folder() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("no-such-workspace");
+        for spelling in [
+            missing.to_string_lossy().to_string(),
+            missing
+                .join(calp::workspace_id::WORKSPACE_MARKER_FILE)
+                .to_string_lossy()
+                .to_string(),
+        ] {
+            let (transport, _scope) = open_workspace_scoped(&spelling).unwrap();
+            let listed = transport.list_applications();
+            assert!(listed.is_err(), "{spelling}: a missing workspace lists as an error");
+            assert!(
+                !missing.exists(),
+                "{spelling}: browsing a mistyped location must not create the folder"
+            );
+        }
+        // Adding a workspace deliberately is a WRITE: it places the pointer file,
+        // which creates the folder.
+        ensure_workspace_marker(&missing.to_string_lossy());
+        assert!(missing.join(calp::workspace_id::WORKSPACE_MARKER_FILE).is_file());
+    }
+
     #[test]
     fn an_http_registry_scopes_by_scheme_host_and_path() {
         let (_t, scope) = open_workspace_scoped("https://REG.Acme.com:443/pub/").unwrap();

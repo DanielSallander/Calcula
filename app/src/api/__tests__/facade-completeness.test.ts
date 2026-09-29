@@ -328,6 +328,7 @@ describe("API Facade Completeness", () => {
       expect(typeof mod.unregisterDialog).toBe("function");
       expect(typeof mod.showDialog).toBe("function");
       expect(typeof mod.hideDialog).toBe("function");
+      expect(typeof mod.isDialogOpen).toBe("function");
     });
 
     it("exports overlay functions", async () => {

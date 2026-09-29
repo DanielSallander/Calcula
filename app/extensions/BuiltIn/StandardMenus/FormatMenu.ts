@@ -4,10 +4,11 @@
 
 import React from 'react';
 import { CoreCommands } from '@api/commands';
-import { registerMenu } from '@api/ui';
+import { registerMenu, unregisterMenu } from '@api/ui';
 import type { MenuDefinition } from '@api/ui';
 import { applyFormatting } from '@api/lib';
 import { cellEvents, useGridState, IconFormatCells, IconCellStyles } from '@api';
+import { refuseIfSelectionOwned } from '@api/selectionOwner';
 import { CellStylesGallery } from '../../_shared/components/CellStylesGallery';
 import type { CellStyleDefinition } from '../../_shared/components/CellStylesGallery';
 
@@ -20,6 +21,9 @@ function CellStylesMenuPanel({ onClose }: { onClose: () => void }) {
 
   const handleApply = React.useCallback(
     async (formatting: CellStyleDefinition["formatting"]) => {
+      // The style lands on Core's selection -- a cell hidden under a floating
+      // grid while that grid's cell is selected (BUG-0185). Refused, once.
+      if (refuseIfSelectionOwned("Cell Style")) return;
       const sel = gridState.selection;
       if (!sel) return;
       const startRow = Math.min(sel.startRow, sel.endRow);
@@ -64,8 +68,10 @@ function CellStylesMenuPanel({ onClose }: { onClose: () => void }) {
 /**
  * Register the Format menu with the Menu Registry.
  * Placed between Edit (order=20) and View (order=40).
+ * Returns the teardown (deactivate): the menu is this extension's, so it goes
+ * with it; items other extensions added to it are kept by the registry.
  */
-export function registerFormatMenu(): void {
+export function registerFormatMenu(): () => void {
   const menu: MenuDefinition = {
     id: 'format',
     label: 'Format',
@@ -90,4 +96,5 @@ export function registerFormatMenu(): void {
   };
 
   registerMenu(menu);
+  return () => unregisterMenu(menu.id);
 }

@@ -47,7 +47,18 @@ describe("activate() wires the canvas-sheet pieces", () => {
     const listener = body.slice(body.indexOf("context.events.on(AppEvents.CELLS_UPDATED"));
     const call = listener.slice(0, listener.indexOf("});"));
     expect(call).toContain("peekRangeRefSheetIndex(chart.spec.data)");
-    expect(call).toMatch(/chartIntersectsChanges\(chart\.spec, changes, activeSheetIndex, sourceSheetIndex\)/);
+    expect(call).toMatch(
+      /chartIntersectsChanges\(chart\.spec, changes, activeSheetIndex, sourceSheetIndex, paramSheetIndex\)/,
+    );
+  });
+
+  it("keys a bound param cell on the sheet the chart READS (its own, or on a canvas its data sheet)", () => {
+    const body = activateBody();
+    const listener = body.slice(body.indexOf("context.events.on(AppEvents.CELLS_UPDATED"));
+    const call = listener.slice(0, listener.indexOf("});"));
+    expect(call).toMatch(
+      /const paramSheetIndex = paramCellSheetIndex\(\s*chart\.sheetIndex,\s*peekSheetIsCanvas\(chart\.sheetIndex\),\s*sourceSheetIndex,/,
+    );
   });
 
   it("reloads the store when the sheet COLLECTION changes (a detail-less SHEET_CHANGED)", () => {
@@ -72,5 +83,15 @@ describe("param write-back never writes a canvas", () => {
     // The brush site and the click site.
     expect(sites).toBe(2);
     expect(source).not.toMatch(/\bupdateCell\(/);
+  });
+
+  it("both sites name the chart, so the cell is on the sheet the chart reads", () => {
+    const source = chartsIndexSource();
+    expect(source).toMatch(
+      /writeParamValueToCell\(param\.writeTo, keys\[0\], param\.name, \{\s*sheetIndex: brushed\.sheetIndex,\s*spec: brushed\.spec,/,
+    );
+    expect(source).toMatch(
+      /writeParamValueToCell\(selectParam\.writeTo, key, selectParam\.name, \{\s*sheetIndex: clickedChart\.sheetIndex,\s*spec: clickedChart\.spec,/,
+    );
   });
 });

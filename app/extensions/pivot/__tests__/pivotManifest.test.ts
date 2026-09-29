@@ -39,10 +39,12 @@ vi.mock("../components/PivotAnalyzeSections", () => ({
   AnalyzeCalculationsSection: () => null,
 }));
 
+import type { DialogProps } from "@api";
 import { RibbonIcon } from "@api/ribbonIcons";
 import {
   PivotAnalyzePanelDefinition,
   PivotDesignPanelDefinition,
+  PivotDialogDefinition,
   PIVOT_ANALYZE_TAB_ID,
   PIVOT_DESIGN_TAB_ID,
 } from "../manifest";
@@ -127,5 +129,26 @@ describe("pivot contextual panels", () => {
       ["Report Layout", 3],
       ["Display", 4],
     ]);
+  });
+});
+
+// Wave D, X3 (completes W24): Insert > PivotTable opens with
+// `{ suppressAutoRange: true }` while a selection owner (a floating grid)
+// holds the selection -- Core's selection is then a cell HIDDEN under it. The
+// dialog wrapper dropped the flag, so the dialog prefilled from that cell.
+describe("the Create PivotTable dialog registration", () => {
+  // The wrapper is a function component: called directly, it returns the
+  // element it renders, whose props are what the dialog receives.
+  type Wrapper = (props: DialogProps) => React.ReactElement<Record<string, unknown>>;
+  const render = (data?: Record<string, unknown>) =>
+    (PivotDialogDefinition.component as Wrapper)({ isOpen: true, onClose: () => {}, data });
+
+  it("hands the opener's suppressAutoRange to the dialog", () => {
+    expect(render({ suppressAutoRange: true }).props.suppressAutoRange).toBe(true);
+  });
+
+  it("reads anything but true as not asked", () => {
+    expect(render().props.suppressAutoRange).toBe(false);
+    expect(render({ suppressAutoRange: "yes" }).props.suppressAutoRange).toBe(false);
   });
 });

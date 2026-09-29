@@ -31,6 +31,27 @@ pub enum OverrideValue {
     Empty,
 }
 
+impl OverrideValue {
+    /// The same value, a formula compared however it is SPELLED
+    /// (`sheet_renames::same_formula_text`).
+    ///
+    /// Every rebase decision goes through this rather than `==`. A published
+    /// formula can come back re-spelled without anybody editing it -- a
+    /// working copy's checkout collision rename and the push's undo of it
+    /// return an untouched `DATA!A1*2` as `Data!A1*2` (BUG-0151) -- and a
+    /// byte compare read that as "upstream changed the cell you overrode": a
+    /// conflict for a cell nobody touched, on every subscriber who had
+    /// overridden it.
+    pub fn same_as(&self, other: &OverrideValue) -> bool {
+        match (self, other) {
+            (OverrideValue::Formula { formula: a }, OverrideValue::Formula { formula: b }) => {
+                crate::sheet_renames::same_formula_text(a, b)
+            }
+            _ => self == other,
+        }
+    }
+}
+
 /// The canonical `OverrideValue` for an upstream cell, `None` meaning the cell
 /// is absent from the payload.
 ///
@@ -120,10 +141,10 @@ pub enum RebaseOutcome {
 pub fn classify_rebase(ovr: &CellOverride, upstream_new: &OverrideValue) -> RebaseOutcome {
     // auto_clear_matching runs AFTER rebase and wins over the conflict flag, so
     // it is tested first here for the same reason.
-    if ovr.current == *upstream_new || ovr.current == ovr.baseline {
+    if ovr.current.same_as(upstream_new) || ovr.current.same_as(&ovr.baseline) {
         return RebaseOutcome::AutoCleared;
     }
-    if *upstream_new != ovr.baseline {
+    if !upstream_new.same_as(&ovr.baseline) {
         RebaseOutcome::Conflict
     } else {
         RebaseOutcome::Unchanged
@@ -256,12 +277,12 @@ impl OverrideLayer {
         self.overrides.retain(|o| {
             if let Some(ref upstream_new) = o.upstream_new {
                 // If the override value now matches upstream, clear it
-                if o.current == *upstream_new {
+                if o.current.same_as(upstream_new) {
                     return false; // remove
                 }
             }
             // Also clear if current matches baseline (consumer undid their change)
-            if o.current == o.baseline {
+            if o.current.same_as(&o.baseline) {
                 return false;
             }
             true
@@ -292,7 +313,7 @@ impl OverrideLayer {
             // cells is worse than no resolver.
             let outcome = classify_rebase(ovr, new_upstream);
 
-            if *new_upstream != ovr.baseline {
+            if !new_upstream.same_as(&ovr.baseline) {
                 // Record what upstream now holds even when this will auto-clear:
                 // `auto_clear_matching` below needs it to recognise "the
                 // subscriber already typed what upstream now says".
@@ -617,6 +638,45 @@ mod tests {
 
         assert!(layer.get(s, c1).unwrap().conflict);
         assert!(!layer.get(s, c2).unwrap().conflict);
+    }
+
+    /// A RE-SPELLED FORMULA IS NOT AN UPSTREAM CHANGE. An author whose checkout
+    /// collision-renamed "Data" pushes an untouched `DATA!A1*2` home as
+    /// `Data!A1*2` (BUG-0151). A subscriber who had overridden that cell must
+    /// not be asked to resolve a conflict about it -- in the apply, and in the
+    /// preview's classifier, which must agree -- while a real upstream edit of
+    /// the formula still is one.
+    ///
+    /// SABOTAGE: compare with `==` in `classify_rebase` / `rebase`.
+    #[test]
+    fn a_re_spelled_upstream_formula_is_not_a_conflict() {
+        let formula = |f: &str| OverrideValue::Formula { formula: f.to_string() };
+        let mut layer = OverrideLayer::new();
+        let (s, c) = make_ids();
+        let c2 = CellId::from_bytes(identity::generate_uuid_v7());
+        let mut ovr = make_override(s, c, "", "");
+        ovr.baseline = formula("DATA!A1*2");
+        ovr.current = formula("DATA!A1*5");
+        let mut edited = ovr.clone();
+        edited.cell_id = c2;
+        layer.set_override(ovr.clone());
+        layer.set_override(edited.clone());
+
+        let respelled = formula("Data!A1*2");
+        assert_eq!(classify_rebase(&ovr, &respelled), RebaseOutcome::Unchanged);
+        assert_eq!(classify_rebase(&edited, &formula("Data!A1*3")), RebaseOutcome::Conflict);
+
+        let upstream: HashMap<(SheetId, CellId), OverrideValue> =
+            [((s, c), respelled), ((s, c2), formula("Data!A1*3"))].into_iter().collect();
+        let (conflicts, cleared) = layer.rebase(&upstream);
+        assert_eq!((conflicts, cleared), (1, 0));
+        assert!(!layer.get(s, c).unwrap().conflict, "the re-spelled cell is not a conflict");
+        assert!(layer.get(s, c2).unwrap().conflict, "a real upstream edit still is");
+
+        // The subscriber typing the upstream formula back, in any spelling,
+        // is a restore.
+        assert!(formula("'Data'!A1*2").same_as(&formula("DATA!A1*2")));
+        assert!(!formula("Data!A1*2").same_as(&OverrideValue::Value { display: "Data!A1*2".to_string() }));
     }
 
     #[test]

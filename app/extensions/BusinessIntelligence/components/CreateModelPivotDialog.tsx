@@ -9,9 +9,13 @@
 import React, { useState, useCallback, useEffect } from "react";
 import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api";
-import { useGridState, columnToLetter, DialogExtensions } from "@api";
+import { useGridState, DialogExtensions } from "@api";
 import { getConnections } from "../../_shared/lib/bi-api";
-import { createModelPivot } from "../lib/modelPivot";
+import {
+  createModelPivot,
+  modelPivotDestinationAtSelection,
+  modelPivotDestinationLabel,
+} from "../lib/modelPivot";
 import { MODEL_DIALOG_ID } from "../manifest";
 import type { ConnectionInfo } from "../types";
 
@@ -169,15 +173,14 @@ export function CreateModelPivotDialog({
 
   const handleInsert = useCallback(async () => {
     if (!selectedId) return;
+    // Refused, once, while Core's active cell is hidden under something else
+    // that owns the selection (lib/modelPivot.ts).
+    const destination = modelPivotDestinationAtSelection(gridState);
+    if (destination === null) return;
     try {
       setCreating(true);
       setError("");
-      const sel = gridState.selection;
-      await createModelPivot(selectedId, {
-        row: sel ? sel.startRow : 0,
-        col: sel ? sel.startCol : 0,
-        sheetIndex: gridState.sheetContext?.activeSheetIndex,
-      });
+      await createModelPivot(selectedId, destination);
       onClose();
     } catch (err) {
       setError(`Failed to create pivot: ${err}`);
@@ -188,8 +191,9 @@ export function CreateModelPivotDialog({
 
   if (!isOpen) return null;
 
-  const sel = gridState.selection;
-  const destCell = `${columnToLetter(sel ? sel.startCol : 0)}${(sel ? sel.startRow : 0) + 1}`;
+  // The cell on a worksheet; on a canvas the frame the pivot goes into -- the
+  // cell is not used there, so naming it misled (W23).
+  const destination = modelPivotDestinationLabel(gridState);
   const hasConnections = connections.length > 0;
 
   return (
@@ -226,7 +230,7 @@ export function CreateModelPivotDialog({
                   ))}
                 </select>
               </div>
-              <div style={styles.destination}>Destination: Cell {destCell}</div>
+              <div style={styles.destination}>Destination: {destination}</div>
             </>
           ) : (
             <div style={styles.emptyState}>

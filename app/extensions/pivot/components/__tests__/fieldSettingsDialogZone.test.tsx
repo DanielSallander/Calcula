@@ -3,12 +3,13 @@
 //          of the pivot, with its filter (review3 finding 2).
 //
 //          `update_pivot_fields` REPLACES each zone it is given
-//          (`definition.row_fields = row_configs...`, pivot/commands.rs), and
-//          an absent hidden-items list builds a field that hides nothing. The
-//          dialog sent `{ rowFields: [thisField] }`, so OK on Product's
-//          subtotals removed Region -- and Region's filter -- from the pivot.
-//          It now sends the whole zone as the definition holds it, with only
-//          the edited field changed.
+//          (`apply_zone_field_configs`, pivot/utils.rs). The dialog sent
+//          `{ rowFields: [thisField] }`, so OK on Product's subtotals removed
+//          Region -- and Region's filter -- from the pivot. It now sends the
+//          whole zone as the definition holds it, with only the edited field
+//          changed -- and, since BUG-0184 (the command keeps every setting it
+//          is not sent), no field's item filter: an echoed list could only
+//          race a filter changed elsewhere.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import React, { act } from "react";
@@ -93,9 +94,9 @@ describe("Field Settings saves one field without dropping its neighbours", () =>
       {
         pivotId: "p1",
         rowFields: [
-          { sourceIndex: 0, name: "Region", hiddenItems: ["West"] },
-          { sourceIndex: 1, name: "Product", hiddenItems: [], showSubtotals: false },
-          { sourceIndex: 2, name: "Channel", hiddenItems: ["Web"] },
+          { sourceIndex: 0, name: "Region" },
+          { sourceIndex: 1, name: "Product", showSubtotals: false },
+          { sourceIndex: 2, name: "Channel" },
         ],
       },
     ]);

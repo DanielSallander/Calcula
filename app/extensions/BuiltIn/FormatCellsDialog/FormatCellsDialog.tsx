@@ -26,6 +26,7 @@ import { FillTab } from "./tabs/FillTab";
 import { ProtectionTab } from "./tabs/ProtectionTab";
 import * as S from "./FormatCellsDialog.styles";
 import { alertAsync } from "@api/dialogs";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 // ============================================================================
 // Tab Definitions
@@ -187,6 +188,11 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
 
   // Handle OK - apply all formatting
   const handleOK = useCallback(async () => {
+    // The selection read below is Core's. If something else took the
+    // selection while the dialog was open (BUG-0185), that is a cell the user
+    // cannot see: refuse, write nothing, and keep the dialog (and the user's
+    // choices) open.
+    if (refuseIfSelectionOwned("Format Cells")) return;
     try {
       // Build row/col arrays from selection
       const startRow = Math.min(selection.startRow, selection.endRow);

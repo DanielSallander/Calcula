@@ -19,6 +19,7 @@ import {
   createChartObjectSelectionProvider,
   chartOwnsObjectKey,
   chartIdOfRegion,
+  type ChartDeleteRefusal,
 } from "../chartObjectSelection";
 import {
   consumePendingClick,
@@ -217,5 +218,29 @@ describe("the canvas selection set (M8)", () => {
     expect(getSetHeldObjectRegions().map((r) => r.id)).toEqual(["chart-c2"]);
     expect(getSelectedObjectRegions()).toHaveLength(2);
     setGridRegions([]);
+  });
+});
+
+describe("deleteObjects (a canvas-wide Delete's share, open-items 2.af row 1)", () => {
+  it("hands EVERY chart it is given -- the set-held ones too -- to THE chart delete", async () => {
+    const deleteCharts = vi.fn(async (): Promise<ChartDeleteRefusal[]> => []);
+    const p = createChartObjectSelectionProvider({ ...deps, deleteCharts });
+    await p.deleteObjects!([region("c1"), region("c2")]);
+    expect(deleteCharts).toHaveBeenCalledWith(["c1", "c2"]);
+  });
+
+  it("REJECTS with the backend's reason when a chart delete was refused (the seam's contract)", async () => {
+    // THE chart delete never rejects: it puts a refused chart back and
+    // resolves. Resolving here too made the seam count the chart as deleted
+    // and deselect the chart that came back (wave A review).
+    const deleteCharts = vi.fn(
+      async (): Promise<ChartDeleteRefusal[]> => [{ chartId: "c2", reason: "The sheet is protected." }],
+    );
+    const p = createChartObjectSelectionProvider({ ...deps, deleteCharts });
+    await expect(p.deleteObjects!([region("c1"), region("c2")])).rejects.toThrow("The sheet is protected.");
+  });
+
+  it("without the delete injected the provider offers none (it stays out of the seam's delete)", () => {
+    expect(createChartObjectSelectionProvider(deps).deleteObjects).toBeUndefined();
   });
 });

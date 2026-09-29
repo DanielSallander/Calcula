@@ -3,11 +3,11 @@
 //          2026-09-27): what ONE click, ONE undo, ONE delete and ONE view do.
 //
 //          - A click is ONE undo step: the selection write AND the filter it
-//            puts on the pivots run inside one frontend undo transaction (a
-//            server-side column add records a step that joins it). Outside it,
-//            Ctrl+Z un-filtered the pivot while the slicer kept its selection.
-//          - User clicks are QUEUED: a click never joins another click's
-//            transaction, and a Ctrl+click toggle is computed from the
+//            puts on the pivots go to the backend as ONE gesture, which
+//            records ONE step at the end (BUG-0187) -- no frontend undo
+//            transaction is opened around it any more.
+//          - User clicks are QUEUED: a click starts only after the previous
+//            one landed, and a Ctrl+click toggle is computed from the
 //            selection the previous click committed.
 //          - After the undo fan-out ("slicers:refresh") the store RE-APPLIES
 //            only the pivot MASKS (masksOnly) of ordinary (level-1) slicers
@@ -63,6 +63,7 @@ const txLabels: string[] = [];
 vi.mock("@api/objectGeometry", () => ({
   // Mirrors the real seam: a click reads it right before it opens its step.
   isUndoTransactionOpen: () => txDepth > 0,
+  undoCommitsSettled: () => Promise.resolve(),
   runInUndoTransaction: async (label: string, fn: () => Promise<unknown>) => {
     txLabels.push(label);
     txDepth++;
@@ -92,10 +93,25 @@ const mockApply = vi.fn(async (s: Slicer, options?: ApplyOptions) => {
 const mockReport = vi.fn((_failures: readonly SlicerFilterFailure[]) => undefined);
 type Item = { value: string; selected: boolean; hasData: boolean };
 const mockListFromModel = vi.fn(async (_s: Slicer): Promise<Item[] | null> => null);
+/** The click's ONE backend gesture: the selection AND its filter. */
+const mockGesture = vi.fn(async (s: Slicer, actor: string) => {
+  apiCalls.push(`gesture:${s.id}`);
+  log.push({ what: "gesture:start", inTx: txDepth > 0, detail: { selectedItems: s.selectedItems, actor } });
+  const gate = selectionGate;
+  selectionGate = null;
+  if (gate) await gate;
+  backendSlicers = backendSlicers.map((b) => (b.id === s.id ? { ...b, selectedItems: s.selectedItems } : b));
+  log.push({ what: "gesture:end", inTx: txDepth > 0, detail: s.selectedItems });
+  return {
+    step: "pushed",
+    overwrites: { note: () => undefined, cellCount: 0, pivotIds: [], tokens: [], unrecorded: false },
+  };
+});
 vi.mock("../slicerFilterBridge", () => ({
   applySlicerFilter: (s: Slicer, options?: ApplyOptions) => mockApply(s, options),
   listPivotSlicerItemsFromModel: (s: Slicer) => mockListFromModel(s),
   reportSlicerFilterFailures: (f: readonly SlicerFilterFailure[]) => mockReport(f),
+  runSlicerSelectionGesture: (s: Slicer, actor: string) => mockGesture(s, actor),
 }));
 
 /** The backend, as the list `get_all_slicers` returns. */
@@ -185,7 +201,7 @@ function slicer(id: string, overrides: Partial<Slicer> = {}): Slicer {
   };
 }
 
-const WRITE = /^(updateSlicerSelection|deleteSlicer)/;
+const WRITE = /^(updateSlicerSelection|deleteSlicer|gesture)/;
 
 beforeEach(async () => {
   resetStore();
@@ -199,6 +215,7 @@ beforeEach(async () => {
   txDepth = 0;
   maxTxDepth = 0;
   mockApply.mockClear();
+  mockGesture.mockClear();
   mockReport.mockClear();
   refusals = {};
   mockListFromModel.mockReset();
@@ -219,17 +236,19 @@ async function load(slicers: Slicer[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 describe("a slicer click", () => {
-  it("writes the selection AND applies the filter inside ONE undo transaction", async () => {
+  it("sends the selection AND its filter as ONE backend gesture, with no frontend transaction around it", async () => {
     await load([slicer("s1")]);
     await updateSlicerSelectionAsync("s1", ["East"]);
 
-    expect(txLabels).toEqual(["Slicer Selection"]);
+    expect(txLabels).toEqual([]);
     expect(log.map((l) => [l.what, l.inTx])).toEqual([
-      ["select", true],
-      ["apply", true],
+      ["gesture:start", false],
+      ["gesture:end", false],
     ]);
-    // The apply saw the NEW selection.
-    expect(log[1].detail).toEqual({ id: "s1", selectedItems: ["East"] });
+    // The gesture carried the NEW selection; a direct call is a SCRIPT's
+    // (it joins the batch the script opened).
+    expect(log[0].detail).toEqual({ selectedItems: ["East"], actor: "script" });
+    expect(getSlicerById("s1")?.selectedItems).toEqual(["East"]);
   });
 });
 
@@ -240,7 +259,7 @@ describe("a slicer click", () => {
 const ITEMS = ["East", "West", "North", "South"].map((value) => ({ value, selected: true, hasData: true }));
 
 describe("user clicks (the click queue)", () => {
-  it("a second click made while the first is still applying never JOINS the first click's undo step", async () => {
+  it("a second click made while the first is still applying starts only after the first LANDED, as a user click", async () => {
     backendItems = { s1: ITEMS };
     await load([slicer("s1")]);
     let release!: () => void;
@@ -248,19 +267,18 @@ describe("user clicks (the click queue)", () => {
 
     const first = clickSlicerItem("s1", "East", false);
     const second = clickSlicerItem("s1", "West", false);
-    // Let the first click reach its (slow) backend write.
+    // Let the first click reach its (slow) backend gesture.
     await new Promise((r) => setTimeout(r, 0));
     release();
     await Promise.all([first, second]);
 
-    expect(txLabels).toEqual(["Slicer Selection", "Slicer Selection"]);
-    expect(maxTxDepth).toBe(1);
-    // Each click's write and apply ran inside its OWN step, in order.
+    expect(txLabels).toEqual([]);
+    // Each click is its own gesture, one after the other.
     expect(log.map((l) => [l.what, l.detail])).toEqual([
-      ["select", ["East"]],
-      ["apply", { id: "s1", selectedItems: ["East"] }],
-      ["select", ["West"]],
-      ["apply", { id: "s1", selectedItems: ["West"] }],
+      ["gesture:start", { selectedItems: ["East"], actor: "user" }],
+      ["gesture:end", ["East"]],
+      ["gesture:start", { selectedItems: ["West"], actor: "user" }],
+      ["gesture:end", ["West"]],
     ]);
   });
 
@@ -279,7 +297,7 @@ describe("user clicks (the click queue)", () => {
     await Promise.all([first, second]);
 
     expect(getSlicerById("s1")?.selectedItems).toEqual(["East", "West"]);
-    expect(log.filter((l) => l.what === "select").map((l) => l.detail)).toEqual([["East"], ["East", "West"]]);
+    expect(log.filter((l) => l.what === "gesture:end").map((l) => l.detail)).toEqual([["East"], ["East", "West"]]);
   });
 
   it("Clear on a slicer that filters nothing writes nothing (no empty undo step)", async () => {
@@ -292,8 +310,8 @@ describe("user clicks (the click queue)", () => {
   it("Clear on a filtering slicer clears it in one step", async () => {
     await load([slicer("s1", { selectedItems: ["East"] })]);
     await clickSlicerClearFilter("s1");
-    expect(apiCalls.filter((c) => WRITE.test(c))).toEqual(["updateSlicerSelection:s1"]);
-    expect(txLabels).toEqual(["Slicer Selection"]);
+    expect(apiCalls.filter((c) => WRITE.test(c))).toEqual(["gesture:s1"]);
+    expect(mockGesture.mock.calls[0][0]).toMatchObject({ id: "s1", selectedItems: null });
     expect(getSlicerById("s1")?.selectedItems).toBeNull();
   });
 });

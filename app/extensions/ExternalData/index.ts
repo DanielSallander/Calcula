@@ -9,6 +9,9 @@
 //          Collaboration extension) rather than a submenu here.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { unregisterMenu } from "@api";
+
+const EXTERNAL_DATA_MENU_ID = "externalData";
 
 // ============================================================================
 // Lifecycle
@@ -19,7 +22,7 @@ function activate(context: ExtensionContext): void {
 
   // Register the "External Data" top-level menu (order 43 = right after Data at 42)
   context.ui.menus.register({
-    id: "externalData",
+    id: EXTERNAL_DATA_MENU_ID,
     label: "External Data",
     order: 43,
     items: [],
@@ -29,7 +32,10 @@ function activate(context: ExtensionContext): void {
 }
 
 function deactivate(): void {
-  // Menu is automatically cleaned up by the registry
+  // Nothing removed it before (X19): the registry never cleans up a menu on
+  // its own. CSV ("Get Data") and Collaboration ("Refresh Data") add their
+  // items to it, so it stays for as long as either still has one there.
+  unregisterMenu(EXTERNAL_DATA_MENU_ID, { keepWhileShared: true });
 }
 
 // ============================================================================

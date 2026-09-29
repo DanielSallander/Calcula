@@ -89,7 +89,9 @@ function showContextMenu(
       label: `Clear Timeline Filter`,
       disabled: !hasFilter,
       onClick: () => {
-        updateTimelineSelectionAsync(timelineId, null, null).catch(
+        // A USER gesture: a clear that grows a pivot over the user's cells is
+        // asked about once, and a decline takes it back (the review of S2).
+        updateTimelineSelectionAsync(timelineId, null, null, { askBeforeOverwrite: true }).catch(
           console.error,
         );
       },

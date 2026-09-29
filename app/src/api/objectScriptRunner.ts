@@ -85,6 +85,7 @@
 //          the boundary's gate fire at all.
 
 import {
+  hostCloseBatchLeftOpen,
   hostIsMounted,
   hostMountScript,
   hostUnmountScript,
@@ -99,7 +100,6 @@ import {
   scriptOriginForStoredRecord,
   type MountOrigin,
 } from "./scriptHost/scriptOrigin";
-import { cancelUndoTransaction, getUndoState } from "./lib";
 import { getWorkbookScript, listWorkbookScripts } from "./workbookScripts";
 import { SCRIPT_API_VERSION, type ScriptAccessLevel, type ScriptableObjectType } from "./scriptableObjects";
 
@@ -361,14 +361,11 @@ export async function runObjectScriptOnce(
   // every subsequent edit the user makes accumulates into a group that is never
   // committed: their next Ctrl+Z does nothing, silently and permanently. The
   // `finally` below closes it (discarding the group, not the writes, which is
-  // what `cancel_transaction` does). Remembering the state beforehand is what
-  // distinguishes "this run opened it" from "it was already open".
-  let transactionWasOpen = false;
-  try {
-    transactionWasOpen = (await getUndoState()).transactionOpen;
-  } catch {
-    // No backend (tests, teardown): nothing to leak either.
-  }
+  // what `cancel_transaction` does) -- but ONLY a transaction this run's own
+  // beginBatch OPENED, which the host knows from the begin's answer. Probing
+  // "was one open before / is one open after" could not tell: a transaction a
+  // user's gesture (or another script) opened while the run was going read as
+  // "this run's", and was cancelled -- its opener's writes lost their undo step.
 
   try {
     await hostMountScript({
@@ -423,18 +420,18 @@ export async function runObjectScriptOnce(
     }
     throw err;
   } finally {
-    if (hostIsMounted(id)) hostUnmountScript(id);
-    if (!transactionWasOpen) {
-      try {
-        if ((await getUndoState()).transactionOpen) {
-          await cancelUndoTransaction();
-        }
-      } catch (cleanupError) {
-        console.error(
-          "[objectScriptRunner] could not close the undo transaction the run left open:",
-          cleanupError,
-        );
-      }
+    // Awaited, and BEFORE the unmount, so the user's next edit cannot land in
+    // the transaction first. (The unmount sweeps a batch begun after this. On
+    // a FAILED run the mount's own teardown has swept already, and this then
+    // awaits that sweep's cancel instead of returning before it lands.)
+    try {
+      await hostCloseBatchLeftOpen(id);
+    } catch (cleanupError) {
+      console.error(
+        "[objectScriptRunner] could not close the undo transaction the run left open:",
+        cleanupError,
+      );
     }
+    if (hostIsMounted(id)) hostUnmountScript(id);
   }
 }

@@ -16,6 +16,16 @@
 //              same conflict rules, same visible list — see "Script-owned
 //              shortcuts" below for the five rules that keep a key hook from
 //              being VBA's Application.OnKey.
+//          Two more things the dispatcher answers before any command runs: a
+//          settings box RECORDING a combination gets the key instead
+//          (beginShortcutCapture), and a feature may REFUSE a command id
+//          whatever combination it is on (registerCommandRefusal).
+//          Matching is EXACT first; only when nothing matched exactly does a
+//          SYMBOL combination (Alt+;, Ctrl+]) match the character a keyboard
+//          layout needed Shift or AltGr to type (matchesEventOnLayout -- sv-SE
+//          types Alt+; as Alt+Shift+comma, Ctrl+] as Ctrl+AltGr+9) -- except
+//          that in READY mode an AltGr character is typed into the cell, never
+//          read as a shortcut (typesAltGrCharacterIntoACell, W17).
 //          Grid-scoped commands (GRID_SCOPED_COMMANDS) fire only with grid focus
 //          and defer to native otherwise; copy/cut additionally defer when a DOM
 //          text selection exists. Supports user customization, conflict
@@ -31,6 +41,7 @@
 //       is a tracked, behavior-neutral follow-up (needs clipboard test coverage).
 
 import { CommandRegistry } from "./commands";
+import { addCommandRefusal, commandRefusalFor, type CommandRefusal } from "./commandRefusals";
 import { showToast } from "./notifications";
 import { findPointerClaim } from "./pointerClaims";
 // Straight from the Core module (the same binding @api/externalEdit re-exports):
@@ -41,6 +52,14 @@ import { isExternalEditLive } from "../core/lib/formulaEditTarget";
 // core/hooks/useEditing (which reads and writes it) is a hook module with the
 // grid state and the backend calls behind it.
 import { isCoreCellEditOpen } from "../core/lib/cellEditFlag";
+// Both dependency-free Core modules as well: the grid's one "does this key TYPE
+// its character" rule (AltGr included, E13) and the selection-owner store.
+import { isTypedCharacterKey } from "../core/lib/editOpenBuffer";
+import { isSelectionOwned, selectionOwnerReceivesTyping } from "../core/lib/selectionOwner";
+// Core's grid state, for ONE question: is a cell selected (a canvas has none)?
+// The module's other imports are the reducer and its types, none of which reach
+// back here.
+import { getGridStateSnapshot } from "../core/state/GridContext";
 
 // ============================================================================
 // Types
@@ -72,13 +91,17 @@ export interface KeyBinding {
    * When THIS binding wins a keystroke, no other keydown listener hears it:
    * the dispatcher calls `stopImmediatePropagation`, not only
    * `stopPropagation`. For a REFUSAL ("not while my subject owns the
-   * selection"). Several extensions still act on their own shortcut from a
-   * window-CAPTURE listener of their own -- Ctrl+K (Hyperlinks), Ctrl+E (Flash
-   * Fill), Alt+Shift+Arrow (Grouping), Ctrl+Shift+L (AutoFilter), Ctrl+Alt+M
-   * and Shift+F2 (Review), Alt+Down (Data Validation) -- on the same target and
-   * in the same phase as this dispatcher, where `stopPropagation` does not
-   * reach them. A binding that exists to say "not now" was otherwise followed
-   * by the very action it refused. Ignored for script bindings.
+   * selection"). An extension may still act on a key from a window-CAPTURE
+   * listener of its own -- Alt+Down (Data Validation) does -- on the same
+   * target and in the same phase as this dispatcher, where `stopPropagation`
+   * does not reach it. A binding that exists to say "not now" was otherwise
+   * followed by the very action it refused. Ignored for script bindings.
+   * (The built-in shortcuts' own listeners -- Ctrl+K, Ctrl+E, Alt+Shift+Arrow,
+   * Ctrl+Shift+L, Ctrl+Alt+M, Shift+F2, Alt+;, the bookmark keys, the panel
+   * toggles and Ctrl+P -- are gone since wave B: the registry is their ONE
+   * path. Refusing a COMMAND, whatever its keys, is registerCommandRefusal's
+   * job: it follows a remap, which a binding on the default combination
+   * cannot.)
    */
   exclusive?: boolean;
   /**
@@ -183,7 +206,11 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
 
   // Format
   { id: "core.formatCells", combo: "Ctrl+1", commandId: "core.format.cells", label: "Format Cells", category: "Formatting", source: "built-in" },
-  { id: "core.formatPainter", combo: "Ctrl+Shift+C", commandId: "core.format.painter", label: "Format Painter", category: "Formatting", source: "built-in" },
+  // NOT grid-scoped, "not-editing" (BUG-0199): Format Painter works from a
+  // focused ribbon button too, and it is started ONLY here -- the extension's
+  // own Ctrl+Shift+C listener, which made one keystroke start it twice with the
+  // grid focused and ignored a remap, is gone (its Escape stays).
+  { id: "core.formatPainter", combo: "Ctrl+Shift+C", commandId: "core.format.painter", label: "Format Painter", category: "Formatting", context: "not-editing", source: "built-in" },
 
   // File (global — must fire even when focus is outside the grid). Commands are
   // registered by the StandardMenus extension.
@@ -206,9 +233,10 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
   // (isEditingKeystroke): a text field, a pointer claim, or a live cell edit --
   // Core's own (parked on another sheet included) or an external session. An
   // extension that ALSO listens for its key itself asks the same question
-  // through @api/editing isEditKeystroke. (Format Painter's Ctrl+Shift+C, like
-  // the fills, merge and Format Cells, is GRID-SCOPED instead, and a live cell
-  // edit refuses every grid-scoped binding -- see handleGlobalKeyDown.)
+  // through @api/editing isEditKeystroke. (The fills, merge and Format Cells
+  // are GRID-SCOPED instead, and a live cell edit refuses every grid-scoped
+  // binding -- see handleGlobalKeyDown. Format Painter's Ctrl+Shift+C is
+  // "not-editing" since BUG-0199, so it also works from a ribbon button.)
   { id: "core.insertTable", combo: "Ctrl+T", commandId: "insert.table", label: "Insert Table", category: "Insert", context: "not-editing", source: "built-in" },
   { id: "core.goToSpecial", combo: "Ctrl+G", commandId: "view.goToSpecial", label: "Go To Special", category: "Navigation", source: "built-in" },
 
@@ -230,7 +258,10 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
 
   // Data
   { id: "ext.autofilter.toggle", combo: "Ctrl+Shift+L", commandId: "autofilter.toggle", label: "Toggle AutoFilter", category: "Data", context: "not-editing", source: "built-in" },
-  { id: "ext.flashFill", combo: "Ctrl+E", commandId: "flashFill.execute", label: "Flash Fill", category: "Data", context: "not-editing", source: "built-in" },
+  // `flashfill.execute` is the id FlashFill registers (script-safe, so scripts
+  // call it by that spelling); this binding named `flashFill.execute`, which
+  // nothing registered (BUG-0183).
+  { id: "ext.flashFill", combo: "Ctrl+E", commandId: "flashfill.execute", label: "Flash Fill", category: "Data", context: "not-editing", source: "built-in" },
 
   // Names. Excel's Ctrl+F3. BARE F3 IS NOT TAKEN BY THIS: the app's only other
   // F3 handler is Find Next inside the Find and Replace dialog, which tests
@@ -245,7 +276,14 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
   // Hyperlinks
   { id: "ext.hyperlinks.insert", combo: "Ctrl+K", commandId: "hyperlinks.insert", label: "Insert Hyperlink", category: "Editing", context: "not-editing", source: "built-in" },
 
-  // Bookmarks
+  // Bookmarks. EVERY built-in in this list names a command its extension
+  // REGISTERS (BUG-0183 and wave B's D2: several named ids nothing registered
+  // and "worked" only because the extension's own listener ran beside this
+  // dispatcher -- or, for the bubble-phase ones, did nothing at all, because
+  // this capture-phase dispatcher stops a matched key before it bubbles).
+  // Those listeners are gone: this registry is the ONE keyboard path, so a key
+  // runs exactly once and a remap MOVES it (builtinShortcutCensus checks the
+  // registrations from source).
   { id: "ext.bookmarks.toggle", combo: "Ctrl+Shift+B", commandId: "bookmarks.toggle", label: "Toggle Bookmark", category: "Navigation", context: "not-editing", source: "built-in" },
   { id: "ext.bookmarks.next", combo: "Ctrl+]", commandId: "bookmarks.next", label: "Next Bookmark", category: "Navigation", context: "not-editing", source: "built-in" },
   { id: "ext.bookmarks.prev", combo: "Ctrl+[", commandId: "bookmarks.prev", label: "Previous Bookmark", category: "Navigation", context: "not-editing", source: "built-in" },
@@ -256,6 +294,7 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
 
   // Review
   { id: "ext.review.newComment", combo: "Ctrl+Alt+M", commandId: "review.newComment", label: "New Comment", category: "Review", context: "not-editing", source: "built-in" },
+  { id: "ext.review.newNote", combo: "Shift+F2", commandId: "review.newNote", label: "New Note", category: "Review", context: "not-editing", source: "built-in" },
 
   // Select Visible Cells
   { id: "ext.selectVisible", combo: "Alt+;", commandId: "selectVisibleCells.execute", label: "Select Visible Cells", category: "Editing", context: "not-editing", source: "built-in" },
@@ -341,6 +380,132 @@ export function matchesEvent(combo: string, event: KeyboardEvent): boolean {
 }
 
 /**
+ * A SYMBOL key: one character that is neither a letter nor a digit (";", "]",
+ * "[", ","). Which modifiers TYPE it is the keyboard layout's business, not
+ * the user's: on sv-SE ";" is Shift+comma, and "]" / "[" are AltGr+9 / AltGr+8.
+ */
+function isLayoutSymbol(key: string): boolean {
+  return /^[^\p{L}\p{N}\s]$/u.test(key);
+}
+
+/**
+ * The LAYOUT-TOLERANT match, for a combo whose key is a symbol: it matches the
+ * CHARACTER the keystroke produced, whatever modifiers the layout needed to
+ * produce it. The dispatcher asks it only when no binding matched EXACTLY
+ * (matchesEvent), so it can widen what a symbol combination hears but never
+ * take a keystroke from the binding that names it exactly.
+ *
+ * Why (review of BUG-0183): on sv-SE, Excel's Alt+; is typed Alt+Shift+comma
+ * (key ";" with Alt AND Shift) and Ctrl+] is typed Ctrl+AltGr+9 (key "]" with
+ * Ctrl AND Alt -- Windows reports AltGr as Ctrl+Alt). The exact match refused
+ * both, and once the extensions' own listeners (which took the character
+ * whatever the extra modifier) stood aside for the registry -- they are
+ * deleted now -- Select Visible Cells and next/previous bookmark were dead
+ * keys on the owner's own layout.
+ *
+ *  - SHIFT is ignored unless the combo names it. The layout put it there to
+ *    make the symbol; Shift+";" on a US layout is ":", a different key, which
+ *    never reaches this function's `event.key === parsed.key`. A combo that
+ *    NAMES Shift still requires it.
+ *  - Ctrl+Alt is read as ALTGR when `altGr` is true: the symbol needed it, so a
+ *    combo matches whether it names Ctrl (a Ctrl pressed WITH AltGr is
+ *    indistinguishable from AltGr's own, as it always was for these keys),
+ *    names Ctrl+Alt, or names neither. An Alt-only combo does not: Alt without
+ *    Ctrl is never AltGr, so Alt+; is not answered by an AltGr-typed ";".
+ *    The dispatcher passes `altGr: false` while the keystroke is TYPING (a
+ *    text field, a live cell edit, or an AltGr character typed into a cell in
+ *    READY mode -- typesAltGrCharacterIntoACell, W17): there a Ctrl+Alt
+ *    character is text --
+ *    "]" in a structured reference, "$" (AltGr+4) in an absolute one -- and
+ *    only an exact Ctrl+Alt combination may take it.
+ *  - Meta is compared exactly; letters, digits and named keys (F2, ArrowRight,
+ *    Delete) never match here -- their Shift MEANS something (Ctrl+Shift+E is
+ *    not Ctrl+E).
+ */
+export function matchesEventOnLayout(
+  combo: string,
+  event: KeyboardEvent,
+  options: { altGr: boolean },
+): boolean {
+  const parsed = getCachedParsedCombo(combo);
+  if (!isLayoutSymbol(parsed.key) || event.key !== parsed.key) return false;
+  if (parsed.meta !== event.metaKey) return false;
+  if (parsed.shift && !event.shiftKey) return false;
+  if (options.altGr && event.ctrlKey && event.altKey) {
+    return parsed.ctrl || !parsed.alt;
+  }
+  return parsed.ctrl === event.ctrlKey && parsed.alt === event.altKey;
+}
+
+/** A combo key that is one ASCII letter or digit ("M", "1"). */
+function isLetterOrDigitKey(key: string): boolean {
+  return /^[A-Za-z0-9]$/.test(key);
+}
+
+/**
+ * The letter or digit a keystroke's KEY carries ("M", "1"), or null when the
+ * key is neither. Digits by `code` (Digit0..Digit9: the digit row is the digit
+ * row on every layout). Letters by `keyCode` first -- Windows' virtual-key
+ * code, the LAYOUT's letter on that key (QWERTZ's Z sits where US has Y,
+ * AZERTY's M where US has ";") -- and by `code` only for a keystroke that
+ * carries none (a synthetic event).
+ */
+function physicalLetterOrDigit(event: KeyboardEvent): string | null {
+  const digit = /^Digit([0-9])$/.exec(event.code ?? "");
+  if (digit) return digit[1];
+  const vk = event.keyCode;
+  if (vk >= 65 && vk <= 90) return String.fromCharCode(vk);
+  const letter = /^Key([A-Z])$/.exec(event.code ?? "");
+  return letter ? letter[1] : null;
+}
+
+/**
+ * The PHYSICAL-KEY match, for a combo whose key is a letter or a digit: it
+ * matches the KEY that carries that letter or digit when the layout made the
+ * keystroke type something else. The dispatcher asks it only when neither the
+ * exact match (matchesEvent) nor the symbol tier (matchesEventOnLayout)
+ * matched, so it never takes a keystroke from a binding that names the typed
+ * character.
+ *
+ * Why (review of D1/D4): Windows turns Ctrl+Alt into AltGr when it generates
+ * the character, so on sv-SE and de-DE -- where AltGr+M types the micro sign
+ * -- Ctrl+Alt+M arrives as key "µ" with Ctrl+Alt, and New Comment was a dead
+ * key there. The same exact-character match left AZERTY's digit shortcuts
+ * dead (Ctrl+1 types Ctrl+&) and every Ctrl+letter on a non-Latin layout
+ * (Ctrl+Z types Ctrl+я). Excel binds the KEY (its virtual-key code), not the
+ * character.
+ *
+ *  - Only when the typed key is NOT itself an ASCII letter or digit: when the
+ *    layout typed a Latin letter, the layout has already said which key it is
+ *    (AZERTY's Ctrl+Q is on the US "A" position and is Ctrl+Q, never Ctrl+A).
+ *  - Modifiers match EXACTLY, Shift included: on a letter or a digit, Shift
+ *    MEANS something (Ctrl+Shift+E is not Ctrl+E).
+ *  - The combo must name Ctrl, Alt or Meta: a bare or Shift-only letter is
+ *    typing, never a shortcut to be found by position.
+ *  - `typing` (a text field, a live cell edit, an AltGr character typed into
+ *    a cell in ready mode -- W17): a Ctrl+Alt keystroke there is
+ *    an AltGr CHARACTER -- "@", "€", "µ" -- and is never taken; only the exact
+ *    tier may.
+ *  - Never during an IME composition.
+ */
+export function matchesEventOnPhysicalKey(
+  combo: string,
+  event: KeyboardEvent,
+  options: { typing: boolean },
+): boolean {
+  const parsed = getCachedParsedCombo(combo);
+  if (!isLetterOrDigitKey(parsed.key)) return false;
+  if (!(parsed.ctrl || parsed.alt || parsed.meta)) return false;
+  if (event.isComposing || event.key === "Process") return false;
+  if (isLetterOrDigitKey(event.key)) return false;
+  if (parsed.ctrl !== event.ctrlKey || parsed.alt !== event.altKey) return false;
+  if (parsed.shift !== event.shiftKey || parsed.meta !== event.metaKey) return false;
+  if (options.typing && event.ctrlKey && event.altKey) return false;
+  const key = physicalLetterOrDigit(event);
+  return key !== null && key === parsed.key.toUpperCase();
+}
+
+/**
  * Format a combo string for display.
  * Normalizes casing: "ctrl+shift+b" -> "Ctrl+Shift+B"
  */
@@ -366,6 +531,14 @@ export function formatCombo(combo: string): string {
 
 /**
  * Convert a KeyboardEvent into a combo string.
+ *
+ * A LETTER typed with Ctrl, Alt or Meta in place of the key's own letter or
+ * digit is recorded as that KEY (see matchesEventOnPhysicalKey): the Settings
+ * capture box recorded sv-SE's Ctrl+Alt+M by its character, upper-cased --
+ * "Ctrl+Alt+Μ", a GREEK capital mu (the micro sign µ upper-cased), which no
+ * keystroke can ever match -- and a Russian Ctrl+Z as "Ctrl+Я". A SYMBOL keeps
+ * its character ("Ctrl+Alt+]", "Ctrl+Alt+@"): the symbol tier matches it by
+ * what the layout types, whatever key it sits on.
  */
 export function eventToCombo(event: KeyboardEvent): string | null {
   // Skip pure modifier keys
@@ -379,6 +552,10 @@ export function eventToCombo(event: KeyboardEvent): string | null {
   if (event.metaKey) parts.push("Meta");
 
   let key = event.key;
+  const shortcut = event.ctrlKey || event.altKey || event.metaKey;
+  if (shortcut && /^\p{L}$/u.test(key) && !isLetterOrDigitKey(key)) {
+    key = physicalLetterOrDigit(event) ?? key;
+  }
   if (key.length === 1) {
     key = key.toUpperCase();
   }
@@ -531,7 +708,6 @@ const GRID_SCOPED_COMMANDS = new Set([
   "core.edit.fillUp",
   "core.edit.fillLeft",
   "core.format.cells",
-  "core.format.painter",
   "core.grid.merge",
 ]);
 
@@ -846,6 +1022,14 @@ export function removeCustomKeybinding(id: string): boolean {
   notifyChange();
   return true;
 }
+
+// NOTE (W19): there is deliberately no "does the registry bind this command?"
+// helper for an extension's own key listener to stand aside by. A listener of
+// an extension's own for a command the registry binds is the defect: one
+// keystroke ran the command twice (the binding and the listener, BUG-0199's
+// Format Painter), or a key the user had remapped AWAY kept running it from
+// the listener's hard-coded combo (BUG-0183). Those listeners were deleted in
+// wave B; register the command and let a binding run it.
 
 /**
  * Get all available command IDs from the CommandRegistry.
@@ -1246,19 +1430,196 @@ function notifyChange(): void {
 }
 
 // ============================================================================
+// Command refusals ("not this command, right now" -- whatever its keys)
+// ============================================================================
+//
+// A feature that must say "not now" to somebody else's command -- FloatingRange
+// refusing Copy, Paste, Fill, Format Cells while ITS range owns the selection,
+// because those commands would act on Core's HIDDEN cell -- used to do it by
+// binding the command's DEFAULT combination (a guarded, exclusive binding).
+// That refused the KEY, not the command: a user who moved Copy to Ctrl+Shift+Q
+// copied the hidden cell with the new key, while the old key, no longer Copy,
+// still showed the refusal (BUG-0199). A refusal registered here is asked at
+// the dispatcher's WINNER, by command id, so it follows every remap -- and the
+// dispatcher's own rules still come first: a grid-scoped command off the grid,
+// a copy with DOM text selected and any "not-editing" key during an edit are
+// never matched, so they are never refused either (they stay native).
+
+// The registry itself lives in ./commandRefusals, so the OTHER command door --
+// CommandRegistry.execute (ribbon, menus, Quick Access Toolbar, command line,
+// scripts' executeCommand) -- asks the same refusals; only the keyboard asked
+// them when they lived here (found live 2026-09-29, e2e fixall-edit W15).
+export { commandRefusalFor } from "./commandRefusals";
+export type { CommandRefusal } from "./commandRefusals";
+
+/**
+ * Register a refusal. Returns the cleanup. When a refused command wins a
+ * keystroke, the dispatcher takes the key (preventDefault), stops it from
+ * reaching ANY other key listener (stopImmediatePropagation -- an extension's
+ * own listener for the same key must not run the refused action anyway), shows
+ * the sentence, and runs nothing. CommandRegistry.execute refuses it the same
+ * way from every other door.
+ */
+export function registerCommandRefusal(refusal: CommandRefusal): () => void {
+  installListener();
+  return addCommandRefusal(refusal);
+}
+
+// ============================================================================
+// Shortcut capture (a settings box RECORDING a key combination)
+// ============================================================================
+//
+// A box that records "press the keys you want" must receive EVERY combination,
+// the ones already bound included -- recording Ctrl+S is the whole point of
+// remapping onto it. The dispatcher below is a window-CAPTURE listener, the
+// outermost there is: it matched Ctrl+S and SAVED the workbook before the box
+// heard it, and the extensions' own window-capture listeners (Print's Ctrl+P,
+// File Explorer's Ctrl+Shift+E, ...) acted on the rest (BUG-0199). So the
+// dispatcher hands a keystroke aimed at an active capture box to that box and
+// stops it there -- stopImmediatePropagation, so no other key listener hears a
+// key that is being recorded -- and runs nothing.
+
+interface ShortcutCapture {
+  element: HTMLElement;
+  onKey: (event: KeyboardEvent) => void;
+}
+
+/**
+ * Every open capture box. SEVERAL can be open at once -- Settings keeps the Add
+ * Shortcut form open while a row's Edit is used -- so this is a set, and a key
+ * goes to the box that holds it. It was one slot ("a newer capture replaces an
+ * older one"): a row's Edit evicted the Add box, which never registered again,
+ * and Ctrl+S pressed in the Add box SAVED the workbook (review of BUG-0199).
+ */
+const activeCaptures = new Set<ShortcutCapture>();
+
+/**
+ * Make `element` a shortcut capture box: while it (or anything inside it) has
+ * the keyboard, every non-modifier keydown is handed to `onKey` INSTEAD of
+ * being dispatched -- no command runs and no other key listener hears it.
+ * Keys aimed anywhere else dispatch as usual. Returns the release, which ends
+ * THIS capture only: any number of boxes may capture at once, and releasing
+ * one never ends another (nor does a second release of the same one).
+ */
+export function beginShortcutCapture(
+  element: HTMLElement,
+  onKey: (event: KeyboardEvent) => void,
+): () => void {
+  installListener();
+  const capture: ShortcutCapture = { element, onKey };
+  activeCaptures.add(capture);
+  return () => {
+    activeCaptures.delete(capture);
+  };
+}
+
+/**
+ * The capture box this keystroke is aimed at, or null: the box holding the
+ * event's TARGET, else the box holding the focused element. When boxes nest,
+ * the innermost holder wins; for one element registered twice, the newest.
+ */
+function captureFor(event: KeyboardEvent): ShortcutCapture | null {
+  if (activeCaptures.size === 0) return null;
+  const target = event.target;
+  const active = typeof document !== "undefined" ? document.activeElement : null;
+  for (const node of [target instanceof Node ? target : null, active]) {
+    if (node === null) continue;
+    let best: ShortcutCapture | null = null;
+    for (const capture of activeCaptures) {
+      if (!capture.element.isConnected || !capture.element.contains(node)) continue;
+      // Later registrations and inner elements win (`contains` is inclusive).
+      if (best === null || best.element.contains(capture.element)) best = capture;
+    }
+    if (best !== null) return best;
+  }
+  return null;
+}
+
+// ============================================================================
 // Centralized Keyboard Dispatcher
 // ============================================================================
+
+/**
+ * Whether this keystroke TYPES an AltGr character into a cell in READY mode
+ * (W17, the owner's decision on the wave-B KNOWN CONFLICT): TYPING WINS.
+ *
+ * Windows reports AltGr as Ctrl+Alt, and Chromium cannot tell AltGr+8 from
+ * Ctrl+AltGr+8. So the tolerant tiers read sv-SE's AltGr+8 / AltGr+9 ("[" /
+ * "]") as Ctrl+[ / Ctrl+] (Previous / Next Bookmark), AltGr+M (the micro
+ * sign) as New Comment's Ctrl+Alt+M, and AltGr+2 ("@") as a user's
+ * Ctrl+Alt+2 -- and none of those characters could BEGIN a cell entry, while
+ * Excel starts one with each. In ready mode the character wins; the commands
+ * stay reachable from their menus, by a remap, and from the keyboard
+ * anywhere else (a ribbon button, a pane), where nothing would be typed.
+ *
+ * An AltGr character: Ctrl+Alt producing a printable character that is not a
+ * plain ASCII letter or digit -- the grid's own rule (isTypedCharacterKey), so
+ * the dispatcher lets through exactly what the grid then types. Ready mode:
+ * no text field, claim or cell edit owns the key (the caller's `editing`),
+ * and a CELL would receive it:
+ *   - Core's grid holds the selection, has the keyboard, and has a CELL
+ *     selected (`coreGridHasACell`) -- a CANVAS has none, so on a canvas
+ *     with nothing claiming the selection the keystroke is the shortcut
+ *     (X16: sv-SE AltGr+9 there did nothing at all, where it used to be Next
+ *     Bookmark); or
+ *   - something else owns the selection and its OWN cell takes typing
+ *     (`receivesTyping`: a floating grid's selected cell, whose type-to-edit
+ *     listens on the window), with the keyboard the grid's or on the body.
+ * Review C: a floating grid selected as a whole OBJECT claims the selection
+ * with the grid still focused, and no cell of it takes typing -- W17 asked
+ * only "is the grid focused", so AltGr+9 went on to Core's type-to-edit,
+ * which opened an edit of Core's HIDDEN active cell. There, nothing would be
+ * typed (Core's door refuses while the claim lasts), so the keystroke is the
+ * shortcut it always was. An EXACT binding of the typed character (a user who
+ * recorded Ctrl+Alt+@) is not a tolerant match, and still runs.
+ */
+function typesAltGrCharacterIntoACell(event: KeyboardEvent): boolean {
+  if (!(event.ctrlKey && event.altKey) || !isTypedCharacterKey(event)) return false;
+  if (isEditingKeystroke(event)) return false;
+  const gridFocused = isGridFocused();
+  if (!isSelectionOwned()) return gridFocused && coreGridHasACell();
+  const active = typeof document !== "undefined" ? document.activeElement : null;
+  const keyboardIsTheGrids = gridFocused || active === null || active === document.body;
+  return keyboardIsTheGrids && selectionOwnerReceivesTyping();
+}
+
+/**
+ * Whether Core's grid has a CELL a typed character would open an entry in: a
+ * selection. Core's type-to-edit opens nothing without one, and a CANVAS never
+ * has one (the reducer drops the cell selection on entering a canvas). No grid
+ * state at all (nothing mounted yet) says nothing about a canvas, so it leaves
+ * the answer to the focus test alone.
+ */
+function coreGridHasACell(): boolean {
+  const state = getGridStateSnapshot();
+  return state === null || state.selection !== null;
+}
 
 /**
  * Handle a global keydown event against all registered keybindings.
  * Returns true if a keybinding was matched and the command was executed.
  */
 export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
-  if (registry.size === 0) return false;
-
   // Skip pure modifier keys
   const modifierKeys = ["Control", "Shift", "Alt", "Meta"];
   if (modifierKeys.includes(event.key)) return false;
+
+  // A settings box is RECORDING a combination: the key is its, not a command's
+  // (see "Shortcut capture" above). Before everything, the registry-empty
+  // early-out included -- a recorded key must never reach another listener.
+  const capture = captureFor(event);
+  if (capture) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    try {
+      capture.onKey(event);
+    } catch (err) {
+      console.error("[Keybindings] Error in a shortcut capture box:", err);
+    }
+    return true;
+  }
+
+  if (registry.size === 0) return false;
 
   // -------------------------------------------------------------------------
   // WHAT A POINTER CLAIM MEANS FOR A SHORTCUT
@@ -1324,45 +1685,68 @@ export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
   // -------------------------------------------------------------------------
   const editing = isEditingKeystroke(event);
   const gridFocused = isGridFocused() && !isClaimedKeystroke(event) && !isCellEditLive();
+  // TYPING -- a text field, a live cell edit, or an AltGr character typed in
+  // READY mode (typesAltGrCharacterIntoACell). The tolerant tiers below never
+  // read a typed Ctrl+Alt character as a shortcut; only an exact binding may.
+  const typing = editing || typesAltGrCharacterIntoACell(event);
 
-  // Find matching keybindings
-  const matches: KeyBinding[] = [];
-  registry.forEach((binding) => {
-    const effectiveCombo = getEffectiveCombo(binding.id);
-    if (!matchesEvent(effectiveCombo, event)) return;
+  // Find matching keybindings: EXACT matches first; only when none survives
+  // the rules below, the layout-tolerant match of a SYMBOL combination
+  // (matchesEventOnLayout -- sv-SE types Alt+; as Alt+Shift+comma and Ctrl+]
+  // as Ctrl+AltGr+9); and only when THAT finds none, the physical-key match of
+  // a LETTER or DIGIT combination (matchesEventOnPhysicalKey -- sv-SE types
+  // Ctrl+Alt+M as Ctrl+AltGr+M, the micro sign). Exact-first, so a binding that
+  // names the keystroke's modifiers exactly always beats one that merely
+  // produces its character, and the character typed beats the key it sits on.
+  // AltGr is read into a Ctrl+Alt keystroke only when it is not TYPING -- and
+  // in ready mode an AltGr character IS typing (W17, the owner's decision).
+  const collect = (matchesCombo: (combo: string) => boolean): KeyBinding[] => {
+    const matches: KeyBinding[] = [];
+    registry.forEach((binding) => {
+      const effectiveCombo = getEffectiveCombo(binding.id);
+      if (!matchesCombo(effectiveCombo)) return;
 
-    const ctx = binding.context ?? "always";
-    if (ctx === "editing" && !editing) return;
-    if (ctx === "not-editing" && editing) return;
+      const ctx = binding.context ?? "always";
+      if (ctx === "editing" && !editing) return;
+      if (ctx === "not-editing" && editing) return;
 
-    // A binding may declare WHEN it applies (see `registerKeybinding`). Asked
-    // here, before `matches` is populated, so a guarded binding that says no
-    // neither shadows the binding underneath it nor causes a preventDefault.
-    if (!bindingApplies(binding.id)) return;
+      // A binding may declare WHEN it applies (see `registerKeybinding`). Asked
+      // here, before `matches` is populated, so a guarded binding that says no
+      // neither shadows the binding underneath it nor causes a preventDefault.
+      if (!bindingApplies(binding.id)) return;
 
-    // Skip grid-scoped commands when focus is outside the grid
-    // (e.g., in dialogs, side panes, menus) so native browser
-    // shortcuts like Ctrl+C to copy text work as expected.
-    if (!gridFocused && GRID_SCOPED_COMMANDS.has(binding.commandId)) {
-      console.debug(
-        `[Keybindings] Skipping grid-scoped command '${binding.commandId}' ` +
-        `— focus is outside grid (active: ${document.activeElement?.tagName})`
-      );
-      return;
-    }
+      // Skip grid-scoped commands when focus is outside the grid
+      // (e.g., in dialogs, side panes, menus) so native browser
+      // shortcuts like Ctrl+C to copy text work as expected.
+      if (!gridFocused && GRID_SCOPED_COMMANDS.has(binding.commandId)) {
+        console.debug(
+          `[Keybindings] Skipping grid-scoped command '${binding.commandId}' ` +
+          `— focus is outside grid (active: ${document.activeElement?.tagName})`
+        );
+        return;
+      }
 
-    // Even with the grid focused, defer copy/cut to the browser when the user
-    // has selected real DOM text (toast, dialog, panel) — otherwise Ctrl+C would
-    // copy the active cell instead of the highlighted text.
-    if (
-      (binding.commandId === "core.clipboard.copy" || binding.commandId === "core.clipboard.cut") &&
-      hasDomTextSelection()
-    ) {
-      return;
-    }
+      // Even with the grid focused, defer copy/cut to the browser when the user
+      // has selected real DOM text (toast, dialog, panel) — otherwise Ctrl+C would
+      // copy the active cell instead of the highlighted text.
+      if (
+        (binding.commandId === "core.clipboard.copy" || binding.commandId === "core.clipboard.cut") &&
+        hasDomTextSelection()
+      ) {
+        return;
+      }
 
-    matches.push(binding);
-  });
+      matches.push(binding);
+    });
+    return matches;
+  };
+  let matches = collect((combo) => matchesEvent(combo, event));
+  if (matches.length === 0) {
+    matches = collect((combo) => matchesEventOnLayout(combo, event, { altGr: !typing }));
+  }
+  if (matches.length === 0) {
+    matches = collect((combo) => matchesEventOnPhysicalKey(combo, event, { typing }));
+  }
 
   if (matches.length === 0) return false;
 
@@ -1387,6 +1771,22 @@ export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
   // capture phase (see KeyBinding.exclusive): stopPropagation alone never
   // reaches a listener on the same target and phase.
   if (winner.exclusive === true && winner.source !== "script") event.stopImmediatePropagation();
+
+  // A REFUSED command (see "Command refusals"): asked by command id, so it
+  // follows the user's remaps. The key is taken and no other listener hears
+  // it -- an extension's own listener for it would run the refused action.
+  if (winner.source !== "script") {
+    const refusal = commandRefusalFor(winner.commandId);
+    if (refusal !== null) {
+      event.stopImmediatePropagation();
+      try {
+        showToast(refusal, { variant: "info" });
+      } catch {
+        console.warn(`[Keybindings] ${refusal}`);
+      }
+      return true;
+    }
+  }
 
   if (winner.source === "script") {
     const run = scriptRunners.get(winner.id);

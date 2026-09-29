@@ -249,8 +249,6 @@ export interface GridConfig {
    * Managed by the Grouping extension; default is 0 (no outline bar).
    */
   outlineBarHeight?: number;
-  /** Index of the currently active sheet (used by extensions) */
-  activeSheet?: number;
   /** Default row height in pixels (alias for defaultCellHeight, used by Print extension) */
   defaultRowHeight?: number;
 }

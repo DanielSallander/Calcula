@@ -648,6 +648,32 @@ pub(crate) fn clear_pivot_region_from_grid(
 }
 
 /// Gets the current protected region for a pivot ID, if it exists.
+/// Remove every merged range lying wholly inside a pivot's block on
+/// `sheet_idx` -- the merges `write_pivot_to_grid` made for its spanned cells
+/// (a report filter's dropdown across the row-label columns). A pivot that
+/// goes away (deleted, or its create undone) must take them with it, exactly
+/// as `update_pivot_in_grid` drops the old block's merges before a rewrite;
+/// clearing the cells alone left the user's cells there merged (BUG-0148).
+///
+/// LOCKS: the destination sheet's merge set only (`with_sheet_merges_mut`:
+/// `active_sheet`, then `merged_regions` or `all_merged_regions`). Legal
+/// under `grid` -> `grids` -> `pivot_tables`, the order both callers hold.
+pub(crate) fn clear_pivot_merges(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    sheet_idx: usize,
+    region: &ProtectedRegion,
+) {
+    crate::report::with_sheet_merges_mut(state, effect, sheet_idx, |merged| {
+        merged.retain(|m| {
+            !(m.start_row >= region.start_row
+                && m.end_row <= region.end_row
+                && m.start_col >= region.start_col
+                && m.end_col <= region.end_col)
+        });
+    });
+}
+
 pub(crate) fn get_pivot_region(state: &AppState, pivot_id: PivotId) -> Option<ProtectedRegion> {
     let regions = state.protected_regions.lock().unwrap();
     regions.iter().find(|r| r.region_type == "pivot" && r.owner_id == pivot_id).cloned()
@@ -1075,6 +1101,60 @@ pub(crate) fn check_pivot_source_destination_overlap(
         );
     }
     Ok(())
+}
+
+/// Reject a Change Data Source whose new range covers the pivot's OWN output
+/// (wave F, Z1): the Change Data Source twin of
+/// [`check_pivot_source_destination_overlap`], which only the create door
+/// called. Accepted, the change read the pivot's own header, item labels and
+/// totals into its records, and every refresh after summarised the pivot's own
+/// output again -- the same self-referential corruption, reached by the other
+/// door.
+///
+/// "Covers" is the pivot's anchor (`destination` on `dest_sheet`, what the
+/// create door checks) OR any cell of the output the pivot holds now
+/// (`output`, its registered region): a range that stops short of the anchor
+/// but reaches the rows below it reads the item labels and totals just the
+/// same. A pivot has output to protect here, where a new one has only an
+/// anchor. Only meaningful on the pivot's own sheet; called before the
+/// document effect, so a refusal leaves the document clean.
+pub(crate) fn check_change_source_excludes_own_output(
+    source_sheet: usize,
+    source_start: (u32, u32),
+    source_end: (u32, u32),
+    dest_sheet: usize,
+    destination: (u32, u32),
+    output: Option<&ProtectedRegion>,
+) -> Result<(), String> {
+    let (sr, sc) = source_start;
+    let (er, ec) = source_end;
+    // Normalize, so a caller passing the corners in either order still works.
+    let (r0, r1) = if sr <= er { (sr, er) } else { (er, sr) };
+    let (c0, c1) = if sc <= ec { (sc, ec) } else { (ec, sc) };
+    let overlaps =
+        |top: u32, left: u32, bottom: u32, right: u32| top <= r1 && bottom >= r0 && left <= c1 && right >= c0;
+
+    let (dest_row, dest_col) = destination;
+    let mut covered: Option<((u32, u32), (u32, u32))> = None;
+    if let Some(region) = output.filter(|r| r.sheet_index == source_sheet) {
+        if overlaps(region.start_row, region.start_col, region.end_row, region.end_col) {
+            covered = Some(((region.start_row, region.start_col), (region.end_row, region.end_col)));
+        }
+    }
+    if covered.is_none() && source_sheet == dest_sheet && overlaps(dest_row, dest_col, dest_row, dest_col) {
+        covered = Some((destination, destination));
+    }
+    let Some((start, end)) = covered else {
+        return Ok(());
+    };
+    let a1 = |(row, col): (u32, u32)| format!("{}{}", col_index_to_letter(col), row + 1);
+    let output_text = if start == end { a1(start) } else { format!("{}:{}", a1(start), a1(end)) };
+    Err(format!(
+        "Cannot change the data source: the range covers this PivotTable's own output ({}), so \
+         the pivot would summarize its own cells. Choose a range outside the PivotTable (or move \
+         the PivotTable to another sheet).",
+        output_text
+    ))
 }
 
 /// Updates the pivot region tracking for a pivot table.
@@ -1667,15 +1747,32 @@ pub fn lookup_pivot_data(
         vf.name.to_lowercase() == data_field_lower
     })?;
 
-    // If no field/item pairs, return the grand total for this value field
+    // If no field/item pairs, return the grand total for this value field --
+    // the value that stands for the WHOLE dataset. That is the GrandTotal
+    // cell; a pivot that shows none for it (values on rows with no row field
+    // and row grand totals off: each value row IS its field's total) shows the
+    // value in the one cell of that field whose group path names nothing.
+    // Only a GrandTotal was accepted, so `=GETPIVOTDATA("Count of Sales";E1)`
+    // answered #REF! beside the very count it names (found live 2026-09-29,
+    // e2e fixall-pivot R4).
     if field_item_pairs.is_empty() {
+        let is_field = |cell: &pivot_engine::PivotViewCell| {
+            cell.value_field_index == Some(vf_idx) || definition.value_fields.len() == 1
+        };
         for row_cells in &view.cells {
             for cell in row_cells {
-                if cell.cell_type == pivot_engine::PivotCellType::GrandTotal {
-                    if cell.value_field_index == Some(vf_idx) || definition.value_fields.len() == 1 {
-                        if let pivot_engine::PivotCellValue::Number(n) = cell.value {
-                            return Some(n);
-                        }
+                if cell.cell_type == pivot_engine::PivotCellType::GrandTotal && is_field(cell) {
+                    if let pivot_engine::PivotCellValue::Number(n) = cell.value {
+                        return Some(n);
+                    }
+                }
+            }
+        }
+        for row_cells in &view.cells {
+            for cell in row_cells {
+                if cell.value_field_index.is_some() && is_field(cell) && cell.group_path.is_empty() {
+                    if let pivot_engine::PivotCellValue::Number(n) = cell.value {
+                        return Some(n);
                     }
                 }
             }
@@ -1692,8 +1789,24 @@ pub fn lookup_pivot_data(
         field_name_by_index.insert(f.source_index, f.name.clone());
     }
 
-    // Search ALL data cells in the view for one whose group_path matches
-    // all the requested field/item pairs AND the correct value field.
+    // Does one entry of a cell's group path answer one requested pair? The
+    // field is named as the pivot shows it or as its source column is named;
+    // both it and the item compare ignoring case, as Excel's do. The blank
+    // member is named "(blank)", as the pivot shows it.
+    let entry_answers = |field_index: usize, value_id, req_field: &str, req_item: &str| -> bool {
+        let shown = field_name_by_index.get(&field_index).cloned();
+        let source = cache.field_name(field_index);
+        let named = shown.iter().chain(source.iter()).any(|n| n.eq_ignore_ascii_case(req_field));
+        named && group_path_item_label(cache, field_index, value_id).eq_ignore_ascii_case(req_item)
+    };
+
+    // The cell whose group path names EXACTLY the requested fields and items
+    // -- Excel's rule: the value must be one the pivot SHOWS. "Region=North"
+    // on a Region > Product pivot is North's subtotal, never the first leaf
+    // under North; "Product=Apples" alone names no cell there (no row shows
+    // Apples across every region) and answers #REF!. The first version
+    // accepted any cell whose path merely CONTAINED the pairs, so a partial
+    // spelling answered whichever leaf the view listed first, silently.
     for row_cells in &view.cells {
         for cell in row_cells {
             // Only consider data-area cells with a value_field_index
@@ -1701,31 +1814,20 @@ pub fn lookup_pivot_data(
                 Some(idx) => idx,
                 None => continue,
             };
-            if cell_vf != vf_idx {
+            if cell_vf != vf_idx || cell.group_path.len() != field_item_pairs.len() {
                 continue;
             }
-
-            // Check if this cell's group_path matches ALL field/item pairs
-            let all_match = field_item_pairs.iter().all(|(req_field, req_item)| {
-                cell.group_path.iter().any(|&(field_index, value_id)| {
-                    // Get field name for this group_path entry
-                    let field_name = field_name_by_index.get(&field_index)
-                        .cloned()
-                        .or_else(|| cache.field_name(field_index))
-                        .unwrap_or_default();
-
-                    if !field_name.eq_ignore_ascii_case(req_field) {
-                        return false;
-                    }
-
-                    // Get value label and compare
-                    let value_label = cache.get_value_label(field_index, value_id)
-                        .unwrap_or_default();
-                    value_label.eq_ignore_ascii_case(req_item)
-                })
+            let every_entry_requested = cell.group_path.iter().all(|&(field_index, value_id)| {
+                field_item_pairs
+                    .iter()
+                    .any(|(req_field, req_item)| entry_answers(field_index, value_id, req_field, req_item))
             });
-
-            if all_match {
+            let every_request_answered = field_item_pairs.iter().all(|(req_field, req_item)| {
+                cell.group_path
+                    .iter()
+                    .any(|&(field_index, value_id)| entry_answers(field_index, value_id, req_field, req_item))
+            });
+            if every_entry_requested && every_request_answered {
                 if let pivot_engine::PivotCellValue::Number(n) = cell.value {
                     return Some(n);
                 }
@@ -1736,29 +1838,40 @@ pub fn lookup_pivot_data(
     None
 }
 
-/// Resolves a grid cell position into GETPIVOTDATA formula arguments.
-/// Returns None if the cell is not a data cell in any pivot table.
+/// The GETPIVOTDATA item a group-path entry names: the cache's label, or
+/// `pivot_engine::BLANK_ITEM_LABEL` for the blank member. A cell of the
+/// (blank) row names its member (`VALUE_ID_BLANK`, wave D X1) and the cache
+/// reads that id as an empty value; spelled "" it would be an item nobody can
+/// type and that the pivot never shows.
+fn group_path_item_label(cache: &PivotCache, field_index: usize, value_id: pivot_engine::ValueId) -> String {
+    if pivot_engine::is_blank_member_id(value_id) {
+        return pivot_engine::BLANK_ITEM_LABEL.to_string();
+    }
+    cache.get_value_label(field_index, value_id).unwrap_or_default()
+}
+
+/// Resolves a grid cell position of pivot `pivot_id` into GETPIVOTDATA
+/// formula arguments. Returns None if the cell is not one of that pivot's
+/// data cells.
+///
+/// The caller names the pivot -- the owner of the protected region at the
+/// cell on the CLICKED sheet. Finding it by address alone scanned every
+/// pivot's view on every sheet, and two pivots at one address (every "New
+/// Worksheet" pivot is at A1, and so is every canvas's first pivot) made the
+/// pick describe whichever the map yielded first.
 pub fn resolve_pivot_data_formula(
     pivot_tables: &HashMap<PivotId, (PivotDefinition, PivotCache)>,
     pivot_views: &HashMap<PivotId, PivotView>,
+    pivot_id: PivotId,
     grid_row: u32,
     grid_col: u32,
 ) -> Option<super::types::GetPivotDataFormulaResult> {
-    // Find which pivot table contains this cell
-    let (pivot_id, view) = pivot_views.iter().find(|(_id, v)| {
-        if let Some((def, _)) = pivot_tables.get(_id) {
-            let (dest_row, dest_col) = def.destination;
-            let end_row = dest_row + v.row_count as u32;
-            let end_col = dest_col + v.col_count as u32;
-            grid_row >= dest_row && grid_row < end_row
-                && grid_col >= dest_col && grid_col < end_col
-        } else {
-            false
-        }
-    })?;
-
-    let (definition, cache) = pivot_tables.get(pivot_id)?;
+    let view = pivot_views.get(&pivot_id)?;
+    let (definition, cache) = pivot_tables.get(&pivot_id)?;
     let (dest_row, dest_col) = definition.destination;
+    if grid_row < dest_row || grid_col < dest_col {
+        return None;
+    }
 
     // Get the view cell at this position
     let view_row = (grid_row - dest_row) as usize;
@@ -1811,10 +1924,8 @@ pub fn resolve_pivot_data_formula(
                     .unwrap_or_else(|| format!("Field{}", field_index + 1))
             });
 
-        // Get the item value from the cache
-        let item_value = cache
-            .get_value_label(field_index, value_id)
-            .unwrap_or_default();
+        // Get the item value from the cache ("(blank)" for the blank member)
+        let item_value = group_path_item_label(cache, field_index, value_id);
 
         field_item_pairs.push((field_name, item_value));
     }

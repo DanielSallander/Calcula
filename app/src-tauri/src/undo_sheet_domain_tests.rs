@@ -1364,3 +1364,42 @@ fn the_active_sheet_path_is_unchanged_by_the_off_sheet_one() {
         "and must not touch any other sheet's store"
     );
 }
+
+/// Found live 2026-09-29 (e2e fixall-edit Y6 header-resize): undoing a column
+/// resize restored the backend's width and left the dragged one on screen.
+/// The grid re-reads its dimensions only when told, and a `SetColumnWidth` /
+/// `SetRowHeight` restore announced nothing.
+#[test]
+fn undoing_a_column_width_or_row_height_announces_dimensions() {
+    let f = Fixture::new(1);
+    {
+        let mut undo = f.state.undo_stack.lock().unwrap();
+        undo.begin_transaction("Resize column".to_string());
+        undo.record_column_width_change(0, 6, None);
+        undo.commit_transaction();
+    }
+    f.state.column_widths.write(&loading()).unwrap().insert(6, 104.29);
+    let result = f.undo();
+    assert!(
+        !f.state.column_widths.read().unwrap().contains_key(&6),
+        "precondition: the backend restored the width"
+    );
+    assert!(
+        result.refresh_domains.iter().any(|d| d == "dimensions"),
+        "a column width undo announced {:?}: the grid keeps painting the undone width",
+        result.refresh_domains
+    );
+
+    {
+        let mut undo = f.state.undo_stack.lock().unwrap();
+        undo.begin_transaction("Resize row".to_string());
+        undo.record_row_height_change(0, 4, None);
+        undo.commit_transaction();
+    }
+    let result = f.undo();
+    assert!(
+        result.refresh_domains.iter().any(|d| d == "dimensions"),
+        "a row height undo announced {:?}",
+        result.refresh_domains
+    );
+}

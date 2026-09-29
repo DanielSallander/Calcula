@@ -1,39 +1,53 @@
 //! FILENAME: app/extensions/FloatingRange/lib/frKeyRouting.ts
-// PURPOSE: While a floating range owns the selection, the grid's own
-//          selection-acting keys and commands must not act on Core's HIDDEN
-//          active cell. Delete/Backspace are routed to the range (clear its
-//          cells, or delete the object); copy, cut, paste, fill, format and
-//          merge are refused with a sentence; and the grid commands' ribbon
-//          and menu doors are guarded.
+// PURPOSE: While a floating range owns the selection, nothing may act on Core's
+//          HIDDEN active cell. Delete/Backspace are routed to the range (clear
+//          its cells, or delete the object); every other door that acts on
+//          Core's selection is refused with one sentence -- through the two
+//          feature-neutral seams built for exactly this (wave A, K1 and K3).
 // CONTEXT: Review 2026-09-27 (FR finding 5). Clicking a floating range's cell
 //          on a WORKSHEET leaves Core's selection on the last grid cell (say
-//          Sheet1!C3) and the grid container focused. The keybinding
-//          dispatcher (@api/keybindings) is a window-CAPTURE listener that
-//          runs before this extension's own keyboard handler, and it matched
-//          Delete to `core.edit.clearContents` over C3 -- then the range's
-//          handler cleared its own cell too, because the dispatcher's
-//          stopPropagation does not stop a second listener on the same target.
-//          One Delete cleared two cells, one of them out of sight; Ctrl+V
-//          pasted into C3, Ctrl+X cut it, Ctrl+D/R filled around it.
+//          Sheet1!C3) and the grid container focused. Delete cleared C3 as
+//          well as the range's cell, Ctrl+V pasted into C3, the ribbon's Bold
+//          turned it bold (BUG-0185).
 //
-//          The ONLY honest way to say "the range owns this key while its
-//          selection exists" is a guarded binding: the dispatcher prefers a
-//          binding whose `when` passed over the unguarded built-in -- the
-//          shape Charts (`ext.charts.deleteSelection`) and Controls
-//          (`ext.controls.deleteSelection`) already use for the identical
-//          collision. `context: "not-editing"` keeps every text field and
-//          pointer claim out of it, and the dispatcher does the
-//          preventDefault/stopPropagation itself.
+// TWO MECHANISMS, EACH FOR WHAT IT COVERS (E7, 2026-09-28; W18, wave C):
 //
-//          No clipboard or fill of a range's cells exists yet (v1), so those
-//          keys say so instead of reaching the hidden cell. A copy with real
-//          DOM text selected is left to the browser, as the dispatcher does for
-//          its own copy.
+//   1. THE SELECTION OWNER (@api/selectionOwner). The range CLAIMS the
+//      selection while one of its cells -- or the range itself -- is selected
+//      on the sheet shown. Every door that writes to Core's selection asks the
+//      claim and refuses ONCE with the range's sentence, whichever key, button
+//      or menu reached it (so a remap changes nothing -- BUG-0199): the grid
+//      commands' one choke point (`gridCommands.execute`: cut, copy, paste,
+//      the clears, the fills, merge, insert/delete row/column -- the core.*
+//      commands bridge to it), Core's grid keyboard (the font toggles, number
+//      formats, Ctrl+; / Ctrl+Shift+:, Ctrl+Alt+V, F11, Space), the formatting
+//      doors (Home tab, Format Cells, Format menu, mini toolbar, Format
+//      Painter, Paste Special and its quick pastes, Conditional Formatting),
+//      and since D4 every extension command that acts on the selection
+//      (Insert Table, AutoFilter, Group/Ungroup, Hyperlink, Flash Fill,
+//      Comment/Note, Bookmark, ...).
+//      W18: the range used to ALSO refuse 24 of those commands by id at the
+//      dispatcher (`registerCommandRefusal`) -- first for doors that did not
+//      ask yet, then "belt and braces". Answering BEFORE the door made it
+//      redundant everywhere and wrong where the door is finer: Ctrl+Shift+L
+//      could not turn an existing filter OFF, which AutoFilter's door allows
+//      (the sheet's filter, not the selection's). The door decides now.
+//
+//   2. COMBINATIONS, only for a key no command stands behind: Data
+//      Validation's Alt+Down is its own window listener, so the refusal is a
+//      guarded, EXCLUSIVE binding on that key (the listener asks the owner
+//      too since D4; the exclusive binding keeps it to one sentence, the
+//      range's, and keeps the key from anything else on the window).
+//
+// Delete/Backspace stay a guarded binding of the RANGE (not a refusal): they
+// clear the range's cells, which is a real action. A remapped Clear Contents
+// is refused by the owner (its command bridges to `gridCommands`).
 
 import { CommandRegistry } from "@api/commands";
 import { registerKeybinding, isGridFocused } from "@api/keybindings";
-import { gridCommands, showToast } from "@api";
-import { GRID_COMMANDS, type GridCommand } from "@api/extensions";
+import { registerSelectionOwner } from "@api/selectionOwner";
+import { deleteSelectedObjects, shouldActOnWholeObjectSelection } from "@api/objectSelection";
+import { showToast } from "@api";
 import { getFloatingRangeById, getFrActiveSheetIndex } from "./floatingRangeStore";
 import { getLocalSelection, getSelectedFloatingRange } from "./frSelection";
 import { isFrEditorOpen } from "../editor/frEditor";
@@ -41,125 +55,41 @@ import { isFrEditorOpen } from "../editor/frEditor";
 /** The range's Delete/Backspace command (clear the cells, or delete the object). */
 export const FR_DELETE_SELECTION_COMMAND = "ext.floatingRange.deleteSelection";
 
+/** The id the range claims the selection under (@api/selectionOwner). */
+export const FR_SELECTION_OWNER_ID = "floatingRange";
+
+/** What the refusal calls the thing that holds the selection. */
+export const FR_SELECTION_OWNER_LABEL = "a floating grid's cells";
+
 /**
- * Every grid key the range refuses while it owns the selection: each one acts
- * on Core's active cell or selection -- on a worksheet, a cell HIDDEN under the
- * range the user is looking at. Audited 2026-09-28 across the three places a
- * grid key is acted on:
- *   - the keybinding registry's built-ins (api/keybindings.ts);
- *   - Core's own grid keyboard (core/hooks/useGridKeyboard.ts: the font
- *     toggles, number formats, Ctrl+; / Ctrl+Shift+:, Ctrl+Alt+V, F11), which
- *     no registry binding names but which this dispatcher's match still
- *     stops (it runs first, on window capture);
- *   - extensions' own window-capture listeners (Hyperlinks Ctrl+K, Flash Fill
- *     Ctrl+E, Grouping Alt+Shift+Arrow, AutoFilter Ctrl+Shift+L, Review
- *     Ctrl+Alt+M and Shift+F2, Data Validation Alt+Down, Format Painter
- *     Ctrl+Shift+C), which only an EXCLUSIVE binding silences.
- * Left alone on purpose: keys that only MOVE Core's selection or open a
- * dialog/pane without writing (Ctrl+A, Ctrl+Space, Ctrl+G, Alt+;, Ctrl+[ / ],
- * Ctrl+F/H, Ctrl+F3, F5, F9, Ctrl+`), and undo/redo (a workbook action, not a
- * cell's).
- * `id` names the binding and command when one action has two keys.
- *
- * WHERE THE KEYBOARD IS (review 2026-09-28). A refusal is refused WHEREVER the
- * keyboard sits -- the grid, the body, a ribbon tab's button, a pane's button
- * -- except a text field (the bindings' "not-editing" context). That is the
- * safe default, because most of these keys are acted on by something that
- * never asks where the focus is: a registry built-in that is not grid-scoped
- * (Ctrl+T, Ctrl+E, Ctrl+Shift+L, ... -- "not-editing" since fix round 4, which
- * keeps them out of text fields and live edits but not off a focused button)
- * or an extension's own window listener (Review's
- * Ctrl+Alt+M wrote a comment into the hidden cell from a focused ribbon tab).
- * Only a key marked `gridFocusOnly` stands down off the grid, and only because
- * EVERY action behind it that reads Core's selection needs the grid focused: a
- * grid-scoped registry binding (the dispatcher skips those off the grid) or
- * Core's grid keyboard (a listener on the grid container). Off the grid such a
- * key keeps its native or pane meaning (Controls' Ctrl+C/V/D act on a selected
- * control, CellBookmarks' Ctrl+Shift+V opens Save View -- neither reads a
- * cell). frKeyRouting.test.ts pins the registry half of that claim; an
- * extension listener added for a `gridFocusOnly` key that acts on the
- * selection must drop the mark.
+ * The ONE sentence every refused door shows -- a key, a ribbon button, a menu
+ * item, a remapped shortcut -- so the user hears the same thing whichever way
+ * they asked.
  */
-export interface FrRefusedGridKey {
-  combo: string;
-  action: string;
-  id?: string;
-  /** Copy/cut defer to a real DOM text selection (the dispatcher's own rule). */
-  textSelectionWins?: boolean;
-  /** Every action behind the key needs the grid focused (see above). */
-  gridFocusOnly?: boolean;
+export function frSelectionRefusal(action: string): string {
+  return `${action} is not available for a floating range's cells yet. Nothing was changed.`;
 }
 
-export const FR_REFUSED_GRID_KEYS: readonly FrRefusedGridKey[] = [
-  // Grid-scoped registry built-ins (the dispatcher skips them off the grid).
-  { combo: "Ctrl+C", action: "Copy", textSelectionWins: true, gridFocusOnly: true },
-  { combo: "Ctrl+X", action: "Cut", textSelectionWins: true, gridFocusOnly: true },
-  { combo: "Ctrl+V", action: "Paste", gridFocusOnly: true },
-  { combo: "Ctrl+Shift+V", action: "Paste Special", gridFocusOnly: true },
-  { combo: "Ctrl+D", action: "Fill Down", gridFocusOnly: true },
-  { combo: "Ctrl+R", action: "Fill Right", gridFocusOnly: true },
-  { combo: "Ctrl+1", action: "Format Cells", gridFocusOnly: true },
-  { combo: "Ctrl+M", action: "Merge Cells", gridFocusOnly: true },
-  // Core's grid keyboard (a listener on the grid container).
-  { combo: "Ctrl+Alt+V", action: "Paste Special", id: "pastespecial.alt", gridFocusOnly: true },
-  // Font toggles (Core's grid keyboard).
-  { combo: "Ctrl+B", action: "Bold", gridFocusOnly: true },
-  { combo: "Ctrl+2", action: "Bold", id: "bold.2", gridFocusOnly: true },
-  { combo: "Ctrl+I", action: "Italic", gridFocusOnly: true },
-  { combo: "Ctrl+3", action: "Italic", id: "italic.3", gridFocusOnly: true },
-  { combo: "Ctrl+U", action: "Underline", gridFocusOnly: true },
-  { combo: "Ctrl+4", action: "Underline", id: "underline.4", gridFocusOnly: true },
-  { combo: "Ctrl+5", action: "Strikethrough", gridFocusOnly: true },
-  // Number formats (Core's grid keyboard; the shifted symbol is the key).
-  { combo: "Ctrl+Shift+~", action: "General Number Format", gridFocusOnly: true },
-  { combo: "Ctrl+Shift+`", action: "General Number Format", id: "generalnumberformat.backtick", gridFocusOnly: true },
-  { combo: "Ctrl+Shift+$", action: "Currency Format", gridFocusOnly: true },
-  { combo: "Ctrl+Shift+%", action: "Percentage Format", gridFocusOnly: true },
-  { combo: "Ctrl+Shift+^", action: "Scientific Format", gridFocusOnly: true },
-  { combo: "Ctrl+Shift+#", action: "Date Format", gridFocusOnly: true },
-  { combo: "Ctrl+Shift+@", action: "Time Format", gridFocusOnly: true },
-  { combo: "Ctrl+Shift+!", action: "Number Format", gridFocusOnly: true },
-  // Data entry into the active cell (Core's grid keyboard).
-  { combo: "Ctrl+;", action: "Insert Date", gridFocusOnly: true },
-  { combo: "Ctrl+Shift+:", action: "Insert Time", gridFocusOnly: true },
-  { combo: "F11", action: "Insert Chart", gridFocusOnly: true },
-  // EVERYTHING BELOW acts whatever has the keyboard, so it is refused there too.
-  // Format Painter's own window listener checks no focus at all (its registry
-  // built-in is grid-scoped, the listener is not).
-  { combo: "Ctrl+Shift+C", action: "Format Painter" },
-  // Objects and structure built from the selection.
-  { combo: "Ctrl+T", action: "Insert Table" },
-  { combo: "Ctrl+Shift+L", action: "AutoFilter" },
-  { combo: "Alt+Shift+ArrowRight", action: "Group" },
-  { combo: "Alt+Shift+ArrowLeft", action: "Ungroup" },
-  // Cell-anchored content (extensions' own listeners).
-  { combo: "Ctrl+K", action: "Insert Hyperlink" },
-  { combo: "Ctrl+E", action: "Flash Fill" },
-  { combo: "Ctrl+Alt+M", action: "New Comment" },
-  { combo: "Shift+F2", action: "New Note" },
-  { combo: "Ctrl+Shift+B", action: "Toggle Bookmark" },
+/** A key with no command behind it, refused as a COMBINATION. */
+export interface FrRefusedCombo {
+  combo: string;
+  action: string;
+}
+
+/**
+ * The keys no registered command stands behind -- an extension's own window
+ * listener acts on them -- so only an exclusive binding on the key itself can
+ * stop them. Keep this list short: a combination does NOT follow a remap.
+ */
+export const FR_REFUSED_COMBOS: readonly FrRefusedCombo[] = [
+  // Data Validation's in-cell dropdown (its own window-capture listener).
   { combo: "Alt+ArrowDown", action: "Pick From List" },
 ];
 
-/** The binding/command slug of a refused key (unique; pinned by frKeyRouting.test.ts). */
-export function frRefusalSlug(key: { action: string; id?: string }): string {
-  return key.id ?? key.action.toLowerCase().replace(/\s+/g, "");
+/** The binding/command slug of a refused combination (unique). */
+export function frRefusalSlug(key: { action: string }): string {
+  return key.action.toLowerCase().replace(/\s+/g, "");
 }
-
-/**
- * The grid commands whose ribbon/menu doors act on Core's selection -- ALL of
- * them: cut/copy/paste, the four clears (contents, formatting, comments,
- * hyperlinks) and Clear All, insert/delete row/column, merge/unmerge, and the
- * four fills. Guarded so a button pressed while a range owns the selection is
- * refused rather than run over the hidden cell. The list is Core's own, handed
- * out by @api (it used to be a copied union of 8 of these 18, so the fill,
- * merge and clear-formatting doors could not even be named here).
- */
-const GUARDED_GRID_COMMANDS: GridCommand[] = [...GRID_COMMANDS];
-
-export const FR_GRID_COMMAND_REFUSAL =
-  "A floating range's cells are selected, so this command would act on a sheet cell you cannot see. " +
-  "Click a cell of the sheet first.";
 
 /** A floating range selection (cells, or just the object) on the sheet shown. */
 export function frSelectionOnScreen(): boolean {
@@ -167,6 +97,19 @@ export function frSelectionOnScreen(): boolean {
   if (!id) return false;
   const entry = getFloatingRangeById(id);
   return !!entry && entry.sheetIndex === getFrActiveSheetIndex();
+}
+
+/**
+ * Whether a character typed now lands in one of the range's own CELLS (the
+ * claim's `receivesTyping`): the range's type-to-edit (index.ts
+ * handleFrKeyDown) takes it only with a cell selected and no editor open.
+ * With only the OBJECT selected nothing of the range takes typing -- and
+ * Core's cell under it is hidden -- so the keybinding dispatcher reads an
+ * AltGr character as the shortcut it collides with, not as typing (W17,
+ * review C).
+ */
+export function frReceivesTyping(): boolean {
+  return getLocalSelection() !== null && !isFrEditorOpen();
 }
 
 /**
@@ -182,11 +125,6 @@ function keyboardIsTheGrids(): boolean {
   return active === null || active === document.body;
 }
 
-function hasDomTextSelection(): boolean {
-  const sel = typeof window !== "undefined" ? window.getSelection() : null;
-  return !!sel && sel.rangeCount > 0 && !sel.isCollapsed && sel.toString().trim() !== "";
-}
-
 /**
  * Whether the range owns the grid's selection keys right now -- the GRID's
  * keys, so the keyboard must be the grid's: Delete/Backspace (and their
@@ -198,21 +136,32 @@ export function frOwnsGridKeys(): boolean {
   return !isFrEditorOpen() && frSelectionOnScreen() && keyboardIsTheGrids();
 }
 
-/**
- * Whether a refused key is refused right now. Wherever the keyboard is,
- * unless the key is `gridFocusOnly` (FR_REFUSED_GRID_KEYS); text fields never
- * see it (the bindings' "not-editing" context).
- */
-export function frRefusesKey(key: FrRefusedGridKey): boolean {
-  if (isFrEditorOpen() || !frSelectionOnScreen()) return false;
-  if (key.textSelectionWins && hasDomTextSelection()) return false;
-  return key.gridFocusOnly === true ? keyboardIsTheGrids() : true;
+/** Whether a refused combination is refused right now (text fields never see it). */
+export function frRefusesCombo(): boolean {
+  return !isFrEditorOpen() && frSelectionOnScreen();
 }
 
 /**
- * Install the bindings, their commands and the grid-command guard. `deleteSelection`
- * is the extension's own Delete (index.ts: clear the local selection's cells,
- * or confirm-and-delete the selected object). Returns the cleanup.
+ * The range's Delete door (index.ts `deleteFrSelection`) asks this BEFORE its
+ * own delete: on a CANVAS whose object selection spans families, with no
+ * inner cell selection, Delete acts on the WHOLE selection
+ * (@api/objectSelection) -- a second chart and a slicer beside the range are
+ * deleted with it, through each family's `deleteObjects`. The keybinding
+ * dispatcher runs ONE winner per key, so whichever family's Delete binding
+ * wins must hand the whole selection over. Returns true when it did.
+ */
+export function handOverToWholeSelectionDelete(): boolean {
+  if (getLocalSelection() !== null) return false;
+  if (!shouldActOnWholeObjectSelection()) return false;
+  void deleteSelectedObjects();
+  return true;
+}
+
+/**
+ * Install the Delete bindings, the selection-owner claim and the one
+ * combination refusal. `deleteSelection` is the extension's own Delete
+ * (index.ts: clear the local selection's cells, or confirm-and-delete the
+ * selected object). Returns the cleanup.
  */
 export function installFrKeyRouting(deps: {
   extensionId: string;
@@ -244,14 +193,25 @@ export function installFrKeyRouting(deps: {
     );
   }
 
-  for (const key of FR_REFUSED_GRID_KEYS) {
+  // 1. The claim. Asked by every door, every time (never cached), so it cannot
+  //    outlive the selection it describes.
+  cleanups.push(
+    registerSelectionOwner({
+      id: FR_SELECTION_OWNER_ID,
+      label: FR_SELECTION_OWNER_LABEL,
+      ownsSelection: frSelectionOnScreen,
+      refusal: frSelectionRefusal,
+      receivesTyping: frReceivesTyping,
+    }),
+  );
+
+  // 2. The combinations no command stands behind. (No refusal by command id:
+  //    every command that acts on the selection asks the claim itself -- W18.)
+  for (const key of FR_REFUSED_COMBOS) {
     const slug = frRefusalSlug(key);
     const commandId = `ext.floatingRange.refuse.${slug}`;
     CommandRegistry.register(commandId, () => {
-      showToast(
-        `${key.action} is not available for a floating range's cells yet. Nothing was changed.`,
-        { variant: "info" },
-      );
+      showToast(frSelectionRefusal(key.action), { variant: "info" });
     });
     cleanups.push(() => CommandRegistry.unregister(commandId));
     cleanups.push(
@@ -265,26 +225,18 @@ export function installFrKeyRouting(deps: {
           context: "not-editing",
           source: "extension",
           extensionId: deps.extensionId,
-          // The refusal must be the ONLY listener that acts: an extension's
-          // own window-capture listener for the same key (Ctrl+K, Ctrl+E, ...)
-          // would otherwise run the refused action over the hidden cell anyway.
+          // The refusal must be the ONLY listener that acts: the owning
+          // extension's own window-capture listener for the same key would
+          // otherwise run the refused action over the hidden cell anyway.
           exclusive: true,
           // Not a shortcut the user looks up or remaps: a "not now" over the
-          // real one, which stays listed. Listing them put ~40 rows on the
-          // keyboard settings page, each with an Edit that would move the
-          // refusal off the key it refuses.
+          // real one, which stays listed.
           listed: false,
         },
-        () => frRefusesKey(key),
+        frRefusesCombo,
       ),
     );
   }
-
-  cleanups.push(
-    gridCommands.registerGuard(GUARDED_GRID_COMMANDS, () =>
-      frSelectionOnScreen() ? FR_GRID_COMMAND_REFUSAL : true,
-    ),
-  );
 
   return () => {
     for (let i = cleanups.length - 1; i >= 0; i--) cleanups[i]();

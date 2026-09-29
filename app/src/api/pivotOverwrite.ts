@@ -49,7 +49,7 @@ import { confirmAsync } from "./dialogs";
 import { undoPivotOverwrite } from "./backend";
 import { AppEvents, emitAppEvent, type MutationDomain } from "./events";
 import { showToast } from "./notifications";
-import { isUndoTransactionOpen, runInUndoTransaction } from "./objectGeometry";
+import { isUndoTransactionOpen, openUndoTransaction, undoCommitsSettled } from "./objectGeometry";
 import { getUndoState } from "../core/lib/tauri-api";
 
 /** What one gesture's pivot responses overwrote. */
@@ -121,33 +121,26 @@ export type PivotOverwriteOutcome =
   /** The user declined (or could not be asked) and NOTHING could be taken back. */
   | "refused";
 
-/** Options of {@link confirmPivotOverwriteOrUndo}. */
-export interface ConfirmPivotOverwriteOptions {
-  /**
-   * One more undo step to take back AFTER the overwrite steps, by its history
-   * id, and only when it is then the last change -- the gesture's own step
-   * that its backend records separately BENEATH the pivot step (a ribbon
-   * filter's selection). Never anything else.
-   */
-  thenUndoSeq?: number | null;
-}
-
 /**
- * Take back the undo step(s) `tokens` name (and `thenUndoSeq` after them) and
- * announce what came back. Resolves true when something was taken back; on a
- * refusal it tells the user and resolves false. Never throws.
+ * Take back the undo step(s) `tokens` name and announce what came back.
+ * Resolves true when something was taken back; on a refusal it tells the user
+ * and resolves false. Never throws.
+ *
+ * Only steps CARRYING the gesture's tokens are ever taken back. A gesture
+ * whose backend records its own step separately must instead JOIN its pivots'
+ * step (the timeline selection does since W1): naming "one more step" by its
+ * history id is how a take-back comes to undo a stranger's step.
  */
 export async function takeBackPivotOverwrite(
   pivotId: string,
   tokens: readonly number[],
-  thenUndoSeq?: number | null,
 ): Promise<boolean> {
   if (tokens.length === 0) {
     showToast(PIVOT_OVERWRITE_NOT_TAKEN_BACK, { type: "error", duration: 8000 });
     return false;
   }
   try {
-    const result = await undoPivotOverwrite(pivotId, tokens, thenUndoSeq);
+    const result = await undoPivotOverwrite(pivotId, tokens);
     const domains: MutationDomain[] = ["styles", ...((result?.refreshDomains ?? []) as MutationDomain[])];
     emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "undo" });
     emitAppEvent(AppEvents.GRID_REFRESH);
@@ -173,7 +166,6 @@ export async function takeBackPivotOverwrite(
  */
 export async function confirmPivotOverwriteOrUndo(
   tally: PivotOverwriteTally,
-  options: ConfirmPivotOverwriteOptions = {},
 ): Promise<PivotOverwriteOutcome> {
   if (tally.cellCount <= 0) return "none";
   let confirmed = false;
@@ -189,7 +181,7 @@ export async function confirmPivotOverwriteOrUndo(
     confirmed = false;
   }
   if (confirmed) return "kept";
-  const undone = await takeBackPivotOverwrite(tally.pivotIds[0] ?? "", tally.tokens, options.thenUndoSeq);
+  const undone = await takeBackPivotOverwrite(tally.pivotIds[0] ?? "", tally.tokens);
   // Some pivot of the gesture overwrote cells WITHOUT a step to take back:
   // those stay overwritten, and the user must not be left believing otherwise.
   if (undone && tally.unrecorded) {
@@ -202,10 +194,12 @@ export async function confirmPivotOverwriteOrUndo(
  * Whether an undo transaction is open ANYWHERE right now: the frontend's own
  * (`isUndoTransactionOpen`), or one opened on the backend directly. A script's
  * `api.beginBatch` goes straight to the backend's `begin_undo_transaction`,
- * so the frontend flag never sees it; and the backend's begin is a no-op while
- * a transaction is open, so a gesture that "opens" its step then silently
- * JOINS the script's batch -- its commit closes the batch, and a decline would
- * take back the script's writes along with the gesture's.
+ * so the frontend flag never sees it; and the backend's begin JOINS while a
+ * transaction is open, so a gesture that "opens" its step then JOINS the
+ * script's batch -- and a decline would take back the script's writes along
+ * with the gesture's. (Its commit no longer closes the batch: the begin
+ * answers "joined" and `openUndoTransaction` then leaves the commit to the
+ * script; but the question must still not be asked.)
  *
  * Read it right BEFORE the gesture opens its step (the frontend flag is read
  * after the backend round trip, so it is current). A backend state that cannot
@@ -213,6 +207,12 @@ export async function confirmPivotOverwriteOrUndo(
  * not offer to take it back -- Ctrl+Z still restores the cells with that step.
  */
 export async function isAnyUndoTransactionOpen(): Promise<boolean> {
+  // The frontend's own transaction, open and not yet committing: joined.
+  if (isUndoTransactionOpen()) return true;
+  // One that is COMMITTING still reads as open on the backend until its
+  // commit lands; waiting for it keeps a gesture made in that window from
+  // being falsely "joined" -- and so never asked (BUG-0200).
+  await undoCommitsSettled();
   let backendOpen: boolean;
   try {
     const state = await getUndoState();
@@ -242,54 +242,19 @@ export async function runStepThenConfirmOverwrite<T>(
   label: string,
   body: (overwrites: PivotOverwriteTally) => Promise<T>,
 ): Promise<{ result: T; outcome: PivotOverwriteStepOutcome }> {
-  const joined = await isAnyUndoTransactionOpen();
   const overwrites = createPivotOverwriteTally();
-  const result = await runInUndoTransaction(label, () => body(overwrites));
-  if (joined) return { result, outcome: "joined" };
-  return { result, outcome: await confirmPivotOverwriteOrUndo(overwrites) };
-}
-
-/**
- * The one step a write pushed, read from the undo history ids before and after
- * it (`UndoState.undoSeqs`, oldest first): the new top when EXACTLY one entry
- * appeared on top of the old one, else null. Conservative by construction --
- * two entries, a cleared history or an unchanged top all answer null, so a
- * caller never names a step it cannot prove is its own. Pure.
- */
-export function undoStepPushedBetween(before: readonly number[], after: readonly number[]): number | null {
-  if (after.length === 0) return null;
-  const top = after[after.length - 1];
-  if (before.includes(top)) return null;
-  const below = after.length >= 2 ? after[after.length - 2] : undefined;
-  const oldTop = before.length > 0 ? before[before.length - 1] : undefined;
-  return below === oldTop ? top : null;
-}
-
-/** The history ids, oldest first, or null when they cannot be read or a
- *  transaction is OPEN (a write then joins someone else's step and pushes
- *  none of its own, so nothing it pushes can be proven its own). */
-async function readOwnUndoSeqs(): Promise<number[] | null> {
+  const step = openUndoTransaction(label);
+  let result: T;
   try {
-    const state = await getUndoState();
-    if (!state || state.transactionOpen || !Array.isArray(state.undoSeqs)) return null;
-    return state.undoSeqs;
-  } catch {
-    return null;
+    result = await step.run(() => body(overwrites));
+  } finally {
+    await step.commit();
   }
-}
-
-/**
- * Run `write` -- a backend write that records exactly one undo step of its
- * own -- and name that step (its history id) when it can be PROVEN to be the
- * write's: exactly one entry appeared on top, with no transaction open before
- * or after. Otherwise `seq` is null and the caller names nothing. For a
- * gesture whose backend records a step BENEATH its pivot step (a ribbon
- * filter's selection), handed to {@link confirmPivotOverwriteOrUndo} as
- * `thenUndoSeq`. The write's own rejection propagates.
- */
-export async function runNamingItsUndoStep<T>(write: () => Promise<T>): Promise<{ result: T; seq: number | null }> {
-  const before = await readOwnUndoSeqs();
-  const result = await write();
-  const after = before === null ? null : await readOwnUndoSeqs();
-  return { result, seq: before !== null && after !== null ? undoStepPushedBetween(before, after) : null };
+  // "Was this step MINE?" is the BEGIN's own answer. It used to be a probe
+  // taken BEFORE the begin (isAnyUndoTransactionOpen), which a script's batch
+  // opened in between made stale: the gesture joined the batch, was still
+  // asked, and a decline took back the SCRIPT's writes too (the Z3 race,
+  // wave F backlog B5, BUG-0200's residual).
+  if (!(await step.openedBackend())) return { result, outcome: "joined" };
+  return { result, outcome: await confirmPivotOverwriteOrUndo(overwrites) };
 }

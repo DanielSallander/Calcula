@@ -17,7 +17,7 @@
 
 import React, { useCallback, useRef, useEffect, useSyncExternalStore } from "react";
 import { useGridContext, getCell, getMergeInfo, isSheetProtected, getCellProtection, checkRangeGuards, getSpillRanges } from "../../api";
-import { useEditing, setGlobalIsEditing, getGlobalEditingValue, setGlobalCursorPosition, getGlobalCursorPosition, setChartSeriesRefMode } from "../../api/editing";
+import { useEditing, getGlobalEditingValue, setGlobalCursorPosition, getGlobalCursorPosition, setChartSeriesRefMode } from "../../api/editing";
 // The SUBPATH, not `api/editing`: this component's tests double `api/editing`
 // with a fixed export list, and the external-edit store must stay REAL in them.
 import {
@@ -25,6 +25,7 @@ import {
   getExternalEditVersion,
   resolveFormulaBarSource,
   endExternalFormulaSession,
+  enterCommitMove,
   type FormulaBarSource,
 } from "../../api/externalEdit";
 import { toggleReferenceAtCursor } from "../../core/lib/formulaRefToggle";
@@ -513,8 +514,12 @@ export function FormulaInput({
     }
 
     setIsFocused(true);
-    setGlobalIsEditing(true);
 
+    // Core's edit flag is raised by the edit that OPENS -- startEdit raises it
+    // once its guards have passed -- never here (E12). Raised ahead of the
+    // call, a refusal (a canvas, a range guard, an edit guard such as Format
+    // Painter's) or a focus with nothing selected left it up with no edit
+    // behind it, and Ctrl+Z / Ctrl+Y stood down for an edit that did not exist.
     if (!editing && state.selection) {
       await startEdit(state.selection.endRow, state.selection.endCol);
     }
@@ -629,7 +634,8 @@ export function FormulaInput({
           }
           if (e.key === "Enter") {
             e.preventDefault();
-            await endExternalFormulaSession("commit", e.shiftKey ? "up" : "down");
+            // The user's Move-after-Return preference, as on the sheet (E4).
+            await endExternalFormulaSession("commit", enterCommitMove(e.shiftKey));
             blurIfFocused();
             return;
           }
@@ -787,7 +793,11 @@ export function FormulaInput({
     onSelect: handleSelect,
     readOnly: isReadOnly,
     $isFocused: isFocused,
-    $isSpillRef: isSpillRef,
+    // A selected EXTERNAL cell (a floating-grid cell) says for itself whether it
+    // is a spill ghost; `isSpillRef` answers only for Core's own grid cell (its
+    // `getSpillRanges` read covers the active sheet), and is cleared while an
+    // external cell is the subject. One grey for both (wave C, W12).
+    $isSpillRef: isSpillRef || (!editing && ext.kind === "cell" && ext.cell.spillGhost === true),
     "data-formula-bar": "true",
     placeholder: "",
     "aria-label": "Formula Bar",

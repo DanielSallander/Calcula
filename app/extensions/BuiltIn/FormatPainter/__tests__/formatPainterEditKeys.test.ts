@@ -1,35 +1,45 @@
 //! FILENAME: app/extensions/BuiltIn/FormatPainter/__tests__/formatPainterEditKeys.test.ts
-// PURPOSE: Format Painter's own Ctrl+Shift+C listener stands down while a cell
-//          edit owns the keyboard (and in any text field), and still picks up
-//          the format when nothing is being edited.
+// PURPOSE: Ctrl+Shift+C does not start Format Painter while a cell edit owns
+//          the keyboard (and in any text field), and still picks up the format
+//          when nothing is being edited.
 // CONTEXT: Fix round 4, F2. The listener checked NOTHING: Ctrl+Shift+C typed in
 //          the formula bar -- during Core's own edit or a floating grid's cell
 //          edit -- started the painter on Core's selection, a HIDDEN one during
-//          a floating-grid edit. Driven through the real activation and the
-//          real window listener; only the painter itself is doubled.
+//          a floating-grid edit. Since BUG-0199 the key is started ONLY by the
+//          registry binding ("not-editing"), so this drives the REAL
+//          dispatcher (initKeybindings) and the real command registry through
+//          the real activation; only the painter itself is doubled.
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 
+const activate = vi.fn(async (..._a: unknown[]) => {});
 vi.mock("../formatPainterLogic", () => ({
-  activateFormatPainter: vi.fn(async () => {}),
+  activateFormatPainter: (...a: unknown[]) => activate(...a),
   deactivateFormatPainter: vi.fn(),
 }));
 vi.mock("../formatPainterState", () => ({ isFormatPainterActive: () => false }));
-vi.mock("@api/ui", () => ({ registerMenuItem: vi.fn() }));
+vi.mock("@api/ui", () => ({ registerMenuItem: vi.fn(), unregisterMenuItem: vi.fn() }));
 vi.mock("@api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api")>()),
+  // eslint-disable-next-line @typescript-eslint/naming-convention -- the real export name
   ExtensionRegistry: { onSelectionChange: () => () => {} },
 }));
 
 import extension from "../index";
-import { CoreCommands } from "@api/commands";
+import { CommandRegistry, CoreCommands } from "@api/commands";
+import { initKeybindings } from "@api/keybindings";
 import { registerExternalFormulaTarget, setGlobalIsEditing } from "@api/editing";
 
-const execute = vi.fn(async (..._a: unknown[]) => {});
 const cleanups: (() => void)[] = [];
 
 function stubContext(): never {
-  return { commands: { register: vi.fn(), execute } } as never;
+  return {
+    commands: {
+      register: (id: string, fn: (...a: unknown[]) => unknown) => CommandRegistry.register(id, fn),
+      unregister: (id: string) => CommandRegistry.unregister(id),
+      execute: (id: string) => CommandRegistry.execute(id),
+    },
+  } as never;
 }
 function focus(el: HTMLElement): HTMLElement {
   document.body.appendChild(el);
@@ -57,15 +67,20 @@ function ctrlShiftC(): KeyboardEvent {
   return e;
 }
 function painterStarts(): number {
-  return execute.mock.calls.filter((c) => c[0] === CoreCommands.FORMAT_PAINTER).length;
+  return activate.mock.calls.length;
 }
 
+beforeAll(() => {
+  initKeybindings();
+});
 beforeEach(() => {
-  execute.mockClear();
+  activate.mockClear();
   extension.activate(stubContext());
 });
 afterEach(() => {
   extension.deactivate();
+  CommandRegistry.unregister(CoreCommands.FORMAT_PAINTER);
+  CommandRegistry.unregister(CoreCommands.FORMAT_PAINTER_LOCK);
   while (cleanups.length > 0) cleanups.pop()!();
   setGlobalIsEditing(false);
   document.body.innerHTML = "";

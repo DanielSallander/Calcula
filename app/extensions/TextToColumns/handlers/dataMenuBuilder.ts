@@ -4,6 +4,7 @@
 
 import type { ExtensionContext } from "@api/contract";
 import { IconTextToColumns } from "@api";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 // ============================================================================
 // State
@@ -34,8 +35,11 @@ export function setCurrentSelection(
 /**
  * Register the "Text to Columns..." item in the Data menu.
  * Assumes the "data" menu was already created by AutoFilter or another extension.
+ *
+ * Returns the cleanup for deactivation: it takes back this extension's OWN
+ * items, never the shared Data menu (wave E, Y14).
  */
-export function registerTextToColumnsMenuItem(context: ExtensionContext): void {
+export function registerTextToColumnsMenuItem(context: ExtensionContext): () => void {
   context.ui.menus.registerItem("data", {
     id: "data:textToColumns:separator",
     label: "",
@@ -47,6 +51,10 @@ export function registerTextToColumnsMenuItem(context: ExtensionContext): void {
     label: "Text to Columns...",
     icon: IconTextToColumns,
     action: () => {
+      // The dialog splits Core's selection, which is HIDDEN while something
+      // else owns the selection (a floating grid's selected cell): refuse, once
+      // (D4, BUG-0185 class).
+      if (refuseIfSelectionOwned("Text to Columns")) return;
       const sel = currentSelection;
       context.ui.dialogs.show("text-to-columns", {
         startRow: sel?.startRow ?? 0,
@@ -56,4 +64,9 @@ export function registerTextToColumnsMenuItem(context: ExtensionContext): void {
       });
     },
   });
+
+  return () => {
+    context.ui.menus.unregisterItem("data", "data:textToColumns:separator");
+    context.ui.menus.unregisterItem("data", "data:textToColumns");
+  };
 }

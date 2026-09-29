@@ -1,15 +1,18 @@
 //! FILENAME: app/extensions/Grouping/__tests__/groupingEditKeys.test.ts
-// PURPOSE: Grouping's own Alt+Shift+Arrow listener stands down while a cell
-//          edit owns the keyboard, and still groups/ungroups when nothing is
-//          being edited.
-// CONTEXT: Fix round 4, F2. The listener had only a pointer-claim check, so
-//          Alt+Shift+Right typed during a floating grid's cell edit (its editor
-//          or the formula bar focused, or parked with the keyboard on the grid
-//          container) grouped the rows of Core's HIDDEN selection. Driven
-//          through the real activation and the real window listener; only the
-//          outline store and the menu builders are doubled.
+// PURPOSE: Alt+Shift+Arrow does not group/ungroup while a cell edit owns the
+//          keyboard, and still groups/ungroups (once) when nothing is being
+//          edited.
+// CONTEXT: Fix round 4, F2: Alt+Shift+Right typed during a floating grid's
+//          cell edit (its editor or the formula bar focused, or parked with the
+//          keyboard on the grid container) grouped the rows of Core's HIDDEN
+//          selection. That was the extension's own window listener; since wave
+//          B (D1) the keybinding registry is the ONE keyboard path and the
+//          listener is gone, so this drives the REAL dispatcher
+//          (initKeybindings, the `not-editing` bindings) and the REAL
+//          grouping.group / grouping.ungroup commands through the real
+//          activation; only the outline store and the menu builders are doubled.
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 
 const performGroupRows = vi.fn();
 const performUngroupRows = vi.fn();
@@ -34,6 +37,7 @@ const h = vi.hoisted(() => ({ onSelection: null as null | ((sel: unknown) => voi
 vi.mock("@api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api")>()),
   registerPostHeaderOverlay: () => () => {},
+  // eslint-disable-next-line @typescript-eslint/naming-convention -- the real export name
   ExtensionRegistry: {
     onSelectionChange: (cb: (sel: unknown) => void) => {
       h.onSelection = cb;
@@ -45,6 +49,8 @@ vi.mock("@api", async (importOriginal) => ({
 }));
 
 import extension from "../index";
+import { CommandRegistry } from "@api/commands";
+import { initKeybindings } from "@api/keybindings";
 import { registerExternalFormulaTarget, setGlobalIsEditing } from "@api/editing";
 
 const cleanups: (() => void)[] = [];
@@ -53,6 +59,11 @@ function stubContext(): never {
   return {
     ui: { dialogs: { register: vi.fn(), unregister: vi.fn() } },
     events: { on: () => () => {} },
+    commands: {
+      register: (id: string, fn: (...a: unknown[]) => unknown) => CommandRegistry.register(id, fn),
+      unregister: (id: string) => CommandRegistry.unregister(id),
+      execute: (id: string) => CommandRegistry.execute(id),
+    },
   } as never;
 }
 function focus(el: HTMLElement): HTMLElement {
@@ -75,9 +86,10 @@ function startFloatingGridEdit(): void {
     }),
   );
 }
-function press(key: "ArrowRight" | "ArrowLeft"): KeyboardEvent {
+async function press(key: "ArrowRight" | "ArrowLeft"): Promise<KeyboardEvent> {
   const e = new KeyboardEvent("keydown", { key, altKey: true, shiftKey: true, bubbles: true, cancelable: true });
   (document.activeElement ?? document.body).dispatchEvent(e);
+  for (let i = 0; i < 4; i++) await Promise.resolve();
   return e;
 }
 function acted(): number {
@@ -89,6 +101,9 @@ function acted(): number {
   );
 }
 
+beforeAll(() => {
+  initKeybindings();
+});
 beforeEach(() => {
   vi.clearAllMocks();
   extension.activate(stubContext());
@@ -96,7 +111,7 @@ beforeEach(() => {
   h.onSelection?.({ startRow: 2, endRow: 5, startCol: 0, endCol: 3, type: "cells" });
 });
 afterEach(() => {
-  extension.deactivate();
+  extension.deactivate?.();
   while (cleanups.length > 0) cleanups.pop()!();
   setGlobalIsEditing(false);
   document.body.innerHTML = "";
@@ -104,39 +119,41 @@ afterEach(() => {
 
 describe("Grouping Alt+Shift+Arrow while a cell edit owns the keyboard", () => {
   for (const key of ["ArrowRight", "ArrowLeft"] as const) {
-    it(`${key}: a floating grid's live edit, parked with the keyboard on the grid container -> nothing grouped, key not taken`, () => {
+    it(`${key}: a floating grid's live edit, parked with the keyboard on the grid container -> nothing grouped, key not taken`, async () => {
       startFloatingGridEdit();
       focus(gridContainer());
-      const e = press(key);
+      const e = await press(key);
       expect(acted()).toBe(0);
       expect(e.defaultPrevented).toBe(false);
     });
 
-    it(`${key}: a floating grid's live edit in the formula bar -> nothing grouped`, () => {
+    it(`${key}: a floating grid's live edit in the formula bar -> nothing grouped`, async () => {
       startFloatingGridEdit();
       focus(document.createElement("input"));
-      press(key);
+      await press(key);
       expect(acted()).toBe(0);
     });
 
-    it(`${key}: Core's own in-cell edit -> nothing grouped`, () => {
+    it(`${key}: Core's own in-cell edit -> nothing grouped`, async () => {
       setGlobalIsEditing(true);
       focus(document.createElement("textarea"));
-      press(key);
+      await press(key);
       expect(acted()).toBe(0);
     });
   }
 
-  it("positive control: nothing being edited, grid focused -> Alt+Shift+Right groups the selected rows", () => {
+  it("positive control: nothing being edited, grid focused -> Alt+Shift+Right groups the selected rows ONCE", async () => {
     focus(gridContainer());
-    const e = press("ArrowRight");
+    const e = await press("ArrowRight");
+    expect(performGroupRows).toHaveBeenCalledTimes(1);
     expect(performGroupRows).toHaveBeenCalledWith(2, 5);
     expect(e.defaultPrevented).toBe(true);
   });
 
-  it("positive control: Alt+Shift+Left ungroups them", () => {
+  it("positive control: Alt+Shift+Left ungroups them ONCE", async () => {
     focus(gridContainer());
-    press("ArrowLeft");
+    await press("ArrowLeft");
+    expect(performUngroupRows).toHaveBeenCalledTimes(1);
     expect(performUngroupRows).toHaveBeenCalledWith(2, 5);
   });
 });

@@ -3144,6 +3144,19 @@ declare interface UnlockedAPI {
    * Begin an undo transaction. All cell changes until commitBatch() are
    * grouped as a single undo entry.
    *
+   * Batches NEST. A `beginBatch` while a batch is already open -- your own
+   * outer one, another script's, a command-line run's -- JOINS it: your writes
+   * become part of THAT step, and only the batch that opened the step closes
+   * it (a joined batch's `commitBatch()` / `cancelBatch()` closes nothing).
+   *
+   * A sheet add / delete / rename / move / copy ends the undo history, as in
+   * Excel, and the open step with it. When YOUR script makes that change
+   * (with `api.addSheet`, `deleteSheet`, `renameSheet`, `moveSheet` or
+   * `copySheet`), your batch resumes as a new step after it. When the USER --
+   * or another script -- changes the sheets while your batch is open, your
+   * batch ends there: your later writes are no longer grouped by it, and your
+   * `commitBatch()` / `cancelBatch()` close nothing.
+   *
    * `{ deferRepaint: true }` additionally pauses screen repaints for the LIFE
    * OF THE BATCH — the honest version of VBA's `ScreenUpdating = False`. The
    * canvas repaints exactly once, at `commitBatch()` / `cancelBatch()`; and if
@@ -3155,19 +3168,27 @@ declare interface UnlockedAPI {
    * await api.beginBatch("Import 10k rows", { deferRepaint: true });
    * try {
    *   // ...thousands of writes, zero intermediate repaints...
-   *   await api.commitBatch();      // ONE repaint, final state
+   *   await api.commitBatch();      // ONE undo step, ONE repaint, final state
    * } catch (e) {
-   *   await api.cancelBatch();      // reverted, then ONE repaint
+   *   await api.cancelBatch();      // NO undo step -- the writes so far STAY; ONE repaint
    * }
    * ```
+   *
+   * A cancel is not a rollback. To make a batch's writes removable, commit it:
+   * one Ctrl+Z then takes the whole batch back.
    *
    * @param description Human-readable description shown in the Undo menu.
    */
   beginBatch(description: string, options?: { deferRepaint?: boolean }): Promise<void>;
   /** Commit the current batch, finalizing it as a single undo entry (and, for
-   *  a `deferRepaint` batch, firing the one trailing repaint). */
+   *  a `deferRepaint` batch, firing the one trailing repaint). A batch that
+   *  JOINED another caller's step commits nothing: that step's opener does. */
   commitBatch(): Promise<void>;
-  /** Cancel the current batch, discarding all changes since beginBatch(). */
+  /** Close the current batch with NO undo step: its writes STAY in the sheet (not a rollback).
+   *  The batch's undo record is dropped, so Ctrl+Z can no longer take those
+   *  writes back. For a `deferRepaint` batch it also fires the one trailing
+   *  repaint. A batch that JOINED another caller's step cancels nothing:
+   *  dropping that step's record would strand the other caller's writes too. */
   cancelBatch(): Promise<void>;
 
   // -- The Application cluster (VBA's Application object) --

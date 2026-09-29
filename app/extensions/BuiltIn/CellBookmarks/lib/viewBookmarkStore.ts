@@ -26,11 +26,8 @@ import {
   hideColumns,
   setColumnWidth,
   setRowHeight,
-  setActiveSheet,
-  setActiveSheetApi,
+  activateSheet,
   scrollToPosition,
-  emitAppEvent,
-  AppEvents,
   getAutoFilter,
   applyAutoFilter,
   setColumnFilterValues,
@@ -215,19 +212,16 @@ export async function restoreState(
   snapshot: ViewStateSnapshot,
   dimensions: ViewStateDimensions
 ): Promise<void> {
-  // Restore active sheet first so subsequent actions apply to the right sheet
+  // Restore active sheet first so subsequent actions apply to the right sheet.
+  // AWAITED, through the one switch door: an unawaited switch announced before
+  // the backend had switched let SheetTabs' re-read dispatch the OLD sheet
+  // back (found live 2026-09-29, e2e fixall-edit X16), and every restore below
+  // (hides, widths, the filter) would then land on the wrong sheet.
   if (dimensions.activeSheet && snapshot.activeSheet) {
     const state = getGridStateSnapshot();
     const currentSheet = state?.sheetContext.activeSheetIndex ?? 0;
     if (snapshot.activeSheet.index !== currentSheet) {
-      setActiveSheetApi(snapshot.activeSheet.index);
-      dispatchGridAction(
-        setActiveSheet(snapshot.activeSheet.index, snapshot.activeSheet.name)
-      );
-      emitAppEvent(AppEvents.SHEET_CHANGED, {
-        index: snapshot.activeSheet.index,
-        name: snapshot.activeSheet.name,
-      });
+      await activateSheet(snapshot.activeSheet.index);
     }
   }
 

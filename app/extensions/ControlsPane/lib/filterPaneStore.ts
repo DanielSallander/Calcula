@@ -13,15 +13,17 @@ import type {
 } from "./filterPaneTypes";
 import * as api from "./filterPaneApi";
 import { FilterPaneEvents } from "./filterPaneEvents";
-import { applyRibbonFilter, clearRibbonFilter } from "./filterPaneFilterBridge";
-import { cellEvents } from "@api/cellEvents";
-import { showToast } from "@api/notifications";
 import {
-  confirmPivotOverwriteOrUndo,
-  createPivotOverwriteTally,
-  isAnyUndoTransactionOpen,
-  runNamingItsUndoStep,
-} from "@api/pivotOverwrite";
+  applyRibbonFilter,
+  clearModelColumnOnPivots,
+  clearRibbonFilter,
+  reportRibbonFilterFailures,
+  resolveTargetPivots,
+  runRibbonFilterSelectionGesture,
+  type RibbonFilterFailure,
+} from "./filterPaneFilterBridge";
+import { cellEvents } from "@api/cellEvents";
+import { confirmPivotOverwriteOrUndo } from "@api/pivotOverwrite";
 import { emitAppEvent, AppEvents } from "@api/events";
 import {
   CONTROL_VALUE_CHANGED,
@@ -117,6 +119,18 @@ function dispatchFilterValueDiffs(previous: RibbonFilter[], next: RibbonFilter[]
   for (const gone of prevById.values()) {
     dispatchFilterValueChanged(gone.id, gone.name, undefined);
   }
+}
+
+/** Ribbon filter changes whose backend command has not landed its step yet. */
+let landingGestures = 0;
+
+/**
+ * Whether a ribbon filter change's backend command is still landing its one
+ * undo step. The backend refuses an undo or redo meanwhile; the keyboard's
+ * refusal asks this so the user hears why (the review of BUG-0187).
+ */
+export function isRibbonFilterChangeLanding(): boolean {
+  return landingGestures > 0;
 }
 
 /** Cached items per filter (filter id -> items). Refreshed on demand. */
@@ -236,21 +250,22 @@ export async function updateFilterAsync(
 }
 
 /**
- * A ribbon filter's selection change: the selection write, then the filter on
- * every target pivot (ONE "Ribbon filter change" step for the pivots).
+ * A ribbon filter's selection change: the selection AND the filter on every
+ * target pivot, as ONE backend command that records ONE step at the end
+ * (`runRibbonFilterSelectionGesture`, BUG-0187). The backend used to record
+ * the selection as a step of its own (committing any open transaction), and
+ * the pivots joined a frontend transaction held open across their model
+ * re-queries, so an unrelated edit made meanwhile joined the change.
  *
- * OVERWRITE. A pivot the change grows over the user's cells records a step
- * holding them. Once the pivot step has committed, the user is asked ONCE for
- * the whole change (every pivot, how many cells) through `@api/pivotOverwrite`,
- * failing closed. A decline takes back the pivot step AND the selection step
- * beneath it -- the backend records the selection as a step of its own, before
- * the pivots' -- but that one only when it is PROVABLY this change's (exactly
- * one entry appeared for the write; `runNamingItsUndoStep`), never a guess. A
- * change that runs inside someone else's open transaction -- the frontend's,
- * or a script batch's opened on the backend directly -- never asks. After a
- * decline, the pivots the change masked without overwriting (they recorded
- * nothing, so the take-back could not restore them) are re-derived from the
- * restored selection ({@link rederiveAfterDecline}).
+ * OVERWRITE. A pivot the change grows over the user's cells is recorded in
+ * the change's own step, with its cells. Once the step has landed, the user is
+ * asked ONCE for the whole change (every pivot, how many cells) through
+ * `@api/pivotOverwrite`, failing closed, and a decline takes back THE WHOLE
+ * CHANGE -- the selection with its pivots, one step. The pivots the change
+ * masked without overwriting recorded nothing; the take-back's announcement
+ * re-reads this store, whose reconcile re-derives them from the restored
+ * selection ({@link refreshCacheAndReapplyChangedFilters}), and a declined
+ * change resolves only once that has landed ({@link settleAfterTakeBack}).
  */
 export async function updateFilterSelectionAsync(
   filterId: string,
@@ -262,39 +277,41 @@ export async function updateFilterSelectionAsync(
   const filter = cachedFilters.find((f) => f.id === filterId);
   const previousSelection = filter ? filter.selectedItems : null;
   try {
-    if (filter) {
-      filter.selectedItems = selectedItems;
+    if (!filter) {
+      // Not in the store (yet): the selection alone, nothing to filter.
+      await api.updateRibbonFilterSelection(filterId, selectedItems);
+      return;
     }
-
-    const joined = await isAnyUndoTransactionOpen();
-    const { seq: selectionStep } = await runNamingItsUndoStep(() =>
-      api.updateRibbonFilterSelection(filterId, selectedItems),
-    );
-
-    // Apply or clear filter on connected sources
-    const updatedFilter = cachedFilters.find((f) => f.id === filterId);
-    if (updatedFilter) {
-      const overwrites = createPivotOverwriteTally();
-      if (selectedItems === null) {
-        await clearRibbonFilter(updatedFilter, undefined, overwrites);
-      } else {
-        await applyRibbonFilter(updatedFilter, undefined, overwrites);
-      }
-      if (!joined) {
-        const outcome = await confirmPivotOverwriteOrUndo(overwrites, { thenUndoSeq: selectionStep });
-        if (outcome === "undone") {
-          // The take-back announced what it restored: the "ribbonFilter"
-          // domain re-reads this cache (and tells @Name consumers). Formulas
-          // bound to the filter follow the restored selection.
-          await rederiveAfterDecline(filterId, selectedItems, overwrites.pivotIds);
-          triggerControlValueRecalc([updatedFilter.name]);
-          return;
-        }
-      }
-      // GET.CONTROLVALUE: formulas bound to this filter's name react to the
-      // new selection (multi-select spills handled backend-side).
-      triggerControlValueRecalc([updatedFilter.name]);
+    // Counted BEFORE the change: a take-back's announcement starts a
+    // reconcile after this point, and the decline below waits for it.
+    const reconcilesBefore = reconcilesStarted;
+    filter.selectedItems = selectedItems;
+    // LANDING until its one step is pushed: an Undo meanwhile -- Ctrl+Z, the
+    // ribbon, the Edit menu -- is refused with a sentence (index.ts; the
+    // backend refuses it anyway). Armed before the first await, so an Undo
+    // issued right after the change already sees it.
+    landingGestures += 1;
+    let gesture: Awaited<ReturnType<typeof runRibbonFilterSelectionGesture>>;
+    try {
+      gesture = await runRibbonFilterSelectionGesture({ ...filter, selectedItems });
+    } finally {
+      landingGestures -= 1;
     }
+    const { step, overwrites } = gesture;
+    if (step === "pushed") {
+      const outcome = await confirmPivotOverwriteOrUndo(overwrites);
+      if (outcome === "undone") {
+        // The take-back announced what it restored ("ribbonFilter"): the
+        // reconcile it started re-reads this cache and re-derives the masks
+        // the step did not carry. Formulas bound to the filter follow.
+        await settleAfterTakeBack(reconcilesBefore);
+        triggerControlValueRecalc([filter.name]);
+        return;
+      }
+    }
+    // GET.CONTROLVALUE: formulas bound to this filter's name react to the
+    // new selection (multi-select spills handled backend-side).
+    triggerControlValueRecalc([filter.name]);
 
     // Refresh sibling filter items (cross-filtering has_data)
     await refreshSiblingFilterItems(filterId);
@@ -310,13 +327,7 @@ export async function updateFilterSelectionAsync(
     // filter via @Name) reacts to the new selection, exactly as it would for a
     // pane control. Non-transient — a ribbon selection is a committed change,
     // never a mid-drag preview frame.
-    if (updatedFilter) {
-      dispatchFilterValueChanged(
-        updatedFilter.id,
-        updatedFilter.name,
-        filterControlValue(selectedItems),
-      );
-    }
+    dispatchFilterValueChanged(filter.id, filter.name, filterControlValue(selectedItems));
   } catch (err) {
     // Roll back the optimistic update: the backend never saw this selection.
     if (filter) {
@@ -326,49 +337,145 @@ export async function updateFilterSelectionAsync(
   }
 }
 
-/** Told when the pivots a declined change left on its selection could not be
- *  put back (the filter could not be re-read). */
-export const RIBBON_DECLINE_NOT_REDERIVED =
-  "Some PivotTables may still show the filter you declined. Select the filter's items again to update them.";
+// ============================================================================
+// Reconcile after an outside change (undo / redo / a declined change / pull)
+// ============================================================================
+
+/** The part of a ribbon filter that decides what it filters. */
+export type RibbonFilterState = Pick<
+  RibbonFilter,
+  "id" | "selectedItems" | "filterLevel" | "connectionMode" | "connectedPivots" | "connectedSheets"
+>;
+
+function selectionKey(f: Pick<RibbonFilter, "selectedItems">): string {
+  return JSON.stringify(f.selectedItems ?? null);
+}
+
+/** Whether what a filter REACHES moved (its mode, manual pivots or sheets). */
+function targetsDefinitionChanged(a: RibbonFilterState, b: RibbonFilterState): boolean {
+  const sorted = (v: ReadonlyArray<string | number> | undefined) => JSON.stringify([...(v ?? [])].sort());
+  return (
+    (a.connectionMode ?? "manual") !== (b.connectionMode ?? "manual") ||
+    sorted(a.connectedPivots) !== sorted(b.connectedPivots) ||
+    sorted(a.connectedSheets) !== sorted(b.connectedSheets)
+  );
+}
 
 /**
- * After a DECLINED selection change was taken back (fix round 5 review): the
- * take-back restored every pivot whose step it holds -- the ones that grew
- * over the user's cells -- but a pivot the change masked WITHOUT overwriting
- * recorded nothing (a level-1 mask records no step), so it still showed the
- * declined selection while the card showed the restored one. Re-derive
- * exactly those from the selection the take-back RESTORED, read back from
- * the backend (the cache still holds the declined one until the take-back's
- * own re-read lands), recording nothing: `RibbonFilterReconcile` sends
- * `reconcile: true`, opens no step, and skips `restoredPivotIds`.
+ * The ribbon filters whose pivot MASKS must be re-derived after the store
+ * re-read the backend (BUG-0200, "a general ribbon reconcile after a plain
+ * Ctrl+Z"): present BOTH before and after, ORDINARY (level 1) on both sides,
+ * whose selection changed -- or whose targets moved while it filters
+ * something. An ordinary mask records no undo of its own, so an undone
+ * change restored the filter's selection and left its pivots masked with the
+ * undone one. A PINNED level on either side is skipped: its re-query recorded
+ * the pivot's pre-state in the step the undo restored.
  *
- * Nothing is re-derived when the selection did not come back (its step was
- * not provably this change's, so the backend still holds the declined
- * selection and the untouched pivots agree with it), or at a PINNED level
- * (every pivot's re-query recorded its pre-state in the step that came back).
+ * A filter that APPEARED (absent before) is named too when it is ordinary and
+ * carries a selection: Ctrl+Z of its DELETE brings it back with its selection,
+ * but the delete had cleared its masks first (recording nothing), so its
+ * pivots showed everything while its card showed the selection (the review of
+ * S2). The initial load never diffs (there is no "before" yet). Pure.
  */
-async function rederiveAfterDecline(
-  filterId: string,
-  declined: string[] | null,
-  restoredPivotIds: readonly string[],
-): Promise<void> {
-  let restored: RibbonFilter | undefined;
-  try {
-    restored = (await api.getAllRibbonFilters()).find((f) => f.id === filterId);
-  } catch (err) {
-    console.warn("[FilterPane] Could not re-read the filter after a declined change:", err);
-    showToast(RIBBON_DECLINE_NOT_REDERIVED, { type: "error", duration: 8000 });
-    return;
+export function ribbonFiltersWhoseFilterChanged(
+  before: readonly RibbonFilterState[],
+  after: readonly RibbonFilter[],
+): RibbonFilter[] {
+  const prior = new Map(before.map((f) => [f.id, f]));
+  return after.filter((f) => {
+    const was = prior.get(f.id);
+    if (!was) return f.selectedItems !== null && (f.filterLevel ?? 1) === 1;
+    if ((was.filterLevel ?? 1) !== 1 || (f.filterLevel ?? 1) !== 1) return false;
+    if (selectionKey(was) !== selectionKey(f)) return true;
+    if (f.selectedItems === null) return false;
+    return targetsDefinitionChanged(was, f);
+  });
+}
+
+/** How many reconciles have started (monotonic). */
+let reconcilesStarted = 0;
+/** Settles once every reconcile started so far has settled. Never rejects. */
+let reconcilesSettled: Promise<void> = Promise.resolve();
+
+/**
+ * Re-read the store after a mutation the frontend did not make itself (the
+ * "ribbonFilter" fan-out: undo, redo, a declined change's take-back, a pull)
+ * and re-derive the pivot masks of every filter
+ * {@link ribbonFiltersWhoseFilterChanged} names -- recording NOTHING (every
+ * write is a reconcile: `reconcile: true`, no undo step, never a column
+ * added). A filter whose targets moved has its mask taken OFF the pivots it
+ * no longer reaches first. Pivots that refuse are told in ONE toast. The
+ * before-state is captured SYNCHRONOUSLY at the call, so a change that set
+ * the cache just before announcing (a declined one) is diffed against it.
+ */
+export function refreshCacheAndReapplyChangedFilters(): Promise<RibbonFilter[]> {
+  const run = reconcileAfterOutsideChange();
+  reconcilesStarted += 1;
+  reconcilesSettled = Promise.allSettled([reconcilesSettled, run]).then(() => undefined);
+  return run;
+}
+
+async function reconcileAfterOutsideChange(): Promise<RibbonFilter[]> {
+  const before: RibbonFilterState[] | null = cacheInitialized
+    ? cachedFilters.map((f) => ({
+        id: f.id,
+        selectedItems: f.selectedItems === null ? null : [...f.selectedItems],
+        filterLevel: f.filterLevel,
+        connectionMode: f.connectionMode,
+        connectedPivots: [...(f.connectedPivots ?? [])],
+        connectedSheets: [...(f.connectedSheets ?? [])],
+      }))
+    : null;
+  await refreshCache();
+  if (!before) return [];
+  const changed = ribbonFiltersWhoseFilterChanged(before, cachedFilters);
+  const prior = new Map(before.map((f) => [f.id, f]));
+  const refused: RibbonFilterFailure[] = [];
+  const reconcile = { skipPivotIds: [] as string[] };
+  for (const filter of changed) {
+    // Absent before: a filter that came back (an undone delete) -- nothing of
+    // its old reach to take off, only its selection to re-derive.
+    const was = prior.get(filter.id);
+    if (was && was.selectedItems !== null && targetsDefinitionChanged(was, filter)) {
+      try {
+        const reached = new Set(await resolveTargetPivots(filter));
+        const dropped = (await resolveTargetPivots({ ...filter, ...was } as RibbonFilter)).filter(
+          (pivotId) => !reached.has(pivotId),
+        );
+        await clearModelColumnOnPivots(filter.fieldName, dropped, {
+          label: filter.name,
+          failures: refused,
+          reconcile: true,
+        });
+      } catch (err) {
+        refused.push({
+          filter: filter.name,
+          pivotId: "",
+          clearing: true,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (filter.selectedItems === null) {
+      await clearRibbonFilter(filter, refused, undefined, reconcile);
+    } else {
+      await applyRibbonFilter(filter, refused, undefined, reconcile);
+    }
   }
-  if (!restored) return;
-  if (JSON.stringify(restored.selectedItems) === JSON.stringify(declined)) return;
-  if ((restored.filterLevel ?? 1) !== 1) return;
-  const reconcile = { skipPivotIds: restoredPivotIds };
-  if (restored.selectedItems === null) {
-    await clearRibbonFilter(restored, undefined, undefined, reconcile);
-  } else {
-    await applyRibbonFilter(restored, undefined, undefined, reconcile);
-  }
+  reportRibbonFilterFailures(refused);
+  return changed;
+}
+
+/**
+ * After a declined change was taken back: bring the store to the RESTORED
+ * selection -- and its masks -- before anything reads it. The take-back
+ * announced the "ribbonFilter" domain and the Shell's fan-out started a
+ * reconcile INSIDE that announcement; wait for it, or run one here when the
+ * take-back started none.
+ */
+async function settleAfterTakeBack(reconcilesBefore: number): Promise<void> {
+  if (reconcilesStarted > reconcilesBefore) await reconcilesSettled;
+  else await refreshCacheAndReapplyChangedFilters();
 }
 
 // ============================================================================
@@ -516,6 +623,7 @@ export async function refreshAllItems(): Promise<void> {
 export function clearCache(): void {
   cachedFilters = [];
   cacheInitialized = false;
+  reconcilesSettled = Promise.resolve();
   itemsCache.clear();
   connectionInfoCache = new Map();
 }

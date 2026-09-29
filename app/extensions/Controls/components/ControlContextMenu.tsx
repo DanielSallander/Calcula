@@ -15,6 +15,7 @@ import { css } from "@emotion/css";
 import type { OverlayProps } from "@api/uiTypes";
 import { getFloatingControl } from "../lib/floatingStore";
 import type { ControlMenuItem } from "../lib/controlContextMenu";
+import { noteControlMenuMounted } from "../lib/controlMenuState";
 
 const styles = {
   menu: css`
@@ -126,13 +127,24 @@ export function ControlContextMenu({
     };
   }, [onClose]);
 
+  // Close on Escape -- and CONSUME it: the Escape that closes the menu is the
+  // menu's alone, so nothing behind it (the grid's own keyboard) hears it as
+  // well. The canvas's Escape binding, which runs EARLIER on this path, asks
+  // Controls first and stands down while the menu is open
+  // (lib/controlMenuState.ts).
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
     };
     document.addEventListener("keydown", handler, true);
     return () => document.removeEventListener("keydown", handler, true);
   }, [onClose]);
+
+  // Open while mounted (lib/controlMenuState.ts).
+  useEffect(() => noteControlMenuMounted(), []);
 
   const ctrl = controlId ? getFloatingControl(controlId) : null;
   if (!ctrl || screenX === null || screenY === null || items.length === 0) return null;

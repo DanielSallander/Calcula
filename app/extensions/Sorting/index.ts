@@ -33,7 +33,7 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => context.ui.dialogs.unregister("sort-dialog"));
 
   // 2. Register menu items in Data menu
-  registerSortMenuItems(context);
+  cleanupFns.push(registerSortMenuItems(context));
 
   // 3. Track current selection (for quick sort and dialog context)
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {

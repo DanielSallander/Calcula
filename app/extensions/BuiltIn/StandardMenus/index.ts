@@ -4,7 +4,14 @@
 // NOTE: Default exports an ExtensionModule object per the contract.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { registerMenu, registerShellComponent, unregisterShellComponent, showDialog, updateMenuItem, type MenuDefinition } from "@api/ui";
+import {
+  registerMenu,
+  unregisterMenu,
+  registerShellComponent,
+  unregisterShellComponent,
+  updateMenuItem,
+  type MenuDefinition,
+} from "@api/ui";
 import { CoreCommands } from "@api/commands";
 import { getUndoAvailability, subscribeToUndoAvailability } from "@api/undoState";
 import {
@@ -16,6 +23,8 @@ import {
 import { registerFormatMenu } from "./FormatMenu";
 import { fileNew, fileOpen, fileSave, fileSaveAs } from "./FileMenu";
 import { StandardMenus } from "./StandardMenus";
+import { openInsertTableDialog, openGoToSpecialDialog } from "./selectionDoors";
+import { runEditCopy, runEditPaste } from "./objectClipboardDoors";
 
 const SHELL_COMPONENT_ID = "standard-menus";
 
@@ -35,15 +44,19 @@ let activeContext: ExtensionContext | null = null;
 /** Torn down on deactivate; the store drops its own bus listener with the last
  *  subscriber, so a deactivated extension leaves nothing running. */
 let unsubscribeUndoAvailability: (() => void) | null = null;
+/** The menus this extension BUILT (Edit, Format), taken away on deactivate --
+ *  a menu is its builder's, exactly as an item is its adder's (W20). */
+let unregisterOwnMenus: (() => void)[] = [];
 
 function registerMenuActionCommands(context: ExtensionContext): void {
   context.commands.register("core.file.new", () => fileNew());
   context.commands.register("core.file.open", () => fileOpen());
   context.commands.register("core.file.save", () => fileSave());
   context.commands.register("core.file.saveAs", () => fileSaveAs());
-  // Stateless dialog openers (same one-liners the menu items' actions use).
-  context.commands.register("insert.table", () => showDialog("table:createDialog"));
-  context.commands.register("view.goToSpecial", () => showDialog("go-to-special"));
+  // The same dialog openers the menu items use (selectionDoors.ts): both
+  // target Core's selection, so both refuse while a selection owner holds it.
+  context.commands.register("insert.table", () => openInsertTableDialog());
+  context.commands.register("view.goToSpecial", () => openGoToSpecialDialog());
 }
 
 // ============================================================================
@@ -54,7 +67,7 @@ function registerMenuActionCommands(context: ExtensionContext): void {
 // which uses React hooks for reactive state (checkmarks, dynamic items).
 // Only Edit menu is registered here since it's purely command-based.
 
-function registerEditMenu(context: ExtensionContext): void {
+function registerEditMenu(context: ExtensionContext): () => void {
   const editMenu: MenuDefinition = {
     id: "edit",
     label: "Edit",
@@ -64,13 +77,16 @@ function registerEditMenu(context: ExtensionContext): void {
       { id: "edit:redo", label: "Redo", shortcut: "Ctrl+Y", commandId: CoreCommands.REDO, icon: IconRedo },
       { id: "edit:sep1", label: "", separator: true },
       { id: "edit:cut", label: "Cut", shortcut: "Ctrl+X", commandId: CoreCommands.CUT, icon: IconCut },
-      { id: "edit:copy", label: "Copy", shortcut: "Ctrl+C", commandId: CoreCommands.COPY, icon: IconCopy },
+      // Copy / Paste name the cell commands (their shortcut chips read
+      // commandId) but RUN the one that answers now: on a canvas, the canvas's
+      // object clipboard, as Ctrl+C / Ctrl+V do there (objectClipboardDoors.ts).
+      { id: "edit:copy", label: "Copy", shortcut: "Ctrl+C", commandId: CoreCommands.COPY, icon: IconCopy, action: runEditCopy },
       {
         id: "edit:paste",
         label: "Paste",
         icon: IconPaste,
         children: [
-          { id: "edit:paste:paste", label: "Paste", commandId: CoreCommands.PASTE, shortcut: "Ctrl+V", icon: IconPaste },
+          { id: "edit:paste:paste", label: "Paste", commandId: CoreCommands.PASTE, shortcut: "Ctrl+V", icon: IconPaste, action: runEditPaste },
           { id: "edit:paste:values", label: "Paste Values", commandId: CoreCommands.PASTE_VALUES, icon: IconPasteValues },
           { id: "edit:paste:formulas", label: "Paste Formulas", commandId: CoreCommands.PASTE_FORMULAS, icon: IconPasteFormulas },
           { id: "edit:paste:formatting", label: "Paste Formatting", commandId: CoreCommands.PASTE_FORMATTING, icon: IconPasteFormatting },
@@ -112,6 +128,7 @@ function registerEditMenu(context: ExtensionContext): void {
     ],
   };
   registerMenu(editMenu);
+  return () => unregisterMenu(editMenu.id);
 }
 
 /**
@@ -146,9 +163,8 @@ function activate(context: ExtensionContext): void {
 
   // Only register Edit and Format menus here
   // File, View, Insert are handled by StandardMenus.tsx component (hook-based)
-  registerEditMenu(context);
+  unregisterOwnMenus = [registerEditMenu(context), registerFormatMenu()];
   bindUndoEnablement();
-  registerFormatMenu();
   registerMenuActionCommands(context);
   activeContext = context;
 
@@ -171,6 +187,8 @@ function deactivate(): void {
 
   console.log("[StandardMenusExtension] Deactivating...");
   unregisterShellComponent(SHELL_COMPONENT_ID);
+  for (const unregisterOwnMenu of unregisterOwnMenus) unregisterOwnMenu();
+  unregisterOwnMenus = [];
   unsubscribeUndoAvailability?.();
   unsubscribeUndoAvailability = null;
   for (const id of MENU_ACTION_COMMANDS) activeContext?.commands.unregister(id);

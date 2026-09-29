@@ -93,6 +93,10 @@ mod transform_preview;
 mod writeback;
 
 #[cfg(test)]
+mod blank_member_tests;
+#[cfg(test)]
+mod direct_query_second_column_tests;
+#[cfg(test)]
 mod calc_group_tests;
 #[cfg(test)]
 mod calculated_column_tests;
@@ -241,8 +245,9 @@ pub use engine_query::request::{
     CalcGroupSelection, CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy,
     InFilter, LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, RankBy,
     ResultColumn, ResultColumnKind, ScopedFilter, ScopedInFilter, TopN, TotalsMode,
-    GROUPING_ID_COLUMN,
+    BLANK_MEMBER_LABEL, GROUPING_ID_COLUMN,
 };
+pub use engine_query::request::is_blank_member_label;
 pub use engine_query::rest_connector::{RestConnector, REST_SOURCE_SCHEMA};
 pub use engine_query::{
     effective_group_by, HierarchyLevelSpec, HierarchySpec, LookupSpec, PushdownPlanner,

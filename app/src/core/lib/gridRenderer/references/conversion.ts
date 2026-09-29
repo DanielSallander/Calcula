@@ -3,22 +3,21 @@
 //CONTEXT: Converts cell coordinates to string references like "A1", "B2:C5", "Sheet1!A1"
 
 import { columnToLetter } from "../../../types";
+import { quoteSheetNameForFormula } from "../../formulaEditTarget";
 
 /**
- * Format a sheet name for use in a reference.
- * Quotes the name if it contains spaces or special characters.
+ * Format a sheet name for use in a reference: bare when the formula PARSER
+ * reads it as one identifier, apostrophe-quoted (inner ' doubled) otherwise.
+ *
+ * The parser's rule, not a display rule of its own (W13): this used to quote
+ * only whitespace, ' ! [ ] and a leading digit, so Core's own cross-sheet
+ * picks wrote `Q1-2026!A1`, `TRUE!A1` and `Q1.!A1` -- none of which the
+ * parser reads back, and the formula failed on Enter. The one rule lives in
+ * formulaEditTarget.ts (`quoteSheetNameForFormula`, mirroring the backend's
+ * `is_bare_sheet_name`); every reference builder spells a sheet through it.
  */
 export function formatSheetName(sheetName: string): string {
-  // Check if quoting is needed (spaces, special chars, or starts with digit)
-  const needsQuoting = /[\s'![\]]/.test(sheetName) || /^\d/.test(sheetName);
-  
-  if (needsQuoting) {
-    // Escape any single quotes by doubling them
-    const escaped = sheetName.replace(/'/g, "''");
-    return `'${escaped}'`;
-  }
-  
-  return sheetName;
+  return quoteSheetNameForFormula(sheetName);
 }
 
 /**

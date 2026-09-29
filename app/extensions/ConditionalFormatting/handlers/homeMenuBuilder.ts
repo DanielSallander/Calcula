@@ -40,6 +40,7 @@ import type {
   IconSetType,
 } from "@api";
 
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 import { invalidateAndRefresh } from "../lib/cfStore";
 import {
   PRESET_STYLES,
@@ -83,11 +84,23 @@ function getSelectionRange(): ConditionalFormatRange | null {
   return { startRow: minRow, startCol: minCol, endRow: maxRow, endCol: maxCol };
 }
 
+/**
+ * The selection these items act on is Core's. While something else owns the
+ * selection (BUG-0185: a floating grid's selected cell, Core's selection
+ * HIDDEN under it) every item that builds a rule over it, opens a dialog
+ * seeded with it, or clears it refuses -- once -- and does nothing. Manage
+ * Rules and Clear Rules from Entire Sheet are not about the selection.
+ */
+function refusedForSelection(action: string): boolean {
+  return refuseIfSelectionOwned(action);
+}
+
 /** Add a quick rule with the current selection and given rule + format */
 async function addQuickRule(
   rule: ConditionalFormatRule,
   format: ConditionalFormat
 ): Promise<void> {
+  if (refusedForSelection("Conditional Formatting")) return;
   const range = getSelectionRange();
   if (!range) return;
 
@@ -104,11 +117,19 @@ async function addQuickRule(
 
 /** Show a quick dialog for threshold-based rules */
 function showQuickDialog(ruleType: string): void {
+  if (refusedForSelection("Conditional Formatting")) return;
   showDialog(QUICK_CF_DIALOG_ID, { ruleType, selection: getSelectionRange() });
+}
+
+/** Open New Rule, seeded with the current selection (the item and every gallery's "More Rules"). */
+function showNewRuleDialog(): void {
+  if (refusedForSelection("New Rule")) return;
+  showDialog(NEW_RULE_DIALOG_ID, { selection: getSelectionRange() });
 }
 
 /** Clear rules from the current selection */
 async function handleClearRulesFromSelection(): Promise<void> {
+  if (refusedForSelection("Clear Rules")) return;
   const range = getSelectionRange();
   if (!range) return;
 
@@ -129,8 +150,12 @@ async function handleClearAllRules(): Promise<void> {
 
 /**
  * Register Conditional Formatting menu items into the Format menu.
+ *
+ * Returns the cleanup for deactivation: it takes back this extension's OWN
+ * items (the submenu's children go with it), never the Format menu, which
+ * Standard Menus builds and Format Cells and others add to (wave E, Y14).
  */
-export function registerCFMenuItems(context: ExtensionContext): void {
+export function registerCFMenuItems(context: ExtensionContext): () => void {
   // Separator before CF items
   context.ui.menus.registerItem("format", {
     id: "format:cf-separator",
@@ -264,7 +289,7 @@ export function registerCFMenuItems(context: ExtensionContext): void {
               } as ConditionalFormatRule;
               addQuickRule(rule, {});
             },
-            onMoreRules: () => showDialog(NEW_RULE_DIALOG_ID, { selection: getSelectionRange() }),
+            onMoreRules: () => showNewRuleDialog(),
             onClose,
           }),
       },
@@ -289,7 +314,7 @@ export function registerCFMenuItems(context: ExtensionContext): void {
               } as ConditionalFormatRule;
               addQuickRule(rule, {});
             },
-            onMoreRules: () => showDialog(NEW_RULE_DIALOG_ID, { selection: getSelectionRange() }),
+            onMoreRules: () => showNewRuleDialog(),
             onClose,
           }),
       },
@@ -320,7 +345,7 @@ export function registerCFMenuItems(context: ExtensionContext): void {
               } as ConditionalFormatRule;
               addQuickRule(rule, {});
             },
-            onMoreRules: () => showDialog(NEW_RULE_DIALOG_ID, { selection: getSelectionRange() }),
+            onMoreRules: () => showNewRuleDialog(),
             onClose,
           }),
       },
@@ -333,7 +358,7 @@ export function registerCFMenuItems(context: ExtensionContext): void {
         id: "cf:newRule",
         label: "New Rule...",
         icon: IconNewRule,
-        action: () => showDialog(NEW_RULE_DIALOG_ID, { selection: getSelectionRange() }),
+        action: () => showNewRuleDialog(),
       },
 
       // ---- Clear Rules ----
@@ -366,4 +391,9 @@ export function registerCFMenuItems(context: ExtensionContext): void {
       },
     ],
   });
+
+  return () => {
+    context.ui.menus.unregisterItem("format", "format:cf-separator");
+    context.ui.menus.unregisterItem("format", "format:conditionalFormatting");
+  };
 }

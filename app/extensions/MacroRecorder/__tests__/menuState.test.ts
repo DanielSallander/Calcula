@@ -12,6 +12,12 @@ import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 
 const dialogs: string[] = [];
 
+/** The recording's store, observable and holdable (E8: the close awaits it). */
+const store = vi.hoisted(() => ({
+  saves: 0,
+  hold: null as null | Promise<void>,
+}));
+
 vi.mock("@api/ui", () => ({
   showDialog: (id: string) => {
     dialogs.push(id);
@@ -45,7 +51,10 @@ vi.mock("@api", async () => {
   getWorkbookScript: async () => {
     throw new Error("not found");
   },
-  saveWorkbookScript: async () => undefined,
+  saveWorkbookScript: async () => {
+    store.saves += 1;
+    if (store.hold) await store.hold;
+  },
   deleteWorkbookScript: async () => undefined,
   runWorkbookScript: async () => ({
     type: "success",
@@ -91,6 +100,7 @@ import {
   startRecording,
 } from "../lib/actionRecorder";
 import { abandonRecording, finishRecording, resetFlow } from "../lib/flow";
+import { closePreparationCount, runClosePreparations } from "@api/lifecycleGuards";
 
 // ---------------------------------------------------------------------------
 // A context that records what happens to the menu.
@@ -204,6 +214,40 @@ describe("the Developer-menu record item", () => {
 
       expect(labelOf(harness.items), `after ${event}`).toBe("Record Macro…");
     }
+  });
+
+  it("a CLOSE awaits the recording's store (E8): the close preparation resolves only once the module is saved", async () => {
+    let release: () => void = () => {};
+    store.saves = 0;
+    store.hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await startRecording("Macro1245");
+      // The shell's synchronous teardown...
+      for (const handler of appEventHandlers.get("app:before-close") ?? []) handler();
+      // ...then the AWAITED half, which the file write and the window wait on.
+      let prepared = false;
+      const closing = runClosePreparations().then(() => {
+        prepared = true;
+      });
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      expect(store.saves, "the store never started").toBe(1);
+      expect(prepared, "the close went on before the recording was stored").toBe(false);
+      release();
+      await closing;
+      expect(prepared).toBe(true);
+      expect(labelOf(harness.items)).toBe("Record Macro…");
+    } finally {
+      store.hold = null;
+    }
+  });
+
+  it("the close preparation is withdrawn on deactivation", () => {
+    const before = closePreparationCount();
+    extension.deactivate?.();
+    expect(closePreparationCount()).toBe(before - 1);
+    extension.activate?.(harness.context);
   });
 
   it("removes both items on deactivation", () => {

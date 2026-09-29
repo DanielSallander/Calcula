@@ -7,7 +7,7 @@
 //          bindings are plain persisted records — visible without running code.
 
 import type { ExtensionContext } from "@api/contract";
-import type { Selection } from "@api";
+import type { Selection, CommandDefinition } from "@api";
 import {
   ExtensionRegistry,
   gridExtensions,
@@ -40,6 +40,7 @@ import {
 } from "../../../src/api/cellBehaviors";
 import { getScaffoldTemplate } from "../../../src/api/scriptableObjectScaffolds";
 import { saveObjectScript } from "../../../src/api/objectScriptBackend";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 // ============================================================================
 // Range helpers
@@ -265,6 +266,9 @@ function paintBehaviorHighlights(context: GridLayerContext): void {
 // Registration
 // ============================================================================
 
+/** The add-in whose contributions are the cellBehaviors.* commands. */
+const CELL_BEHAVIOR_COMMANDS_ADDIN_ID = "calcula.scriptable-objects.cell-behaviors";
+
 /** Wire the cell-behavior UX. Returns a cleanup function. */
 export function registerCellBehaviorUx(context: ExtensionContext): () => void {
   const cleanups: Array<() => void> = [];
@@ -369,11 +373,11 @@ export function registerCellBehaviorUx(context: ExtensionContext): () => void {
     highlightLayerCleanup = null;
     highlightActive = false;
   });
-  ExtensionRegistry.registerCommand({
+  const toggleHighlightCommand: CommandDefinition = {
     id: "cellBehaviors.toggleHighlight",
     name: "Highlight Cell Behaviors",
     execute: async () => toggleHighlight(),
-  });
+  };
   gridExtensions.registerContextMenuItem({
     id: "cellBehaviors.highlight",
     label: () => (highlightActive ? "Hide Behavior Highlights" : "Highlight Cell Behaviors"),
@@ -384,12 +388,17 @@ export function registerCellBehaviorUx(context: ExtensionContext): () => void {
   cleanups.push(() => gridExtensions.unregisterContextMenuItem("cellBehaviors.highlight"));
 
   // Command mirror of the attach flow (usable from the palette / buttons).
-  ExtensionRegistry.registerCommand({
+  const attachToSelectionCommand: CommandDefinition = {
     id: "cellBehaviors.attachToSelection",
     name: "Attach Cell Behavior to Selection",
     execute: async (cmdCtx) => {
       const sel = cmdCtx.selection;
       if (!sel) return;
+      // The command binds to Core's selection -- HIDDEN while something else
+      // owns the selection (a floating grid's selected cell) -- so it refuses,
+      // once (BUG-0185 class). The right-click item above acts on the
+      // right-clicked cell, as every context menu does, and stays allowed.
+      if (refuseIfSelectionOwned("Attach Cell Behavior")) return;
       await attachBehavior({
         sheetIndex: activeBehaviorSheet(),
         startRow: Math.min(sel.startRow, sel.endRow),
@@ -398,7 +407,23 @@ export function registerCellBehaviorUx(context: ExtensionContext): () => void {
         endCol: Math.max(sel.startCol, sel.endCol),
       });
     },
+  };
+
+  // The commands are an add-in's contributions, so they are taken away WITH
+  // this UX (W21): one unregisterAddIn takes both back. (When this was
+  // written registerCommand had no inverse and a command outlived the
+  // extension -- a ribbon or cell-type button bound to it still ran the
+  // torn-down UX after deactivate. ExtensionRegistry.unregisterCommand exists
+  // since wave D and takes back the one object it is given; the add-in stays
+  // the one call for the pair.)
+  ExtensionRegistry.registerAddIn({
+    id: CELL_BEHAVIOR_COMMANDS_ADDIN_ID,
+    name: "Cell Behaviors",
+    version: "1.0.0",
+    description: "Cell-behavior commands (highlight, attach to selection).",
+    commands: [toggleHighlightCommand, attachToSelectionCommand],
   });
+  cleanups.push(() => ExtensionRegistry.unregisterAddIn(CELL_BEHAVIOR_COMMANDS_ADDIN_ID));
 
   return () => {
     for (const cleanup of cleanups) cleanup();

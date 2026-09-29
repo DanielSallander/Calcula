@@ -351,4 +351,21 @@ describe("Name Box - entries it cannot honour", () => {
     );
     expect(showToastMock).not.toHaveBeenCalled();
   });
+
+  // W13 (wave C): the definition's refersTo named the sheet with no quoting at
+  // all, so on "My Sheet" the name referred to `=My Sheet!$A$1:$A$5` -- text
+  // the formula parser rejects, and the name evaluated to an error. The prefix
+  // now follows the parser's rule (quoteSheetNameForFormula).
+  it.each([
+    ["My Sheet", "='My Sheet'!$A$1:$A$5"],
+    ["Q1-2026", "='Q1-2026'!$A$1:$A$5"],
+    ["TRUE", "='TRUE'!$A$1:$A$5"],
+  ])("a name defined on sheet %s refers to %s", async (sheetName, refersTo) => {
+    gridState.sheetContext = { activeSheetIndex: 2, activeSheetName: sheetName };
+    gridState.selection = { startRow: 0, startCol: 0, endRow: 4, endCol: 0 };
+    await render();
+    await commit("SalesData");
+
+    expect(createNamedRangeMock).toHaveBeenCalledWith("SalesData", null, refersTo);
+  });
 });

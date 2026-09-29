@@ -27,7 +27,7 @@ use crate::executor::cancel::{check_cancelled, race_cancelled};
 use crate::registry::SourceRegistry;
 use crate::request::{ColumnRef, OrderByClause, OrderTarget, TotalsMode};
 
-use super::bidirectional::{compute_bidirectional_filters, filter_batches_by_in_values};
+use super::bidirectional::{compute_bidirectional_filters, filter_batches_by_in_filter};
 
 /// Whether the plan's measures must be rewritten (measure references inlined,
 /// global variables substituted) before SQL rendering. Keyed on the
@@ -81,9 +81,17 @@ fn contested_in_list_expression(
     model: &DataModel,
     cf: &crate::planner::ContestedFilter,
     values: &[String],
+    include_null: bool,
 ) -> Expression {
+    // The BLANK member (a scoped IN-list naming it): the NULL rows match too.
+    let blank = || {
+        Expression::IsBlank(Box::new(Expression::QualifiedColumnRef {
+            table_or_var: cf.table.clone(),
+            column: cf.column.clone(),
+        }))
+    };
     if values.is_empty() {
-        return Expression::LiteralBool(false);
+        return if include_null { blank() } else { Expression::LiteralBool(false) };
     }
     let needs_quoting = model
         .table(&cf.table)
@@ -102,13 +110,24 @@ fn contested_in_list_expression(
             Expression::LiteralString(v.clone())
         })
         .collect();
-    Expression::InList {
+    let in_list = Expression::InList {
         expr: Box::new(Expression::QualifiedColumnRef {
             table_or_var: cf.table.clone(),
             column: cf.column.clone(),
         }),
         values: literals,
         negated: false,
+    };
+    // NULL rows, spelled out BOTH ways. With the label: `IN (...) OR IS NULL`.
+    // Without it: `IN (...) AND NOT IS NULL` -- SQL's `NULL IN (...)` is NULL
+    // and would already exclude them, but the local SQL runs over the CACHED,
+    // dictionary-encoded batches (`optimize`), where DataFusion evaluated a
+    // NULL dictionary key as a MATCH: a contested pin on "East" counted every
+    // NULL-region row too (found with W6; pinned by `blank_member_tests`).
+    if include_null {
+        Expression::Or(Box::new(in_list), Box::new(blank()))
+    } else {
+        Expression::And(Box::new(in_list), Box::new(Expression::Not(Box::new(blank()))))
     }
 }
 
@@ -487,11 +506,7 @@ impl QueryExecutor {
                 // table — the cached/in-memory equivalent of the connector's
                 // pushed `in_filters`. An empty value list yields zero rows.
                 for in_filter in &request.in_filters {
-                    filtered_batches = filter_batches_by_in_values(
-                        &filtered_batches,
-                        &in_filter.column,
-                        &in_filter.values,
-                    )?;
+                    filtered_batches = filter_batches_by_in_filter(&filtered_batches, in_filter)?;
                 }
                 // Apply a cross-column OR restriction (DNF) on this cached table.
                 if !request.or_groups.is_empty() {
@@ -624,6 +639,7 @@ impl QueryExecutor {
                             column: fact_col.clone(),
                             values,
                             kind,
+                            include_null: false,
                         });
                 }
             }
@@ -675,6 +691,7 @@ impl QueryExecutor {
                                 column: fact_col,
                                 values,
                                 kind,
+                                include_null: false,
                             });
                     }
                 }
@@ -692,11 +709,7 @@ impl QueryExecutor {
             for (table_name, batches, row_count, _) in inmemory_results.iter_mut() {
                 if let Some(in_filters) = in_filters_by_table.get(&table_name.to_lowercase()) {
                     for in_filter in in_filters {
-                        *batches = filter_batches_by_in_values(
-                            batches,
-                            &in_filter.column,
-                            &in_filter.values,
-                        )?;
+                        *batches = filter_batches_by_in_filter(batches, in_filter)?;
                     }
                     *row_count = batches.iter().map(|b| b.num_rows()).sum();
                 }
@@ -734,11 +747,7 @@ impl QueryExecutor {
             for (table_name, batches, row_count, _) in inmemory_results.iter_mut() {
                 if let Some(filters) = bidirectional_filters.get(&table_name.to_lowercase()) {
                     for bf in filters {
-                        *batches = filter_batches_by_in_values(
-                            batches,
-                            &bf.in_filter.column,
-                            &bf.in_filter.values,
-                        )?;
+                        *batches = filter_batches_by_in_filter(batches, &bf.in_filter)?;
                     }
                     *row_count = batches.iter().map(|b| b.num_rows()).sum();
                 }
@@ -746,11 +755,7 @@ impl QueryExecutor {
             for (_, table_name, batches, row_count, _) in pre_fetch_results.iter_mut() {
                 if let Some(filters) = bidirectional_filters.get(&table_name.to_lowercase()) {
                     for bf in filters {
-                        *batches = filter_batches_by_in_values(
-                            batches,
-                            &bf.in_filter.column,
-                            &bf.in_filter.values,
-                        )?;
+                        *batches = filter_batches_by_in_filter(batches, &bf.in_filter)?;
                     }
                     *row_count = batches.iter().map(|b| b.num_rows()).sum();
                 }
@@ -1716,9 +1721,9 @@ impl QueryExecutor {
                                 .with_level(cf.level),
                             );
                         }
-                        crate::planner::ContestedPredicate::InList { values } => {
+                        crate::planner::ContestedPredicate::InList { values, include_null } => {
                             contested_conditions
-                                .push(contested_in_list_expression(model, cf, values));
+                                .push(contested_in_list_expression(model, cf, values, *include_null));
                         }
                     }
                 }
@@ -2157,8 +2162,13 @@ impl QueryExecutor {
                                 value.clone(),
                             ));
                         }
-                        crate::planner::ContestedPredicate::InList { values } => {
-                            probe_conditions.push(contested_in_list_expression(model, cf, values));
+                        crate::planner::ContestedPredicate::InList { values, include_null } => {
+                            probe_conditions.push(contested_in_list_expression(
+                                model,
+                                cf,
+                                values,
+                                *include_null,
+                            ));
                         }
                     }
                 }

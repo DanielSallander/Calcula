@@ -61,6 +61,7 @@ import {
   focusExternalSessionView,
 } from "../../api/externalEdit";
 import { resolveTabClick } from "./resolveTabClick";
+import { sheetRangePrefix } from "./sheetRangePrefix";
 import type {
   SheetInfo,
   SheetsResult,
@@ -492,17 +493,6 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     [isInFormulaMode, activeIndex]
   );
 
-  /**
-   * Format a sheet name for use in formula references.
-   * Quotes the name if it contains spaces or special characters.
-   */
-  const formatSheetForFormula = useCallback((name: string): string => {
-    if (/[\s'![\]]/.test(name) || /^\d/.test(name)) {
-      return `'${name.replace(/'/g, "''")}'`;
-    }
-    return name;
-  }, []);
-
   const handleSheetClick = useCallback(
     async (index: number, event?: React.MouseEvent) => {
       // Skip click if we just finished a drag
@@ -570,14 +560,8 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           const startSheet = sheetAt(sheets, activeIndex)?.name;
           const endSheet = sheetAt(sheets, index)?.name;
           if (startSheet && endSheet) {
-            // Build the 3D reference prefix
-            const needsQuoting = /[\s'![\]]/.test(startSheet) || /[\s'![\]]/.test(endSheet);
-            let prefix: string;
-            if (needsQuoting) {
-              prefix = `'${startSheet.replace(/'/g, "''")}:${endSheet.replace(/'/g, "''")}'!`;
-            } else {
-              prefix = `${startSheet}:${endSheet}!`;
-            }
+            // Build the 3D reference prefix, by the parser's rule (W13).
+            const prefix = sheetRangePrefix(startSheet, endSheet);
 
             // Insert the 3D prefix into the formula bar
             const formulaBar = document.querySelector('[data-formula-bar="true"]') as HTMLInputElement;

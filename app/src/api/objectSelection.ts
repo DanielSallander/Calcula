@@ -37,6 +37,21 @@
 //          `notifyObjectSelectionChanged()` at their selection chokepoints, so
 //          the set reflects a selection made by a mouse press inside a family.
 //
+//          DELETE acts on the WHOLE set (`deleteSelectedObjects`): each
+//          family's share -- set-held members included -- goes to its
+//          provider's `deleteObjects`, inside ONE undo transaction. A family's
+//          own Delete door hands over a selection for which
+//          `shouldActOnWholeObjectSelection` answers yes (a CANVAS selection
+//          that spans families), because the keybinding dispatcher runs one
+//          winner per key and a family's door only knows its own objects. A
+//          worksheet keeps each family's own door.
+//
+//          COPY / PASTE / DUPLICATE act on the whole set as well, through the
+//          feature-neutral OBJECT CLIPBOARD (@api/objectClipboard): each
+//          family's share is snapshotted by its provider's `copyObjects` and
+//          re-created by its `pasteObjects`; a paste or duplicate of several is
+//          ONE undo step, and the copies become the selection.
+//
 // PRESS PARITY. On a canvas, Core calls `noteObjectPress` BEFORE it dispatches
 //          `floatingObject:selected`: a plain press on an object that is not in
 //          a multi-selection deselects every OTHER family (today only the pivot
@@ -48,14 +63,49 @@
 //          Worksheets are untouched: Core gates the call on the canvas surface.
 
 import { getGridRegions, stackedFloatingRegions, type GridRegion } from "./gridOverlays";
+import { getGridStateSnapshot } from "../core/state/GridContext";
+import { runInUndoTransaction } from "./objectGeometry";
+import { showToast } from "./notifications";
 import type { CanvasObjectRef } from "./lib";
+import type { CanvasObjectKind } from "./canvasSheet";
 
 /**
  * Keys an INNER selection can claim (a chart's series, a floating range's
  * cell). "Arrow" stands for all four arrow keys, with or without Shift -- the
- * canvas nudge asks it before moving the selected objects.
+ * canvas nudge asks it before moving the selected objects. "Clipboard" stands
+ * for Copy, Paste and Duplicate (Ctrl+C / Ctrl+V / Ctrl+D) -- the canvas's
+ * object clipboard (@api/objectClipboard) asks it before copying OBJECTS, so
+ * a floating range with a selected cell keeps those keys for its cells.
  */
-export type ObjectSelectionKey = "Tab" | "Escape" | "Arrow";
+export type ObjectSelectionKey = "Tab" | "Escape" | "Arrow" | "Clipboard";
+
+/**
+ * Where a family creates the copies a paste or a duplicate makes
+ * (`ObjectSelectionProvider.pasteObjects`, @api/objectClipboard).
+ */
+export interface ObjectPasteTarget {
+  /** The sheet the copies are created on. */
+  sheetIndex: number;
+  /**
+   * Where the copy of an object whose snapshot stood at `rect` lands: offset
+   * from it (the paste cascade, or a duplicate's one step) and, on a canvas,
+   * kept on the page. The family says where its object was; the seam decides
+   * where the copy goes, so every family's copies land alike.
+   */
+  place(rect: { x: number; y: number; width: number; height: number }): { x: number; y: number };
+}
+
+/** What a family's `pasteObjects` made. */
+export interface ObjectPasteResult {
+  /** The IDENTITY (see `refOf`) of every object created, in snapshot order. */
+  created: readonly CanvasObjectRef[];
+  /**
+   * Why snapshots could NOT be created -- one entry per refused copy, in the
+   * words the user should read (the backend's refusal). Empty or absent when
+   * every one was.
+   */
+  refused?: readonly string[];
+}
 
 export interface ObjectSelectionProvider {
   /** The `GridRegion.type` values this provider owns. */
@@ -101,9 +151,56 @@ export interface ObjectSelectionProvider {
    * "Button"), or null when it has no name to show.
    */
   labelOf?(region: GridRegion): string | null;
+  /**
+   * DELETE the objects behind `regions` -- all of them this family's, all of
+   * them selected -- the way the family's own Delete does (its cleanup, its
+   * undo record, its refusal message). The canvas-wide Delete
+   * ({@link deleteSelectedObjects}) calls it for the family's share of a
+   * multi-selection, inside ONE undo transaction, so it must resolve when the
+   * deletions have LANDED (and its backend recorders must join an open
+   * transaction). Rejects when the family refused (the objects stay).
+   * Optional: a family without it keeps its members through a canvas-wide
+   * Delete, and the user is told which.
+   */
+  deleteObjects?(regions: readonly GridRegion[]): Promise<void> | void;
+  /**
+   * COPY: a SNAPSHOT of each object behind `regions` (all of them this
+   * family's) from which `pasteObjects` can later create a new object -- after
+   * the original was moved, edited or even deleted, so a deep copy, never a
+   * live reference. Opaque to the seam (@api/objectClipboard): only this
+   * family ever reads it back. One entry per region, in order; null for an
+   * object that could not be read (it is named as not copied).
+   * Optional, and only meaningful together with `pasteObjects`: a family
+   * without the pair cannot be copied or duplicated -- a Copy / Duplicate of a
+   * selection that holds its objects leaves them out and names them in one
+   * toast.
+   */
+  copyObjects?(regions: readonly GridRegion[]): Promise<ReadonlyArray<unknown>> | ReadonlyArray<unknown>;
+  /**
+   * PASTE: create one NEW object from each snapshot this family's
+   * `copyObjects` made, on `target.sheetIndex`, at `target.place(rect)` where
+   * `rect` is the snapshot's own position and size. The seam runs a paste or
+   * duplicate of several objects inside ONE undo transaction, so this must
+   * resolve when every creation has LANDED (its backend recorders join an
+   * open transaction). A refused creation is reported in `refused`, not
+   * thrown, and shows no dialog of its own (the seam's one toast names it).
+   * The family does NOT select what it created: the seam makes every created
+   * object, across families, the selection afterwards.
+   */
+  pasteObjects?(snapshots: ReadonlyArray<unknown>, target: ObjectPasteTarget): Promise<ObjectPasteResult>;
 }
 
 const providers = new Map<string, ObjectSelectionProvider>();
+
+/**
+ * The provider registered for a region TYPE, or null. For the seam's sibling
+ * modules (@api/objectClipboard creates a copy through the family that owns a
+ * clipboard entry's type); callers that act on objects use the functions
+ * below, which go through the same providers.
+ */
+export function getObjectSelectionProvider(type: string): ObjectSelectionProvider | null {
+  return providers.get(type) ?? null;
+}
 
 /**
  * Register a family's provider for each of its region types. Last
@@ -297,6 +394,54 @@ export function objectRefOf(region: GridRegion): CanvasObjectRef | null {
   return guarded("refOf", () => p.refOf!(region) ?? null, null);
 }
 
+// ============================================================================
+// Identities a sheet's layout still names
+// ============================================================================
+
+/**
+ * The refs a sheet's saved LAYOUT names (a canvas's `locked` and `zOrder`
+ * lists, CanvasSheet lib/layoutRefs.ts), INCLUDING refs of objects that are
+ * gone: a delete does not prune a ref when its object is deleted, and must
+ * not -- the delete's undo step restores the object, not the layout lists, so
+ * a pruned lock (or paint slot) would not come back when Ctrl+Z restores the
+ * object. (Restacking and locking are undoable steps of their own since W5.)
+ */
+export type LayoutRefSource = (sheetIndex: number) => readonly CanvasObjectRef[];
+
+let layoutRefSource: LayoutRefSource | null = null;
+
+/**
+ * Register THE layout-ref source (the canvas sheet extension). Last
+ * registration wins; the cleanup unregisters only if this source is still the
+ * registered one.
+ */
+export function registerLayoutRefSource(source: LayoutRefSource): () => void {
+  layoutRefSource = source;
+  return () => {
+    if (layoutRefSource === source) layoutRefSource = null;
+  };
+}
+
+/**
+ * The ids of `kind` that the layout of `sheetIndex` names, live or dead ([]
+ * on a worksheet, with no source, or when the source threw).
+ *
+ * For a family whose ids are RECYCLED -- a control is named by its anchor
+ * cell, and a new control can be handed the anchor a deleted one freed -- an
+ * id named here is NOT free: a new object given it would inherit the dead
+ * one's lock and its slot in the paint order (wave C review). Ids that are
+ * never reused (a chart's UUID) need not ask.
+ */
+export function idsNamedByLayout(sheetIndex: number, kind: CanvasObjectKind): string[] {
+  const source = layoutRefSource;
+  if (!source) return [];
+  return guarded(
+    "layoutRefSource",
+    () => source(sheetIndex).filter((r) => r.kind === kind).map((r) => r.id),
+    [] as string[],
+  );
+}
+
 /**
  * What the object behind `region` is called (see
  * `ObjectSelectionProvider.labelOf`); null when nobody can say, or an empty
@@ -467,6 +612,140 @@ export function clearSetHeldObjects(): void {
     heldIds.clear();
     markChanged();
   });
+}
+
+// ============================================================================
+// Acting on the WHOLE selection (canvas multi-selection)
+// ============================================================================
+
+/**
+ * Whether the selection is one that no single family's own door can act on
+ * whole: two or more members of DIFFERENT families, or any member the SET
+ * holds for a single-select family (a second chart). Several objects of ONE
+ * family that holds them all itself (three controls) is not: that family's
+ * own Delete already acts on all of them. `regions` defaults to the live list.
+ */
+export function objectSelectionSpansFamilies(regions: readonly GridRegion[] = getGridRegions()): boolean {
+  const members = getSelectedObjectRegions(regions);
+  if (members.length < 2) return false;
+  if (members.some((r) => heldIds.has(r.id) && !familyHolds(r))) return true;
+  return new Set(members.map((r) => providers.get(r.type))).size > 1;
+}
+
+/**
+ * THE rule a family's own door (Delete, Copy, Duplicate) asks before acting on
+ * its own share: is this a CANVAS multi-selection that spans families (see
+ * {@link objectSelectionSpansFamilies})? Then the door must speak for the
+ * whole selection -- hand a Delete to {@link deleteSelectedObjects}, refuse a
+ * copy it cannot make whole -- instead of acting on what its family holds.
+ *
+ * Canvas ONLY. A worksheet has no selection set (Core gates press parity on
+ * the canvas surface), so a chart and a slicer clicked in turn both stay
+ * "selected" there, and the chart may be walked down to its TITLE: Delete on
+ * a worksheet must keep deleting the smallest thing selected (the title), not
+ * the whole chart and every other family's object with it (wave A review).
+ * One helper, so the doors cannot disagree about where the line is.
+ */
+export function shouldActOnWholeObjectSelection(regions: readonly GridRegion[] = getGridRegions()): boolean {
+  return getGridStateSnapshot()?.surface === "canvas" && objectSelectionSpansFamilies(regions);
+}
+
+/** What an action on the whole selection did. */
+export interface ObjectSelectionActionOutcome {
+  /** Members whose family acted on them. */
+  acted: number;
+  /** Members whose family cannot do this through the seam (they stay). */
+  unsupported: number;
+  /** Members whose family refused (they stay; one toast said why). */
+  failed: number;
+}
+
+/**
+ * DELETE every selected object -- the members each family holds AND the
+ * members the set holds for a single-select family -- as ONE undo step
+ * labelled `label`.
+ *
+ * Why it exists (open-items 2.af row 1): each family's own Delete acts on what
+ * that family holds, and the keybinding dispatcher runs ONE winner per key, so
+ * with a chart, a second chart and a control selected on a canvas, Delete
+ * removed one chart and left the rest. The families' Delete doors hand a
+ * selection for which {@link shouldActOnWholeObjectSelection} answers yes to
+ * this instead.
+ *
+ * Grouped by family, in paint order; each family's share goes to its
+ * provider's `deleteObjects` inside one frontend undo transaction
+ * (`runInUndoTransaction`, @api/objectGeometry). A member whose family has no
+ * `deleteObjects`, or whose family refused, STAYS -- it is left as the
+ * selection, and ONE toast names the ones not deleted (and the refusal).
+ */
+export async function deleteSelectedObjects(label = "Delete Objects"): Promise<ObjectSelectionActionOutcome> {
+  const members = getSelectedObjectRegions();
+  const outcome: ObjectSelectionActionOutcome = { acted: 0, unsupported: 0, failed: 0 };
+  if (members.length === 0) return outcome;
+
+  const groups = new Map<ObjectSelectionProvider, GridRegion[]>();
+  const kept: GridRegion[] = [];
+  for (const m of members) {
+    const p = providers.get(m.type);
+    if (!p?.deleteObjects) {
+      kept.push(m);
+      continue;
+    }
+    const list = groups.get(p);
+    if (list) list.push(m);
+    else groups.set(p, [m]);
+  }
+  outcome.unsupported = kept.length;
+
+  const reasons: string[] = [];
+  const refused: GridRegion[] = [];
+  if (groups.size > 0) {
+    try {
+      await runInUndoTransaction(label, async () => {
+        for (const [p, list] of groups) {
+          try {
+            await p.deleteObjects!(list);
+            outcome.acted += list.length;
+          } catch (err) {
+            refused.push(...list);
+            reasons.push(err instanceof Error ? err.message : String(err));
+            console.error(`[objectSelection] "${label}" refused for ${list.length} object(s):`, err);
+          }
+        }
+      });
+    } catch (err) {
+      // The transaction itself could not be opened or closed; what ran is on
+      // the undo stack either way.
+      console.error(`[objectSelection] "${label}" transaction failed:`, err);
+    }
+  }
+
+  // What is still there stays selected; what was deleted is gone from it.
+  const live = new Set(getGridRegions().map((r) => r.id));
+  // A family that refused may still have deleted PART of its share (two
+  // charts, the second refused): what is gone was deleted, and only what is
+  // still standing was refused -- it is named, and it stays selected.
+  const stillThere = refused.filter((r) => live.has(r.id));
+  outcome.acted += refused.length - stillThere.length;
+  outcome.failed = stillThere.length;
+  kept.push(...stillThere);
+  if (stillThere.length === 0) reasons.length = 0;
+  const remaining = kept.filter((r) => live.has(r.id));
+  if (remaining.length > 0) setObjectSelectionSet(remaining);
+  else clearObjectSelection();
+
+  if (kept.length > 0) {
+    const names = kept.map((r) => objectLabelOf(r) ?? r.type);
+    const why = Array.from(new Set(reasons.filter((r) => r.trim() !== "")));
+    const what = kept.length === 1 ? "1 selected object was" : `${kept.length} selected objects were`;
+    const advice =
+      why.length > 0 ? why.join(" ") : kept.length === 1 ? "Delete it on its own." : "Delete them one at a time.";
+    showToast(`${label}: ${what} not deleted (${names.join(", ")}). ${advice}`, {
+      type: outcome.failed > 0 ? "error" : "warning",
+      duration: 8000,
+    });
+  }
+  return outcome;
 }
 
 /**
@@ -646,6 +925,7 @@ function restoreMembers(kept: readonly GridRegion[]): void {
 /** Test hook: forget every provider and all selection-set state. */
 export function resetObjectSelectionProviders(): void {
   providers.clear();
+  layoutRefSource = null;
   if (press) press.detach();
   press = null;
   retained = null;

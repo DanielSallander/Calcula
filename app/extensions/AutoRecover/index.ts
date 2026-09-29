@@ -5,7 +5,7 @@
 //          is dirty. Settings are persisted in AppState on the Rust side.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { registerMenuItem, IconAutoRecover, IconClock } from "@api";
+import { registerMenuItem, unregisterMenuItem, IconAutoRecover, IconClock } from "@api";
 import { createBackendChannel } from "@api/backendCommands";
 
 const autoRecoverBackend = createBackendChannel("AutoRecover");
@@ -107,7 +107,17 @@ const intervalOptions: IntervalOption[] = [
 // Menu Registration
 // ============================================================================
 
-function registerMenuItems(): void {
+/** The File-menu items AutoRecover adds: its OWN ids, taken back on deactivate
+ *  (wave E, Y14). The File menu is Standard Menus'; the interval item's
+ *  children go with it. */
+const OWN_FILE_MENU_ITEM_IDS = [
+  "file:autoRecover:separator",
+  "file:autoRecover:toggle",
+  "file:autoRecover:interval",
+] as const;
+
+/** Registers the File-menu items; returns their cleanup. */
+function registerMenuItems(): () => void {
   // Separator before auto-recover options
   registerMenuItem("file", {
     id: "file:autoRecover:separator",
@@ -155,7 +165,14 @@ function registerMenuItems(): void {
       },
     })),
   });
+
+  return () => {
+    for (const id of OWN_FILE_MENU_ITEM_IDS) unregisterMenuItem("file", id);
+  };
 }
+
+/** The cleanup of the menu items the current activation registered. */
+let unregisterMenuItems: (() => void) | null = null;
 
 // ============================================================================
 // Lifecycle
@@ -164,12 +181,15 @@ function registerMenuItems(): void {
 async function activate(context: ExtensionContext): Promise<void> {
   autoRecoverBackend.set(context.invokeBackend);
   await loadSettings();
-  registerMenuItems();
+  unregisterMenuItems?.();
+  unregisterMenuItems = registerMenuItems();
   startTimer();
 }
 
 function deactivate(): void {
   stopTimer();
+  unregisterMenuItems?.();
+  unregisterMenuItems = null;
 }
 
 // ============================================================================

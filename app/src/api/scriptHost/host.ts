@@ -182,10 +182,16 @@ import {
   type LifecycleDetail,
   type LifecycleGuardResult,
 } from "../../core/lib/lifecycleGuards";
+import { registerClosePreparation } from "../lifecycleGuards";
 // The two click choke points Core already consults (Wave 4): double-click asks
 // before entering edit mode, right-click before requesting the context menu.
 // The script host registers one interceptor per declared onBefore*Click hook.
 import { registerCellDoubleClickInterceptor } from "../../core/lib/cellDoubleClickInterceptors";
+import {
+  readUndoBeginAnswer,
+  type UndoBeginAnswer,
+  type UndoTransactionTicket,
+} from "../../core/lib/tauri-api";
 import { registerCellContextMenuInterceptor } from "../../core/lib/cellContextMenuInterceptors";
 import {
   rectRowsCols,
@@ -1424,6 +1430,17 @@ export function hostUnmountScript(scriptId: string): void {
   // same deferred-action discipline as the calculation mode above: the pause
   // is a debt, and every way a script ends routes through here.
   releaseDeferredRepaint(scriptId);
+  // ...and CLOSE the undo batch THIS script opened with api.beginBatch and
+  // never committed (it died between its begin and its commit): left open,
+  // that transaction would swallow every later edit of the user's into a
+  // group nobody commits. Only the script's OWN, by its ticket -- a batch it
+  // merely joined belongs to its opener, and one the history has since ended
+  // (a sheet change, a document swap) closes nothing (see scriptBatchBegins).
+  // Fire-and-forget like the calculation mode above, but TRACKED: the
+  // object-script runner closes its run's batch itself, awaited, before it
+  // unmounts (hostCloseBatchLeftOpen), and when a failed mount's own teardown
+  // got here first, that awaits this sweep instead.
+  sweepScriptBatchesLeftOpen(scriptId);
   // ...and take its status-bar message down (Wave 4). A dead script must
   // never pin a stale "Working…" in front of the user.
   releaseScriptStatusBar(scriptId);
@@ -1447,6 +1464,40 @@ export function hostIsMounted(scriptId: string): boolean {
   return mounted.has(scriptId);
 }
 
+/**
+ * The RESTORES a workbook reset starts (hostResetAll): automatic calculation
+ * and every sheet protection a script lifted. They are async (the backend
+ * writes them), and on BEFORE_CLOSE the close prompt's Save writes the file
+ * right after the teardown -- so the close AWAITS them (E8): the file must not
+ * be written with the user's sheet still unprotected, or with the calculation
+ * mode a script switched to manual.
+ */
+const pendingResetRestores = new Set<Promise<unknown>>();
+
+function trackResetRestore(restore: Promise<unknown>): void {
+  pendingResetRestores.add(restore);
+  void restore.finally(() => {
+    pendingResetRestores.delete(restore);
+  });
+}
+
+/**
+ * Resolve once every restore a workbook reset started has settled. Never
+ * rejects (each restore is best-effort already). Exported for the unit tier.
+ */
+export async function settleHostResetRestores(): Promise<void> {
+  while (pendingResetRestores.size > 0) {
+    await Promise.allSettled(Array.from(pendingResetRestores));
+  }
+}
+
+// The close waits for them (see pendingResetRestores). Registered once, for
+// the module's life: the host outlives every workbook.
+registerClosePreparation(
+  "Script host: restore lifted sheet protection and automatic calculation",
+  settleHostResetRestores,
+);
+
 export function hostResetAll(): void {
   // FIRST, ahead of the per-script unmounts: every task pane, its layout and
   // its dock bucket (M2). The ORDER is the whole point. This sweep is the only
@@ -1458,6 +1509,13 @@ export function hostResetAll(): void {
   // document has already been replaced, so that flush wrote what the user typed
   // into the OLD workbook into the NEW workbook's cell of the same address.
   resetScriptPanes();
+  // Forget every open script batch before the unmounts below: a document swap
+  // clears the backend's undo stack, open transaction included, so there is
+  // nothing of theirs left to close. (What makes a sweep harmless is the
+  // TICKET, not this order: the object-script manager unmounts its scripts
+  // before it calls this, and those sweeps present the previous document's
+  // tickets, which the swap's clear has spent -- the backend closes nothing.)
+  resetScriptBatchTracking();
   for (const scriptId of [...mounted.keys()]) {
     hostUnmountScript(scriptId);
   }
@@ -1494,11 +1552,13 @@ export function hostResetAll(): void {
   // the race and swallow them. One direct restore covers the workbook swap.
   if (manualCalcHolders.size > 0) {
     resetManualCalculationTracking();
-    void getLib()
-      .then((lib) => lib.setCalculationMode("automatic"))
-      .catch(() => {
-        // Best-effort: the backend may already be gone (window teardown).
-      });
+    trackResetRestore(
+      getLib()
+        .then((lib) => lib.setCalculationMode("automatic"))
+        .catch(() => {
+          // Best-effort: the backend may already be gone (window teardown).
+        }),
+    );
   }
   // ...and every sheet protection a script lifted with api.withUnprotected, by
   // the SAME snapshot-then-clear shape and for the same reason: the per-script
@@ -1512,11 +1572,13 @@ export function hostResetAll(): void {
   if (unprotectedHolds.size > 0) {
     const holds = allUnprotectedHolds();
     resetUnprotectedTracking();
-    void getLib()
-      .then((lib) => restoreAllUnprotected(lib, holds))
-      .catch(() => {
-        // Best-effort: the backend may already be gone (window teardown).
-      });
+    trackResetRestore(
+      getLib()
+        .then((lib) => restoreAllUnprotected(lib, holds))
+        .catch(() => {
+          // Best-effort: the backend may already be gone (window teardown).
+        }),
+    );
   }
   // ...and the Wave-4 application debts: a paused repaint (dropped without a
   // flush — the document under the canvas is being replaced wholesale), the
@@ -4083,14 +4145,14 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // with no bracket is exactly how VBA left dead Excel windows frozen.
       const [description, options] = args as [string, { deferRepaint?: boolean } | undefined];
       const lib = await getLib();
-      await lib.beginUndoTransaction(description);
+      await executeBeginBatch(lib, definition.id, description);
       if (options?.deferRepaint === true) acquireDeferredRepaint(definition.id);
       return undefined;
     }
     case "api.commitBatch": {
       const lib = await getLib();
       try {
-        await lib.commitUndoTransaction();
+        await executeCommitBatch(lib, definition.id);
       } finally {
         // Release EVEN when the commit throws — the batch is over either way,
         // and a script must never keep the screen frozen past its bracket.
@@ -4101,10 +4163,12 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     case "api.cancelBatch": {
       const lib = await getLib();
       try {
-        await lib.cancelUndoTransaction();
+        await executeCancelBatch(lib, definition.id);
       } finally {
-        // The cancel REVERTED whatever the batch wrote, so the single release
-        // repaint is what takes the reverted state to the screen.
+        // The cancel DROPS the open transaction's undo record; it does NOT
+        // revert what the batch wrote (core/engine/src/undo.rs), so those
+        // writes stay, with no undo step. The single release repaint takes
+        // them to the screen if repaints were deferred.
         releaseDeferredRepaint(definition.id);
       }
       return undefined;
@@ -4505,7 +4569,9 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         (SheetKindName | null)?,
       ];
       const lib = await getLib();
-      return executeAddSheet(lib, name, position, kind);
+      const added = await executeAddSheet(lib, name, position, kind);
+      await resumeScriptBatchAfterHistoryEnded(lib, definition.id);
+      return added;
     }
     case "api.deleteSheet": {
       const [ref] = args as [number | string];
@@ -4516,6 +4582,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         throw new BrokerError("ValidationError", "Cannot delete the last remaining sheet");
       }
       const result = await lib.deleteSheet(index);
+      await resumeScriptBatchAfterHistoryEnded(lib, definition.id);
       await announceSheetsChanged(result);
       return undefined;
     }
@@ -4525,6 +4592,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const index = await resolveSheetRef(lib, ref, "renameSheet");
       await assertSheetNameFree(lib, newName, index);
       const result = await lib.renameSheet(index, newName);
+      await resumeScriptBatchAfterHistoryEnded(lib, definition.id);
       await announceSheetsChanged(result);
       return undefined;
     }
@@ -4559,65 +4627,20 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         );
       }
       const result = await lib.moveSheet(fromIndex, toIndex);
+      await resumeScriptBatchAfterHistoryEnded(lib, definition.id);
       await announceSheetsChanged(result);
       return undefined;
     }
     case "api.copySheet": {
-      // copy_sheet inserts the duplicate immediately after its source, so every
-      // index at or after that point shifts by one — the same "re-read your
-      // indexes" contract as moveSheet. The new sheet is resolved by comparing
-      // the list BEFORE and AFTER rather than by arithmetic on the insert
-      // position, so a backend that changes where it inserts cannot make this
-      // return the wrong sheet.
       const [sourceRef, newName, position] = args as [
         number | string,
         string?,
         { before?: number | string | null; after?: number | string | null }?,
       ];
       const lib = await getLib();
-      const before = await lib.getSheets();
-      const sourceIndex = resolveSheetRefIn(before.sheets, sourceRef, "copySheet");
-      if (newName !== undefined && newName !== null) {
-        await assertSheetNameFree(lib, newName, null);
-      }
-      // Optional POSITION (Wave 4), same construction as addSheet: the anchor
-      // resolves against the PRE-COPY list, the final index is computed in the
-      // list WITHOUT the copy, and move_sheet rotates the copy there — which
-      // yields exactly "the base list with the copy inserted at target".
-      const target = resolveSheetPosition(before.sheets, position, "copySheet");
-      let result;
-      let added: { index: number; name: string } | undefined;
-      if (target === null) {
-        result = await lib.copySheet(sourceIndex, newName ?? undefined);
-        const beforeNames = new Set(before.sheets.map((s) => s.name));
-        added = result.sheets.find((s) => !beforeNames.has(s.name));
-      } else {
-        await lib.beginUndoTransaction("Copy sheet");
-        try {
-          result = await lib.copySheet(sourceIndex, newName ?? undefined);
-          const beforeNames = new Set(before.sheets.map((s) => s.name));
-          const copy = result.sheets.find((s) => !beforeNames.has(s.name));
-          if (copy && copy.index !== target) {
-            result = await lib.moveSheet(copy.index, target);
-            added = copy ? result.sheets.find((s) => s.name === copy.name) : undefined;
-          } else {
-            added = copy;
-          }
-          await lib.commitUndoTransaction();
-        } catch (e) {
-          try {
-            await lib.cancelUndoTransaction();
-          } catch {
-            /* the throw below is the primary failure */
-          }
-          throw e;
-        }
-      }
-      await announceSheetsChanged(result);
-      if (!added) {
-        throw new BrokerError("HostError", "The sheet was copied but the new sheet could not be identified");
-      }
-      return { index: added.index, name: added.name };
+      const copied = await executeCopySheet(lib, sourceRef, newName, position);
+      await resumeScriptBatchAfterHistoryEnded(lib, definition.id);
+      return copied;
     }
 
     // ---- unlocked: sort + find/replace (B2; sheet-addressable since Wave 3) ----
@@ -5263,34 +5286,8 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       announceFloatingRangesChanged();
       return undefined;
     }
-    case "api.floatingRangeGetCells": {
-      const [id] = args as [string];
-      const { invokeBackend } = await import("../backend");
-      const rows = await invokeBackend<FloatingRangeWire[]>("list_floating_ranges", {});
-      const info = (rows ?? []).find((fr) => fr.id === id);
-      if (!info) throw new BrokerError("ValidationError", `No floating range with id "${id}"`);
-      const cells = await invokeBackend<
-        Array<{ row: number; col: number; kind: string; value: unknown; formula?: string | null }>
-      >("get_floating_range_cells", {
-        id,
-        startRow: 0,
-        startCol: 0,
-        endRow: Math.max(0, info.rowCount - 1),
-        endCol: Math.max(0, info.colCount - 1),
-      });
-      return {
-        rowCount: info.rowCount,
-        colCount: info.colCount,
-        // SPARSE, exactly as the backend answers: only cells that exist.
-        cells: (cells ?? []).map((c) => ({
-          row: c.row,
-          col: c.col,
-          kind: c.kind,
-          value: c.value,
-          formula: c.formula ?? undefined,
-        })),
-      };
-    }
+    case "api.floatingRangeGetCells":
+      return executeFloatingRangeGetCells(args);
     case "api.deleteTable": {
       const [tableId] = args as [string];
       const lib = await getLib();
@@ -8268,25 +8265,51 @@ async function clampSheetIndex(
  * script's own object. Instead every multi-cell path batches INTERNALLY, so a
  * restricted script's block write is already one Ctrl+Z with no way to leak an
  * open transaction.
+ *
+ * `discard` (a TRANSIENT write, createNamedStyle's scratch cell): a
+ * transaction this opened is CANCELLED at the end, success or failure -- its
+ * undo record dropped, never committed. Joined, it is left alone like any
+ * other join (the apply + revert pair nets to nothing inside the opener's
+ * step).
  */
-async function withScriptUndoBatch(
+async function withScriptUndoBatch<T>(
   lib: Awaited<ReturnType<typeof getLib>>,
   description: string,
-  fn: () => Promise<void>,
-): Promise<void> {
-  const alreadyOpen = (await lib.getUndoState()).transactionOpen;
-  if (alreadyOpen) {
-    await fn();
-    return;
+  fn: () => Promise<T>,
+  options?: { discard?: boolean },
+): Promise<T> {
+  // ALWAYS through the begin door, even to JOIN (W3): the Tauri
+  // `begin_undo_transaction` is what MARKS an open transaction as having
+  // absorbed another caller's begin (`Transaction::absorbed_begin`), and a
+  // user gesture's "overwrite existing data?" Cancel refuses to take back a
+  // marked step -- it would take this script's writes back with it. Joining
+  // silently (running `fn` with no begin) left the step unmarked, so that
+  // Cancel undid the script's cells too.
+  //
+  // The backend answers whether this begin OPENED the transaction (a ticket)
+  // or joined one (null), decided under its own lock. It is the only race-free
+  // answer: a probe ("is one open?") taken before the begin can be stale by
+  // the time the begin lands, in either direction. The close presents the
+  // ticket, so it lands only on the transaction this begin opened.
+  const own = readUndoBeginAnswer(await lib.beginUndoTransaction(description));
+  if (!own.opened) {
+    // Joined: the opener owns the step -- never commit or cancel it here.
+    return fn();
   }
-  await lib.beginUndoTransaction(description);
+  let result: T;
   try {
-    await fn();
+    result = await fn();
   } catch (err) {
-    await lib.cancelUndoTransaction();
+    try {
+      await cancelOwnTransaction(lib, own.ticket);
+    } catch {
+      /* the throw below is the primary failure */
+    }
     throw err;
   }
-  await lib.commitUndoTransaction();
+  if (options?.discard === true) await cancelOwnTransaction(lib, own.ticket);
+  else await commitOwnTransaction(lib, own.ticket);
+  return result;
 }
 
 /**
@@ -8725,6 +8748,257 @@ export function normalizeSelection(
  */
 let gridRefreshScheduled = false;
 
+// ---- Script undo batches: api.beginBatch / commitBatch / cancelBatch ----
+// The backend has ONE undo-transaction slot. A begin while it is open JOINS it
+// (and marks the step shared), and a bare commit / cancel closes WHATEVER is
+// open. So a caller may close only a transaction its own begin OPENED -- which
+// `begin_undo_transaction` answers with a TICKET (null = joined) -- and it
+// closes by PRESENTING that ticket, so the backend closes the slot only while
+// it still holds that very transaction. A sheet add / delete / rename / move /
+// copy or a document swap ENDS the history, open transaction included (Excel
+// parity), and a "my begin opened it" record alone then pointed at whatever a
+// stranger opened next: the script's commit closed a user's chart drag
+// halfway, its cleanup cancelled a user's paste (wave D review F1/F3). These
+// doors used to discard the begin's answer altogether and close whatever was
+// open: a script whose batch had joined a user's gesture (or its own outer
+// batch, or another script's) committed -- or dropped -- it halfway.
+
+/** One api.beginBatch of a script not yet closed: what its begin answered,
+ *  and the label it asked for (reused when the batch resumes after a sheet
+ *  structure change of the script's own ended the history). */
+interface ScriptBatchBegin {
+  answer: UndoBeginAnswer;
+  description: string;
+}
+
+/**
+ * scriptId -> its api.beginBatch calls not yet closed, innermost LAST. An
+ * answer that OPENED the backend transaction is this script's to close (with
+ * its ticket); one that JOINED belongs to another caller (the join only marked
+ * it shared).
+ */
+const scriptBatchBegins = new Map<string, ScriptBatchBegin[]>();
+
+/** Commit / cancel a transaction a begin of ours OPENED: with its ticket, or
+ *  bare when the begin was answered without one (see readUndoBeginAnswer). */
+function commitOwnTransaction(lib: Awaited<ReturnType<typeof getLib>>, ticket: UndoTransactionTicket | null) {
+  return ticket === null ? lib.commitUndoTransaction() : lib.commitUndoTransaction(ticket);
+}
+function cancelOwnTransaction(lib: Awaited<ReturnType<typeof getLib>>, ticket: UndoTransactionTicket | null) {
+  return ticket === null ? lib.cancelUndoTransaction() : lib.cancelUndoTransaction(ticket);
+}
+
+/**
+ * api.beginBatch: open ONE undo step for the script's writes, or join the one
+ * that is open, and remember which. A script that departed while its begin
+ * was in flight owns a transaction nothing will ever close: one this begin
+ * opened is cancelled on the spot (see scriptDepartures). Exported for tests.
+ */
+export async function executeBeginBatch(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  description: string,
+): Promise<void> {
+  const epoch = departureEpoch(scriptId);
+  const answer = readUndoBeginAnswer(await lib.beginUndoTransaction(description));
+  if (departureEpoch(scriptId) !== epoch) {
+    if (answer.opened) await cancelOwnTransaction(lib, answer.ticket);
+    throw new BrokerError(
+      "HostError",
+      "beginBatch: the script ended before its batch opened; nothing was left open",
+    );
+  }
+  const begins = scriptBatchBegins.get(scriptId) ?? [];
+  begins.push({ answer, description });
+  scriptBatchBegins.set(scriptId, begins);
+}
+
+/** Take the script's innermost open batch: its begin's answer, or null when
+ *  the script has no batch open at all (then there is nothing of its own to
+ *  close). */
+function takeInnermostScriptBatch(scriptId: string): UndoBeginAnswer | null {
+  const begins = scriptBatchBegins.get(scriptId);
+  if (!begins || begins.length === 0) return null;
+  const innermost = begins.pop()!;
+  if (begins.length === 0) scriptBatchBegins.delete(scriptId);
+  return innermost.answer;
+}
+
+/** api.commitBatch: commit the script's innermost batch -- only when its begin
+ *  opened the transaction, and only that transaction (the ticket); a joined
+ *  batch is committed by its opener, and a nested one by the outer batch's
+ *  commit. Exported for tests. */
+export async function executeCommitBatch(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+): Promise<void> {
+  const own = takeInnermostScriptBatch(scriptId);
+  if (own?.opened) await commitOwnTransaction(lib, own.ticket);
+}
+
+/**
+ * api.cancelBatch: close the script's innermost batch WITHOUT an undo step --
+ * only when its begin opened the transaction, and only that transaction. A
+ * cancel DROPS the transaction's undo record; it does not revert what the
+ * batch wrote (core/engine/src/undo.rs `cancel_transaction`), so cancelling a
+ * JOINED transaction would strand the opener's writes with no undo step at
+ * all. Exported for tests.
+ */
+export async function executeCancelBatch(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+): Promise<void> {
+  const own = takeInnermostScriptBatch(scriptId);
+  if (own?.opened) await cancelOwnTransaction(lib, own.ticket);
+}
+
+/**
+ * The script's own sheet add / delete / rename / move / copy just ENDED the
+ * undo history -- its open batch's transaction with it (Excel parity: a sheet
+ * structure change is not undoable, and nothing before it stays undoable).
+ * The batch itself is not over: the script's writes from here to its
+ * commitBatch are still ONE step. So the batch the script OPENED (its latest)
+ * begins again under the same label; a begin that OPENS replaces the spent
+ * ticket. One that JOINS -- somebody opened the slot in between, or the
+ * operation changed nothing and the script's own transaction is still open --
+ * leaves the record alone: a ticket the history kept is still good, and a
+ * spent one closes nothing. Call only after the operation SUCCEEDED (a refused
+ * one ends nothing). Exported for tests.
+ */
+export async function resumeScriptBatchAfterHistoryEnded(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+): Promise<void> {
+  const begins = scriptBatchBegins.get(scriptId);
+  if (!begins) return;
+  let latest = -1;
+  for (let i = begins.length - 1; i >= 0; i--) {
+    if (begins[i].answer.opened) {
+      latest = i;
+      break;
+    }
+  }
+  if (latest < 0) return;
+  const target = begins[latest];
+  const epoch = departureEpoch(scriptId);
+  let answer: UndoBeginAnswer;
+  try {
+    answer = readUndoBeginAnswer(await lib.beginUndoTransaction(target.description));
+  } catch {
+    // Best-effort: the sheet change itself SUCCEEDED, and the script must not
+    // be told otherwise. Unresumed, its later writes are steps of their own.
+    return;
+  }
+  if (!answer.opened) return;
+  if (departureEpoch(scriptId) !== epoch || scriptBatchBegins.get(scriptId) !== begins || begins[latest] !== target) {
+    // The script (or this batch) ended while the begin was in flight: nothing
+    // will ever close what it opened.
+    await cancelOwnTransaction(lib, answer.ticket);
+    return;
+  }
+  begins[latest] = { answer, description: target.description };
+}
+
+/** Forget every batch `scriptId` has open, returning the answers of those that
+ *  OPENED a transaction (innermost first): they are the script's to close.
+ *  Synchronous, so a remount of the same id can never inherit the departed
+ *  run's record. */
+function takeScriptBatchesLeftOpen(scriptId: string): UndoBeginAnswer[] {
+  const begins = scriptBatchBegins.get(scriptId);
+  scriptBatchBegins.delete(scriptId);
+  if (!begins) return [];
+  return begins
+    .map((b) => b.answer)
+    .filter((answer) => answer.opened)
+    .reverse();
+}
+
+/** Cancel each transaction in `own` (see takeScriptBatchesLeftOpen) with its
+ *  ticket: a ticket the history has spent closes nothing. */
+async function cancelOwnTransactions(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  own: UndoBeginAnswer[],
+): Promise<void> {
+  for (const answer of own) await cancelOwnTransaction(lib, answer.ticket);
+}
+
+/**
+ * The unmount's sweep of a batch left open, while its cancel is in flight
+ * (hostUnmountScript cannot await). hostCloseBatchLeftOpen awaits it, so a
+ * run that FAILED -- whose realm the mount's own catch has already torn down,
+ * sweeping as it went -- still does not return before the cancel has landed.
+ */
+const pendingBatchSweeps = new Map<string, Promise<boolean>>();
+
+function trackBatchSweep(scriptId: string, sweep: Promise<boolean>): void {
+  pendingBatchSweeps.set(scriptId, sweep);
+  void sweep.finally(() => {
+    if (pendingBatchSweeps.get(scriptId) === sweep) pendingBatchSweeps.delete(scriptId);
+  });
+}
+
+/**
+ * Close the batch `scriptId` OPENED and never committed (it finished, faulted
+ * or timed out between its beginBatch and its commitBatch): an open
+ * transaction would swallow every later edit of the user's into a group that
+ * is never committed. Only the script's OWN transaction is closed (its
+ * ticket) -- one it merely joined, or one somebody else opened after a sheet
+ * change or a document swap ended the script's, is left to its opener. It is
+ * CANCELLED: the undo record is dropped, the writes stay. Resolves true when
+ * the script had one to close. The object-script runner awaits this before it
+ * unmounts; hostUnmountScript sweeps whatever is still recorded, and this
+ * awaits that sweep when it got there first (a failed run).
+ */
+export async function hostCloseBatchLeftOpen(scriptId: string): Promise<boolean> {
+  const sweeping = pendingBatchSweeps.get(scriptId);
+  if (sweeping) return sweeping;
+  if (!scriptBatchBegins.has(scriptId)) return false;
+  return executeCloseBatchLeftOpen(await getLib(), scriptId);
+}
+
+/** {@link hostCloseBatchLeftOpen} over an explicit `lib`. Exported for tests. */
+export async function executeCloseBatchLeftOpen(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+): Promise<boolean> {
+  const own = takeScriptBatchesLeftOpen(scriptId);
+  if (own.length === 0) return false;
+  await cancelOwnTransactions(lib, own);
+  return true;
+}
+
+/**
+ * The unmount's sweep (hostUnmountScript): take the script's batches left
+ * open and cancel its own, fire-and-forget but TRACKED (see
+ * pendingBatchSweeps). Exported for tests, with the `lib` getter the host uses.
+ */
+export function sweepScriptBatchesLeftOpen(
+  scriptId: string,
+  lib: () => Promise<Awaited<ReturnType<typeof getLib>>> = getLib,
+): void {
+  const own = takeScriptBatchesLeftOpen(scriptId);
+  if (own.length === 0) return;
+  trackBatchSweep(
+    scriptId,
+    lib()
+      .then((l) => cancelOwnTransactions(l, own))
+      .then(
+        () => true,
+        // Best-effort: the backend may already be gone (window teardown).
+        () => false,
+      ),
+  );
+}
+
+/** Workbook-swap sweep (hostResetAll): forget every batch without closing it.
+ *  A document swap clears the backend's undo stack, open transaction
+ *  included. A sweep that ran anyway -- the object-script manager unmounts
+ *  its scripts BEFORE this reset -- is harmless: it presents the previous
+ *  document's tickets, which the swap's clear has spent. */
+export function resetScriptBatchTracking(): void {
+  scriptBatchBegins.clear();
+}
+
 // ---- Deferred repaint (Wave 4): api.beginBatch({ deferRepaint: true }) ----
 // ScreenUpdating with a guaranteed end. While ONE script holds the deferral,
 // this choke point — the broker's single door to the canvas after a mutate —
@@ -9010,16 +9284,81 @@ export async function executeGetSheets(
 }
 
 /**
+ * api.copySheet — [sourceRef, newName?, position?].
+ *
+ * copy_sheet inserts the duplicate immediately after its source, so every
+ * index at or after that point shifts by one — the same "re-read your
+ * indexes" contract as moveSheet. The new sheet is resolved by comparing the
+ * list BEFORE and AFTER rather than by arithmetic on the insert position, so a
+ * backend that changes where it inserts cannot make this return the wrong
+ * sheet. Exported for tests.
+ */
+export async function executeCopySheet(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sourceRef: number | string,
+  newName: string | null | undefined,
+  position: { before?: number | string | null; after?: number | string | null } | null | undefined,
+): Promise<{ index: number; name: string }> {
+  const before = await lib.getSheets();
+  const sourceIndex = resolveSheetRefIn(before.sheets, sourceRef, "copySheet");
+  if (newName !== undefined && newName !== null) {
+    await assertSheetNameFree(lib, newName, null);
+  }
+  // Optional POSITION (Wave 4), same construction as addSheet: the anchor
+  // resolves against the PRE-COPY list, the final index is computed in the
+  // list WITHOUT the copy, and move_sheet rotates the copy there — which
+  // yields exactly "the base list with the copy inserted at target".
+  const target = resolveSheetPosition(before.sheets, position, "copySheet");
+  let result;
+  let added: { index: number; name: string } | undefined;
+  if (target === null) {
+    result = await lib.copySheet(sourceIndex, newName ?? undefined);
+    const beforeNames = new Set(before.sheets.map((s) => s.name));
+    added = result.sheets.find((s) => !beforeNames.has(s.name));
+  } else {
+    // Copy + move under ONE bracket, through withScriptUndoBatch -- so inside a
+    // script's open batch it JOINS and never closes that batch. Today the
+    // bracket groups nothing: the copy and the move each END the undo history
+    // (Excel parity -- neither is undoable), its ticket is spent, and its
+    // commit closes nothing. It keeps the two ONE step should a sheet change
+    // ever become undoable. A batch the script has open resumes after the call
+    // (resumeScriptBatchAfterHistoryEnded).
+    const positioned = await withScriptUndoBatch(lib, "Copy sheet", async () => {
+      let copied = await lib.copySheet(sourceIndex, newName ?? undefined);
+      const beforeNames = new Set(before.sheets.map((s) => s.name));
+      const copy = copied.sheets.find((s) => !beforeNames.has(s.name));
+      if (copy && copy.index !== target) {
+        copied = await lib.moveSheet(copy.index, target);
+        return { result: copied, added: copied.sheets.find((s) => s.name === copy.name) };
+      }
+      return { result: copied, added: copy };
+    });
+    result = positioned.result;
+    added = positioned.added;
+  }
+  await announceSheetsChanged(result);
+  if (!added) {
+    throw new BrokerError("HostError", "The sheet was copied but the new sheet could not be identified");
+  }
+  return { index: added.index, name: added.name };
+}
+
+/**
  * api.addSheet — [name?, position?, kind?].
  *
  * Optional POSITION (Wave 4 — VBA's Add Before:=/After:=). The backend has no
  * position parameter (add_sheet always appends), so the position is composed
- * as add + move under ONE undo transaction: the anchor is resolved against the
- * PRE-ADD list (an append never renumbers it), the final index computed there,
- * and move_sheet rotates the new sheet into place. A failed move CANCELS the
- * transaction and rethrows — the caller is never told half the truth. (Sheet
- * CRUD records no undo entries today, so the empty transaction commits as a
- * no-op; the bracket is what keeps this one step if that ever changes.)
+ * as add + move under ONE bracket: the anchor is resolved against the PRE-ADD
+ * list (an append never renumbers it), the final index computed there, and
+ * move_sheet rotates the new sheet into place. A failed move CANCELS the
+ * bracket it opened and rethrows — the caller is never told half the truth.
+ * The bracket is `withScriptUndoBatch`, so inside a script's open batch the
+ * add and the move JOIN that batch instead of closing it. Today the bracket
+ * groups nothing: the add and the move each END the undo history (Excel
+ * parity — neither is undoable), so its ticket is spent and its close closes
+ * nothing; it keeps the two ONE step should a sheet change ever become
+ * undoable. A batch the script has open resumes after the call
+ * (resumeScriptBatchAfterHistoryEnded).
  *
  * Optional KIND (2026-09-25): "canvas" adds a canvas page with the default
  * layout. A kind is fixed at creation, so it is forwarded on BOTH add paths —
@@ -9045,23 +9384,12 @@ export async function executeAddSheet(
     const added = result.sheets.find((s) => s.index === result.activeIndex);
     return { index: added?.index ?? result.activeIndex, name: added?.name ?? "" };
   }
-  await lib.beginUndoTransaction("Add sheet");
-  let result;
-  try {
-    result = await lib.addSheet(name ?? undefined, kind ?? undefined);
-    const appendedAt = result.activeIndex;
-    if (target !== appendedAt) {
-      result = await lib.moveSheet(appendedAt, target);
-    }
-    await lib.commitUndoTransaction();
-  } catch (e) {
-    try {
-      await lib.cancelUndoTransaction();
-    } catch {
-      /* the throw below is the primary failure */
-    }
-    throw e;
-  }
+  // Add + move under ONE bracket (see above).
+  const result = await withScriptUndoBatch(lib, "Add sheet", async () => {
+    const appended = await lib.addSheet(name ?? undefined, kind ?? undefined);
+    const appendedAt = appended.activeIndex;
+    return target !== appendedAt ? lib.moveSheet(appendedAt, target) : appended;
+  });
   await announceSheetsChanged(result);
   const added = result.sheets.find((s) => s.index === target);
   return { index: added?.index ?? target, name: added?.name ?? "" };
@@ -9908,11 +10236,13 @@ async function findScratchCell(
 
 /**
  * Create a custom named style from a script format. Transient-write dance (see
- * the section comment): the scratch write joins ONE transaction that is
- * CANCELLED (records dropped) after the cell is reverted — unless the script
- * already holds an open batch, in which case the apply+revert pair simply
- * nets to nothing inside it (cancelling would destroy the script's batch).
- * Exported for tests.
+ * the section comment): the scratch write runs in ONE transaction that is
+ * CANCELLED (records dropped) after the cell is reverted — `withScriptUndoBatch`
+ * in its `discard` mode. When the begin JOINS a transaction that is already
+ * open (the script's own batch, or a user's gesture) the apply+revert pair
+ * simply nets to nothing inside it, and nothing is cancelled: cancelling would
+ * drop the opener's whole step. The begin is still made, so the joined step is
+ * MARKED shared like every other script join. Exported for tests.
  */
 export async function executeCreateNamedStyle(
   lib: Awaited<ReturnType<typeof getLib>>,
@@ -9926,31 +10256,35 @@ export async function executeCreateNamedStyle(
   }
   const lowered = await lowerScriptFormat(lib, format);
   const scratch = await findScratchCell(lib);
-  const alreadyOpen = (await lib.getUndoState()).transactionOpen;
-  if (!alreadyOpen) await lib.beginUndoTransaction(`Create named style '${name}'`);
-  let applied = false;
-  try {
-    const result = await lib.applyFormatting([scratch.row], [scratch.col], lowered);
-    applied = true;
-    const cell = result.cells.find((c) => c.row === scratch.row && c.col === scratch.col);
-    if (!cell) {
-      throw new BrokerError("HostError", "the backend reported no style index for the format");
-    }
-    const created = await lib.createNamedStyle(name, cell.styleIndex, "Custom");
-    return { name: created.name, builtIn: created.builtIn, category: created.category };
-  } finally {
-    if (applied) {
+  return withScriptUndoBatch(
+    lib,
+    `Create named style '${name}'`,
+    async () => {
+      let applied = false;
       try {
-        // Revert the scratch cell entirely (the style stays in the registry —
-        // that is what the named style points at).
-        await lib.clearRangeWithOptions(scratch.row, scratch.col, scratch.row, scratch.col, "all");
-      } catch {
-        // Best effort: the cancel below still drops the undo record, and the
-        // scratch cell is outside the used range.
+        const result = await lib.applyFormatting([scratch.row], [scratch.col], lowered);
+        applied = true;
+        const cell = result.cells.find((c) => c.row === scratch.row && c.col === scratch.col);
+        if (!cell) {
+          throw new BrokerError("HostError", "the backend reported no style index for the format");
+        }
+        const created = await lib.createNamedStyle(name, cell.styleIndex, "Custom");
+        return { name: created.name, builtIn: created.builtIn, category: created.category };
+      } finally {
+        if (applied) {
+          try {
+            // Revert the scratch cell entirely (the style stays in the
+            // registry — that is what the named style points at).
+            await lib.clearRangeWithOptions(scratch.row, scratch.col, scratch.row, scratch.col, "all");
+          } catch {
+            // Best effort: the cancel still drops the undo record, and the
+            // scratch cell is outside the used range.
+          }
+        }
       }
-    }
-    if (!alreadyOpen) await lib.cancelUndoTransaction();
-  }
+    },
+    { discard: true },
+  );
 }
 
 // ============================================================================
@@ -12313,6 +12647,63 @@ export async function executeCreateFloatingRange(args: unknown[]): Promise<Scrip
     rowCount: info.rowCount,
     colCount: info.colCount,
   });
+}
+
+/**
+ * `api.floatingRangeGetCells`: the window's cells, SPARSE -- only cells that
+ * exist -- each with its value kind ("number", "text", "boolean", "error",
+ * "empty"), value and formula.
+ *
+ * THROUGH THE OWNING EXTENSION'S SEAM (@api/floatingRangeService `getCells`),
+ * as `api.floatingRangeResize` is. The extension reads in row bands the
+ * backend accepts (`get_floating_range_cells` delegates to
+ * `get_range_cells_typed`, which refuses more than 100,000 cells, and a
+ * window can be 1000 x 256 -- E10); this door used to carry a SECOND copy of
+ * that banding and of the ceiling beside the extension's (review B,
+ * 2026-09-28), a copied recipe the Seam Rule forbids. Only the window lookup
+ * stays here, from the backend's list -- a range a script created a moment ago
+ * may not be in the extension's store yet -- and `kind` is the wire's
+ * `type` (it was read from a `kind` field the wire does not carry, so
+ * every cell came back with `kind: undefined`). Exported for the unit tier.
+ */
+export async function executeFloatingRangeGetCells(args: unknown[]): Promise<{
+  rowCount: number;
+  colCount: number;
+  cells: Array<{ row: number; col: number; kind: string; value: unknown; formula?: string }>;
+}> {
+  const [id] = args as [string];
+  const { invokeBackend } = await import("../backend");
+  const rows = await invokeBackend<FloatingRangeWire[]>("list_floating_ranges", {});
+  const info = (rows ?? []).find((fr) => fr.id === id);
+  if (!info) throw new BrokerError("ValidationError", `No floating range with id "${id}"`);
+  const { getFloatingRangeProvider } = await import("../floatingRangeService");
+  const provider = getFloatingRangeProvider();
+  if (!provider) {
+    throw new BrokerError(
+      "HostError",
+      "Floating ranges are unavailable: the FloatingRange extension is not loaded.",
+    );
+  }
+  let read;
+  try {
+    read = await provider.getCells(
+      id,
+      0,
+      0,
+      Math.max(0, info.rowCount - 1),
+      Math.max(0, info.colCount - 1),
+    );
+  } catch (err) {
+    throw new BrokerError("HostError", err instanceof Error ? err.message : String(err));
+  }
+  const cells = read.map((c) => ({
+    row: c.row,
+    col: c.col,
+    kind: c.type,
+    value: c.value,
+    formula: c.formula ?? undefined,
+  }));
+  return { rowCount: info.rowCount, colCount: info.colCount, cells };
 }
 
 /**

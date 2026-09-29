@@ -38,7 +38,7 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.dialogs.unregister("solver-result"));
 
-  registerSolverMenuItems(context);
+  cleanupFns.push(registerSolverMenuItems(context));
 
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
     setCurrentSelection(

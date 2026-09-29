@@ -20,6 +20,7 @@ import {
   ROW_GUTTER_WIDTH,
 } from "../../../../api/rowHeaderOverrides";
 import { rowHeaderGutter, colHeaderGutter } from "../../../lib/gridRenderer/layout/headerVisibility";
+import { notifyGridCellPressed } from "../../../lib/cellClickInterceptors";
 
 interface HeaderSelectionDependencies {
   config: GridConfig;
@@ -108,6 +109,32 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
   let lastExtendedIndex: number | null = null;
 
   /**
+   * Announce a HANDLED header press (core/lib/cellClickInterceptors.ts) --
+   * after commit-before-select and the selection, as the cell handler does.
+   * WHY (BUG-0186): a re-press of an already-selected row or column header
+   * leaves Core's selection UNCHANGED, and a right-press inside a header
+   * selection keeps it for the context menu, so no selection listener could
+   * see either; an object that keeps its own selection over the grid (a
+   * floating grid's cell) went on showing its selection beside the sheet's.
+   */
+  const announceHeaderPress = (
+    target: "row" | "column" | "all",
+    index: number,
+    event: React.MouseEvent<HTMLElement>,
+    keptSelection: boolean,
+  ): void => {
+    notifyGridCellPressed({
+      row: target === "row" ? index : -1,
+      col: target === "column" ? index : -1,
+      button: event.button,
+      shiftKey: event.shiftKey,
+      ctrlKey: event.ctrlKey,
+      target,
+      keptSelection,
+    });
+  };
+
+  /**
    * Handle mouse down on the select-all corner: select the whole sheet.
    * Returns true if the event was handled.
    *
@@ -137,6 +164,7 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
     // Single dispatch with endRow/endCol: a select-then-extend pair scrolls to
     // the end of the sheet on the way through.
     onSelectCell(0, 0, "cells", config.totalRows - 1, config.totalCols - 1);
+    announceHeaderPress("all", -1, event, false);
 
     return true;
   };
@@ -162,6 +190,7 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
     // Right-click (button === 2) within existing column selection: preserve selection
     if (event.button === 2 && isColumnWithinSelection(headerCol, selection)) {
       // Don't change selection, just let context menu appear
+      announceHeaderPress("column", headerCol, event, true);
       return true;
     }
 
@@ -220,6 +249,7 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
       // Fallback: select all rows in this column
       onSelectCell(0, headerCol, "columns", config.totalRows - 1, headerCol);
     }
+    announceHeaderPress("column", headerCol, event, false);
 
     return true;
   };
@@ -245,6 +275,7 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
     // Right-click (button === 2) within existing row selection: preserve selection
     if (event.button === 2 && isRowWithinSelection(headerRow, selection)) {
       // Don't change selection, just let context menu appear
+      announceHeaderPress("row", headerRow, event, true);
       return true;
     }
 
@@ -283,6 +314,7 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
       onSelectCell(headerRow, 0, "rows");
       onExtendTo(headerRow, config.totalCols - 1);
     }
+    announceHeaderPress("row", headerRow, event, false);
 
     return true;
   };

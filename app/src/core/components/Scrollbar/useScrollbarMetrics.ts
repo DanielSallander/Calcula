@@ -18,6 +18,16 @@ export interface ScrollbarMetrics {
   maxScrollX: number;
   /** Maximum vertical scroll position */
   maxScrollY: number;
+  /**
+   * How far the WHEEL may scroll: the whole sheet (a page-bounded surface: its
+   * page). `maxScrollX/Y` size the THUMB -- the used range plus a buffer,
+   * grown to "where you are plus one viewport" -- and clamping the wheel to
+   * that let it advance only about one row per notch past the used range
+   * (found live 2026-09-29, e2e fixall-edit K4: forty notches reached 818 px).
+   * Excel scrolls freely there; the thumb then follows the new position.
+   */
+  wheelMaxScrollX: number;
+  wheelMaxScrollY: number;
   /** Whether horizontal scrollbar should be visible */
   showHorizontal: boolean;
   /** Whether vertical scrollbar should be visible */
@@ -107,6 +117,8 @@ export function useScrollbarMetrics({
       contentHeight: 1,
       maxScrollX: 0,
       maxScrollY: 0,
+      wheelMaxScrollX: 0,
+      wheelMaxScrollY: 0,
       showHorizontal: false,
       showVertical: false,
       refresh: refreshUsedRange,
@@ -138,6 +150,8 @@ export function useScrollbarMetrics({
       contentHeight: extent.height,
       maxScrollX,
       maxScrollY,
+      wheelMaxScrollX: maxScrollX,
+      wheelMaxScrollY: maxScrollY,
       showHorizontal: maxScrollX > 0,
       showVertical: maxScrollY > 0,
       refresh: refreshUsedRange,
@@ -189,11 +203,17 @@ export function useScrollbarMetrics({
   const maxScrollX = Math.max(0, contentWidth - availableWidth);
   const maxScrollY = Math.max(0, contentHeight - availableHeight);
 
+  // The wheel's limit is the SHEET's, same delta-based extent.
+  const wheelMaxScrollX = Math.max(maxScrollX, getColumnXPosition(config.totalCols, config, dimensions) - availableWidth);
+  const wheelMaxScrollY = Math.max(maxScrollY, getRowYPosition(config.totalRows, config, dimensions) - availableHeight);
+
   return {
     contentWidth,
     contentHeight,
     maxScrollX,
     maxScrollY,
+    wheelMaxScrollX,
+    wheelMaxScrollY,
     showHorizontal: maxScrollX > 0,
     showVertical: maxScrollY > 0,
     refresh: refreshUsedRange,

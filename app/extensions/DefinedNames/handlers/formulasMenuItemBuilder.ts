@@ -17,6 +17,7 @@ import {
   AppEvents,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 /**
  * Register defined names menu items in the Formulas menu.
@@ -24,6 +25,17 @@ import { getGridStateSnapshot } from "@api/grid";
  */
 export function registerDefinedNamesMenuItems(context: ExtensionContext): () => void {
   const cleanups: (() => void)[] = [];
+  // Every item registered below is taken back by the returned cleanup (the D3
+  // class, found in wave C beside W20/W21: the list was empty, so all four
+  // Formulas items outlived the extension).
+  for (const itemId of [
+    "formulas:separator-names",
+    "formulas:nameManager",
+    "formulas:pasteNames",
+    "formulas:applyNames",
+  ]) {
+    cleanups.push(() => context.ui.menus.unregisterItem("formulas", itemId));
+  }
 
   context.ui.menus.registerItem("formulas", {
     id: "formulas:separator-names",
@@ -44,6 +56,10 @@ export function registerDefinedNamesMenuItems(context: ExtensionContext): () => 
         label: "Define Name...",
         icon: IconDefineName,
         action: () => {
+          // The new name's Refers To is prefilled from Core's selection --
+          // HIDDEN while something else owns the selection (a floating grid's
+          // selected cell) -- so refuse, once (D4, BUG-0185 class).
+          if (refuseIfSelectionOwned("Define Name")) return;
           showDialog("define-name", { mode: "new" });
         },
       },
@@ -64,6 +80,10 @@ export function registerDefinedNamesMenuItems(context: ExtensionContext): () => 
     label: "Paste Names...",
     icon: IconPasteNames,
     action: async () => {
+      // Pastes the list at Core's active cell -- HIDDEN while something else
+      // owns the selection (a floating grid's selected cell) -- so refuse,
+      // once (D4, BUG-0185 class).
+      if (refuseIfSelectionOwned("Paste Names")) return;
       try {
         const namedRanges = await getAllNamedRanges();
         if (namedRanges.length === 0) {

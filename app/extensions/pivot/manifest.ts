@@ -213,6 +213,10 @@ function CreatePivotDialogWrapper(props: DialogProps): React.ReactElement {
     // A canvas insert (the Canvas tab) hands the frame's rectangle; the
     // dialog validates it and switches to canvas mode.
     placement: props.data?.placement,
+    // The opener says the grid selection is not data (Insert > PivotTable
+    // while a floating grid owns the selection: Core's selection is then a
+    // cell hidden under it), so nothing is detected from it.
+    suppressAutoRange: props.data?.suppressAutoRange === true,
   });
 }
 

@@ -16,6 +16,8 @@ import { useFindStore } from "../../_shared/lib/useFindStore";
 // ============================================================================
 
 let isActivated = false;
+/** Undoes this activation's command registrations (see deactivate). */
+let unregisterCommands: (() => void) | null = null;
 
 // ============================================================================
 // Activation
@@ -47,6 +49,12 @@ function activate(context: ExtensionContext): void {
     useFindStore.getState().open(true);
     DialogExtensions.openDialog("find-replace", { mode: "replace" });
   });
+  // Deactivate takes them away: a deactivated extension must not keep
+  // answering the registry's Ctrl+F / Ctrl+H (D3 class).
+  unregisterCommands = () => {
+    context.commands.unregister(CoreCommands.FIND);
+    context.commands.unregister(CoreCommands.REPLACE);
+  };
 
   isActivated = true;
   console.log("[FindReplaceExtension] Activated successfully.");
@@ -63,7 +71,9 @@ function deactivate(): void {
 
   console.log("[FindReplaceExtension] Deactivating...");
 
-  // Unregister dialog
+  // Unregister commands and dialog
+  unregisterCommands?.();
+  unregisterCommands = null;
   DialogExtensions.unregisterDialog("find-replace");
 
   isActivated = false;

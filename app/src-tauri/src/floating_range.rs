@@ -613,6 +613,47 @@ pub fn get_floating_range_cells(
     )
 }
 
+/// The SPILLS on a floating range's backing sheet, in the range's own cell
+/// coordinates: each anchor and the bounding box of the cells it spills into
+/// -- the shape `get_spill_ranges` answers for the ACTIVE sheet, which a
+/// backing sheet never is (wave C, W12). The formula bar needs it to show a
+/// spilled floating-grid cell as Excel's greyed "ghost" of its anchor's
+/// formula instead of a bare, editable value. Id-addressed; read-only.
+#[tauri::command]
+pub fn get_floating_range_spill_ranges(
+    state: State<AppState>,
+    id: identity::EntityId,
+) -> Result<Vec<crate::api_types::SpillRangeInfo>, String> {
+    floating_range_spill_ranges(&state, id)
+}
+
+/// [`get_floating_range_spill_ranges`] over a plain reference. LOCKS:
+/// `floating_ranges` and `sheet_ids` (each released) then `spill_ranges`.
+pub(crate) fn floating_range_spill_ranges(
+    state: &AppState,
+    id: identity::EntityId,
+) -> Result<Vec<crate::api_types::SpillRangeInfo>, String> {
+    let range = find_row(state, id)?;
+    let backing_index = sheet_index_of(state, range.backing_sheet_id)
+        .ok_or_else(|| "Floating range backing sheet is missing".to_string())?;
+    let spill_ranges = state.spill_ranges.read().map_err(|e| e.to_string())?;
+    let mut out: Vec<crate::api_types::SpillRangeInfo> = spill_ranges
+        .iter()
+        .filter(|((sheet, _, _), _)| *sheet == backing_index)
+        .map(|(&(_, origin_row, origin_col), cells)| {
+            let (mut end_row, mut end_col) = (origin_row, origin_col);
+            for &(r, c) in cells {
+                end_row = end_row.max(r);
+                end_col = end_col.max(c);
+            }
+            crate::api_types::SpillRangeInfo { origin_row, origin_col, end_row, end_col }
+        })
+        .collect();
+    // A stable order (the map's is not): the answer is compared and cached.
+    out.sort_by_key(|s| (s.origin_row, s.origin_col));
+    Ok(out)
+}
+
 /// Write ONE cell of a floating range, id-addressed (the backing sheet index
 /// is resolved server-side — the frontend never handles raw indexes).
 /// Delegates to the off-sheet write path (`update_cell_on_sheets_inner`):
@@ -735,10 +776,16 @@ pub fn rename_floating_range(
     state: State<AppState>,
     file_state: State<FileState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     id: identity::EntityId,
     new_name: String,
 ) -> Result<FloatingRangeInfo, String> {
-    rename_floating_range_inner(&state, &file_state, &pivot_state, id, new_name)
+    // A pane dropdown sourced from `Float1!A1:A5` names the BACKING sheet, and
+    // follows the rename like any sheet reference (wave C, W7).
+    let backing = find_row(&state, id).ok().map(|row| row.backing_sheet_id);
+    crate::sheets::with_pane_controls_following_rename(&state, &pane_control_state, backing, || {
+        rename_floating_range_inner(&state, &file_state, &pivot_state, id, new_name)
+    })
 }
 
 pub(crate) fn rename_floating_range_inner(
@@ -970,5 +1017,64 @@ pub(crate) fn delete_floating_ranges_for_host(
                 rows.retain(|fr| fr.id != id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod spill_range_tests {
+    //! Wave C, W12: a floating range's spills are read from its BACKING sheet
+    //! (`get_floating_range_spill_ranges`), which `get_spill_ranges` -- the
+    //! active sheet's -- never covers.
+    use super::*;
+
+    fn write(state: &AppState, file: &FileState, id: identity::EntityId, row: u32, col: u32, value: &str) {
+        update_floating_range_cell_inner(
+            state,
+            file,
+            &crate::persistence::UserFilesState::default(),
+            &PivotState::new(),
+            &crate::pane_control::PaneControlState::new(),
+            &crate::ribbon_filter::RibbonFilterState::new(),
+            id,
+            row,
+            col,
+            value.to_string(),
+            None,
+        )
+        .expect("write a floating-range cell");
+    }
+
+    fn spans(state: &AppState, id: identity::EntityId) -> Vec<(u32, u32, u32, u32)> {
+        floating_range_spill_ranges(state, id)
+            .expect("the spills")
+            .iter()
+            .map(|s| (s.origin_row, s.origin_col, s.end_row, s.end_col))
+            .collect()
+    }
+
+    #[test]
+    fn a_floating_ranges_spills_come_from_its_own_backing_sheet() {
+        let state = crate::create_app_state();
+        let file = FileState::default();
+        let first = create_floating_range_inner(&state, &file, Some("Float1".to_string()), 10.0, 10.0)
+            .expect("create Float1")
+            .range
+            .id;
+        let second = create_floating_range_inner(&state, &file, Some("Float2".to_string()), 400.0, 10.0)
+            .expect("create Float2")
+            .range
+            .id;
+        write(&state, &file, first, 0, 0, "=SEQUENCE(3)");
+        // One argument: the cell door parses in the workbook locale (sv-SE here).
+        write(&state, &file, second, 0, 0, "=SEQUENCE(2)");
+
+        assert_eq!(spans(&state, first), vec![(0, 0, 2, 0)], "Float1's =SEQUENCE(3) at A1 spills to A3");
+        assert_eq!(spans(&state, second), vec![(0, 0, 1, 0)], "each range sees only its own backing sheet");
+        let active = *state.active_sheet.read().unwrap();
+        assert!(
+            state.spill_ranges.read().unwrap().keys().all(|&(sheet, _, _)| sheet != active),
+            "fixture: the ACTIVE sheet (all `get_spill_ranges` reads) holds none of these spills"
+        );
+        assert!(floating_range_spill_ranges(&state, identity::EntityId::from_bytes(identity::generate_uuid_v7())).is_err());
     }
 }

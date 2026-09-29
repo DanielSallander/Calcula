@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 206,
+  "nextId": 259,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4919,7 +4919,7 @@
     },
     {
       "id": "BUG-0134",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-25",
       "source": {
         "kind": "manual",
@@ -4934,6 +4934,11 @@
       "whyNobodyNoticed": "Every publish path NEEDS the directory created, so the create-on-open behaviour looks correct from the write side, and a read of an existing workspace never exercises it. The only symptom is an empty folder appearing where someone mistyped.",
       "repro": {
         "description": "Collaboration > Application Inspector..., type C:\\Temp\\no-such-workspace in the location field, press Enter. The folder now exists and is empty. Fix direction: split `open` (must exist, for read paths) from an explicit create used only by the publish routes and calp_add_workspace."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "C6 (wave A): LocalWorkspace::open no longer creates directories on read paths; a missing location is an error, the write paths still create."
       }
     },
     {
@@ -5020,7 +5025,7 @@
     },
     {
       "id": "BUG-0138",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-25",
       "source": {
         "kind": "manual",
@@ -5037,7 +5042,12 @@
       "repro": {
         "description": "Insert a BI query result on Sheet2, move Sheet2 to the front, Refresh the connection: the block is written onto the sheet now at index 1."
       },
-      "notes": "Since M1 a block whose index now names a CANVAS is skipped loudly (bi_refresh_connection reports it); the worksheet case is unchanged."
+      "notes": "Since M1 a block whose index now names a CANVAS is skipped loudly (bi_refresh_connection reports it); the worksheet case is unchanged.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "M1 (wave B): a BI query result block follows its sheet by id; the refresh writes inside with_block_sheet holding grid+grids (the lock move/delete/copy renumber under), a block whose sheet was deleted is dropped, PHASE B re-resolves by id."
+      }
     },
     {
       "id": "BUG-0139",
@@ -5217,7 +5227,7 @@
     },
     {
       "id": "BUG-0146",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-25",
       "source": {
         "kind": "manual",
@@ -5234,11 +5244,16 @@
       "repro": {
         "description": "Harness pivot with a Region row field; enter the field/item form of GETPIVOTDATA: #REF!."
       },
-      "notes": "Found by the M6 backend agent; predates M6."
+      "notes": "Found by the M6 backend agent; predates M6.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "P1 (wave A): value cells of a pivot with no column fields carry the row group path, and lookup_pivot_data matches only the cell whose path names exactly the requested fields."
+      }
     },
     {
       "id": "BUG-0147",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-25",
       "source": {
         "kind": "manual",
@@ -5254,11 +5269,16 @@
       "whyNobodyNoticed": "Tab names normally match their definitions exactly, and opening a pivot's sheet fetches its view.",
       "repro": {
         "description": "Save a workbook with =GETPIVOTDATA(..) on Sheet1 reading a pivot on Sheet2; reopen without visiting Sheet2: #REF!."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "P2 (wave A): restore_pivot_definitions resolves the destination ignoring case, leaves an unresolvable one unregistered instead of sheet 0, stores each grid pivot's view at load, and copies sheet_names before taking pivot_tables."
       }
     },
     {
       "id": "BUG-0148",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-25",
       "source": {
         "kind": "manual",
@@ -5274,11 +5294,16 @@
       "whyNobodyNoticed": "Only pivots with merged filter rows are affected.",
       "repro": {
         "description": "Create a pivot whose layout merges a filter row; Ctrl+Z: the merged range remains."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "P3 (wave A): clear_pivot_merges runs on undo of a create and on delete_pivot_table."
       }
     },
     {
       "id": "BUG-0149",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-25",
       "source": {
         "kind": "manual",
@@ -5295,11 +5320,16 @@
       "repro": {
         "description": "On Sheet1, Insert > PivotTable, type Sheet2!A1:D9: the pivot summarises Sheet1!A1:D9."
       },
-      "notes": "Canvas mode resolves the prefix correctly (Pivot/lib/canvasPivotCreate.ts); worksheet mode deliberately left unchanged in M6."
+      "notes": "Canvas mode resolves the prefix correctly (Pivot/lib/canvasPivotCreate.ts); worksheet mode deliberately left unchanged in M6.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "P4 + N1 (wave A): resolveWorksheetPivotSource / resolveWorksheetPivotDestination resolve a typed (quoted, $-absolute, any-case) sheet prefix; an unknown or canvas sheet is refused before anything is added."
+      }
     },
     {
       "id": "BUG-0150",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-25",
       "source": {
         "kind": "manual",
@@ -5315,11 +5345,16 @@
       "whyNobodyNoticed": "The diff line reads like a real removal and the push itself carries the objects.",
       "repro": {
         "description": "Publish an application with a model overlay; open the push preview: the overlay artifact is listed as removed."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "C2 (wave A): the push preview and merge analysis receive the frontend's distributable objects, so they are no longer reported as removed."
       }
     },
     {
       "id": "BUG-0151",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-25",
       "source": {
         "kind": "manual",
@@ -5336,11 +5371,16 @@
       "repro": {
         "description": "Subscriber has 'Data'; subscribe to an application whose 'Report' has =Data!A1: the pulled Report reads the subscriber's Data."
       },
-      "notes": "Needs a SIMULTANEOUS multi-name rewriter (pairwise application chains wrongly, e.g. {B->A, A->A (2)}) over pulled grids before edges are built, named ranges and chart string sources, on subscribe and on refresh."
+      "notes": "Needs a SIMULTANEOUS multi-name rewriter (pairwise application chains wrongly, e.g. {B->A, A->A (2)}) over pulled grids before edges are built, named ranges and chart string sources, on subscribe and on refresh.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "C1 (wave A) + B4 (wave B): one simultaneous multi-name rewriter (core/calp sheet_renames) applied to pulled formulas, names, chart string sources, CF, DV and control formulas on subscribe, refresh and checkout; round trips no longer re-spell untouched content."
+      }
     },
     {
       "id": "BUG-0152",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-25",
       "source": {
         "kind": "manual",
@@ -5356,11 +5396,16 @@
       "whyNobodyNoticed": "Reasoned from the code by the M5 refresh agent; not reproduced.",
       "repro": {
         "description": "Open Application for Editing where the first sheet holds a pivot; edit any cell: check whether the pivot's cells survive."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "C3 (wave A): restore_pulled_pivots writes the active-sheet mirror too."
       }
     },
     {
       "id": "BUG-0153",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-25",
       "source": {
         "kind": "manual",
@@ -5377,11 +5422,16 @@
       "repro": {
         "description": "(a) Detach a pulled sheet with a scripted button, Refresh: the button's script is gone. (b) Detach a sheet with a sheet-scoped name, Refresh: the name is workbook-scoped."
       },
-      "notes": "Converting the scripts to local was NOT done because it would bypass consent."
+      "notes": "Converting the scripts to local was NOT done because it would bypass consent.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "C4 (wave A): a detached sheet keeps its object scripts and sheet-scoped names through a refresh; consent is not bypassed."
+      }
     },
     {
       "id": "BUG-0154",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-25",
       "source": {
         "kind": "manual",
@@ -5397,11 +5447,16 @@
       "whyNobodyNoticed": "Dev pulls usually go into a fresh workbook.",
       "repro": {
         "description": "Dev subscribe to a source folder whose sheet is named Sheet1 into a workbook that has Sheet1."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "C5 (wave A, review R6): the dev pull resolves sheet-name and sheet-id collisions."
       }
     },
     {
       "id": "BUG-0155",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-25",
       "source": {
         "kind": "manual",
@@ -5417,6 +5472,11 @@
       "whyNobodyNoticed": "Only the no-reload replacement paths are exposed; observed in the E2E harness (a canvas pivot's hidden-grid cells painted on the new Sheet1).",
       "repro": {
         "description": "E2E: create a canvas pivot, call file-api newFile() without a reload: the new Sheet1 shows the pivot's cells although get_cells_in_rows returns none."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "C8 (wave A): the grid cell cache is invalidated when the document is replaced without a reload."
       }
     },
     {
@@ -6097,7 +6157,7 @@
     },
     {
       "id": "BUG-0183",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-27",
       "source": {
         "kind": "manual",
@@ -6114,11 +6174,16 @@
       "repro": {
         "description": "Select a cell, press Ctrl+Shift+B: no bookmark."
       },
-      "notes": "Pre-existing (the dispatcher's stopPropagation predates the canvas work). Related: several built-ins point at unregistered command ids (hyperlinks.insert, flashFill.execute, autofilter.toggle, review.newComment, grouping.group/ungroup, selectVisibleCells.execute) and work only because each extension's own capture listener runs next to the dispatcher."
+      "notes": "Pre-existing (the dispatcher's stopPropagation predates the canvas work). Related: several built-ins point at unregistered command ids (hyperlinks.insert, flashFill.execute, autofilter.toggle, review.newComment, grouping.group/ungroup, selectVisibleCells.execute) and work only because each extension's own capture listener runs next to the dispatcher.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "K2 (wave A) + D1/D2 (wave B): every built-in shortcut runs once through a registered command (remappable); the extensions' duplicate listeners are retired; Ctrl+Shift+B works."
+      }
     },
     {
       "id": "BUG-0184",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-27",
       "source": {
         "kind": "manual",
@@ -6135,11 +6200,16 @@
       "repro": {
         "description": "Range pivot, sort a row field descending, drag another field into Columns: the sort is back to ascending (expected per the trace)."
       },
-      "notes": "Fix: give PivotFieldConfig the tri-state BiFieldRef already has (None keeps, Some sets) and keep sort/subtotal/grouping/show-all when not sent; then the editor can send only edited fields for range pivots. pivot/commands.rs ~1174-1209, pivot/utils.rs 135-186."
+      "notes": "Fix: give PivotFieldConfig the tri-state BiFieldRef already has (None keeps, Some sets) and keep sort/subtotal/grouping/show-all when not sent; then the editor can send only edited fields for range pivots. pivot/commands.rs ~1174-1209, pivot/utils.rs 135-186.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "P5 (wave A) + A3 (wave B): update_pivot_fields / update_bi_pivot_fields merge each sent field onto what the pivot holds (sort, grouping, subtotals, show-all kept); hidden items are tri-state; the editor sends only edited fields."
+      }
     },
     {
       "id": "BUG-0185",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-27",
       "source": {
         "kind": "manual",
@@ -6156,11 +6226,16 @@
       "repro": {
         "description": "Worksheet with A1 selected; select a floating-grid cell; click Bold on the Home tab: A1 turns bold."
       },
-      "notes": "Door list in docs/design/open-items.md 2.af. Fix = a feature-neutral 'selection owner' seam in @api checked at each door."
+      "notes": "Door list in docs/design/open-items.md 2.af. Fix = a feature-neutral 'selection owner' seam in @api checked at each door.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "K1 (wave A) + E7 (wave B) + D4/B8 + W22/W24 (waves B-C): @api/selectionOwner; every formatting and selection-reading menu door refuses once while a floating grid owns the selection; FloatingRange claims it."
+      }
     },
     {
       "id": "BUG-0186",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-27",
       "source": {
         "kind": "manual",
@@ -6177,11 +6252,16 @@
       "repro": {
         "description": "Select a floating-grid cell on a worksheet whose A1 is selected; right-click A1: the grid menu opens, the floating-grid cell stays selected."
       },
-      "notes": "core/hooks/useMouseSelection/selection/cellSelectionHandlers.ts (notifyGridCellPressed); header handlers do not emit it."
+      "notes": "core/hooks/useMouseSelection/selection/cellSelectionHandlers.ts (notifyGridCellPressed); header handlers do not emit it.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "E1 (wave B): header re-presses and right-presses inside Core's hidden selection announce the press, so a floating grid drops its selection."
+      }
     },
     {
       "id": "BUG-0187",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-27",
       "source": {
         "kind": "manual",
@@ -6198,7 +6278,12 @@
       "repro": {
         "description": "Slow model; click a slicer item and immediately type into a cell; Ctrl+Z undoes both."
       },
-      "notes": "Fix = one backend command (apply_slicer_selection) that builds a local transaction and pushes it once. Slicer/lib/slicerStore.ts updateSlicerSelectionAsync; the ribbon filter's 'Ribbon filter change' transaction has the same window."
+      "notes": "Fix = one backend command (apply_slicer_selection) that builds a local transaction and pushes it once. Slicer/lib/slicerStore.ts updateSlicerSelectionAsync; the ribbon filter's 'Ribbon filter change' transaction has the same window.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "S1 (wave B): a slicer click and a ribbon filter change are ONE backend gesture (update_slicer_selection / update_ribbon_filter_selection with a gesture) with no transaction held across the model re-query; table writes moved into it in wave C (W2)."
+      }
     },
     {
       "id": "BUG-0188",
@@ -6402,7 +6487,7 @@
     },
     {
       "id": "BUG-0196",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-27",
       "source": {
         "kind": "manual",
@@ -6419,11 +6504,16 @@
       "repro": {
         "description": "Canvas, right-click a chart, press Escape."
       },
-      "notes": "Fix per family: ownsKey('Escape') while its menu is open (FloatingRange/lib/frObjectSelection.ts is the worked example)."
+      "notes": "Fix per family: ownsKey('Escape') while its menu is open (FloatingRange/lib/frObjectSelection.ts is the worked example).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "V4 (wave A), S4 (wave B), P8 (wave A): chart, axis, control, slicer and pivot-box menus claim Escape while open."
+      }
     },
     {
       "id": "BUG-0197",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-27",
       "source": {
         "kind": "manual",
@@ -6440,11 +6530,16 @@
       "repro": {
         "description": "Chart design query with Region = (\"East\"): the chart shows every region."
       },
-      "notes": "CompileResult.unresolvedInclusions (extensions/_shared/dsl/pivotLayout/compiler.ts) now names these fields; whether it becomes an error or a warning is the owner's call."
+      "notes": "CompileResult.unresolvedInclusions (extensions/_shared/dsl/pivotLayout/compiler.ts) now names these fields; whether it becomes an error or a warning is the owner's call.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "P10 (wave A) + X1/X2 (wave D): a design-query inclusion filter filters charts and reports (blank members included)."
+      }
     },
     {
       "id": "BUG-0198",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-27",
       "source": {
         "kind": "manual",
@@ -6461,11 +6556,16 @@
       "repro": {
         "description": "Report filter over values East and east: one page."
       },
-      "notes": "Fix: unique_sheet_name suffixes, or refuse the command; needs the owner's call on Excel behaviour. pivot/commands.rs show_report_filter_pages_core."
+      "notes": "Fix: unique_sheet_name suffixes, or refuse the command; needs the owner's call on Excel behaviour. pivot/commands.rs show_report_filter_pages_core.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "P6 (wave A): a colliding report-filter page name gets a unique ' (2)' suffix; never skipped."
+      }
     },
     {
       "id": "BUG-0199",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-27",
       "source": {
         "kind": "manual",
@@ -6482,11 +6582,16 @@
       "repro": {
         "description": "Settings > Keyboard, remap Copy to Ctrl+Shift+Q; select a floating-grid cell on a worksheet; press Ctrl+Shift+Q."
       },
-      "notes": "FloatingRange/lib/frKeyRouting.ts, BuiltIn/FormatPainter/index.ts, Settings/components/KeybindingsPage.tsx, src/api/keybindings.ts (isCellEditLive)."
+      "notes": "FloatingRange/lib/frKeyRouting.ts, BuiltIn/FormatPainter/index.ts, Settings/components/KeybindingsPage.tsx, src/api/keybindings.ts (isCellEditLive).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "K3 (wave A), E7/W18 (waves B-C), W17/X16 (waves C-D): refusals follow remaps (registerCommandRefusal), Format Painter starts once, the capture box records, a stuck edit flag self-heals, AltGr typing wins only where a cell receives it."
+      }
     },
     {
       "id": "BUG-0200",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-27",
       "source": {
         "kind": "manual",
@@ -6503,7 +6608,12 @@
       "repro": {
         "description": "Script: await delay(0) inside a slicer click's re-query, beginBatch, write A1; decline the overwrite prompt: A1 reverts."
       },
-      "notes": "Needs backend transaction ownership (refuse a take-back of a step that absorbed someone else's begin) and an awaitable close-decided hook; app/src/api/pivotOverwrite.ts, ribbon_filter/commands.rs, shell/Layout.tsx, core/lib/file-api.ts."
+      "notes": "Needs backend transaction ownership (refuse a take-back of a step that absorbed someone else's begin) and an awaitable close-decided hook; app/src/api/pivotOverwrite.ts, ribbon_filter/commands.rs, shell/Layout.tsx, core/lib/file-api.ts.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Closed across the programme: a slicer click / ribbon filter change is ONE backend gesture holding no transaction across the model re-query (wave B S1); a take-back refuses a step that absorbed another caller's begin (Transaction::absorbed_begin); close preparation is awaitable (wave B E8); every Rust command's own begin/commit goes through engine::OwnedTransaction, so a joined begin closes nothing (live round, undo_ownership_census_tests); and runStepThenConfirmOverwrite decides 'joined' from its begin's own answer (UndoTransactionHandle.openedBackend), not a probe taken before it (pivotOverwrite.test.ts, the Z3 race)."
+      }
     },
     {
       "id": "BUG-0201",
@@ -6582,7 +6692,7 @@
     },
     {
       "id": "BUG-0204",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-28",
       "source": {
         "kind": "manual",
@@ -6599,11 +6709,16 @@
       "repro": {
         "description": "Open a workbook with index-only chart ranges and delete a sheet before the charts finish loading; save; reopen."
       },
-      "notes": "app/extensions/Charts/lib/chartStore.ts (migrateSheetIds), app/src-tauri/src/chart_commands.rs (record_chart_sheet_id_stamp)."
+      "notes": "app/extensions/Charts/lib/chartStore.ts (migrateSheetIds), app/src-tauri/src/chart_commands.rs (record_chart_sheet_id_stamp).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "M3 (wave B): chart ranges are pinned to their sheet at load in the backend while the sheet list is the file's own; no frontend stamp race."
+      }
     },
     {
       "id": "BUG-0205",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-28",
       "source": {
         "kind": "manual",
@@ -6620,7 +6735,1325 @@
       "repro": {
         "description": "Run dirty-flag.spec.ts then floating-range.spec.ts with the old raw new_file cleanup."
       },
-      "notes": "dirty-flag.spec.ts now cleans up in afterAll through the app's newFile; helpers/screenshots.ts resetToNewWorkbook still uses the raw call."
+      "notes": "dirty-flag.spec.ts now cleans up in afterAll through the app's newFile; helpers/screenshots.ts resetToNewWorkbook still uses the raw call.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "helpers/screenshots.ts resetToNewWorkbook now goes through the app's own newFile (file-api.ts, via __calcImport) and refuses a raw new_file, so AFTER_NEW reaches every store; the fixall journeys use it."
+      }
+    },
+    {
+      "id": "BUG-0206",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "pivot-blank-member",
+        "message": "A PIVOT'S (blank) ROW SHOWED THE GRAND TOTAL AND TOTALS COUNTED BLANK ROWS TWICE: VALUE_ID_EMPTY was both the blank member's id and the subtotal padding, in every pivot with a blank member on rows or columns.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "X1 (wave D): a reserved VALUE_ID_BLANK member id in group keys and the column layout; engine blank_member_tests; drill-through, GETPIVOTDATA '(blank)', show-all-items and Show Values As follow."
+      }
+    },
+    {
+      "id": "BUG-0207",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "pivot-blank-member",
+        "message": "HIDING (blank) IN ANY PIVOT FILTER DID NOTHING (the engine never resolved the blank item), and slicer/ribbon masks kept blank rows under any selection.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Wave A fix-up (BLANK_ITEM_LABEL, is_blank_item_label) + A1/A2 (wave B) + X2 (wave D): (blank) is listed, selectable and hidden consistently; model lists fold \"\" and NULL into (blank)."
+      }
+    },
+    {
+      "id": "BUG-0208",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "pivot-show-values-as",
+        "message": "SHOW VALUES AS (Running Total, Rank, Difference previous/next) WALKED ITEMS ASCENDING whatever the field's sort, and skipped the blank member.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Y2 (wave E): sibling order as displayed (sibling_order_of); hidden items are no longer ranked."
+      }
+    },
+    {
+      "id": "BUG-0209",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "pivot-sort-order",
+        "message": "MANUAL AND DATA-SOURCE SORT ORDERS SHOWED ITEMS IN HASH ORDER (calculation-group items out of declaration order).",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Z2 (wave F): first-appearance order over every record, filtered or not."
+      }
+    },
+    {
+      "id": "BUG-0210",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "pivot-data-source",
+        "message": "CHANGE DATA SOURCE (a) ignored a typed sheet prefix, (b) guessed a BI model from the text (quoted/digit-leading sheets, table names), (c) refused a table source, and (d) accepted a range covering the pivot's own output.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Y5/Y6 (waves D-E) + Z1 (wave F): real BI flag, typed prefix honoured and persisted, table sources handled, own-output overlap refused before any effect."
+      }
+    },
+    {
+      "id": "BUG-0211",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "pivot-getpivotdata-pick",
+        "message": "A POINT-MODE GETPIVOTDATA PICK IGNORED THE SHEET and described another sheet's pivot at the same address; a pivot with values on rows and no row field gave cells a bogus group path.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Wave A fix-up R2/R4."
+      }
+    },
+    {
+      "id": "BUG-0212",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "lock-order",
+        "message": "MORE LOCK-ORDER INVERSIONS: undo apply_changes vs ~40 writers (a Ctrl+Z overlapping an MCP formatting call could hang), rename_sheet_inner and apply_names_to_formulas vs F9, the save path vs F9, drill-through bi_metadata vs pivot_tables, get_pivot_source_data (two-party deadlock).",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Waves 3-4 of the owner-findings round and wave A C7/C9: reordered or copy-then-release; the census now sees lock_pending(), literals, split chains/lets; pair_inversions reports real line numbers."
+      }
+    },
+    {
+      "id": "BUG-0213",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "undo-completeness",
+        "message": "GESTURES AND COMMANDS COMMITTED WHATEVER UNDO STEP WAS OPEN, closing a script's beginBatch halfway (paste, fill, edit commit, AutoFilter, Format Painter, Paste Special, named styles, CLI runs, eight dialog doors), and a script batch could join and be taken back with a user's gesture.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "W3/X6 (waves C-D) + Y3/Y7 (wave E) + Z6/Z8 (wave F): begin returns whether it opened the step (a ticket); every door commits or cancels only what it opened; a census lists every begin site. The Rust commands' own begin/commit pairs were closed by the live round (engine::OwnedTransaction)."
+      }
+    },
+    {
+      "id": "BUG-0214",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "undo-completeness",
+        "message": "UNDO AND REDO RAN UNDER AN IN-FLIGHT SLICER/RIBBON/TIMELINE GESTURE OR PIVOT FILTER COMMAND, leaving slicer and pivot disagreeing and losing redo; apply_changes replayed cell restores before deferred pivot restores.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Wave B fix-up + W4 (wave C): PendingGesture refuses history moves while a gesture lands; joined pivot restores fit to the step's earliest cell state."
+      }
+    },
+    {
+      "id": "BUG-0215",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "timeline-undo",
+        "message": "A TIMELINE SELECTION COMMITTED THE FRONTEND'S OPEN STEP EARLY (split steps), its delete had no protection gate, Ctrl+Z/Ctrl+Y left its pivots stale, and a decline re-applied the declined selection unrecorded.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "W1 (wave C) + wave B fix-up + Z3 (wave F): joining recorders, editObjects gate, refreshCacheAndReconcile, the begin's own answer decides joined."
+      }
+    },
+    {
+      "id": "BUG-0216",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "canvas-stacking-undo",
+        "message": "CANVAS BRING TO FRONT / SEND TO BACK / LOCK WERE NOT UNDOABLE, and an unchanged layout patch marked the document modified.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "W5 (wave C): canvas_stacking restore, one Ctrl+Z each, redo works; page/snap/background stay view state."
+      }
+    },
+    {
+      "id": "BUG-0217",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "canvas-multi-selection",
+        "message": "A CANVAS MULTI-SELECTION'S DELETE / COPY / PASTE / DUPLICATE ACTED ONLY ON EACH FAMILY'S OWN MEMBER; group drags led by a control, slicer or timeline did not snap or page-clamp their co-moved members; a pasted control inherited a deleted control's lock and z slot.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "V1/V3 (wave A) + W25/W26 (wave C) + X12 (wave D): the @api object clipboard and deleteObjects on every provider; one undo step; Edit and Home Copy/Paste route to it on a canvas."
+      }
+    },
+    {
+      "id": "BUG-0218",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "protection-gate-parity",
+        "message": "SLICER, PIVOT, TIMELINE AND CONTROL CREATE/DELETE/PROPERTY DOORS SKIPPED editObjects PROTECTION (a canvas-wide Delete removed slicers on a protected sheet while charts were refused).",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Wave B fix-up + B5 (wave B) + X11 (wave D)."
+      }
+    },
+    {
+      "id": "BUG-0219",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "sheet-rename-delete-refs",
+        "message": "SHEET RENAMES AND DELETES MISSED REFERENCES: conditional-format, data-validation, control and pane-dropdown formulas, .calp override formulas, 3D references inside wrapper nodes, and index-only chart ranges on later sheets; a dropdown whose source named an unknown sheet read the active sheet.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "B1/B3/B4 (wave B) + W7-W10 (wave C) + X13 (wave D)."
+      }
+    },
+    {
+      "id": "BUG-0220",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "formula-quoting",
+        "message": "SHEET NAMES LIKE Q1-2026, 2024Budget, TRUE AND `Q1.` WERE WRITTEN UNQUOTED by Core's reference builders, header/GETPIVOTDATA picks, the floating grid's picks, the chart text editor, series formulas, data-validation list sources and the renderer, so the formula did not parse.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "B2 (wave B) + wave B edit fix-up + W13 (wave C): one parser-rule quoter (quoteSheetNameForFormula / is_bare_sheet_name)."
+      }
+    },
+    {
+      "id": "BUG-0221",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "keybinding-edit-context",
+        "message": "KEYBOARD LAYOUT AND EDIT-MODE GAPS: sv-SE Alt+;, Ctrl+[ ], Ctrl+; and the Ctrl+Shift number formats were dead; modified Delete/Backspace cleared cells; AltGr characters could not start an entry; Ctrl+Backspace / Shift+Backspace did nothing.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Wave A keys fix-up + D5 (wave B) + E13/W17/X16 (waves B-D) + K4 (wave A)."
+      }
+    },
+    {
+      "id": "BUG-0222",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "extension-lifecycle",
+        "message": "EXTENSIONS LEFT MENUS AND COMMANDS BEHIND ON DEACTIVATE (Standard Menus, Data/Review/Insert contributors, 27 extensions' items, Scenario Manager even deleted the shared What-If parent), and @api had no unregisterMenu or unregisterCommand.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "W20/W21 (wave C) + X18-X20 (wave D) + Y14/Y15 (wave E) + Z5 (wave F): unregisterMenu (shared parents kept), ExtensionRegistry.unregisterCommand, a lifecycle census over every contributor, a dev-only re-activate hook."
+      }
+    },
+    {
+      "id": "BUG-0223",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "command-dispatch",
+        "message": "COMMANDS NOBODY RAN: Space never toggled a legacy checkbox (unknown command), the TestRunner suites and the ribbon executeCommand never reached extension commands, F11 Insert Chart ran an unregistered command, a refused Space toggle was an unhandled rejection.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Y9 (wave E) + Z7/Z9/Z10 (wave F): executeCommandAnywhere / buildCommandContext; a census of executed command ids."
+      }
+    },
+    {
+      "id": "BUG-0224",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "close-lifecycle",
+        "message": "CLOSE-THEN-SAVE RACED ASYNC BEFORE_CLOSE WORK (a recording taken just before could miss the file) and a cancelled Save As picker left the window over torn-down scripts.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "E8 (wave B): awaitable close preparation; saving split into resolve-and-consent then write, every refusing step before teardown."
+      }
+    },
+    {
+      "id": "BUG-0225",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "calp-rename-roundtrip",
+        "message": "A COLLISION-RENAMED WORKING COPY PUSHED UN-RENAMED BASE FORMULAS (hold-back) and re-serialised untouched chart specs, showing false changes and conflicts; the diff keyed sheet-scoped names by id.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the adversarial review rounds of the fix-all programme.",
+      "repro": {
+        "description": "See the named wave item's tests in scratchpad reports."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Wave A calp fix-up R1/R2/R4 + new defects 1-2."
+      }
+    },
+    {
+      "id": "BUG-0226",
+      "status": "open",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all-bugs programme 2026-09-28/29 (waves A-F)"
+      },
+      "violation": {
+        "oracleId": "pivot-data-source",
+        "message": "NOT DEMONSTRATED: Change Data Source and create let a new source placed BELOW the output pass the overlap check even when the re-grown pivot would write over it.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the fix-all review rounds.",
+      "repro": {
+        "description": "NOT DEMONSTRATED: Change Data Source and create let a new source placed BELOW the output pass the overlap check even when the re-grown pivot would write over it."
+      },
+      "notes": "Recorded in wave F."
+    },
+    {
+      "id": "BUG-0227",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "undo-completeness",
+        "message": "THIRTY RUST COMMANDS BEGAN AND COMMITTED THEIR UNDO STEP UNCONDITIONALLY (clear range x3, sort x2, remove duplicates, replace x3, insert/delete rows/columns, off-sheet structural edits, formatting on sheets, MCP formatting, pane controls x4, create pivot x2, cell protection, reports, tables x4, calp hold-back/reset): inside a script batch or a command-line run the commit closed the caller's step halfway -- a script's createNamedStyle split its batch live.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "engine::OwnedTransaction (begin_owned_transaction / commit_owned / cancel_owned): a joined begin closes nothing; every site converted; undo_ownership_census_tests fails on any new bare begin; off_sheet_tests pins the behaviour."
+      }
+    },
+    {
+      "id": "BUG-0228",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "timeline-undo",
+        "message": "A TIMELINE PERIOD CLICK ARMED A PHANTOM RANGE DRAG ON ITS MOUSEUP: hovering afterwards grew the selection with no button held, and the next click anywhere re-applied a period the user had undone; a click also fired two selections.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "The drag state, its mousemove and its mouseup finish are removed (a press on a timeline is Core's floating-object press); timelineNoPhantomDrag.test.ts."
+      }
+    },
+    {
+      "id": "BUG-0229",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "serde-wire",
+        "message": "ENUM VARIANT FIELDS CROSSED THE WIRE IN snake_case: the Data Validation dialog's list-from-range rule was refused (missing field start_row), and a manual grouping's ungroupedName was dropped.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "rename_all_fields on ListSource and FieldGroupingConfig; serde_enum_field_case_tests censuses every enum."
+      }
+    },
+    {
+      "id": "BUG-0230",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "formula-locale",
+        "message": "THE sv-SE LOCALISER MANGLED A BARE SHEET NAME WITH DIGITS AROUND A DOT (Q1.2026!C3 became Q1,2026!C3).",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "bare_sheet_prefix_len copies a sheet prefix verbatim in both directions; formula_locale test."
+      }
+    },
+    {
+      "id": "BUG-0231",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "controls-sheet",
+        "message": "FLOATING CONTROLS ALWAYS LOADED SHEET 0'S CONTROLS (GridConfig.activeSheet was never set): a canvas or a second sheet showed the first sheet's buttons, and an undo re-published controls on the wrong sheet.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "sheetContext.activeSheetIndex at every site; the dead field removed; a reload purges other sheets' controls (floatingStore tests)."
+      }
+    },
+    {
+      "id": "BUG-0232",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "undo-completeness",
+        "message": "THE COMMAND LINE'S add / rename / delete sheet ENDED ITS RUN'S UNDO STEP: the set-cell lines after it became separate steps.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "resumeRunBatchAfterHistoryEnded begins the run's batch again (the script host's twin); appCli tests."
+      }
+    },
+    {
+      "id": "BUG-0233",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "command-line",
+        "message": "THE COMMAND LINE COULD NOT BE REOPENED WITH ITS TOGGLE AFTER ITS X CLOSED IT (a mirrored isOpen flag the unmounted panel never cleared).",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "@api/ui isDialogOpen; the toggle asks the dialog registry (panelToggle, dialogIsOpen tests)."
+      }
+    },
+    {
+      "id": "BUG-0234",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "color-picker",
+        "message": "THE COLOUR POPOVER'S HEX FIELD APPLIED A COLOUR TWICE ON ENTER (two undo steps): the blur the close caused committed the same draft again.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "The draft lives in a ref cleared on commit (color.test.tsx)."
+      }
+    },
+    {
+      "id": "BUG-0235",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "chart-source",
+        "message": "A CHART OVER A SHEET WHOSE NAME HOLDS AN ESCAPED QUOTE (Rock'!Roll) NEVER PLOTTED: the A1 parser left the doubled quote doubled.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "dataSourceResolver uses the range binding's splitter."
+      }
+    },
+    {
+      "id": "BUG-0236",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "calp-checkout",
+        "message": "AN UNTOUCHED WORKING COPY'S PUSH PREVIEW LISTED EVERY BUTTON AS MODIFIED: the checkout's sanitiser stripped the empty onSelect every button carries.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "The sanitiser keeps an EMPTY executable slot (it holds no code); whitespace and code are still stripped (controls persistence_tests)."
+      }
+    },
+    {
+      "id": "BUG-0237",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "sheet-rename-delete-refs",
+        "message": "A 3D REFERENCE LOSING AN ENDPOINT READ =SUM(MID:Mid!B1) IN MANAGE RULES: the kept endpoint kept the lexer's upper-cased spelling.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "The kept endpoint takes the workbook's spelling when its partner moved (exact-text test)."
+      }
+    },
+    {
+      "id": "BUG-0238",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "pivot-getpivotdata-pick",
+        "message": "A GETPIVOTDATA PICK ON A PIVOT ON ANOTHER SHEET INSERTED A PLAIN REFERENCE: the interceptor gated on the EDIT sheet's cached regions.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "getPivotDataPick asks the backend while pointing at a foreign sheet; quotes in names are doubled."
+      }
+    },
+    {
+      "id": "BUG-0239",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "contextual-tabs",
+        "message": "THE TABLE DESIGN AND PIVOT TABLE TABS FOLLOWED THE CELL'S COORDINATES, NOT THE SHEET: B2 on another sheet kept the old tab.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Both extensions re-derive after the new sheet's tables / regions are cached."
+      }
+    },
+    {
+      "id": "BUG-0240",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "undo-repaint",
+        "message": "UNDOING A COLUMN RESIZE OR A ROW HEIGHT LEFT THE OLD SIZE ON SCREEN: the restore announced no dimensions domain.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "SetColumnWidth / SetRowHeight restores announce Dimensions (undo_sheet_domain_tests)."
+      }
+    },
+    {
+      "id": "BUG-0241",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "format-painter",
+        "message": "AFTER Ctrl+Shift+C THE FORMAT PAINTER'S FIRST CLICK PAINTED NOTHING: it skipped a 'first selection callback' the registry never sends.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Every change after activation is a candidate; a restatement of the source range is ignored."
+      }
+    },
+    {
+      "id": "BUG-0242",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "scrolling",
+        "message": "THE MOUSE WHEEL CRAWLED ONE ROW PER NOTCH PAST THE USED RANGE: it clamped to the scrollbar thumb's extent.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "wheelMaxScrollX/Y: the whole sheet (a canvas: its page)."
+      }
+    },
+    {
+      "id": "BUG-0243",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "bi-direct-query",
+        "message": "A DIRECTQUERY TABLE ON A FETCH-ONLY CONNECTOR (CSV, Parquet, in-memory, REST) RETURNED RAW ROWS AS AGGREGATES: grouped by Region, one row per record; grouped by Year, the Region column -- a Year slicer listed regions.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "model-engine-lib ConnectorCapabilities::aggregate_pushdown gates PushedAggregation; SQL Server opts in; host-integration changelog entry."
+      }
+    },
+    {
+      "id": "BUG-0244",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "pivot-values-on-rows",
+        "message": "VALUES ON ROWS SHOWED EVERY VALUE IN EVERY VALUE ROW with no column field, and with a column field every value row showed the FIRST value field's numbers (the Count row repeated the Sums).",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "FlatAxisItem.value_field; one value column; pivot-engine tests."
+      }
+    },
+    {
+      "id": "BUG-0245",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "pivot-show-values-as",
+        "message": "SHOW VALUES AS COULD NOT BE SET IN THE VALUE FIELD SETTINGS DIALOG (no Base field or Base item was offered), and the dialog reopened on Normal.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "PivotEditor passes the row/column fields (useBaseFieldChoices); the dialog seeds from the field; (previous)/(next) need no items."
+      }
+    },
+    {
+      "id": "BUG-0246",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "timeline-dates",
+        "message": "A TIMELINE OVER TYPED DATES LISTED YEAR -2688 (the pivot cache's own serial arithmetic), and number columns such as Sales were offered as date fields.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "The cache uses engine::date_serial; only date/time-FORMATTED numeric columns are a grid pivot's date fields."
+      }
+    },
+    {
+      "id": "BUG-0247",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "pane-controls",
+        "message": "A PANE DROPDOWN SOURCED FROM A FLOATING RANGE LISTED NOTHING: getSheets() never lists a floating range's backing sheet.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "A prefix no sheet answers to may name a floating range, read by its id."
+      }
+    },
+    {
+      "id": "BUG-0248",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "canvas-marquee",
+        "message": "AFTER AN INSTANT CLICK ON THE EMPTY CANVAS PAGE THE MARQUEE BAND FOLLOWED THE BARE POINTER, and the next click selected everything between.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "A move with no primary button held ends the band, unapplied."
+      }
+    },
+    {
+      "id": "BUG-0249",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "protection-gate-parity",
+        "message": "INSERT > CONTROLS > BUTTON ON A SHEET PROTECTED AGAINST OBJECT EDITS FAILED SILENTLY.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "The refusal is said in one toast, as the shape door does."
+      }
+    },
+    {
+      "id": "BUG-0250",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "test-runner",
+        "message": "THE TESTRUNNER'S CHECKBOX SUITE WAS WRITTEN BUT NEVER REGISTERED.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "Registered in Phase 19."
+      }
+    },
+    {
+      "id": "BUG-0251",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "pivot-sort-order",
+        "message": "PIVOT TEXT SORTED BY BYTES: every capital before every lower-case letter (\"YTD\" before \"YoY\"), in row order and in item lists; Excel ignores case.",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "compare_text_excel (case-insensitive, ordinal tie-break) in both comparators (wave F backlog B1)."
+      }
+    },
+    {
+      "id": "BUG-0252",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "undo-completeness",
+        "message": "runStepThenConfirmOverwrite DECIDED 'joined' WITH A PROBE TAKEN BEFORE ITS BEGIN: a script batch opened in between was joined, the gesture was still asked, and a decline took the script's writes back too.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "UndoTransactionHandle.openedBackend (the begin's own answer) decides (wave F backlog B5, the Z3 race)."
+      }
+    },
+    {
+      "id": "BUG-0253",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "sheet-switch",
+        "message": "SHEET SWITCHES OUTSIDE THE TAB STRIP WERE HALF A SWITCH: Next/Previous Bookmark and a view bookmark announced the switch before the backend had made it (SheetTabs' re-read dispatched the old sheet back, so a jump from a canvas left the grid on the canvas and the bookmarked cell unselected), and the Application Explorer, Go To (Tracing), CSV import to a new sheet and a notebook's Send to grid switched only the BACKEND -- the grid, the tab strip and the new sheet's cells never followed.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "@api activateSheet: ONE door, a tab click step for step (beforeSwitch, backend awaited, prime, context with the sheet's surface, normalSwitch, SHEET_CHANGED); all six callers converted (sheetSwitch.test.ts, bookmarkSheetSwitch.test.ts)."
+      }
+    },
+    {
+      "id": "BUG-0254",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "undo-completeness",
+        "message": "UNDO FROM THE RIBBON, THE EDIT MENU OR THE QUICK ACCESS TOOLBAR WHILE A SLICER CLICK OR RIBBON FILTER CHANGE WAS STILL LANDING WAS NOT REFUSED: only the keyboard asked the command refusals.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "The registry moved to @api/commandRefusals; CommandRegistry.execute asks it first, says the sentence, runs nothing and records nothing (keybindings.commandRefusal.test.ts)."
+      }
+    },
+    {
+      "id": "BUG-0255",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "pivot-getpivotdata",
+        "message": "=GETPIVOTDATA(\"Count of Sales\";E1) WITHOUT FIELD/ITEM PAIRS READ #REF! BESIDE THE VERY COUNT IT NAMES when the values are on rows with no row field and row grand totals off: only a GrandTotal cell was accepted.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "The no-pairs form falls back to the value field's cell whose group path names nothing (getpivotdata_without_pairs_reads_a_values_on_rows_total)."
+      }
+    },
+    {
+      "id": "BUG-0256",
+      "status": "fixed",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "pivot-show-values-as",
+        "message": "SHOW VALUES AS WITH A BASE (Running Total In, Difference From, % Of, % Difference From) CHANGED NOTHING: the editor kept neither the Base field nor the Base item and sent only the plain string. And a REOPENED editor cleared every value field's Show Values As and number format on its first change: its seed carried neither, and the update replaces the value fields.",
+        "severity": "high",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by driving the real app (e2e fixall-*.spec.ts) after the unit-level fix waves.",
+      "repro": {
+        "description": "See the named test in the fix."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-09-29",
+        "description": "The showAs rule is sent (lib/showAsRule.ts); the editor's field info carries numberFormat + showAs (value_zone_fields) and the Values zone is seeded from it (showValuesAsBaseSent.test.tsx, the_values_zone_carries_show_values_as_with_its_base_and_the_number_format)."
+      }
+    },
+    {
+      "id": "BUG-0257",
+      "status": "open",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "calp-checkout",
+        "message": "OWNER DECISION NEEDED: a working copy is sanitised like a subscription, so pushing an UNTOUCHED working copy strips every button's onSelect / macroRef wiring from the published application.",
+        "severity": "medium",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the live verification.",
+      "repro": {
+        "description": "OWNER DECISION NEEDED: a working copy is sanitised like a subscription, so pushing an UNTOUCHED working copy strips every button's onSelect / macroRef wiring from the published application."
+      },
+      "notes": "A security design choice (consent for a developer's own application vs the distributed-script rule). The empty-slot half was fixed 2026-09-29."
+    },
+    {
+      "id": "BUG-0258",
+      "status": "open",
+      "discovered": "2026-09-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "fix-all live verification 2026-09-29 (e2e fixall-*.spec.ts)"
+      },
+      "violation": {
+        "oracleId": "timeline-range",
+        "message": "A TIMELINE RANGE CANNOT BE SELECTED BY DRAGGING: a press on a timeline is Core's floating-object press (select, and move on drag).",
+        "severity": "low",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found by the live verification.",
+      "repro": {
+        "description": "A TIMELINE RANGE CANNOT BE SELECTED BY DRAGGING: a press on a timeline is Core's floating-object press (select, and move on drag)."
+      },
+      "notes": "Needs Core to leave the period strip to the timeline. The phantom drag that pretended to do it was removed 2026-09-29."
     }
   ]
 }

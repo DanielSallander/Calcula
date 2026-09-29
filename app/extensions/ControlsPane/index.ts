@@ -17,6 +17,7 @@ import {
 } from "@api/controlValues";
 import { registerPaneControlStoreService } from "@api/componentStoreRegistry";
 import { AppEvents, onAppEvent } from "@api/events";
+import { refuseUndoWhileAGestureLands } from "@api/objectGeometry";
 import { ObjectScriptManager } from "@api/scriptableObjects";
 import { deleteObjectScriptsForInstance } from "@api/objectScriptBackend";
 import {
@@ -26,7 +27,12 @@ import {
   AddControlDialogDefinition,
   CONTROLS_PANE_TAB_ID,
 } from "./manifest";
-import { refreshCache, clearCache } from "./lib/filterPaneStore";
+import {
+  refreshCache,
+  clearCache,
+  isRibbonFilterChangeLanding,
+  refreshCacheAndReapplyChangedFilters,
+} from "./lib/filterPaneStore";
 import {
   refreshControlsCache,
   clearControlsCache,
@@ -48,6 +54,7 @@ import {
 } from "./components/CustomControlHost";
 
 let unregisterBadge: (() => void) | null = null;
+let releaseUndoRefusal: (() => void) | null = null;
 let removeWindowListeners: (() => void) | null = null;
 /** Unsubscribers for the @api event-bus listeners (the document lifecycle). */
 let removeAppEventListeners: Array<() => void> = [];
@@ -130,17 +137,33 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  // Refresh caches on sheet change, and after undo/redo restores state (the
-  // shell fans the ribbonFilter / paneControl mutation domains out as
+  // Refresh caches after undo/redo restores state (the shell fans the
+  // ribbonFilter / paneControl mutation domains out as
   // "filterpane:filters-refreshed" / "controlspane:controls-refreshed").
+  // An outside change to a ribbon filter (an undo, a declined change's
+  // take-back, a pull) also RE-DERIVES the pivot masks of every ordinary
+  // filter whose selection or targets it moved: a level-1 mask records no
+  // undo of its own, so an undone change left its pivots masked with the
+  // undone selection (BUG-0200). The reconcile records nothing.
   const handleFiltersRefresh = () => {
-    refreshCache();
+    void refreshCacheAndReapplyChangedFilters();
   };
   const handleControlsRefresh = () => {
     refreshControls();
   };
-  const handleSheetActivated = () => {
-    refreshCache();
+  // The SHEET COLLECTION or the active sheet changed (X13). A rename rewrites
+  // every dropdown source naming the sheet ("Data!A1:A5" becomes
+  // "'My Facts'!A1:A5", in the backend), and a delete turns one into #REF!;
+  // the open pane kept the old text -- a sheet that no longer exists -- until
+  // the workbook was reopened, because the only listener for this was a
+  // "sheet:activated" window event nothing dispatches. SHEET_CHANGED is the
+  // hook: the Shell fans the `sheets` mutation domain out as it (every sheet
+  // route announces that domain -- the tauri-api wrappers, an MCP tool's
+  // backend-initiated refresh, undo and redo), and it is also the plain
+  // "the active sheet changed", which a source with no sheet prefix (it reads
+  // the ACTIVE sheet) needs as well. Ribbon filters name no sheet by NAME,
+  // and a delete or move already announces their own domain.
+  const handleSheetChanged = () => {
     refreshControls();
   };
   // Deleting a control also unmounts + deletes its object scripts
@@ -172,7 +195,7 @@ function activate(context: ExtensionContext): void {
   // the workbook, and so does everything their scripts built: the html a card
   // renders, the properties it declares, and the live-frame budget slot its
   // iframe holds. None of that left with the document — this extension had no
-  // document listener at all, and its only other refresh triggers are the
+  // document listener at all, and its only other refresh triggers were the
   // mutation-domain fan-out and a "sheet:activated" event nothing dispatches.
   //
   // The budget is the half that bites silently. It is ONE cap of 24 shared with
@@ -199,7 +222,7 @@ function activate(context: ExtensionContext): void {
     removeAppEventListeners.push(onAppEvent(evt, handleDocumentReplaced));
   }
 
-  window.addEventListener("sheet:activated", handleSheetActivated);
+  removeAppEventListeners.push(onAppEvent(AppEvents.SHEET_CHANGED, handleSheetChanged));
   window.addEventListener("filterpane:filters-refreshed", handleFiltersRefresh);
   window.addEventListener(
     "controlspane:controls-refreshed",
@@ -210,7 +233,6 @@ function activate(context: ExtensionContext): void {
     handleControlDeleted,
   );
   removeWindowListeners = () => {
-    window.removeEventListener("sheet:activated", handleSheetActivated);
     window.removeEventListener(
       "filterpane:filters-refreshed",
       handleFiltersRefresh,
@@ -228,6 +250,10 @@ function activate(context: ExtensionContext): void {
   // Track applied filters and show count badge on the Controls tab
   unregisterBadge = registerFilterBadge();
 
+  // A keyboard Ctrl+Z / Ctrl+Y while a ribbon filter change lands is refused
+  // with a sentence (the backend refuses it silently): @api/objectGeometry.
+  releaseUndoRefusal = refuseUndoWhileAGestureLands(isRibbonFilterChangeLanding);
+
   // Initial cache loads
   refreshCache();
   refreshControls();
@@ -242,6 +268,8 @@ function deactivate(): void {
   console.log("[ControlsPane Extension] Deactivating...");
   unregisterBadge?.();
   unregisterBadge = null;
+  releaseUndoRefusal?.();
+  releaseUndoRefusal = null;
   removeWindowListeners?.();
   removeWindowListeners = null;
   for (const off of removeAppEventListeners) off();

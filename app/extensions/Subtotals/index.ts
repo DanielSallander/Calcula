@@ -35,8 +35,8 @@ function activate(_context: ExtensionContext): void {
   });
   cleanupFns.push(() => DialogExtensions.unregisterDialog("subtotals"));
 
-  // 2. Register menu item in Data menu
-  registerSubtotalsMenuItem();
+  // 2. Register menu item in Data menu (and take it back on deactivate)
+  cleanupFns.push(registerSubtotalsMenuItem());
 
   // 3. Track current selection for the dialog context
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {

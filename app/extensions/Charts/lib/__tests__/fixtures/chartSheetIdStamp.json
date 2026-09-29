@@ -1,0 +1,51 @@
+{
+  "comment": "ONE fixture, TWO walks: chartSheetRefs.ts stampStoredChartJson (chartSheetIdStampParity.test.ts) and the backend's load-time stamp chart_commands.rs stamp_chart_record_sheet_ids (sheet_id_stamp_tests). A ref lives in four places (spec.data, spec.layers[].data, a lookup transform's from, concat children recursively); an edit to either walk that the other does not make turns one of these cases red. `expected` null means: nothing to stamp, the record is left byte-identical.",
+  "sheetIds": ["id-0", "id-1", "id-2"],
+  "cases": [
+    {
+      "name": "a wrapped record: the spec's data is stamped, the placement index at the root is not a range",
+      "record": { "chartId": "c1", "sheetIndex": 2, "x": 10, "spec": { "mark": "bar", "data": { "sheetIndex": 1, "startRow": 0, "startCol": 0, "endRow": 3, "endCol": 1 } } },
+      "expected": { "chartId": "c1", "sheetIndex": 2, "x": 10, "spec": { "mark": "bar", "data": { "sheetIndex": 1, "startRow": 0, "startCol": 0, "endRow": 3, "endCol": 1, "sheetId": "id-1" } } }
+    },
+    {
+      "name": "a bare spec (what a raw save_chart stores) is its own spec",
+      "record": { "mark": "line", "data": { "sheetIndex": 0, "startRow": 5, "startCol": 30, "endRow": 8, "endCol": 31 }, "title": "T" },
+      "expected": { "mark": "line", "data": { "sheetIndex": 0, "startRow": 5, "startCol": 30, "endRow": 8, "endCol": 31, "sheetId": "id-0" }, "title": "T" }
+    },
+    {
+      "name": "layers: a layer's own data, not a layer without one, not an A1 string",
+      "record": { "spec": { "mark": "bar", "data": "Sheet1!A1:B4", "layers": [ { "mark": "line", "data": { "sheetIndex": 2, "startRow": 0, "startCol": 0, "endRow": 1, "endCol": 1 } }, { "mark": "rule" }, { "mark": "point", "data": "Other!A1:B2" } ] } },
+      "expected": { "spec": { "mark": "bar", "data": "Sheet1!A1:B4", "layers": [ { "mark": "line", "data": { "sheetIndex": 2, "startRow": 0, "startCol": 0, "endRow": 1, "endCol": 1, "sheetId": "id-2" } }, { "mark": "rule" }, { "mark": "point", "data": "Other!A1:B2" } ] } }
+    },
+    {
+      "name": "a lookup transform's from is a ref; another transform's from is not",
+      "record": { "spec": { "mark": "bar", "transform": [ { "type": "lookup", "from": { "sheetIndex": 0, "startRow": 0, "startCol": 0, "endRow": 9, "endCol": 2 }, "fields": ["T"] }, { "type": "filter", "from": { "sheetIndex": 1, "startRow": 0, "startCol": 0, "endRow": 1, "endCol": 1 } } ] } },
+      "expected": { "spec": { "mark": "bar", "transform": [ { "type": "lookup", "from": { "sheetIndex": 0, "startRow": 0, "startCol": 0, "endRow": 9, "endCol": 2, "sheetId": "id-0" }, "fields": ["T"] }, { "type": "filter", "from": { "sheetIndex": 1, "startRow": 0, "startCol": 0, "endRow": 1, "endCol": 1 } } ] } }
+    },
+    {
+      "name": "concat children, recursively, each in all four places",
+      "record": { "spec": { "mark": "bar", "concat": { "charts": [ { "mark": "bar", "data": { "sheetIndex": 1, "startRow": 0, "startCol": 0, "endRow": 1, "endCol": 1 }, "concat": { "charts": [ { "mark": "line", "layers": [ { "mark": "line", "data": { "sheetIndex": 0, "startRow": 0, "startCol": 0, "endRow": 1, "endCol": 1 } } ] } ] } }, { "mark": "bar", "data": "Sheet1!A1:B4" } ] } } },
+      "expected": { "spec": { "mark": "bar", "concat": { "charts": [ { "mark": "bar", "data": { "sheetIndex": 1, "startRow": 0, "startCol": 0, "endRow": 1, "endCol": 1, "sheetId": "id-1" }, "concat": { "charts": [ { "mark": "line", "layers": [ { "mark": "line", "data": { "sheetIndex": 0, "startRow": 0, "startCol": 0, "endRow": 1, "endCol": 1, "sheetId": "id-0" } } ] } ] } }, { "mark": "bar", "data": "Sheet1!A1:B4" } ] } } }
+    },
+    {
+      "name": "an empty sheetId is no id",
+      "record": { "spec": { "mark": "bar", "data": { "sheetIndex": 2, "sheetId": "", "startRow": 0, "startCol": 0, "endRow": 1, "endCol": 1 } } },
+      "expected": { "spec": { "mark": "bar", "data": { "sheetIndex": 2, "sheetId": "id-2", "startRow": 0, "startCol": 0, "endRow": 1, "endCol": 1 } } }
+    },
+    {
+      "name": "an already stamped ref keeps its id and the record is untouched",
+      "record": { "spec": { "mark": "bar", "data": { "sheetIndex": 0, "sheetId": "kept", "startRow": 0, "startCol": 0, "endRow": 1, "endCol": 1 } } },
+      "expected": null
+    },
+    {
+      "name": "an index no sheet answers to cannot be pinned",
+      "record": { "spec": { "mark": "bar", "data": { "sheetIndex": 7, "startRow": 0, "startCol": 0, "endRow": 1, "endCol": 1 } } },
+      "expected": null
+    },
+    {
+      "name": "a pivot source and a design-query source are not ranges",
+      "record": { "spec": { "mark": "bar", "data": { "type": "pivot", "pivotId": "p1" }, "layers": [ { "mark": "line", "data": { "type": "designQuery", "query": "q" } } ] } },
+      "expected": null
+    }
+  ]
+}

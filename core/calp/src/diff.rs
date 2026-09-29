@@ -536,7 +536,7 @@ pub fn count_sheet_data_changes(
             Some(a) => {
                 if !cells_equal(b, a) {
                     counts.modified += 1;
-                    if b.f != a.f {
+                    if !same_formula(&b.f, &a.f) {
                         counts.formula_changes += 1;
                     }
                 }
@@ -917,7 +917,11 @@ impl DiffContext<'_, '_> {
     ) -> Result<bool, CalpError> {
         let before = self.parse_json(self.from, rel)?;
         let after = self.parse_json(self.to, &self.to_path(rel))?;
-        if presence == Presence::Changed && before == after {
+        let same = match (&before, &after) {
+            (Some(b), Some(a)) => same_object(domain, b, a),
+            (b, a) => b == a,
+        };
+        if presence == Presence::Changed && same {
             self.spurious += 1;
             return Ok(false);
         }
@@ -958,8 +962,8 @@ impl DiffContext<'_, '_> {
             return Ok(false);
         }
 
-        let before_items = keyed_items(before.as_ref());
-        let after_items = keyed_items(after.as_ref());
+        let before_items = keyed_domain_items(domain, before.as_ref());
+        let after_items = keyed_domain_items(domain, after.as_ref());
         if before_items.is_none() && after_items.is_none() {
             // Not a keyed list (theme, extension_data) — one entry for the whole.
             return self.push_json_object(rel, domain, domain, presence);
@@ -974,7 +978,7 @@ impl DiffContext<'_, '_> {
             let change = match (b, a) {
                 (None, Some(_)) => Presence::Added,
                 (Some(_), None) => Presence::Removed,
-                (Some(x), Some(y)) if x != y => Presence::Changed,
+                (Some(x), Some(y)) if !same_object(domain, x, y) => Presence::Changed,
                 _ => continue,
             };
             let (name, detail, before_src, after_src, caps_added, caps_removed) =
@@ -1225,18 +1229,38 @@ fn simple_object(domain: &str, id: &str, change: &str, detail: &str) -> ObjectCh
     }
 }
 
-/// A JSON array of objects, keyed by whichever id-ish field it carries.
-fn keyed_items(value: Option<&serde_json::Value>) -> Option<BTreeMap<String, &serde_json::Value>> {
+/// A JSON array of objects, keyed by whichever id-ish field it carries -- by
+/// its NAME for a defined name (see below).
+///
+/// A DEFINED NAME IS KEYED BY ITS NAME (and its scope). The generic order
+/// tries `sheetId` before `name`, which is right for a per-sheet container
+/// (one item per sheet) and wrong for defined names: every name scoped to one
+/// sheet got that sheet's id as its key, the map kept only the LAST of them,
+/// and a change to any other name scoped to the same sheet was never reported
+/// -- nor seen by the merge analysis.
+fn keyed_domain_items<'a>(
+    domain: &str,
+    value: Option<&'a serde_json::Value>,
+) -> Option<BTreeMap<String, &'a serde_json::Value>> {
     let arr = value?.as_array()?;
     let mut out = BTreeMap::new();
     for (i, item) in arr.iter().enumerate() {
-        let key = item
-            .get("id")
-            .and_then(|v| v.as_str())
-            .or_else(|| item.get("sheetId").and_then(|v| v.as_str()))
-            .or_else(|| item.get("sheet_id").and_then(|v| v.as_str()))
-            .or_else(|| item.get("name").and_then(|v| v.as_str()))
-            .map(|s| s.to_string())
+        let named_range_key = (domain == "namedRange")
+            .then(|| item.get("name").and_then(|v| v.as_str()))
+            .flatten()
+            .map(|name| match item.get("sheetId").and_then(|v| v.as_str()) {
+                Some(scope) => format!("{scope}/{name}"),
+                None => name.to_string(),
+            });
+        let key = named_range_key
+            .or_else(|| {
+                item.get("id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.get("sheetId").and_then(|v| v.as_str()))
+                    .or_else(|| item.get("sheet_id").and_then(|v| v.as_str()))
+                    .or_else(|| item.get("name").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+            })
             // A keyless element still has to be comparable to SOMETHING, and
             // its position is the only handle available. Order-sensitive by
             // construction — which is why the keyed fields are tried first.
@@ -1505,7 +1529,7 @@ pub(crate) fn walk_cells(
             }
             (Some(x), Some(y)) if !cells_equal(x, y) => {
                 counts.modified += 1;
-                if x.f != y.f {
+                if !same_formula(&x.f, &y.f) {
                     counts.formula_changes += 1;
                 }
                 "modified"
@@ -1558,14 +1582,83 @@ pub(crate) fn walk_cells(
 /// A cell that GAINS or LOSES a formula still differs, because `f` differs. A
 /// literal cell is compared in full, because for a literal `v` IS the authored
 /// content.
+///
+/// "The same formula" is [`crate::sheet_renames::same_formula_text`], not byte
+/// equality: a checkout's collision rename and the push's undo of it bring an
+/// untouched `DATA!A1*2` home as `Data!A1*2`, and that re-spelling is not an
+/// edit (BUG-0151). Byte-wise, every reference to a collision-renamed sheet
+/// was listed as changed in the push preview, shipped as a change, and
+/// collided with a teammate's edit of the same cell in the merge analysis.
 fn cells_equal(
     a: &calcula_format::sheet_data::CellEntry,
     b: &calcula_format::sheet_data::CellEntry,
 ) -> bool {
-    if a.f.is_some() && a.f == b.f {
-        return a.rt == b.rt;
+    if let (Some(fa), Some(fb)) = (&a.f, &b.f) {
+        if crate::sheet_renames::same_formula_text(fa, fb) {
+            return a.rt == b.rt;
+        }
     }
     a.t == b.t && a.v == b.v && a.f == b.f && a.e == b.e && a.sp == b.sp && a.rt == b.rt
+}
+
+/// Two optional formula texts: both absent, or the same formula however it is
+/// spelled ([`crate::sheet_renames::same_formula_text`]).
+fn same_formula(a: &Option<String>, b: &Option<String>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => crate::sheet_renames::same_formula_text(x, y),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// Are these two versions of one object the SAME object?
+///
+/// JSON equality, except for the two fields a rename round trip re-spells
+/// without anybody editing them (BUG-0151): a chart's `specJson` STRING (the
+/// round trip re-serializes it with its keys sorted, and re-spells its string
+/// sources' sheet prefixes -- `chart_refs::comparable_chart_spec`) and a defined
+/// name's `refersTo` formula (`sheet_renames::same_formula_text`).
+fn same_object(domain: &str, a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    if a == b {
+        return true;
+    }
+    // The RULE payloads (conditional formats, validations, controls, pane
+    // controls) are renamed at checkout and back at push too (wave-B B4):
+    // compared with every formula slot in its spelling-blind form.
+    if let (Some(x), Some(y)) = (
+        crate::sheet_renames::comparable_rule_payload(domain, a),
+        crate::sheet_renames::comparable_rule_payload(domain, b),
+    ) {
+        return x == y;
+    }
+    let field = match domain {
+        "chart" => "specJson",
+        "namedRange" => "refersTo",
+        _ => return false,
+    };
+    let (Some(ao), Some(bo)) = (a.as_object(), b.as_object()) else {
+        return false;
+    };
+    // Every OTHER field byte-equal, and the same set of fields.
+    if ao.len() != bo.len() || ao.iter().any(|(k, v)| k != field && bo.get(k) != Some(v)) {
+        return false;
+    }
+    let (Some(x), Some(y)) = (
+        ao.get(field).and_then(|v| v.as_str()),
+        bo.get(field).and_then(|v| v.as_str()),
+    ) else {
+        return false;
+    };
+    match domain {
+        "chart" => match (
+            crate::chart_refs::comparable_chart_spec(x),
+            crate::chart_refs::comparable_chart_spec(y),
+        ) {
+            (Some(cx), Some(cy)) => cx == cy,
+            _ => x == y,
+        },
+        _ => crate::sheet_renames::same_formula_text(x, y),
+    }
 }
 
 /// Cells that are the OUTPUT of a dynamic array whose origin did not change.
@@ -1595,7 +1688,7 @@ fn unchanged_spill_cells(
     for (a1, b) in &before.cells {
         let (Some(sp), Some(_)) = (b.sp.as_ref(), b.f.as_ref()) else { continue };
         let Some(a) = after.cells.get(a1) else { continue };
-        if a.f != b.f || a.sp.as_ref() != Some(sp) {
+        if !same_formula(&a.f, &b.f) || a.sp.as_ref() != Some(sp) {
             continue;
         }
         let Some((r0, c0, r1, c1)) = calcula_format::cell_ref::range_from_a1(sp) else { continue };
@@ -1678,6 +1771,47 @@ fn parse_a1(a1: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wave-B B4: a checkout's collision rename now reaches rule payloads, and
+    /// the push's undo of it re-renders the formulas it touches. That is
+    /// spelling, not an edit -- exactly as for cells, charts and names.
+    #[test]
+    fn a_re_spelled_rule_formula_is_the_same_rule_and_an_edit_is_not() {
+        use serde_json::json;
+        let cf = |formula: &str, value1: &str| {
+            json!({ "sheetId": "s", "rules": [
+                { "id": 1, "rule": { "type": "expression", "formula": formula } },
+                { "id": 2, "rule": { "type": "cellValue", "operator": "equal", "value1": value1 } }
+            ] })
+        };
+        let typed = cf("=a1>data!$b$1", "abc");
+        assert!(
+            same_object("conditionalFormat", &typed, &cf("=A1>Data!$B$1", "abc")),
+            "a re-spelled CF formula read as a changed rule"
+        );
+        assert!(!same_object("conditionalFormat", &typed, &cf("=A1>Data!$B$2", "abc")), "a real edit is a change");
+        assert!(!same_object("conditionalFormat", &typed, &cf("=a1>data!$b$1", "ABC")), "a LITERAL bound is data");
+        // An always-formula slot typed WITHOUT `=` is renamed at checkout and
+        // back at push exactly like one with it (the CF evaluator parses
+        // either), so its re-spelling is spelling too -- the review's demo: an
+        // untouched `A1 > data!$B$1` came back `A1>Data!$B$1` and shipped as an edit.
+        assert!(
+            same_object("conditionalFormat", &cf("A1 > data!$B$1", "abc"), &cf("A1>Data!$B$1", "abc")),
+            "an `=`-less CF formula's re-spelling read as a changed rule"
+        );
+        assert!(!same_object("conditionalFormat", &cf("A1 > data!$B$1", "abc"), &cf("A1>Data!$B$2", "abc")), "a real edit is a change");
+        assert!(!same_object("conditionalFormat", &cf("=A1", "data!a1"), &cf("=A1", "Data!A1")), "an `=`-less bound is a literal");
+        let bar = |min: &str| json!({ "sheetId": "s", "rules": [ { "id": 3, "rule": { "type": "dataBar", "minFormula": min } } ] });
+        assert!(same_object("conditionalFormat", &bar("data!c1"), &bar("Data!C1")), "an `=`-less data-bar bound");
+
+        let dv = |formula: &str| json!({ "sheetId": "s", "ranges": [ { "validation": { "rule": { "custom": { "formula": formula } } } } ] });
+        assert!(same_object("dataValidation", &dv("=countif(data!a:a,a1)=1"), &dv("=COUNTIF(Data!A:A,A1)=1")));
+        let ctl = |value: &str| json!({ "sheetId": "s", "controls": [ { "row": 0, "col": 0, "properties": { "text": { "valueType": "formula", "value": value } } } ] });
+        assert!(same_object("control", &ctl("=data!a1"), &ctl("='Data'!A1")));
+        let pane = |reference: &str| json!({ "id": "p", "config": { "type": "dropdown", "source": { "type": "cellRange", "reference": reference } } });
+        assert!(same_object("paneControl", &pane("data!a1:a5"), &pane("'Data'!A1:A5")));
+        assert!(!same_object("paneControl", &pane("Data!A1:A5"), &pane("Data!A1:A6")));
+    }
 
     #[test]
     fn a1_parses_to_zero_based_row_and_column() {
@@ -1788,14 +1922,14 @@ mod tests {
             { "id": "chart-b", "name": "B" },
             { "id": "chart-a", "name": "A" },
         ]);
-        let items = keyed_items(Some(&arr)).expect("an array is keyable");
+        let items = keyed_domain_items("", Some(&arr)).expect("an array is keyable");
         assert!(items.contains_key("chart-a") && items.contains_key("chart-b"));
         // Reordering the array must not read as two changes.
         let reordered = serde_json::json!([
             { "id": "chart-a", "name": "A" },
             { "id": "chart-b", "name": "B" },
         ]);
-        let items2 = keyed_items(Some(&reordered)).expect("keyable");
+        let items2 = keyed_domain_items("", Some(&reordered)).expect("keyable");
         assert_eq!(items.len(), items2.len());
         for (k, v) in &items {
             assert_eq!(items2.get(k), Some(v), "{k} must compare equal after a reorder");

@@ -4,10 +4,12 @@
 
 import {
   registerMenuItem,
+  unregisterMenuItem,
   DialogExtensions,
   IconOutline,
   IconSubtotals,
 } from "@api";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 /** Current selection state, updated by the extension's selection listener. */
 let currentSelection: {
@@ -23,7 +25,14 @@ export function setCurrentSelection(
   currentSelection = sel;
 }
 
-export function registerSubtotalsMenuItem(): void {
+const SUBTOTALS_MENU_ITEM_ID = "data:outline:subtotals";
+
+/**
+ * Register "Subtotals..." under Data > Outline. Returns the cleanup for
+ * deactivation, which takes back this extension's own CHILD -- never
+ * "data:outline", which Grouping builds and shares (X18).
+ */
+export function registerSubtotalsMenuItem(): () => void {
   // Register under "Outline" submenu (merged with Grouping's Outline)
   registerMenuItem("data", {
     id: "data:outline",
@@ -31,10 +40,14 @@ export function registerSubtotalsMenuItem(): void {
     icon: IconOutline,
     children: [
       {
-        id: "data:outline:subtotals",
+        id: SUBTOTALS_MENU_ITEM_ID,
         label: "Subtotals...",
         icon: IconSubtotals,
         action: () => {
+          // The dialog subtotals Core's selection -- HIDDEN while something
+          // else owns the selection (a floating grid's selected cell) -- so
+          // refuse, once (D4, BUG-0185 class).
+          if (refuseIfSelectionOwned("Subtotals")) return;
           const context = currentSelection
             ? {
                 startRow: currentSelection.startRow,
@@ -53,4 +66,5 @@ export function registerSubtotalsMenuItem(): void {
       },
     ],
   });
+  return () => unregisterMenuItem("data", SUBTOTALS_MENU_ITEM_ID);
 }

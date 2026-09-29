@@ -404,7 +404,7 @@ pub fn apply_cell_formatting(
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
 
     // Make the AI/MCP format UNDOABLE in one transaction, like the in-app path.
-    undo_stack.begin_transaction(format!(
+    let owned_txn = undo_stack.begin_owned_transaction(format!(
         "Apply formatting ({}{}:{}{}) (AI)",
         col_letter(params.start_col),
         params.start_row + 1,
@@ -479,7 +479,7 @@ pub fn apply_cell_formatting(
         }
     }
 
-    undo_stack.commit_transaction();
+    undo_stack.commit_owned(owned_txn);
 
     // Mark dirty + live-refresh the open grid (mirrors execute_script:858) so the
     // AI/MCP format participates in save state and repaints out-of-band.

@@ -6,6 +6,13 @@
 
 import type { Selection, DimensionOverrides } from "../types";
 import { alertAsync } from "./dialogs";
+import { refuseIfSelectionOwned } from "./selectionOwner";
+
+/** "clearContents" -> "Clear Contents": what a refusal calls a grid command. */
+function gridCommandLabel(command: GridCommand): string {
+  const words = command.replace(/([a-z])([A-Z])/g, "$1 $2");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
 
 // ============================================================================
 // Grid Menu Context Type
@@ -134,6 +141,14 @@ class GridCommandRegistry {
    * @returns true if the command was executed, false otherwise
    */
   async execute(command: GridCommand): Promise<boolean> {
+    // Every grid command acts on Core's SELECTION. While something else owns
+    // the selection (a floating grid's selected cell, with Core's selection
+    // HIDDEN under it -- BUG-0185), none of them may run: refused here, once,
+    // before any command-specific guard adds a second message.
+    if (refuseIfSelectionOwned(gridCommandLabel(command))) {
+      return false;
+    }
+
     // Check guards
     const guards = this.guards.get(command);
     if (guards) {

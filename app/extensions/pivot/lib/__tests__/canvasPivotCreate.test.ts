@@ -224,4 +224,29 @@ describe("qualifySourceRange", () => {
     expect(qualifySourceRange("Sheet1", "A1:B2")).toBe("Sheet1!A1:B2");
     expect(qualifySourceRange("My Sheet", "A1:B2")).toBe("'My Sheet'!A1:B2");
   });
+
+  // Wave D, X4 (NOT REAL, pinned): names the formula parser would quote --
+  // 2024, 2024Budget, TRUE, FALSE -- are left bare here. That is safe because
+  // this text never reaches the formula parser: the create door reads the
+  // range with `parse_range` (pivot/utils.rs), which drops everything up to
+  // the LAST "!", and takes the sheet from the explicit `sourceSheet`; this
+  // file's `splitSheetPrefix` reads it back the same way. (Rust twin:
+  // `a_source_range_with_a_parser_quoted_sheet_name_parses_bare_or_quoted`.)
+  it("round-trips a name the formula parser would quote, bare, to that sheet", async () => {
+    const sheets = [
+      { index: 0, name: "2024", kind: "worksheet", visibility: "visible" },
+      { index: 1, name: "2024Budget", kind: "worksheet", visibility: "visible" },
+      { index: 2, name: "TRUE", kind: "worksheet", visibility: "visible" },
+      { index: 3, name: "FALSE", kind: "worksheet", visibility: "visible" },
+    ];
+    for (const sheet of sheets) {
+      const text = qualifySourceRange(sheet.name, "A1:D10");
+      expect(text).toBe(`${sheet.name}!A1:D10`);
+      expect(await resolveCanvasPivotSource(text, sheets, noTable)).toEqual({
+        ok: true,
+        sourceRange: text,
+        sourceSheet: sheet.index,
+      });
+    }
+  });
 });

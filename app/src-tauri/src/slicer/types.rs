@@ -306,6 +306,42 @@ pub struct UpdateSlicerParams {
 }
 
 // ============================================================================
+// A SLICER CLICK'S RESPONSE
+// ============================================================================
+
+/// A TABLE target of a slicer click that could not be filtered (or cleared):
+/// its table is gone, has no such column, the sheet's AutoFilter belongs to
+/// another table, the sheet's protection forbids AutoFilter use... The click's
+/// other targets still filtered; the frontend tells the user once.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlicerTableFilterFailure {
+    pub table_id: identity::EntityId,
+    /// True when the write was a clear (a null selection).
+    pub clearing: bool,
+    pub message: String,
+}
+
+/// What a slicer CLICK did (`update_slicer_selection` with a gesture): the
+/// pivot gesture's response, plus its TABLE targets -- filtered by the same
+/// backend command, inside the same ONE undo step (W2). No step is ever left
+/// open for a later write: the tables used to be filtered by the frontend
+/// after the command, with the step held open for them, and anything the user
+/// did meanwhile joined the click's step (that mode is gone).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlicerSelectionGestureResponse {
+    /// The pivot writes' responses and where the ONE step went.
+    #[serde(flatten)]
+    pub gesture: crate::pivot::types::PivotFilterGestureResponse,
+    /// The sheets whose AutoFilter the click changed (their hidden rows moved):
+    /// the AutoFilter owner re-reads its filter and pushes the hidden rows.
+    pub table_sheets: Vec<usize>,
+    /// The table targets that refused.
+    pub table_failures: Vec<SlicerTableFilterFailure>,
+}
+
+// ============================================================================
 // APPLICATION STATE
 // ============================================================================
 

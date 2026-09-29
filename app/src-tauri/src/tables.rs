@@ -1061,7 +1061,7 @@ pub fn delete_table(
     // successful one.
     {
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Delete table".to_string());
+        let owned_txn = undo_stack.begin_owned_transaction("Delete table".to_string());
 
         // Undo replays a transaction's changes in REVERSE record order
         // (undo_commands.rs: `transaction.changes.iter().rev()`, and deferred
@@ -1109,7 +1109,7 @@ pub fn delete_table(
             crate::undo_commands::table_snapshot_bytes(active_sheet, table_id, Some(table)),
             "Delete table",
         );
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
     }
 
     // PHASE B. `rewrite_table_refs_to_ranges` above froze every dependent
@@ -1220,7 +1220,7 @@ pub fn rename_table(
     // (undo replays a transaction in reverse), i.e. after the table is back.
     {
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Rename table".to_string());
+        let owned_txn = undo_stack.begin_owned_transaction("Rename table".to_string());
         let mut by_sheet: std::collections::HashMap<usize, Vec<(u32, u32, Option<engine::Cell>)>> =
             std::collections::HashMap::new();
         for (sheet_idx, row, col, before) in renamed_cells {
@@ -1239,7 +1239,7 @@ pub fn rename_table(
             crate::undo_commands::table_snapshot_bytes(active_sheet, table_id, Some(previous)),
             "Rename table",
         );
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
 
         if cell_count > 0 {
             crate::log_info!(
@@ -2315,7 +2315,7 @@ pub fn resize_table(
     // the old bounds while the filter stayed on the resized range.
     {
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Resize table".to_string());
+        let owned_txn = undo_stack.begin_owned_transaction("Resize table".to_string());
         if let Some(af_previous) = filter_undo {
             undo_stack.record_custom_restore(
                 "obj_autofilter".to_string(),
@@ -2328,7 +2328,7 @@ pub fn resize_table(
             crate::undo_commands::table_snapshot_bytes(active_sheet, table_id, Some(previous)),
             "Resize table",
         );
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
     }
 
     // PHASE B. THE reason §2aj exists: a resize is what a structured reference
@@ -2615,7 +2615,7 @@ pub fn convert_to_range(
     // filter, the scripts, the cascade, and the table itself.
     {
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Convert to range".to_string());
+        let owned_txn = undo_stack.begin_owned_transaction("Convert to range".to_string());
 
         let mut by_sheet: std::collections::HashMap<usize, Vec<(u32, u32, Option<engine::Cell>)>> =
             std::collections::HashMap::new();
@@ -2651,7 +2651,7 @@ pub fn convert_to_range(
             crate::undo_commands::table_snapshot_bytes(active_sheet, table_id, Some(table)),
             "Convert to range",
         );
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
     }
 
     // PHASE B. The VALUES do not move -- `rewrite_table_refs_to_ranges` froze

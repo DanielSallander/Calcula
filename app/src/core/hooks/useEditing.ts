@@ -49,6 +49,7 @@ import type { EditingCell, CellUpdateResult, FormulaReference } from "../types";
 import { isFormulaExpectingReference, FORMULA_REFERENCE_COLORS } from "../types";
 import { checkEditGuards, checkRangeGuards } from "../lib/editGuards";
 import { checkCommitGuards } from "../lib/commitGuards";
+import { qualifyInterceptedCellRef } from "../lib/formulaReferenceInterceptors";
 import {
   parseFormulaReferences,
   parseFormulaReferencesWithPositions,
@@ -57,8 +58,8 @@ import {
   type FormulaReferenceWithPosition,
 } from "../lib/formulaRefParser";
 import { alertAsync } from "../lib/dialogs";
-import { openEntryValue, abortEditorOpen } from "../lib/editOpenBuffer";
-import { setCoreCellEditFlag, isCoreCellEditOpen } from "../lib/cellEditFlag";
+import { openEntryValue, abortEditorOpen, isEditorOpening } from "../lib/editOpenBuffer";
+import { setCoreCellEditFlag, isCoreCellEditOpen, coreCellEditSession } from "../lib/cellEditFlag";
 
 /**
  * MODULE-LEVEL singleton ref for synchronous editing state.
@@ -109,11 +110,50 @@ let arrowRefColor: string | null = null;
 let arrowRefSuffix: string = "";
 
 /**
+ * THE FLAG HEALS (BUG-0199). The keybinding dispatcher reads this flag to
+ * refuse workbook keys (Ctrl+Z, Ctrl+Y, Delete, the fills, ...) while an edit
+ * is open, so a flag left up with NOTHING behind it refused them for the rest
+ * of the session -- until some key happened to reach the grid container, the
+ * one handler that noticed. Two ways it was left up, both healed here, each
+ * only when there is proof the edit is gone:
+ *   - an open that never happened: the formula bar raises the flag on focus
+ *     and asks startEdit to open the cell, and startEdit REFUSED (an edit
+ *     guard such as Format Painter's, a protected range, a canvas) --
+ *     lowerUnbackedEditFlag, at those refusals;
+ *   - an edit whose STATE ended without the flag (a bare stopEditing, a state
+ *     replaced under it) -- the editing-state effect in useEditing, which
+ *     lowers the flag only if it is still the SAME raising that state had.
+ * `openingSession` is the raising an open is in flight for (raised, its
+ * editing state not yet seen -- the awaits before the dispatch and the render
+ * after it): nothing heals that one.
+ */
+let openingSession: number | null = null;
+
+/** An open (startEdit / startEditing / replaceCurrentCell) just raised the flag. */
+function noteOpenInFlight(): void {
+  openingSession = coreCellEditSession();
+}
+
+/**
+ * An open was REFUSED. If the flag is up with no edit behind it -- no editing
+ * state, no open in flight, no typed open buffering keys -- it was raised for
+ * this open by its caller (the formula bar) and nothing will ever lower it.
+ */
+function lowerUnbackedEditFlag(): void {
+  if (!isCoreCellEditOpen()) return;
+  if (openingSession === coreCellEditSession() || isEditorOpening()) return;
+  if (getGridStateSnapshot()?.editing != null) return;
+  console.warn("[useEditing] The edit flag was up for an open that was refused; lowering it (nothing is being edited).");
+  setGlobalIsEditing(false);
+}
+
+/**
  * Set the global editing flag. Used internally by the hook.
  */
 export function setGlobalIsEditing(value: boolean): void {
   setCoreCellEditFlag(value);
   if (!value) {
+    openingSession = null;
     globalEditingValue = "";
     globalCursorPosition = 0;
     // The editor-open window only means anything while an entry is live. If
@@ -703,6 +743,32 @@ export function useEditing(): UseEditingReturn {
     set current(value: boolean) { setCoreCellEditFlag(value); }
   }).current;
 
+  // The flag's other self-heal (see openingSession): the raising whose editing
+  // STATE this instance last saw. When that state ends and the flag is still up
+  // for the SAME raising, nothing lowered it -- a bare stopEditing, a state
+  // replaced under the edit -- so it is lowered here. A new edit raised in the
+  // meantime is a new raising and is left alone.
+  const stateSessionRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (editing !== null) {
+      stateSessionRef.current = coreCellEditSession();
+      if (openingSession === stateSessionRef.current) openingSession = null;
+      return;
+    }
+    const ended = stateSessionRef.current;
+    stateSessionRef.current = null;
+    if (
+      ended !== null &&
+      isCoreCellEditOpen() &&
+      coreCellEditSession() === ended &&
+      openingSession !== ended &&
+      !isEditorOpening()
+    ) {
+      console.warn("[useEditing] The edit's state ended but its flag was still up; lowering it.");
+      setGlobalIsEditing(false);
+    }
+  }, [editing]);
+
   /**
    * Check if currently in formula mode (expecting a reference).
    */
@@ -854,6 +920,7 @@ export function useEditing(): UseEditingReturn {
       // backend refuses a canvas cell write too; this keeps the inline editor
       // from ever opening over the page.
       if (getGridStateSnapshot()?.surface === "canvas") {
+        lowerUnbackedEditFlag();
         return;
       }
 
@@ -861,6 +928,7 @@ export function useEditing(): UseEditingReturn {
       const rangeGuard = checkRangeGuards(row, col, row, col);
       if (rangeGuard?.blocked) {
         console.log("[useEditing] Edit blocked by range guard (sync)");
+        lowerUnbackedEditFlag();
         return;
       }
 
@@ -868,12 +936,14 @@ export function useEditing(): UseEditingReturn {
       const guardResult = await checkEditGuards(row, col);
       if (guardResult?.blocked) {
         console.log("[useEditing] Edit blocked by guard");
+        lowerUnbackedEditFlag();
         return;
       }
 
       // FIX: Set global flag BEFORE any async operation to prevent race conditions
       setGlobalIsEditing(true);
       setExtendMode(false);
+      noteOpenInFlight();
 
       // FIX: Check if this cell is part of a merged region and resolve to master cell
       let editRow = row;
@@ -1002,6 +1072,7 @@ export function useEditing(): UseEditingReturn {
         // FIX: Set global flag BEFORE dispatch
         setGlobalIsEditing(true);
         setExtendMode(false);
+        noteOpenInFlight();
 
         // Check for merge info for replace mode too
         let editRow = row;
@@ -1147,6 +1218,14 @@ export function useEditing(): UseEditingReturn {
    * highlight coordinates, by insertTextIntoActiveFormula: plain text goes in
    * at the cursor and no FormulaReference is pushed.
    * Returns whether the text was inserted (false when not expecting a reference).
+   *
+   * A pick made on ANOTHER sheet than the edit's (W14): the interceptor built
+   * its text from the picked cell's coordinates alone -- GETPIVOTDATA's pivot
+   * argument `$C$3` -- which, inserted as it was, pointed at the EDIT's sheet
+   * (#REF! on Enter). Its highlight cell is qualified with the picked sheet,
+   * exactly as a plain cell pick there is (insertReference); when the text
+   * carries no findable reference to that cell, the plain qualified cell goes
+   * in instead of a formula aimed at the wrong sheet.
    */
   const insertFormulaText = useCallback(
     (text: string, highlightRow?: number, highlightCol?: number): boolean => {
@@ -1154,11 +1233,24 @@ export function useEditing(): UseEditingReturn {
         return false;
       }
 
+      let inserted = text;
+      if (highlightRow !== undefined && highlightCol !== undefined) {
+        const pickedOn = getTargetSheetName();
+        if (pickedOn !== null) {
+          const qualified = qualifyInterceptedCellRef(text, highlightRow, highlightCol, pickedOn);
+          if (qualified === null) {
+            insertReference(highlightRow, highlightCol);
+            return true;
+          }
+          inserted = qualified;
+        }
+      }
+
       const cursorPos = globalCursorPosition;
-      const newValue = editing.value.substring(0, cursorPos) + text + editing.value.substring(cursorPos);
+      const newValue = editing.value.substring(0, cursorPos) + inserted + editing.value.substring(cursorPos);
 
       setGlobalEditingValue(newValue);
-      globalCursorPosition = cursorPos + text.length;
+      globalCursorPosition = cursorPos + inserted.length;
       dispatch(updateEditing(newValue));
 
       if (highlightRow !== undefined && highlightCol !== undefined) {
@@ -1190,7 +1282,7 @@ export function useEditing(): UseEditingReturn {
       dispatchReferenceInsertedEvent();
       return true;
     },
-    [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, getTargetSheetName]
+    [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, getTargetSheetName, insertReference]
   );
 
   // Register the module-level inserter backing insertTextIntoActiveFormula.
@@ -1823,6 +1915,7 @@ export function useEditing(): UseEditingReturn {
       // FIX: Set global flag BEFORE dispatch
       setGlobalIsEditing(true);
       setExtendMode(false);
+      noteOpenInFlight();
 
       // Check for merge info
       let editRow = selection.endRow;

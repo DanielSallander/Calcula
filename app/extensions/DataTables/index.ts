@@ -30,7 +30,7 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.dialogs.unregister("data-table"));
 
-  registerDataTableMenuItems(context);
+  cleanupFns.push(registerDataTableMenuItems(context));
 
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
     setCurrentSelection(

@@ -22,7 +22,18 @@ import {
 // Command Registration
 // ============================================================================
 
-/** Command ID for checkbox toggling (dispatched by Spacebar in useGridKeyboard) */
+/**
+ * Command ID for checkbox toggling, registered with the EXTENSION registry.
+ * Two doors reach it:
+ *   - bare Space: useGridKeyboard's fallback calls Core's
+ *     onCommand("checkbox.toggle"), and handleCommand's default
+ *     (useSpreadsheetSelection.ts) runs it through executeCommandAnywhere
+ *     (@api/commandDispatch), which asks this registry too (wave E, Y9);
+ *   - a cell-type Button bound to it (CellTypes/types/button.ts), through
+ *     ExtensionRegistry.getCommand.
+ * A toggle the backend refuses (a checkbox inside a pivot / report output
+ * region) says why in one toast (interceptors.ts, wave F Z7).
+ */
 const CHECKBOX_TOGGLE_COMMAND = "checkbox.toggle";
 
 // ============================================================================
@@ -74,14 +85,19 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unregDataChanged);
 
-  // 7. Register the toggle command handler
-  ExtensionRegistry.registerCommand({
+  // 7. Register the toggle command handler -- and take it back on
+  //    deactivate: a button bound to it must not toggle through a disabled
+  //    extension (X20). The object, not the id, is taken back, so another
+  //    extension's checkbox.toggle registered over it is never removed.
+  const toggleCommand = {
     id: CHECKBOX_TOGGLE_COMMAND,
     name: "Toggle Checkbox",
     execute: async () => {
       await toggleCheckboxesInSelection();
     },
-  });
+  };
+  ExtensionRegistry.registerCommand(toggleCommand);
+  cleanupFns.push(() => ExtensionRegistry.unregisterCommand(toggleCommand));
 
   // 8. (Removed) The Insert > Controls > Checkbox menu item now lives in the
   // CellTypes extension ("Insert > Cell Type > Checkbox", cell-type brick).

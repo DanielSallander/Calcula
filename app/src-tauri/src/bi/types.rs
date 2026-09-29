@@ -242,8 +242,15 @@ impl Connection {
 pub struct ActiveQuery {
     /// The query request that produced the result.
     pub request: BiQueryRequest,
-    /// Sheet where the result was inserted.
+    /// Sheet where the result was inserted, as an INDEX: a position, which a
+    /// sheet move, delete or copy renumbers. Re-derived from `sheet_id` at
+    /// every refresh (`live_active_queries`) and never trusted on its own.
     pub sheet_index: usize,
+    /// The IDENTITY of the sheet the result was inserted on (BUG-0138). The
+    /// refresh resolves the block's sheet from this, so a block follows its
+    /// sheet through a move and is dropped with it on a delete -- instead of
+    /// being rewritten onto whichever sheet inherited the index.
+    pub sheet_id: identity::SheetId,
     /// Top-left cell of the inserted region.
     pub start_row: u32,
     pub start_col: u32,

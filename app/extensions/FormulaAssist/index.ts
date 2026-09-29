@@ -38,6 +38,7 @@ import type {
 } from "@api/formulaAssistService";
 import { OverlayExtensions } from "@api/ui";
 import { getGridStateSnapshot } from "@api/grid";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 import {
   FORMULA_ASSIST_COMBO,
   FORMULA_ASSIST_CONTEXT_MENU_ID,
@@ -118,6 +119,12 @@ function cachedFor(sheetIndex: number, row: number, col: number): CachedCell | n
 // ---------------------------------------------------------------------------
 
 function openForActiveCell(intent?: string): void {
+  // The formula lands in Core's active cell -- HIDDEN while something else
+  // owns the selection (a floating grid's selected cell) -- so every door
+  // here (Formulas menu, the command and its key) refuses, once (D4, BUG-0185
+  // class). The context menu's "Fix this formula" targets the right-clicked
+  // cell instead and is not refused.
+  if (refuseIfSelectionOwned("Ask for a Formula")) return;
   const state = getGridStateSnapshot();
   if (!state?.selection) return;
   const row = state.selection.startRow;

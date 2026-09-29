@@ -45,6 +45,7 @@ import {
   notifyExternalEditChanged,
   isExternalSessionParked,
   isFormulaBarElement,
+  enterCommitMove,
   type ExternalEditMove,
   type ExternalEditSession,
   type ExternalEditView,
@@ -57,6 +58,7 @@ import {
   getFloatingRangeById,
   type FloatingRangeEntry,
 } from "../lib/floatingRangeStore";
+import { frDisplayText, frStoredText } from "../lib/frReferenceStyle";
 import {
   localCellOrigin,
   frColWidth,
@@ -314,6 +316,13 @@ export function openFrEditor(
         ),
       );
     },
+    // A whole column/row from a header, the whole sheet from the corner, a
+    // GETPIVOTDATA call from a pivot cell -- already built and sheet-qualified
+    // by Core (E2). They used to reach Core's own editor only.
+    insertText: (text) => {
+      if (!editorState || editorState.token !== token) return;
+      insertTextAtCursor(text);
+    },
     session: editorSession,
   });
 
@@ -471,7 +480,9 @@ async function loadInitialValue(
     if (!st || st.token !== token) return;
     if (st.touched || !textarea) return; // the user got there first
     const cell = cells.find((c) => c.row === row && c.col === col);
-    const value = cell ? (cell.formula ?? cell.display ?? "") : "";
+    // Edited in the workbook's reference style (R1C1, relative to the cell,
+    // when the workbook uses it -- E3); stored back as A1 by commitFrEditor.
+    const value = frDisplayText(cell ? (cell.formula ?? cell.display ?? "") : "", row, col);
     st.loaded = true;
     if (textarea.value !== value) {
       textarea.value = value;
@@ -518,7 +529,9 @@ function teardown(): void {
 export async function commitFrEditor(move: ExternalEditMove): Promise<boolean> {
   const st = editorState;
   if (!st || !textarea || closing) return false;
-  const value = textarea.value;
+  // What is STORED: the edited text back in A1 when the workbook uses R1C1
+  // (E3; the grid's own commit does the same).
+  const value = frStoredText(textarea.value, st.row, st.col);
   // Nothing typed and the cell's content never arrived: writing would blank
   // the cell with "" (double-click, then Enter before the read lands).
   const nothingToWrite = !st.touched && !st.loaded;
@@ -691,7 +704,9 @@ function handleKeyDown(e: KeyboardEvent): void {
   // the edit is parked), so these never need to return anywhere first.
   if (e.key === "Enter" && !e.altKey) {
     e.preventDefault();
-    void commitFrEditor(e.shiftKey ? "up" : "down");
+    // Enter's move is the user's Move-after-Return preference, as on the
+    // sheet (E4): off, or pointed right, is honoured here too.
+    void commitFrEditor(enterCommitMove(e.shiftKey));
   } else if (e.key === "Tab") {
     e.preventDefault();
     void commitFrEditor(e.shiftKey ? "left" : "right");

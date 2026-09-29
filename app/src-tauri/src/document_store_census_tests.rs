@@ -1069,6 +1069,11 @@ const NOT_DOCUMENT_REPLACING: &[(&str, &str)] = &[
       pivots (a pinned filter re-queries the model, hence BiState); the document stays"),
     ("set_slicer_item_selected", "toggles one slicer item; holds BiState only to read a MODEL \
       slicer's full item list from its model"),
+    ("update_slicer_selection", "sets one slicer's selection and, with a gesture, filters the pivots \
+      it reaches in the same step (a model or pinned write re-queries the model, hence BiState); the \
+      document stays"),
+    ("update_ribbon_filter_selection", "sets one ribbon filter's selection and, with a gesture, filters \
+      its target pivots in the same step (BI re-queries, hence BiState); the document stays"),
     ("drill_through_to_sheet", "adds a sheet of detail rows"),
     ("create_pivot_from_bi_model", "adds a pivot"),
     // -- BI / report / script surfaces ----------------------------------------

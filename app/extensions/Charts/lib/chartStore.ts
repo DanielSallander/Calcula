@@ -706,8 +706,16 @@ export async function flushPendingChartSavesQuietly(): Promise<ChartPersistFailu
 /**
  * Load all charts from the Rust backend into the in-memory store.
  * Call this on extension activation and after file open.
+ *
+ * `stampSheetIds: false` skips the late sheet-id stamp (see `migrateSheetIds`).
+ * A chart loaded from a FILE arrives stamped already -- the backend pins every
+ * index-only range to the file's own sheet inside `open_file` (BUG-0204) -- so
+ * the late stamp only ever meets a chart some other path wrote by index. After
+ * a sheet-list CHANGE it must not meet one at all: the backend renumbered the
+ * sheets but not the index inside such a range, so stamping it now would pin
+ * the chart to whichever sheet took the old index.
  */
-export async function loadChartsFromBackend(): Promise<void> {
+export async function loadChartsFromBackend(options?: { stampSheetIds?: boolean }): Promise<void> {
   // File > New and File > Open both land here. The whole `charts` array is
   // replaced below, so a preview held against the OUTGOING document would
   // otherwise survive as a restore token aimed at a chart id from another
@@ -771,6 +779,7 @@ export async function loadChartsFromBackend(): Promise<void> {
   }
   // AFTER the snapshots are recorded: they are what the backend holds. The
   // stamp is persisted AS a stamp (see `pendingStampEntries`).
+  if (options?.stampSheetIds === false) return;
   await migrateSheetIds(charts, loadedEntries, "afterLoad");
 }
 
@@ -822,6 +831,166 @@ async function migrateSheetIds(
   }
 }
 
+// ============================================================================
+// Adopting the backend's rewrites of a record a pending save still holds
+// ============================================================================
+
+/** Bound on the merge's recursion (a spec nests `concat` charts, each shallow). */
+const MAX_REWRITE_MERGE_DEPTH = 64;
+
+/** Keys of a JSON object whose value is present (an `undefined` value is absence, as in JSON). */
+function presentKeys(value: Record<string, unknown>): string[] {
+  return Object.keys(value).filter((key) => value[key] !== undefined);
+}
+
+/** Structural JSON equality: key order ignored, an `undefined` member equal to an absent one. */
+function sameJson(a: unknown, b: unknown, depth = 0): boolean {
+  if (a === b) return true;
+  if (depth > MAX_REWRITE_MERGE_DEPTH) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, i) => sameJson(item, b[i], depth + 1));
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const keysA = presentKeys(a);
+    const keysB = presentKeys(b);
+    if (keysA.length !== keysB.length) return false;
+    return keysA.every((key) => b[key] !== undefined && sameJson(a[key], b[key], depth + 1));
+  }
+  return false;
+}
+
+/**
+ * THREE-WAY MERGE of a pending edit with what the backend holds now.
+ *
+ * `current` is the in-memory value (the last persisted value plus the pending
+ * edit), `before` the last value the backend confirmed (the snapshot), and
+ * `stored` what the backend holds after an operation of its own rewrote the
+ * record. Wherever the backend changed the value and the pending edit did not,
+ * the backend's value is adopted; wherever the edit changed it, the edit wins;
+ * where both changed an object the merge goes down into it, so a range whose
+ * ROWS the user edited still takes the sheet index the backend remapped; and
+ * where both changed a LIST it goes down element by element, each against the
+ * element it came from (`matchListElements`), so a pending edit that appended,
+ * removed or reordered a layer or a transform still takes the backend's
+ * rewrite of every element it left alone. Returns `current` itself when there
+ * is nothing to adopt.
+ *
+ * Generic on purpose: which members of a chart record a backend operation
+ * rewrites (today the index-only ranges `remap_chart_index_ranges` walks, in
+ * object_deps.rs) is the backend's business, and a copy of that walk here
+ * would drift from it -- the same reason `count_sheet_id_stamps` is generic.
+ */
+function adoptBackendRewrites(current: unknown, before: unknown, stored: unknown, depth = 0): unknown {
+  if (sameJson(before, stored)) return current;
+  if (sameJson(current, before)) return stored === undefined ? undefined : JSON.parse(JSON.stringify(stored));
+  if (depth >= MAX_REWRITE_MERGE_DEPTH) return current;
+  if (isPlainObject(current) && isPlainObject(before) && isPlainObject(stored)) {
+    const out: Record<string, unknown> = { ...current };
+    const keys = new Set([...Object.keys(current), ...Object.keys(before), ...Object.keys(stored)]);
+    for (const key of keys) {
+      const merged = adoptBackendRewrites(current[key], before[key], stored[key], depth + 1);
+      if (merged === undefined) delete out[key];
+      else out[key] = merged;
+    }
+    return out;
+  }
+  // A list the backend rewrote IN PLACE (it never adds or removes elements:
+  // its remap rewrites a range where it stands). One whose length it changed
+  // cannot be lined up with the edit.
+  if (Array.isArray(current) && Array.isArray(before) && Array.isArray(stored) && before.length === stored.length) {
+    const origin = matchListElements(current, before, depth);
+    return current.map((item, i) => {
+      const j = origin[i];
+      return j < 0 ? item : adoptBackendRewrites(item, before[j], stored[j], depth + 1);
+    });
+  }
+  // Both changed it, and not in a shape that can be merged: the edit wins.
+  return current;
+}
+
+/** Bound on the element pairs `matchListElements` compares; a longer list is matched by position only. */
+const MAX_REWRITE_MATCH_PAIRS = 4096;
+
+/** Leaf values in a JSON value (an empty object or list counts as one). */
+function leafCount(value: unknown, depth = 0): number {
+  if (depth >= MAX_REWRITE_MERGE_DEPTH) return 1;
+  let n = 0;
+  if (isPlainObject(value)) for (const key of presentKeys(value)) n += leafCount(value[key], depth + 1);
+  else if (Array.isArray(value)) for (const item of value) n += leafCount(item, depth + 1);
+  else return 1;
+  return Math.max(n, 1);
+}
+
+/** How many of `a`'s leaf values `b` holds unchanged at the same path (0: nothing in common). */
+function sharedLeaves(a: unknown, b: unknown, depth = 0): number {
+  if (sameJson(a, b, depth)) return leafCount(a, depth);
+  if (depth >= MAX_REWRITE_MERGE_DEPTH) return 0;
+  let n = 0;
+  if (isPlainObject(a) && isPlainObject(b)) {
+    for (const key of presentKeys(a)) n += sharedLeaves(a[key], b[key], depth + 1);
+  } else if (Array.isArray(a) && Array.isArray(b)) {
+    for (let i = 0; i < Math.min(a.length, b.length); i++) n += sharedLeaves(a[i], b[i], depth + 1);
+  }
+  return n;
+}
+
+/**
+ * For each element of the edited list `current`, the index of the element of
+ * `before` it CAME FROM, or -1 for one the edit added. Matching by position
+ * alone (what the merge did until review D) goes wrong the moment the edit
+ * changes the list's shape: after an append the untouched elements were not
+ * merged at all, and after a removal or a reorder a layer would be read
+ * against its NEIGHBOUR and take the neighbour's rewrite -- a live range
+ * pinned as gone because the layer beside it was on the deleted sheet.
+ *
+ *   1. An element the edit left UNCHANGED is found by value (its own position
+ *      first). Wherever an append, removal or reorder moved it, it is the
+ *      same value, and equal values are rewritten alike. This goes BEFORE
+ *      step 2: an element holding all of this one's values and more (the same
+ *      range stamped with its sheet id, which the backend leaves alone)
+ *      shares as much with it as its true origin does.
+ *   2. An element the edit CHANGED is paired with the remaining one it shares
+ *      the most leaf values with (ties to the nearer position): a layer whose
+ *      rows were edited still carries its sheet, its columns and its mark.
+ *      One that shares nothing is new, and stays exactly as the edit wrote it
+ *      -- pairing it anyway could only hand it keys the backend ADDED to
+ *      another element.
+ *
+ * Past `MAX_REWRITE_MATCH_PAIRS` only step 1 at the same position runs.
+ */
+function matchListElements(current: readonly unknown[], before: readonly unknown[], depth: number): number[] {
+  const origin = new Array<number>(current.length).fill(-1);
+  const taken = new Array<boolean>(before.length).fill(false);
+  const pair = (i: number, j: number): void => {
+    origin[i] = j;
+    taken[j] = true;
+  };
+  for (let i = 0; i < Math.min(current.length, before.length); i++) {
+    if (sameJson(current[i], before[i], depth + 1)) pair(i, i);
+  }
+  if (current.length * before.length > MAX_REWRITE_MATCH_PAIRS) return origin;
+  for (let i = 0; i < current.length; i++) {
+    if (origin[i] >= 0) continue;
+    const j = before.findIndex((item, k) => !taken[k] && sameJson(current[i], item, depth + 1));
+    if (j >= 0) pair(i, j);
+  }
+  const candidates: Array<{ i: number; j: number; shared: number }> = [];
+  for (let i = 0; i < current.length; i++) {
+    if (origin[i] >= 0) continue;
+    for (let j = 0; j < before.length; j++) {
+      if (taken[j]) continue;
+      const shared = sharedLeaves(current[i], before[j], depth + 1);
+      if (shared > 0) candidates.push({ i, j, shared });
+    }
+  }
+  candidates.sort((a, b) => b.shared - a.shared || Math.abs(a.i - a.j) - Math.abs(b.i - b.j) || a.i - b.i || a.j - b.j);
+  for (const { i, j } of candidates) {
+    if (origin[i] < 0 && !taken[j]) pair(i, j);
+  }
+  return origin;
+}
+
 /**
  * Reload the store after the sheet COLLECTION changed (a sheet added, deleted,
  * moved, copied, or such an operation undone), WITHOUT losing a pending
@@ -830,15 +999,22 @@ async function migrateSheetIds(
  * WHY NOT JUST RELOAD. A drag schedules its write 300 ms out. Replacing the
  * array under it lost the drag (the timer then wrote the reloaded, un-dragged
  * chart). WHY NOT JUST FLUSH FIRST. The backend has already REMAPPED each
- * chart's placement sheet for the operation that just happened, and a flush
- * writes the whole entry -- so writing the in-memory, pre-operation index would
- * undo that remap, the very staleness this reload exists to cure.
+ * chart for the operation that just happened -- its placement sheet, and every
+ * data range that names its sheet by INDEX only (`spec.data`,
+ * `layers[].data`, a lookup's `from`, `concat` children; a range whose sheet
+ * is gone is pinned to an unresolvable sheet id) -- and a flush writes the
+ * whole record, so writing the in-memory, pre-operation indices would undo
+ * that remap, the very staleness this reload exists to cure. (X14: the ranges
+ * were not adopted, so a drag still waiting its turn wrote them back and the
+ * chart charted whichever sheet took the old index.)
  *
- * So: read the entries the backend holds now, adopt ITS placement index for
- * every pending chart whose placement the user has not changed since the last
- * persist, drop a pending chart the backend no longer has (it went with its
- * sheet -- `update_chart` would refuse it and show a spurious error), flush,
- * THEN reload.
+ * So: read the entries the backend holds now; for every pending chart adopt
+ * ITS placement index unless the user moved the chart to another sheet since
+ * the last persist, and ITS rewrites of the spec wherever the pending edit did
+ * not change the same value (`adoptBackendRewrites`); make the rollback
+ * snapshot what the backend now holds; drop a pending chart the backend no
+ * longer has (it went with its sheet -- `update_chart` would refuse it and
+ * show a spurious error); flush; THEN reload.
  */
 export async function reloadChartsAfterSheetListChange(): Promise<void> {
   if (saveTimer !== null || dirtyChartIds.size > 0) {
@@ -849,30 +1025,51 @@ export async function reloadChartsAfterSheetListChange(): Promise<void> {
       entries = null;
     }
     if (entries !== null) {
-      const storedPlacement = new Map<string, number>();
-      for (const e of entries) storedPlacement.set(e.id, e.sheetIndex);
+      const storedEntries = new Map<string, ChartEntry>();
+      for (const e of entries) storedEntries.set(e.id, e);
       for (const id of Array.from(dirtyChartIds)) {
         const chart = getChartById(id);
-        const stored = storedPlacement.get(id);
-        if (!chart || stored === undefined) {
+        const storedEntry = storedEntries.get(id);
+        if (!chart || storedEntry === undefined) {
           dirtyChartIds.delete(id);
           stampOnlyCharts.delete(id);
           pendingStampEntries.delete(id);
           continue;
         }
+        const stored = storedEntry.sheetIndex;
         const snapshot = persistedSnapshots.get(id);
         // A pending placement MOVE (the user put the chart on another sheet and
         // it has not been written yet) is the user's; anything else follows the
         // backend's remap.
         if (!snapshot || chart.sheetIndex === snapshot.sheetIndex) {
           chart.sheetIndex = stored;
-          if (snapshot) snapshot.sheetIndex = stored;
+        }
+        // The spec: three-way against the last confirmed version. Without a
+        // snapshot there is no telling the user's edit from the backend's
+        // rewrite, and the spec is written as it is.
+        if (snapshot) {
+          const storedSpec = fromEntry(storedEntry).spec;
+          chart.spec = adoptBackendRewrites(chart.spec, snapshot.spec, storedSpec) as ChartSpec;
+          // A hover preview holds the spec to persist; it takes the rewrites too.
+          if (activePreview !== null && activePreview.chartId === id) {
+            activePreview = {
+              chartId: id,
+              original: adoptBackendRewrites(activePreview.original, snapshot.spec, storedSpec) as ChartSpec,
+            };
+          }
+          // The rollback target is what the backend holds NOW: a refused flush
+          // must put back the remapped record, and name only the user's edit
+          // as lost.
+          snapshot.sheetIndex = stored;
+          snapshot.spec = JSON.parse(JSON.stringify(storedSpec)) as ChartSpec;
         }
       }
       await flushPendingChartSaves();
     }
   }
-  await loadChartsFromBackend();
+  // NO late sheet-id stamp here (BUG-0204): the sheet list just changed under
+  // every index-only range, so stamping would pin it to the wrong sheet.
+  await loadChartsFromBackend({ stampSheetIds: false });
 }
 
 // ============================================================================
@@ -883,18 +1080,59 @@ export async function reloadChartsAfterSheetListChange(): Promise<void> {
  * Create a new chart and add it to the store.
  * Returns the created chart definition.
  */
-export function createChart(
+export function createChart(spec: ChartSpec, placement: ChartPlacement): ChartDefinition {
+  const chart = addNewChart(spec, placement);
+  // Persist to backend. Still not awaited (createChart is synchronous by
+  // contract and a dozen callers rely on that), but no longer SWALLOWED: a
+  // refusal removes the chart again and tells the user.
+  void persistNewChart(chart, "create");
+  return chart;
+}
+
+/** Where a new chart goes (createChart / createChartLanded). */
+export interface ChartPlacement {
+  sheetIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Display name; omitted (or blank) auto-numbers as "Chart N". */
+  name?: string;
+}
+
+/** What `createChartLanded` settled to. */
+export interface LandedChartCreate {
+  /** The chart, now stored by the backend -- or null when it was refused. */
+  chart: ChartDefinition | null;
+  /** The backend's reason when refused (the chart is gone from the store again). */
+  refusal: string | null;
+}
+
+/**
+ * Create a chart and WAIT until the backend has it -- for a caller that must
+ * know it LANDED: a paste or duplicate of several objects runs inside ONE
+ * undo transaction (@api/objectClipboard), and a save still in flight when
+ * that transaction commits would record its "Insert chart" as a step of its
+ * own. Never rejects. A refusal removes the chart again (as `createChart`
+ * does) and settles to its reason; with `reportRefusal: false` the caller
+ * names it (one toast for the whole paste) instead of this store's dialog.
+ *
+ * `opts` is optional without a default literal, like `deleteChart`'s (the
+ * cascade-announcement census reads bodies from the first brace).
+ */
+export async function createChartLanded(
   spec: ChartSpec,
-  placement: {
-    sheetIndex: number;
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    /** Display name; omitted (or blank) auto-numbers as "Chart N". */
-    name?: string;
-  },
-): ChartDefinition {
+  placement: ChartPlacement,
+  opts?: { reportRefusal?: boolean },
+): Promise<LandedChartCreate> {
+  const chart = addNewChart(spec, placement);
+  const refusal = await persistNewChart(chart, "create", opts?.reportRefusal !== false);
+  if (refusal !== null) return { chart: null, refusal };
+  return { chart, refusal: null };
+}
+
+/** Build a new chart from `spec` + `placement` and put it in the store (no persist). */
+function addNewChart(spec: ChartSpec, placement: ChartPlacement): ChartDefinition {
   const id = crypto.randomUUID();
   // The auto-number is consumed either way, so a later rename of an explicitly
   // named chart can never collide with the next auto-named one.
@@ -919,10 +1157,6 @@ export function createChart(
     spec: stampSpecSheetIds(normalizeChartSpec(spec), cachedSheetIdForIndex),
   };
   charts.push(chart);
-  // Persist to backend. Still not awaited (createChart is synchronous by
-  // contract and a dozen callers rely on that), but no longer SWALLOWED: a
-  // refusal removes the chart again and tells the user.
-  void persistNewChart(chart, "create");
   return chart;
 }
 
@@ -939,7 +1173,8 @@ export function createChart(
 async function persistNewChart(
   chart: ChartDefinition,
   operation: "create" | "restore",
-): Promise<void> {
+  report = true,
+): Promise<string | null> {
   // The record exactly as written: a later stamp is verified against it.
   const written = toEntry(chart);
   try {
@@ -954,19 +1189,29 @@ async function persistNewChart(
     if (operation === "create" && specHasUnstampedRangeRef(chart.spec)) {
       void migrateSheetIds([chart], [written], "afterCreate");
     }
+    return null;
   } catch (error) {
     const chartName = chart.name;
+    const reason = describeBackendError(error);
     const outcome = rollbackToPersisted(chart.chartId);
+    if (!report) {
+      // The caller names the refusal (createChartLanded, reportRefusal:false);
+      // the chart it removed must stop painting all the same.
+      console.error(`[Charts] Backend refused ${operation} for chart "${chartName}" (${chart.chartId}): ${reason}`);
+      syncChartRegions();
+      return reason;
+    }
     await reportChartPersistFailures([
       {
         chartId: chart.chartId,
         chartName,
         operation,
-        reason: describeBackendError(error),
+        reason,
         outcome,
         lost: "the whole chart",
       },
     ]);
+    return reason;
   }
 }
 
@@ -1047,10 +1292,32 @@ export function replaceChartSpec(chartId: string, spec: ChartSpec): void {
   }
 }
 
+/** How {@link deleteChart} tells of a refusal. */
+export interface DeleteChartOptions {
+  /**
+   * false: the store does NOT raise its own failure dialog for a refusal --
+   * the CALLER names it (the canvas-wide Delete's one toast,
+   * @api/objectSelection `deleteSelectedObjects`). The chart is put back and
+   * its region re-published either way. Default true.
+   */
+  reportRefusal?: boolean;
+}
+
 /**
- * Delete a chart from the store.
+ * Delete a chart from the store. The store changes at once; the returned
+ * promise settles when the backend delete has landed -- resolving to null --
+ * or has been refused and the chart put back -- resolving to the refusal's
+ * reason. It never rejects. A canvas-wide Delete awaits it so the whole
+ * selection's deletes land inside ONE undo transaction, and reads the reason
+ * so a refused chart STAYS selected and is named (wave A review: a refusal
+ * used to count as deleted and deselect the chart that came back).
+ *
+ * `opts` is optional WITHOUT a default object literal on purpose: the
+ * cascade-announcement census (src/api/__tests__/cascadeAnnouncementCensus.test.ts)
+ * reads this function's body from the first brace after its name, and a
+ * default literal in the parameter list is a brace.
  */
-export function deleteChart(chartId: string): void {
+export function deleteChart(chartId: string, opts?: DeleteChartOptions): Promise<string | null> {
   // Restore BEFORE the trash copy is taken. Undo must put back the chart the
   // reader had, not the colour their pointer was resting on when they pressed
   // Delete.
@@ -1067,7 +1334,7 @@ export function deleteChart(chartId: string): void {
   const trashDepth = deletedChartsTrash.length;
   charts = charts.filter((c) => c.chartId !== chartId);
   // Persist to backend
-  chartsBackend
+  return chartsBackend
     .invoke("delete_chart", { id: chartId })
     .then(() => {
       persistedSnapshots.delete(chartId);
@@ -1079,8 +1346,9 @@ export function deleteChart(chartId: string): void {
         domains: ["paneControl"],
         source: "commit",
       });
+      return null;
     })
-    .catch((error) => {
+    .catch((error): string => {
       // The backend still HAS this chart, so the store must have it too. Put it
       // back where it was (z-order is array order) and un-trash it, otherwise
       // Undo would offer to restore a chart that was never removed.
@@ -1092,16 +1360,24 @@ export function deleteChart(chartId: string): void {
         const top = deletedChartsTrash[deletedChartsTrash.length - 1];
         if (top && top.chartId === chartId) deletedChartsTrash.pop();
       }
-      void reportChartPersistFailures([
-        {
-          chartId,
-          chartName: chart?.name ?? chartId,
-          operation: "delete",
-          reason: describeBackendError(error),
-          outcome: restored ? "restored" : "unchanged",
-          lost: "the deletion",
-        },
-      ]);
+      const reason = describeBackendError(error);
+      if (opts?.reportRefusal === false) {
+        console.error(`[Charts] Backend refused delete for chart "${chart?.name ?? chartId}" (${chartId}): ${reason}`);
+        // The caller names the refusal; the chart it put back must still paint.
+        syncChartRegions();
+      } else {
+        void reportChartPersistFailures([
+          {
+            chartId,
+            chartName: chart?.name ?? chartId,
+            operation: "delete",
+            reason,
+            outcome: restored ? "restored" : "unchanged",
+            lost: "the deletion",
+          },
+        ]);
+      }
+      return reason;
     });
 }
 

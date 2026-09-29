@@ -205,7 +205,7 @@ pub struct LocalWorkspace {
 }
 
 impl LocalWorkspace {
-    /// Open or create a workspace at the given path.
+    /// Open a workspace at the given path. TOUCHES NOTHING ON DISK.
     ///
     /// The path may name either the workspace DIRECTORY or the
     /// `workspace.calcula` marker file inside it — a file is far easier to aim
@@ -213,13 +213,35 @@ impl LocalWorkspace {
     /// resolve to the same directory here, and `workspace_scope` collapses them
     /// to the same pin scope, so which one a user picked can never split one
     /// workspace into two trust identities.
+    ///
+    /// BUG-0134: this used to `create_dir_all` a missing root. `open` runs on
+    /// READ paths too (the Application Inspector's typed location, the browse
+    /// behind Subscribe and Open for Editing), so a mistyped path left an empty
+    /// folder on the user's disk or a shared drive and the browse then reported
+    /// "No applications found" about a folder the product had just made. A read
+    /// of a missing workspace is now an error ([`Self::list_applications`]), and
+    /// the WRITE paths create the root themselves: the publish lock
+    /// ([`Self::lock`]) and every artifact/manifest write (`atomic_write`
+    /// creates its parent directories).
     pub fn open(root: &Path) -> Result<Self, CalpError> {
         let located = crate::workspace_id::strip_workspace_marker(&root.to_string_lossy());
-        let root = PathBuf::from(located);
-        if !root.exists() {
-            fs::create_dir_all(&root)?;
+        Ok(Self { root: PathBuf::from(located) })
+    }
+
+    /// Create the workspace folder if it is not there yet. WRITE paths only.
+    fn ensure_root(&self) -> Result<(), CalpError> {
+        if !self.root.is_dir() {
+            fs::create_dir_all(&self.root)?;
         }
-        Ok(Self { root })
+        Ok(())
+    }
+
+    /// The error a READ of a missing workspace answers with.
+    fn missing_root_error(&self) -> CalpError {
+        CalpError::Workspace(format!(
+            "There is no workspace at '{}': the folder does not exist.",
+            self.root.display()
+        ))
     }
 
     /// Get the root path of this workspace.
@@ -253,6 +275,9 @@ impl LocalWorkspace {
 
     /// List all application names in the workspace.
     pub fn list_applications(&self) -> Result<Vec<String>, CalpError> {
+        if !self.root.is_dir() {
+            return Err(self.missing_root_error());
+        }
         let mut names = Vec::new();
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
@@ -308,6 +333,9 @@ impl LocalWorkspace {
     /// write_application_manifest) so concurrent publishes can't lose a version-list
     /// update. Released when the returned guard is dropped.
     pub fn lock(&self) -> Result<WorkspaceLock, CalpError> {
+        // Only WRITE paths take the lock, so this is where a publish into a
+        // fresh folder creates it (BUG-0134: `open` no longer does).
+        self.ensure_root()?;
         WorkspaceLock::acquire(&self.root)
     }
 
@@ -1122,7 +1150,7 @@ impl WorkspaceTransport for LocalWorkspace {
     }
 
     fn lock(&self) -> Result<Box<dyn std::any::Any>, CalpError> {
-        Ok(Box::new(WorkspaceLock::acquire(&self.root)?))
+        Ok(Box::new(LocalWorkspace::lock(self)?))
     }
 }
 
@@ -1758,5 +1786,60 @@ mod tests {
         assert!(!lockfile.exists(), "lockfile removed when the boxed guard drops");
         // Re-acquire after release works through the trait.
         let _g2 = t.lock().unwrap();
+    }
+
+    /// BUG-0134. `open` runs on READ paths (the Application Inspector's typed
+    /// location, `calp_browse_workspace` behind Subscribe and Open for Editing),
+    /// so a mistyped location must never leave an empty folder behind, and the
+    /// browse must say the workspace is not there rather than "No applications
+    /// found" about a folder the product just made. The WRITE paths still create
+    /// what they need: the publish lock and every artifact write create the root.
+    #[test]
+    fn open_on_a_missing_location_creates_nothing_and_says_so() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("no-such-workspace");
+        let reg = LocalWorkspace::open(&missing).unwrap();
+        assert!(!missing.exists(), "opening a workspace must not create its folder");
+
+        let err = reg
+            .list_applications()
+            .expect_err("browsing a folder that does not exist must be an error, not an empty list");
+        assert!(
+            err.to_string().contains("does not exist"),
+            "the error names the missing folder: {err}"
+        );
+        assert!(
+            reg.get_application_manifest("anything").is_err(),
+            "reading an application from a missing workspace is an error"
+        );
+        assert!(!missing.exists(), "a failed read must not create the folder either");
+
+        // The marker form of the same location resolves to the same missing
+        // folder and creates nothing.
+        let via_marker = missing.join(crate::workspace_id::WORKSPACE_MARKER_FILE);
+        let reg2 = LocalWorkspace::open(&via_marker).unwrap();
+        assert_eq!(reg2.root(), missing.as_path());
+        assert!(!missing.exists());
+
+        // WRITE paths still create it: the publish lock first, then the manifest.
+        {
+            let _g = reg.lock().expect("the publish lock creates the workspace folder");
+            assert!(missing.is_dir(), "taking the publish lock created the workspace");
+            create_test_package(&reg, "alpha");
+        }
+        assert_eq!(reg.list_applications().unwrap(), vec!["alpha"]);
+
+        // A plain artifact write into a fresh location also creates it.
+        let fresh = dir.path().join("fresh-by-artifact");
+        let reg3 = LocalWorkspace::open(&fresh).unwrap();
+        assert!(!fresh.exists());
+        let t: &dyn WorkspaceTransport = &reg3;
+        t.write_artifact("pkg", "1.0.0", "named_ranges.json", b"[]").unwrap();
+        assert!(fresh.is_dir());
+        let fresh_lock = dir.path().join("fresh-by-trait-lock");
+        let reg4 = LocalWorkspace::open(&fresh_lock).unwrap();
+        let t4: &dyn WorkspaceTransport = &reg4;
+        let _g4 = t4.lock().expect("the trait lock creates the workspace folder too");
+        assert!(fresh_lock.is_dir());
     }
 }

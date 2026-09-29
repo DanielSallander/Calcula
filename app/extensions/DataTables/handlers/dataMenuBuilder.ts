@@ -3,6 +3,7 @@
 
 import type { ExtensionContext } from "@api/contract";
 import { IconWhatIfAnalysis, IconDataTable } from "@api";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 // ============================================================================
 // State
@@ -30,17 +31,29 @@ export function setCurrentSelection(
 // Menu Registration
 // ============================================================================
 
-export function registerDataTableMenuItems(context: ExtensionContext): void {
+const DATA_TABLE_MENU_ITEM_ID = "data:whatIf:dataTable";
+
+/**
+ * Register "What-If Data Table..." under Data > What-If Analysis. Returns the
+ * cleanup for deactivation, which takes back this extension's own CHILD --
+ * never "data:whatIf", which Goal Seek, Solver and Scenario Manager share
+ * (X18).
+ */
+export function registerDataTableMenuItems(context: ExtensionContext): () => void {
   context.ui.menus.registerItem("data", {
     id: "data:whatIf",
     label: "What-If Analysis",
     icon: IconWhatIfAnalysis,
     children: [
       {
-        id: "data:whatIf:dataTable",
+        id: DATA_TABLE_MENU_ITEM_ID,
         label: "What-If Data Table...",
         icon: IconDataTable,
         action: () => {
+          // The table fills Core's selection -- HIDDEN while something else
+          // owns the selection (a floating grid's selected cell) -- so refuse,
+          // once (D4, BUG-0185 class).
+          if (refuseIfSelectionOwned("What-If Data Table")) return;
           const sel = currentSelection;
           context.ui.dialogs.show("data-table", {
             activeRow: sel?.activeRow ?? 0,
@@ -52,4 +65,5 @@ export function registerDataTableMenuItems(context: ExtensionContext): void {
       },
     ],
   });
+  return () => context.ui.menus.unregisterItem("data", DATA_TABLE_MENU_ITEM_ID);
 }

@@ -572,6 +572,12 @@ export async function changePivotDataSource(
   setLoading(request.pivotId, "Changing data source...");
   try {
     const result = await apiChangePivotDataSource<ChangePivotDataSourceRequest, PivotViewResponse>(request);
+    // A pivot repointed at a larger range grows over the user's cells: asked
+    // like every other pivot door (it never was), and a decline takes back
+    // exactly this command's step (wave D fix-up).
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {

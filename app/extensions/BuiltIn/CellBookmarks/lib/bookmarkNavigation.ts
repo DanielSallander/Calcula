@@ -3,13 +3,10 @@
 // CONTEXT: Implements Next/Previous bookmark navigation with cross-sheet support.
 
 import {
+  activateSheet,
   dispatchGridAction,
   scrollToCell,
   setSelection,
-  setActiveSheet,
-  setActiveSheetApi,
-  emitAppEvent,
-  AppEvents,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
 import { getSortedBookmarks } from "./bookmarkStore";
@@ -21,8 +18,16 @@ import type { Bookmark } from "./bookmarkTypes";
 
 /**
  * Navigate to a specific bookmark. Handles cross-sheet navigation.
+ *
+ * The sheet switch is AWAITED (through `activateSheet`) before the cell is
+ * selected: the switch used to be fired and announced without waiting, and
+ * SheetTabs' re-read of the sheet list on SHEET_CHANGED could be answered
+ * before the backend had switched -- it reported the old sheet as active and
+ * dispatched it back, so a jump from a canvas left the backend on the
+ * bookmark's sheet and the grid on the canvas (found live 2026-09-29, e2e
+ * fixall-edit X16).
  */
-export function navigateToBookmark(bookmark: Bookmark): void {
+export async function navigateToBookmark(bookmark: Bookmark): Promise<void> {
   const state = getGridStateSnapshot();
   if (!state) return;
 
@@ -30,14 +35,19 @@ export function navigateToBookmark(bookmark: Bookmark): void {
 
   // Switch sheet if needed
   if (bookmark.sheetIndex !== currentSheet) {
-    setActiveSheetApi(bookmark.sheetIndex);
-    dispatchGridAction(setActiveSheet(bookmark.sheetIndex, bookmark.sheetName));
-    emitAppEvent(AppEvents.SHEET_CHANGED, { index: bookmark.sheetIndex, name: bookmark.sheetName });
+    await activateSheet(bookmark.sheetIndex);
   }
 
   // Select the bookmarked cell and scroll to it
   dispatchGridAction(setSelection(bookmark.row, bookmark.col, bookmark.row, bookmark.col));
   dispatchGridAction(scrollToCell(bookmark.row, bookmark.col, true));
+}
+
+/** Navigate and report a failed switch rather than dropping it. */
+function goTo(bookmark: Bookmark): void {
+  navigateToBookmark(bookmark).catch((err) => {
+    console.error("[CellBookmarks] navigation failed:", err);
+  });
 }
 
 /**
@@ -66,7 +76,7 @@ export function navigateToNextBookmark(): Bookmark | null {
 
   // Wrap around if at the end
   const target = nextIndex >= 0 ? sorted[nextIndex] : sorted[0];
-  navigateToBookmark(target);
+  goTo(target);
   return target;
 }
 
@@ -102,6 +112,6 @@ export function navigateToPrevBookmark(): Bookmark | null {
 
   // Wrap around if at the beginning
   const target = prevIndex >= 0 ? sorted[prevIndex] : sorted[sorted.length - 1];
-  navigateToBookmark(target);
+  goTo(target);
   return target;
 }

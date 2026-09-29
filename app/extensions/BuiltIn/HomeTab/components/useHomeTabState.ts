@@ -22,6 +22,8 @@ import {
 import type { CellStyleDefinition } from "../../../_shared/components/CellStylesGallery";
 import { FONT_SIZES } from "../../../_shared/lib/fontList";
 import { alertAsync } from "@api/dialogs";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { clipboardDoorCommand } from "@api/objectClipboard";
 
 export function useHomeTabState() {
   const gridState = useGridState();
@@ -142,9 +144,13 @@ export function useHomeTabState() {
     return { rows, cols };
   }, []);
 
-  // Apply formatting and refresh
+  // Apply formatting and refresh. THE Home tab's formatting door: every
+  // button, picker, colour and the cell-style gallery come through here, so
+  // this is where a selection owner (a floating grid's selected cell, with
+  // Core's selection HIDDEN under it -- BUG-0185) refuses them, once.
   const applyFormat = useCallback(
-    async (formatting: Record<string, unknown>) => {
+    async (formatting: Record<string, unknown>, action = "Formatting") => {
+      if (refuseIfSelectionOwned(action)) return;
       const range = getSelectionRange();
       if (!range) return;
       try {
@@ -183,18 +189,25 @@ export function useHomeTabState() {
   // Handle item click
   const handleItemClick = useCallback(
     async (item: HomeTabItem) => {
+      // What a refusal calls this action ("Bold", "Wrap Text").
+      const action = item.label || "Formatting";
       try {
       switch (item.id) {
         case "cut": await CommandRegistry.execute(CoreCommands.CUT); break;
-        case "copy": await CommandRegistry.execute(CoreCommands.COPY); break;
-        case "paste": await CommandRegistry.execute(CoreCommands.PASTE); break;
+        // On a canvas, the canvas's object clipboard -- what Ctrl+C / Ctrl+V
+        // run there -- else the cell clipboard: ONE rule, shared with the Edit
+        // menu and the canvas key guard (@api/objectClipboard, wave E Y11).
+        case "copy": await CommandRegistry.execute(clipboardDoorCommand("copy")); break;
+        case "paste": await CommandRegistry.execute(clipboardDoorCommand("paste")); break;
         case "formatPainter": await CommandRegistry.execute(CoreCommands.FORMAT_PAINTER); break;
-        case "bold": await applyFormat({ bold: !(currentStyle?.bold ?? false) }); break;
-        case "italic": await applyFormat({ italic: !(currentStyle?.italic ?? false) }); break;
-        case "underline": await applyFormat({ underline: (currentStyle?.underline ?? "none") !== "none" ? "none" : "single" }); break;
-        case "strikethrough": await applyFormat({ strikethrough: !(currentStyle?.strikethrough ?? false) }); break;
+        case "bold": await applyFormat({ bold: !(currentStyle?.bold ?? false) }, action); break;
+        case "italic": await applyFormat({ italic: !(currentStyle?.italic ?? false) }, action); break;
+        case "underline": await applyFormat({ underline: (currentStyle?.underline ?? "none") !== "none" ? "none" : "single" }, action); break;
+        case "strikethrough": await applyFormat({ strikethrough: !(currentStyle?.strikethrough ?? false) }, action); break;
         case "superscript":
         case "subscript": {
+          // Its own write path (rich text, not applyFormat), so its own ask.
+          if (refuseIfSelectionOwned(action)) break;
           const sel = gridState.selection ?? lastSelectionRef.current;
           if (!sel) break;
           const isSuperscript = item.id === "superscript";
@@ -218,30 +231,30 @@ export function useHomeTabState() {
         case "increaseFontSize": {
           const size = currentStyle?.fontSize ?? 11;
           const next = FONT_SIZES.find((s) => s > size) ?? FONT_SIZES[FONT_SIZES.length - 1];
-          await applyFormat({ fontSize: next });
+          await applyFormat({ fontSize: next }, action);
           break;
         }
         case "decreaseFontSize": {
           const size = currentStyle?.fontSize ?? 11;
           const smaller = FONT_SIZES.filter((s) => s < size);
           const next = smaller.length > 0 ? smaller[smaller.length - 1] : FONT_SIZES[0];
-          await applyFormat({ fontSize: next });
+          await applyFormat({ fontSize: next }, action);
           break;
         }
         // Vertical alignment is exclusive; clicking the active state returns
         // to the spreadsheet default (bottom), mirroring the h-align toggles.
-        case "alignTop": await applyFormat({ verticalAlign: currentStyle?.verticalAlign === "top" ? "bottom" : "top" }); break;
-        case "alignMiddle": await applyFormat({ verticalAlign: currentStyle?.verticalAlign === "middle" ? "bottom" : "middle" }); break;
-        case "alignBottom": await applyFormat({ verticalAlign: "bottom" }); break;
-        case "alignLeft": await applyFormat({ textAlign: currentStyle?.textAlign === "left" ? "general" : "left" }); break;
-        case "alignCenter": await applyFormat({ textAlign: currentStyle?.textAlign === "center" ? "general" : "center" }); break;
-        case "alignRight": await applyFormat({ textAlign: currentStyle?.textAlign === "right" ? "general" : "right" }); break;
-        case "wrapText": await applyFormat({ wrapText: !(currentStyle?.wrapText ?? false) }); break;
-        case "increaseIndent": await applyFormat({ indent: Math.min(15, (currentStyle?.indent ?? 0) + 1) }); break;
-        case "decreaseIndent": await applyFormat({ indent: Math.max(0, (currentStyle?.indent ?? 0) - 1) }); break;
+        case "alignTop": await applyFormat({ verticalAlign: currentStyle?.verticalAlign === "top" ? "bottom" : "top" }, action); break;
+        case "alignMiddle": await applyFormat({ verticalAlign: currentStyle?.verticalAlign === "middle" ? "bottom" : "middle" }, action); break;
+        case "alignBottom": await applyFormat({ verticalAlign: "bottom" }, action); break;
+        case "alignLeft": await applyFormat({ textAlign: currentStyle?.textAlign === "left" ? "general" : "left" }, action); break;
+        case "alignCenter": await applyFormat({ textAlign: currentStyle?.textAlign === "center" ? "general" : "center" }, action); break;
+        case "alignRight": await applyFormat({ textAlign: currentStyle?.textAlign === "right" ? "general" : "right" }, action); break;
+        case "wrapText": await applyFormat({ wrapText: !(currentStyle?.wrapText ?? false) }, action); break;
+        case "increaseIndent": await applyFormat({ indent: Math.min(15, (currentStyle?.indent ?? 0) + 1) }, action); break;
+        case "decreaseIndent": await applyFormat({ indent: Math.max(0, (currentStyle?.indent ?? 0) - 1) }, action); break;
         case "mergeCells": await CommandRegistry.execute(CoreCommands.MERGE_CELLS); break;
-        case "percentFormat": await applyFormat({ numberFormat: "0%" }); break;
-        case "commaFormat": await applyFormat({ numberFormat: "#,##0" }); break;
+        case "percentFormat": await applyFormat({ numberFormat: "0%" }, action); break;
+        case "commaFormat": await applyFormat({ numberFormat: "#,##0" }, action); break;
         case "increaseDecimal": {
           const fmt = currentStyle?.numberFormat ?? "General";
           const decMatch = fmt.match(/(\d+)\s*decimal/i);
@@ -249,7 +262,7 @@ export function useHomeTabState() {
           const hasSep = fmt.includes("separator");
           const newDecimals = currentDecimals + 1;
           const decPart = newDecimals > 0 ? "." + "0".repeat(newDecimals) : "";
-          await applyFormat({ numberFormat: hasSep ? `#,##0${decPart}` : `0${decPart}` });
+          await applyFormat({ numberFormat: hasSep ? `#,##0${decPart}` : `0${decPart}` }, action);
           break;
         }
         case "decreaseDecimal": {
@@ -260,7 +273,7 @@ export function useHomeTabState() {
             const hasSep = fmt.includes("separator");
             const newDecimals = currentDecimals - 1;
             const decPart = newDecimals > 0 ? "." + "0".repeat(newDecimals) : "";
-            await applyFormat({ numberFormat: hasSep ? `#,##0${decPart}` : `0${decPart}` });
+            await applyFormat({ numberFormat: hasSep ? `#,##0${decPart}` : `0${decPart}` }, action);
           }
           break;
         }
@@ -288,9 +301,9 @@ export function useHomeTabState() {
   const handleColorSelect = useCallback(
     async (itemId: string, color: string) => {
       if (itemId === "textColor") {
-        await applyFormat({ textColor: color });
+        await applyFormat({ textColor: color }, "Font Color");
       } else if (itemId === "backgroundColor") {
-        await applyFormat({ backgroundColor: color });
+        await applyFormat({ backgroundColor: color }, "Fill Color");
       }
     },
     [applyFormat]
@@ -299,7 +312,7 @@ export function useHomeTabState() {
   // Ribbon font pickers (Font group row 1)
   const handleFontFamilyChange = useCallback(
     async (fontFamily: string) => {
-      await applyFormat({ fontFamily });
+      await applyFormat({ fontFamily }, "Font");
     },
     [applyFormat]
   );
@@ -307,7 +320,7 @@ export function useHomeTabState() {
   const handleFontSizeChange = useCallback(
     async (fontSize: number) => {
       if (Number.isFinite(fontSize) && fontSize > 0) {
-        await applyFormat({ fontSize });
+        await applyFormat({ fontSize }, "Font Size");
       }
     },
     [applyFormat]
@@ -316,7 +329,7 @@ export function useHomeTabState() {
   // Number-format dropdown (Number group row 1)
   const handleNumberFormatChange = useCallback(
     async (numberFormat: string) => {
-      await applyFormat({ numberFormat });
+      await applyFormat({ numberFormat }, "Number Format");
     },
     [applyFormat]
   );
@@ -324,7 +337,7 @@ export function useHomeTabState() {
   // Handle cell style gallery selection
   const handleCellStyleApply = useCallback(
     async (formatting: CellStyleDefinition["formatting"]) => {
-      await applyFormat(formatting as Record<string, unknown>);
+      await applyFormat(formatting as Record<string, unknown>, "Cell Style");
     },
     [applyFormat]
   );

@@ -11,7 +11,7 @@ import {
   getSubscriptions,
   getApplicationObjects,
   publishPreview,
-  setActiveSheetApi,
+  activateSheet,
   onAppEvent,
   AppEvents,
 } from "@api";
@@ -175,7 +175,14 @@ export function ConnectedObjectsSection(_props: PanelSectionProps): React.ReactE
               {s.localSheetIndex !== null ? (
                 <a
                   style={{ cursor: "pointer", textDecoration: "underline" }}
-                  onClick={() => void setActiveSheetApi(s.localSheetIndex as number)}
+                  // The whole switch, not the backend's half of it: the grid
+                  // and the tab strip follow (a backend-only switch left both
+                  // on the old sheet, found 2026-09-29).
+                  onClick={() => {
+                    activateSheet(s.localSheetIndex as number).catch((err) => {
+                      console.error("[ApplicationExplorer] sheet switch failed:", err);
+                    });
+                  }}
                 >
                   {s.localName}
                 </a>

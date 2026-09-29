@@ -8,6 +8,7 @@ import {
   loadAndInstallCustomFunctions,
   uninstallCustomFunctions,
   registerMenuItem,
+  unregisterMenuItem,
   DialogExtensions,
   AppEvents,
   IconCustomFunctions,
@@ -44,6 +45,11 @@ function activate(context: ExtensionContext): void {
     label: "Custom Functions...",
     icon: IconCustomFunctions,
     action: () => DialogExtensions.openDialog(DIALOG_ID, {}),
+  });
+  // Its OWN items back on deactivate (wave E, Y14): the Formulas menu is Tracing's.
+  cleanupFns.push(() => {
+    unregisterMenuItem("formulas", "formulas:customFunctions:sep");
+    unregisterMenuItem("formulas", "formulas:customFunctions");
   });
 
   // ===== Distributed (.calp) consent gate for packaged formula functions =====

@@ -7,8 +7,7 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import type { Selection } from "@api";
 import { CoreCommands } from "@api/commands";
 import { ExtensionRegistry, IconFormatPainter, IconLock } from "@api";
-import { registerMenuItem } from "@api/ui";
-import { isEditKeystroke } from "@api/editing";
+import { registerMenuItem, unregisterMenuItem } from "@api/ui";
 import { activateFormatPainter, deactivateFormatPainter } from "./formatPainterLogic";
 import { isFormatPainterActive } from "./formatPainterState";
 
@@ -49,24 +48,18 @@ function activate(context: ExtensionContext): void {
   context.commands.register(CoreCommands.FORMAT_PAINTER_LOCK, async () => {
     await activateFormatPainter(true, currentSelection);
   });
+  // Deactivate takes both away: a deactivated extension must not keep
+  // answering the registry's Ctrl+Shift+C (D3 class).
+  cleanupFns.push(() => context.commands.unregister(CoreCommands.FORMAT_PAINTER));
+  cleanupFns.push(() => context.commands.unregister(CoreCommands.FORMAT_PAINTER_LOCK));
 
-  // Register keyboard shortcuts
+  // Keyboard. Ctrl+Shift+C is NOT handled here: the keybinding registry's
+  // `core.formatPainter` binding runs FORMAT_PAINTER ("not-editing", so never
+  // in a text field, a claim or a cell edit). This listener used to run the
+  // same command beside it, so one keystroke with the grid focused started the
+  // painter twice, and a user's remap in Settings left Ctrl+Shift+C working
+  // (BUG-0199). Only Escape is the painter's own key.
   const handleKeyDown = (e: KeyboardEvent) => {
-    // Ctrl+Shift+C: Activate Format Painter (single-use)
-    if (e.ctrlKey && e.shiftKey && e.key === "C") {
-      // This listener checked NOTHING, not even a text field: Ctrl+Shift+C
-      // typed in the formula bar picked up Core's selection's format.
-      // Not while a cell edit owns the keyboard: Core's in-cell editor, the
-      // formula bar, any text field, or a floating grid's live cell edit (whose
-      // keyboard can sit on the grid container while it picks a reference).
-      // Excel ignores this key in edit mode, and here it acted on Core's
-      // selection -- during a floating-grid edit, a HIDDEN one.
-      if (isEditKeystroke(e)) return;
-      e.preventDefault();
-      context.commands.execute(CoreCommands.FORMAT_PAINTER);
-      return;
-    }
-
     // ESC: Deactivate Format Painter (if active)
     if (e.key === "Escape" && isFormatPainterActive()) {
       e.preventDefault();
@@ -79,11 +72,14 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
 
   // Register menu items in Edit menu (separator + format painter with submenu)
+  // Both items go on deactivate, like the commands: an item outliving the
+  // extension ran a command that no longer existed (D3 review).
   registerMenuItem("edit", {
     id: "edit:sep-fp",
     label: "",
     separator: true,
   });
+  cleanupFns.push(() => unregisterMenuItem("edit", "edit:sep-fp"));
   registerMenuItem("edit", {
     id: "edit:formatPainter",
     label: "Format Painter",
@@ -100,6 +96,7 @@ function activate(context: ExtensionContext): void {
       },
     ],
   });
+  cleanupFns.push(() => unregisterMenuItem("edit", "edit:formatPainter"));
 
   isActivated = true;
   console.log("[FormatPainterExtension] Activated successfully.");

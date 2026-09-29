@@ -61,6 +61,14 @@ pub fn delocalize_formula(input: &str, locale: &LocaleSettings) -> String {
             continue;
         }
 
+        // A BARE sheet-name prefix (`Q1.2026!C3`) is a NAME too: copied verbatim,
+        // mirrored in `localize_formula` (see `bare_sheet_prefix_len`).
+        if let Some(run) = bare_sheet_prefix_len(&chars, i) {
+            result.extend(&chars[i..i + run]);
+            i += run;
+            continue;
+        }
+
         braces.observe(ch);
 
         if braces.in_array_constant() {
@@ -241,6 +249,30 @@ impl SheetNameSpan {
     }
 }
 
+/// The length of a BARE (unquoted) sheet-name prefix starting at `i`, i.e. a run
+/// of name characters that begins a token and ends right before `!`.
+///
+/// WHY: a sheet named `Q1.2026` is written bare (`=SUM(Q1.2026!C3)`), and its
+/// `1.2` is digits around a dot, which the decimal rule read as a number: the
+/// formula DISPLAYED as `=SUM(Q1,2026!C3)` on a Swedish machine, a reference to
+/// a sheet that does not exist (found live 2026-09-29, e2e fixall-edit W13).
+/// Everything before `!` is a name, never syntax -- the same reason quoted
+/// names are copied verbatim (`SheetNameSpan`).
+///
+/// A token starts where the previous character is not a name character, so the
+/// `A1` of `Sheet1!A1` or the tail of a function name never starts a run.
+fn bare_sheet_prefix_len(chars: &[char], i: usize) -> Option<usize> {
+    let is_name_char = |c: char| c.is_alphanumeric() || c == '_' || c == '.';
+    if i > 0 && is_name_char(chars[i - 1]) {
+        return None;
+    }
+    let mut j = i;
+    while j < chars.len() && is_name_char(chars[j]) {
+        j += 1;
+    }
+    (j > i && j < chars.len() && chars[j] == '!').then_some(j - i)
+}
+
 /// Convert a formula from invariant (US) format to locale format for display.
 ///
 /// Example (sv-SE): `=SUMMA(A1,B1,1.5)` -> `=SUMMA(A1;B1;1,5)`
@@ -290,6 +322,13 @@ pub fn localize_formula(invariant: &str, locale: &LocaleSettings) -> String {
                 result.push(chars[i + k]);
             }
             i += verbatim;
+            continue;
+        }
+
+        // Mirror of `delocalize_formula`: a BARE sheet-name prefix is a name.
+        if let Some(run) = bare_sheet_prefix_len(&chars, i) {
+            result.extend(&chars[i..i + run]);
+            i += run;
             continue;
         }
 
@@ -671,4 +710,18 @@ mod tests {
         // Plain cell reference with no function
         assert_eq!(delocalize_formula("=A1+1,5", &locale), "=A1+1.5");
     }
+
+    #[test]
+    fn a_bare_sheet_name_with_digits_around_a_dot_is_not_a_number() {
+        // Found live 2026-09-29: =SUM(Q1.2026!C3) displayed as =SUM(Q1,2026!C3).
+        assert_eq!(localize_formula("=SUM(Q1.2026!C3)", &se()), "=SUM(Q1.2026!C3)");
+        assert_eq!(localize_formula("=Q1.2026!C3+1.5", &se()), "=Q1.2026!C3+1,5");
+        assert_eq!(delocalize_formula("=Q1.2026!C3+1,5", &se()), "=Q1.2026!C3+1.5");
+        // Round trip, both directions.
+        let inv = "=SUM(Q1.2026!C3,v2.5!A1,2.5)";
+        assert_eq!(delocalize_formula(&localize_formula(inv, &se()), &se()), inv);
+        // A plain reference and a function name are untouched by the rule.
+        assert_eq!(localize_formula("=Sheet1!A1+ROUND(1.25,1)", &se()), "=Sheet1!A1+ROUND(1,25;1)");
+    }
+
 }

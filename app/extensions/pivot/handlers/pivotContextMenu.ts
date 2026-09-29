@@ -56,30 +56,6 @@ import {
 import { confirmAsync, promptAsync } from "@api/dialogs";
 
 // ============================================================================
-// Context Menu Item IDs
-// ============================================================================
-
-const CONTEXT_ITEM_IDS = [
-  "pivot:formatCells",
-  "pivot:refresh",
-  "pivot:insertChart",
-  "pivot:delete",
-  "pivot:rename",
-  "pivot:sort",
-  "pivot:filter",
-  "pivot:subtotal",
-  "pivot:expandCollapse",
-  "pivot:group",
-  "pivot:ungroup",
-  "pivot:move",
-  "pivot:removeField",
-  "pivot:fieldSettings",
-  "pivot:pivotOptions",
-  "pivot:hideFieldList",
-  "pivot:editScript",
-];
-
-// ============================================================================
 // Registration
 // ============================================================================
 
@@ -403,26 +379,18 @@ export function registerPivotContextMenuItems(): () => void {
           const fieldInZone = fields.find((f) => f.sourceIndex === fieldIndex);
           if (!fieldInZone) return;
 
-          // Build the update request: toggle showSubtotals. Every field of
-          // the zone carries the items it hides NOW, explicitly:
-          // `update_pivot_fields` rebuilds each field it is given, and an
-          // absent list builds one that hides nothing -- toggling one field's
-          // subtotals used to clear the filters of every field in its zone.
-          const updatedFields = fields.map((f) => {
-            if (f.sourceIndex === fieldIndex) {
-              return {
-                sourceIndex: f.sourceIndex,
-                name: f.name,
-                hiddenItems: [...(f.hiddenItems ?? [])],
-                showSubtotals: !currentShowSubtotals,
-              };
-            }
-            return {
-              sourceIndex: f.sourceIndex,
-              name: f.name,
-              hiddenItems: [...(f.hiddenItems ?? [])],
-            };
-          });
+          // Build the update request: the whole zone (the command REPLACES a
+          // zone it is given), with only the clicked field's subtotals
+          // flipped. No field's item filter is sent: `update_pivot_fields`
+          // keeps every setting it is not sent since BUG-0184 (it used to
+          // rebuild each field, so toggling one field's subtotals cleared the
+          // filters of every field in its zone), and an echoed list read at
+          // click time could only race a filter changed since.
+          const updatedFields = fields.map((f) =>
+            f.sourceIndex === fieldIndex
+              ? { sourceIndex: f.sourceIndex, name: f.name, showSubtotals: !currentShowSubtotals }
+              : { sourceIndex: f.sourceIndex, name: f.name },
+          );
 
           const updateRequest = isRow
             ? { pivotId: pivotInfo.pivotId, rowFields: updatedFields }
@@ -833,8 +801,12 @@ export function registerPivotContextMenuItems(): () => void {
 
   gridExtensions.registerContextMenuItems(items);
 
+  // The ids are read from the items just registered, never from a hand list:
+  // one kept beside them had drifted, and "Drill-Through Behavior..." outlived
+  // every deactivate (wave E, Y14).
+  const ownIds = items.map((item) => item.id);
   return () => {
-    for (const id of CONTEXT_ITEM_IDS) {
+    for (const id of ownIds) {
       gridExtensions.unregisterContextMenuItem(id);
     }
   };

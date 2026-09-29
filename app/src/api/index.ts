@@ -15,6 +15,10 @@ export { API_VERSION } from "./version";
 
 export { CoreCommands, CommandRegistry } from "./commands";
 export type { ICommandRegistry } from "./commands";
+// Run a command from WHICHEVER registry holds it (CommandRegistry, else the
+// extension registry's commands). Not a script door: scripts stay behind isScriptSafe.
+export { executeCommandAnywhere, buildCommandContext } from "./commandDispatch";
+export type { CommandRunOutcome } from "./commandDispatch";
 
 // ============================================================================
 // Contract (Extension types)
@@ -357,6 +361,7 @@ export type {
 
 export { showToast } from "./notifications";
 export type { ToastOptions } from "./notifications";
+export { registerSelectionOwner, isSelectionOwned, refuseIfSelectionOwned, type SelectionOwner } from "./selectionOwner";
 
 // ============================================================================
 // Cell Events
@@ -378,6 +383,14 @@ export type { FormulaReferenceWithPosition } from "../core/lib/formulaRefParser"
 // backend switch and BEFORE dispatching sheet:beforeSwitch/normalSwitch, so
 // the tab strip and the canvas commit the new sheet in ONE paint.
 export { primeSheetSwitch } from "../core/lib/sheetSwitchPrefetch";
+
+// Undo-transaction tickets: beginUndoTransaction answers a ticket when it
+// OPENED the transaction (null = joined); close by presenting it.
+export { readUndoBeginAnswer } from "./undoTicket";
+export type { UndoBeginAnswer, UndoTransactionTicket } from "./undoTicket";
+// ...and a gesture closes ONLY what its own begin opened (a join closes nothing).
+export { ownUndoTransaction } from "./undoTicket";
+export type { OwnedUndoTransaction, UndoTransactionCloses } from "./undoTicket";
 
 // ============================================================================
 // Grid Dispatch Bridge (for non-React code)
@@ -841,6 +854,7 @@ export { exposeExtensionRuntimeGlobals, getExtensionReact, REACT_GLOBAL } from "
 export {
   // Menu API
   registerMenu,
+  unregisterMenu,
   registerMenuItem,
   updateMenuItem,
   unregisterMenuItem,
@@ -872,6 +886,7 @@ export {
   unregisterDialog,
   showDialog,
   hideDialog,
+  isDialogOpen,
   // Overlay API
   registerOverlay,
   unregisterOverlay,
@@ -2926,6 +2941,15 @@ export type {
   UndoTransactionHandle,
 } from "./objectGeometry";
 
+// The ONE door for "make sheet N the active sheet" from an extension: the
+// backend switch AWAITED, then Core's sheet context (with the sheet's own
+// surface), then SHEET_CHANGED -- in that order (see sheetSwitch.ts).
+export { activateSheet } from "./sheetSwitch";
+
+// The command-refusal registry both command doors ask: the keyboard
+// dispatcher and CommandRegistry.execute (see commandRefusals.ts).
+export { commandRefusalFor } from "./commandRefusals";
+
 // The ONE "a PivotTable report will overwrite existing data" decision for any
 // gesture that filters or rebuilds pivots (a slicer click, a ribbon filter,
 // the pivot's own commands): asked once, failing closed, and on decline only
@@ -2935,8 +2959,6 @@ export {
   confirmPivotOverwriteOrUndo,
   takeBackPivotOverwrite,
   pivotOverwriteQuestion,
-  undoStepPushedBetween,
-  runNamingItsUndoStep,
   isAnyUndoTransactionOpen,
   runStepThenConfirmOverwrite,
   PIVOT_OVERWRITE_NOT_TAKEN_BACK,
@@ -2946,7 +2968,6 @@ export type {
   PivotOverwriteTally,
   PivotOverwriteOutcome,
   PivotOverwriteStepOutcome,
-  ConfirmPivotOverwriteOptions,
 } from "./pivotOverwrite";
 
 // Restack floating objects (bring forward / send backward / to front / to

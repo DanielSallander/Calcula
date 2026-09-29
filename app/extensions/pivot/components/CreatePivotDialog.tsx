@@ -43,6 +43,9 @@ import {
   findDefaultCanvasSource,
   readCanvasPivotPlacement,
   resolveCanvasPivotSource,
+  resolveWorksheetPivotDestination,
+  resolveWorksheetPivotSource,
+  sourceTextNamesTable,
   type CanvasPivotPlacement,
 } from '../lib/canvasPivotCreate';
 
@@ -77,6 +80,12 @@ export interface CreatePivotDialogProps {
    *  (`{ sheetIndex, x, y, width, height }`, logical page px). Validated here;
    *  a valid one puts the dialog in canvas mode with that frame. */
   placement?: unknown;
+  /** The opener says the grid selection is NOT data (Insert > PivotTable
+   *  while a selection owner -- a floating grid -- holds the selection, so
+   *  Core's selection is a cell hidden under it): no data region is detected
+   *  from it and the source starts EMPTY. A `tableName` still applies: it is
+   *  the opener's explicit choice, not a guess from the selection. */
+  suppressAutoRange?: boolean;
 }
 
 type DestinationType = 'new' | 'existing';
@@ -150,8 +159,8 @@ function parseCellReference(cellRef: string): { row: number; col: number } | nul
     ref = ref.substring(bangIndex + 1);
   }
   
-  // Remove any quotes
-  ref = ref.replace(/'/g, '').trim().toUpperCase();
+  // Remove any quotes, and the `$` of an absolute reference ($F$1)
+  ref = ref.replace(/'/g, '').replace(/\$/g, '').trim().toUpperCase();
   
   // Match column letters and row number
   const match = ref.match(/^([A-Z]+)(\d+)$/);
@@ -170,25 +179,6 @@ function parseCellReference(cellRef: string): { row: number; col: number } | nul
   const row = rowNumber - 1; // Convert to 0-indexed
   
   return { row, col };
-}
-
-/**
- * Extract sheet name from a reference like "Sheet1!A1" or "'My Sheet'!A1"
- * Returns null if no sheet prefix.
- */
-function extractSheetName(reference: string): string | null {
-  const bangIndex = reference.lastIndexOf('!');
-  if (bangIndex === -1) {
-    return null;
-  }
-  
-  let sheetName = reference.substring(0, bangIndex);
-  // Remove surrounding quotes if present
-  if (sheetName.startsWith("'") && sheetName.endsWith("'")) {
-    sheetName = sheetName.substring(1, sheetName.length - 1);
-  }
-  
-  return sheetName;
 }
 
 /**
@@ -212,6 +202,7 @@ export function CreatePivotDialog({
   selection,
   tableName,
   placement,
+  suppressAutoRange = false,
 }: CreatePivotDialogProps): React.ReactElement | null {
   // Read current grid selection (active cell) for auto-detection
   const gridState = useGridState();
@@ -299,7 +290,8 @@ export function CreatePivotDialog({
 
   // Auto-detect the contiguous data region around the active cell. Never on a
   // canvas: it has no cells, so its "selection" is not data (the canvas
-  // effect below chooses the default source instead).
+  // effect below chooses the default source instead). Never when the opener
+  // says the selection is not data (`suppressAutoRange`).
   useEffect(() => {
     if (canvasMode) return;
     if (!isOpen || hasAutoDetected || !currentSheetName) return;
@@ -308,6 +300,14 @@ export function CreatePivotDialog({
     if (tableName) {
       setHasAutoDetected(true);
       setSourceRange(tableName);
+      return;
+    }
+
+    // The opener asked for no prefill: the source starts EMPTY -- including
+    // over a range a previous open detected, which this state still holds.
+    if (suppressAutoRange) {
+      setHasAutoDetected(true);
+      setSourceRange('');
       return;
     }
 
@@ -353,7 +353,7 @@ export function CreatePivotDialog({
           setSourceRange(fullRange);
         }
       });
-  }, [canvasMode, isOpen, hasAutoDetected, currentSheetName, selection, tableName, gridState.selection]);
+  }, [canvasMode, isOpen, hasAutoDetected, currentSheetName, selection, tableName, suppressAutoRange, gridState.selection]);
 
   // Canvas mode, once per open: the default source (a table the opener named,
   // else the data on the first worksheet that has any, else a note saying
@@ -544,6 +544,14 @@ export function CreatePivotDialog({
       if (!sourceRange.trim()) {
         throw new Error('Please enter a source data range.');
       }
+      // The source SHEET: a typed "Sheet2!A1:D9" names it (BUG-0149: the
+      // sheet active when the dialog opened was sent, and the create door
+      // strips the prefix, so the pivot summarised the wrong sheet). Refused
+      // here, before a destination sheet is added.
+      const source = resolveWorksheetPivotSource(sourceRange, sheets, sourceSheetIndex);
+      if (!source.ok) {
+        throw new Error(source.message);
+      }
 
       let destinationCell: string;
       let destinationSheetIndex: number | undefined;
@@ -586,14 +594,17 @@ export function CreatePivotDialog({
           throw new Error('Please enter a destination cell.');
         }
         destinationCell = existingDestination.trim();
-        destinationSheetName = extractSheetName(destinationCell);
-        
-        // If a sheet name was specified, find its index
-        if (destinationSheetName) {
-          const destSheet = sheets.find(s => s.name === destinationSheetName);
-          if (destSheet) {
-            destinationSheetIndex = destSheet.index;
-          }
+        // Its sheet, found ignoring case as the source's is. An exact-case
+        // match that found nothing sent no sheet, and the create door then
+        // used the active sheet: `sheet2!B3` (or a sheet that does not exist)
+        // put the pivot on the sheet the dialog was opened from.
+        const destination = resolveWorksheetPivotDestination(destinationCell, sheets);
+        if (!destination.ok) {
+          throw new Error(destination.message);
+        }
+        if (destination.sheet) {
+          destinationSheetIndex = destination.sheet.index;
+          destinationSheetName = destination.sheet.name;
         }
         
         // Parse the destination coordinates
@@ -612,8 +623,13 @@ export function CreatePivotDialog({
       // When sourced from a table, resolve the range from the table's current
       // coordinates but still send the cell range for initial cache build.
       // The sourceTableName links the pivot to the table for future refreshes.
-      let resolvedSourceRange = sourceRange;
-      if (tableName && selection) {
+      // Only while the text still names the table: retyped (`Sheet2!A1:D9`),
+      // the text is the source and the pivot is not linked -- the table's
+      // cells on this sheet with the typed sheet as `sourceSheet` named two
+      // sources in one request.
+      const linkedTable = sourceTextNamesTable(sourceRange, tableName) ? tableName : undefined;
+      let resolvedSourceRange = source.sourceRange;
+      if (linkedTable && selection) {
         // Build an A1 range from the table's coordinates so the backend can parse it
         const range = selectionToRange(
           selection.startRow,
@@ -628,11 +644,11 @@ export function CreatePivotDialog({
       const view = await pivot.create({
         sourceRange: resolvedSourceRange,
         destinationCell: destinationCell,
-        sourceSheet: sourceSheetIndex,
+        sourceSheet: source.sourceSheet,
         destinationSheet: destinationSheetIndex,
         hasHeaders: true,
         name: pivotName.trim() || undefined,
-        sourceTableName: tableName || undefined,
+        sourceTableName: linkedTable,
       });
 
       console.log('[CreatePivotDialog] Pivot table created:', view.pivotId, 'rows:', view.rowCount, 'cols:', view.colCount);
@@ -866,6 +882,7 @@ export function CreatePivotDialog({
                 </label>
                 <input
                   type="text"
+                  data-testid="pivot-worksheet-source-range"
                   style={styles.input}
                   value={sourceRange}
                   onChange={e => setSourceRange(e.target.value)}

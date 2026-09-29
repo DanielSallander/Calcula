@@ -80,7 +80,7 @@ describe("SelectVisibleCells Deep", () => {
     const registerMenuItemMock = vi.mocked(registerMenuItem);
     registerMenuItemMock.mockClear();
 
-    extension.activate({} as ExtensionContext);
+    extension.activate({ commands: { register: vi.fn(), unregister: vi.fn() } } as unknown as ExtensionContext);
 
     const call = registerMenuItemMock.mock.calls.find(
       (c) => (c[1] as { id: string }).id === "edit:selectVisibleCells",

@@ -225,28 +225,52 @@ const DEFAULT_SCREENSHOT_OPTIONS = SCREENSHOT_DEFAULTS;
  */
 
 /**
- * Reset the app to a brand-new empty workbook via the Tauri `new_file` command.
- * This clears all sheets, data, and formatting — equivalent to File > New.
- * Use at the start of test groups that need a guaranteed clean slate.
+ * Reset the app to a brand-new empty workbook through the APP'S OWN File > New
+ * (`newFile` in src/core/lib/file-api.ts). This clears all sheets, data, and
+ * formatting. Use at the start of test groups that need a guaranteed clean slate.
+ *
+ * NEVER A RAW `new_file` INVOKE (BUG-0205). The backend command alone replaces
+ * the document but announces nothing, and the frontend stores keep describing
+ * the previous one: the chart store reloads only on AFTER_NEW / AFTER_OPEN, so
+ * a chart left by the previous spec kept painting over the next spec's grid.
+ * `newFile` emits AFTER_NEW and `announceBackendStateReplaced` (sheet list,
+ * per-sheet display flags, the grid's cell cache, Core's edit flag), which is
+ * exactly what File > New does in the product.
+ *
+ * The module is imported from the URL the app itself loaded it from (its
+ * resource-timing entry): a copy under another URL is a second module instance
+ * with its own state -- its own Core edit flag -- and would reset that one.
+ *
+ * GEOMETRY is the one thing `newFile` does not announce: the frontend re-reads
+ * column widths / row heights and the sheet defaults only on mount or on
+ * "dimensions:refresh", so that event is still dispatched here, as before.
  */
 export async function resetToNewWorkbook(page: Page): Promise<void> {
   await page.evaluate(async () => {
-    const tauri = (window as any).__TAURI__;
-    if (tauri?.core?.invoke) {
-      await tauri.core.invoke("new_file", {});
-      // `new_file` clears the backend's per-column/row overrides AND resets the
-      // default geometry (persistence::reset_default_geometry). The FRONTEND
-      // caches both: Spreadsheet.tsx re-reads dimensions only on mount or on
-      // "dimensions:refresh", and SheetTabs.tsx reloads only on mount or on
-      // "app:sheet-changed". Dispatching "grid:refresh" alone therefore repaints
-      // the canvas with geometry the backend has already discarded — goldens
-      // captured after this helper would encode ghost 100px/24px lines and a
-      // phantom "Sheet2" tab, states the app can never actually be in. (The
-      // product is unaffected: File > New does a full window.location.reload().)
-      window.dispatchEvent(new CustomEvent("dimensions:refresh"));
-      window.dispatchEvent(new Event("app:sheet-changed"));
-      window.dispatchEvent(new Event("grid:refresh"));
+    const w = window as unknown as { __calcImport?: (u: string) => Promise<unknown> };
+    if (!w.__calcImport) {
+      throw new Error(
+        "resetToNewWorkbook: window.__calcImport is missing, so the app's own newFile cannot be " +
+          "reached (E2E must run against the dev server). Refusing to fall back to a raw new_file (BUG-0205).",
+      );
     }
+    const modulePath = "/src/core/lib/file-api.ts";
+    const loaded = performance
+      .getEntriesByType("resource")
+      .map((e) => e.name)
+      .filter((n) => {
+        try {
+          return new URL(n).pathname === modulePath;
+        } catch {
+          return false;
+        }
+      })
+      .sort();
+    const url = loaded.length > 0 ? loaded[loaded.length - 1] : new URL(modulePath, document.baseURI).href;
+    const fileApi = (await w.__calcImport(url)) as { newFile: () => Promise<void> };
+    await fileApi.newFile();
+    window.dispatchEvent(new CustomEvent("dimensions:refresh"));
+    window.dispatchEvent(new Event("grid:refresh"));
   });
   // Wait for the UI to fully re-render after the reset
   await page.waitForTimeout(1000);

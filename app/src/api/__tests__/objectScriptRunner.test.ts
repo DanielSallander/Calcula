@@ -23,11 +23,32 @@ vi.mock("../scriptHost/host", () => ({
   },
   hostIsMounted: (id: string) => mountedIds.has(id),
   workerRealmAvailable: () => workerAvailable.value,
+  hostCloseBatchLeftOpen: (id: string) => hostCloseBatchLeftOpen(id),
 }));
 
-const undo = { open: false };
+/**
+ * The backend's one transaction slot, and WHO opened it: `ownBatch` is true
+ * only while the RUN's script holds a batch its own beginBatch opened -- what
+ * the host records from the begin's answer. A transaction a user's gesture
+ * opens is `open` without being the run's.
+ */
+const undo = { open: false, ownBatch: false };
 const cancelUndoTransaction = vi.fn(async () => {
   undo.open = false;
+  undo.ownBatch = false;
+});
+/** The script's api.beginBatch, as the host answers it. */
+function scriptBeginsBatch(): void {
+  if (!undo.open) {
+    undo.open = true;
+    undo.ownBatch = true;
+  }
+}
+/** The host's close of the run's OWN batch (cancelled; see host.ts). */
+const hostCloseBatchLeftOpen = vi.fn(async (_id: string) => {
+  if (!undo.ownBatch) return false;
+  await cancelUndoTransaction();
+  return true;
 });
 
 vi.mock("../lib", () => ({
@@ -121,12 +142,14 @@ beforeEach(() => {
   hostMountScript.mockReset().mockResolvedValue(undefined);
   hostUnmountScript.mockReset();
   cancelUndoTransaction.mockClear();
+  hostCloseBatchLeftOpen.mockClear();
   moduleStore.length = 0;
   unreadable.clear();
   listWorkbookScripts.mockClear();
   getWorkbookScript.mockClear();
   mountedIds.clear();
   undo.open = false;
+  undo.ownBatch = false;
   workerAvailable.value = true;
   invokeBackend.mockClear();
 });
@@ -212,7 +235,7 @@ describe("runObjectScriptOnce", () => {
     // open group would swallow every later edit the user makes and quietly
     // break their Ctrl+Z.
     hostMountScript.mockImplementationOnce(async () => {
-      undo.open = true;
+      scriptBeginsBatch();
       throw new Error("Script mount timed out (10s)");
     });
 
@@ -230,11 +253,43 @@ describe("runObjectScriptOnce", () => {
 
   it("does not cancel anything when the run closed its own transaction", async () => {
     hostMountScript.mockImplementationOnce(async () => {
-      undo.open = true; // beginBatch
+      scriptBeginsBatch(); // beginBatch
       undo.open = false; // commitBatch
+      undo.ownBatch = false;
     });
     await runObjectScriptOnce({ name: "A", source: "" });
     expect(cancelUndoTransaction).not.toHaveBeenCalled();
+  });
+
+  it("leaves a transaction ANOTHER caller opened while the run was going alone (X6)", async () => {
+    // A user's gesture (or another script) opened the slot during the run;
+    // the run's own script never began a batch. Cancelling it would strip the
+    // opener's writes of their undo step.
+    hostMountScript.mockImplementationOnce(async () => {
+      undo.open = true;
+    });
+    await runObjectScriptOnce({ name: "A", source: "" });
+    expect(cancelUndoTransaction, "the run cancelled a transaction it did not open").not.toHaveBeenCalled();
+    expect(undo.open).toBe(true);
+  });
+
+  it("closes the run's batch BEFORE the realm is unmounted, and asks for the run's own id", async () => {
+    const order: string[] = [];
+    hostMountScript.mockImplementationOnce(async (d: unknown) => {
+      mountedIds.add(String((d as { id: string }).id));
+      scriptBeginsBatch();
+    });
+    hostCloseBatchLeftOpen.mockImplementationOnce(async () => {
+      order.push("close");
+      await cancelUndoTransaction();
+      return true;
+    });
+    hostUnmountScript.mockImplementationOnce(() => {
+      order.push("unmount");
+    });
+    await runObjectScriptOnce({ name: "A", source: "" });
+    expect(order).toEqual(["close", "unmount"]);
+    expect(hostCloseBatchLeftOpen).toHaveBeenCalledWith(String(lastMount().id));
   });
 });
 

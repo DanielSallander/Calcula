@@ -72,6 +72,7 @@ vi.mock("@api/gridOverlays", async () => {
     getLiveGridRegions: () => publishedRegions,
     onPointModeViewChanged: () => () => undefined,
     floatingHitOrder: actual.floatingHitOrder,
+    stackedFloatingRegions: actual.stackedFloatingRegions,
     replaceGridRegionsByType: (_type: string, regions: unknown[]) => {
       publishedRegions = regions;
     },
@@ -105,7 +106,21 @@ vi.mock("@api/grid", async () => {
   };
 });
 
+// The object clipboard's canvas rule reads Core's grid state; this double
+// answers it from the same snapshot the hit test reads.
+vi.mock("@api/objectClipboard", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  canvasOwnsObjectClipboard: () => gridSnapshot.surface === "canvas",
+}));
+
 import { installControlObjectMenu, CONTROL_CONTEXT_MENU_ID } from "../lib/controlObjectMenu";
+import { registerControlObjectSelection } from "../lib/controlObjectSelection";
+import {
+  getSelectedObjectRegions,
+  registerObjectSelectionProvider,
+  resetObjectSelectionProviders,
+  setObjectSelectionSet,
+} from "@api/objectSelection";
 import { buildControlObjectMenu } from "../lib/controlContextMenu";
 import { ControlContextMenu } from "../components/ControlContextMenu";
 import {
@@ -278,6 +293,65 @@ describe("a control covered by another family's object", () => {
     rightClickOnGrid(ON_BUTTON);
     expect(showOverlay).toHaveBeenCalledTimes(1);
     expect(showOverlay.mock.calls[0][1].data.controlId).toBe(BUTTON_ID);
+  });
+});
+
+describe("on a CANVAS the right-click makes the control THE selection across families (W25)", () => {
+  // The menu's Copy / Duplicate act on the WHOLE object selection there, so a
+  // chart selected before a right-click on an unselected shape must not ride
+  // along into the shape's Duplicate.
+  let chartSelected = false;
+  const CHART = {
+    id: "chart-c1",
+    type: "chart",
+    startRow: 0,
+    startCol: 0,
+    endRow: 0,
+    endCol: 0,
+    floating: { x: 600, y: 400, width: 120, height: 40 },
+    data: { chartId: "c1" },
+  };
+  const cleanups: Array<() => void> = [];
+
+  beforeEach(() => {
+    gridSnapshot.surface = "canvas";
+    chartSelected = true;
+    resetObjectSelectionProviders();
+    publishedRegions = [...publishedRegions, CHART];
+    cleanups.push(
+      registerControlObjectSelection(),
+      registerObjectSelectionProvider({
+        types: ["chart"],
+        isSelected: () => chartSelected,
+        select: () => {
+          chartSelected = true;
+        },
+        deselectAll: () => {
+          chartSelected = false;
+        },
+      }),
+    );
+  });
+
+  afterEach(() => {
+    while (cleanups.length) cleanups.pop()!();
+    resetObjectSelectionProviders();
+  });
+
+  it("a right-click on a control OUTSIDE the selection selects it alone -- the chart is dropped", () => {
+    // Canvas: no header gutters, the button paints at (100..180, 50..74).
+    rightClickOnGrid({ clientX: 105, clientY: 55 });
+    expect(showOverlay).toHaveBeenCalledTimes(1);
+    expect(isFloatingControlSelected(BUTTON_ID)).toBe(true);
+    expect(chartSelected, "the chart stayed selected and would be duplicated with the shape").toBe(false);
+  });
+
+  it("control: a right-click on a MEMBER of a multi-selection keeps the whole selection", () => {
+    const button = (publishedRegions as Array<{ id: string }>).find((r) => r.id === BUTTON_ID)!;
+    setObjectSelectionSet([button as never, CHART as never], button as never);
+    rightClickOnGrid({ clientX: 105, clientY: 55 });
+    expect(chartSelected).toBe(true);
+    expect(getSelectedObjectRegions().map((r) => r.id).sort()).toEqual([BUTTON_ID, "chart-c1"].sort());
   });
 });
 

@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use calp::diff::{DiffOptions, DiffSide, VersionDiff};
@@ -51,6 +51,18 @@ pub struct MergeAnalysisResponse {
     pub analysis: MergeAnalysis,
 }
 
+/// What the merge commands' caller can hand over. Optional, so an older caller
+/// that sends nothing still gets an answer (a less complete one).
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergePreviewParams {
+    /// The frontend providers' distributable objects, collected the way a push
+    /// collects them (BUG-0150). Without them the working side lacks every
+    /// model overlay and report, and each reads as REMOVED by "you".
+    #[serde(default)]
+    pub custom_objects: Option<Vec<crate::calp_commands::FrontendCustomObject>>,
+}
+
 /// Where a push stands against what landed while its author was working.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -64,6 +76,7 @@ pub fn calp_push_merge_analyze(
     pane_control_state: State<crate::pane_control::PaneControlState>,
     user_files_state: State<crate::persistence::UserFilesState>,
     timeline_slicer_state: State<crate::timeline_slicer::TimelineSlicerState>,
+    params: Option<MergePreviewParams>,
     window: tauri::Window,
 ) -> Result<MergeAnalysisResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -96,6 +109,7 @@ pub fn calp_push_merge_analyze(
         &user_files_state,
         &timeline_slicer_state,
         &ctx,
+        params.unwrap_or_default().custom_objects,
     )?;
 
     let analysis = if head_str == ctx.base_version {
@@ -145,6 +159,7 @@ pub fn calp_push_merge_apply(
     pane_control_state: State<crate::pane_control::PaneControlState>,
     user_files_state: State<crate::persistence::UserFilesState>,
     timeline_slicer_state: State<crate::timeline_slicer::TimelineSlicerState>,
+    params: Option<MergePreviewParams>,
     window: tauri::Window,
 ) -> Result<MergeApplyResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -168,6 +183,8 @@ pub fn calp_push_merge_apply(
     }
 
     let theirs = diff_head_against_base(&ctx, &head_str)?;
+    // The SAME objects the analysis the user saw was given, or this re-run
+    // could reach a different verdict than the dialog showed.
     let yours = diff_working_copy_against_base(
         &state,
         &bi_state,
@@ -179,6 +196,7 @@ pub fn calp_push_merge_apply(
         &user_files_state,
         &timeline_slicer_state,
         &ctx,
+        params.unwrap_or_default().custom_objects,
     )?;
     let analysis = calp::merge::analyze(&theirs, &yours);
     if analysis.verdict != MergeVerdict::CanMerge {
@@ -358,6 +376,7 @@ fn diff_working_copy_against_base(
     user_files_state: &State<crate::persistence::UserFilesState>,
     timeline_slicer_state: &State<crate::timeline_slicer::TimelineSlicerState>,
     ctx: &MergeContext,
+    frontend_custom_objects: Option<Vec<crate::calp_commands::FrontendCustomObject>>,
 ) -> Result<VersionDiff, String> {
     let (base_registry, base_version, base_manifest) = crate::calp_inspector::open_verified_content(
         &ctx.registry_url,
@@ -366,6 +385,7 @@ fn diff_working_copy_against_base(
         true,
     )?;
 
+    let frontend_objects_supplied = frontend_custom_objects.is_some();
     let memory = calp::MemoryWorkspace::new();
     let working_version = calp::SemVer::new(0, 0, 0);
     crate::calp_commands::publish_into_for_preview(
@@ -385,6 +405,9 @@ fn diff_working_copy_against_base(
         &ctx.kind,
         Vec::new(),
         false,
+        frontend_custom_objects,
+        // A working copy's collision renames are undone by the assembly itself.
+        &HashMap::new(),
     )?;
     let working_str = working_version.to_string();
     let working_manifest = memory
@@ -405,11 +428,15 @@ fn diff_working_copy_against_base(
     .map_err(|e| e.to_string())?;
     // A `minAppVersion` change the working side cannot know to be real is not a
     // piece "you" touched, and must not collide with the head's.
-    crate::calp_commands::reconcile_unknowable_min_app_version(
-        &mut diff,
-        &base_manifest,
-        &working_manifest,
-    );
+    // Only when the working side could not see the frontend's objects: one
+    // that was handed them saw everything the push carries (BUG-0150).
+    if !frontend_objects_supplied {
+        crate::calp_commands::reconcile_unknowable_min_app_version(
+            &mut diff,
+            &base_manifest,
+            &working_manifest,
+        );
+    }
     Ok(diff)
 }
 
@@ -429,6 +456,12 @@ fn overlay_their_cells(
         true,
     )?;
 
+    // The head speaks the APPLICATION's sheet names; a working copy whose
+    // checkout collision-renamed a sheet has its references rewritten to the
+    // local name (BUG-0151), and a merged-in cell must say the same or it reads
+    // the author's own same-named sheet.
+    let renames =
+        crate::calp_commands::working_copy_sheet_renames(state, &ctx.registry_url, &ctx.package_name)?;
     let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
     let mut grids = state.grids.read().map_err(|e| e.to_string())?.clone();
     let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
@@ -454,25 +487,23 @@ fn overlay_their_cells(
             ));
         };
 
-        let data = registry
-            .read_artifact(
-                &ctx.package_name,
-                &head_version,
-                &format!("sheets/{}/data.json", sheet.sheet_id),
-            )
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("v{head} is missing data for the sheet '{}'.", sheet.name))?;
-        let head_data: calcula_format::sheet_data::SheetData =
-            serde_json::from_slice(&data).map_err(|e| e.to_string())?;
-        let head_cells = calcula_format::sheet_data::sheet_data_to_cells(&head_data);
+        let positions: Vec<(u32, u32)> = sheet.sample.iter().map(|c| (c.row, c.col)).collect();
+        let head_cells = crate::calp_commands::published_cells_in_local_names(
+            &*registry,
+            &ctx.package_name,
+            &head_version,
+            &sheet.sheet_id,
+            &positions,
+            &renames,
+        )?
+        .ok_or_else(|| format!("v{head} is missing data for the sheet '{}'.", sheet.name))?;
 
         let grid = grids
             .get_mut(local_index)
             .ok_or_else(|| "Sheet index out of range while merging.".to_string())?;
 
-        for cell in &sheet.sample {
-            let pos = (cell.row, cell.col);
-            match head_cells.get(&pos) {
+        for (pos, head_cell) in head_cells {
+            match head_cell {
                 Some(saved) => {
                     grid.cells.insert(pos, saved.to_cell());
                 }

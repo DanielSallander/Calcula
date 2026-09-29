@@ -130,10 +130,17 @@ pub(crate) async fn apply_filters(
         conditions.push(render_scalar(f, &schema));
     }
 
-    // IN-list filters: `col IN (v1, v2, …)`; empty → matches nothing.
+    // IN-list filters: `col IN (v1, v2, …)`; empty → matches nothing. One
+    // that names the BLANK member (`include_null`) keeps the NULL rows too
+    // (`(col IN (…) OR col IS NULL)`; empty → the NULL rows only).
     for in_filter in &request.in_filters {
+        let column = quote_ident_double(&in_filter.column);
         if in_filter.values.is_empty() {
-            conditions.push("1 = 0".to_string());
+            conditions.push(if in_filter.include_null {
+                format!("{column} IS NULL")
+            } else {
+                "1 = 0".to_string()
+            });
             continue;
         }
         let values: Vec<String> = in_filter
@@ -141,11 +148,12 @@ pub(crate) async fn apply_filters(
             .iter()
             .map(|v| render_value(v, &in_filter.column, &schema))
             .collect();
-        conditions.push(format!(
-            "{} IN ({})",
-            quote_ident_double(&in_filter.column),
-            values.join(", ")
-        ));
+        let condition = format!("{column} IN ({})", values.join(", "));
+        conditions.push(if in_filter.include_null {
+            format!("({condition} OR {column} IS NULL)")
+        } else {
+            condition
+        });
     }
 
     // OR groups (DNF): `((c AND c) OR (c AND c) …)`. An empty AND-group matches

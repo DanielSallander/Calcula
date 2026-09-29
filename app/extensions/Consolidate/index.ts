@@ -33,7 +33,7 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => context.ui.dialogs.unregister("consolidate"));
 
   // 2. Register menu item in Data menu
-  registerConsolidateMenuItem(context);
+  cleanupFns.push(registerConsolidateMenuItem(context));
 
   // 3. Track current selection (for menu item to know active cell)
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {

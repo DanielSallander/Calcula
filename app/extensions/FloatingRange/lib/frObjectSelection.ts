@@ -39,11 +39,41 @@ export function frIdOf(region: GridRegion): string | null {
   return typeof id === "string" && id.length > 0 ? id : null;
 }
 
+/** What the provider needs from the extension that it cannot import itself. */
+export interface FrObjectSelectionDeps {
+  /**
+   * Delete these ranges the way the range's own Delete does (one confirmation,
+   * because a delete ends the undo history). Resolves when every deletion has
+   * LANDED; rejects -- the ranges stay -- when the user declines or the
+   * backend refuses (the @api/objectSelection `deleteObjects` contract).
+   */
+  deleteRanges?: (frIds: readonly string[]) => Promise<void>;
+}
+
 /** The provider object (exported for tests; register it through
  *  `registerFloatingRangeObjectSelection`). */
-export function createFloatingRangeSelectionProvider(): ObjectSelectionProvider {
+export function createFloatingRangeSelectionProvider(
+  deps: FrObjectSelectionDeps = {},
+): ObjectSelectionProvider {
+  const deleteRanges = deps.deleteRanges;
   return {
     types: [FLOATING_RANGE_REGION_TYPE],
+
+    // A canvas-wide Delete (@api/objectSelection `deleteSelectedObjects`)
+    // hands the range's share of a multi-selection here -- set-held members
+    // included -- so a floating range is deleted with the chart beside it
+    // instead of being left standing and named in a "not deleted" toast.
+    ...(deleteRanges
+      ? {
+          async deleteObjects(regions: readonly GridRegion[]): Promise<void> {
+            const ids = Array.from(
+              new Set(regions.map(frIdOf).filter((id): id is string => id !== null)),
+            );
+            if (ids.length === 0) return;
+            await deleteRanges(ids);
+          },
+        }
+      : {}),
 
     isSelected(region: GridRegion): boolean {
       const id = frIdOf(region);
@@ -79,7 +109,12 @@ export function createFloatingRangeSelectionProvider(): ObjectSelectionProvider 
       // Tab moves the inner cell, the arrows move (or Shift-extend) it, and
       // Escape drops the inner selection — all only while an inner selection
       // exists (handleFrKeyDown). Without one, the range has no use for them.
-      if (key !== "Tab" && key !== "Escape" && key !== "Arrow") return false;
+      // Copy / Paste / Duplicate ("Clipboard") are the CELLS' keys while a
+      // cell is selected: the canvas's object clipboard (W25) must not copy
+      // the range as an object from under a cell selection (today those keys
+      // are refused for the range's cells, frKeyRouting.ts, and the refusal
+      // is what the user must hear).
+      if (key !== "Tab" && key !== "Escape" && key !== "Arrow" && key !== "Clipboard") return false;
       const local = getLocalSelection();
       return local !== null && getFloatingRangeById(local.frId) !== null;
     },
@@ -98,6 +133,6 @@ export function createFloatingRangeSelectionProvider(): ObjectSelectionProvider 
 }
 
 /** Register the provider; returns the cleanup for the extension's list. */
-export function registerFloatingRangeObjectSelection(): () => void {
-  return registerObjectSelectionProvider(createFloatingRangeSelectionProvider());
+export function registerFloatingRangeObjectSelection(deps: FrObjectSelectionDeps = {}): () => void {
+  return registerObjectSelectionProvider(createFloatingRangeSelectionProvider(deps));
 }

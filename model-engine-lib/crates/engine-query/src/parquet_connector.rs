@@ -364,6 +364,7 @@ mod tests {
                     column: "region".into(),
                     values: vec!["West".into()],
                     kind: InValueKind::Text,
+                    include_null: false,
                 }],
                 ..Default::default()
             })
@@ -381,6 +382,7 @@ mod tests {
                     column: "region".into(),
                     values: vec![],
                     kind: InValueKind::Text,
+                    include_null: false,
                 }],
                 ..Default::default()
             })

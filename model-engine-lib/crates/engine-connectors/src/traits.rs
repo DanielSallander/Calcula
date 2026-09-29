@@ -203,6 +203,13 @@ pub struct InFilterCondition {
     /// How the values should be rendered in SQL. Defaults to
     /// [`InValueKind::Text`] (escaped + quoted).
     pub kind: InValueKind,
+    /// Also keep the rows whose column is NULL: `column IN (...) OR column IS
+    /// NULL` (an empty `values` then keeps the NULL rows only). The planner
+    /// sets it for a scoped IN-list that names the BLANK member
+    /// (`engine_query::request::BLANK_MEMBER_LABEL`); every connector and the
+    /// local cached-table filter must honor it. `false` for every other
+    /// IN-list (relationship and security propagation included).
+    pub include_null: bool,
 }
 
 impl InFilterCondition {
@@ -213,6 +220,7 @@ impl InFilterCondition {
             column: column.into(),
             values,
             kind: InValueKind::Text,
+            include_null: false,
         }
     }
 
@@ -412,6 +420,21 @@ pub struct JoinAggregationRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct ConnectorCapabilities {
+    /// The connector answers a single-table [`FetchRequest`] whose `group_by`
+    /// and `aggregates` are set -- with its `order_by`, `limit` and
+    /// `rollup_totals` -- AT THE SOURCE: `fetch_data` returns the aggregated
+    /// shape (the group-by columns, then one column per aggregate). When
+    /// `false`, the planner never chooses `QueryPlan::PushedAggregation` for a
+    /// table on this connector and aggregates locally instead.
+    ///
+    /// This gate did not exist, and a connector that only FETCHES (CSV,
+    /// Parquet, in-memory, REST) was handed the pushed shape anyway, ignored
+    /// `group_by` / `aggregates`, and returned raw rows that the engine read
+    /// POSITIONALLY as the aggregated result: a DirectQuery CSV table grouped
+    /// by Region answered one row per source row, and grouped by Year answered
+    /// with the Region column (found by the host 2026-09-29, a model slicer on
+    /// `Sales.Year` listing East / North / South / West).
+    pub aggregate_pushdown: bool,
     /// The connector can execute a pushed JOIN + aggregation whose GROUP BY and
     /// measures are arbitrary Expression trees rendered to the connector's SQL
     /// dialect — i.e. it meaningfully implements
@@ -425,14 +448,25 @@ impl ConnectorCapabilities {
     /// The universal floor: a plain filtered fetch only, nothing pushed.
     pub const fn fetch_only() -> Self {
         Self {
+            aggregate_pushdown: false,
+            expression_pushdown: false,
+        }
+    }
+
+    /// A SQL source that renders a single-table GROUP BY + aggregates at the
+    /// source, but not expression JOIN-aggregations (today: SQL Server).
+    pub const fn with_aggregate_pushdown() -> Self {
+        Self {
+            aggregate_pushdown: true,
             expression_pushdown: false,
         }
     }
 
     /// A source that can additionally execute pushed expression
-    /// JOIN-aggregations (today: PostgreSQL).
+    /// JOIN-aggregations (today: PostgreSQL). Implies aggregate pushdown.
     pub const fn with_expression_pushdown() -> Self {
         Self {
+            aggregate_pushdown: true,
             expression_pushdown: true,
         }
     }
@@ -656,6 +690,7 @@ mod tests {
             column: "date_key".into(),
             values: vec!["1".into(), "2".into(), "3".into()],
             kind: InValueKind::Integer,
+            include_null: false,
         };
         assert_eq!(in_filter.column, "date_key");
         assert_eq!(in_filter.values.len(), 3);
@@ -675,6 +710,7 @@ mod tests {
             column: "product_id".into(),
             values: vec!["1".into(), "-42".into(), "9223372036854775807".into()],
             kind: InValueKind::Integer,
+            include_null: false,
         };
         assert_eq!(in_filter.effective_kind(), InValueKind::Integer);
     }
@@ -685,6 +721,7 @@ mod tests {
             column: "product_id".into(),
             values: vec!["1".into(), "2); DROP TABLE t; --".into()],
             kind: InValueKind::Integer,
+            include_null: false,
         };
         assert_eq!(in_filter.effective_kind(), InValueKind::Text);
     }
@@ -695,6 +732,7 @@ mod tests {
             column: "code".into(),
             values: vec!["1".into(), "2".into()],
             kind: InValueKind::Text,
+            include_null: false,
         };
         assert_eq!(in_filter.effective_kind(), InValueKind::Text);
     }

@@ -49,11 +49,17 @@ import {
   getControlMetadata,
 } from "./controlApi";
 import {
-  copyControl,
+  copyControls,
   pasteControl,
-  duplicateControl,
+  duplicateControls,
   hasClipboardControl,
 } from "./controlClipboard";
+import {
+  canvasOwnsObjectClipboard,
+  copySelectedObjects,
+  duplicateSelectedObjects,
+  runObjectClipboardAction,
+} from "@api/objectClipboard";
 import {
   invalidateShapeCache,
 } from "../Shape/shapeRenderer";
@@ -234,8 +240,30 @@ function handleSendBackward(id: string): void {
 // Copy / Paste / Duplicate Handlers
 // ============================================================================
 
+// The menu's Copy and Duplicate do what their keys do (the shortcuts they
+// show): on a CANVAS they act on the WHOLE object selection through the object
+// clipboard -- every family's objects, one undo step (W25; the right-click made
+// this control part of the selection, lib/controlObjectMenu.ts) -- and on a
+// worksheet on EVERY selected control (lib/controlKeys.ts), not only the one
+// right-clicked. Before, the menu copied or duplicated the clicked control
+// alone while Ctrl+C / Ctrl+D took the whole selection.
+//
+// Like the keys, the worksheet acts run on the object clipboard's queue
+// (`runObjectClipboardAction`), reading the subject when their turn comes, so
+// a menu Duplicate right behind a Ctrl+D still landing is its own undo step.
+
+/** The controls the menu acts on: the selection when it holds `id`, else `id`. */
+function menuSubject(id: string): string[] {
+  const selected = [...getSelectedFloatingControls()];
+  return selected.includes(id) ? selected : [id];
+}
+
 async function handleCopy(id: string): Promise<void> {
-  await copyControl(id);
+  if (canvasOwnsObjectClipboard()) {
+    await copySelectedObjects();
+    return;
+  }
+  await runObjectClipboardAction(() => copyControls(menuSubject(id)), { copies: true });
 }
 
 async function handlePaste(sheetIndex: number): Promise<void> {
@@ -243,7 +271,11 @@ async function handlePaste(sheetIndex: number): Promise<void> {
 }
 
 async function handleDuplicate(id: string): Promise<void> {
-  await duplicateControl(id);
+  if (canvasOwnsObjectClipboard()) {
+    await duplicateSelectedObjects();
+    return;
+  }
+  await runObjectClipboardAction(() => duplicateControls(menuSubject(id)));
 }
 
 // ============================================================================

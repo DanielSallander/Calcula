@@ -65,8 +65,8 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.dialogs.unregister("tracing-goto"));
 
-  // 3. Register the Formulas menu
-  registerFormulasMenu(context);
+  // 3. Register the Formulas menu (taken away again on deactivate)
+  cleanupFns.push(registerFormulasMenu(context));
 
   // 4. Clear traces on sheet change
   const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, () => {

@@ -47,8 +47,10 @@ import {
   commitUndoTransaction,
   cancelUndoTransaction,
 } from "@api/lib";
+import { ownUndoTransaction, type OwnedUndoTransaction, type UndoTransactionCloses } from "@api/undoTicket";
 import { FilterEvents } from "./filterEvents";
 import { alertAsync } from "@api/dialogs";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 // ============================================================================
 // Module State
@@ -156,6 +158,12 @@ export async function toggleFilter(): Promise<void> {
     emitAppEvent(FilterEvents.FILTER_TOGGLED, { active: false });
     return;
   }
+
+  // Creating a filter builds it from Core's selection -- HIDDEN while
+  // something else owns the selection (a floating grid's selected cell), so
+  // refuse, once (D4, BUG-0185 class). Removing an existing filter (above) is
+  // the sheet's filter, not the selection's, and stays allowed.
+  if (refuseIfSelectionOwned("Filter")) return;
 
   // Create a new filter - detect data region
   let startRow: number;
@@ -306,6 +314,17 @@ export async function refreshFilterState(): Promise<void> {
 // Sort Operations (from filter dropdown)
 // ============================================================================
 
+// The closes this module's gestures make, bound to each begin's answer by
+// ownUndoTransaction: a gesture closes ONLY the undo transaction its own begin
+// OPENED. Inside a script's open batch (or a command-line run) the begin JOINS,
+// the gesture's writes become part of that holder's step, and the holder closes
+// it -- an unconditional commit ended the batch halfway, and a cancel dropped
+// its undo record (wave E, Y7).
+const UNDO_CLOSES: UndoTransactionCloses = {
+  commitUndoTransaction: (...ticket) => commitUndoTransaction(...ticket),
+  cancelUndoTransaction: (...ticket) => cancelUndoTransaction(...ticket),
+};
+
 /**
  * Sort the AutoFilter data range by the given column.
  * Uses the header row as headers.
@@ -313,8 +332,9 @@ export async function refreshFilterState(): Promise<void> {
 export async function sortByColumn(absoluteCol: number, ascending: boolean): Promise<void> {
   if (!state.autoFilterInfo) return;
   const info = state.autoFilterInfo;
+  let tx: OwnedUndoTransaction | null = null;
   try {
-    await beginUndoTransaction("Sort by column");
+    tx = ownUndoTransaction(await beginUndoTransaction("Sort by column"), UNDO_CLOSES);
     const result = await sortRangeByColumn<{ success: boolean; error?: string }>(
       info.startRow,
       info.startCol,
@@ -324,7 +344,7 @@ export async function sortByColumn(absoluteCol: number, ascending: boolean): Pro
       ascending,
       true, // hasHeaders
     );
-    await commitUndoTransaction();
+    await tx.commit();
     if (result.success) {
       // Use "grid:refresh" (not "app:grid-refresh") to re-fetch cell data from backend
       window.dispatchEvent(new CustomEvent("grid:refresh"));
@@ -338,7 +358,7 @@ export async function sortByColumn(absoluteCol: number, ascending: boolean): Pro
     // outcome rather than an internal error. Cancel the transaction (the commit
     // above is skipped on throw, leaving it open for later edits to join) and
     // tell the user why the click did nothing.
-    await cancelUndoTransaction().catch(() => {});
+    await tx?.cancel().catch(() => {});
     console.error("[AutoFilter] Sort failed:", err);
     const msg = typeof err === "string" ? err : (err as Error)?.message;
     if (msg) void alertAsync(msg);
@@ -356,8 +376,9 @@ export async function sortByColor(
 ): Promise<void> {
   if (!state.autoFilterInfo) return;
   const info = state.autoFilterInfo;
+  let tx: OwnedUndoTransaction | null = null;
   try {
-    await beginUndoTransaction("Sort by color");
+    tx = ownUndoTransaction(await beginUndoTransaction("Sort by color"), UNDO_CLOSES);
     const result = await sortRange<{ success: boolean; error?: string }>(
       info.startRow,
       info.startCol,
@@ -371,7 +392,7 @@ export async function sortByColor(
       }],
       { hasHeaders: true },
     );
-    await commitUndoTransaction();
+    await tx.commit();
     if (result.success) {
       window.dispatchEvent(new CustomEvent("grid:refresh"));
       await reapplyFilter();
@@ -380,7 +401,7 @@ export async function sortByColor(
     }
   } catch (err) {
     // Same as sortByColumn: a protected range now rejects here.
-    await cancelUndoTransaction().catch(() => {});
+    await tx?.cancel().catch(() => {});
     console.error("[AutoFilter] Sort by color failed:", err);
     const msg = typeof err === "string" ? err : (err as Error)?.message;
     if (msg) void alertAsync(msg);

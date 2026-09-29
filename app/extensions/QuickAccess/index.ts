@@ -5,7 +5,7 @@
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { CommandRegistry, IconPin, IconMore } from "@api";
-import { registerMenu, getMenus, subscribeToMenus } from "@api/ui";
+import { registerMenu, unregisterMenu, getMenus, subscribeToMenus } from "@api/ui";
 import type { MenuItemDefinition } from "@api/uiTypes";
 import React from "react";
 import { CommandPalette, PinIcon } from "./components/CommandPalette";
@@ -30,6 +30,10 @@ let pinnedIds: Set<string> = new Set();
 let pinnedEntries: CommandEntry[] = [];
 
 let menuUnsubscribe: (() => void) | null = null;
+
+/** Between activate and deactivate. A pin toggled from a palette that is
+ *  still open when the extension goes must not build the menu again. */
+let isActive = false;
 
 // ============================================================================
 // Persistence
@@ -115,6 +119,10 @@ function executeCommand(entry: CommandEntry): void {
 
 /** Toggle pin state for a command. */
 function togglePin(entry: CommandEntry): void {
+  // A palette still open when the extension went: deactivate() emptied
+  // pinnedIds, so saving here would overwrite the user's stored pins with
+  // this one id, and the next activation would load only that.
+  if (!isActive) return;
   if (pinnedIds.has(entry.id)) {
     pinnedIds.delete(entry.id);
   } else {
@@ -127,6 +135,7 @@ function togglePin(entry: CommandEntry): void {
 
 /** Register/re-register the Quick Access menu with current pinned items. */
 function registerQuickAccessMenu(): void {
+  if (!isActive) return;
   const items: MenuItemDefinition[] = [];
 
   // Add pinned command items (with blue pin icon to unpin)
@@ -142,6 +151,7 @@ function registerQuickAccessMenu(): void {
         icon: React.createElement(PinIcon),
         title: "Unpin from Quick Access",
         onClick: () => {
+          if (!isActive) return; // as togglePin: never save after deactivate
           pinnedIds.delete(capturedEntry.id);
           savePinnedIds();
           rebuildPinnedEntries();
@@ -191,6 +201,8 @@ function registerQuickAccessMenu(): void {
 function activate(_context: ExtensionContext): void {
   console.log("[QuickAccess] Activating...");
 
+  isActive = true;
+
   // Load persisted pins
   pinnedIds = loadPinnedIds();
   rebuildPinnedEntries();
@@ -215,6 +227,10 @@ function deactivate(): void {
     menuUnsubscribe();
     menuUnsubscribe = null;
   }
+  isActive = false;
+  // The menu was never taken back (X19): it outlived the extension, pins and
+  // all. No other extension adds to it; keepWhileShared would keep it for one.
+  unregisterMenu(MENU_ID, { keepWhileShared: true });
   pinnedIds.clear();
   pinnedEntries = [];
 }

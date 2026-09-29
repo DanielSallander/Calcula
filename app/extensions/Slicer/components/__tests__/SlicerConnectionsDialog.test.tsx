@@ -40,9 +40,22 @@ vi.mock("@api/dialogs", () => ({ confirmAsync: (...a: unknown[]) => h.confirm(..
 vi.mock("@api/notifications", () => ({ showToast: vi.fn() }));
 vi.mock("@api/objectGeometry", () => ({
   isUndoTransactionOpen: () => false,
+  undoCommitsSettled: () => Promise.resolve(),
   runInUndoTransaction: async (label: string, fn: () => Promise<unknown>) => {
     h.txLabels.push(label);
     return fn();
+  },
+  // The Tauri shape of the gesture's step: the BEGIN answers whether it opened
+  // the step, and it joins (opens nothing) while a script holds one open.
+  openUndoTransaction: (label: string) => {
+    h.txLabels.push(label);
+    const opened = !h.backendTxOpen;
+    return {
+      joined: !opened,
+      run: async (fn: () => Promise<unknown>) => fn(),
+      commit: async () => undefined,
+      openedBackend: async () => opened,
+    };
   },
 }));
 vi.mock("../../../../src/core/lib/tauri-api", async (importOriginal) => ({
@@ -201,7 +214,7 @@ describe("Report Connections for a model slicer", () => {
 
     expect(h.txLabels).toEqual(["Slicer Connections"]);
     expect(h.confirm).toHaveBeenCalledTimes(1);
-    expect(h.undo).toHaveBeenCalledWith("p-other", [41], undefined);
+    expect(h.undo).toHaveBeenCalledWith("p-other", [41]);
     expect(onClose).toHaveBeenCalled();
   });
 

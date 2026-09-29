@@ -51,6 +51,10 @@ export type {
 class ExtensionRegistryImpl {
   // Registered items
   private commands: Map<string, Command> = new Map();
+  /** Registrations of an id that a later registerCommand overwrote, oldest
+   *  first. The live one is in `commands`; when its owner takes it back, the
+   *  most recent one still standing under it is live again. */
+  private shadowedCommands: Map<string, Command[]> = new Map();
   private ribbonTabs: Map<string, RibbonTabDefinition> = new Map();
   private ribbonGroups: Map<string, RibbonGroupDefinition> = new Map();
   private addins: Map<string, AddInManifest> = new Map();
@@ -68,8 +72,13 @@ class ExtensionRegistryImpl {
    * Register an add-in and all its contributions.
    */
   registerAddIn(manifest: AddInManifest): void {
-    if (this.addins.has(manifest.id)) {
+    const previous = this.addins.get(manifest.id);
+    if (previous) {
       console.warn(`[ExtensionRegistry] Add-in "${manifest.id}" already registered, overwriting.`);
+      // The overwrite REPLACES the add-in: its previous commands go first, or
+      // they would stay stacked under the new ones and come back when
+      // unregisterAddIn (which reads only the new manifest) takes those.
+      previous.commands?.forEach((cmd) => this.unregisterCommand(cmd));
     }
 
     // Check dependencies
@@ -97,7 +106,7 @@ class ExtensionRegistryImpl {
     const manifest = this.addins.get(addinId);
     if (!manifest) return;
 
-    manifest.commands?.forEach((cmd) => this.commands.delete(cmd.id));
+    manifest.commands?.forEach((cmd) => this.unregisterCommand(cmd));
     manifest.ribbonTabs?.forEach((tab) => this.unregisterRibbonTab(tab.id));
     manifest.ribbonGroups?.forEach((group) => this.ribbonGroups.delete(group.id));
 
@@ -110,10 +119,41 @@ class ExtensionRegistryImpl {
   // =========================================================================
 
   registerCommand(command: Command): void {
-    if (this.commands.has(command.id)) {
+    const live = this.commands.get(command.id);
+    if (live === command) return; // the same registration again: nothing to stack
+    if (live) {
       console.warn(`[ExtensionRegistry] Command "${command.id}" already registered, overwriting.`);
+      const shadowed = this.shadowedCommands.get(command.id) ?? [];
+      shadowed.push(live);
+      this.shadowedCommands.set(command.id, shadowed);
     }
     this.commands.set(command.id, command);
+  }
+
+  /**
+   * The inverse of registerCommand (an extension's deactivation). It takes
+   * back THIS registration -- the object the caller registered -- and no
+   * other, so an extension going cannot remove a command of the same id that
+   * another extension registered over it, nor leave no command at all when
+   * it had shadowed one (review of X20, wave D):
+   * - the live one: the most recent registration it overwrote that is still
+   *   standing is live again, or the id goes;
+   * - one overwritten since: it leaves the stack, so it cannot come back when
+   *   the one over it goes, and the live command is untouched;
+   * - not registered (already taken back): nothing happens.
+   */
+  unregisterCommand(command: Command): void {
+    const id = command.id;
+    const shadowed = this.shadowedCommands.get(id);
+    if (this.commands.get(id) === command) {
+      const previous = shadowed?.pop();
+      if (previous) this.commands.set(id, previous);
+      else this.commands.delete(id);
+    } else if (shadowed) {
+      const at = shadowed.lastIndexOf(command);
+      if (at >= 0) shadowed.splice(at, 1);
+    }
+    if (shadowed && shadowed.length === 0) this.shadowedCommands.delete(id);
   }
 
   getCommand(commandId: string): Command | undefined {
@@ -282,6 +322,7 @@ class ExtensionRegistryImpl {
 
   clear(): void {
     this.commands.clear();
+    this.shadowedCommands.clear();
     this.ribbonTabs.clear();
     this.ribbonGroups.clear();
     this.addins.clear();

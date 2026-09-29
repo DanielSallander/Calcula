@@ -165,14 +165,17 @@ function indexView(view: PivotViewResponse, valueFields: readonly string[]): Vie
 
   // Pass 2: the data cells.
   //
-  // A BLANK MEMBER (a category whose name is empty or null) has no pair at
-  // all: the engine skips `VALUE_ID_EMPTY` when it builds a group path, so the
-  // blank member's LEAF cell carries the same pairs as a subtotal one level up
-  // and would pass for "the cell that IS the fact". A fact never names a blank
-  // member, so a leaf (`Data`) cell with fewer pairs than the pivot has axis
-  // fields is left out — found live on a model whose product category was
-  // null for some sales, where the month's change cue landed on that column
-  // as well as on the Grand Total.
+  // A leaf (`Data`) cell with FEWER pairs than the pivot has axis fields names
+  // no member on some axis: it carries the pairs of a subtotal one level up
+  // and would pass for "the cell that IS the fact", so it is left out. Found
+  // live on a model whose product category was null for some sales, where the
+  // month's change cue landed on that column as well as on the Grand Total:
+  // the engine then gave a BLANK member (a category whose name is empty or
+  // null) no pair at all. It no longer does (wave D, X1): a blank member
+  // carries a pair of its own (`VALUE_ID_BLANK`), its header shows "(blank)",
+  // and its cells are matched like any other member's -- by that label, which
+  // a fact naming "" or nothing does not match. The length rule stays as the
+  // backstop for any leaf that still comes without a full path.
   const axisFields = view.rowFieldSummaries.length + view.columnFieldSummaries.length;
   const cells: DataCell[] = [];
   const measures = new Set<string>();

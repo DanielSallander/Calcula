@@ -4,7 +4,7 @@
 // CONTEXT: Must be rendered inside the React tree (e.g., in Layout.tsx).
 
 import { useEffect } from 'react';
-import { registerMenu } from '@api/ui';
+import { registerMenu, unregisterMenu } from '@api/ui';
 import { useFileMenu } from './FileMenu';
 import { useViewMenu } from './ViewMenu';
 import { useInsertMenu } from './InsertMenu';
@@ -22,6 +22,17 @@ export function StandardMenus(): null {
   useEffect(() => { registerMenu(fileMenu); }, [fileMenu]);
   useEffect(() => { registerMenu(viewMenu); }, [viewMenu]);
   useEffect(() => { registerMenu(insertMenu); }, [insertMenu]);
+
+  // ...and take them away when this component leaves the shell frame (the
+  // extension's deactivate unregisters it): these menus are this component's,
+  // and without it they would outlive the extension (W20). Items other
+  // extensions added to them are kept by the registry and return with them.
+  const fileId = fileMenu.id;
+  const viewId = viewMenu.id;
+  const insertId = insertMenu.id;
+  useEffect(() => () => {
+    for (const id of [fileId, viewId, insertId]) unregisterMenu(id);
+  }, [fileId, viewId, insertId]);
 
   return null;
 }

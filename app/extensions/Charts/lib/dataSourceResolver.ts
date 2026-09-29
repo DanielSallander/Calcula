@@ -33,6 +33,7 @@ import { getGridStateSnapshot } from "@api/grid";
 import type { ChartSpec, DataSource, DataRangeRef } from "../types";
 import { isDataRangeRef, isPivotDataSource, isDesignQueryDataSource } from "../types";
 import { loadSheetIdMap, peekSheetIndexForId } from "./sheetIdMap";
+import { splitSheetQualifiedRange } from "./chartRangeBinding";
 
 // ============================================================================
 // Sheet identity: the stable sheet id -> the live sheet index
@@ -187,20 +188,14 @@ interface ParsedA1 {
  * Dollar signs ($) are stripped (absolute references treated same as relative).
  */
 function parseA1Reference(ref: string): ParsedA1 | null {
-  let remaining = ref;
-  let sheetName: string | undefined;
-
-  // Extract sheet name if present (before the !)
-  const bangIndex = remaining.lastIndexOf("!");
-  if (bangIndex !== -1) {
-    sheetName = remaining.substring(0, bangIndex);
-    remaining = remaining.substring(bangIndex + 1);
-
-    // Strip surrounding quotes from sheet name
-    if (sheetName.startsWith("'") && sheetName.endsWith("'")) {
-      sheetName = sheetName.substring(1, sheetName.length - 1);
-    }
-  }
+  // The sheet prefix through the range binding's own splitter: the name is
+  // unquoted AND its doubled quotes unescaped. This parser used to strip the
+  // quotes only, so a chart over a sheet named Rock'!Roll asked for a sheet
+  // called Rock''!Roll and never plotted, not even for its publisher (found
+  // live 2026-09-29, e2e fixall-calp R5).
+  const split = splitSheetQualifiedRange(ref);
+  const sheetName = split.sheetName ?? undefined;
+  let remaining = split.range;
 
   // Strip dollar signs
   remaining = remaining.replace(/\$/g, "").trim().toUpperCase();
@@ -314,30 +309,88 @@ async function resolveCellValue(
 }
 
 /**
- * Resolve a param's single-cell reference to its display value. Same-sheet only:
- * a sheet-qualified ref (containing "!") returns null so the caller falls back
- * to the literal default. Accepts "=B1" or "B1".
- *
- * "Same sheet" is the ACTIVE sheet -- the sheet the chart is showing on, and the
- * one a param write-back targets (`parseParamCellTarget`) -- which is also the
- * rule the scoped invalidation keys a param cell on (lib/chartInvalidation.ts).
- * On a canvas there are no cells, so the read finds nothing and the param keeps
- * its literal default.
+ * The chart a param belongs to, as far as its bound cell is concerned: the
+ * sheet it is PLACED on, and its spec (whose data names the sheet it reads).
  */
-export async function resolveParamCell(
-  cellRef: string,
-): Promise<string | null> {
-  const body = (cellRef.startsWith("=") ? cellRef.slice(1) : cellRef).trim();
-  if (body === "" || body.includes("!")) return null;
-  // Single same-sheet cell only — a range would silently read its top-left cell.
-  if (!isCellReference(`=${body}`)) return null;
-  return resolveCellValue(`=${body}`, undefined);
+export interface ParamCellHost {
+  sheetIndex: number;
+  spec: ChartSpec;
 }
 
 /**
- * Parse a single same-sheet cell write target ("=B1" or "B1") to {row, col}
+ * Where a param's bound cell is: a cell on a sheet; "invalid" when the text
+ * is not one unqualified cell (the S7c rule: the read keeps the default, a
+ * write-back is skipped); "noSheet" when the chart is on a canvas and its data
+ * does not come from a sheet (a pivot, a model query), so there is no sheet
+ * for an unqualified cell to be on.
+ */
+export type ParamCellLocation =
+  | { kind: "cell"; sheetIndex: number; row: number; col: number }
+  | { kind: "invalid" }
+  | { kind: "noSheet" };
+
+/**
+ * WHICH SHEET a param's unqualified cell ("=B1") is on -- the sheet the chart
+ * reads its cells from:
+ *
+ *   - a chart on a WORKSHEET: that sheet, its own (the long-standing rule --
+ *     it used to be spelled "the active sheet", which is the sheet a chart is
+ *     showing on while you click it; naming it keeps a chart on a sheet that
+ *     is NOT active reading its own cell);
+ *   - a chart on a CANVAS, which has no cells: the sheet its DATA comes from,
+ *     the rule an unqualified `=A1` title already follows
+ *     ({@link specReferenceSheet}). It used to read the canvas, find nothing,
+ *     and keep the literal default forever, and its write-back was refused;
+ *   - a canvas chart whose data has no sheet: "noSheet".
+ *
+ * `host` null (a preview, an export -- no placed chart) keeps the historical
+ * rule: the ACTIVE sheet. A sheet list that cannot be read counts the host as
+ * a worksheet (the old behaviour, never a guess at another sheet).
+ */
+export async function locateParamCell(
+  cellRef: string,
+  host: ParamCellHost | null,
+): Promise<ParamCellLocation> {
+  const target = parseParamCellTarget(cellRef);
+  if (!target) return { kind: "invalid" };
+  if (!host) return { kind: "cell", sheetIndex: activeSheetIndexFallback(), ...target };
+  let hostIsCanvas = false;
+  try {
+    const map = await loadSheetIdMap();
+    hostIsCanvas = map.sheets.find((sh) => sh.index === host.sheetIndex)?.kind === "canvas";
+  } catch {
+    hostIsCanvas = false;
+  }
+  if (!hostIsCanvas) return { kind: "cell", sheetIndex: host.sheetIndex, ...target };
+  const dataSheet = await specReferenceSheet(host.spec);
+  if (typeof dataSheet !== "number" || dataSheet === host.sheetIndex) return { kind: "noSheet" };
+  return { kind: "cell", sheetIndex: dataSheet, ...target };
+}
+
+/**
+ * Resolve a param's single-cell reference to its display value, on the sheet
+ * {@link locateParamCell} names. Unqualified only: a sheet-qualified ref
+ * (containing "!") or a range returns null so the caller falls back to the
+ * literal default, as does a canvas chart with no data sheet. Accepts "=B1" or
+ * "B1". The scoped invalidation keys the param cell on the same sheet
+ * (lib/chartInvalidation.ts `paramCellSheetIndex`).
+ */
+export async function resolveParamCell(
+  cellRef: string,
+  host: ParamCellHost | null = null,
+): Promise<string | null> {
+  const at = await locateParamCell(cellRef, host);
+  if (at.kind !== "cell") return null;
+  // Sparse: a cell that does not exist is simply absent from the result.
+  const cells = await getRangeCellsTyped(at.row, at.col, at.row, at.col, at.sheetIndex);
+  return cells.length > 0 ? cells[0].display || null : null;
+}
+
+/**
+ * Parse a single unqualified cell target ("=B1" or "B1") to {row, col}
  * (0-based). Returns null for a range, a sheet-qualified ref, or an invalid ref
- * — the caller skips the write (writeback is same-sheet single-cell only, S7c).
+ * — the caller skips the write (writeback is single-cell only, S7c). WHICH
+ * sheet the cell is on is {@link locateParamCell}'s answer.
  */
 export function parseParamCellTarget(cellRef: string): { row: number; col: number } | null {
   const body = (cellRef.startsWith("=") ? cellRef.slice(1) : cellRef).trim();

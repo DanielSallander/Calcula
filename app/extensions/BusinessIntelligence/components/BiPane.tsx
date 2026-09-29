@@ -5,6 +5,7 @@
 import React, { useState, useCallback, useEffect, useMemo } from "react";
 import type { TaskPaneViewProps } from "@api";
 import { useGridState, restoreFocusToGrid } from "@api";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 import {
   getConnections,
   connect,
@@ -406,6 +407,11 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
 
   const handleInsert = useCallback(async () => {
     if (!queryResult || selectedConnectionId === null) return;
+    // The result block is anchored at Core's active cell -- HIDDEN while
+    // something else owns the selection (a floating grid's selected cell) --
+    // so refuse, once, and write nothing (BUG-0185 class). (A canvas holds no
+    // cells; the backend refuses a result block there either way.)
+    if (refuseIfSelectionOwned("Insert Query Result")) return;
     try {
       setLoading(true);
       setStatus("Inserting into sheet...");

@@ -106,6 +106,16 @@ export interface ExternalFormulaTarget {
   /** Insert the picked reference into the target's formula at the cursor. */
   insertReference(ref: ExternalFormulaReference): void;
   /**
+   * Insert already-built, SHEET-QUALIFIED formula text at the cursor: what a
+   * pick produces that is not a cell range -- a whole column or row picked
+   * from a header ("Sheet1!C:C", "Sheet1!3:5", "Sheet1!1:1048576" from the
+   * select-all corner) or a GETPIVOTDATA call built for a pivot cell (E2).
+   * Optional: a target without it receives cell ranges only, and a header
+   * pick inserts nothing into it (a GETPIVOTDATA pick falls back to the plain
+   * cell reference).
+   */
+  insertText?(text: string): void;
+  /**
    * Present when this target is a two-view edit session (a floating grid's
    * cell editor). ABSENT for pick-only targets -- the chart text editor
    * (core/lib/overlayTextEditor.ts) -- which keep exactly the historical
@@ -129,6 +139,13 @@ export interface ExternalCellTarget {
   readonly content: string | null;
   /** The bar refuses focus when true. */
   readonly readOnly: boolean;
+  /**
+   * The cell is a NON-ANCHOR cell of a spill (Excel's "ghost"): `content` is
+   * the anchor's formula, and the bar shows it GREYED, exactly as it greys a
+   * grid spill cell (FormulaInput's `isSpillRef`). The owner also sets
+   * `readOnly` -- the formula lives in the anchor, not here. Absent = false.
+   */
+  readonly spillGhost?: boolean;
   /**
    * Open (or adopt) an edit session on the active cell WITHOUT taking focus
    * (view "bar"); `seed` replaces the text (fx passes "="). Returns the session
@@ -334,14 +351,19 @@ export function setExternalSessionParked(viewedSheetIndex: number | null): void 
 // ============================================================================
 
 function sameCellData(a: ExternalCellTarget, b: ExternalCellTarget): boolean {
-  return a.address === b.address && a.content === b.content && a.readOnly === b.readOnly;
+  return (
+    a.address === b.address &&
+    a.content === b.content &&
+    a.readOnly === b.readOnly &&
+    (a.spillGhost === true) === (b.spillGhost === true)
+  );
 }
 
 /**
  * Single slot, last writer wins. `null` withdraws ONLY when `owner` still holds
  * the slot (identity by owner key -- a stale withdraw cannot remove a newer
  * publisher). There is no fallback to an older publication: a withdrawn WRITE
- * target is gone. Notifies only when owner/address/content/readOnly changed;
+ * target is gone. Notifies only when owner/address/content/readOnly/spillGhost changed;
  * the stored object is always replaced, so handlers read live state.
  */
 export function publishExternalCellTarget(owner: string, target: ExternalCellTarget | null): void {
@@ -426,6 +448,49 @@ export function resolveExternalAddress(text: string): ExternalAddressResolution 
 export function isFormulaBarElement(el: unknown): boolean {
   const candidate = el as { getAttribute?: (name: string) => string | null } | null | undefined;
   return typeof candidate?.getAttribute === "function" && candidate.getAttribute("data-formula-bar") === "true";
+}
+
+// ============================================================================
+// Reference text handed to an external target
+// ============================================================================
+
+/**
+ * True when `name` may stand in a formula WITHOUT apostrophes -- the backend
+ * lexer reads it as ONE plain identifier. Rule for rule the backend's own
+ * `is_bare_sheet_name` (core/engine/src/ast_render.rs), which its
+ * render-then-parse test pins for every reference shape:
+ *   - an ASCII letter or `_` first (a leading digit lexes as a number);
+ *   - then ASCII letters, digits and `_`, and a `.` only when one of those
+ *     follows it (a trailing dot is the trim-reference operator);
+ *   - never `TRUE` / `FALSE` in any case (they lex as BOOLEAN literals).
+ * A reference-SHAPED name (`A1`, `Sheet1`) is bare: the `!` after it is what
+ * tells the lexer it is a sheet.
+ */
+export function isBareSheetName(name: string): boolean {
+  if (!/^[A-Za-z_]/.test(name)) return false;
+  for (let i = 0; i < name.length; i++) {
+    const c = name[i];
+    if (/[A-Za-z0-9_]/.test(c)) continue;
+    if (c === "." && i + 1 < name.length && /[A-Za-z0-9_]/.test(name[i + 1])) continue;
+    return false;
+  }
+  const upper = name.toUpperCase();
+  return upper !== "TRUE" && upper !== "FALSE";
+}
+
+/**
+ * A sheet (or floating-range) name as a formula must spell it before `!`:
+ * bare when {@link isBareSheetName}, otherwise apostrophe-quoted with an
+ * inner `'` doubled. The ONE rule the text handed to an external edit is
+ * built with -- Core's header and GETPIVOTDATA picks (useSpreadsheetSelection)
+ * and a floating grid's own cell picks and addresses (@api/externalEdit) --
+ * so the two halves of one edit cannot quote the same sheet differently.
+ * Core's display helper `formatSheetName` (gridRenderer/references/
+ * conversion.ts) quotes only whitespace, ' ! [ ] and a leading digit, and
+ * produced `Q1-2026!C:C`, which the parser rejects.
+ */
+export function quoteSheetNameForFormula(name: string): string {
+  return isBareSheetName(name) ? name : `'${name.replace(/'/g, "''")}'`;
 }
 
 // ============================================================================

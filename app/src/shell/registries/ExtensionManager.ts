@@ -14,6 +14,7 @@ import { createScopedInvokeBackend } from "../../api/backendCommands";
 // Import free functions from API to wire into the context object
 import {
   registerMenu,
+  unregisterMenu,
   registerMenuItem,
   updateMenuItem,
   unregisterMenuItem,
@@ -257,6 +258,7 @@ function buildContext(): ExtensionContext {
     ui: {
       menus: {
         register: registerMenu,
+        unregister: unregisterMenu,
         registerItem: registerMenuItem,
         updateItem: updateMenuItem,
         unregisterItem: unregisterMenuItem,
@@ -536,47 +538,7 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
     try {
       console.log(`[ExtensionManager] Activating extension: ${id} (${name} v${version})`);
       // Create a per-extension context with extension-scoped APIs
-      const extContext: ExtensionContext = {
-        ...this.context,
-        keybindings: {
-          // `when` is FORWARDED, not dropped. A one-parameter arrow here is
-          // assignable to IKeybindingsAPI['register'] whatever that signature
-          // says, so TypeScript never complained: an extension that passed a
-          // predicate through the facade simply had it swallowed and got a
-          // binding that fired everywhere. The base context above hands over
-          // `registerKeybinding` itself and always forwarded it; only this
-          // per-extension wrapper, which exists to stamp the attribution, did
-          // not.
-          register: (binding, when) =>
-            registerKeybinding({ ...binding, source: "extension", extensionId: id }, when),
-          getAll: getAllKeybindings,
-          getEffectiveCombo,
-        },
-        settings: {
-          get: <T extends string | number | boolean>(key: string, defaultValue: T) =>
-            getSetting(id, key, defaultValue),
-          set: (key: string, value: string | number | boolean) =>
-            setSetting(id, key, value),
-          remove: (key: string) => removeSetting(id, key),
-          registerSettings: (definitions) =>
-            registerSettingDefinitions(id, definitions),
-        },
-        cellEditors: {
-          register: (editorId, canEdit, component, priority) =>
-            registerCellEditor(editorId, canEdit, component, priority),
-        },
-        fileFormats: {
-          registerFormat: registerFileFormat,
-          getFormats: getFileFormats,
-        },
-        // Capability-scoped backend door (A3). `trust` is already classified for
-        // this extension here, so enforcement is a single gate before the raw
-        // invoke: trusted (built-in) callers pass everything; distributed
-        // (third-party) callers are denied privileged commands. The denylist,
-        // gate, and this factory all live in @api/backendCommands.
-        invokeBackend: createScopedInvokeBackend(trust === "trusted", invokeBackend),
-      };
-      await module.activate(extContext);
+      await module.activate(this.buildExtensionContext(id, trust));
 
       entry.status = "active";
       console.log(`[ExtensionManager] Extension '${id}' activated successfully.`);
@@ -588,6 +550,55 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
 
     this.updateCachedArray();
     this.notifyChange();
+  }
+
+  /**
+   * The context an extension is activated with: the shared base context plus
+   * the doors stamped with its id and its trust. Built fresh for every
+   * activation, the first and a dev re-activation alike, so both hand the
+   * module the same doors.
+   */
+  private buildExtensionContext(id: string, trust: ExtensionTrust): ExtensionContext {
+    return {
+      ...this.context,
+      keybindings: {
+        // `when` is FORWARDED, not dropped. A one-parameter arrow here is
+        // assignable to IKeybindingsAPI['register'] whatever that signature
+        // says, so TypeScript never complained: an extension that passed a
+        // predicate through the facade simply had it swallowed and got a
+        // binding that fired everywhere. The base context above hands over
+        // `registerKeybinding` itself and always forwarded it; only this
+        // per-extension wrapper, which exists to stamp the attribution, did
+        // not.
+        register: (binding, when) =>
+          registerKeybinding({ ...binding, source: "extension", extensionId: id }, when),
+        getAll: getAllKeybindings,
+        getEffectiveCombo,
+      },
+      settings: {
+        get: <T extends string | number | boolean>(key: string, defaultValue: T) =>
+          getSetting(id, key, defaultValue),
+        set: (key: string, value: string | number | boolean) =>
+          setSetting(id, key, value),
+        remove: (key: string) => removeSetting(id, key),
+        registerSettings: (definitions) =>
+          registerSettingDefinitions(id, definitions),
+      },
+      cellEditors: {
+        register: (editorId, canEdit, component, priority) =>
+          registerCellEditor(editorId, canEdit, component, priority),
+      },
+      fileFormats: {
+        registerFormat: registerFileFormat,
+        getFormats: getFileFormats,
+      },
+      // Capability-scoped backend door (A3). `trust` is already classified for
+      // this extension here, so enforcement is a single gate before the raw
+      // invoke: trusted (built-in) callers pass everything; distributed
+      // (third-party) callers are denied privileged commands. The denylist,
+      // gate, and this factory all live in @api/backendCommands.
+      invokeBackend: createScopedInvokeBackend(trust === "trusted", invokeBackend),
+    };
   }
 
   // --------------------------------------------------------------------------
@@ -1187,6 +1198,75 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
     console.log(`[ExtensionManager] Extension '${id}' disabled.`);
   }
 
+  // --------------------------------------------------------------------------
+  // DEV / E2E only: take a BUILT-IN down and bring it back (wave E, Y15)
+  // --------------------------------------------------------------------------
+
+  /**
+   * The loaded built-in `id`, or a refusal. Both dev doors refuse outright
+   * outside a development build, so a release build -- where Vite replaces
+   * `import.meta.env.DEV` with `false` -- has no way to reach either of them,
+   * whatever holds a reference to the manager.
+   */
+  private devBuiltIn(id: string): LoadedExtension {
+    if (!import.meta.env.DEV) {
+      throw new Error("Re-activating a built-in extension is only available in a development build.");
+    }
+    const entry = this.extensions.get(id);
+    if (!entry || entry.trust !== "trusted" || entry.worker) {
+      throw new Error(`'${id}' is not a loaded built-in extension.`);
+    }
+    return entry;
+  }
+
+  /**
+   * DEV / E2E only: deactivate a built-in, exactly as deactivateExtension
+   * does, so its lifecycle can be checked live. Built-ins cannot be disabled
+   * (setExtensionEnabled) -- this is not that: nothing is persisted, and the
+   * next reload brings it back regardless.
+   */
+  async devDeactivateBuiltIn(id: string): Promise<void> {
+    const entry = this.devBuiltIn(id);
+    if (entry.status !== "active") {
+      throw new Error(`Built-in extension '${id}' is not active (status: ${entry.status}).`);
+    }
+    await this.deactivateExtension(id);
+  }
+
+  /**
+   * DEV / E2E only: activate a built-in that devDeactivateBuiltIn took down,
+   * with the same per-extension context as its first activation. Before
+   * this a deactivated built-in could never come back (activateExtension
+   * skips an id it already holds), so "every item back exactly once" could
+   * not be checked in the running app. A built-in that is already active
+   * is refused: activate must never run twice on a live extension.
+   */
+  async devReactivateBuiltIn(id: string): Promise<void> {
+    const entry = this.devBuiltIn(id);
+    if (entry.status === "active") {
+      throw new Error(`Built-in extension '${id}' is already active.`);
+    }
+    if (entry.status !== "inactive") {
+      throw new Error(`Built-in extension '${id}' cannot be re-activated from status '${entry.status}'.`);
+    }
+    entry.status = "pending";
+    entry.error = undefined;
+    this.updateCachedArray();
+    this.notifyChange();
+    try {
+      console.log(`[ExtensionManager] DEV: re-activating built-in extension: ${id}`);
+      await entry.module.activate(this.buildExtensionContext(id, entry.trust));
+      entry.status = "active";
+    } catch (error) {
+      entry.status = "error";
+      entry.error = error instanceof Error ? error : new Error(String(error));
+      console.error(`[ExtensionManager] DEV: re-activating '${id}' failed:`, error);
+    }
+    this.updateCachedArray();
+    this.notifyChange();
+    if (entry.status === "error") throw entry.error;
+  }
+
   /** Whether an extension is currently disabled (persisted). */
   isDisabled(id: string): boolean {
     return this.disabledIds.has(id);
@@ -1332,3 +1412,21 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
 // ============================================================================
 
 export const ExtensionManager = new ExtensionManagerImpl();
+
+// DEV / E2E ONLY (wave E, Y15): the live door to a built-in's lifecycle, for
+// devtools and E2E (`page.evaluate` runs classic scripts that cannot import).
+// It is installed by THIS module instance -- a second copy of the manager
+// pulled in through the dev `__calcImport` bridge would hold none of the
+// running app's extensions. Vite replaces `import.meta.env.DEV` with `false`
+// in a release build, so this block is not in one; the methods it calls
+// refuse on their own there too.
+if (import.meta.env.DEV && typeof window !== "undefined") {
+  (window as unknown as Record<string, unknown>).__CALCULA_EXTENSION_LIFECYCLE__ = {
+    deactivate: (id: string): Promise<void> => ExtensionManager.devDeactivateBuiltIn(id),
+    activate: (id: string): Promise<void> => ExtensionManager.devReactivateBuiltIn(id),
+    builtIns: (): { id: string; status: string }[] =>
+      ExtensionManager.getExtensions()
+        .filter((entry) => entry.trust === "trusted")
+        .map((entry) => ({ id: entry.id, status: entry.status })),
+  };
+}

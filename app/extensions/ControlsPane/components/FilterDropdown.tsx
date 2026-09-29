@@ -24,6 +24,7 @@ import {
   popoverLayout,
 } from "@api/layout";
 import { focusWhenVisible, primaryButtonClass } from "./paneChrome";
+import { runStepThenConfirmOverwrite } from "@api/pivotOverwrite";
 import type { SlicerItem, ConnectionMode, UpdateRibbonFilterParams, AdvancedFilter, AdvancedFilterOperator, AdvancedFilterLogic, FieldDataType } from "../lib/filterPaneTypes";
 import { updateFilterAsync, updateFilterSelectionAsync, getAllFilters, getConnectionName } from "../lib/filterPaneStore";
 import {
@@ -182,31 +183,40 @@ export function FilterDropdown({
     if (localMode === "manual") {
       updates.connectedPivots = Array.from(localConnections);
     }
-    const updated = await updateFilterAsync(filterId, updates);
 
-    // Clear this filter's column on pivots that are no longer targeted, by
-    // its "Table.Column" key: the Pivot owner resolves the column, and a pivot
-    // that does not carry it is left alone. Never by a field index found
-    // here -- BI cache names are bare, so "Customers.Region" matched the
-    // first "Region" in the cache (Stores.Region on Rows) and wiped the
-    // user's own row filter on it.
+    // ONE Save is ONE undo step -- the connections, the clears and the apply
+    // (the backend's settings update joins it: BUG-0200) -- and a Save that
+    // grows a pivot over the user's cells is asked about ONCE after that step
+    // committed; a decline takes the whole Save back, and the store's
+    // reconcile re-derives the masks it did not record.
     // ONE Save is one gesture: the pivots that refuse the clears below and the
     // apply after them are told in ONE toast at the end.
     const refused: RibbonFilterFailure[] = [];
-    const disconnected = Array.from(oldTargets).filter((pivotId) => !newTargets.has(pivotId));
-    if (disconnected.length > 0) {
-      await clearModelColumnOnPivots(fieldName, disconnected, {
-        label: updated?.name ?? getAllFilters().find((f) => f.id === filterId)?.name,
-        failures: refused,
-      });
-      window.dispatchEvent(new Event("pivot:refresh"));
-    }
+    await runStepThenConfirmOverwrite("Filter Connections", async (overwrites) => {
+      const updated = await updateFilterAsync(filterId, updates);
 
-    // Re-apply an active selection to the (possibly grown) target set —
-    // newly targeted pivots have never seen this filter.
-    if (updated && updated.selectedItems !== null) {
-      await applyRibbonFilter(updated, refused);
-    }
+      // Clear this filter's column on pivots that are no longer targeted, by
+      // its "Table.Column" key: the Pivot owner resolves the column, and a pivot
+      // that does not carry it is left alone. Never by a field index found
+      // here -- BI cache names are bare, so "Customers.Region" matched the
+      // first "Region" in the cache (Stores.Region on Rows) and wiped the
+      // user's own row filter on it.
+      const disconnected = Array.from(oldTargets).filter((pivotId) => !newTargets.has(pivotId));
+      if (disconnected.length > 0) {
+        await clearModelColumnOnPivots(fieldName, disconnected, {
+          label: updated?.name ?? getAllFilters().find((f) => f.id === filterId)?.name,
+          failures: refused,
+          overwrites,
+        });
+        window.dispatchEvent(new Event("pivot:refresh"));
+      }
+
+      // Re-apply an active selection to the (possibly grown) target set —
+      // newly targeted pivots have never seen this filter.
+      if (updated && updated.selectedItems !== null) {
+        await applyRibbonFilter(updated, refused, overwrites);
+      }
+    });
     reportRibbonFilterFailures(refused);
 
     emitAppEvent(AppEvents.GRID_REFRESH);
@@ -651,20 +661,26 @@ function FilterSettingsPanel({
 
   const handleSave = useCallback(async () => {
     const levelChanged = localFilterLevel !== (initFilterLevel || 1);
-    const updated = await updateFilterAsync(filterId, {
-      hideNoData: localHideNoData,
-      indicateNoData: localIndicateNoData,
-      sortNoDataLast: localSortNoDataLast,
-      showSelectAll: localShowSelectAll,
-      singleSelect: localSingleSelect,
-      filterLevel: localFilterLevel,
+    // ONE Save is ONE undo step (the backend's settings update joins it:
+    // BUG-0200). A level change that re-routes an active selection and grows
+    // a pivot over the user's cells is asked about ONCE after the step
+    // committed; a decline takes back the whole Save.
+    await runStepThenConfirmOverwrite("Filter Settings", async (overwrites) => {
+      const updated = await updateFilterAsync(filterId, {
+        hideNoData: localHideNoData,
+        indicateNoData: localIndicateNoData,
+        sortNoDataLast: localSortNoDataLast,
+        showSelectAll: localShowSelectAll,
+        singleSelect: localSingleSelect,
+        filterLevel: localFilterLevel,
+      });
+      // A level change moves an ACTIVE selection between the host-side mask
+      // and the engine-routed (pinned) filter — re-apply so target pivots
+      // pick up the new routing.
+      if (levelChanged && updated && updated.selectedItems !== null) {
+        await applyRibbonFilter(updated, undefined, overwrites);
+      }
     });
-    // A level change moves an ACTIVE selection between the host-side mask
-    // and the engine-routed (pinned) filter — re-apply so target pivots
-    // pick up the new routing.
-    if (levelChanged && updated && updated.selectedItems !== null) {
-      await applyRibbonFilter(updated);
-    }
     onClose();
   }, [
     filterId, localHideNoData, localIndicateNoData, localSortNoDataLast,

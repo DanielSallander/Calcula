@@ -16,6 +16,14 @@ import { FILE_VIEWER_PANE_ID } from "./constants";
 
 const cleanupFns: Array<() => void> = [];
 
+/**
+ * Toggle the File Explorer panel -- the command the keybinding registry's
+ * `ext.fileExplorer.toggle` (Ctrl+Shift+E) runs. The registry named this id
+ * long before anything registered it; the key worked only through a window
+ * listener here, which a remap in Settings could not move (BUG-0183 class).
+ */
+export const FILE_EXPLORER_TOGGLE_COMMAND = "fileExplorer.toggle";
+
 /** SVG folder icon for the Activity Bar */
 const FolderIcon = React.createElement(
   "svg",
@@ -56,15 +64,9 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.taskPanes.unregister(FILE_VIEWER_PANE_ID));
 
-  // Keyboard shortcut: Ctrl+Shift+E
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.ctrlKey && e.shiftKey && e.key === "E") {
-      e.preventDefault();
-      context.ui.activityBar.toggle("explorer");
-    }
-  };
-  window.addEventListener("keydown", handleKeyDown, true);
-  cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
+  // The command the registry's Ctrl+Shift+E runs (the one keyboard path).
+  context.commands.register(FILE_EXPLORER_TOGGLE_COMMAND, () => context.ui.activityBar.toggle("explorer"));
+  cleanupFns.push(() => context.commands.unregister(FILE_EXPLORER_TOGGLE_COMMAND));
 
   // Listen for virtual file changes and recalculate formulas using FILEREAD/FILELINES/FILEEXISTS
   listenForEvent("virtual-file-changed", () => {

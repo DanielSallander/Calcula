@@ -393,29 +393,15 @@ async fn run_cell_internal(
     let style_registry = app_state.style_registry.read().map_err(|e| e.to_string())?.clone();
     let sheet_names = app_state.sheet_names.read().map_err(|e| e.to_string())?.clone();
     let active_sheet = *app_state.active_sheet.read().map_err(|e| e.to_string())?;
+    // Which sheet each grid IS, for the rewind (see `NotebookCheckpoints`).
+    let sheet_ids = app_state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
 
     {
         let mut runtime = script_state
             .notebook_runtime
             .lock()
             .map_err(|e| e.to_string())?;
-
-        // Capture baseline if this is the first cell execution
-        if runtime.baseline.is_none() {
-            runtime.baseline = Some(grids.clone());
-        }
-
-        // Capture checkpoint (snapshot before this cell runs)
-        let checkpoint = GridCheckpoint {
-            cell_id: cell_id.to_string(),
-            grids: grids.clone(),
-        };
-
-        // Enforce max checkpoints (LRU: remove oldest)
-        if runtime.checkpoints.len() >= runtime.max_checkpoints {
-            runtime.checkpoints.remove(0);
-        }
-        runtime.checkpoints.push(checkpoint);
+        capture_checkpoint(&mut runtime, cell_id, &grids, sheet_ids);
     } // runtime guard dropped before the await below
 
     // Phase 2 (async): execute on the dedicated executor thread, which owns
@@ -539,6 +525,75 @@ async fn run_cell_internal(
             Ok(NotebookCellResponse::Error { message, output })
         }
     }
+}
+
+/// Record the checkpoint taken before `cell_id` runs: the grids as they are,
+/// STAMPED with the id of the sheet each belongs to (`sheet_ids`, in the grids'
+/// order), plus the session baseline on the first run. Bounded LRU.
+pub(crate) fn capture_checkpoint(
+    runtime: &mut crate::scripting::types::NotebookRuntime,
+    cell_id: &str,
+    grids: &[engine::grid::Grid],
+    sheet_ids: Vec<identity::SheetId>,
+) {
+    // Capture baseline if this is the first cell execution
+    if runtime.baseline.is_none() {
+        runtime.baseline = Some(grids.to_vec());
+    }
+    // Enforce max checkpoints (LRU: remove oldest)
+    if runtime.checkpoints.len() >= runtime.max_checkpoints {
+        runtime.checkpoints.evict_oldest();
+    }
+    runtime.checkpoints.push_stamped(
+        GridCheckpoint { cell_id: cell_id.to_string(), grids: grids.to_vec() },
+        sheet_ids,
+    );
+}
+
+/// The grids a rewind installs, in the LIVE workbook's sheet order.
+///
+/// A checkpoint's grids are in the order the sheets had when it was taken;
+/// `snapshot_ids` names the sheet each one is. Each live sheet receives the
+/// snapshot of the SAME sheet, found by identity -- not the snapshot that
+/// happens to sit at its position, which after a sheet move is a neighbour's.
+/// Refused, naming what changed, when the workbook's sheets are not the ones
+/// the checkpoint holds: a sheet added, copied or deleted since (a snapshot
+/// cannot be poured into a sheet it never saw, and a deleted sheet's snapshot
+/// has nowhere to go), or a checkpoint taken without its sheet identities.
+pub(crate) fn plan_checkpoint_install(
+    snapshot_grids: &[engine::grid::Grid],
+    snapshot_ids: Option<&[identity::SheetId]>,
+    live_ids: &[identity::SheetId],
+) -> Result<Vec<engine::grid::Grid>, String> {
+    const RUN_AGAIN: &str = "Run the notebook again from the top instead.";
+    let Some(snapshot_ids) = snapshot_ids.filter(|ids| ids.len() == snapshot_grids.len()) else {
+        return Err(format!(
+            "This notebook's checkpoint does not record which sheet each of its grids belongs to, \
+             so it cannot be restored onto the right sheets. {}",
+            RUN_AGAIN
+        ));
+    };
+    let same_sheets = snapshot_ids.len() == live_ids.len()
+        && live_ids.iter().all(|id| snapshot_ids.contains(id))
+        && snapshot_ids.iter().all(|id| live_ids.contains(id));
+    if !same_sheets {
+        return Err(format!(
+            "This notebook's checkpoint was taken when the workbook had {} sheet(s), and its sheets \
+             have changed since (it has {} now). Rewind restores whole sheets, so it is refused after \
+             sheets were added, deleted or copied. {}",
+            snapshot_ids.len(),
+            live_ids.len(),
+            RUN_AGAIN
+        ));
+    }
+    // Each LIVE sheet takes the snapshot of the same sheet, wherever it sat.
+    Ok(live_ids
+        .iter()
+        .map(|id| {
+            let then = snapshot_ids.iter().position(|s| s == id).expect("checked above");
+            snapshot_grids[then].clone()
+        })
+        .collect())
 }
 
 /// Internal helper to reset the notebook runtime (session + bookkeeping).
@@ -678,6 +733,7 @@ async fn notebook_rewind_internal(
 ) -> Result<Vec<NotebookCellResponse>, String> {
     // 1. Find the checkpoint for the target cell
     let snapshot_grids: Vec<engine::grid::Grid>;
+    let snapshot_ids: Option<Vec<identity::SheetId>>;
     let cells_before_target: Vec<(String, String)>;
     {
         let runtime = script_state
@@ -685,10 +741,9 @@ async fn notebook_rewind_internal(
             .lock()
             .map_err(|e| e.to_string())?;
 
-        let checkpoint_idx = runtime
+        let stamped = runtime
             .checkpoints
-            .iter()
-            .position(|cp| cp.cell_id == request.target_cell_id)
+            .first_for_cell(&request.target_cell_id)
             .ok_or_else(|| {
                 format!(
                     "No checkpoint found for cell '{}'. Was it ever executed?",
@@ -696,7 +751,8 @@ async fn notebook_rewind_internal(
                 )
             })?;
 
-        snapshot_grids = runtime.checkpoints[checkpoint_idx].grids.clone();
+        snapshot_grids = stamped.checkpoint.grids.clone();
+        snapshot_ids = stamped.sheet_ids.clone();
 
         // Determine which cells come before the target in the notebook
         let notebooks = script_state
@@ -728,26 +784,26 @@ async fn notebook_rewind_internal(
     // exempt-paths block in protection.rs.
     let active_sheet = *app_state.active_sheet.read().map_err(|e| e.to_string())?;
     // STRUCTURE GATES, before the effect. A checkpoint is a copy of every
-    // grid BY POSITION. Installed over a workbook whose sheet count changed
-    // since, it would truncate the grid list below every per-sheet store (a
-    // sheet added) or pour one sheet's cells into its neighbour (one deleted),
-    // a canvas's hidden grid included. So a count mismatch is refused, and
-    // each CANVAS slot keeps its LIVE grid whatever the checkpoint holds: a
-    // canvas never receives restored cells.
+    // grid in the order the sheets had THEN. Each snapshot is installed onto
+    // the sheet it came from, found by identity (`plan_checkpoint_install`):
+    // by position, a sheet move since the checkpoint poured each sheet's cells
+    // into its neighbour. A workbook whose sheets are not the checkpoint's (one
+    // added, copied or deleted) is refused, and each CANVAS slot keeps its LIVE
+    // grid whatever the checkpoint holds: a canvas never receives restored cells.
     let canvas_indices: Vec<usize> = {
         let kinds = app_state.sheet_kinds.read().map_err(|e| e.to_string())?;
         (0..kinds.len()).filter(|&i| crate::sheets::is_canvas_sheet(&kinds, i)).collect()
     };
+    let live_ids: Vec<identity::SheetId> = app_state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
     let live_len = app_state.grids.read().map_err(|e| e.to_string())?.len();
-    if snapshot_grids.len() != live_len {
+    if live_ids.len() != live_len {
         return Err(format!(
-            "This notebook's checkpoint was taken when the workbook had {} sheet(s), and it has {} now. \
-             Rewind restores whole sheets by position, so it is refused after sheets were added, \
-             deleted or copied. Run the notebook again from the top instead.",
-            snapshot_grids.len(),
+            "The workbook's sheet list is inconsistent ({} sheet ids for {} sheets); rewind refused.",
+            live_ids.len(),
             live_len
         ));
     }
+    let snapshot_grids = plan_checkpoint_install(&snapshot_grids, snapshot_ids.as_deref(), &live_ids)?;
     {
         // Rewinding installs a checkpoint's cells over the live ones -- a real
         // change to what a save would write, even though it is a "revert" in
@@ -1189,6 +1245,111 @@ mod markdown_cell_tests {
                 assert!(screen_updating);
             }
             other => panic!("expected an inert success, got {:?}", other),
+        }
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_identity_tests {
+    //! Open item 2.af "Notebook rewind still installs a checkpoint by
+    //! POSITION": a sheet MOVE between a cell's checkpoint and a rewind to it
+    //! (same count, new order) installed each sheet's snapshot onto its
+    //! neighbour, and a delete plus an add (same count again) handed one sheet
+    //! a stranger's cells. The checkpoint now records which sheet each grid is,
+    //! and the rewind installs by identity or refuses.
+    use super::{capture_checkpoint, plan_checkpoint_install};
+    use crate::scripting::types::NotebookRuntime;
+    use engine::grid::Grid;
+
+    fn grid_with(text: &str) -> Grid {
+        let mut g = Grid::new();
+        g.set_cell(0, 0, engine::Cell::new_text(text.to_string()));
+        g
+    }
+
+    fn a1(g: &Grid) -> String {
+        g.get_cell(0, 0).map(|c| crate::format_cell_value_simple(&c.value)).unwrap_or_default()
+    }
+
+    fn new_id() -> identity::SheetId {
+        identity::SheetId::from_bytes(identity::generate_uuid_v7())
+    }
+
+    #[test]
+    fn a_rewind_after_a_sheet_move_gives_each_sheet_its_own_snapshot() {
+        let (ia, ib) = (new_id(), new_id());
+        let mut runtime = NotebookRuntime::new();
+        capture_checkpoint(&mut runtime, "cell-1", &[grid_with("A-then"), grid_with("B-then")], vec![ia, ib]);
+        let stamped = runtime.checkpoints.first_for_cell("cell-1").expect("the checkpoint");
+
+        // The user moved B in front of A since.
+        let plan = plan_checkpoint_install(&stamped.checkpoint.grids, stamped.sheet_ids.as_deref(), &[ib, ia])
+            .expect("the same sheets in another order rewind");
+        assert_eq!(
+            plan.iter().map(a1).collect::<Vec<_>>(),
+            vec!["B-then", "A-then"],
+            "a rewind after a sheet move poured each sheet's snapshot into its neighbour"
+        );
+    }
+
+    #[test]
+    fn a_rewind_after_sheets_were_swapped_out_is_refused() {
+        let (ia, ib, ic) = (new_id(), new_id(), new_id());
+        let mut runtime = NotebookRuntime::new();
+        capture_checkpoint(&mut runtime, "cell-1", &[grid_with("A"), grid_with("B")], vec![ia, ib]);
+        let stamped = runtime.checkpoints.first_for_cell("cell-1").unwrap();
+        // B deleted, C added: the COUNT is unchanged, and C never had B's cells.
+        let refused = plan_checkpoint_install(&stamped.checkpoint.grids, stamped.sheet_ids.as_deref(), &[ia, ic]);
+        let err = refused.expect_err("B's snapshot must never be installed onto C");
+        assert!(err.contains("added") && err.contains("deleted"), "the refusal names what changed: {err}");
+    }
+
+    #[test]
+    fn a_checkpoint_without_sheet_identities_is_refused() {
+        let ia = new_id();
+        let refused = plan_checkpoint_install(&[grid_with("A")], None, &[ia]);
+        assert!(refused.is_err(), "an unstamped checkpoint was installed by position");
+    }
+
+    /// End to end through the REAL sheet move: capture from the workbook, move,
+    /// then plan against the workbook's own sheet ids.
+    #[test]
+    fn a_checkpoint_taken_from_the_workbook_follows_a_real_sheet_move() {
+        let state = crate::create_app_state();
+        let file = crate::persistence::FileState::default();
+        crate::sheets::add_sheet_inner(&state, &file, Some("Data".to_string()), ::persistence::SheetKind::Worksheet)
+            .expect("add Data");
+        crate::sheets::activate_sheet(&state, 0).expect("back to Sheet1");
+        {
+            let seed = crate::document_effect::test_seed_effect();
+            let mut grids = state.grids.write(&seed).unwrap();
+            grids[0] = grid_with("sheet1-then");
+            grids[1] = grid_with("data-then");
+        }
+        let mut runtime = NotebookRuntime::new();
+        let grids = state.grids.read().unwrap().clone();
+        let ids = state.sheet_ids.read().unwrap().clone();
+        capture_checkpoint(&mut runtime, "cell-1", &grids, ids);
+
+        crate::sheets::move_sheet_impl(
+            &state,
+            &file,
+            &crate::slicer::SlicerState::new(),
+            &crate::timeline_slicer::TimelineSlicerState::new(),
+            &crate::ribbon_filter::RibbonFilterState::new(),
+            1,
+            0,
+        )
+        .expect("move Data to the front");
+
+        let live = state.sheet_ids.read().unwrap().clone();
+        let stamped = runtime.checkpoints.first_for_cell("cell-1").unwrap();
+        let plan = plan_checkpoint_install(&stamped.checkpoint.grids, stamped.sheet_ids.as_deref(), &live)
+            .expect("plan");
+        let names = state.sheet_names.read().unwrap().clone();
+        for (i, name) in names.iter().enumerate() {
+            let want = if name == "Data" { "data-then" } else { "sheet1-then" };
+            assert_eq!(a1(&plan[i]), want, "sheet {name} would receive another sheet's snapshot");
         }
     }
 }

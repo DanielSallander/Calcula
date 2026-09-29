@@ -421,6 +421,112 @@ describe("multi-write runs", () => {
     expect(allText(lines)).toContain("kept as ONE undo step");
   });
 
+  // The backend's begin answers whether it OPENED the transaction; one that
+  // JOINED another caller's (a script's open batch, a gesture landing) must
+  // leave the commit to that caller -- committing closed it halfway.
+  // ...and one that OPENED presents the ticket it was handed, so its commit
+  // closes only that transaction: a sheet change inside the run ends it
+  // (Excel parity), and a bare commit then closed whatever a stranger had
+  // opened since (review F1).
+  it("a run whose begin OPENED commits with the ticket it was handed", async () => {
+    const { calls, ok } = await runApp("set cell A1 = 1\nset cell A2 = 2", {
+      beginUndoTransaction: () => Promise.resolve(42),
+    });
+    expect(ok).toBe(true);
+    expect(calls.commitUndoTransaction, "the run committed without its ticket: it would close whatever is open").toEqual([
+      [42],
+    ]);
+  });
+
+  // Found live 2026-09-29 (e2e fixall-calp X6 check 11): a sheet add inside a
+  // run ENDS the undo history and the run's transaction with it, so the two
+  // set-cell lines after `add sheet Y` were two steps and one Ctrl+Z took back
+  // only A2. The run now begins its batch again after its own sheet change and
+  // commits the NEW ticket.
+  it.each([
+    ["add sheet Y", "addSheet"],
+    ["rename sheet Sheet2 to Z", "renameSheet"],
+    ["delete sheet Sheet2", "deleteSheet"],
+  ])("`%s` inside a run begins its batch again, and the run commits the NEW ticket", async (line, gatewayCall) => {
+    let next = 41;
+    const { calls, seq, ok, lines } = await runApp(`${line}\nset cell A1 = 1\nset cell A2 = 2`, {
+      beginUndoTransaction: () => Promise.resolve(++next),
+    });
+    expect(ok, allText(lines)).toBe(true);
+    expect(calls.beginUndoTransaction).toEqual([["Command line run"], ["Command line run"]]);
+    expect(seq.indexOf(gatewayCall)).toBeGreaterThanOrEqual(0);
+    expect(seq.indexOf(gatewayCall), "the batch began again BEFORE the sheet change").toBeLessThan(
+      seq.lastIndexOf("beginUndoTransaction"),
+    );
+    expect(seq.lastIndexOf("beginUndoTransaction"), "a set cell ran before the batch began again").toBeLessThan(
+      seq.indexOf("updateCell"),
+    );
+    expect(calls.commitUndoTransaction, "the run committed the ticket its sheet change had spent").toEqual([[43]]);
+  });
+
+  it("a run that only JOINED a caller's step does not begin again after its sheet change", async () => {
+    const { calls, ok } = await runApp("add sheet Y\nset cell A1 = 1", {
+      beginUndoTransaction: () => Promise.resolve(null),
+    });
+    expect(ok).toBe(true);
+    expect(calls.beginUndoTransaction).toHaveLength(1);
+    expect(calls.commitUndoTransaction).toBeUndefined();
+  });
+
+  it("a begin again that JOINS keeps the run's first ticket", async () => {
+    const answers = [42, null];
+    const { calls, ok } = await runApp("add sheet Y\nset cell A1 = 1", {
+      beginUndoTransaction: () => Promise.resolve(answers.shift() ?? null),
+    });
+    expect(ok).toBe(true);
+    expect(calls.beginUndoTransaction).toHaveLength(2);
+    expect(calls.commitUndoTransaction).toEqual([[42]]);
+  });
+
+  it("a run whose begin JOINED an open transaction never commits it", async () => {
+    const { calls, ok } = await runApp("set cell A1 = 1\nset cell A2 = 2", {
+      beginUndoTransaction: () => Promise.resolve(null),
+    });
+    expect(ok).toBe(true);
+    expect(calls.beginUndoTransaction).toHaveLength(1);
+    expect(calls.commitUndoTransaction, "the run committed a transaction it had only joined").toBeUndefined();
+  });
+
+  it("a failing run whose begin JOINED commits nothing either", async () => {
+    let n = 0;
+    const { calls, ok } = await runApp("set cell A1 = 1\nset cell A2 = 2", {
+      beginUndoTransaction: () => Promise.resolve(null),
+      updateCell: () => {
+        n++;
+        return n === 2
+          ? Promise.reject(new Error("boom"))
+          : Promise.resolve({ cells: [], dimensionChanges: [] });
+      },
+    });
+    expect(ok).toBe(false);
+    expect(calls.commitUndoTransaction, "the failed run committed a transaction it had only joined").toBeUndefined();
+    expect(calls.cancelUndoTransaction).toBeUndefined();
+  });
+
+  it("a failing run whose begin JOINED does not claim a step of its own (review D F2)", async () => {
+    let n = 0;
+    const { lines, ok } = await runApp("set cell A1 = 1\nset cell A2 = 2", {
+      beginUndoTransaction: () => Promise.resolve(null),
+      updateCell: () => {
+        n++;
+        return n === 2
+          ? Promise.reject(new Error("boom"))
+          : Promise.resolve({ cells: [], dimensionChanges: [] });
+      },
+    });
+    expect(ok).toBe(false);
+    const text = allText(lines);
+    expect(text, "the run told the user its edits are ONE undo step of its own, but it committed nothing").not.toMatch(
+      /kept as ONE undo step/,
+    );
+    expect(text).toContain("inside the undo step a script or gesture still holds open");
+  });
+
   it("a single write runs without a transaction", async () => {
     const { calls } = await runApp("set cell A1 = 1");
     expect(calls.beginUndoTransaction).toBeUndefined();
@@ -608,6 +714,38 @@ describe("recalc and undo/redo", () => {
     const { calls, lines } = await runApp("undo");
     expect(calls.undo).toHaveLength(1);
     expect(lines.some((l) => l.cls === "info" && l.text === "Undone.")).toBe(true);
+  });
+
+  // X10: a REFUSED history move (a gesture still landing, W4/W15) comes back
+  // as `success: false` WITH a `refusal` sentence -- the history is not empty,
+  // it was not allowed to move. "Nothing to undo." told the user the opposite.
+  const REFUSAL = "That change is still being applied. Try Undo again in a moment.";
+
+  it("a REFUSED undo prints the backend's reason, not 'Nothing to undo.'", async () => {
+    const { lines, ok } = await runApp("undo", {
+      undo: (() => Promise.resolve({ ...UNDO_RESULT, success: false, refusal: REFUSAL })) as AppCliGateway["undo"],
+    });
+    expect(allText(lines), "a refused undo was reported as an empty history").not.toContain("Nothing to undo.");
+    expect(lines.some((l) => l.cls === "err" && l.text.includes(REFUSAL))).toBe(true);
+    expect(ok, "a refused undo is not a success").toBe(false);
+  });
+
+  it("a REFUSED redo prints the backend's reason, not 'Nothing to redo.'", async () => {
+    const { lines, ok } = await runApp("redo", {
+      redo: (() => Promise.resolve({ ...UNDO_RESULT, success: false, refusal: REFUSAL })) as AppCliGateway["redo"],
+    });
+    expect(allText(lines), "a refused redo was reported as an empty history").not.toContain("Nothing to redo.");
+    expect(lines.some((l) => l.cls === "err" && l.text.includes(REFUSAL))).toBe(true);
+    expect(ok).toBe(false);
+  });
+
+  it("an empty history still says 'Nothing to undo.' / 'Nothing to redo.' (positive control)", async () => {
+    const empty = (() => Promise.resolve({ ...UNDO_RESULT, success: false })) as AppCliGateway["undo"];
+    const u = await runApp("undo", { undo: empty });
+    expect(u.lines.some((l) => l.cls === "info" && l.text === "Nothing to undo.")).toBe(true);
+    expect(u.ok).toBe(true);
+    const r = await runApp("redo", { redo: empty });
+    expect(r.lines.some((l) => l.cls === "info" && l.text === "Nothing to redo.")).toBe(true);
   });
 });
 

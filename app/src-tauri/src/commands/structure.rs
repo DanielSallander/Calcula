@@ -1721,7 +1721,7 @@ pub(crate) fn insert_rows_impl(
     let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
 
     // Record snapshot for undo
-    undo_stack.begin_transaction(format!("Insert {} row(s)", count));
+    let owned_txn = undo_stack.begin_owned_transaction(format!("Insert {} row(s)", count));
     undo_stack.record_snapshot(snapshot);
     // Past every refusal gate above (sheet-protection options + the writeback
     // shift guard) and inside the open transaction: the edit is committed, and
@@ -1868,7 +1868,7 @@ pub(crate) fn insert_rows_impl(
         &sheet_names_snapshot,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
     );
-    undo_stack.commit_transaction();
+    undo_stack.commit_owned(owned_txn);
 
     // D8 seeds, collected in the loops this command already runs (see
     // `StructuralSeeds`). POST-edit coordinates throughout.
@@ -2182,7 +2182,7 @@ pub(crate) fn insert_columns_impl(
     let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
 
     // Record snapshot for undo
-    undo_stack.begin_transaction(format!("Insert {} column(s)", count));
+    let owned_txn = undo_stack.begin_owned_transaction(format!("Insert {} column(s)", count));
     undo_stack.record_snapshot(snapshot);
     // Past every refusal gate above (sheet-protection options + the writeback
     // shift guard) and inside the open transaction: the edit is committed, and
@@ -2323,7 +2323,7 @@ pub(crate) fn insert_columns_impl(
         &sheet_names_snapshot,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
     );
-    undo_stack.commit_transaction();
+    undo_stack.commit_owned(owned_txn);
 
     // D8 seeds, collected in the loops this command already runs (see
     // `StructuralSeeds`). POST-edit coordinates throughout.
@@ -3527,7 +3527,7 @@ pub(crate) fn delete_rows_impl(
     let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
 
     // Record snapshot for undo
-    undo_stack.begin_transaction(format!("Delete {} row(s)", count));
+    let owned_txn = undo_stack.begin_owned_transaction(format!("Delete {} row(s)", count));
     undo_stack.record_snapshot(snapshot);
     // BUG-0054: restores for the pivots this delete removes outright, INSIDE
     // this transaction so one Ctrl+Z restores rows + pivot + slicers together.
@@ -3683,7 +3683,7 @@ pub(crate) fn delete_rows_impl(
         &sheet_names_snapshot,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
     );
-    undo_stack.commit_transaction();
+    undo_stack.commit_owned(owned_txn);
 
     // D8 seeds, collected in the loops this command already runs (see
     // `StructuralSeeds`). POST-edit coordinates throughout.
@@ -4063,7 +4063,7 @@ pub(crate) fn delete_columns_impl(
     let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
 
     // Record snapshot for undo
-    undo_stack.begin_transaction(format!("Delete {} column(s)", count));
+    let owned_txn = undo_stack.begin_owned_transaction(format!("Delete {} column(s)", count));
     undo_stack.record_snapshot(snapshot);
     // BUG-0054: restores for the pivots this delete removes outright — see the
     // row twin for ordering (cascade first; reverse replay recreates the pivot
@@ -4216,7 +4216,7 @@ pub(crate) fn delete_columns_impl(
         &sheet_names_snapshot,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
     );
-    undo_stack.commit_transaction();
+    undo_stack.commit_owned(owned_txn);
 
     // D8 seeds, collected in the loops this command already runs (see
     // `StructuralSeeds`). POST-edit coordinates throughout.
@@ -7311,7 +7311,7 @@ pub(crate) fn off_sheet_structural_edit(
             grids.push(engine::grid::Grid::new());
         }
 
-        undo_stack.begin_transaction(description.clone());
+        let owned_txn = undo_stack.begin_owned_transaction(description.clone());
         undo_stack.record_custom_restore(
             "sheet_structural_snapshot".to_string(),
             crate::undo_commands::sheet_structural_snapshot_bytes(&snapshot),
@@ -7400,7 +7400,7 @@ pub(crate) fn off_sheet_structural_edit(
             &sheet_names_snapshot,
             edit,
         );
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
 
         // --- Same-sheet transform on grids[target] ---
         let grid = &mut grids[target];

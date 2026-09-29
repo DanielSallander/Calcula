@@ -114,6 +114,21 @@ export function peekSheetIndexForId(sheetId: string): number | "cold" | "missing
 }
 
 /**
+ * Whether the sheet at `sheetIndex` is a CANVAS, from the CACHED list only
+ * (synchronous). Null when there is no cached list yet (it is then warmed in
+ * the background) or no sheet has that index -- a caller deciding whether to
+ * invalidate must treat null as "could be either".
+ */
+export function peekSheetIsCanvas(sheetIndex: number): boolean | null {
+  if (cachedMap === null) {
+    if (invalidationInstalls > 0) void loadSheetIdMap().catch(() => {});
+    return null;
+  }
+  const sheet = cachedMap.sheets.find((s) => s.index === sheetIndex);
+  return sheet ? sheet.kind === "canvas" : null;
+}
+
+/**
  * Forget the cached sheet list (the next read asks the backend again). When
  * the list was in use and caching is on, it is re-read straight away in the
  * background, so the synchronous peeks find a warm cache instead of a cold one.

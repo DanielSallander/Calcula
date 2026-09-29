@@ -286,28 +286,42 @@ pub struct PublishResult {
 /// Shared with `chart_refs`, so a chart's A1 string source and a dropdown's
 /// cell range are split by ONE parser.
 pub(crate) fn reference_sheet_name(reference: &str) -> Option<String> {
+    split_sheet_reference(reference).map(|(name, _)| name)
+}
+
+/// [`reference_sheet_name`] plus the text AFTER the prefix's `!` (`"A1:A10"`
+/// for `"Data!A1:A10"`), cut where the prefix scan itself ended.
+///
+/// ONE SCAN FOR BOTH HALVES. A rename that re-derived the split point on its
+/// own -- `find("'!")` -- cut a legal name such as `Rock'!Roll`, quoted as
+/// `'Rock''!Roll'!A1`, at the `'!` INSIDE its doubled-quote escape and glued
+/// the rest of the name onto the range.
+pub(crate) fn split_sheet_reference(reference: &str) -> Option<(String, &str)> {
     let reference = reference.trim();
     if let Some(rest) = reference.strip_prefix('\'') {
         // Quoted sheet name: scan to the closing quote ('' escapes a quote),
         // which must be immediately followed by '!'.
         let mut name = String::new();
-        let mut chars = rest.chars().peekable();
-        while let Some(c) = chars.next() {
+        let mut chars = rest.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
             if c != '\'' {
                 name.push(c);
-            } else if chars.peek() == Some(&'\'') {
+            } else if chars.peek().map(|&(_, n)| n) == Some('\'') {
                 chars.next();
                 name.push('\'');
             } else {
                 return match chars.next() {
-                    Some('!') => Some(name),
+                    // The closing quote and the `!` are one byte each.
+                    Some((_, '!')) => Some((name, &rest[i + 2..])),
                     _ => None, // malformed quote-then-no-'!' — treat as prefix-less
                 };
             }
         }
         None // unterminated quote — treat as prefix-less
     } else {
-        reference.find('!').map(|i| reference[..i].to_string())
+        reference
+            .find('!')
+            .map(|i| (reference[..i].to_string(), &reference[i + 1..]))
     }
 }
 

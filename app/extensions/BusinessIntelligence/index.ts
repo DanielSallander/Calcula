@@ -28,6 +28,8 @@ import { getRegionAtCell, getConnections, connect, updateConnection } from "../_
 import { ModelDialog } from "./components/ModelDialog";
 import { CreateModelPivotDialog } from "./components/CreateModelPivotDialog";
 import { registerModelOverlayDistribution } from "./lib/modelOverlayDistribution";
+import { modelPivotDestinationAtSelection } from "./lib/modelPivot";
+import { getGridStateSnapshot } from "@api/grid";
 
 // ============================================================================
 // State
@@ -90,7 +92,12 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFunctions.push(() => context.ui.dialogs.unregister(CREATE_MODEL_PIVOT_DIALOG_ID));
 
-  // 5. Connections section of the consolidated Model menu
+  // 5. Connections section of the consolidated Model menu. The items (5 and
+  //    6) are taken back on deactivate -- they outlived the extension (the D3
+  //    class, found in wave C beside W20/W21).
+  for (const itemId of ["model:connections", "model:newConnection", "model:insertPivot"]) {
+    cleanupFunctions.push(() => context.ui.menus.unregisterItem("model", itemId));
+  }
   context.ui.menus.registerItem("model", {
     id: "model:connections",
     label: "Connections",
@@ -119,6 +126,10 @@ function activate(context: ExtensionContext): void {
     icon: IconDataModel,
     order: 30,
     action: () => {
+      // The dialog inserts at Core's active cell (and shows it as the
+      // destination): refused, once, while that cell is hidden under
+      // something else that owns the selection (lib/modelPivot.ts).
+      if (modelPivotDestinationAtSelection(getGridStateSnapshot()) === null) return;
       context.ui.dialogs.show(CREATE_MODEL_PIVOT_DIALOG_ID);
     },
   });

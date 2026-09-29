@@ -132,10 +132,14 @@ describe("Core's doors read the external-edit liveness signal (1.7)", () => {
   it("a handled cell press is announced AFTER commit-before-select (onGridCellPressed)", () => {
     const src = code("src/core/hooks/useMouseSelection/selection/cellSelectionHandlers.ts");
     const commit = src.indexOf("await onCommitBeforeSelect();");
-    const announce = src.indexOf("notifyGridCellPressed({");
+    // The SELECTING press's announcement (BUG-0186 added a second one, for a
+    // right-press that KEEPS the selection: it selects and commits nothing, so
+    // it is announced where it returns, before the commit).
+    const announce = src.indexOf("keptSelection: false");
     expect(commit).toBeGreaterThan(0);
     expect(announce).toBeGreaterThan(commit);
     expect(announce).toBeGreaterThan(src.indexOf("onSelectCell(row, col);"));
+    expect(src.indexOf("keptSelection: true")).toBeLessThan(commit);
   });
 
   it("commit-before-select ends a live session before Core's own branch", () => {

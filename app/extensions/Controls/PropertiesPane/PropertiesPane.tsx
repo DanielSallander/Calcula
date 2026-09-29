@@ -5,6 +5,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import type { TaskPaneViewProps } from "@api";
 import { emitAppEvent } from "@api/events";
+import { showToast } from "@api/notifications";
 import { PropertyRow } from "./PropertyRow";
 import { CollapsibleSection } from "./CollapsibleSection";
 import {
@@ -448,7 +449,13 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
           });
         }
       } catch (err) {
+        // A REFUSAL is the user's answer, not a console line: a sheet whose
+        // protection does not allow editing objects refuses a move, resize or
+        // rotation typed here exactly as it refuses the drag. Say why, and
+        // re-read the stored metadata so the field shows the value that was kept.
         console.error("[Controls] Failed to set property:", err);
+        showToast(`Could not change "${key}": ${String(err)}`, { type: "error" });
+        if (mountedRef.current) setReloadTrigger((prev) => prev + 1);
       }
     },
     [row, col, sheetIndex, controlType, metadata],

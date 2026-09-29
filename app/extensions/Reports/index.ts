@@ -12,13 +12,17 @@ import {
   unregisterDialog,
   showDialog,
   registerMenuItem,
+  unregisterMenuItem,
   ExtensionRegistry,
   getSheets,
+  onAppEvent,
+  AppEvents,
 } from "@api";
 import { CreateReportDialog } from "./components/CreateReportDialog";
 import { ManageReportsDialog } from "./components/ManageReportsDialog";
 import { EditReportDialog } from "./components/EditReportDialog";
 import { CREATE_DIALOG_ID, EDIT_DIALOG_ID, MANAGE_DIALOG_ID } from "./dialogIds";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 import { reportsBackend } from "./lib/reportsBackend";
 import { clearReportModelCache } from "./lib/reportRefresh";
 import { registerReportQueryProvider } from "./lib/reportQueryProvider";
@@ -45,6 +49,10 @@ interface Selection {
 let currentSelection: Selection | null = null;
 
 async function openCreateReportDialog(): Promise<void> {
+  // The report is anchored at Core's active cell -- HIDDEN while something
+  // else owns the selection (a floating grid's selected cell) -- so refuse,
+  // once (D4, BUG-0185 class).
+  if (refuseIfSelectionOwned("Report from Design Query")) return;
   let anchorRow = 0;
   let anchorCol = 0;
   if (currentSelection) {
@@ -95,6 +103,12 @@ function activate(context: ExtensionContext): void {
     order: 32,
     action: () => showDialog(MANAGE_DIALOG_ID, {}),
   });
+  // Take back OUR two items on deactivate -- never the shared Model menu
+  // itself, which other extensions still have items in (wave F, Z5).
+  cleanupFns.push(() => {
+    unregisterMenuItem("model", "model:createReport");
+    unregisterMenuItem("model", "model:manageReports");
+  });
 
   // Region cache for sync hit-testing (context menu, Report tab): initial load,
   // re-check the tab after every cache refresh, refresh on sheet switches and —
@@ -102,12 +116,16 @@ function activate(context: ExtensionContext): void {
   // (covers undo/redo of report operations).
   setReportRegionsChangedCallback(reevaluateActiveReport);
   void refreshReportRegions();
-  const onSheetActivated = () => void refreshReportRegions();
+  // A sheet switch moves the ACTIVE sheet the cache hit-tests against.
+  // SHEET_CHANGED is what every switch announces (tabs, Name Box, undo,
+  // scripts); the `sheet:activated` window event listened to before is one
+  // NOTHING dispatches, so a report on the sheet switched to went unrecognised
+  // until some edit happened to fire grid:refresh (wave E, Y10).
+  const offSheetChanged = onAppEvent(AppEvents.SHEET_CHANGED, () => void refreshReportRegions());
   const onGridRefresh = () => refreshReportRegionsDebounced();
-  window.addEventListener("sheet:activated", onSheetActivated);
   window.addEventListener("grid:refresh", onGridRefresh);
   cleanupFns.push(() => {
-    window.removeEventListener("sheet:activated", onSheetActivated);
+    offSheetChanged();
     window.removeEventListener("grid:refresh", onGridRefresh);
     resetReportRegions();
     resetReportSelectionHandler();

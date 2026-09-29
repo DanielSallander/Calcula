@@ -23,6 +23,21 @@ import { slicerAtCanvasPoint } from "../lib/slicerCanvasGeometry";
 /** The slicer ID that was right-clicked (set during contextmenu, consumed by menu) */
 let contextSlicerId: string | null = null;
 let activeMenuElement: HTMLDivElement | null = null;
+/** Removes the open menu's document listeners (Escape, click outside). */
+let detachMenuListeners: (() => void) | null = null;
+
+/**
+ * Whether a slicer's right-click menu is open: Escape is then the MENU's
+ * alone (BUG-0196, slicer part). Asked by the slicer's object-selection
+ * provider (`ownsKey`), which a canvas's Escape binding consults before it
+ * clears the selection -- that binding runs earlier, in the keybinding
+ * dispatcher's window-capture listener, and used to deselect the slicer
+ * behind the open menu and leave the menu open (the Floating Range's worked
+ * example, FloatingRange/lib/frObjectSelection.ts).
+ */
+export function isSlicerContextMenuOpen(): boolean {
+  return activeMenuElement !== null;
+}
 
 // ============================================================================
 // Public API
@@ -69,6 +84,11 @@ export function closeSlicerContextMenu(): void {
     activeMenuElement.remove();
     activeMenuElement = null;
   }
+  // Every way the menu closes (an item, a click outside, Escape, a re-open)
+  // takes its listeners down: a stale Escape listener would eat the next
+  // Escape the user meant for something else.
+  detachMenuListeners?.();
+  detachMenuListeners = null;
   contextSlicerId = null;
 }
 
@@ -285,19 +305,29 @@ function renderMenu(clientX: number, clientY: number, items: MenuItem[]): void {
   const closeHandler = (e: MouseEvent) => {
     if (!menu.contains(e.target as Node)) {
       closeSlicerContextMenu();
-      document.removeEventListener("mousedown", closeHandler);
     }
   };
+  // Escape closes the menu -- and is CONSUMED: the Escape that closes the
+  // menu is the menu's alone, so nothing behind it (the grid's keyboard, the
+  // slicer's selection) hears it as well. Capture phase, on document: the
+  // canvas's Escape binding runs earlier (window capture) and stands down
+  // while the menu is open (`isSlicerContextMenuOpen`, the provider's
+  // `ownsKey`).
   const escHandler = (e: KeyboardEvent) => {
-    if (e.key === "Escape") {
-      closeSlicerContextMenu();
-      document.removeEventListener("keydown", escHandler);
-    }
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeSlicerContextMenu();
   };
+  document.addEventListener("keydown", escHandler, true);
 
   // Delay slightly so the current click doesn't immediately close it
-  setTimeout(() => {
+  const timer = setTimeout(() => {
     document.addEventListener("mousedown", closeHandler);
-    document.addEventListener("keydown", escHandler);
   }, 0);
+  detachMenuListeners = () => {
+    clearTimeout(timer);
+    document.removeEventListener("mousedown", closeHandler);
+    document.removeEventListener("keydown", escHandler, true);
+  };
 }

@@ -170,6 +170,9 @@ function makeNamedStyleLib(options?: {
     })),
     beginUndoTransaction: vi.fn(async (description: string) => {
       order.push({ op: "begin", args: [description] });
+      // The backend's answer: opened, unless a transaction is already open
+      // (then this begin JOINS it and marks it shared).
+      return !(options?.transactionOpen ?? false);
     }),
     commitUndoTransaction: vi.fn(async () => {
       order.push({ op: "commit" });
@@ -297,11 +300,13 @@ describe("executeCreateNamedStyle", () => {
   it("joins an already-open script batch instead of cancelling it", async () => {
     const { lib, order } = makeNamedStyleLib({ transactionOpen: true });
     await executeCreateNamedStyle(asLib(lib), "Alert", { bold: true });
-    // No begin/cancel of its own — cancelling would destroy the script's
-    // batch; the apply+revert pair nets to nothing inside it.
-    expect(order.map((c) => c.op)).toEqual(["applyFormatting", "createNamedStyle", "clear"]);
-    expect(lib.beginUndoTransaction).not.toHaveBeenCalled();
+    // The begin still runs -- it is the door that MARKS the joined step
+    // shared (X6) -- but it answers "joined", so there is no cancel of its
+    // own: cancelling would destroy the script's batch; the apply+revert pair
+    // nets to nothing inside it.
+    expect(order.map((c) => c.op)).toEqual(["begin", "applyFormatting", "createNamedStyle", "clear"]);
     expect(lib.cancelUndoTransaction).not.toHaveBeenCalled();
+    expect(lib.commitUndoTransaction).not.toHaveBeenCalled();
   });
 });
 

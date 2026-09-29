@@ -59,8 +59,11 @@ export interface CliVerbSpec {
 export interface CliBatchStrategy<S> {
   begin(session: S): Promise<void>;
   end(session: S): Promise<void>;
-  /** Error recovery; the engine prints the outcome-appropriate message. */
-  onError(session: S): Promise<"rolled-back" | "kept-partial">;
+  /** Error recovery; the engine prints the outcome-appropriate message.
+   *  "joined": the run's begin JOINED a transaction another caller holds open
+   *  (a script's batch, a gesture landing), so the completed edits are part of
+   *  THAT caller's step -- this run committed nothing of its own. */
+  onError(session: S): Promise<"rolled-back" | "kept-partial" | "joined">;
   /** Confirm-card wording, e.g. "one undo step, all-or-nothing". */
   confirmNote: string;
 }

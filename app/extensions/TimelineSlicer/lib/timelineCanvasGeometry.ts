@@ -21,7 +21,11 @@ import {
   resolveHeaderSizes,
   paintedDisplayHeadings,
 } from "@api/grid";
-import { topFloatingRegionAt, type FloatingHitGeometry } from "@api/gridOverlays";
+import {
+  isPointModeOnForeignSheet,
+  topFloatingRegionAt,
+  type FloatingHitGeometry,
+} from "@api/gridOverlays";
 import { getAllTimelines, getTimelineById } from "./timelineSlicerStore";
 import { TIMELINE_REGION_TYPE, timelineIdOf } from "./timelineObjectSelection";
 import type { TimelineSlicer } from "./timelineSlicerTypes";
@@ -63,8 +67,14 @@ export function timelineCanvasBounds(
  * the answer; any OTHER object on top refuses the point. Only when no
  * published region is there does the timeline store itself answer (active
  * sheet, last first), with the same painted gutters.
+ *
+ * NOTHING while a formula is picking a reference on a sheet other than its
+ * own (`isPointModeOnForeignSheet`): no object is painted or hit-tested then,
+ * and the store fallback's "active sheet" is the sheet being SHOWN, whose own
+ * timelines are not painted (open-items 2.af row 5).
  */
 export function timelineAtCanvasPoint(canvasX: number, canvasY: number): TimelineSlicer | null {
+  if (isPointModeOnForeignSheet()) return null;
   const geo = timelineHitGeometry();
   if (!geo) return null;
   const top = topFloatingRegionAt(canvasX, canvasY, geo);

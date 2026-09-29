@@ -400,15 +400,25 @@ export function ScenarioManagerDialog(props: DialogProps): React.ReactElement | 
     setFormName("");
     setFormComment("");
     const sel = data as Record<string, unknown> | undefined;
-    const activeRow = (sel?.activeRow as number) ?? 0;
-    const activeCol = (sel?.activeCol as number) ?? 0;
-    const endRow = (sel?.endRow as number) ?? activeRow;
-    const endCol = (sel?.endCol as number) ?? activeCol;
 
     // A new scenario starts blank: clear first so the carry-over inside
     // handleChangingCellsChange has nothing from the previous scenario to
     // carry (queued state updaters run in the order they were queued).
     setFormCellValues([]);
+
+    // Opened with no selection to prefill from -- the door hands none while a
+    // selection owner holds the selection, because Core's selection is then a
+    // cell hidden under it (W24): the Changing cells start EMPTY rather than
+    // naming a cell nobody chose.
+    if (typeof sel?.activeRow !== "number" || typeof sel?.activeCol !== "number") {
+      setFormChangingCellsRef("");
+      setError(null);
+      return;
+    }
+    const activeRow = sel.activeRow;
+    const activeCol = sel.activeCol;
+    const endRow = (sel.endRow as number) ?? activeRow;
+    const endCol = (sel.endCol as number) ?? activeCol;
 
     if (activeRow !== endRow || activeCol !== endCol) {
       const ref = `${formatCellRef(activeRow, activeCol)}:${formatCellRef(endRow, endCol)}`;

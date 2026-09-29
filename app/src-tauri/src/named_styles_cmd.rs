@@ -142,7 +142,8 @@ pub fn apply_named_style_range(
 
 /// Shared body of `apply_named_style` / `apply_named_style_range`: applies the
 /// named style to the CROSS PRODUCT of `rows` x `cols` on the active sheet, in
-/// a single undo transaction. Takes plain references so it is unit-testable
+/// a single undo transaction (the caller's, when one is already open -- see
+/// the begin below). Takes plain references so it is unit-testable
 /// with `create_app_state()` (same pattern as off_sheet_structural_edit).
 pub(crate) fn apply_named_style_impl(
     state: &AppState,
@@ -189,8 +190,19 @@ pub(crate) fn apply_named_style_impl(
 
     let mut updated_cells = Vec::new();
 
+    // ONE step for the whole range -- or, inside a transaction someone else
+    // opened (a script's `beginBatch`, a CLI run), part of THAT one: decided
+    // under the undo lock held for the whole body, and only a transaction
+    // opened HERE is committed here. The body used to begin (a no-op join
+    // while one is open) and then commit unconditionally, closing the
+    // caller's batch halfway (wave E, Y3): the writes after the style became
+    // a step of their own, and the caller's ticketed commit found nothing of
+    // its own left to close.
     let cell_count = rows.len() * cols.len();
-    undo_stack.begin_transaction(format!("Apply style '{}' to {} cells", name, cell_count));
+    let opened_transaction = !undo_stack.has_open_transaction();
+    if opened_transaction {
+        undo_stack.begin_transaction(format!("Apply style '{}' to {} cells", name, cell_count));
+    }
 
     for &row in rows {
         for &col in cols {
@@ -266,8 +278,10 @@ pub(crate) fn apply_named_style_impl(
         }
     }
 
-    // Commit undo transaction
-    undo_stack.commit_transaction();
+    // Commit the undo transaction -- only the one this body opened.
+    if opened_transaction {
+        undo_stack.commit_transaction();
+    }
 
     // Collect all styles
     let theme = state.theme.read().unwrap();
@@ -365,6 +379,39 @@ mod rect_apply_tests {
         assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), 0);
         assert!(state.grid.read().unwrap().get_cell(0, 0).is_none());
         assert!(!file_state.is_dirty());
+    }
+
+    /// Wave E, Y3: a style applied INSIDE someone else's open transaction (a
+    /// script's `beginBatch`, a CLI run) JOINS it and leaves it open. The body
+    /// began -- a no-op join while one is open -- and then committed
+    /// unconditionally, closing the batch halfway: the script's writes after
+    /// the style became a step of their own, and the script's own ticketed
+    /// commit then found nothing of its own left to close.
+    #[test]
+    fn a_style_applied_inside_an_open_batch_joins_it_and_leaves_it_open() {
+        let state = crate::create_app_state();
+        let file_state = FileState::default();
+        let ticket = crate::undo_commands::open_or_join_undo_transaction(&state, |stack| {
+            stack.begin_transaction_from_caller("Script batch")
+        })
+        .expect("fixture: the script's begin opens the batch");
+
+        apply_named_style_impl(&state, &file_state, "Good", &[0], &[0]).expect("apply to A1");
+        assert!(
+            state.undo_stack.lock().unwrap().has_open_transaction(),
+            "applying the style closed the script's open batch"
+        );
+        apply_named_style_impl(&state, &file_state, "Bad", &[1], &[0]).expect("apply to A2");
+        assert!(
+            crate::undo_commands::commit_undo_transaction_core(&state, Some(ticket)),
+            "the script's own commit found its batch already closed"
+        );
+
+        let mut undo = state.undo_stack.lock().unwrap();
+        assert!(!undo.has_open_transaction(), "the script's commit left a transaction open");
+        assert_eq!(undo.undo_depth(), 1, "the batch is not ONE undo step");
+        let step = undo.pop_undo().expect("the batch's step");
+        assert_eq!(step.changes.len(), 2, "the batch's one step does not hold both cells");
     }
 }
 

@@ -28,6 +28,10 @@ import type { LayoutConfig, ShowValuesAs, BiPivotModelInfo, CalculatedFieldDef, 
 export interface UnresolvedInclusion {
   /** The filter field's compiled name -- the `name` of its entry in `filters`. */
   fieldName: string;
+  /** The items the clause SHOWS, as written. A consumer that can apply an
+   *  inclusion itself (a design query: the backend inverts it against the
+   *  query's own result) sends these instead of hidden items. */
+  values: string[];
   /** The inclusion clause's position in the compiled text. */
   location: SourceLocation;
 }
@@ -301,7 +305,11 @@ class Compiler {
           // (no filter applied) to avoid incorrect semantics, and SAY SO: the
           // empty shape is otherwise indistinguishable from "no list here".
           resolved.hiddenItems = undefined;
-          this.unresolvedInclusions.push({ fieldName: resolved.name, location: node.location });
+          this.unresolvedInclusions.push({
+            fieldName: resolved.name,
+            values: [...node.values],
+            location: node.location,
+          });
         }
       }
 

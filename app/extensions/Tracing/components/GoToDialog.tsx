@@ -6,7 +6,7 @@
 import React, { useState } from "react";
 import type { DialogProps } from "@api/uiTypes";
 import {
-  setActiveSheetApi,
+  activateSheet,
   scrollToCell,
   setSelection,
   columnToLetter,
@@ -147,7 +147,9 @@ export function GoToDialog({ data, onClose }: DialogProps) {
 
     const ref = refs[selectedIndex];
     try {
-      await setActiveSheetApi(ref.sheetIndex);
+      // The whole switch (backend, then Core, then SHEET_CHANGED): a
+      // backend-only switch left the grid and the tab strip on the old sheet.
+      await activateSheet(ref.sheetIndex);
       scrollToCell(ref.row, ref.col);
       setSelection({
         startRow: ref.row,

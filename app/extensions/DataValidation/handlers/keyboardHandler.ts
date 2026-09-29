@@ -8,6 +8,7 @@ import { getCurrentSelection, getOpenDropdownCell } from "../lib/validationStore
 import { closeDropdown, toggleDropdownFromKeyboard } from "./dropdownHandler";
 import { isKeyClaimed } from "@api";
 import { isEditKeystroke } from "@api/editing";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 let keydownHandler: ((e: KeyboardEvent) => void) | null = null;
 
@@ -60,5 +61,9 @@ export function handleKeyDown(e: KeyboardEvent): void {
   // the key must be claimed synchronously or the grid moves the cursor first.
   e.preventDefault();
   e.stopPropagation();
+  // The list opens on Core's ACTIVE cell, and a pick writes into it -- HIDDEN
+  // while something else owns the selection (a floating grid's selected
+  // cell): refuse, once, with the key still taken (D4, BUG-0185 class).
+  if (refuseIfSelectionOwned("Open the In-Cell List")) return;
   void toggleDropdownFromKeyboard(row, col);
 }

@@ -260,10 +260,13 @@ describe("a contribution fact", () => {
 });
 
 describe("a blank member", () => {
-  it("is never the cell a fact lands on: its leaf carries a subtotal's pairs, and a fact names no blank", () => {
-    // Found live: a null product category. The engine skips VALUE_ID_EMPTY, so
-    // the blank column's header has no path and its leaf cells carry only the
-    // month pair — the same pairs as the month's grand total.
+  it("a leaf with a short path is never the cell a fact lands on: it carries a subtotal's pairs", () => {
+    // Found live: a null product category, when the engine still gave a blank
+    // member no pair (before wave D, X1), so the blank column's header had no
+    // path and its leaf cells carried only the month pair — the same pairs as
+    // the month's grand total. The engine now gives a blank member a pair of
+    // its own (next test); this view keeps the old shape to pin the backstop
+    // for any leaf that still arrives without a full path.
     const v = view([
       row("ColumnHeader", 0, [cell("Corner", ""), cell("ColumnHeader", "", []), cell("ColumnHeader", "Gadgets", [[CAT, GADGETS]]), cell("GrandTotalColumn", "Grand Total")], 0),
       row("Data", 0, [cell("RowHeader", "2024-Q2", [[QTR, Q2]]), cell("Data", 16, [[QTR, Q2]]), cell("Data", 150, [[QTR, Q2], [CAT, GADGETS]]), cell("GrandTotalColumn", 166, [[QTR, Q2]])], 1),
@@ -274,6 +277,25 @@ describe("a blank member", () => {
     const set = pivotCuesFor(bundle([change("Total Sales", "better"), contribution("Total Sales", "Product[Category]", [["Gadgets", 5], ["", 3]])]), v, ["[Total Sales]"]);
     expect(set.cues.map((c) => [c.description, ...at(c)])).toEqual([["Total Sales up 13%", 1, 3], ["Gadgets: Total Sales up", 1, 2]]);
     expect(set.dropped).toEqual([]);
+  });
+
+  it("carries a pair of its own (the engine since wave D): matched by its \"(blank)\" label, never by an empty name", () => {
+    // VALUE_ID_BLANK (u32::MAX - 1, core/pivot-engine/src/cache.rs): the blank
+    // member's own id in a group path, and the header shows "(blank)".
+    const BLANK = 4294967294;
+    const v = view([
+      row("ColumnHeader", 0, [cell("Corner", ""), cell("ColumnHeader", "(blank)", [[CAT, BLANK]]), cell("ColumnHeader", "Gadgets", [[CAT, GADGETS]]), cell("GrandTotalColumn", "Grand Total")], 0),
+      row("Data", 0, [cell("RowHeader", "2024-Q2", [[QTR, Q2]]), cell("Data", 16, [[QTR, Q2], [CAT, BLANK]]), cell("Data", 150, [[QTR, Q2], [CAT, GADGETS]]), cell("GrandTotalColumn", 166, [[QTR, Q2]])], 1),
+      row("GrandTotal", 0, [cell("GrandTotalRow", "Grand Total", []), cell("GrandTotalRow", 16, [[CAT, BLANK]]), cell("GrandTotalRow", 150, [[CAT, GADGETS]]), cell("GrandTotal", 166, [])], 2),
+    ], ["Product.Category"], ["Date.Quarter"]);
+    // A fact naming "" does not match the blank member's "(blank)" label: the
+    // period's change still lands on the month's total, not on the blank's cell.
+    const empty = pivotCuesFor(bundle([change("Total Sales", "better"), contribution("Total Sales", "Product[Category]", [["Gadgets", 5], ["", 3]])]), v, ["[Total Sales]"]);
+    expect(empty.cues.map((c) => [c.description, ...at(c)])).toEqual([["Total Sales up 13%", 1, 3], ["Gadgets: Total Sales up", 1, 2]]);
+    // A fact naming "(blank)" lands on the blank member's own Q2 cell.
+    const named = pivotCuesFor(bundle([change("Total Sales", "better"), contribution("Total Sales", "Product[Category]", [["(blank)", 3]])]), v, ["[Total Sales]"]);
+    expect(named.cues.map((c) => [c.description, ...at(c)])).toEqual([["Total Sales up 13%", 1, 3], ["(blank): Total Sales up", 1, 1]]);
+    expect(named.dropped).toEqual([]);
   });
 });
 

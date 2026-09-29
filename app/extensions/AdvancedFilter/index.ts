@@ -8,6 +8,7 @@ import {
   unregisterDialog,
   showDialog,
   registerMenuItem,
+  unregisterMenuItem,
   ExtensionRegistry,
   detectDataRegion,
   IconAdvancedFilter,
@@ -15,6 +16,7 @@ import {
 import { AdvancedFilterDialog } from "./components/AdvancedFilterDialog";
 import { formatRangeRef } from "./lib/advancedFilterEngine";
 import type { AdvancedFilterDialogData } from "./types";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 // ============================================================================
 // Constants
@@ -46,6 +48,10 @@ let currentSelection: Selection | null = null;
 // ============================================================================
 
 async function openAdvancedFilterDialog(): Promise<void> {
+  // The list range is prefilled from Core's selection, which is HIDDEN while
+  // something else owns the selection (a floating grid's selected cell):
+  // refuse, once (D4, BUG-0185 class).
+  if (refuseIfSelectionOwned("Advanced Filter")) return;
   const dialogData: AdvancedFilterDialogData = {};
 
   // Try to pre-fill list range from current selection or detected data region
@@ -103,6 +109,8 @@ function activate(_context: ExtensionContext): void {
     icon: IconAdvancedFilter,
     action: () => openAdvancedFilterDialog(),
   });
+  // Its OWN item back on deactivate (wave E, Y14): the Data menu is AutoFilter's.
+  cleanupFns.push(() => unregisterMenuItem("data", "data:advancedFilter"));
 
   console.log("[AdvancedFilter] Activated successfully.");
 }

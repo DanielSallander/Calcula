@@ -474,6 +474,41 @@ fn off_sheet_clear_lands_and_records_sheet_tagged_undo() {
     assert_eq!(snapshot.cells.len(), 2);
 }
 
+/// A command run INSIDE a caller's open step joins it and leaves it open: the
+/// caller's step stays ONE undo entry. Found live 2026-09-29 (e2e fixall-calp
+/// X6): a script's createNamedStyle clears its scratch cell inside the script's
+/// batch, the clear's unconditional commit closed the batch halfway, and the
+/// script's next write became a step of its own (engine::OwnedTransaction).
+#[test]
+fn a_clear_inside_a_callers_open_step_joins_it_and_leaves_it_open() {
+    let state = two_sheet_state(|g| {
+        g.set_cell(0, 0, Cell::new_number(5.0));
+    });
+    let a = aux();
+    assert!(
+        state.undo_stack.lock().unwrap().begin_transaction_from_caller("Batch"),
+        "precondition: the caller opened the step"
+    );
+    state.undo_stack.lock().unwrap().record_cell_change(1, 5, 5, None);
+
+    crate::commands::data::clear_range_with_options_off_sheet(
+        &state, &a.file, &a.files, &a.pivots, &a.pane, &a.filters,
+        1,
+        clear_params(ClearApplyTo::All),
+    )
+    .expect("clear succeeds");
+    assert_eq!(value_at(&state, 1, 0, 0), None, "precondition: the clear happened");
+
+    let mut undo = state.undo_stack.lock().unwrap();
+    assert!(undo.has_open_transaction(), "the clear closed the caller's open step");
+    assert!(!undo.can_undo(), "the clear pushed a step of its own inside the caller's");
+    undo.record_cell_change(1, 6, 6, None);
+    undo.commit_transaction();
+    let step = undo.pop_undo().expect("the caller's step");
+    assert_eq!(step.description, "Batch");
+    assert!(undo.pop_undo().is_none(), "one Ctrl+Z must take back the caller's whole step");
+}
+
 #[test]
 fn off_sheet_clear_contents_keeps_the_style() {
     let state = two_sheet_state(|g| {

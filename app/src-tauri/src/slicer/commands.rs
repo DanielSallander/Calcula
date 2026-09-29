@@ -277,7 +277,7 @@ pub(crate) struct TableSlicerFilterTarget {
 }
 
 /// The AutoFilter columns a TABLE slicer filters right now -- the same mapping
-/// the slicer's click makes (`applyTableFilterForSource`): the table's column
+/// the slicer's click makes (`table_click_targets`): the table's column
 /// named like the slicer's field, translated into the sheet's ONE AutoFilter,
 /// which must be the one this table owns. A slicer with no selection filtered
 /// nothing, and a column that carries no criteria has nothing to clear, so
@@ -358,6 +358,14 @@ pub(crate) async fn delete_slicer_core(
         .get(&slicer_id)
         .cloned()
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+    // A sheet protected against object edits refuses the delete, as it
+    // refuses the move (`update_slicer_position_core`) and a chart's delete: a
+    // canvas-wide Delete of a mixed selection relies on each family refusing
+    // what the sheet forbids (the review of A4). Before anything is written.
+    crate::protection::check_sheet_action(ctx.state, slicer.sheet_index, "editObjects", "delete a slicer")?;
+    // In flight until its one step is recorded (the clears can await model
+    // re-queries): an undo or redo asked for meanwhile is refused.
+    let _in_flight = crate::undo_commands::PendingGesture::begin(ctx.state);
     let targets = slicer_filter_targets(ctx.state, ctx.pivot_state, &slicer);
     // OWNER DECISION 3 covers TABLE slicers too: the AutoFilter column its
     // selection set is cleared in this same step.
@@ -404,7 +412,7 @@ pub(crate) async fn delete_slicer_core(
             reconcile: false,
         };
         match crate::pivot::commands::clear_pivot_filter_core_keeping(&quiet, request).await {
-            Ok((_, cells)) => overwritten.entry(target.pivot_id).or_default().extend(cells),
+            Ok((_, kept)) => overwritten.entry(target.pivot_id).or_default().extend(kept.overwritten),
             Err(e) => crate::log_warn!(
                 "SLICER",
                 "delete_slicer {}: could not clear its filter on pivot {}: {}",
@@ -805,21 +813,319 @@ pub(crate) fn update_slicer_position_core(
 
 /// Update slicer selection (which items are checked).
 ///
-/// A MEMBER of an open transaction: a slicer click is the selection plus one
-/// `apply_pivot_filter` per target pivot (and, when a pivot lacked the column,
-/// that apply's ensure step), and the frontend wraps them in ONE undo
-/// transaction so a single Ctrl+Z restores the slicer and the pivots together.
-/// The plain begin/commit this used to record closed that outer transaction
-/// early and split the click into several steps.
+/// Without `gesture`: the selection alone, a MEMBER of an open transaction
+/// (the plain begin/commit this used to record closed an outer transaction
+/// early and split a gesture into several steps).
+///
+/// With `gesture` -- a SLICER CLICK, the selection AND the filter it puts on
+/// every pivot and every TABLE the slicer reaches (BUG-0187, W2): ONE backend
+/// command, which writes the selection, runs every pivot write with its own
+/// recording off, filters the tables, and pushes ONE step at the end
+/// ([`apply_slicer_selection_core`]). The click used to be a frontend
+/// transaction held open across the model re-query, so an unrelated edit made
+/// during a slow click joined its Ctrl+Z step, and a script's `beginBatch`
+/// joined it too (BUG-0200).
 #[tauri::command]
-pub fn update_slicer_selection(
-    state: State<AppState>,
+#[allow(clippy::too_many_arguments)]
+pub async fn update_slicer_selection(
+    state: State<'_, AppState>,
     file_state: State<'_, crate::persistence::FileState>,
-    slicer_state: State<SlicerState>,
+    slicer_state: State<'_, SlicerState>,
+    pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
     slicer_id: identity::EntityId,
     selected_items: Option<Vec<String>>,
-) -> Result<(), String> {
-    update_slicer_selection_core(&state, &file_state, &slicer_state, slicer_id, selected_items, "Slicer filter change")
+    gesture: Option<crate::pivot::types::PivotFilterGesture>,
+) -> Result<Option<SlicerSelectionGestureResponse>, String> {
+    let Some(gesture) = gesture else {
+        update_slicer_selection_core(&state, &file_state, &slicer_state, slicer_id, selected_items, "Slicer filter change")?;
+        return Ok(None);
+    };
+    let ctx = PivotCmdCtx {
+        state: &state,
+        file_state: &file_state,
+        pivot_state: &pivot_state,
+        pane_control_state: &pane_control_state,
+        ribbon_filter_state: &ribbon_filter_state,
+        user_files_state: &user_files_state,
+        bi_state: &bi_state,
+        slicer_state: &slicer_state,
+        record_undo: true,
+    };
+    apply_slicer_selection_core(&ctx, slicer_id, selected_items, gesture).await.map(Some)
+}
+
+/// The undo mode a gesture's wire `step` asks for.
+pub(crate) fn gesture_step_mode(step: crate::pivot::types::FilterGestureStep) -> crate::undo_commands::GestureStepMode {
+    use crate::pivot::types::FilterGestureStep;
+    use crate::undo_commands::GestureStepMode;
+    match step {
+        FilterGestureStep::Own => GestureStepMode::Own,
+        FilterGestureStep::Join => GestureStepMode::Join,
+    }
+}
+
+/// A gesture's response: its run, and where its ONE step went.
+pub(crate) fn gesture_response(
+    run: crate::pivot::commands::PivotFilterGestureRun,
+    outcome: crate::undo_commands::GestureStepOutcome,
+) -> crate::pivot::types::PivotFilterGestureResponse {
+    use crate::pivot::types::FilterGestureStepOutcome;
+    use crate::undo_commands::GestureStepOutcome;
+    let (step, step_seq) = match outcome {
+        GestureStepOutcome::Nothing => (FilterGestureStepOutcome::Nothing, None),
+        GestureStepOutcome::Pushed(seq) => (FilterGestureStepOutcome::Pushed, Some(seq)),
+        GestureStepOutcome::Joined => (FilterGestureStepOutcome::Joined, None),
+    };
+    crate::pivot::types::PivotFilterGestureResponse {
+        responses: run.responses,
+        failures: run.failures,
+        step,
+        step_seq,
+        // A step that was not recorded holds nothing a Cancel could name.
+        overwrite_token: if step == FilterGestureStepOutcome::Nothing { None } else { run.overwrite_token },
+    }
+}
+
+/// A SLICER CLICK as ONE command (BUG-0187): the selection, then every pivot
+/// write the frontend resolved for it (its Report Connections pivots, or a
+/// model slicer's page), then every TABLE it is connected to (W2), then ONE
+/// undo step.
+///
+/// TABLES (W2). A table connection's AutoFilter column is filtered HERE, on
+/// the table's own sheet (`autofilter::set_column_values_on_sheet`), and its
+/// restore joins the click's one step. The frontend used to filter tables
+/// through the AutoFilter owner AFTER this command, so the step had to be
+/// held open for them -- and every edit the user made while those writes ran
+/// joined the click (those modes are gone). A table that cannot
+/// take the filter is reported in `table_failures` (an APPLY only: a CLEAR
+/// there has no filter of this slicer's to take off); the other targets still
+/// filter. The frontend then has the AutoFilter owner re-read the filter.
+///
+/// The selection is written FIRST -- a pinned write re-queries, and the
+/// re-query folds in the page's model slicers, so it must read the NEW
+/// selection -- and recorded nowhere yet. The pivot writes run with their own
+/// recording off ([`crate::pivot::commands::run_pivot_filter_gesture`]), so no
+/// undo transaction is held open across a model re-query. The step is pushed
+/// once, at the end, the way `gesture.step` says: a user click is a step of
+/// its own, even while a script batch that has recorded nothing yet is open
+/// (one that already holds writes is joined and marked shared, so undoing
+/// replays in time order); a script's own call JOINS the batch it opened. No
+/// step is left open for anything after the command: its TABLE targets are
+/// filtered above, inside it. See `undo_commands::GestureStepMode`. The
+/// pivots are recorded first and the slicer LAST, so the reverse replay
+/// restores the slicer first (the `delete_slicer_core` order).
+///
+/// Refusal first: an unknown slicer writes nothing and records nothing. A
+/// pivot write that refuses is reported and the others still run.
+///
+/// IN FLIGHT from the selection write to the push: an undo or redo asked for
+/// meanwhile is refused (`undo_commands::history_move_refusal`). It used to
+/// take back the step BEFORE the click -- restoring the slicer over the
+/// click's new selection while the click's pivot writes still landed with it,
+/// and the click's push then cleared that undo's redo (the review of BUG-0187).
+pub(crate) async fn apply_slicer_selection_core(
+    ctx: &PivotCmdCtx<'_>,
+    slicer_id: identity::EntityId,
+    selected_items: Option<Vec<String>>,
+    gesture: crate::pivot::types::PivotFilterGesture,
+) -> Result<SlicerSelectionGestureResponse, String> {
+    let _in_flight = crate::undo_commands::PendingGesture::begin(ctx.state);
+    let before = write_slicer_selection_unrecorded(ctx.file_state, ctx.slicer_state, slicer_id, selected_items)?;
+    let mut run = crate::pivot::commands::run_pivot_filter_gesture(ctx, gesture.writes).await;
+    let mut restores = std::mem::take(&mut run.restores);
+    // The tables, with the selection as it stands NOW (the store holds the
+    // new one). Synchronous: no lock is held and nothing is awaited.
+    let slicer = ctx.slicer_state.slicers.read().map_err(|e| e.to_string())?.get(&slicer_id).cloned();
+    let tables = match &slicer {
+        Some(slicer) => filter_slicer_tables(ctx.state, ctx.file_state, slicer),
+        None => SlicerTableWrites::default(),
+    };
+    restores.extend(tables.restores);
+    // LAST, so the reverse replay restores the slicer first.
+    if let Some(before) = before {
+        restores.push(crate::undo_commands::slicer_restore(slicer_id, before));
+    }
+    let outcome =
+        crate::undo_commands::record_gesture_step(ctx.state, "Slicer Selection", restores, gesture_step_mode(gesture.step));
+    // Rows the tables hid or showed change what SUBTOTAL/AGGREGATE-style
+    // formulas see -- the recalculation `set_column_filter_values` runs.
+    if !tables.sheets.is_empty() {
+        if let Err(e) = crate::calculation::recalc_visibility_dependents_core(
+            ctx.state,
+            ctx.user_files_state,
+            ctx.pivot_state,
+            Some((ctx.pane_control_state, ctx.ribbon_filter_state)),
+        ) {
+            crate::log_warn!("SLICER", "visibility recalc after slicer {} filtered its tables failed: {}", slicer_id, e);
+        }
+    }
+    Ok(SlicerSelectionGestureResponse {
+        gesture: gesture_response(run, outcome),
+        table_sheets: tables.sheets,
+        table_failures: tables.failures,
+    })
+}
+
+/// What a click's TABLE writes did (see [`filter_slicer_tables`]).
+#[derive(Default)]
+pub(crate) struct SlicerTableWrites {
+    /// One `obj_autofilter` restore per table filter written, for the click's
+    /// one step.
+    pub restores: Vec<(&'static str, Vec<u8>)>,
+    /// The sheets whose AutoFilter changed, each once.
+    pub sheets: Vec<usize>,
+    /// The tables that refused.
+    pub failures: Vec<SlicerTableFilterFailure>,
+}
+
+/// Put `slicer`'s selection on every TABLE it is connected to (a null
+/// selection clears the column), recording nothing: the restores are handed
+/// back for the caller's one step. The values are the slicer's items with the
+/// blank spellings ("" and "(Blanks)") turned into "keep blanks", as the
+/// frontend's AutoFilter call did. Each table's refusal is collected; the
+/// others still filter.
+pub(crate) fn filter_slicer_tables(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    slicer: &Slicer,
+) -> SlicerTableWrites {
+    let mut out = SlicerTableWrites::default();
+    let clearing = slicer.selected_items.is_none();
+    for (table_id, target) in table_click_targets(state, slicer) {
+        let target = match target {
+            Ok(target) => target,
+            // A CLEAR on a table that cannot take this slicer's filter has
+            // nothing of this slicer's to take off.
+            Err(reason) if clearing => {
+                log_debug!("SLICER", "slicer {}: nothing to clear on table {}: {}", slicer.id, table_id, reason);
+                continue;
+            }
+            Err(reason) => {
+                out.failures.push(SlicerTableFilterFailure { table_id, clearing, message: reason });
+                continue;
+            }
+        };
+        let written = match &slicer.selected_items {
+            None => crate::autofilter::clear_column_values_on_sheet(
+                state,
+                file_state,
+                target.sheet,
+                target.filter_id,
+                target.column_index,
+            ),
+            Some(selected) => {
+                let is_blank = |v: &String| v.is_empty() || v == "(Blanks)";
+                crate::autofilter::set_column_values_on_sheet(
+                    state,
+                    file_state,
+                    target.sheet,
+                    target.filter_id,
+                    target.column_index,
+                    selected.iter().filter(|v| !is_blank(v)).cloned().collect(),
+                    selected.iter().any(is_blank),
+                )
+            }
+        };
+        match written {
+            Ok(Some(previous)) => {
+                out.restores.push(crate::undo_commands::encode_autofilter_restore(target.sheet, Some(previous)));
+                if !out.sheets.contains(&target.sheet) {
+                    out.sheets.push(target.sheet);
+                }
+            }
+            Ok(None) => {}
+            Err(message) => out.failures.push(SlicerTableFilterFailure { table_id, clearing, message }),
+        }
+    }
+    out
+}
+
+/// The AutoFilter column each TABLE connection of `slicer` is filtered
+/// through, resolved -- or why it cannot be: its table is gone, has no column
+/// named like the slicer's field, its sheet has no AutoFilter or one another
+/// table owns, or the column lies outside it. The sheet's ONE AutoFilter is
+/// keyed relative to ITS start column, so the table's column is translated
+/// through absolute grid coordinates. Any sheet: a table slicer may sit on
+/// another sheet than its table.
+///
+/// LOCKS: `tables` then `auto_filters` (the order `create_table` uses), both
+/// released on return.
+pub(crate) fn table_click_targets(
+    state: &AppState,
+    slicer: &Slicer,
+) -> Vec<(identity::EntityId, Result<TableSlicerFilterTarget, String>)> {
+    let mut table_ids: Vec<identity::EntityId> = Vec::new();
+    for c in &slicer.connected_sources {
+        if c.source_type == SlicerSourceType::Table && !table_ids.contains(&c.source_id) {
+            table_ids.push(c.source_id);
+        }
+    }
+    if table_ids.is_empty() {
+        return Vec::new();
+    }
+    let (Ok(tables), Ok(auto_filters)) = (state.tables.read(), state.auto_filters.read()) else {
+        return table_ids.into_iter().map(|id| (id, Err("the tables could not be read".to_string()))).collect();
+    };
+    let field = &slicer.field_name;
+    table_ids
+        .into_iter()
+        .map(|table_id| {
+            let resolved = (|| {
+                let (sheet, table) = tables
+                    .iter()
+                    .find_map(|(sheet, by_id)| by_id.get(&table_id).map(|t| (*sheet, t)))
+                    .ok_or_else(|| "its table is no longer in the workbook".to_string())?;
+                let offset = table
+                    .columns
+                    .iter()
+                    .position(|c| &c.name == field)
+                    .ok_or_else(|| format!("the table has no column \"{field}\""))?;
+                let af = auto_filters
+                    .get(&sheet)
+                    .ok_or_else(|| "the table's sheet has no AutoFilter to filter with".to_string())?;
+                if table.auto_filter_id != Some(af.id) {
+                    // Refused rather than filtering ANOTHER table's columns.
+                    return Err("the sheet's AutoFilter belongs to another table".to_string());
+                }
+                let abs_col = table.start_col + offset as u32;
+                if abs_col < af.start_col || abs_col > af.end_col {
+                    return Err(format!("column \"{field}\" is outside the table's AutoFilter range"));
+                }
+                Ok(TableSlicerFilterTarget { sheet, filter_id: af.id, column_index: abs_col - af.start_col })
+            })();
+            (table_id, resolved)
+        })
+        .collect()
+}
+
+/// Write a slicer's selection WITHOUT recording it, handing back the slicer as
+/// it was (for the caller's one step), or `None` when the selection already
+/// was that (nothing written, the document left clean). An unknown slicer is
+/// refused before anything is written.
+pub(crate) fn write_slicer_selection_unrecorded(
+    file_state: &crate::persistence::FileState,
+    slicer_state: &SlicerState,
+    slicer_id: identity::EntityId,
+    selected_items: Option<Vec<String>>,
+) -> Result<Option<Slicer>, String> {
+    let pending = slicer_state.slicers.lock_pending().map_err(|e| e.to_string())?;
+    let before = pending
+        .get(&slicer_id)
+        .cloned()
+        .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+    if before.selected_items == selected_items {
+        return Ok(None);
+    }
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut slicers = pending.authorize(&effect);
+    if let Some(slicer) = slicers.get_mut(&slicer_id) {
+        slicer.selected_items = selected_items;
+    }
+    Ok(Some(before))
 }
 
 /// [`update_slicer_selection`] (and [`clear_slicer_filter`]) over plain
@@ -1361,7 +1667,7 @@ pub(crate) async fn get_slicer_items_core(
         .map(|value| {
             let selected = match &slicer.selected_items {
                 None => true,
-                Some(selected) => selected.contains(&value),
+                Some(selected) => selection_holds_item(selected, &value),
             };
             let has_data = match &has_data_set {
                 None => true,
@@ -1566,6 +1872,12 @@ fn get_pivot_field_values(
         .iter()
         .position(|f| field_name_matches(&f.name, field_name))
         .ok_or_else(|| format!("Field '{}' not found in pivot cache", field_name))?;
+    // The BLANK item is listed (last) when the column has blank records: a
+    // level-1 selection hides the blank rows unless it names the blank item
+    // (`hidden_for_selection`), so the list must offer it -- without it,
+    // deselecting one item from "all" dropped the blank rows too, with no
+    // item to bring them back (the review of A1). Excel lists "(blank)".
+    let has_blank = cache.has_blank_values(field_index);
 
     let field = cache
         .fields
@@ -1604,8 +1916,20 @@ fn get_pivot_field_values(
         })
         .filter(|s| !s.is_empty())
         .collect();
+    let mut unique_values = unique_values;
+    if has_blank {
+        unique_values.push(pivot_engine::BLANK_ITEM_LABEL.to_string());
+    }
 
     Ok(unique_values)
+}
+
+/// Whether a listed slicer item is in `selection`: by its exact text, and the
+/// BLANK item by any spelling of its label (or the empty string a model uses).
+fn selection_holds_item(selection: &[String], value: &str) -> bool {
+    selection.iter().any(|s| s == value)
+        || (pivot_engine::is_blank_item_label(value)
+            && selection.iter().any(|s| s.is_empty() || pivot_engine::is_blank_item_label(s)))
 }
 
 /// Get values from a pivot field that still have data given cross-slicer filters.
@@ -1640,17 +1964,30 @@ fn get_pivot_available_values(
                 .iter()
                 .position(|f| field_name_matches(&f.name, field_name))
                 .map(|idx| {
-                    let allowed_set: std::collections::HashSet<String> =
-                        allowed.iter().cloned().collect();
+                    // Any spelling of the blank item (or a model's empty
+                    // NULL spelling) is the one label a blank record reads as.
+                    let allowed_set: std::collections::HashSet<String> = allowed
+                        .iter()
+                        .map(|v| {
+                            if v.is_empty() || pivot_engine::is_blank_item_label(v) {
+                                pivot_engine::BLANK_ITEM_LABEL.to_string()
+                            } else {
+                                v.clone()
+                            }
+                        })
+                        .collect();
                     (idx, allowed_set)
                 })
         })
         .collect();
 
-    // Helper: convert a cache value to string (same logic as get_pivot_field_values)
+    // Helper: convert a cache value to string (same logic as get_pivot_field_values).
+    // A BLANK record reads as the blank item's label, the one the slicer lists
+    // (`get_pivot_field_values`): a sibling that selects the blank item keeps
+    // it, and the blank item has data when a passing record is blank.
     let value_to_string = |field_idx: usize, value_id: pivot_engine::ValueId| -> String {
         if value_id == VALUE_ID_EMPTY {
-            return String::new();
+            return pivot_engine::BLANK_ITEM_LABEL.to_string();
         }
         cache
             .fields

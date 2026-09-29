@@ -573,6 +573,50 @@ fn remap_cell_keyed_map<V>(
     }
 }
 
+/// Re-aim the SOURCE of every list validation in `ranges` through `remap`
+/// (found with wave C's W10). A list rule names its source range by sheet
+/// INDEX (`ListSource::Range.sheet_index`; `None` = the validated range's own
+/// sheet), and no sheet operation had ever remapped it: after a delete or a
+/// move the dropdown listed -- and validated against -- whichever sheet
+/// inherited the index, with no error anywhere. A source whose sheet is gone
+/// (`remap` answers `None`) becomes an EMPTY list: every entry is refused, as
+/// Excel refuses one against a `#REF!` source -- never another sheet's cells.
+/// Returns whether anything changed. Also resolves a PULLED list source's
+/// application position to its local sheet (`calp_commands.rs`, W11).
+pub(crate) fn remap_list_sources(
+    ranges: &mut [crate::data_validation::ValidationRange],
+    remap: &dyn Fn(usize) -> Option<usize>,
+) -> bool {
+    use crate::data_validation::{DataValidationRule, ListSource};
+    let mut changed = false;
+    for range in ranges.iter_mut() {
+        let DataValidationRule::List(list) = &mut range.validation.rule else { continue };
+        let ListSource::Range { sheet_index: Some(old), .. } = &mut list.source else { continue };
+        match remap(*old) {
+            Some(new) if new == *old => {}
+            Some(new) => {
+                *old = new;
+                changed = true;
+            }
+            None => {
+                list.source = ListSource::Values(Vec::new());
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// [`remap_list_sources`] over every sheet's validations.
+fn remap_list_validation_sources(
+    store: &mut HashMap<usize, Vec<crate::data_validation::ValidationRange>>,
+    remap: &impl Fn(usize) -> Option<usize>,
+) {
+    for ranges in store.values_mut() {
+        remap_list_sources(ranges, remap);
+    }
+}
+
 /// Apply `remap` to every sheet-index-keyed HashMap store, re-stamping the
 /// `sheet_index` field carried INSIDE Comment and Scenario payloads (the same
 /// re-stamp load_file performs when it materializes them). Takes each store's
@@ -619,7 +663,11 @@ fn remap_sheet_keyed_stores(
     }
     remap_indexed_map(&mut state.outlines.write(effect).unwrap(), &remap);
     remap_indexed_map(&mut state.conditional_formats.write(effect).unwrap(), &remap);
-    remap_indexed_map(&mut state.data_validations.write(effect).unwrap(), &remap);
+    {
+        let mut validations = state.data_validations.write(effect).unwrap();
+        remap_indexed_map(&mut validations, &remap);
+        remap_list_validation_sources(&mut validations, &remap);
+    }
     remap_cell_keyed_map(&mut state.cell_types.write(effect).unwrap(), &remap);
     // On-grid controls (buttons/checkboxes) share the cell-type key shape.
     remap_cell_keyed_map(&mut state.controls.write(effect).unwrap(), &remap);
@@ -1162,6 +1210,237 @@ fn repair_named_ranges(
     }
 }
 
+/// Repair every FORMULA in the `.calp` override layer -- each record's
+/// `current` through `repair_current`, its `baseline` and conflict
+/// `upstream_new` through `repair_upstream`. A rename passes the closure the
+/// grid formulas and defined names go through for both.
+///
+/// A DELETE passes two (review C): `current` is the subscriber's own text, and
+/// the next refresh writes it over the cell (`apply_override_value_to_grid`),
+/// so it must read exactly as the cell's own repair left the cell; `baseline`
+/// and `upstream_new` are UPSTREAM text, which the next refresh compares with
+/// its own rewrite of the untouched upstream (`RefreshSheetNames::renames`),
+/// so they follow that rewrite -- or every refresh reads a false conflict.
+///
+/// The layer records formulas WITHOUT a leading `=` (`override_value_from_saved`
+/// and the app's `override_value_from_cell` both do), and the repair renders a
+/// changed formula WITH one; the layer's own spelling is kept. A formula the
+/// repair does not change keeps its bytes (the repair returns the original
+/// text then), and a layer with no formula referring to the sheet is left
+/// exactly as it was. Takes `override_layer` alone, after every sheet guard.
+fn repair_override_formulas(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    repair_current: &dyn Fn(&str) -> String,
+    repair_upstream: &dyn Fn(&str) -> String,
+) {
+    let fix = |value: &mut calp::OverrideValue, repair: &dyn Fn(&str) -> String| {
+        let calp::OverrideValue::Formula { formula } = value else { return };
+        let repaired = repair(formula);
+        if repaired == *formula {
+            return;
+        }
+        *formula = if formula.trim_start().starts_with('=') {
+            repaired
+        } else {
+            repaired.strip_prefix('=').map(str::to_string).unwrap_or(repaired)
+        };
+    };
+    let Ok(mut layer) = state.override_layer.write(effect) else { return };
+    for ovr in layer.overrides.iter_mut() {
+        fix(&mut ovr.baseline, repair_upstream);
+        fix(&mut ovr.current, repair_current);
+        if let Some(upstream) = ovr.upstream_new.as_mut() {
+            fix(upstream, repair_upstream);
+        }
+    }
+}
+
+/// Run one typed rule-store value through a `calp::sheet_renames` payload
+/// rename: serialized to the JSON the payload walker reads (the shape a
+/// `.calp` carries it in), renamed, and deserialized back ONLY when the walker
+/// changed something. True when `value` changed. A renamed payload that no
+/// longer deserializes is left exactly as it was and logged -- a rename must
+/// never destroy a rule.
+fn rename_typed_payload<T: Serialize + serde::de::DeserializeOwned>(
+    value: &mut T,
+    rename: impl FnOnce(&mut serde_json::Value) -> usize,
+) -> bool {
+    let Ok(mut json) = serde_json::to_value(&*value) else { return false };
+    if rename(&mut json) == 0 {
+        return false;
+    }
+    match serde_json::from_value::<T>(json) {
+        Ok(renamed) => {
+            *value = renamed;
+            true
+        }
+        Err(e) => {
+            crate::log_error!("SHEET", "a renamed rule payload no longer deserializes ({}); left as it was", e);
+            false
+        }
+    }
+}
+
+/// Rename the sheet references inside the RULE stores a sheet rename must
+/// carry besides cells, names and overrides: every conditional-formatting
+/// formula, every custom data-validation formula, and every formula property
+/// of a cell-anchored control (wave-B fix-up).
+///
+/// Each names sheets by NAME exactly as a cell formula does, and a rename left
+/// them alone: a CF rule `=A1>Data!$B$1` kept reading "Data" after Data became
+/// Facts -- the formula named a sheet that no longer existed, so the highlight
+/// silently vanished -- and a custom validation or a button's text formula read
+/// a missing sheet the same way. Excel carries all of them through a rename.
+///
+/// Goes through the SAME per-payload walkers a `.calp` pull's collision rename
+/// does (`calp::sheet_renames`), so a user's rename and a pull cannot disagree
+/// about which strings are formulas -- a CF expression with or without its
+/// `=`, a cell-value bound or a control property only with one (the host reads
+/// the rest as literals). Each store is taken alone, after every sheet guard.
+fn rename_rule_references(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    renames: &calp::sheet_renames::SheetRenames,
+) {
+    if renames.is_empty() {
+        return;
+    }
+    rewrite_rule_formulas(state, effect, &|text| renames.rename_formula(text));
+}
+
+/// Run every formula slot of the three RULE stores -- conditional formats,
+/// data validations, cell-anchored controls -- through `rewrite` (`None` =
+/// leave the slot as it is). The slots are the ones the `.calp` payload
+/// visitors reach (`calp::sheet_renames::visit_*_formulas`), the one
+/// definition of which strings are formulas that a rename, a pull and a delete
+/// share. Each store is taken alone.
+fn rewrite_rule_formulas(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    rewrite: &dyn Fn(&str) -> Option<String>,
+) {
+    let mut slot = |text: &mut String| match rewrite(text.as_str()) {
+        Some(rewritten) => {
+            *text = rewritten;
+            true
+        }
+        None => false,
+    };
+    if let Ok(mut store) = state.conditional_formats.write(effect) {
+        for defs in store.values_mut() {
+            rename_typed_payload(defs, |json| calp::sheet_renames::visit_cf_rule_formulas(json, &mut slot));
+        }
+    }
+    if let Ok(mut store) = state.data_validations.write(effect) {
+        for ranges in store.values_mut() {
+            rename_typed_payload(ranges, |json| calp::sheet_renames::visit_validation_formulas(json, &mut slot));
+        }
+    }
+    if let Ok(mut store) = state.controls.write(effect) {
+        for (&(_, row, col), meta) in store.iter_mut() {
+            // The walker reads the `.calp` shape (`Vec<SavedControlEntry>`).
+            let mut entries = vec![crate::controls::SavedControlEntry {
+                row,
+                col,
+                control_type: meta.control_type.clone(),
+                properties: meta.properties.clone(),
+            }];
+            if rename_typed_payload(&mut entries, |json| {
+                calp::sheet_renames::visit_control_formulas(json, &mut slot)
+            }) {
+                if let Some(entry) = entries.pop() {
+                    meta.properties = entry.properties;
+                }
+            }
+        }
+    }
+}
+
+/// The DELETE twin of [`rename_rule_references`], plus the override layer
+/// (wave C, W10/W11): every reference to the deleted sheet in a conditional
+/// format, a custom validation, a control's formula property, a pane
+/// dropdown's range source and a `.calp` override record becomes `#REF!` --
+/// except a 3D reference that loses one endpoint, which keeps the rest of its
+/// range exactly as a cell's does (below).
+///
+/// Before this, a delete repaired cell formulas and defined names only: a CF
+/// rule `=A1>Data!$B$1` kept naming Data after Data was deleted -- the
+/// evaluator resolves an unknown sheet name to the rule's OWN sheet, so the
+/// highlight silently read a local cell, and a sheet created later under the
+/// old name captured every such rule. The same held for validations, button
+/// captions and dropdowns, and for override formulas, whose baseline then
+/// disagreed with the refresh's own rewrite of the upstream text (a gone
+/// sheet's references become `#REF!` there -- `RefreshSheetNames`) and read as
+/// a conflict.
+///
+/// TWO RULES, by whose text it is (review C). A formula the workbook itself
+/// evaluates -- a rule formula, an override's CURRENT text, which the next
+/// refresh writes over its cell -- is repaired as the CELLS were: a 3D
+/// reference that loses one endpoint keeps the rest of its range
+/// (`SUM(Mid:Data!B1)` becomes `SUM(Mid:Mid!B1)`), and anything else naming
+/// the deleted sheet becomes `#REF!` in place, as Excel writes a rule
+/// (`=A1>#REF!`) -- `crate::repair_formula_text_on_delete_at`. The gone-walker
+/// alone had turned the 3D reference into `#REF!` beside a cell that still
+/// summed Mid, and the override's current text then broke that working cell
+/// at the next refresh. An override's BASELINE and conflict UPSTREAM are
+/// upstream text, and keep the `.calp` gone-walker -- the rule a refresh
+/// applies to a sheet the subscriber deleted -- because the refresh compares
+/// its own rewrite of the untouched upstream with the baseline
+/// (`repair_override_formulas`). A pane dropdown's source is a plain A1
+/// reference, for which the two rules agree. Each store is taken alone, after
+/// every sheet guard.
+fn delete_rule_references(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    deleted_name: &str,
+    deleted_index: usize,
+    sheet_names_after: &[String],
+) {
+    let gone = calp::sheet_renames::SheetRenames::default().with_gone([deleted_name]);
+    if gone.is_empty() {
+        return;
+    }
+    let as_the_cells_were = |formula: &str| {
+        crate::repair_formula_text_on_delete_at(formula, deleted_name, deleted_index, sheet_names_after)
+    };
+    rewrite_rule_formulas(state, effect, &as_the_cells_were);
+    rename_pane_control_references(pane_control_state, &gone);
+    repair_override_formulas(
+        state,
+        effect,
+        &|formula| as_the_cells_were(formula).unwrap_or_else(|| formula.to_string()),
+        &|formula| gone.rename_formula(formula).unwrap_or_else(|| formula.to_string()),
+    );
+}
+
+/// Rename the sheet prefix of every pane-control dropdown's cell-range source
+/// (`"Data!A1:A5"`) for a sheet rename -- the fourth rule store a rename must
+/// carry, through the same walker a `.calp` pull uses. Returns how many changed.
+///
+/// Called by every rename door through [`with_pane_controls_following_rename`]
+/// (pane controls live in their own managed state, `PaneControlState`, which
+/// `rename_sheet_inner` does not receive), and by a sheet DELETE with a
+/// `SheetRenames::with_gone` set, which turns a dropdown sourced from the
+/// deleted sheet into `#REF!` (`delete_rule_references`).
+pub fn rename_pane_control_references(
+    pane_state: &crate::pane_control::PaneControlState,
+    renames: &calp::sheet_renames::SheetRenames,
+) -> usize {
+    if renames.is_empty() {
+        return 0;
+    }
+    let Ok(mut controls) = pane_state.controls.lock() else { return 0 };
+    let mut changed = 0;
+    for control in controls.values_mut() {
+        if rename_typed_payload(&mut control.config, |json| renames.rename_pane_control_config(json)) {
+            changed += 1;
+        }
+    }
+    changed
+}
+
 /// Re-key the two cross-sheet dependency maps after a sheet is RENAMED.
 ///
 /// The other half of the same defect. `cross_sheet_dependents` is keyed by
@@ -1340,6 +1619,68 @@ pub struct CanvasLayoutChanged {
     pub layout: ::persistence::CanvasLayout,
 }
 
+/// The undo restore kind for a canvas's STACKING and LOCKS (`z_order`,
+/// `locked`). The other layout settings (page, snap grid, background) stay
+/// view state with no undo (decision D1); Excel's Bring to Front / Send to
+/// Back and object locking ARE undoable, so these two are (W5, = M4).
+/// Registered in `undo_commands::RESTORE_REGISTRY` with the `Sheets` domain:
+/// the Shell fans that out to `SHEET_CHANGED`, on which the CanvasSheet
+/// extension re-reads every canvas layout and repaints in the restored order.
+pub(crate) const CANVAS_STACKING_RESTORE_KIND: &str = "canvas_stacking";
+
+/// A canvas's stacking and locks before a change, by sheet IDENTITY (an index
+/// would name another sheet after a move or a delete in between).
+#[derive(Serialize, Deserialize)]
+struct CanvasStackingSnapshot {
+    sheet_id: identity::SheetId,
+    z_order: Vec<::persistence::CanvasObjectRef>,
+    locked: Vec<::persistence::CanvasObjectRef>,
+}
+
+/// The `canvas_stacking` restore payload of a canvas's CURRENT stacking.
+fn canvas_stacking_restore_bytes(
+    sheet_id: identity::SheetId,
+    layout: &::persistence::CanvasLayout,
+) -> Vec<u8> {
+    serde_json::to_vec(&CanvasStackingSnapshot {
+        sheet_id,
+        z_order: layout.z_order.clone(),
+        locked: layout.locked.clone(),
+    })
+    .unwrap_or_default()
+}
+
+/// Restore a canvas's `z_order` and `locked` from a `canvas_stacking`
+/// snapshot, pushing the CURRENT ones as the inverse (redo). A canvas that no
+/// longer exists (or is no longer a canvas) restores nothing and pushes no
+/// inverse. LOCKS: `sheet_ids` is read and released before `sheet_kinds` is
+/// written -- the order `set_canvas_layout_inner` takes them in.
+pub(crate) fn apply_canvas_stacking_restore(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    data: &[u8],
+    inverse: &mut engine::Transaction,
+) {
+    let Ok(snap) = serde_json::from_slice::<CanvasStackingSnapshot>(data) else {
+        crate::log_error!("UNDO", "bad canvas_stacking snapshot; nothing restored");
+        return;
+    };
+    let Some(index) = state.sheet_ids.read().unwrap().iter().position(|id| *id == snap.sheet_id) else {
+        return;
+    };
+    let mut kinds = state.sheet_kinds.write(effect).unwrap();
+    let Some(::persistence::SheetKind::Canvas(layout)) = kinds.get_mut(index) else { return };
+    let current = CanvasStackingSnapshot {
+        sheet_id: snap.sheet_id,
+        z_order: std::mem::replace(&mut layout.z_order, snap.z_order),
+        locked: std::mem::replace(&mut layout.locked, snap.locked),
+    };
+    inverse.add_change(engine::CellChange::CustomRestore {
+        kind: CANVAS_STACKING_RESTORE_KIND.to_string(),
+        data: serde_json::to_vec(&current).unwrap_or_default(),
+    });
+}
+
 /// Change a canvas sheet's LAYOUT (page, snap grid, background, stacking).
 ///
 /// ONE command for the whole layout (a partial patch), for the reason
@@ -1350,7 +1691,10 @@ pub struct CanvasLayoutChanged {
 /// in the same critical section as the write (`lock_pending`), so a refusal
 /// leaves the document clean and a concurrent patch cannot slip in between.
 ///
-/// Not undoable, like zoom and the display flags: it is view/layout state.
+/// UNDO: a change to the STACKING (Bring to Front / Send to Back) or the LOCKS
+/// is ONE undo step (W5, see `set_canvas_layout_inner`). The page, snap grid
+/// and background are not undoable, like zoom and the display flags: they are
+/// view/layout state.
 #[tauri::command]
 pub fn set_canvas_layout(
     app: tauri::AppHandle,
@@ -1368,6 +1712,16 @@ pub fn set_canvas_layout(
 }
 
 /// Command body over plain references (unit-testable without a Tauri State).
+///
+/// A change to the STACKING (`z_order`) or the LOCKS (`locked`) is ONE undo
+/// step (W5): Bring to Front / Send to Back and Lock are Excel-undoable, so
+/// each records a `canvas_stacking` restore of the previous lists -- JOINING
+/// the caller's open transaction (a cross-family arrange) or as a step of its
+/// own. Every other layout setting stays non-undoable view state (decision
+/// D1), and a patch that leaves both lists as they were records nothing. A
+/// patch that changes nothing at all leaves the document clean.
+/// Recorded after the `sheet_kinds` guard drops: the undo stack is never
+/// taken while holding a store.
 pub(crate) fn set_canvas_layout_inner(
     state: &AppState,
     file_state: &FileState,
@@ -1398,10 +1752,36 @@ pub(crate) fn set_canvas_layout_inner(
             ))
         }
     };
-    let next = patch.apply(current)?;
+    let next = patch.apply(current.clone())?;
+    if next == current {
+        // A patch that changes NOTHING (a script re-sending the page, snap
+        // grid or stacking already there) mints no effect and records no step:
+        // the effect is constructed only in the branch that changes something.
+        return Ok(CanvasLayoutChanged {
+            sheet_index: index,
+            sheet_id,
+            layout: next,
+        });
+    }
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let mut kinds = kinds.authorize(&effect);
     kinds[index] = ::persistence::SheetKind::Canvas(next.clone());
+    drop(kinds);
+    let reordered = current.z_order != next.z_order;
+    if reordered || current.locked != next.locked {
+        // Bound FIRST, so the `sheet_ids` guard drops here: in an `if let`
+        // scrutinee (edition 2021) it would live through the whole body --
+        // held while the recorder waits for the undo stack.
+        let id = state.sheet_ids.read().unwrap().get(index).copied();
+        if let Some(id) = id {
+            let description = if reordered { "Reorder objects" } else { "Lock objects" };
+            crate::undo_commands::record_restores_joining_open_transaction(
+                state,
+                description,
+                vec![(CANVAS_STACKING_RESTORE_KIND, canvas_stacking_restore_bytes(id, &current))],
+            );
+        }
+    }
     Ok(CanvasLayoutChanged {
         sheet_index: index,
         sheet_id,
@@ -2240,7 +2620,7 @@ pub(crate) fn delete_sheet_impl(
                 .map(|(_, n)| n.clone())
                 .collect();
             let repair = |formula: &str| {
-                crate::repair_3d_refs_on_delete(formula, &deleted_name, &names_after)
+                crate::repair_3d_refs_on_delete_at(formula, &deleted_name, index, &names_after)
             };
             if let Err(refusal) =
                 check_workbook_repairable(&grids, &current_grid, active, Some(index), &repair)
@@ -2265,6 +2645,11 @@ pub(crate) fn delete_sheet_impl(
     // released: floating ranges HOSTED on this sheet die with it. Deferred
     // init — every path that reaches the consumer passed the assignment.
     let deleted_sheet_stable_id: Option<identity::SheetId>;
+    // The deleted sheet's NAME and the tab order without it, for the rule
+    // stores and the override layer repaired after the guarded block
+    // (W10/W11). Deferred init, like the id.
+    let deleted_sheet_name: String;
+    let deleted_sheet_names_after: Vec<String>;
     let result = {
     // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else --
     // including `sheet_names`. The recalculation pass takes `sheet_names` only
@@ -2316,6 +2701,7 @@ pub(crate) fn delete_sheet_impl(
 
     let old_active = *active_sheet;
     let deleted_name = sheet_names[index].clone();
+    deleted_sheet_name = deleted_name.clone();
 
     if old_active < grids.len() {
         grids[old_active] = current_grid.clone();
@@ -2548,13 +2934,14 @@ pub(crate) fn delete_sheet_impl(
     // Repair 3D reference bookends AND plain cross-sheet references in all
     // formulas. A reference to the deleted sheet becomes #REF!.
     let names_after = sheet_names.clone();
+    deleted_sheet_names_after = names_after.clone();
     // UNREACHABLE BY CONSTRUCTION: the pre-flight at the top of this command ran
     // the identical closure over the identical formulas and nothing between
     // there and here rewrites a cell. If it ever does fire, the repair wrote
     // NOTHING (it is all-or-nothing), so no formula has been corrupted — the
     // workbook is left with the sheet removed and a refusal the log names.
     if let Err(refusal) = crate::repair_all_formulas(&mut grids, &|formula| {
-        crate::repair_3d_refs_on_delete(formula, &deleted_name, &names_after)
+        crate::repair_3d_refs_on_delete_at(formula, &deleted_name, index, &names_after)
     }) {
         crate::log_error!(
             "SHEET",
@@ -2566,7 +2953,7 @@ pub(crate) fn delete_sheet_impl(
     // Defined names hold their target as formula TEXT and go through the same
     // repair; one whose sheet just vanished becomes `=#REF!`.
     repair_named_ranges(&state, &effect, &|refers_to| {
-        crate::repair_3d_refs_on_delete(refers_to, &deleted_name, &names_after)
+        crate::repair_3d_refs_on_delete_at(refers_to, &deleted_name, index, &names_after)
     });
     if index < freeze_configs.len() {
         freeze_configs.remove(index);
@@ -2696,6 +3083,20 @@ pub(crate) fn delete_sheet_impl(
     }
     }; // drop all locks before rebuilding dependency maps
 
+    // THE RULE STORES AND THE OVERRIDE LAYER (wave C, W10/W11): references to
+    // the deleted sheet are repaired there too, by the rule every cell formula
+    // and defined name just went through (a 3D endpoint moves inward, anything
+    // else becomes `#REF!`). Each store taken alone, with every sheet guard
+    // above released.
+    delete_rule_references(
+        &state,
+        &effect,
+        &pane_control_state,
+        &deleted_sheet_name,
+        index,
+        &deleted_sheet_names_after,
+    );
+
     // §3bn — the SECOND half of the sheet cascade, and the one the sheet-index
     // walk above cannot do: a slicer on Sheet1 bound to a table that lived on
     // the sheet just deleted is still on a live sheet, so it survives the index
@@ -2792,10 +3193,52 @@ pub fn rename_sheet(
     state: State<AppState>,
     file_state: State<crate::persistence::FileState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     index: usize,
     new_name: String,
 ) -> Result<SheetsResult, String> {
-    rename_sheet_inner(&state, &file_state, &pivot_state, index, new_name, false)
+    let sheet_id = state.sheet_ids.read().map_err(|e| e.to_string())?.get(index).copied();
+    with_pane_controls_following_rename(&state, &pane_control_state, sheet_id, || {
+        rename_sheet_inner(&state, &file_state, &pivot_state, index, new_name, false)
+    })
+}
+
+/// Run a sheet rename (`rename`) and carry the PANE-CONTROL dropdown sources
+/// that name the sheet with it (wave C, W7) -- the fourth rule store, which
+/// `rename_sheet_inner` cannot reach: pane controls live in their own managed
+/// state (`PaneControlState`), and `rename_sheet_inner` keeps the signature its
+/// many callers share.
+///
+/// The sheet is followed by its STABLE ID (`sheet_id`, read by the caller
+/// before the rename): its name before and after is read by id, so a sheet
+/// operation landing between the id read and the rename can never make a
+/// dropdown follow a DIFFERENT sheet's name -- at worst (the id no longer
+/// names the renamed sheet) nothing is carried. A refused rename carries
+/// nothing. Every rename door goes through here: the `rename_sheet` command,
+/// the MCP `rename_sheet` tool and `rename_floating_range` (a floating range's
+/// name IS its backing sheet's name). LOCKS: `sheet_ids` then `sheet_names`,
+/// each read and released, before and after; the pane store alone after.
+pub(crate) fn with_pane_controls_following_rename<T>(
+    state: &AppState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    sheet_id: Option<identity::SheetId>,
+    rename: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let name_of = |id: identity::SheetId| -> Option<String> {
+        let index = state.sheet_ids.read().ok()?.iter().position(|s| *s == id)?;
+        state.sheet_names.read().ok()?.get(index).cloned()
+    };
+    let before = sheet_id.and_then(|id| name_of(id).map(|name| (id, name)));
+    let out = rename()?;
+    if let Some((id, old)) = before {
+        if let Some(new) = name_of(id) {
+            rename_pane_control_references(
+                pane_control_state,
+                &calp::sheet_renames::SheetRenames::new([(old.as_str(), new.as_str())]),
+            );
+        }
+    }
+    Ok(out)
 }
 
 /// Command body over plain references (the `hide_sheet_inner` split), plus the
@@ -2955,6 +3398,23 @@ pub(crate) fn rename_sheet_inner(
         repair_named_ranges(&state, &effect, &|refers_to| {
             Some(crate::repair_3d_refs_on_rename(refers_to, &old, &new_n))
         });
+        // ...and so do the `.calp` OVERRIDE records, whose baseline, current
+        // and conflict-upstream values are formula TEXT too. Left alone, an
+        // override on a pulled sheet's formula kept the old tab name: its own
+        // formula read a sheet that no longer answers to it, and (since a
+        // refresh rewrites upstream text to the subscriber's CURRENT tab names,
+        // BUG-0151) its baseline no longer matched an untouched upstream -- a
+        // false conflict at the next refresh.
+        let renamed = |formula: &str| crate::repair_3d_refs_on_rename(formula, &old, &new_n);
+        repair_override_formulas(&state, &effect, &renamed, &renamed);
+        // ...and so do the RULE stores: conditional formats, custom
+        // validations and control formula properties, through the walkers a
+        // `.calp` pull's collision rename uses (`rename_rule_references`).
+        rename_rule_references(
+            &state,
+            &effect,
+            &calp::sheet_renames::SheetRenames::new([(old.as_str(), new_n.as_str())]),
+        );
     }
     // A formula the rename really DID rewrite came back out of the renderer with
     // every bare identifier in capitals, so `=Anchor+Data!A1` became
@@ -3380,9 +3840,13 @@ pub(crate) fn move_sheet_impl(
             }
         };
         {
+            // A BI query result block's region moves too (BUG-0138): it is WHERE
+            // the block sits, and left on the old index it would refuse edits to
+            // another sheet's cells while leaving the block's own unguarded.
+            // The refresh re-derives the block's sheet from its identity.
             let mut regions = state.protected_regions.lock().unwrap();
             for r in regions.iter_mut() {
-                if r.region_type == "report" {
+                if r.region_type == "report" || r.region_type == "bi" {
                     r.sheet_index = remap(r.sheet_index);
                 }
             }
@@ -3671,9 +4135,10 @@ pub(crate) fn copy_sheet_impl(
     // (Pivot regions keep their historical no-remap behavior.)
     {
         {
+            // BI result blocks' regions shift with their sheets too (BUG-0138).
             let mut regions = state.protected_regions.lock().unwrap();
             for r in regions.iter_mut() {
-                if r.region_type == "report" && r.sheet_index >= insert_at {
+                if (r.region_type == "report" || r.region_type == "bi") && r.sheet_index >= insert_at {
                     r.sheet_index += 1;
                 }
             }
@@ -4808,6 +5273,14 @@ mod sheet_tab_state_undo_tests;
 #[cfg(test)]
 #[path = "object_sheet_tests.rs"]
 mod object_sheet_tests;
+
+#[cfg(test)]
+#[path = "sheet_rename_repair_tests.rs"]
+mod sheet_rename_repair_tests;
+
+#[cfg(test)]
+#[path = "sheet_structure_repair_tests.rs"]
+mod sheet_structure_repair_tests;
 
 #[cfg(test)]
 mod rename_lock_order_tests {

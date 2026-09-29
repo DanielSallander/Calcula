@@ -799,8 +799,27 @@ pub struct ScopedFilter {
     pub level: u8,
 }
 
+/// The label a host lists a column's BLANK member with -- its NULL rows, and
+/// on a text column its empty-string rows, shown as one item -- and that a
+/// [`ScopedInFilter`]'s values may name (ASCII case-insensitively) to keep
+/// them. Calcula's pivot and model lists spell it `(blank)`, Excel's own.
+pub const BLANK_MEMBER_LABEL: &str = "(blank)";
+
+/// Whether `value` is [`BLANK_MEMBER_LABEL`], ignoring ASCII case.
+pub fn is_blank_member_label(value: &str) -> bool {
+    value.eq_ignore_ascii_case(BLANK_MEMBER_LABEL)
+}
+
 /// A query-level `IN`-list slicer with explicit table attribution and a
 /// filter level (see [`QueryRequest::scoped_in_filters`]).
+///
+/// # The BLANK member
+///
+/// A value equal to [`BLANK_MEMBER_LABEL`] (any ASCII case) names the
+/// column's blank member: the list also keeps the rows where the column is
+/// NULL -- and, on a text column, the empty string. On a non-text column the
+/// label is not itself a value. A plain [`InFilter`] in
+/// [`QueryRequest::in_filters`] stays literal.
 #[derive(Debug, Clone)]
 pub struct ScopedInFilter {
     /// The owning table. `None` resolves by column-name ownership.

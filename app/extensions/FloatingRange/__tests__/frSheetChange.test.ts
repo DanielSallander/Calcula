@@ -21,6 +21,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { FloatingRangeInfo } from "@api/floatingRanges";
+import type { GridCellPress } from "@api/cellClickInterceptors";
+import type { FloatingRangeProvider } from "@api/floatingRangeService";
 
 const FR_ID = "fr-sheet";
 const HOST = 2;
@@ -58,7 +60,7 @@ const h = vi.hoisted(() => ({
   /** What Core's grid-state snapshot answers (null = no grid mounted). */
   gridState: null as null | { surface?: string },
   /** The listeners the extension gave Core's after-press announcement. */
-  pressListeners: new Set<(press: { row: number; col: number; button: number; shiftKey: boolean; ctrlKey: boolean }) => void>(),
+  pressListeners: new Set<(press: GridCellPress) => void>(),
 }));
 
 // Core's AFTER-press announcement: its `notifyGridCellPressed` is Core-only (an
@@ -79,9 +81,11 @@ vi.mock("@api/cellClickInterceptors", async (importOriginal) => {
   };
 });
 
-/** Core announces a handled press on grid cell (row, col). */
-function corePress(row: number, col: number): void {
-  for (const listener of [...h.pressListeners]) listener({ row, col, button: 0, shiftKey: false, ctrlKey: false });
+/** Core announces a handled press on grid cell (row, col) -- or, with `over`, a header press or a right-press that KEPT Core's selection. */
+function corePress(row: number, col: number, over: Partial<GridCellPress> = {}): void {
+  for (const listener of [...h.pressListeners]) {
+    listener({ row, col, button: 0, shiftKey: false, ctrlKey: false, target: "cell", keptSelection: false, ...over });
+  }
 }
 
 vi.mock("@api/grid", async (importOriginal) => ({
@@ -213,6 +217,8 @@ import {
 } from "../lib/frSelection";
 import { openFrEditor, isFrEditorOpen, getFrEditorSession } from "../editor/frEditor";
 import { FR_TITLE_H, FR_COL_HDR_H, FR_ROW_HDR_W, FR_DEFAULT_COL_W, FR_DEFAULT_ROW_H } from "../lib/frDimensions";
+import { recordFrUsedExtent } from "../lib/frExtent";
+import { getFrScroll } from "../lib/frScroll";
 
 function stubContext(): never {
   return {
@@ -733,6 +739,23 @@ describe("(11 variant) Core's AFTER-press announcement (onGridCellPressed)", () 
     expect(getExternalCellTarget()).toBeNull();
   });
 
+  it("a HEADER press and a right-press that KEPT Core's selection drop the range's selection too (BUG-0186)", async () => {
+    h.gridState = { surface: "grid" };
+    for (const over of [
+      { row: -1, target: "column" as const },
+      { col: -1, target: "row" as const },
+      { row: -1, col: -1, target: "all" as const },
+      { button: 2, keptSelection: true },
+    ]) {
+      selectFloatingRange(FR_ID);
+      selectA1();
+      expect(getLocalSelection()).not.toBeNull();
+      corePress(over.row ?? 0, over.col ?? 0, over);
+      expect(getLocalSelection(), JSON.stringify(over)).toBeNull();
+      expect(isFloatingRangeSelected(FR_ID), JSON.stringify(over)).toBe(false);
+    }
+  });
+
   it("never on a CANVAS", async () => {
     h.gridState = { surface: "canvas" };
     selectFloatingRange(FR_ID);
@@ -844,5 +867,135 @@ describe("(2) Insert > Floating Range on a SUBSCRIBED canvas", () => {
     insertItem().action();
     await flush();
     expect(createFloatingRange).toHaveBeenCalledTimes(1);
+  });
+});
+
+// E6: an extension deactivated while its edit is PARKED used to clear the
+// park without a return -- the grid stayed on the VIEWED sheet with nothing
+// parked, so every family's host objects painted over it until the next
+// genuine switch, on the viewed sheet's column widths.
+describe("(E6) deactivating the extension while an edit is PARKED", () => {
+  it("returns the grid to the host (the switch and the dimension refresh), writes nothing, parks nothing", async () => {
+    selectA1();
+    openFrEditor(FR_ID, 0, 0, null);
+    typeInto("=SUM(");
+    await switchSheetForPointMode(0, vi.fn());
+    expect(isExternalSessionParked()).toBe(true);
+    expect(h.backendActive).toBe(0);
+
+    const dimensionRefreshes = vi.fn();
+    window.addEventListener("dimensions:refresh", dimensionRefreshes);
+    try {
+      extension.deactivate();
+      await flush();
+      expect(h.backendActive, "the grid was left on the viewed sheet").toBe(HOST);
+      expect(dimensionRefreshes).toHaveBeenCalled();
+      expect(isExternalSessionParked()).toBe(false);
+      expect(updateFloatingRangeCell).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("dimensions:refresh", dimensionRefreshes);
+      extension.activate(stubContext());
+      await flush();
+    }
+  });
+
+  it("control: deactivating with an edit that is NOT parked switches no sheet", async () => {
+    selectA1();
+    openFrEditor(FR_ID, 0, 0, null);
+    typeInto("7");
+    tauri.invoke.mockClear();
+    extension.deactivate();
+    await flush();
+    expect(tauri.invoke.mock.calls.filter((c) => c[0] === "set_active_sheet")).toEqual([]);
+    extension.activate(stubContext());
+    await flush();
+  });
+});
+
+// E10 (b): a drag-select was clamped to the cells on screen -- held past the
+// window's edge it stopped there, and a range whose content reaches further
+// could only be walked with the wheel. Now the range auto-scrolls while the
+// pointer is held past an edge, one cell per tick, like the grid's own drag.
+describe("(E10) drag-select past the cell area's edge auto-scrolls", () => {
+  const FRAME_BOTTOM = FR_TITLE_H + FR_COL_HDR_H + 4 * FR_DEFAULT_ROW_H;
+
+  function startDrag(): void {
+    const p = cellPoint(0, 0);
+    window.dispatchEvent(
+      new CustomEvent("floatingObject:bodyDragStart", {
+        detail: { regionType: FLOATING_RANGE_REGION_TYPE, data: { frId: FR_ID }, canvasX: p.x, canvasY: p.y },
+      }),
+    );
+  }
+
+  it("held below the frame, the selection's end walks past the window and the range scrolls; mouseup stops it", () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      recordFrUsedExtent(FR_ID, 20, 3);
+      startDrag();
+      expect(getLocalSelection()).toMatchObject({ anchorRow: 0, endRow: 0 });
+      window.dispatchEvent(new MouseEvent("mousemove", { clientX: cellPoint(0, 0).x, clientY: FRAME_BOTTOM + 30 }));
+      vi.advanceTimersByTime(60 * 6);
+      expect(getLocalSelection()!.endRow, "the selection stopped at the window's edge").toBeGreaterThan(3);
+      expect(getFrScroll(FR_ID).top).toBeGreaterThan(0);
+
+      window.dispatchEvent(new MouseEvent("mouseup"));
+      const end = getLocalSelection()!.endRow;
+      vi.advanceTimersByTime(60 * 10);
+      expect(getLocalSelection()!.endRow).toBe(end);
+    } finally {
+      vi.useRealTimers();
+      window.dispatchEvent(new MouseEvent("mouseup"));
+    }
+  });
+
+  it("stops at the content's last row, and stops ticking once the pointer is back inside", () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      recordFrUsedExtent(FR_ID, 6, 3);
+      startDrag();
+      window.dispatchEvent(new MouseEvent("mousemove", { clientX: cellPoint(0, 0).x, clientY: FRAME_BOTTOM + 30 }));
+      vi.advanceTimersByTime(60 * 20);
+      expect(getLocalSelection()!.endRow).toBe(5);
+      const inside = cellPoint(1, 0);
+      window.dispatchEvent(new MouseEvent("mousemove", { clientX: inside.x, clientY: inside.y }));
+      const end = getLocalSelection()!.endRow;
+      vi.advanceTimersByTime(60 * 10);
+      expect(getLocalSelection()!.endRow).toBe(end);
+    } finally {
+      vi.useRealTimers();
+      window.dispatchEvent(new MouseEvent("mouseup"));
+    }
+  });
+});
+
+// E10 (a) + review B (2026-09-28): the script door `api.floatingRangeGetCells`
+// now reads THROUGH this seam instead of carrying its own copy of the banding,
+// so the provider's `getCells` is the one place a large read is cut into
+// bands the backend accepts (`get_range_cells_typed` refuses more than
+// 100,000 cells; a window can hold 256,000).
+describe("(E10) the seam provider's getCells reads in bands the backend accepts", () => {
+  it("a 1000 x 256 read is cut into row bands of at most 100,000 cells that tile every row", async () => {
+    getFloatingRangeCells.mockClear();
+    const provider = h.provider as unknown as FloatingRangeProvider;
+    await provider.getCells(FR_ID, 0, 0, 999, 255);
+    const reads = getFloatingRangeCells.mock.calls.map((call) => call.slice(1, 5) as number[]);
+    expect(reads.length).toBeGreaterThan(1);
+    let next = 0;
+    for (const [startRow, startCol, endRow, endCol] of reads) {
+      expect((endRow - startRow + 1) * (endCol - startCol + 1)).toBeLessThanOrEqual(100_000);
+      expect(startRow).toBe(next);
+      expect([startCol, endCol]).toEqual([0, 255]);
+      next = endRow + 1;
+    }
+    expect(next).toBe(1000);
+  });
+
+  it("control: a read inside the ceiling is ONE call", async () => {
+    getFloatingRangeCells.mockClear();
+    const provider = h.provider as unknown as FloatingRangeProvider;
+    const cells = await provider.getCells(FR_ID, 0, 0, 3, 2);
+    expect(getFloatingRangeCells.mock.calls.map((call) => call.slice(0, 5))).toEqual([[FR_ID, 0, 0, 3, 2]]);
+    expect(cells).toEqual([{ row: 0, col: 0, formula: "=1", display: "1" }]);
   });
 });

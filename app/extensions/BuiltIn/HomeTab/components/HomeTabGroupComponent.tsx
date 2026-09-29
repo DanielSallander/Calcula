@@ -17,7 +17,7 @@
 
 import React, { useEffect, useState } from "react";
 import { css } from "@emotion/css";
-import { DialogExtensions } from "@api/ui";
+import { CommandRegistry, CoreCommands } from "@api/commands";
 import { getRibbonNumberFormats } from "@api/numberFormats";
 import type { RibbonNumberFormat } from "@api/numberFormats";
 import { onLocaleChanged } from "@api/locale";
@@ -87,6 +87,20 @@ function segmentOf(child: React.ReactElement): string | undefined {
   if (typeof testId !== "string" || !testId.startsWith("fmt-")) return undefined;
   const segment = ITEMS_BY_ID.get(testId.slice(4))?.segment;
   return segment === undefined ? undefined : (SEGMENT_LABELS[segment] ?? segment);
+}
+
+/**
+ * Excel's "More Number Formats..." and "More Fill Options..." rows: Format
+ * Cells on that tab, through the FORMAT_CELLS command -- the ONE door to the
+ * dialog, which refuses (one toast, no dialog) while something else owns the
+ * selection. Both rows opened the dialog directly and skipped that check, so
+ * with a floating grid's cell selected Format Cells opened over Core's HIDDEN
+ * cell (review of BUG-0185).
+ */
+function openFormatCellsOn(tab: "number" | "fill"): void {
+  CommandRegistry.execute(CoreCommands.FORMAT_CELLS, { tab }).catch((err) => {
+    console.error("[HomeTab] Format Cells failed to open:", err);
+  });
 }
 
 /** The typographic glyphs (B, I, U, S, x², x₂, %, ",", ".0", "0.") are square
@@ -292,7 +306,7 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
             // Excel's last row opens Format Cells on the Number tab. The
             // Dropdown is controlled, so the box stays on the cell's own
             // format -- the sentinel never reaches the formatter.
-            DialogExtensions.openDialog("format-cells", { tab: "number" });
+            openFormatCellsOn("number");
             return;
           }
           if (value === CUSTOM_FORMAT_VALUE) return;
@@ -325,7 +339,7 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
           item.id === "backgroundColor"
             ? {
                 label: "More Fill Options...",
-                onSelect: () => DialogExtensions.openDialog("format-cells", { tab: "fill" }),
+                onSelect: () => openFormatCellsOn("fill"),
               }
             : undefined
         }

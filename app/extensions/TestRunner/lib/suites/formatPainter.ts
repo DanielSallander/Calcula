@@ -5,6 +5,7 @@
 import type { TestSuite } from "../types";
 import { expectCellValue } from "../assertions";
 import { CoreCommands } from "@api/commands";
+import { applyFormatting } from "@api/lib";
 import { AREA_FORMAT_PAINTER } from "../testArea";
 
 const A = AREA_FORMAT_PAINTER;
@@ -52,7 +53,9 @@ export const formatPainterSuite: TestSuite = {
 
         // Apply bold to source
         await selectRange(ctx, A.row, A.col, A.row, A.col);
-        await ctx.executeCommand("formatting.bold");
+        // Formatting through @api/lib: `formatting.bold` / `.italic` are command
+        // ids NO registry holds -- they did nothing, silently (wave E, Y9).
+        await applyFormatting([A.row], [A.col], { bold: true });
         await ctx.settle();
 
         // Capture source style
@@ -96,7 +99,9 @@ export const formatPainterSuite: TestSuite = {
 
         // Apply italic to source
         await selectRange(ctx, A.row, A.col, A.row, A.col);
-        await ctx.executeCommand("formatting.italic");
+        // Formatting through @api/lib: `formatting.bold` / `.italic` are command
+        // ids NO registry holds -- they did nothing, silently (wave E, Y9).
+        await applyFormatting([A.row], [A.col], { italic: true });
         await ctx.settle();
 
         // Use format painter
@@ -126,7 +131,9 @@ export const formatPainterSuite: TestSuite = {
 
         // Apply bold to source range
         await selectRange(ctx, A.row, A.col, A.row, A.col + 1);
-        await ctx.executeCommand("formatting.bold");
+        // Formatting through @api/lib: `formatting.bold` / `.italic` are command
+        // ids NO registry holds -- they did nothing, silently (wave E, Y9).
+        await applyFormatting([A.row], [A.col, A.col + 1], { bold: true });
         await ctx.settle();
 
         // Get source styles

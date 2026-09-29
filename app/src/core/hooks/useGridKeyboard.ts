@@ -19,9 +19,9 @@
 //      should narrow. They were four ways of selecting the whole sheet, so an
 //      object on the grid was invisible to every selection shortcut.
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useGridContext } from "../state/GridContext";
-import { setSelection } from "../state/gridActions";
+import { setSelection, scrollToCell } from "../state/gridActions";
 import { findCtrlArrowTarget, getMergeInfo, getUsedRange, type ArrowDirection } from "../lib/tauri-api";
 import { fnLog, stateLog, eventLog } from '../../utils/component-logger';
 import { getGlobalIsEditing } from "./useEditing";
@@ -29,6 +29,7 @@ import { handleCellTypeKeyDown } from "../../api/cellTypes";
 import { getGridRegions } from "../../api/gridOverlays";
 import { isKeyClaimed } from "../lib/pointerClaims";
 import { isExternalEditLive } from "../lib/formulaEditTarget";
+import { refuseIfSelectionOwned } from "../lib/selectionOwner";
 
 /**
  * Options for the useGridKeyboard hook.
@@ -116,10 +117,93 @@ const MODIFIER_KEYS = new Set([
 ]);
 
 /**
+ * The grid-keyboard commands that WRITE to Core's selection (a format, a
+ * value, a paste, a chart built from it, a checkbox toggled in it), with the
+ * name a refusal gives each. While something else owns the selection
+ * (BUG-0185: a floating grid's selected cell, Core's selection HIDDEN under
+ * it) these are refused at the one Core door -- whatever key reached them.
+ * Commands not listed (focus the Name Box, calculate, toggle the ribbon or the
+ * formula view) do not touch the selection and still run.
+ */
+const SELECTION_WRITE_COMMANDS: Readonly<Record<string, string>> = {
+  "format.toggleBold": "Bold",
+  "format.toggleItalic": "Italic",
+  "format.toggleUnderline": "Underline",
+  "format.toggleStrikethrough": "Strikethrough",
+  "format.numberGeneral": "General Number Format",
+  "format.numberCurrency": "Currency Format",
+  "format.numberPercentage": "Percentage Format",
+  "format.numberScientific": "Scientific Format",
+  "format.numberDate": "Date Format",
+  "format.numberTime": "Time Format",
+  "format.numberNumber": "Number Format",
+  "edit.insertDate": "Insert Date",
+  "edit.insertTime": "Insert Time",
+  "clipboard.pasteSpecial": "Paste Special",
+  "insert.chart": "Insert Chart",
+  "checkbox.toggle": "Toggle Checkbox",
+};
+
+/**
  * Clamp a value between min and max bounds.
  */
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+// ============================================================================
+// Digit shortcuts are PHYSICAL keys
+// ============================================================================
+//
+// Excel binds Ctrl+2..5 and Ctrl+Shift+1..6 to the digit KEYS, whatever the
+// layout types on them. Matching the typed character made them dead keys on
+// any layout whose shifted digits are not the US symbols: on sv-SE Shift+2 /
+// Shift+4 / Shift+6 type '"', a currency sign and "&", so Time, Currency and
+// Scientific never matched (D5; AZERTY types the digit itself with Shift and
+// an accented letter without). So `event.code` (Digit0..Digit9) decides when
+// the key IS a digit key, and only a keystroke from somewhere else -- a numpad,
+// or a synthetic event with no `code` -- falls back to its character.
+
+/** The digit a keystroke's physical key carries, or null when it is not a digit key. */
+function physicalDigitKey(event: KeyboardEvent): string | null {
+  const match = /^Digit([0-9])$/.exec(event.code ?? "");
+  return match ? match[1] : null;
+}
+
+/** Ctrl+<digit> (no Shift): the digit, by physical key first, else by character. */
+function ctrlDigit(event: KeyboardEvent): string | null {
+  return physicalDigitKey(event) ?? (/^[0-9]$/.test(event.key) ? event.key : null);
+}
+
+/** Ctrl+Shift+<digit> -> the number format Excel applies (Ctrl+Shift+1..6). */
+const SHIFTED_DIGIT_COMMANDS: ReadonlyMap<string, string> = new Map([
+  ["1", "format.numberNumber"],
+  ["2", "format.numberTime"],
+  ["3", "format.numberDate"],
+  ["4", "format.numberCurrency"],
+  ["5", "format.numberPercentage"],
+  ["6", "format.numberScientific"],
+]);
+
+/** The character a US layout types on each of those digits with Shift. */
+const US_SHIFTED_DIGITS: ReadonlyMap<string, string> = new Map([
+  ["!", "1"],
+  ["@", "2"],
+  ["#", "3"],
+  ["$", "4"],
+  ["%", "5"],
+  ["^", "6"],
+]);
+
+/**
+ * Ctrl+Shift+<digit>: the digit, or null. A digit KEY decides by its digit
+ * alone (Ctrl+Shift+7 that happens to type "$" is not Currency); anything else
+ * by the US character it typed.
+ */
+function ctrlShiftDigit(event: KeyboardEvent): string | null {
+  const physical = physicalDigitKey(event);
+  if (physical !== null) return physical;
+  return US_SHIFTED_DIGITS.get(event.key) ?? (/^[0-9]$/.test(event.key) ? event.key : null);
 }
 
 // ============================================================================
@@ -270,12 +354,46 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
     isEditing = false,
     onClearClipboard,
     hasClipboardContent = false,
-    onDelete,
+    onDelete: rawOnDelete,
     onSelectColumn,
     onSelectRow,
-    onCommand,
+    onCommand: rawOnCommand,
   } = options;
   const { state, dispatch } = useGridContext();
+
+  // Every write this keyboard makes to Core's selection goes through these two
+  // wrappers, so a selection owner is asked at ONE place whatever the key (see
+  // SELECTION_WRITE_COMMANDS). The branches below still consume the key: a
+  // refused write is an answer, not a key for someone else.
+  //
+  // A key's command is fire-and-forget at every call site below, so this
+  // wrapper NEVER rejects: a command that failed (Space on a legacy checkbox
+  // the backend refused inside a pivot output region) is logged here, and its
+  // OWNER says why to the user -- it never becomes an unhandled rejection
+  // (wave F, Z7).
+  const onCommand = useMemo(
+    () =>
+      rawOnCommand &&
+      (async (command: string): Promise<void> => {
+        const action = SELECTION_WRITE_COMMANDS[command];
+        if (action !== undefined && refuseIfSelectionOwned(action)) return;
+        try {
+          await rawOnCommand(command);
+        } catch (error) {
+          console.error(`[useGridKeyboard] ${command} failed:`, error);
+        }
+      }),
+    [rawOnCommand]
+  );
+  const onDelete = useMemo(
+    () =>
+      rawOnDelete &&
+      (async (): Promise<void> => {
+        if (refuseIfSelectionOwned("Clear Contents")) return;
+        await rawOnDelete();
+      }),
+    [rawOnDelete]
+  );
   const { config, viewport, selection, dimensions } = state;
 
   // ==========================================================================
@@ -880,6 +998,33 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
+      // Excel's two modified Backspaces (K4). Neither clears anything -- the
+      // branch below is the bare key's -- and neither moves the ACTIVE cell
+      // (Core's endRow/endCol, the one the renderer draws):
+      //   Ctrl+Backspace  scrolls the grid to show the active cell, selection
+      //                   untouched ("where was I?" after scrolling away);
+      //   Shift+Backspace collapses the selection -- a range, or several Ctrl+
+      //                   click areas -- to the active cell alone (merge-aware,
+      //                   like every navigation).
+      if (key === "Backspace" && !altKey && !metaKey && (ctrlKey !== shiftKey)) {
+        event.preventDefault();
+        event.stopPropagation();
+        const active = liveSelectionRef.current;
+        if (ctrlKey) {
+          eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Backspace', ['Ctrl']);
+          if (active) dispatch(scrollToCell(active.endRow, active.endCol, false));
+          fnLog.exit('handleKeyDown', 'scroll to active cell');
+          return;
+        }
+        eventLog.keyboard('Grid', 'handleKeyDown', 'Shift+Backspace', ['Shift']);
+        if (active) {
+          const { endRow, endCol } = active;
+          enqueueNavigation(() => navigateToCell(endRow, endCol, false));
+        }
+        fnLog.exit('handleKeyDown', 'collapse selection to active cell');
+        return;
+      }
+
       // Handle DELETE/Backspace key - clear selection contents. BARE keys only
       // (review 2026-09-28): with any modifier this branch cleared the
       // selection too, and nothing else binds a modified Delete -- so while a
@@ -971,9 +1116,10 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         }
       }
 
-      // Handle Ctrl+number shortcuts (formatting)
+      // Handle Ctrl+number shortcuts (formatting) -- the digit KEY, not the
+      // character it types (see "Digit shortcuts are PHYSICAL keys").
       if (modKey && !altKey && !shiftKey && onCommand) {
-        switch (key) {
+        switch (ctrlDigit(event)) {
           case '2':
             // Ctrl+2 - Toggle bold (alternative)
             event.preventDefault();
@@ -1012,8 +1158,11 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         }
       }
 
-      // Handle Ctrl+; - Insert current date
-      if (modKey && !altKey && !shiftKey && key === ';' && onCommand) {
+      // Handle Ctrl+; - Insert current date. Shift is ALLOWED: on a layout
+      // where ";" itself needs Shift (sv-SE: Shift+comma) Ctrl+; arrives as
+      // Ctrl+Shift+";", and on US Ctrl+Shift+; types ":" (Insert Time, below),
+      // so the two never collide. AltGr (Ctrl+Alt) is still not Ctrl.
+      if (modKey && !altKey && key === ';' && onCommand) {
         event.preventDefault();
         event.stopPropagation();
         eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+;', ['Ctrl']);
@@ -1032,10 +1181,22 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
-      // Handle Ctrl+Shift shortcuts for number formats and time insertion
-      // On US keyboard, Shift+digit produces the symbol (e.g., Shift+4 = $)
-      // Browsers report the shifted symbol as event.key when Ctrl+Shift is held
+      // Handle Ctrl+Shift shortcuts for number formats and time insertion.
+      // Ctrl+Shift+1..6 are the DIGIT KEYS (Number, Time, Date, Currency,
+      // Percentage, Scientific), whatever character the layout types on them:
+      // a US layout types ! @ # $ % ^, sv-SE types ! " # (currency) % &
+      // (see "Digit shortcuts are PHYSICAL keys").
       if (modKey && shiftKey && !altKey && onCommand) {
+        const digit = ctrlShiftDigit(event);
+        const digitCommand = digit !== null ? SHIFTED_DIGIT_COMMANDS.get(digit) : undefined;
+        if (digitCommand !== undefined) {
+          event.preventDefault();
+          event.stopPropagation();
+          eventLog.keyboard('Grid', 'handleKeyDown', `Ctrl+Shift+${digit}`, ['Ctrl', 'Shift']);
+          onCommand(digitCommand);
+          fnLog.exit('handleKeyDown', digitCommand);
+          return;
+        }
         switch (key) {
           case ':':
             // Ctrl+Shift+: - Insert current time
@@ -1054,60 +1215,6 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
             eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+~', ['Ctrl', 'Shift']);
             onCommand('format.numberGeneral');
             fnLog.exit('handleKeyDown', 'format general');
-            return;
-
-          case '$':
-            // Ctrl+Shift+$ - Currency format
-            event.preventDefault();
-            event.stopPropagation();
-            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+$', ['Ctrl', 'Shift']);
-            onCommand('format.numberCurrency');
-            fnLog.exit('handleKeyDown', 'format currency');
-            return;
-
-          case '%':
-            // Ctrl+Shift+% - Percentage format
-            event.preventDefault();
-            event.stopPropagation();
-            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+%', ['Ctrl', 'Shift']);
-            onCommand('format.numberPercentage');
-            fnLog.exit('handleKeyDown', 'format percentage');
-            return;
-
-          case '^':
-            // Ctrl+Shift+^ - Scientific format
-            event.preventDefault();
-            event.stopPropagation();
-            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+^', ['Ctrl', 'Shift']);
-            onCommand('format.numberScientific');
-            fnLog.exit('handleKeyDown', 'format scientific');
-            return;
-
-          case '#':
-            // Ctrl+Shift+# - Date format
-            event.preventDefault();
-            event.stopPropagation();
-            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+#', ['Ctrl', 'Shift']);
-            onCommand('format.numberDate');
-            fnLog.exit('handleKeyDown', 'format date');
-            return;
-
-          case '@':
-            // Ctrl+Shift+@ - Time format
-            event.preventDefault();
-            event.stopPropagation();
-            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+@', ['Ctrl', 'Shift']);
-            onCommand('format.numberTime');
-            fnLog.exit('handleKeyDown', 'format time');
-            return;
-
-          case '!':
-            // Ctrl+Shift+! - Number format (with thousands separator)
-            event.preventDefault();
-            event.stopPropagation();
-            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+!', ['Ctrl', 'Shift']);
-            onCommand('format.numberNumber');
-            fnLog.exit('handleKeyDown', 'format number');
             return;
         }
       }
@@ -1274,15 +1381,26 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
           // checkbox.toggle command).
           const activeRow = selection?.endRow;
           const activeCol = selection?.endCol;
+          // The cell-type hook below writes to the active cell BEFORE the
+          // command fallback, so the owner is asked here first (the fallback
+          // then finds the selection free and does not ask twice).
+          if (refuseIfSelectionOwned(SELECTION_WRITE_COMMANDS["checkbox.toggle"])) {
+            fnLog.exit('handleKeyDown', 'cell-type space refused (selection owned)');
+            return;
+          }
           void (async () => {
             const handled =
               activeRow !== undefined && activeCol !== undefined
                 ? await handleCellTypeKeyDown(activeRow, activeCol, " ")
                 : false;
             if (!handled && onCommand) {
-              onCommand('checkbox.toggle');
+              await onCommand('checkbox.toggle');
             }
-          })();
+          })().catch((error: unknown) => {
+            // A cell type's own keydown hook threw: never an unhandled
+            // rejection (wave F, Z7).
+            console.error('[useGridKeyboard] Space on a cell type failed:', error);
+          });
           fnLog.exit('handleKeyDown', 'cell-type space');
           return;
         }
@@ -1377,7 +1495,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         fnLog.exit('handleKeyDown', 'handled');
       }
     },
-    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, selection, onSelectionChange, onClearClipboard, hasClipboardContent, onDelete, onSelectColumn, onSelectRow, onCommand, handleCtrlArrow, handleArrowNavigation, navigateToCell, enqueueNavigation, commitSelection, advanceScopedGesture, runSelectAllGesture]
+    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, selection, onSelectionChange, onClearClipboard, hasClipboardContent, onDelete, onSelectColumn, onSelectRow, onCommand, handleCtrlArrow, handleArrowNavigation, navigateToCell, enqueueNavigation, commitSelection, advanceScopedGesture, runSelectAllGesture, dispatch]
   );
 
   /**

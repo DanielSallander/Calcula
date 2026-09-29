@@ -1483,7 +1483,7 @@ pub fn set_cell_protection(
         let mut grids = state.grids.write(&effect).unwrap();
         let mut styles = state.style_registry.write(&effect).unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Change cell protection".to_string());
+        let owned_txn = undo_stack.begin_owned_transaction("Change cell protection".to_string());
 
         match plan {
             Plan::Tier { entries, is_column, fixups } => {
@@ -1576,7 +1576,7 @@ pub fn set_cell_protection(
             }
         }
 
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
     }
 
     let _ = crate::document_effect::DocumentEffect::mutates(&file_state);

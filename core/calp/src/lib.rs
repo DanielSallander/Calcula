@@ -31,6 +31,7 @@ pub mod version;
 pub mod publish;
 pub mod publishers;
 pub mod pull;
+pub mod sheet_renames;
 pub mod working_copy;
 pub mod writeback;
 

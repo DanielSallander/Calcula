@@ -8,6 +8,14 @@ import { SearchView } from "./SearchView";
 
 const cleanupFns: Array<() => void> = [];
 
+/**
+ * Toggle the Search panel -- the command the keybinding registry's
+ * `ext.search.findReplace` (Ctrl+Shift+H) runs. The registry named this id
+ * long before anything registered it; the key worked only through a window
+ * listener here, which a remap in Settings could not move (BUG-0183 class).
+ */
+export const SEARCH_OPEN_COMMAND = "search.openFindReplace";
+
 /** SVG magnifying glass icon for the Activity Bar */
 const SearchIcon = React.createElement(
   "svg",
@@ -35,15 +43,9 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.activityBar.unregister("search"));
 
-  // Keyboard shortcut: Ctrl+Shift+H
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.ctrlKey && e.shiftKey && e.key === "H") {
-      e.preventDefault();
-      context.ui.activityBar.toggle("search");
-    }
-  };
-  window.addEventListener("keydown", handleKeyDown, true);
-  cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
+  // The command the registry's Ctrl+Shift+H runs (the one keyboard path).
+  context.commands.register(SEARCH_OPEN_COMMAND, () => context.ui.activityBar.toggle("search"));
+  cleanupFns.push(() => context.commands.unregister(SEARCH_OPEN_COMMAND));
 
   console.log("[Search] Extension activated");
 }

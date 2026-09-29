@@ -4,7 +4,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useDialogWindow } from '@api/dialogWindow';
-import { changePivotDataSource, getPivotTableInfo } from '../lib/pivot-api';
+import { changePivotDataSource, getPivotHierarchies, getPivotTableInfo } from '../lib/pivot-api';
 import type { PivotId } from './types';
 
 // ============================================================================
@@ -34,24 +34,45 @@ export function ChangeDataSourceDialog({
   const [sourceRange, setSourceRange] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Whether the pivot reads a data model -- the BACKEND's answer
+  // (`get_pivot_hierarchies`' `biModel`), never a guess from the source text.
+  // The old pattern (a range must start with letters then "!" or ":") read a
+  // quoted sheet ('Sales Data'!A1:D10), a sheet named with a leading digit
+  // (2024!A1:D10) and a table name (Table1) as a BI model, and turned OK into
+  // Close for all three (wave D fix-up).
+  const [isBiSource, setIsBiSource] = useState(false);
 
   // Load current source range when dialog opens
   useEffect(() => {
     if (!isOpen || !pivotId) return;
+    let live = true;
     setError(null);
     setIsLoading(false);
+    setIsBiSource(false);
     getPivotTableInfo(pivotId)
       .then((info) => {
-        setSourceRange(info.sourceRange);
+        if (live) setSourceRange(info.sourceRange);
       })
       .catch((err) => {
         console.error('[ChangeDataSourceDialog] Failed to load pivot info:', err);
-        setSourceRange('');
+        if (live) setSourceRange('');
       });
+    getPivotHierarchies(pivotId)
+      .then((info) => {
+        // `biModel` is present only for a data-model pivot (Rust
+        // `PivotHierarchiesInfo.bi_model`, the record the backend's own
+        // range-change refusal reads).
+        if (live) setIsBiSource(!!info?.biModel);
+      })
+      .catch((err) => {
+        // A range pivot's editor: the backend refuses a data-model pivot's
+        // range change with a message, shown in the dialog.
+        console.error('[ChangeDataSourceDialog] Failed to load pivot fields:', err);
+      });
+    return () => {
+      live = false;
+    };
   }, [isOpen, pivotId]);
-
-  // Detect if the source is a BI model (not a cell range)
-  const isBiSource = !!(sourceRange && !sourceRange.match(/^[A-Za-z]+\d*[!:]/) && !sourceRange.match(/^\$?[A-Z]+\$?\d+/));
 
   const handleApply = useCallback(async () => {
     // For BI pivots, just close — the data source is managed via Connections panel
@@ -150,8 +171,8 @@ export function ChangeDataSourceDialog({
                 autoFocus
               />
               <span style={styles.hint}>
-                Enter the new data range including the sheet name (e.g., Sheet1!A1:D100).
-                You can use full-column references like Sheet1!A:D.
+                Enter the new data range including the sheet name (e.g., Sheet1!A1:D100),
+                or a table name (e.g., Table1). You can use full-column references like Sheet1!A:D.
               </span>
             </div>
           )}

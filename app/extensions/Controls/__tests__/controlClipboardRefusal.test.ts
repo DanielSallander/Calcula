@@ -20,6 +20,11 @@
 //          the floating-store entry must NOT be added when the backend write
 //          failed. A floating control with no backend metadata paints until the
 //          next reload and then silently vanishes.
+//
+//          W25: the paste goes through the OBJECT clipboard (@api/objectClipboard),
+//          which creates every entry through its family's provider and names a
+//          refusal in its ONE toast -- Controls' provider is registered with its
+//          real clipboard halves, as activate() does.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
@@ -67,7 +72,10 @@ vi.mock("@api/events", async (importOriginal) => ({
   emitAppEvent: vi.fn(),
 }));
 
-import { copyControl, pasteControl } from "../lib/controlClipboard";
+import { copyControl, pasteControl, pasteControlSnapshots, snapshotControls } from "../lib/controlClipboard";
+import { registerControlObjectSelection } from "../lib/controlObjectSelection";
+import { resetObjectSelectionProviders } from "@api/objectSelection";
+import { resetObjectClipboard } from "@api/objectClipboard";
 
 /** A legacy control this build could not migrate: the picture is still inline. */
 const LEGACY_INLINE = {
@@ -90,6 +98,9 @@ beforeEach(() => {
   syncFloatingControlRegions.mockReset();
   getAllControls.mockReset().mockResolvedValue([]);
   getControlMetadata.mockReset().mockResolvedValue(LEGACY_INLINE);
+  resetObjectClipboard();
+  resetObjectSelectionProviders();
+  registerControlObjectSelection({ copyControls: snapshotControls, pasteControls: pasteControlSnapshots });
 });
 
 describe("a refused control copy is visible, not silent", () => {

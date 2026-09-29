@@ -146,8 +146,13 @@ function pressAt(x: number, y: number, mods: { button?: number; shiftKey?: boole
     new CustomEvent(BACKGROUND_POINTER_DOWN_EVENT, { detail: { x, y, button: 0, ...mods } }),
   );
 }
+/** A move DURING a drag: the primary button is held (`buttons: 1`). */
 function moveTo(x: number, y: number): void {
-  window.dispatchEvent(new MouseEvent("mousemove", { clientX: x, clientY: y }));
+  window.dispatchEvent(new MouseEvent("mousemove", { clientX: x, clientY: y, buttons: 1 }));
+}
+/** A move with NO button held (the pointer merely passing over). */
+function hoverTo(x: number, y: number): void {
+  window.dispatchEvent(new MouseEvent("mousemove", { clientX: x, clientY: y, buttons: 0 }));
 }
 function releaseAt(x: number, y: number): void {
   window.dispatchEvent(new MouseEvent("mouseup", { clientX: x, clientY: y }));
@@ -264,6 +269,20 @@ describe("the gesture", () => {
     expect(getSelectedObjectRegions()).toEqual([]);
     expect(getSetHeldObjectRegions()).toEqual([]);
     expect(escapeApplies()).toBe(false);
+  });
+
+  // Found live 2026-09-29 (e2e fixall-canvas LIVE-2): after an instant
+  // press-and-release on the empty page the band FOLLOWED the bare pointer,
+  // and the next click (on an object) "released" it, selecting everything
+  // between. A band exists only while the primary button is held.
+  it("a move with NO button held ends the band: no band follows the pointer, and the next release selects nothing", () => {
+    charts.provider.select(c1);
+    pressAt(400, 20);
+    expect(getSelectedObjectRegions(), "the press deselected, as a click does").toEqual([]);
+    hoverTo(60, 60);
+    expect(currentMarqueeBand(), "a band follows the pointer with no button held").toBeNull();
+    releaseAt(60, 60);
+    expect(getSelectedObjectRegions(), "a release after the hover applied a band").toEqual([]);
   });
 
   it("its session listeners are in the global input census", () => {

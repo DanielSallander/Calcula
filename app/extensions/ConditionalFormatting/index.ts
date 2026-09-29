@@ -116,7 +116,7 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => context.ui.dialogs.unregister(NEW_RULE_DIALOG_ID));
 
   // 5. Register menu items
-  registerCFMenuItems(context);
+  cleanupFns.push(registerCFMenuItems(context));
 
   // 6. Subscribe to events
 

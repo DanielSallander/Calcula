@@ -255,6 +255,7 @@ describe("Add-ins tab registration", () => {
     const unregistered: string[] = [];
     const ctx = {
       invokeBackend: vi.fn(),
+      commands: { register: vi.fn(), unregister: vi.fn() },
       ui: {
         activityBar: { register: vi.fn(), unregister: vi.fn(), toggle: vi.fn() },
         panels: {

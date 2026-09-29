@@ -66,6 +66,7 @@ import {
   switchSheetForPointMode,
 } from "@api/externalEdit";
 import { getExternalFormulaTarget } from "@api/editing";
+import { AppEvents, emitAppEvent } from "@api/events";
 import {
   installFrFormulaBarPublisher,
   refreshFrFormulaBarContent,
@@ -548,5 +549,56 @@ describe("(i) the Name Box resolver", () => {
 describe("owner key", () => {
   it("is the one the design names", () => {
     expect(FR_FORMULA_BAR_OWNER).toBe("floatingRange");
+  });
+});
+
+// E3: in a workbook that uses R1C1 references, a floating grid's cell shows
+// and edits its formula in R1C1 -- relative to the cell -- and is stored in
+// A1, as Core's own cells are (FormulaInput.tsx, useEditing). It showed A1
+// text whatever the style.
+describe("the R1C1 reference style (E3)", () => {
+  afterEach(() => {
+    emitAppEvent(AppEvents.REFERENCE_STYLE_CHANGED, { referenceStyle: "A1" });
+  });
+
+  it("the bar shows the formula in R1C1, relative to the cell; a value stays a value", async () => {
+    emitAppEvent(AppEvents.REFERENCE_STYLE_CHANGED, { referenceStyle: "R1C1" });
+    select(1, 1);
+    await flush();
+    expect(getExternalCellTarget()?.content).toBe("=R[-1]C[-1]*2");
+    select(1, 0);
+    await flush();
+    expect(getExternalCellTarget()?.content).toBe("plain");
+  });
+
+  it("switching the style republishes the selected cell in the new notation", async () => {
+    select(1, 1);
+    await flush();
+    expect(getExternalCellTarget()?.content).toBe("=A1*2");
+    emitAppEvent(AppEvents.REFERENCE_STYLE_CHANGED, { referenceStyle: "R1C1" });
+    await flush();
+    expect(getExternalCellTarget()?.content).toBe("=R[-1]C[-1]*2");
+  });
+
+  it("an edit begun from the bar starts from the R1C1 text and is STORED in A1", async () => {
+    emitAppEvent(AppEvents.REFERENCE_STYLE_CHANGED, { referenceStyle: "R1C1" });
+    select(1, 1);
+    await flush();
+    const session = getExternalCellTarget()!.beginEdit()!;
+    await flush();
+    expect(session.getText()).toBe("=R[-1]C[-1]*2");
+    session.setText("=R[-1]C[-1]*3", 13);
+    await session.commit(null);
+    expect(updateFloatingRangeCell).toHaveBeenCalledWith(FR_ID, 1, 1, "=A1*3");
+  });
+
+  it("control: in A1 the text is stored as typed", async () => {
+    select(1, 1);
+    await flush();
+    const session = getExternalCellTarget()!.beginEdit()!;
+    await flush();
+    session.setText("=A1*5", 5);
+    await session.commit(null);
+    expect(updateFloatingRangeCell).toHaveBeenCalledWith(FR_ID, 1, 1, "=A1*5");
   });
 });

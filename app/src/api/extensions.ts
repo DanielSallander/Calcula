@@ -5,7 +5,7 @@
 // FIX: Types now match core/lib/gridCommands.ts definitions exactly.
 
 import type { Selection } from "../core/types";
-import type { GridCommand, CommandGuard } from "../core/lib/gridCommands";
+import type { GridCommand, CommandGuard, GridMenuContext } from "../core/lib/gridCommands";
 
 // ============================================================================
 // Type Definitions (Contracts) - Must match Shell implementations
@@ -74,22 +74,18 @@ export interface RibbonGroupDefinition {
 }
 
 // ============================================================================
-// Grid Menu Types - MUST match core/lib/gridCommands.ts exactly
+// Grid Menu Types
 // ============================================================================
 
-/** Context passed to grid context menu callbacks */
-export interface GridMenuContext {
-  /** The current selection */
-  selection: Selection | null;
-  /** The cell that was right-clicked (may differ from selection start) */
-  clickedCell: { row: number; col: number } | null;
-  /** Whether the clicked cell is within the current selection */
-  isWithinSelection: boolean;
-  /** Active sheet index */
-  sheetIndex: number;
-  /** Active sheet name */
-  sheetName: string;
-}
+/**
+ * The context a grid context-menu item is handed -- DERIVED from Core
+ * (core/lib/gridCommands.ts), the way `GridCommand` below is. This used to be
+ * a copy under a "MUST match exactly" banner, and it had drifted: Core fills
+ * `dimensions` (the hidden rows and columns) on every right-click and the copy
+ * did not declare it, so an extension could not read what it was handed.
+ * Pinned by src/api/__tests__/gridMenuContextDrift.test.ts.
+ */
+export type { GridMenuContext } from "../core/lib/gridCommands";
 
 /** A context menu item for the grid */
 export interface GridContextMenuItem {
@@ -202,6 +198,9 @@ export interface ExtensionRegistryService {
   registerAddIn(manifest: AddInManifest): void;
   unregisterAddIn(addinId: string): void;
   registerCommand(command: CommandDefinition): void;
+  /** The inverse of registerCommand: take back THIS registration (the object
+   *  that was registered), never another extension's of the same id. */
+  unregisterCommand(command: CommandDefinition): void;
   getCommand(commandId: string): CommandDefinition | undefined;
   getAllCommands(): CommandDefinition[];
   registerRibbonTab(tab: RibbonTabDefinition): void;
@@ -283,6 +282,21 @@ export const ExtensionRegistry = {
   },
   registerCommand(command: CommandDefinition): void {
     extensionRegistryService?.registerCommand(command);
+  },
+  /**
+   * Take back a command this extension registered with registerCommand --
+   * call it on deactivation, as for menu items and panes. Without it a command
+   * outlived its extension: a ribbon or cell-type button bound to it, or a
+   * script naming it, still ran the torn-down extension's code (X20, wave D).
+   *
+   * Pass the SAME object you registered: the removal is tied to that
+   * registration, not to the id. Another extension that registered the same
+   * id over yours keeps its command when you go; if yours was the one on top,
+   * the one it had overwritten is live again. A command already taken back is
+   * ignored. An add-in's commands go with unregisterAddIn instead.
+   */
+  unregisterCommand(command: CommandDefinition): void {
+    extensionRegistryService?.unregisterCommand(command);
   },
   getCommand(commandId: string): CommandDefinition | undefined {
     return extensionRegistryService?.getCommand(commandId);

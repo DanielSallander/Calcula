@@ -75,13 +75,15 @@ vi.mock("../../../lib/hiddenRowsCols", () => ({
   refreshUserHidden: vi.fn(async () => {}),
 }));
 
-import { useSpreadsheetSelection } from "../useSpreadsheetSelection";
+import { useSpreadsheetSelection, qualifyInterceptedCellRef } from "../useSpreadsheetSelection";
+import { registerFormulaReferenceInterceptor } from "../../../lib/formulaReferenceInterceptors";
 import { GridProvider, useGridContext } from "../../../state/GridContext";
 import { getInitialState } from "../../../state/gridReducer";
 import { setActiveSheet, setSelection } from "../../../state/gridActions";
 import { onGridCellPressed, type GridCellPress } from "../../../lib/cellClickInterceptors";
 import {
   __resetExternalEditForTests,
+  registerExternalFormulaTarget,
   setExternalSessionParked,
 } from "../../../lib/formulaEditTarget";
 import {
@@ -163,6 +165,28 @@ async function clickCell(row: number, col: number, button = 0): Promise<void> {
   const cfg = observedConfig!;
   const x = cfg.rowHeaderWidth + cfg.defaultCellWidth * col + cfg.defaultCellWidth / 2;
   const y = cfg.colHeaderHeight + cfg.defaultCellHeight * row + cfg.defaultCellHeight / 2;
+  await pressAt(x, y, button);
+}
+
+/** A press + release on column `col`'s header. */
+async function clickColumnHeader(col: number, button = 0): Promise<void> {
+  const cfg = observedConfig!;
+  await pressAt(cfg.rowHeaderWidth + cfg.defaultCellWidth * col + cfg.defaultCellWidth / 2, cfg.colHeaderHeight / 2, button);
+}
+
+/** A press + release on row `row`'s header. */
+async function clickRowHeader(row: number, button = 0): Promise<void> {
+  const cfg = observedConfig!;
+  await pressAt(cfg.rowHeaderWidth - 4, cfg.colHeaderHeight + cfg.defaultCellHeight * row + cfg.defaultCellHeight / 2, button);
+}
+
+/** A press + release on the select-all corner. */
+async function clickCorner(): Promise<void> {
+  const cfg = observedConfig!;
+  await pressAt(cfg.rowHeaderWidth / 2, cfg.colHeaderHeight / 2, 0);
+}
+
+async function pressAt(x: number, y: number, button: number): Promise<void> {
   const target = host.querySelector('[data-testid="container"]') as HTMLElement;
   const event = {
     clientX: x,
@@ -267,9 +291,61 @@ describe("a handled grid cell press is announced AFTER commit-before-select", ()
     expect(commitBeforeSelect).not.toHaveBeenCalled();
   });
 
-  it("a right-press INSIDE the selection keeps it for the context menu and announces nothing", async () => {
+  it("a right-press INSIDE the selection keeps it for the context menu, and is announced as a press that KEPT it (BUG-0186)", async () => {
     await clickCell(0, 0, 2);
-    expect(presses).toHaveLength(0);
+    expect(observedSelection).toEqual({ endRow: 0, endCol: 0 });
+    // No commit: the selection is kept, nothing was selected.
+    expect(commitBeforeSelect).not.toHaveBeenCalled();
+    expect(presses).toHaveLength(1);
+    expect(presses[0]).toMatchObject({ row: 0, col: 0, button: 2, target: "cell", keptSelection: true });
+  });
+
+  it("control: a selecting press says it did not keep the selection", async () => {
+    await clickCell(2, 3);
+    expect(presses[0]).toMatchObject({ target: "cell", keptSelection: false });
+  });
+});
+
+describe("a handled HEADER press is announced too (BUG-0186)", () => {
+  it("a re-press of an ALREADY-selected column header -- Core's selection unchanged -- is announced", async () => {
+    await clickColumnHeader(2);
+    const selectedOnce = observedSelection;
+    presses.length = 0;
+    await clickColumnHeader(2);
+    // The case no selection listener sees: nothing changed.
+    expect(observedSelection).toEqual(selectedOnce);
+    expect(presses).toHaveLength(1);
+    expect(presses[0]).toMatchObject({ row: -1, col: 2, button: 0, target: "column", keptSelection: false });
+  });
+
+  it("a re-press of an already-selected row header is announced", async () => {
+    await clickRowHeader(3);
+    presses.length = 0;
+    await clickRowHeader(3);
+    expect(presses).toHaveLength(1);
+    expect(presses[0]).toMatchObject({ row: 3, col: -1, target: "row", keptSelection: false });
+  });
+
+  it("a right-press inside a row-header selection keeps it and is announced as kept", async () => {
+    await clickRowHeader(3);
+    const selectedOnce = observedSelection;
+    presses.length = 0;
+    await clickRowHeader(3, 2);
+    expect(observedSelection).toEqual(selectedOnce);
+    expect(presses).toHaveLength(1);
+    expect(presses[0]).toMatchObject({ row: 3, button: 2, target: "row", keptSelection: true });
+  });
+
+  it("a press on the select-all corner is announced", async () => {
+    await clickCorner();
+    expect(presses.map((p) => p.target)).toEqual(["all"]);
+  });
+
+  it("the header press is announced AFTER commit-before-select (a bar session is committed first)", async () => {
+    liveFake = createFakeExternalEdit({ hostSheetIndex: 0, text: "7" });
+    liveFake.register();
+    await clickColumnHeader(1);
+    expect(order).toEqual(["commit", "press:-1,1"]);
   });
 });
 
@@ -314,5 +390,131 @@ describe("Undo and Redo through the COMMAND stand down while an external session
     }
     expect(api.undo).toHaveBeenCalledTimes(1);
     expect(api.redo).toHaveBeenCalledTimes(1);
+  });
+});
+
+// E2: header picks (a whole column, a whole row, the select-all corner) and a
+// GETPIVOTDATA pick over a pivot cell went to Core's OWN editor only; an
+// external edit (a floating grid's formula) got nothing from them.
+describe("header and GETPIVOTDATA picks reach an EXTERNAL edit (E2)", () => {
+  const inserted: string[] = [];
+  const refs: unknown[] = [];
+  let offTarget: () => void = () => {};
+  let offInterceptor: () => void = () => {};
+
+  function registerExpectingTarget(withText = true): void {
+    offTarget = registerExternalFormulaTarget({
+      isExpectingReference: () => true,
+      insertReference: (ref) => refs.push(ref),
+      ...(withText ? { insertText: (text: string) => inserted.push(text) } : {}),
+    });
+  }
+
+  beforeEach(() => {
+    inserted.length = 0;
+    refs.length = 0;
+  });
+  afterEach(() => {
+    offTarget();
+    offInterceptor();
+  });
+
+  it("a column header inserts the whole column, sheet-qualified", async () => {
+    registerExpectingTarget();
+    await clickColumnHeader(2);
+    expect(inserted).toEqual(["Sheet1!C:C"]);
+    expect(presses).toHaveLength(0);
+  });
+
+  it("a row header inserts the whole row, sheet-qualified", async () => {
+    registerExpectingTarget();
+    await clickRowHeader(3);
+    expect(inserted).toEqual(["Sheet1!4:4"]);
+  });
+
+  it("the select-all corner inserts every row of the sheet", async () => {
+    registerExpectingTarget();
+    await clickCorner();
+    expect(inserted).toEqual([`Sheet1!1:${observedConfig!.totalRows}`]);
+  });
+
+  it("a pivot cell's GETPIVOTDATA reaches it, its pivot reference qualified with the picked sheet", async () => {
+    registerExpectingTarget();
+    offInterceptor = registerFormulaReferenceInterceptor(async (row, col) =>
+      row === 2 && col === 2
+        ? { text: 'GETPIVOTDATA("Sales",$C$3,"Region","C3")', highlightRow: 2, highlightCol: 2 }
+        : null,
+    );
+    await clickCell(2, 2);
+    expect(inserted).toEqual(['GETPIVOTDATA("Sales",Sheet1!$C$3,"Region","C3")']);
+    expect(refs).toEqual([]);
+  });
+
+  it("a target that cannot take text still gets the plain cell for a GETPIVOTDATA pick", async () => {
+    registerExpectingTarget(false);
+    offInterceptor = registerFormulaReferenceInterceptor(async () => ({
+      text: 'GETPIVOTDATA("Sales",$C$3)',
+      highlightRow: 2,
+      highlightCol: 2,
+    }));
+    await clickCell(2, 2);
+    expect(refs).toEqual([{ sheetName: "Sheet1", startRow: 2, startCol: 2, endRow: 2, endCol: 2 }]);
+  });
+
+  it("qualifyInterceptedCellRef: a token inside a string, a longer name or an already-qualified ref is not the reference", () => {
+    expect(qualifyInterceptedCellRef('F("$C$3",$C$3)', 2, 2, "My Sheet")).toBe("F(\"$C$3\",'My Sheet'!$C$3)");
+    expect(qualifyInterceptedCellRef("ABC3+C30+X!C3", 2, 2, "S")).toBeNull();
+    expect(qualifyInterceptedCellRef("SUM(c3)", 2, 2, "S")).toBe("SUM(S!c3)");
+  });
+
+  // Review B (2026-09-28): the prefix was quoted by Core's display rule
+  // (`formatSheetName`), which quotes only whitespace, ' ! [ ] and a leading
+  // digit -- so on a sheet named Q1-2026 a header pick handed the session
+  // `Q1-2026!C:C` and a pivot pick `GETPIVOTDATA("Sales",Q1-2026!$C$3)`, both
+  // of which the backend parser rejects ("Expected RParen, found
+  // Exclamation"), while the SAME session's cell pick quoted it. The prefix
+  // now follows the backend's own bare-name rule (`is_bare_sheet_name`).
+  describe("on a sheet whose name the formula parser needs QUOTED", () => {
+    async function onSheet(name: string): Promise<void> {
+      await act(async () => {
+        dispatchOut(setActiveSheet(0, name));
+      });
+      await settle();
+    }
+
+    it("a column header on Q1-2026 inserts 'Q1-2026'!C:C", async () => {
+      await onSheet("Q1-2026");
+      registerExpectingTarget();
+      await clickColumnHeader(2);
+      expect(inserted).toEqual(["'Q1-2026'!C:C"]);
+    });
+
+    it("a row header and the corner on Q1-2026 quote the prefix too", async () => {
+      await onSheet("Q1-2026");
+      registerExpectingTarget();
+      await clickRowHeader(3);
+      await clickCorner();
+      expect(inserted).toEqual(["'Q1-2026'!4:4", `'Q1-2026'!1:${observedConfig!.totalRows}`]);
+    });
+
+    it("a GETPIVOTDATA pick on Q1-2026 qualifies the pivot cell with a QUOTED prefix", async () => {
+      await onSheet("Q1-2026");
+      registerExpectingTarget();
+      offInterceptor = registerFormulaReferenceInterceptor(async (row, col) =>
+        row === 2 && col === 2
+          ? { text: 'GETPIVOTDATA("Sales",$C$3)', highlightRow: 2, highlightCol: 2 }
+          : null,
+      );
+      await clickCell(2, 2);
+      expect(inserted).toEqual(["GETPIVOTDATA(\"Sales\",'Q1-2026'!$C$3)"]);
+    });
+
+    it("the names the lexer reads as something else are quoted: TRUE, a trailing dot, a leading digit", async () => {
+      expect(qualifyInterceptedCellRef("F($C$3)", 2, 2, "TRUE")).toBe("F('TRUE'!$C$3)");
+      expect(qualifyInterceptedCellRef("F($C$3)", 2, 2, "Q1.")).toBe("F('Q1.'!$C$3)");
+      expect(qualifyInterceptedCellRef("F($C$3)", 2, 2, "2024")).toBe("F('2024'!$C$3)");
+      // Control: a bare identifier -- the default names -- stays bare.
+      expect(qualifyInterceptedCellRef("F($C$3)", 2, 2, "Sheet.1")).toBe("F(Sheet.1!$C$3)");
+    });
   });
 });

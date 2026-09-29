@@ -122,6 +122,7 @@ vi.mock("@api/notifications", () => ({ showToast: vi.fn() }));
 vi.mock("@api/pivotNotices", () => ({ surfacePivotNotices: vi.fn() }));
 vi.mock("@api/objectGeometry", () => ({
   isUndoTransactionOpen: () => false,
+  undoCommitsSettled: () => Promise.resolve(),
   runInUndoTransaction: async (_label: string, fn: () => Promise<unknown>) => fn(),
 }));
 

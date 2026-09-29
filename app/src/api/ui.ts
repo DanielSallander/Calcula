@@ -17,7 +17,6 @@ import type {
   ActivityViewDefinition,
   PanelDefinition,
   PanelPlacement,
-  PanelSection,
   ShellComponentDefinition,
 } from "./uiTypes";
 
@@ -107,6 +106,8 @@ export interface DialogService {
   closeDialog(dialogId: string): void;
   getDialog(dialogId: string): DialogDefinition | undefined;
   getVisibleDialogs(): Array<{ definition: DialogDefinition; data?: Record<string, unknown> }>;
+  /** Whether the dialog is open right now, by whichever path. */
+  isDialogOpen(dialogId: string): boolean;
   onChange(listener: () => void): () => void;
 }
 
@@ -203,13 +204,34 @@ export function registerTaskPaneHooks(hooks: {
 // Menu Registry (Internal State - self-contained in API)
 // ============================================================================
 
+/** Options for unregisterMenu. */
+export interface UnregisterMenuOptions {
+  /**
+   * The menu is SHARED: other extensions add their items to it with
+   * registerMenuItem (Data, Review, Model, Developer, External Data). Take back
+   * only the owner's own items, and keep the menu -- label and order included --
+   * for as long as any other extension still has an item in it. It goes with
+   * the last of those items, or is taken over again by its owner's next
+   * registerMenu. Without it (the default) the menu goes at once, and the
+   * others' items return when it is registered again (Standard Menus: W20).
+   */
+  keepWhileShared?: boolean;
+}
+
 class MenuRegistry {
   private menus: Map<string, MenuDefinition> = new Map();
   private listeners: Set<() => void> = new Set();
   /** Items added via registerMenuItem, keyed by menu id. Survive re-registration. */
   private dynamicItems: Map<string, MenuItemDefinition[]> = new Map();
+  /**
+   * Menus whose owner took them back while other extensions still had items
+   * in them (unregisterMenu with keepWhileShared). Such a menu has no owner
+   * left to remove it, so the removal of its last item removes it.
+   */
+  private ownerless: Set<string> = new Set();
 
   registerMenu(menu: MenuDefinition): void {
+    this.ownerless.delete(menu.id);
     this.menus.set(menu.id, menu);
     // Re-append any dynamically registered items so they survive re-registration
     const dynamic = this.dynamicItems.get(menu.id);
@@ -292,21 +314,73 @@ class MenuRegistry {
     if (changed) this.notify();
   }
 
-  /** Remove a dynamically-registered menu item (by menu id + item id). Used to
-   *  tear down items registered by an extension on deactivation. */
-  removeMenuItem(menuId: string, itemId: string): void {
-    const dynamic = this.dynamicItems.get(menuId);
-    if (dynamic) {
-      const i = dynamic.findIndex((it) => it.id === itemId);
-      if (i >= 0) dynamic.splice(i, 1);
-    }
+  /**
+   * Remove a whole menu (by id) -- the teardown of the extension that BUILT it
+   * with registerMenu, on deactivation, exactly as an item's owner calls
+   * removeMenuItem. Without it a menu outlived its extension by construction
+   * (Standard Menus' Edit and Format, Tracing's Formulas: W20).
+   *
+   * Items OTHER extensions contributed with registerMenuItem are kept in the
+   * dynamic record, not dropped: their owners are still active, and they come
+   * back -- once each -- when the menu is registered again. Unknown ids are
+   * ignored.
+   *
+   * A menu other extensions SHARE is not the owner's to take from them while
+   * they are active (X19, wave D: Grouping's Outline, Solver and Goal Seek went
+   * with AutoFilter's Data menu). With `keepWhileShared` the owner's own items
+   * go and the menu stays, made of the items the others added -- until the
+   * last of them is removed (removeMenuItem) or the owner builds it again.
+   */
+  unregisterMenu(menuId: string, options?: UnregisterMenuOptions): void {
     const menu = this.menus.get(menuId);
-    if (menu) {
-      const j = menu.items.findIndex((it) => it.id === itemId);
-      if (j >= 0) {
-        menu.items.splice(j, 1);
-        this.notify();
+    if (!menu) return;
+    const contributed = this.dynamicItems.get(menuId) ?? [];
+    if (options?.keepWhileShared && contributed.length > 0) {
+      // The record's own objects, as registerMenu would append them: a later
+      // removeMenuItem cuts both by identity.
+      this.menus.set(menuId, { ...menu, items: [...contributed] });
+      this.ownerless.add(menuId);
+    } else {
+      this.menus.delete(menuId);
+      this.ownerless.delete(menuId);
+    }
+    this.notify();
+  }
+
+  /**
+   * Remove a dynamically-registered menu item (by menu id + item id). Used to
+   * tear down items registered by an extension on deactivation.
+   *
+   * `itemId` may name an item at ANY depth, and for a SHARED parent it must:
+   * several extensions build one submenu by each registering the same parent
+   * id with their own child, which registerMenuItem merges (Data > What-If
+   * Analysis holds Goal Seek, What-If Data Table, Solver and Scenario Manager).
+   * The parent is everyone's; an extension takes back its CHILD. Removing the
+   * parent id took every other contributor's child with it, and those register
+   * once, at activation, so they never came back (wave C review of W21).
+   *
+   * A parent the removal leaves with no children, and that does nothing of its
+   * own (no action, command or custom content), goes too -- from the menu and
+   * from the dynamic record: it existed only to hold them, and an empty
+   * submenu must not come back with the next registerMenu.
+   */
+  removeMenuItem(menuId: string, itemId: string): void {
+    // Both paths are found BEFORE either is cut: the record and the menu can
+    // share the very same parent object (an item registered into a live menu
+    // is pushed into both), so cutting one first would hide the other's.
+    const dynamic = this.dynamicItems.get(menuId);
+    const menu = this.menus.get(menuId);
+    const inRecord = dynamic ? pathToMenuItem(dynamic, itemId) : null;
+    const inMenu = menu ? pathToMenuItem(menu.items, itemId) : null;
+    if (inRecord) cutMenuItemPath(inRecord);
+    if (inMenu) {
+      cutMenuItemPath(inMenu);
+      // An ownerless menu existed only to hold the others' items.
+      if (menu && menu.items.length === 0 && this.ownerless.has(menuId)) {
+        this.menus.delete(menuId);
+        this.ownerless.delete(menuId);
       }
+      this.notify();
     }
   }
 
@@ -341,6 +415,43 @@ class MenuRegistry {
   }
 }
 
+/** One step of the way down to a menu item: the list it sits in, and it. */
+interface MenuItemStep {
+  container: MenuItemDefinition[];
+  item: MenuItemDefinition;
+}
+
+/** The way from `items` down to the item `itemId` at any depth (a top-level
+ *  match first), or null. */
+function pathToMenuItem(items: MenuItemDefinition[], itemId: string): MenuItemStep[] | null {
+  const own = items.find((item) => item.id === itemId);
+  if (own) return [{ container: items, item: own }];
+  for (const item of items) {
+    if (!item.children || item.children.length === 0) continue;
+    const below = pathToMenuItem(item.children, itemId);
+    if (below) return [{ container: items, item }, ...below];
+  }
+  return null;
+}
+
+/** Does the item do nothing but hold children? */
+function holdsOnlyChildren(item: MenuItemDefinition): boolean {
+  return !item.action && !item.commandId && !item.customContent;
+}
+
+/** Cut the item at the end of `path`, then every parent above it that the cut
+ *  left EMPTY and that holds only children. By identity, so a list another
+ *  path already cut is left alone. */
+function cutMenuItemPath(path: MenuItemStep[]): void {
+  for (let k = path.length - 1; k >= 0; k--) {
+    const { container, item } = path[k];
+    const isTarget = k === path.length - 1;
+    if (!isTarget && ((item.children?.length ?? 0) > 0 || !holdsOnlyChildren(item))) return;
+    const at = container.indexOf(item);
+    if (at >= 0) container.splice(at, 1);
+  }
+}
+
 const menuRegistry = new MenuRegistry();
 
 // ============================================================================
@@ -355,6 +466,18 @@ export function registerMenuItem(menuId: string, item: MenuItemDefinition): void
   menuRegistry.registerMenuItem(menuId, item);
 }
 
+/** Remove a menu its extension built with registerMenu (deactivation). Items
+ *  other extensions added to it survive and return when it is re-registered.
+ *  For a menu other extensions add to, pass `{ keepWhileShared: true }`: it
+ *  then stays, with only their items, until the last of them is removed.
+ *  See MenuRegistry.unregisterMenu. */
+export function unregisterMenu(menuId: string, options?: UnregisterMenuOptions): void {
+  menuRegistry.unregisterMenu(menuId, options);
+}
+
+/** Take back an item this extension registered -- by the id of the item it
+ *  added, at any depth: for a child of a SHARED parent, the CHILD's id, never
+ *  the parent's (see MenuRegistry.removeMenuItem). */
 export function unregisterMenuItem(menuId: string, itemId: string): void {
   menuRegistry.removeMenuItem(menuId, itemId);
 }
@@ -466,6 +589,10 @@ export const DialogExtensions = {
 
   getVisibleDialogs(): Array<{ definition: DialogDefinition; data?: Record<string, unknown> }> {
     return dialogService?.getVisibleDialogs() ?? [];
+  },
+
+  isDialogOpen(dialogId: string): boolean {
+    return dialogService?.isDialogOpen(dialogId) ?? false;
   },
 
   onChange(listener: () => void): () => void {
@@ -619,6 +746,12 @@ export function showDialog(dialogId: string, data?: Record<string, unknown>): vo
 
 export function hideDialog(dialogId: string): void {
   DialogExtensions.closeDialog(dialogId);
+}
+
+/** Whether the dialog is open right now, by whichever path it was opened or
+ *  closed. Read this instead of mirroring a component's `isOpen`. */
+export function isDialogOpen(dialogId: string): boolean {
+  return DialogExtensions.isDialogOpen(dialogId);
 }
 
 // ============================================================================

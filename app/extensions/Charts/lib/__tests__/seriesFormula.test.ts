@@ -397,3 +397,34 @@ describe("computeSeriesRanges (row-oriented)", () => {
     expect(refs.valuesRef!.startRow).toBe(2);
   });
 });
+
+// ============================================================================
+// W13 (wave C): the REAL formatter, sheet quoting by the parser's rule
+// ============================================================================
+// The blocks above re-implement the helpers; this one imports them. The
+// SERIES formula's sheet prefix used a display rule that left Q1-2026, TRUE
+// and `Q1.` bare -- `=SERIES(Q1-2026!$B$1,...)` is not a formula the parser
+// reads back. It now spells a sheet the way every reference builder does
+// (quoteSheetNameForFormula, @api/externalEdit).
+import * as realSeriesFormula from "../seriesFormula";
+import { quoteSheetNameForFormula } from "@api/externalEdit";
+
+describe("seriesFormula's real sheet quoting", () => {
+  it.each([
+    ["Q1-2026", "'Q1-2026'!$B$1:$B$4"],
+    ["TRUE", "'TRUE'!$B$1:$B$4"],
+    ["Q1.", "'Q1.'!$B$1:$B$4"],
+    ["My Data", "'My Data'!$B$1:$B$4"],
+    ["Sheet1", "Sheet1!$B$1:$B$4"],
+  ])("formatAbsoluteRef on sheet %s writes %s", (sheetName, expected) => {
+    expect(
+      realSeriesFormula.formatAbsoluteRef({ startRow: 0, startCol: 1, endRow: 3, endCol: 1, sheetName }),
+    ).toBe(expected);
+  });
+
+  it("formatSheetName IS the parser's rule, for every name", () => {
+    for (const name of ["Q1-2026", "TRUE", "false", "Q1.", "2024", "Sheet1", "Sheet.1", "It's", "R&D"]) {
+      expect(realSeriesFormula.formatSheetName(name), name).toBe(quoteSheetNameForFormula(name));
+    }
+  });
+});

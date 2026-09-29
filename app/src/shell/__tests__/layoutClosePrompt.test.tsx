@@ -18,17 +18,30 @@
 //          workbook whose scripts were all gone, and Save wrote the file after
 //          every script's Before-Save veto had already been unregistered.
 //
+//          E8 (BUG-0200, close parts), two more gaps. (1) The Save's REFUSING
+//          steps -- the Save As picker of an untitled workbook, the lossy-save
+//          warning -- ran AFTER the teardown, so cancelling one left the window
+//          open over torn-down scripts: saving is now two halves
+//          (file-api prepareSave / writePreparedSave) and every refusal runs
+//          before BEFORE_CLOSE. (2) The teardown's ASYNC work (the recorder
+//          storing its recording, the Animation restore, the script host
+//          re-protecting a sheet) was not awaited, so the file could be written
+//          before it: it is now registered as close preparations
+//          (@api/lifecycleGuards) that the shell awaits before the write and
+//          before the window goes.
+//
 //          The REAL Layout close handler runs here against the REAL dialog
-//          wrapper and the REAL lifecycle-guard registry; only the plugin, the
-//          window and the file API are doubled. The plugin is doubled in its
-//          TAURI shape: `message` with YesNoCancel custom buttons resolves the
-//          clicked button's LABEL, and the cancel label for X / Escape / Alt+F4
-//          (the pinned plugin and rfd source lines are cited in
-//          src/core/lib/dialogs.ts). The plugin's two-button `confirm` resolves
-//          `false` here, which is what X produced on the old box, so this file
-//          run against the old Layout shows the old data loss. `emitAppEvent`
-//          records what was broadcast, and a BEFORE_CLOSE runs the teardowns a
-//          test registered -- the way the script host drops its guards on it.
+//          wrapper, the REAL lifecycle-guard registry and the REAL
+//          close-preparation registry; only the plugin, the window and the file
+//          API are doubled. The plugin is doubled in its TAURI shape: `message`
+//          with YesNoCancel custom buttons resolves the clicked button's LABEL,
+//          and the cancel label for X / Escape / Alt+F4 (the pinned plugin and
+//          rfd source lines are cited in src/core/lib/dialogs.ts). The plugin's
+//          two-button `confirm` resolves `false` here, which is what X produced
+//          on the old box, so this file run against the old Layout shows the
+//          old data loss. `emitAppEvent` records what was broadcast, and a
+//          BEFORE_CLOSE runs the teardowns a test registered -- the way the
+//          script host drops its guards on it.
 
 // The module doubles below must export the REAL (PascalCase) names Layout imports.
 /* eslint-disable @typescript-eslint/naming-convention */
@@ -43,17 +56,22 @@ import {
   type LifecycleAction,
   type LifecycleGuardResult,
 } from "../../core/lib/lifecycleGuards";
+import { registerClosePreparation, resetClosePreparations } from "../../api/lifecycleGuards";
 
 Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
 
 type CloseEvent = { preventDefault: () => void };
+type Prepared = { path: string; kind: "save" | "saveAs" };
 
 const h = vi.hoisted(() => ({
   closeHandler: undefined as undefined | ((event: CloseEvent) => Promise<void>),
   destroy: vi.fn(),
   isFileModified: vi.fn(),
-  saveFile: vi.fn(),
+  prepareSave: vi.fn(),
+  writePreparedSave: vi.fn(),
   getCurrentFilePath: vi.fn(),
+  /** What the (doubled) Save As picker answers for an untitled workbook: a path, or null (cancelled). */
+  pickedPath: "C:/Books/Picked.cala" as string | null,
   pluginMessage: vi.fn(),
   pluginConfirm: vi.fn(),
   checkLifecycleGuards: vi.fn(),
@@ -85,7 +103,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: async () => undefined }));
 vi.mock("../../core/lib/file-api", () => ({
   updateWindowTitle: () => {},
   isFileModified: () => h.isFileModified(),
-  saveFile: () => h.saveFile(),
+  prepareSave: (...a: unknown[]) => h.prepareSave(...a),
+  writePreparedSave: (...a: unknown[]) => h.writePreparedSave(...a),
   getCurrentFilePath: () => h.getCurrentFilePath(),
 }));
 
@@ -152,16 +171,19 @@ async function requestClose(): Promise<{ preventDefault: ReturnType<typeof vi.fn
 }
 
 /**
- * The real saveFile's guard step, reduced: it asks the Before-Save guards
- * registered AT THAT MOMENT (file-api.ts saveFile / saveFileAs) and returns
- * `null` ("not saved") on a veto. Nothing else about saving matters here.
+ * The real prepareSave, reduced (file-api.ts): the destination -- the current
+ * path, or the Save As picker's answer for an untitled workbook -- then the
+ * Before-Save guards registered AT THAT MOMENT. Null = "not saving".
  */
-async function modelledSaveFile(): Promise<string | null> {
+async function modelledPrepareSave(): Promise<Prepared | null> {
   const current = (await h.getCurrentFilePath()) as string | null;
-  const path = current ?? "C:/Books/Picked.cala";
-  const kind = current ? "save" : "saveAs";
-  if (await realCheckLifecycleGuards("save", { path, kind })) return null;
-  return path;
+  if (current) {
+    if (await realCheckLifecycleGuards("save", { path: current, kind: "save" })) return null;
+    return { path: current, kind: "save" };
+  }
+  if (h.pickedPath === null) return null;
+  if (await realCheckLifecycleGuards("save", { path: h.pickedPath, kind: "saveAs" })) return null;
+  return { path: h.pickedPath, kind: "saveAs" };
 }
 
 /** Stand-in for a mounted object script's lifecycle guard: registered now,
@@ -182,15 +204,38 @@ function beforeCloseOrder(): number {
   return h.emitAppEvent.mock.invocationCallOrder[index];
 }
 
+/** A close preparation the test finishes by hand (the recorder's store, say). */
+function heldPreparation(): { finish: () => void; ran: () => boolean; finished: () => boolean } {
+  let release: () => void = () => {};
+  let started = false;
+  let done = false;
+  registerClosePreparation("test: held", () => {
+    started = true;
+    return new Promise<void>((resolve) => {
+      release = () => {
+        done = true;
+        resolve();
+      };
+    });
+  });
+  return { finish: () => release(), ran: () => started, finished: () => done };
+}
+
+async function drain(): Promise<void> {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+}
+
 beforeEach(async () => {
   w.__TAURI_INTERNALS__ = {};
   h.closeHandler = undefined;
   h.emitted.length = 0;
   h.onBeforeClose.length = 0;
+  h.pickedPath = "C:/Books/Picked.cala";
   h.destroy.mockReset().mockResolvedValue(undefined);
   h.isFileModified.mockReset().mockResolvedValue(true);
   h.getCurrentFilePath.mockReset().mockResolvedValue(SAVED_PATH);
-  h.saveFile.mockReset().mockImplementation(modelledSaveFile);
+  h.prepareSave.mockReset().mockImplementation(modelledPrepareSave);
+  h.writePreparedSave.mockReset().mockImplementation(async (p: Prepared) => p.path);
   h.pluginMessage.mockReset();
   // What the X button produced on the OLD two-button box: the refusing button.
   h.pluginConfirm.mockReset().mockResolvedValue(false);
@@ -219,6 +264,7 @@ afterEach(async () => {
   host.remove();
   delete w.__TAURI_INTERNALS__;
   resetLifecycleGuards();
+  resetClosePreparations();
   vi.restoreAllMocks();
 });
 
@@ -241,7 +287,8 @@ describe("Layout close prompt over unsaved changes", () => {
     const event = await requestClose();
     expect(event.preventDefault).toHaveBeenCalled();
     expect(h.destroy).not.toHaveBeenCalled();
-    expect(h.saveFile).not.toHaveBeenCalled();
+    expect(h.prepareSave).not.toHaveBeenCalled();
+    expect(h.writePreparedSave).not.toHaveBeenCalled();
 
     await requestClose();
     expect(h.pluginMessage).toHaveBeenCalledTimes(2);
@@ -251,37 +298,25 @@ describe("Layout close prompt over unsaved changes", () => {
   it("Save saves, THEN closes", async () => {
     h.pluginMessage.mockResolvedValue("Save");
     await requestClose();
-    expect(h.saveFile).toHaveBeenCalledTimes(1);
+    expect(h.writePreparedSave).toHaveBeenCalledTimes(1);
+    expect(h.writePreparedSave).toHaveBeenCalledWith({ path: SAVED_PATH, kind: "save" });
     expect(h.destroy).toHaveBeenCalledTimes(1);
-    expect(h.saveFile.mock.invocationCallOrder[0]).toBeLessThan(h.destroy.mock.invocationCallOrder[0]);
+    expect(h.writePreparedSave.mock.invocationCallOrder[0]).toBeLessThan(h.destroy.mock.invocationCallOrder[0]);
   });
 
   it("an explicit Don't Save closes without saving", async () => {
     h.pluginMessage.mockResolvedValue("Don't Save");
     await requestClose();
-    expect(h.saveFile).not.toHaveBeenCalled();
+    expect(h.prepareSave).not.toHaveBeenCalled();
+    expect(h.writePreparedSave).not.toHaveBeenCalled();
     expect(h.destroy).toHaveBeenCalledTimes(1);
   });
 
-  it("a Save that throws keeps the window open, and the next close asks again", async () => {
+  it("a Save whose WRITE throws keeps the window open, and the next close asks again", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     h.pluginMessage.mockResolvedValue("Save");
-    h.saveFile.mockRejectedValueOnce(new Error("disk full"));
+    h.writePreparedSave.mockRejectedValueOnce(new Error("disk full"));
     await requestClose();
-    expect(h.destroy).not.toHaveBeenCalled();
-
-    await requestClose();
-    expect(h.pluginMessage).toHaveBeenCalledTimes(2);
-  });
-
-  // saveFile's `null` is "not saved": the Save As picker of an untitled
-  // workbook was cancelled or the lossy-save warning was declined. Closing
-  // then discards exactly like Don't Save.
-  it("a Save that did not happen (Save As cancelled) keeps the window open", async () => {
-    h.pluginMessage.mockResolvedValue("Save");
-    h.saveFile.mockResolvedValueOnce(null);
-    await requestClose();
-    expect(h.saveFile).toHaveBeenCalledTimes(1);
     expect(h.destroy).not.toHaveBeenCalled();
 
     await requestClose();
@@ -293,7 +328,7 @@ describe("Layout close prompt over unsaved changes", () => {
     h.pluginMessage.mockRejectedValueOnce(new Error("a modal is already open"));
     await requestClose();
     expect(h.destroy).not.toHaveBeenCalled();
-    expect(h.saveFile).not.toHaveBeenCalled();
+    expect(h.prepareSave).not.toHaveBeenCalled();
     expect(errors).toHaveBeenCalled();
 
     h.pluginMessage.mockResolvedValueOnce("Cancel");
@@ -307,7 +342,7 @@ describe("Layout close prompt over unsaved changes", () => {
       h.pluginMessage.mockResolvedValueOnce(answer);
       await requestClose();
       expect(h.destroy, String(answer)).not.toHaveBeenCalled();
-      expect(h.saveFile, String(answer)).not.toHaveBeenCalled();
+      expect(h.prepareSave, String(answer)).not.toHaveBeenCalled();
     }
     expect(h.pluginMessage).toHaveBeenCalledTimes(4);
   });
@@ -345,17 +380,20 @@ describe("BEFORE_CLOSE goes out only once the close is decided", () => {
     expect(h.destroy).not.toHaveBeenCalled();
   });
 
-  it("Save broadcasts it after the answer and BEFORE the file is written", async () => {
+  it("Save broadcasts it after the save was PREPARED and BEFORE the file is written", async () => {
     h.pluginMessage.mockResolvedValue("Save");
     await requestClose();
 
     const broadcast = beforeCloseOrder();
     expect(h.pluginMessage.mock.invocationCallOrder[0]).toBeLessThan(broadcast);
-    // The recorder stores its module, Animation restores its transient writes
-    // and the script host puts lifted sheet protection back on this broadcast,
-    // so it must precede the write.
-    expect(broadcast).toBeLessThan(h.saveFile.mock.invocationCallOrder[0]);
-    expect(h.saveFile.mock.invocationCallOrder[0]).toBeLessThan(h.destroy.mock.invocationCallOrder[0]);
+    // Every refusing step (destination, consent, vetoes) ran while the
+    // workbook was whole...
+    expect(h.prepareSave.mock.invocationCallOrder[0]).toBeLessThan(broadcast);
+    // ...and the recorder stores its module, Animation restores its transient
+    // writes and the script host puts lifted sheet protection back on this
+    // broadcast, so it must precede the write.
+    expect(broadcast).toBeLessThan(h.writePreparedSave.mock.invocationCallOrder[0]);
+    expect(h.writePreparedSave.mock.invocationCallOrder[0]).toBeLessThan(h.destroy.mock.invocationCallOrder[0]);
     expect(h.emitted.filter((name) => name === "BEFORE_CLOSE")).toHaveLength(1);
   });
 
@@ -386,12 +424,124 @@ describe("BEFORE_CLOSE goes out only once the close is decided", () => {
   });
 });
 
+// E8 (1): a Save that turns out NOT to happen -- the untitled workbook's Save
+// As picker cancelled, the lossy-save warning declined -- used to be learnt
+// only AFTER the teardown, leaving the window open over torn-down scripts.
+describe("a Save that does not happen tears nothing down (E8)", () => {
+  it("the Save As picker cancelled: the window stays, BEFORE_CLOSE never goes out, nothing is written", async () => {
+    h.getCurrentFilePath.mockResolvedValue(null);
+    h.pickedPath = null;
+    const teardown = vi.fn();
+    h.onBeforeClose.push(teardown);
+    h.pluginMessage.mockResolvedValue("Save");
+    await requestClose();
+
+    expect(h.prepareSave).toHaveBeenCalledTimes(1);
+    expect(h.emitted, "the workbook was torn down for a save that did not happen").not.toContain("BEFORE_CLOSE");
+    expect(teardown).not.toHaveBeenCalled();
+    expect(h.writePreparedSave).not.toHaveBeenCalled();
+    expect(h.destroy).not.toHaveBeenCalled();
+
+    await requestClose();
+    expect(h.pluginMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("the lossy-save warning declined (prepareSave answers null): the same", async () => {
+    h.prepareSave.mockResolvedValueOnce(null);
+    h.pluginMessage.mockResolvedValue("Save");
+    await requestClose();
+    expect(h.emitted).not.toContain("BEFORE_CLOSE");
+    expect(h.writePreparedSave).not.toHaveBeenCalled();
+    expect(h.destroy).not.toHaveBeenCalled();
+  });
+
+  it("a preparation that throws keeps the window open and tears nothing down", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    h.prepareSave.mockRejectedValueOnce(new Error("backend gone"));
+    h.pluginMessage.mockResolvedValue("Save");
+    await requestClose();
+    expect(h.emitted).not.toContain("BEFORE_CLOSE");
+    expect(h.destroy).not.toHaveBeenCalled();
+  });
+});
+
+// E8 (2): the teardown's ASYNC work is awaited before the write and before the
+// window goes (@api/lifecycleGuards registerClosePreparation).
+describe("the close AWAITS every close preparation (E8)", () => {
+  it("Save: the file is not written until the preparations have finished", async () => {
+    const held = heldPreparation();
+    h.pluginMessage.mockResolvedValue("Save");
+    const closing = requestClose();
+    await drain();
+
+    expect(held.ran(), "the preparation never ran").toBe(true);
+    expect(h.writePreparedSave, "the file was written before the recording was stored").not.toHaveBeenCalled();
+    held.finish();
+    await closing;
+    expect(h.writePreparedSave).toHaveBeenCalledTimes(1);
+    expect(h.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("the preparations run AFTER BEFORE_CLOSE (its listeners start the work they await)", async () => {
+    const order: string[] = [];
+    h.onBeforeClose.push(() => order.push("teardown"));
+    registerClosePreparation("test: order", () => {
+      order.push("prepare");
+    });
+    h.pluginMessage.mockResolvedValue("Don't Save");
+    await requestClose();
+    expect(order).toEqual(["teardown", "prepare"]);
+  });
+
+  it("Don't Save: the window is not destroyed until the preparations have finished", async () => {
+    const held = heldPreparation();
+    h.pluginMessage.mockResolvedValue("Don't Save");
+    const closing = requestClose();
+    await drain();
+    expect(h.destroy).not.toHaveBeenCalled();
+    held.finish();
+    await closing;
+    expect(h.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("a clean document: the handler (which the native close waits on) resolves only after them", async () => {
+    h.isFileModified.mockResolvedValue(false);
+    const held = heldPreparation();
+    let resolved = false;
+    const closing = requestClose().then(() => {
+      resolved = true;
+    });
+    await drain();
+    expect(resolved).toBe(false);
+    held.finish();
+    await closing;
+    expect(resolved).toBe(true);
+  });
+
+  it("a preparation that throws never keeps the window open", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    registerClosePreparation("test: broken", () => {
+      throw new Error("recorder store gone");
+    });
+    h.pluginMessage.mockResolvedValue("Save");
+    await requestClose();
+    expect(h.writePreparedSave).toHaveBeenCalledTimes(1);
+    expect(h.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("control: Cancel runs no preparation", async () => {
+    const held = heldPreparation();
+    h.pluginMessage.mockResolvedValue("Cancel");
+    await requestClose();
+    expect(held.ran()).toBe(false);
+  });
+});
+
 // The script host registers ONE lifecycle guard per mounted script that declared
 // onBeforeSave, and the BEFORE_CLOSE teardown unmounts it -- guard included. So
 // a Save chosen on the close prompt must ask the Before-Save vetoes while the
-// scripts are still there (VBA's Workbook_BeforeSave fires for it too), not
-// leave the asking to saveFile, which runs after the teardown and would find
-// only the trusted extension guards left.
+// scripts are still there (VBA's Workbook_BeforeSave fires for it too) --
+// prepareSave does, before the teardown.
 describe("Save on the close prompt asks every Before-Save veto first", () => {
   it("a script's veto is heard, and it keeps the window open with nothing torn down", async () => {
     const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -402,7 +552,7 @@ describe("Save on the close prompt asks every Before-Save veto first", () => {
     await requestClose();
 
     expect(guard).toHaveBeenCalledWith("save", { path: SAVED_PATH, kind: "save" });
-    expect(h.saveFile).not.toHaveBeenCalled();
+    expect(h.writePreparedSave).not.toHaveBeenCalled();
     expect(h.destroy).not.toHaveBeenCalled();
     expect(h.emitted).not.toContain("BEFORE_CLOSE");
     // The refusal is attributed to the script, never a silent no-op.
@@ -424,19 +574,19 @@ describe("Save on the close prompt asks every Before-Save veto first", () => {
       ["save", { path: SAVED_PATH, kind: "save" }],
     ]);
     expect(saveVerdicts[0].order).toBeLessThan(beforeCloseOrder());
-    expect(h.saveFile).toHaveBeenCalledTimes(1);
+    expect(h.writePreparedSave).toHaveBeenCalledTimes(1);
     expect(h.destroy).toHaveBeenCalledTimes(1);
   });
 
-  // Excel fires Workbook_BeforeSave BEFORE the Save As dialog, with SaveAsUI
-  // set; the script sees kind "saveAs" and no name yet.
-  it("an untitled workbook's veto is asked as a Save As, before the picker", async () => {
+  it("an untitled workbook's veto is asked as a Save As of the picked path, before the teardown", async () => {
     h.getCurrentFilePath.mockResolvedValue(null);
     const guard = mountScriptGuard(() => null);
     h.pluginMessage.mockResolvedValue("Save");
     await requestClose();
 
-    expect(guard).toHaveBeenCalledWith("save", { kind: "saveAs" });
+    expect(guard).toHaveBeenCalledWith("save", { path: "C:/Books/Picked.cala", kind: "saveAs" });
+    expect(guard.mock.invocationCallOrder[0]).toBeLessThan(beforeCloseOrder());
+    expect(h.writePreparedSave).toHaveBeenCalledWith({ path: "C:/Books/Picked.cala", kind: "saveAs" });
     expect(h.destroy).toHaveBeenCalledTimes(1);
   });
 
@@ -446,7 +596,7 @@ describe("Save on the close prompt asks every Before-Save veto first", () => {
     h.pluginMessage.mockResolvedValue("Save");
     await requestClose();
 
-    expect(h.saveFile).not.toHaveBeenCalled();
+    expect(h.writePreparedSave).not.toHaveBeenCalled();
     expect(h.destroy).not.toHaveBeenCalled();
     expect(h.emitted).not.toContain("BEFORE_CLOSE");
 

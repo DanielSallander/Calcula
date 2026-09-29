@@ -4,6 +4,7 @@
 
 import {
   registerMenuItem,
+  unregisterMenuItem,
   showToast,
   showOverlay,
   openTaskPane,
@@ -16,27 +17,29 @@ import {
   IconHighlight,
   IconDeleteAll,
 } from "@api";
-import { getGridStateSnapshot } from "@api/grid";
 import {
-  addBookmark,
-  removeBookmark,
-  hasBookmarkAt,
   removeAllBookmarks,
   toggleHighlight,
   getBookmarkCount,
 } from "../lib/bookmarkStore";
 import { navigateToNextBookmark, navigateToPrevBookmark } from "../lib/bookmarkNavigation";
+import { addBookmarkAtSelection, removeBookmarkAtSelection } from "../lib/bookmarkAtSelection";
 
 const TASK_PANE_ID = "bookmarks-pane";
 const VIEW_BOOKMARK_CREATE_OVERLAY_ID = "view-bookmark-creator";
 
+/** The Insert menu item that holds every bookmark item (its submenu). */
+const INSERT_BOOKMARKS_ITEM_ID = "insert.bookmarks";
+
 /**
- * Register bookmark menu items under the Insert menu.
- * Returns no cleanup because registerMenuItem does not return one.
+ * Register bookmark menu items under the Insert menu. Returns the cleanup that
+ * removes them: registerMenuItem returns none, and without one a DEACTIVATED
+ * Cell Bookmarks kept Insert > Bookmarks, whose Add Bookmark still wrote to a
+ * store nothing painted or persisted any more (D3 review).
  */
-export function registerBookmarkMenuItems(): void {
+export function registerBookmarkMenuItems(): () => void {
   registerMenuItem("insert", {
-    id: "insert.bookmarks",
+    id: INSERT_BOOKMARKS_ITEM_ID,
     label: "Bookmarks",
     icon: IconBookmarks,
     children: [
@@ -45,32 +48,15 @@ export function registerBookmarkMenuItems(): void {
         label: "Add Bookmark",
         icon: IconBookmarkAdd,
         shortcut: "Ctrl+Shift+B",
-        action: () => {
-          const state = getGridStateSnapshot();
-          if (!state?.selection) return;
-          const { startRow, startCol } = state.selection;
-          const { activeSheetIndex, activeSheetName } = state.sheetContext;
-          if (hasBookmarkAt(startRow, startCol)) {
-            showToast("Cell already bookmarked", { variant: "warning" });
-            return;
-          }
-          addBookmark(startRow, startCol, activeSheetIndex, activeSheetName);
-          showToast("Bookmark added", { variant: "success" });
-        },
+        // The same action as the bookmarks.add command: it refuses while a
+        // selection owner holds the selection (lib/bookmarkAtSelection.ts).
+        action: addBookmarkAtSelection,
       },
       {
         id: "insert.bookmarks.remove",
         label: "Remove Bookmark",
         icon: IconBookmarkRemove,
-        action: () => {
-          const state = getGridStateSnapshot();
-          if (!state?.selection) return;
-          const { startRow, startCol } = state.selection;
-          const { activeSheetIndex } = state.sheetContext;
-          if (removeBookmark(startRow, startCol, activeSheetIndex)) {
-            showToast("Bookmark removed", { variant: "info" });
-          }
-        },
+        action: removeBookmarkAtSelection,
       },
       {
         id: "insert.bookmarks.separator1",
@@ -158,4 +144,5 @@ export function registerBookmarkMenuItems(): void {
       },
     ],
   });
+  return () => unregisterMenuItem("insert", INSERT_BOOKMARKS_ITEM_ID);
 }

@@ -13,6 +13,7 @@
 
 import { columnToLetter, letterToColumn, DEFAULT_GRID_CONFIG } from "@api/types";
 import type { ListSource } from "@api";
+import { quoteSheetNameForFormula } from "@api/externalEdit";
 
 /**
  * The rectangle half of `ListSource`, taken FROM the @api union rather than
@@ -46,15 +47,16 @@ const CELL_REF = /^\$?([A-Za-z]{1,3})\$?([0-9]{1,7})$/;
 const COLUMN_ONLY = /^\$?[A-Za-z]{1,3}$/;
 const ROW_ONLY = /^\$?[0-9]{1,7}$/;
 
-/** A sheet name Excel writes without quotes. */
-const BARE_SHEET_NAME = /^[A-Za-z_][A-Za-z0-9_.]*$/;
-
-/** Quote a sheet name the way a formula must: `'` doubles inside quotes. */
+/**
+ * Quote a sheet name the way a formula must, by the formula PARSER's rule
+ * (quoteSheetNameForFormula, @api/externalEdit): `'` doubles inside quotes.
+ * W13: a rule of its own left TRUE and a trailing-dot name (`Q1.`) bare, and
+ * `=TRUE!$A$1:$A$4` is not a reference the parser reads. A reference-SHAPED
+ * name (`A1`) is bare for the parser -- the `!` after it makes it a sheet --
+ * and `splitSheetPrefix` reads it back either way.
+ */
 function quoteSheetName(name: string): string {
-  if (BARE_SHEET_NAME.test(name) && !CELL_REF.test(name)) {
-    return name;
-  }
-  return `'${name.replace(/'/g, "''")}'`;
+  return quoteSheetNameForFormula(name);
 }
 
 /** Split `Sheet1!A1:B2` / `'My Sheet'!A1` into its name and its reference. */

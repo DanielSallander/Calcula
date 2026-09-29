@@ -283,3 +283,16 @@ describe("the canvas selection set (M8)", () => {
     expect(p.labelOf!({ ...region(BUTTON, "button"), data: {} })).toBeNull();
   });
 });
+
+describe("deleteObjects (a canvas-wide Delete's share, open-items 2.af row 1)", () => {
+  it("hands every control it is given to Controls' own delete", async () => {
+    const deleteControls = vi.fn(async () => {});
+    const p = createControlSelectionProvider({ deleteControls });
+    await p.deleteObjects!([region(BUTTON, "button"), region(SHAPE, "shape")]);
+    expect(deleteControls).toHaveBeenCalledWith([BUTTON, SHAPE]);
+  });
+
+  it("without the delete injected the provider offers none", () => {
+    expect(createControlSelectionProvider().deleteObjects).toBeUndefined();
+  });
+});

@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use arrow::record_batch::RecordBatch;
 use engine::CellValue;
-use pivot_engine::{CacheValue, PivotCache, TotalOverride, VALUE_ID_EMPTY};
+use pivot_engine::{CacheValue, PivotCache, TotalOverride, VALUE_ID_BLANK, VALUE_ID_EMPTY};
 
 use crate::log_info;
 use crate::pivot::operations::arrow_cell_to_value;
@@ -126,9 +126,12 @@ pub(crate) fn enumerate_grains(
 /// Dimension result columns are matched by (source_table, source_column) from
 /// the engine metadata with a positional fallback (group-by columns lead the
 /// result in request order). Measure columns are matched by
-/// (measure, calculation item). Rows with NULL members are skipped — a NULL
-/// member interns as VALUE_ID_EMPTY, which is indistinguishable from the
-/// subtotal padding, so writing it would clobber a subtotal slot.
+/// (measure, calculation item). A NULL member is the pivot's BLANK member and
+/// is keyed as `VALUE_ID_BLANK`, the id every group key gives it (wave D,
+/// X1: it used to be skipped, because the blank then shared VALUE_ID_EMPTY
+/// with the subtotal padding and writing it clobbered a subtotal slot). A
+/// NULL row is still skipped when the pivot's cache has no blank member in
+/// that column: there is no (blank) row for it to describe.
 pub(crate) fn overrides_from_grain_result(
     batches: &[RecordBatch],
     result_columns: &[bi_engine::ResultColumn],
@@ -176,6 +179,9 @@ pub(crate) fn overrides_from_grain_result(
         })
         .collect();
 
+    // Whether each grain field's cache column has a blank member at all.
+    let has_blank: Vec<bool> = grain_fields.iter().map(|gf| cache.has_blank_values(gf.cache_idx)).collect();
+
     let mut out = Vec::new();
     for batch in batches {
         for row in 0..batch.num_rows() {
@@ -188,19 +194,21 @@ pub(crate) fn overrides_from_grain_result(
                     break;
                 };
                 let cell = arrow_cell_to_value(col.as_ref(), row);
-                if matches!(cell, CellValue::Empty) {
-                    resolvable = false;
-                    break;
-                }
-                let Some(id) = cache.find_value_id(gf.cache_idx, &CacheValue::from(&cell))
-                else {
-                    resolvable = false;
-                    break;
+                let id = if matches!(cell, CellValue::Empty) {
+                    if !has_blank[j] {
+                        resolvable = false;
+                        break;
+                    }
+                    VALUE_ID_BLANK
+                } else {
+                    match cache.find_value_id(gf.cache_idx, &CacheValue::from(&cell)) {
+                        Some(id) if id != VALUE_ID_EMPTY => id,
+                        _ => {
+                            resolvable = false;
+                            break;
+                        }
+                    }
                 };
-                if id == VALUE_ID_EMPTY {
-                    resolvable = false;
-                    break;
-                }
                 if j < row_depth {
                     row_key[j] = id;
                 } else {
@@ -568,8 +576,9 @@ mod tests {
         let plan = test_plan();
 
         // Metadata table name uses a different case — matching must be
-        // case-insensitive. The NULL member row must be skipped (a NULL
-        // interns as VALUE_ID_EMPTY, which would clobber a subtotal slot).
+        // case-insensitive. The NULL member row is skipped: this cache has no
+        // blank Region, so there is no (blank) row for it to describe (see
+        // a_null_member_row_keys_the_blank_member_and_lands_on_the_blank_row).
         // A NULL measure becomes None, keeping that cell's rolled-up value.
         let schema = Arc::new(Schema::new(vec![
             Field::new("Region", DataType::Utf8, true),
@@ -598,6 +607,59 @@ mod tests {
             .unwrap();
         assert_eq!(overrides[0].row_key, vec![south_id]);
         assert_eq!(overrides[0].values, vec![Some(200.0), None]);
+    }
+
+    /// WD-X1: a NULL member row keys the BLANK MEMBER (`VALUE_ID_BLANK`) when
+    /// the pivot has one -- it used to be skipped because the blank's id was
+    /// the subtotal padding -- and the override lands on the (blank) row, not
+    /// on the grand total.
+    #[test]
+    fn a_null_member_row_keys_the_blank_member_and_lands_on_the_blank_row() {
+        let mut cache = test_cache();
+        cache.add_record(2, &[CellValue::Empty, CellValue::Number(50.0), CellValue::Number(0.05)]);
+        let plan = test_plan();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("Region", DataType::Utf8, true),
+            Field::new("Revenue", DataType::Float64, true),
+            Field::new("Pct", DataType::Float64, true),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![Some(50.0)])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![Some(0.5)])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let cols = vec![dim_col("Region", "Sales", "Region"), measure_col("Revenue"), measure_col("Pct")];
+
+        let overrides = overrides_from_grain_result(&[batch], &cols, &plan, 1, 0, &cache);
+        assert_eq!(overrides.len(), 1, "the NULL member row is keyed, not skipped");
+        assert_eq!(overrides[0].row_key, vec![pivot_engine::VALUE_ID_BLANK]);
+
+        cache.set_total_overrides(overrides);
+        let mut def = pivot_engine::PivotDefinition::new(cache.pivot_id, (0, 0), (0, 0));
+        def.row_fields.push(pivot_engine::PivotField::new(0, "Sales.Region".to_string()));
+        // The plan's value fields, in its order: Revenue, then Pct.
+        for (idx, name) in [(1, "Revenue"), (2, "Pct")] {
+            def.value_fields.push(pivot_engine::ValueField::new(
+                idx,
+                name.to_string(),
+                pivot_engine::AggregationType::Sum,
+            ));
+        }
+        let view = pivot_engine::calculate_pivot(&def, &mut cache);
+        // The Pct column: row label, Revenue, Pct.
+        let read = |label: &str| -> Option<f64> {
+            view.cells.iter().find(|row| row[0].formatted_value == label).and_then(|row| match row[2].value {
+                pivot_engine::PivotCellValue::Number(n) => Some(n),
+                _ => None,
+            })
+        };
+        assert_eq!(read("(blank)"), Some(0.5), "the engine's value lands on the (blank) row");
+        assert_eq!(read("Grand Total"), Some(0.1 + 0.2 + 0.05), "the grand total keeps its own roll-up");
     }
 
     #[test]

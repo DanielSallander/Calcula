@@ -71,8 +71,59 @@ mod aggregates_pairs {
 /// Using u32 to save memory (supports up to 4B unique values per field).
 pub type ValueId = u32;
 
-/// Represents a "null" or missing value in the cache.
+/// Two meanings, never both at once:
+/// - in a RECORD (`CacheRecord::values`, `virtual_records`): the value is
+///   blank -- blanks are never interned ([`FieldCache::intern`]);
+/// - in a GROUP KEY (the aggregate keys, a column key, an axis item's
+///   `group_values`): "all values" -- the padding of a subtotal or
+///   grand-total key. A blank MEMBER in a group key is [`VALUE_ID_BLANK`].
 pub const VALUE_ID_EMPTY: ValueId = u32::MAX;
+
+/// The BLANK member's id in a GROUP KEY: the aggregate keys, the column
+/// layout, every axis item's `group_values`, every view cell's `group_path`
+/// and every row / column descriptor's `group_values`.
+///
+/// A record stores a blank as [`VALUE_ID_EMPTY`], and every RECORD reader --
+/// hidden items, page filters, slicers, timelines, the tablix engine -- keeps
+/// reading it that way. A group key cannot: there `VALUE_ID_EMPTY` is the
+/// "all values" padding, so a blank member keyed by it WAS the total one
+/// level up. The (blank) row showed the grand total, a rolled-up total
+/// counted the blank records twice (as their own member, and again as the
+/// total they collided with), and the blank member's cells named nothing in
+/// their group path, so a drill-through listed the level above. [`member_id`]
+/// is the ONE translation from a record's id to its member's id;
+/// [`FieldCache::get_value`] reads this id as `CacheValue::Empty`, so every
+/// label path spells it as a blank.
+pub const VALUE_ID_BLANK: ValueId = u32::MAX - 1;
+
+/// The id a record's value has as a MEMBER in a group key: the blank
+/// ([`VALUE_ID_EMPTY`] in a record) becomes [`VALUE_ID_BLANK`]; every
+/// interned id is its own member id.
+#[inline(always)]
+pub fn member_id(record_value: ValueId) -> ValueId {
+    if record_value == VALUE_ID_EMPTY {
+        VALUE_ID_BLANK
+    } else {
+        record_value
+    }
+}
+
+/// True when a GROUP-KEY id (an axis item's value, a `group_path` entry)
+/// names the blank member.
+#[inline(always)]
+pub fn is_blank_member_id(id: ValueId) -> bool {
+    id == VALUE_ID_BLANK
+}
+
+/// How the view (and every item list) spells a blank item. Blanks are never
+/// interned -- they are `VALUE_ID_EMPTY` -- so a hidden-items list names them
+/// by this label, compared ignoring case (the host spells it "(Blank)").
+pub const BLANK_ITEM_LABEL: &str = "(blank)";
+
+/// True when `label` names the blank item.
+pub fn is_blank_item_label(label: &str) -> bool {
+    label.eq_ignore_ascii_case(BLANK_ITEM_LABEL)
+}
 
 /// A normalized, hashable representation of a cell value.
 /// Used as keys in the unique value store.
@@ -220,9 +271,11 @@ impl FieldCache {
         self.value_to_id.get(value).copied()
     }
     
-    /// Gets the value for a given ID.
+    /// Gets the value for a given ID. Both spellings of a blank -- a record's
+    /// `VALUE_ID_EMPTY` and a group key's `VALUE_ID_BLANK` -- read as
+    /// `CacheValue::Empty`.
     pub fn get_value(&self, id: ValueId) -> Option<&CacheValue> {
-        if id == VALUE_ID_EMPTY {
+        if id == VALUE_ID_EMPTY || id == VALUE_ID_BLANK {
             return Some(&CacheValue::Empty);
         }
         self.id_to_value.get(id as usize)
@@ -254,6 +307,7 @@ impl FieldCache {
     
     /// Comparison function for sorting CacheValues.
     fn compare_cache_values(a: &CacheValue, b: &CacheValue) -> std::cmp::Ordering {
+        // (Text: `compare_text_excel`, the ONE text order of item lists and rows.)
         use std::cmp::Ordering;
         match (a, b) {
             (CacheValue::Empty, CacheValue::Empty) => Ordering::Equal,
@@ -266,7 +320,7 @@ impl FieldCache {
             (CacheValue::Number(_), _) => Ordering::Less,
             (_, CacheValue::Number(_)) => Ordering::Greater,
             
-            (CacheValue::Text(ta), CacheValue::Text(tb)) => ta.cmp(tb),
+            (CacheValue::Text(ta), CacheValue::Text(tb)) => compare_text_excel(ta, tb),
             (CacheValue::Text(_), _) => Ordering::Less,
             (_, CacheValue::Text(_)) => Ordering::Greater,
             
@@ -277,6 +331,20 @@ impl FieldCache {
             (CacheValue::Error(ea), CacheValue::Error(eb)) => ea.cmp(eb),
         }
     }
+}
+
+/// Excel's text order for pivot items: CASE-INSENSITIVE ("YoY" before "YTD",
+/// "apple" beside "Apple"), with the ordinal order only as the tie-break so the
+/// order stays total (two spellings never compare Equal unless identical).
+/// Both the item lists (`FieldCache`) and the row/column sort
+/// (`compare_values`) use it; they used to compare bytes, so every capital
+/// sorted before every lower-case letter (found in the fix-all wave F review,
+/// 2026-09-29). Compares without allocating.
+pub fn compare_text_excel(a: &str, b: &str) -> std::cmp::Ordering {
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(b.chars().flat_map(char::to_lowercase))
+        .then_with(|| a.cmp(b))
 }
 
 // ============================================================================
@@ -306,7 +374,8 @@ pub struct CacheRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GroupKey {
     /// ValueIds for each field in the grouping (row fields then column fields).
-    /// A VALUE_ID_EMPTY indicates "all values" (for subtotals/grand totals).
+    /// A VALUE_ID_EMPTY indicates "all values" (for subtotals/grand totals);
+    /// the blank MEMBER is VALUE_ID_BLANK (see [`member_id`]).
     /// Uses SmallVec to avoid heap allocation for the typical 2-6 field case.
     pub values: GroupKeyVec,
 }
@@ -525,68 +594,115 @@ pub struct ComputedAggregate {
 
 /// Layout information for flattening column combinations into array indices.
 /// Enables O(1) column lookups by replacing HashMap with arithmetic indexing.
+///
+/// Per column field `i` the slots are: the interned members `0..card[i]`,
+/// then -- only when the field has one -- the BLANK member
+/// ([`VALUE_ID_BLANK`]) at `card[i]`, then the subtotal slot
+/// ([`VALUE_ID_EMPTY`]). A key naming a member the layout has no slot for
+/// reads the VOID combination, which nothing ever accumulates into: it used
+/// to be clamped onto the subtotal slot, so a member missing from the layout
+/// silently read its total.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ColumnLayout {
-    /// Cardinality of each column field (number of unique values).
-    /// The extra +1 slot (for VALUE_ID_EMPTY subtotals) is accounted for in strides.
+    /// Interned member count of each column field (the blank excluded).
     cardinalities: Vec<usize>,
-    /// Strides for index computation. stride[i] = product of (card[j]+1) for j > i.
+    /// Whether each column field has a BLANK member (some record's value is
+    /// blank): its slot is `cardinalities[i]`, and the subtotal slot follows.
+    #[serde(default)]
+    has_blank: Vec<bool>,
+    /// Strides for index computation. stride[i] = product of (slots[j]+1)
+    /// for j > i, where slots[j] = card[j] + has_blank[j].
     strides: Vec<usize>,
-    /// Total number of column combinations = product of (card[i]+1).
+    /// Total number of column combinations = product of (slots[i]+1), plus
+    /// the one VOID combination (see [`Self::void_index`]) when there are
+    /// column fields.
     pub total_combinations: usize,
     /// Number of value fields.
     pub value_count: usize,
 }
 
 impl ColumnLayout {
-    /// Builds a ColumnLayout from column field cardinalities and value count.
-    fn new(col_cardinalities: &[usize], value_count: usize) -> Self {
+    /// Builds a ColumnLayout from column field cardinalities (interned
+    /// members), whether each field has a blank member, and the value count.
+    fn new(col_cardinalities: &[usize], col_has_blank: &[bool], value_count: usize) -> Self {
         let col_count = col_cardinalities.len();
         if col_count == 0 {
             return ColumnLayout {
                 cardinalities: Vec::new(),
+                has_blank: Vec::new(),
                 strides: Vec::new(),
                 total_combinations: 1, // single "no-column" slot
                 value_count,
             };
         }
 
+        let has_blank: Vec<bool> = (0..col_count).map(|i| col_has_blank.get(i).copied().unwrap_or(false)).collect();
+        let width = |i: usize| col_cardinalities[i] + usize::from(has_blank[i]) + 1;
         let mut strides = vec![1usize; col_count];
-        // strides[last] = 1, strides[i] = product of (card[j]+1) for j > i
+        // strides[last] = 1, strides[i] = product of width(j) for j > i
         for i in (0..col_count - 1).rev() {
-            strides[i] = strides[i + 1] * (col_cardinalities[i + 1] + 1);
+            strides[i] = strides[i + 1] * width(i + 1);
         }
-        let total = strides[0] * (col_cardinalities[0] + 1);
+        let real = strides[0] * width(0);
 
         ColumnLayout {
             cardinalities: col_cardinalities.to_vec(),
+            has_blank,
             strides,
-            total_combinations: total,
+            total_combinations: real + 1, // + the void combination
             value_count,
         }
     }
 
+    /// The combination a key naming a member without a slot reads: always
+    /// empty, because nothing accumulates into it.
+    #[inline(always)]
+    pub fn void_index(&self) -> usize {
+        self.total_combinations - 1
+    }
+
+    /// The slot of `vid` in column field `i`: an interned member, the blank
+    /// member, or the subtotal ([`VALUE_ID_EMPTY`]). `None` when the field has
+    /// no such member.
+    #[inline(always)]
+    fn slot(&self, i: usize, vid: ValueId) -> Option<usize> {
+        let card = self.cardinalities[i];
+        let blank = self.has_blank.get(i).copied().unwrap_or(false);
+        if vid == VALUE_ID_EMPTY {
+            Some(card + usize::from(blank))
+        } else if vid == VALUE_ID_BLANK {
+            if blank { Some(card) } else { None }
+        } else if (vid as usize) < card {
+            Some(vid as usize)
+        } else {
+            None
+        }
+    }
+
+    /// The flat column index of `col_key` with every position at or after
+    /// `level` read as a subtotal ("all values"); `None` when the key names a
+    /// member some field has no slot for.
+    #[inline(always)]
+    fn try_col_index_at_level(&self, col_key: &[ValueId], level: usize) -> Option<usize> {
+        let mut idx = 0;
+        for i in 0..self.cardinalities.len() {
+            let vid = if i < level { col_key.get(i).copied().unwrap_or(VALUE_ID_EMPTY) } else { VALUE_ID_EMPTY };
+            idx += self.slot(i, vid)? * self.strides[i];
+        }
+        Some(idx)
+    }
+
     /// Computes the flat column index for a column key slice.
-    /// VALUE_ID_EMPTY maps to the subtotal slot (= cardinality[i]).
+    /// VALUE_ID_EMPTY -- and any position past the key's end -- maps to the
+    /// subtotal slot; VALUE_ID_BLANK to the blank member's slot. A key naming
+    /// a member without a slot maps to [`Self::void_index`].
     #[inline(always)]
     pub fn col_index(&self, col_key: &[ValueId]) -> usize {
-        let mut idx = 0;
-        for (i, &vid) in col_key.iter().enumerate() {
-            if i >= self.cardinalities.len() {
-                break;
-            }
-            let mapped = if vid == VALUE_ID_EMPTY {
-                self.cardinalities[i]
-            } else {
-                (vid as usize).min(self.cardinalities[i]) // defensive clamp
-            };
-            idx += mapped * self.strides[i];
+        if self.cardinalities.is_empty() {
+            return 0;
         }
-        // Handle col_key shorter than cardinalities (remaining = subtotal slots)
-        for i in col_key.len()..self.cardinalities.len() {
-            idx += self.cardinalities[i] * self.strides[i];
-        }
-        idx
+        self.try_col_index_at_level(col_key, col_key.len())
+            .unwrap_or_else(|| self.void_index())
     }
 
     /// Returns the flat index into the accumulator array for a specific
@@ -673,7 +789,8 @@ pub struct PivotCache {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TotalOverride {
     /// Full-length row key over the effective row fields; positions beyond the
-    /// grain's depth are VALUE_ID_EMPTY (matching subtotal/grand-total keys).
+    /// grain's depth are VALUE_ID_EMPTY (matching subtotal/grand-total keys),
+    /// and a blank member is VALUE_ID_BLANK, as in every group key.
     pub row_key: Vec<ValueId>,
     /// Full-length column key over the effective column fields, padded the
     /// same way (empty when there are no column fields).
@@ -1056,11 +1173,16 @@ impl PivotCache {
         let col_count = col_field_indices.len();
         let base_field_count = self.fields.len();
 
-        // Build column layout from field cardinalities
+        // Build column layout from field cardinalities, with a slot for the
+        // blank member of every column field that has one (over ALL records,
+        // so the layout does not move with the filters).
         let col_cardinalities: Vec<usize> = col_field_indices.iter().map(|&fi| {
             self.get_field(fi).map(|fc| fc.unique_count()).unwrap_or(1).max(1)
         }).collect();
-        self.col_layout = ColumnLayout::new(&col_cardinalities, value_count);
+        let col_has_blank: Vec<bool> = col_field_indices.iter().map(|&fi| {
+            (0..self.records.len()).any(|ri| self.get_record_value_id(ri, fi) == VALUE_ID_EMPTY)
+        }).collect();
+        self.col_layout = ColumnLayout::new(&col_cardinalities, &col_has_blank, value_count);
         let slot_len = self.col_layout.slot_len();
 
         // Estimate row-only capacity
@@ -1112,18 +1234,18 @@ impl PivotCache {
             }
         }
 
-        // Pre-compute column strides for subtotal index calculation
         let col_layout = &self.col_layout;
-        let col_cards = &col_cardinalities;
 
         for (i, record) in self.records.iter().enumerate() {
             if !self.filter_mask[i] {
                 continue;
             }
 
-            // Fill row values buffer
+            // Fill row values buffer -- MEMBER ids: a blank record value is
+            // the blank member (VALUE_ID_BLANK), never the "all values"
+            // padding the subtotal keys below are built with.
             for (slot, &fi) in row_buf.iter_mut().zip(row_field_indices.iter()) {
-                *slot = if fi < base_field_count {
+                *slot = member_id(if fi < base_field_count {
                     record.values.get(fi).copied().unwrap_or(VALUE_ID_EMPTY)
                 } else {
                     let vi = fi - base_field_count;
@@ -1131,12 +1253,12 @@ impl PivotCache {
                         .and_then(|vr| vr.get(i))
                         .copied()
                         .unwrap_or(VALUE_ID_EMPTY)
-                };
+                });
             }
 
-            // Fill column values buffer
+            // Fill column values buffer (member ids, as above)
             for (slot, &fi) in col_buf.iter_mut().zip(col_field_indices.iter()) {
-                *slot = if fi < base_field_count {
+                *slot = member_id(if fi < base_field_count {
                     record.values.get(fi).copied().unwrap_or(VALUE_ID_EMPTY)
                 } else {
                     let vi = fi - base_field_count;
@@ -1144,7 +1266,7 @@ impl PivotCache {
                         .and_then(|vr| vr.get(i))
                         .copied()
                         .unwrap_or(VALUE_ID_EMPTY)
-                };
+                });
             }
 
             // Fill value data buffer
@@ -1169,22 +1291,17 @@ impl PivotCache {
                 }
 
                 for col_level in 0..=col_count {
-                    // Compute column index with subtotal (trailing EMPTY)
-                    let col_idx = if col_level == col_count {
-                        // Full column key
-                        col_layout.col_index(&col_buf)
+                    // Column index with the first col_level values real and
+                    // the rest the subtotal slot. Every record member has a
+                    // slot (the layout was built from these records), so a
+                    // miss is a defect -- skipped, never folded into the void.
+                    let col_idx = if col_count == 0 {
+                        0
                     } else {
-                        // Column subtotal: first col_level values are real, rest are EMPTY
-                        let mut idx = 0;
-                        for ci in 0..col_count {
-                            let mapped = if ci < col_level {
-                                (col_buf[ci] as usize).min(col_cards[ci])
-                            } else {
-                                col_cards[ci] // EMPTY = subtotal slot
-                            };
-                            idx += mapped * col_layout.strides[ci];
+                        match col_layout.try_col_index_at_level(&col_buf, col_level) {
+                            Some(idx) => idx,
+                            None => continue,
                         }
-                        idx
                     };
 
                     accumulate_at(
@@ -1234,7 +1351,17 @@ impl PivotCache {
             if ov.row_key.len() != row_count || ov.col_key.len() != col_count {
                 continue;
             }
-            let base = self.col_layout.col_index(&ov.col_key) * value_count;
+            // A column member the layout has no slot for (a stale entry) is
+            // skipped: writing it would fill the void every missing key reads.
+            let col_index = if col_count == 0 {
+                0
+            } else {
+                match self.col_layout.try_col_index_at_level(&ov.col_key, col_count) {
+                    Some(idx) => idx,
+                    None => continue,
+                }
+            };
+            let base = col_index * value_count;
             let slot = self
                 .aggregates
                 .entry(GroupKey::from_slice(&ov.row_key))
@@ -1286,6 +1413,15 @@ impl PivotCache {
     /// Returns the record count.
     pub fn record_count(&self) -> usize {
         self.records.len()
+    }
+
+    /// True when some record has no value in `field_index` -- the field has a
+    /// blank item (`VALUE_ID_EMPTY`), which `get_unique_values_for_filter`
+    /// never lists because blanks are not interned. Ignores the filter mask.
+    pub fn has_blank_values(&self, field_index: FieldIndex) -> bool {
+        self.records
+            .iter()
+            .any(|r| r.values.get(field_index).copied().unwrap_or(VALUE_ID_EMPTY) == VALUE_ID_EMPTY)
     }
     
     /// Returns the filtered record count.
@@ -1473,39 +1609,19 @@ pub fn parse_cache_value_as_date(value: &CacheValue) -> Option<ParsedDate> {
     }
 }
 
-/// Converts an Excel serial date number to (year, month, day).
-/// Excel serial date: 1 = 1900-01-01, but we handle the Lotus 1-2-3 bug
-/// where 1900 is incorrectly treated as a leap year.
+/// Converts an Excel serial date number to (year, month, day), through THE
+/// engine's conversion (`engine::date_serial`, Lotus 1900 leap-year quirk
+/// included). This used to run its own arithmetic -- a Julian-day algorithm fed
+/// a days-since-0001-01-01 count -- and put a typed 2026-01-10 (serial 46032)
+/// in year -2688: a timeline over typed dates listed nonsense periods (found
+/// live 2026-09-29, e2e fixall-pivot TL-NUM).
 fn excel_serial_to_date(serial: f64) -> Option<ParsedDate> {
     let serial = serial.floor() as i64;
     if serial < 1 || serial > 2958465 {
         return None; // Out of range
     }
-
-    // Adjust for Excel's Lotus 1-2-3 leap year bug (Feb 29, 1900 doesn't exist)
-    let adjusted = if serial > 60 { serial - 1 } else { serial };
-
-    // Convert from days-since-1900-01-01 to days-since-0001-01-01
-    // 1900-01-01 is day 693596 in the proleptic Gregorian calendar
-    let days = adjusted + 693595;
-
-    // Use the algorithm to convert from days to y/m/d
-    let l = days + 68569;
-    let n = (4 * l) / 146097;
-    let l = l - (146097 * n + 3) / 4;
-    let i = (4000 * (l + 1)) / 1461001;
-    let l = l - (1461 * i) / 4 + 31;
-    let j = (80 * l) / 2447;
-    let d = l - (2447 * j) / 80;
-    let l = j / 11;
-    let m = j + 2 - 12 * l;
-    let y = 100 * (n - 49) + i + l;
-
-    Some(ParsedDate {
-        year: y as i32,
-        month: m as u32,
-        day: d as u32,
-    })
+    let (year, month, day) = engine::date_serial::serial_to_date(serial);
+    Some(ParsedDate { year, month, day })
 }
 
 /// Parses a date string in common formats.
@@ -1577,6 +1693,28 @@ fn try_parse_dmy(s: &str, sep: char) -> Option<ParsedDate> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod date_serial_tests {
+    use super::*;
+
+    fn ymd(serial: f64) -> Option<(i32, u32, u32)> {
+        parse_cache_value_as_date(&CacheValue::Number(OrderedFloat(serial))).map(|d| (d.year, d.month, d.day))
+    }
+
+    /// Found live 2026-09-29 (e2e fixall-pivot TL-NUM): a typed 2026-01-10 is
+    /// the number 46032, and the cache read it as year -2688.
+    #[test]
+    fn a_date_serial_reads_as_the_date_excel_shows() {
+        assert_eq!(ymd(46032.0), Some((2026, 1, 10)));
+        assert_eq!(ymd(46084.0), Some((2026, 3, 3)));
+        assert_eq!(ymd(1.0), Some((1900, 1, 1)));
+        // Past the Lotus 1900 leap day: serial 61 is 1 March 1900.
+        assert_eq!(ymd(61.0), Some((1900, 3, 1)));
+        assert_eq!(ymd(45292.5), Some((2024, 1, 1)), "a time of day does not move the date");
+        assert_eq!(ymd(0.0), None);
+    }
 }
 
 #[cfg(test)]

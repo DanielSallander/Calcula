@@ -4,15 +4,18 @@
 //          the FR editor's external-target insertion.
 
 import { columnToLetter } from "@api";
+import { quoteSheetNameForFormula } from "@api/externalEdit";
 
 /**
- * Quote a sheet/FR name for formula use when it contains any character outside
- * [A-Za-z0-9_] (the parser accepts the quoted 'Name'! form; internal quotes
- * double). Bare-identifier names pass through unquoted.
+ * Quote a sheet/FR name for formula use: Core's ONE rule for text handed to an
+ * external edit (`quoteSheetNameForFormula`, the backend's
+ * `is_bare_sheet_name`). This extension's own rule -- bare for anything in
+ * [A-Za-z0-9_] -- left "2024Budget" and "TRUE" bare, which the parser rejects,
+ * and quoted a sheet differently from Core's header picks in the same edit
+ * (review B, 2026-09-28).
  */
 export function quoteSheetName(name: string): string {
-  if (/^[A-Za-z0-9_]+$/.test(name)) return name;
-  return `'${name.replace(/'/g, "''")}'`;
+  return quoteSheetNameForFormula(name);
 }
 
 /** "A1" for local (0-based row, col). */

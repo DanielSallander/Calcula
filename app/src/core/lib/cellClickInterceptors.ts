@@ -78,18 +78,34 @@ export async function checkCellClickInterceptors(
 // ============================================================================
 
 /**
- * A grid cell press Core has HANDLED as a selection gesture: the press was not
- * taken by a floating object, a fill handle or an interceptor, it was not a
- * reference pick, commit-before-select has already run (an open edit -- Core's
- * own or an external session -- is committed), and the cell is now selected.
+ * A grid press Core has HANDLED as a selection gesture -- on a CELL, a row or
+ * column HEADER, or the select-all corner: the press was not taken by a
+ * floating object, a fill handle or an interceptor, it was not a reference
+ * pick, and the selection is now the sheet's. Two kinds:
+ *   - a SELECTING press (`keptSelection: false`): commit-before-select has
+ *     already run (an open edit -- Core's own or an external session -- is
+ *     committed) and the pressed cell, row, column or sheet is now selected;
+ *   - a right-press INSIDE the selection (`keptSelection: true`): Core keeps
+ *     its selection for the context menu and commits nothing, but the press is
+ *     still the user's pointer ON THE SHEET's selection (BUG-0186).
+ * An object that keeps its own selection over the grid (a floating grid's
+ * cell) must drop it on EITHER kind: after either one the grid's selection is
+ * what the next command -- the context menu that opens, a ribbon button --
+ * acts on, and two selections must never both look current.
  */
 export interface GridCellPress {
+  /** The pressed row (-1 for a column-header or select-all press). */
   row: number;
+  /** The pressed column (-1 for a row-header or select-all press). */
   col: number;
-  /** 0 = primary, 2 = secondary (a right-press outside the selection). */
+  /** 0 = primary, 2 = secondary. */
   button: number;
   shiftKey: boolean;
   ctrlKey: boolean;
+  /** What was pressed: a cell, a row header, a column header, the corner. */
+  target: "cell" | "row" | "column" | "all";
+  /** True for a right-press inside the selection (kept for the context menu). */
+  keptSelection: boolean;
 }
 
 /** Hears every handled grid cell press. Synchronous; a throw is logged and ignored. */

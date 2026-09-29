@@ -12,8 +12,10 @@
 import type { GridRegion } from "@api/gridOverlays";
 import {
   registerObjectSelectionProvider,
+  type ObjectSelectionKey,
   type ObjectSelectionProvider,
 } from "@api/objectSelection";
+import { isPivotBoxMenuOpen } from "./pivotVisualMenuState";
 import { canvasObjectRef } from "@api/canvasSheet";
 import {
   deselectPivotVisual,
@@ -23,8 +25,15 @@ import {
 import { PIVOT_VISUAL_REGION_TYPE, pivotIdOfVisual } from "./pivotVisualRegions";
 import type { PivotRegionData } from "../types";
 
+/** What the provider needs from the extension, injected at registration so
+ *  this module stays free of the (large) IPC module. */
+export interface PivotVisualSelectionDeps {
+  /** Delete one pivot the way its own menu does; rejects on refusal. */
+  deletePivot(pivotId: string): Promise<void>;
+}
+
 /** The provider object (exported for tests; register it through `registerPivotVisualSelection`). */
-export function createPivotVisualSelectionProvider(): ObjectSelectionProvider {
+export function createPivotVisualSelectionProvider(deps?: PivotVisualSelectionDeps): ObjectSelectionProvider {
   return {
     types: [PIVOT_VISUAL_REGION_TYPE],
 
@@ -44,6 +53,14 @@ export function createPivotVisualSelectionProvider(): ObjectSelectionProvider {
       deselectPivotVisual();
     },
 
+    ownsKey(key: ObjectSelectionKey): boolean {
+      // A box's right-click menu, while open, owns Escape: it closes itself
+      // (a document-capture listener). A canvas's Escape binding runs
+      // EARLIER, in the dispatcher's window-capture listener, and would
+      // otherwise deselect the box behind the open menu.
+      return key === "Escape" && isPivotBoxMenuOpen();
+    },
+
     refOf(region: GridRegion) {
       const id = pivotIdOfVisual(region);
       return id === null ? null : canvasObjectRef("pivot", id);
@@ -55,12 +72,37 @@ export function createPivotVisualSelectionProvider(): ObjectSelectionProvider {
       const name = region.data?.name;
       return typeof name === "string" && name !== "" ? name : null;
     },
+
+    // A canvas-wide Delete (a multi-selection spanning families) hands the
+    // pivot boxes their share (wave B, A4) -- the same delete the pivot's own
+    // menu runs (the backend's delete joins the seam's one undo step, with
+    // the slicers and timelines it cascades into). Resolves once every delete
+    // LANDED; REJECTS with the backend's reason when any was refused, so the
+    // seam keeps the refused boxes selected and names them.
+    async deleteObjects(regions: readonly GridRegion[]): Promise<void> {
+      if (!deps) throw new Error("PivotTables cannot be deleted from here.");
+      const reasons: string[] = [];
+      let deleted = 0;
+      for (const region of regions) {
+        const pivotId = pivotIdOfVisual(region);
+        if (pivotId === null) continue;
+        try {
+          await deps.deletePivot(pivotId);
+          deleted++;
+        } catch (err) {
+          reasons.push(err instanceof Error ? err.message : String(err));
+        }
+      }
+      // Repaint the boxes that went (their regions re-read on this event).
+      if (deleted > 0) window.dispatchEvent(new Event("pivot:refresh"));
+      if (reasons.length > 0) throw new Error(Array.from(new Set(reasons)).join(" "));
+    },
   };
 }
 
 /** Register the provider; returns the cleanup for the extension's list. */
-export function registerPivotVisualSelection(): () => void {
-  return registerObjectSelectionProvider(createPivotVisualSelectionProvider());
+export function registerPivotVisualSelection(deps?: PivotVisualSelectionDeps): () => void {
+  return registerObjectSelectionProvider(createPivotVisualSelectionProvider(deps));
 }
 
 // ---------------------------------------------------------------------------

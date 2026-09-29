@@ -98,6 +98,7 @@ import {
   type SurfaceLayout,
 } from "@api/layout";
 import { initKeybindings } from "@api/keybindings";
+import { CommandRegistry, CoreCommands } from "@api/commands";
 import { HomeTabGroupComponent } from "../components/HomeTabGroupComponent";
 import { DEFAULT_LAYOUT, ITEMS_BY_ID } from "../homeTabConfig";
 
@@ -472,7 +473,16 @@ describe("Font colour / Fill colour", () => {
       (b) => b.textContent === "More Fill Options...",
     );
     expect(more).toBeTruthy();
-    await click(more!);
-    expect(openDialog).toHaveBeenCalledWith("format-cells", { tab: "fill" });
+    // Through the FORMAT_CELLS command, the one door to the dialog (it refuses
+    // while a selection owner holds the selection -- homeTabFormatCellsDoors).
+    const formatCells = vi.fn();
+    CommandRegistry.register(CoreCommands.FORMAT_CELLS, formatCells);
+    try {
+      await click(more!);
+    } finally {
+      CommandRegistry.unregister(CoreCommands.FORMAT_CELLS);
+    }
+    expect(formatCells).toHaveBeenCalledWith({ tab: "fill" });
+    expect(openDialog, "the row opened the dialog past the command").not.toHaveBeenCalled();
   });
 });

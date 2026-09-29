@@ -2503,6 +2503,7 @@ mod tests {
             parent_index: parent,
             field_indices: vec![0, 1],
             attribute_labels: Vec::new(),
+            value_field: None,
         }
     }
 

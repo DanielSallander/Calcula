@@ -5,6 +5,7 @@
 
 import {
   registerMenuItem,
+  unregisterMenuItem,
   emitAppEvent,
   AppEvents,
   showOverlay,
@@ -26,6 +27,7 @@ import {
   IconDeleteAll,
 } from "@api";
 import type { MenuItemDefinition } from "@api";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 import {
   refreshAnnotationState,
   getShowAllNotes,
@@ -51,6 +53,9 @@ export function setCurrentSelectionForMenu(
 // ============================================================================
 
 async function newComment(): Promise<void> {
+  // Core's active cell is HIDDEN while something else owns the selection (a
+  // floating grid's selected cell): refuse, once (D4, BUG-0185 class).
+  if (refuseIfSelectionOwned("New Comment")) return;
   if (!currentSelection) return;
   const { row, col } = currentSelection;
 
@@ -74,6 +79,7 @@ async function newComment(): Promise<void> {
 }
 
 async function newNote(): Promise<void> {
+  if (refuseIfSelectionOwned("New Note")) return;
   if (!currentSelection) return;
   const { row, col } = currentSelection;
 
@@ -129,8 +135,14 @@ async function deleteAllNotes(): Promise<void> {
 // Registration
 // ============================================================================
 
-/** Register annotation menu items into the existing "review" menu. */
-export function registerReviewMenuItems(): void {
+/**
+ * Register annotation menu items into the existing "review" menu.
+ *
+ * Returns the cleanup for deactivation: it takes back exactly the items
+ * registered here -- their ids read from the list itself, so the two cannot
+ * drift -- and never the Review menu, which Protection builds (wave E, Y14).
+ */
+export function registerReviewMenuItems(): () => void {
   const items: MenuItemDefinition[] = [
     {
       id: "review:annotations-sep",
@@ -190,4 +202,9 @@ export function registerReviewMenuItems(): void {
   for (const item of items) {
     registerMenuItem("review", item);
   }
+
+  const ownIds = items.map((item) => item.id);
+  return () => {
+    for (const id of ownIds) unregisterMenuItem("review", id);
+  };
 }

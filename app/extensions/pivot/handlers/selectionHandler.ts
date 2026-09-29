@@ -17,6 +17,7 @@ import {
 } from "@api";
 import type { LayoutConfig, AggregationType } from "@api";
 import { requestOverlayRedraw } from "@api/gridOverlays";
+import { getGridStateSnapshot } from "@api/grid";
 import { notifyObjectSelectionChanged } from "@api/objectSelection";
 import {
   PIVOT_PANE_ID,
@@ -28,6 +29,7 @@ import {
 import type { SourceField, ZoneField, PivotEditorViewData, PivotRegionData } from "../types";
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
 import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
+import { showValuesAsFromRule } from "../lib/showAsRule";
 
 // ---------------------------------------------------------------------------
 // Module-level state (owned by the pivot extension, not by the shell)
@@ -574,6 +576,12 @@ export function buildPivotPaneData(pivotInfo: PivotRegionInfo): PivotEditorViewD
     isNumeric: f.isNumeric,
     aggregation: f.aggregation as AggregationType | undefined,
     customName: f.customName ?? (isBiPivot ? f.name : undefined),
+    // What the field already shows (format, Show Values As and its base):
+    // the editor sends its whole Values zone back on its next change and the
+    // update REPLACES the value fields, so a setting not seeded here was
+    // cleared by the first edit after the editor reopened.
+    ...(f.numberFormat ? { numberFormat: f.numberFormat } : {}),
+    ...showValuesAsFromRule(f.showAs),
   }));
 
   const initialFilters: ZoneField[] = config.filterFields.map((f) => ({
@@ -721,6 +729,23 @@ export function deselectPivotVisual(): void {
 // ---------------------------------------------------------------------------
 // Force Recheck (called when pane is reopened via View menu)
 // ---------------------------------------------------------------------------
+
+/**
+ * Re-derive the pivot context after the ACTIVE SHEET changed, once the new
+ * sheet's regions are cached (refreshPivotRegions -> updateCachedRegions).
+ *
+ * `handleSelectionChange` skips the cell it checked last, keyed on row and
+ * column alone. Coming back to B2 on a pivot's sheet from B2 on another sheet
+ * asked nothing, so the Pivot Table tab did not show for the pivot under the
+ * active cell (found live 2026-09-29, e2e fixall-pivot CTX). Asks again for
+ * Core's active cell on the sheet now shown.
+ */
+export function recheckSelectionAfterSheetChange(): void {
+  lastCheckedSelection = null;
+  checkInProgress = false;
+  const sel = getGridStateSnapshot()?.selection;
+  if (sel) handleSelectionChange({ endRow: sel.endRow, endCol: sel.endCol });
+}
 
 /**
  * Force a re-check of the current selection against pivot regions.

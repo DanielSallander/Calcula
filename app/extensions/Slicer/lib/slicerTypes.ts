@@ -1,6 +1,8 @@
 //! FILENAME: app/extensions/Slicer/lib/slicerTypes.ts
 // PURPOSE: TypeScript interfaces mirroring Rust slicer types.
 
+import type { PivotFilterGestureResponse } from "@api/pivotTypes";
+
 /** "biConnection" = a MODEL slicer: items come straight from a Calcula model
  * connection (cacheSourceId = the connection id, fieldName = "Table.Column",
  * connectedSources = [{ sourceType: "biConnection", sourceId: connectionId }],
@@ -124,3 +126,27 @@ export interface SlicerComputedPropertyResult {
   properties: SlicerComputedPropertyData[];
   slicerChanged?: boolean;
 }
+
+// ============================================================================
+// A slicer CLICK's response (mirrors slicer::types::SlicerSelectionGestureResponse)
+// ============================================================================
+
+/** A TABLE target of a click that could not be filtered (or cleared). */
+export interface SlicerTableFilterFailure {
+  tableId: string;
+  /** True when the write was a clear (a null selection). */
+  clearing: boolean;
+  message: string;
+}
+
+/**
+ * What a slicer CLICK did (`update_slicer_selection` with a gesture): the
+ * pivot gesture's response (flattened), plus its TABLE targets -- filtered by
+ * the same backend command, inside the same ONE undo step (W2).
+ */
+export type SlicerSelectionGestureResponse = PivotFilterGestureResponse & {
+  /** The sheets whose AutoFilter the click changed (their hidden rows moved). */
+  tableSheets: number[];
+  /** The table targets that refused. */
+  tableFailures: SlicerTableFilterFailure[];
+};

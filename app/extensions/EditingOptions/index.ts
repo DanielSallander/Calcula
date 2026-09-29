@@ -6,6 +6,7 @@
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   registerMenuItem,
+  unregisterMenuItem,
   IconMoveSelection,
   IconMoveDirection,
   IconArrowDown,
@@ -25,7 +26,10 @@ import {
 // Menu Registration
 // ============================================================================
 
-function registerMenuItems(): void {
+/** Registers the Edit-menu items; returns the cleanup that takes back this
+ *  extension's OWN items (the Move Direction submenu's children go with it),
+ *  never the Edit menu, which Standard Menus builds (wave E, Y14). */
+function registerMenuItems(): () => void {
   // Separator before editing options
   registerMenuItem("edit", {
     id: "edit:editingOptions:separator",
@@ -71,17 +75,34 @@ function registerMenuItems(): void {
       action: () => { setMoveDirection(d.value); },
     })),
   });
+
+  return () => {
+    for (const id of [
+      "edit:editingOptions:separator",
+      "edit:editingOptions:moveAfterReturn",
+      "edit:editingOptions:moveDirection",
+    ]) {
+      unregisterMenuItem("edit", id);
+    }
+  };
 }
+
+/** The cleanup of the menu items the current activation registered. */
+let unregisterMenuItems: (() => void) | null = null;
 
 // ============================================================================
 // Lifecycle
 // ============================================================================
 
 function activate(_context: ExtensionContext): void {
-  registerMenuItems();
+  unregisterMenuItems?.();
+  unregisterMenuItems = registerMenuItems();
 }
 
-function deactivate(): void {}
+function deactivate(): void {
+  unregisterMenuItems?.();
+  unregisterMenuItems = null;
+}
 
 // ============================================================================
 // Extension Module

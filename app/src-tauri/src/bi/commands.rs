@@ -3341,24 +3341,40 @@ pub(crate) async fn bi_get_column_values_core(
         log_info!("BI", "bi_get_column_values: data fetched from DATABASE for: {}", refreshed_tables.join(", "));
     }
 
-    // Extract unique values from the first column (group_by column)
+    // Extract unique values from the first column (group_by column).
+    //
+    // THE BLANK MEMBER (wave C, W6). NULL and the empty string -- which a list
+    // shows as ONE item, as a pivot's own lists do -- are offered LAST as
+    // `pivot_engine::BLANK_ITEM_LABEL` ("(blank)", Excel's spelling). They used
+    // to be dropped: a model slicer, a ribbon filter or a pinned pivot slicer
+    // then had no item for the blank rows, so a selection could not say whether
+    // they should show, and a PINNED selection (an IN-list the engine applies)
+    // dropped them in silence. The engine reads the label in a scoped IN-list
+    // as BLANK (`bi_engine::BLANK_MEMBER_LABEL`), and the host's level-1 mask
+    // hides the blank rows when a selection from this list does not name it
+    // (`pivot::commands::MODEL_VALUE_LISTS_NAME_THE_BLANK`).
     let mut values: Vec<String> = Vec::new();
+    let mut has_blank = false;
     for batch in &batches {
         if batch.num_columns() == 0 {
             continue;
         }
         let col = batch.column(0);
         for row_idx in 0..batch.num_rows() {
-            if let Some(v) = arrow_value_to_string(col, row_idx) {
-                if !v.is_empty() {
-                    values.push(v);
-                }
+            match arrow_value_to_string(col, row_idx) {
+                Some(v) if !v.is_empty() => values.push(v),
+                _ => has_blank = true,
             }
         }
     }
 
     values.sort();
     values.dedup();
+    if has_blank {
+        // A literal "(blank)" value and the blank member are one item.
+        values.retain(|v| !pivot_engine::is_blank_item_label(v));
+        values.push(pivot_engine::BLANK_ITEM_LABEL.to_string());
+    }
 
     log_info!(
         "BI",
@@ -3429,27 +3445,42 @@ pub(crate) async fn bi_get_column_available_values_core(
         log_info!("BI", "bi_get_column_available_values: data fetched from DATABASE for: {}", refreshed_tables.join(", "));
     }
 
-    // Post-filter: for each row, check if all cross-filter columns match
+    // Post-filter: for each row, check if all cross-filter columns match.
+    //
+    // THE BLANK MEMBER, both ways (W6, the twin of `bi_get_column_values_core`):
+    // a record whose target value is NULL or empty makes the blank member
+    // available (listed last, as the value list lists it), and a cross filter
+    // admits a record whose value there is NULL or empty when its selection
+    // names the blank member -- `(blank)` in any case, or the empty string, the
+    // mask rule's own test (`pivot::commands::selection_names_blank`).
     let mut values = std::collections::HashSet::new();
+    let mut blank_available = false;
+
+    let allowed: Vec<(std::collections::HashSet<&str>, bool)> = cross_filters
+        .iter()
+        .map(|cf| {
+            (
+                cf.values.iter().map(|v| v.as_str()).collect(),
+                cf.values.iter().any(|v| v.is_empty() || pivot_engine::is_blank_item_label(v)),
+            )
+        })
+        .collect();
 
     for batch in &batches {
         if batch.num_columns() == 0 {
             continue;
         }
 
-        let allowed: Vec<std::collections::HashSet<&str>> = cross_filters
-            .iter()
-            .map(|cf| cf.values.iter().map(|v| v.as_str()).collect())
-            .collect();
-
         for row_idx in 0..batch.num_rows() {
             let mut passes = true;
-            for (cf_idx, allowed_set) in allowed.iter().enumerate() {
+            for (cf_idx, (allowed_set, admits_blank)) in allowed.iter().enumerate() {
                 let col_idx = 1 + cf_idx;
                 if col_idx < batch.num_columns() {
                     let val = arrow_value_to_string(batch.column(col_idx), row_idx)
                         .unwrap_or_default();
-                    if !allowed_set.contains(val.as_str()) {
+                    let admitted =
+                        if val.is_empty() { *admits_blank } else { allowed_set.contains(val.as_str()) };
+                    if !admitted {
                         passes = false;
                         break;
                     }
@@ -3457,10 +3488,11 @@ pub(crate) async fn bi_get_column_available_values_core(
             }
 
             if passes {
-                if let Some(v) = arrow_value_to_string(batch.column(0), row_idx) {
-                    if !v.is_empty() {
+                match arrow_value_to_string(batch.column(0), row_idx) {
+                    Some(v) if !v.is_empty() => {
                         values.insert(v);
                     }
+                    _ => blank_available = true,
                 }
             }
         }
@@ -3468,6 +3500,10 @@ pub(crate) async fn bi_get_column_available_values_core(
 
     let mut result: Vec<String> = values.into_iter().collect();
     result.sort();
+    if blank_available {
+        result.retain(|v| !pivot_engine::is_blank_item_label(v));
+        result.push(pivot_engine::BLANK_ITEM_LABEL.to_string());
+    }
     Ok(result)
 }
 
@@ -3613,10 +3649,13 @@ pub async fn bi_insert_result(
     // Create named ranges for each result column
     {
         let sheet_names = state.sheet_names.read().unwrap();
-        let sheet_name = sheet_names
-            .get(request.sheet_index)
-            .cloned()
-            .unwrap_or_else(|| format!("Sheet{}", request.sheet_index + 1));
+        // Quoted where needed (see `repoint_result_names`).
+        let sheet_name = engine::ast_render::quote_sheet_name(
+            &sheet_names
+                .get(request.sheet_index)
+                .cloned()
+                .unwrap_or_else(|| format!("Sheet{}", request.sheet_index + 1)),
+        );
 
         // The BIResult.* names ride in `workbook.named_ranges`, and the result
         // block itself is written into the grid: this changes what a save writes.
@@ -3651,13 +3690,23 @@ pub async fn bi_insert_result(
         }
     }
 
-    // Store active query on the connection for refresh
+    // Store active query on the connection for refresh. The sheet's IDENTITY is
+    // recorded beside its index (BUG-0138): the index is only right until the
+    // next sheet move, delete or copy.
+    let sheet_id = state
+        .sheet_ids
+        .read()
+        .unwrap()
+        .get(request.sheet_index)
+        .copied()
+        .unwrap_or(identity::SheetId::ZERO);
     {
         let mut connections = bi_state.connections.lock().unwrap();
         if let Some(conn) = connections.get_mut(&request.connection_id) {
             conn.active_queries.insert(region_id, ActiveQuery {
                 request: query_request,
                 sheet_index: request.sheet_index,
+                sheet_id,
                 start_row,
                 start_col,
                 end_row,
@@ -3736,13 +3785,8 @@ pub async fn bi_refresh_connection(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     log_info!("BI", "bi_refresh_connection: id={}", connection_id);
 
-    // Collect active queries
-    let active_queries: Vec<ActiveQuery> = {
-        let connections = bi_state.connections.lock().unwrap();
-        let conn = connections.get(&connection_id)
-            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        conn.active_queries.values().cloned().collect()
-    };
+    // Collect active queries, each on the sheet it was inserted on NOW.
+    let active_queries: Vec<ActiveQuery> = live_active_queries(&state, &bi_state, connection_id)?;
 
     if active_queries.is_empty() {
         // NOT an error, so not an `Err`: a connection may legitimately drive
@@ -3763,7 +3807,7 @@ pub async fn bi_refresh_connection(
     // grid guard has been dropped. Collected as (sheet, region) rather than
     // recalculated per query because two active queries can share a sheet and
     // a formula may read both.
-    let mut rewritten_regions: Vec<(usize, u32, u32, u32, u32)> = Vec::new();
+    let mut rewritten_regions: Vec<(identity::SheetId, u32, u32, u32, u32)> = Vec::new();
 
     // Clear query cache so refreshed queries hit the database for fresh data.
     // In the same lock, refuse up front when the active "view as" role denies
@@ -3789,27 +3833,6 @@ pub async fn bi_refresh_connection(
     let mut failure: Option<String> = None;
 
     for active_query in &active_queries {
-        // A result block whose sheet is now a CANVAS is not written: its rows
-        // would land in the canvas's hidden grid, where nobody sees them.
-        // (`bi_insert_result` refuses a canvas; a block reaches one only when
-        // its stored index went stale.) Skipped LOUDLY -- the other blocks
-        // still refresh, and the command reports the skip at the end.
-        if crate::sheets::is_canvas_sheet(&state.sheet_kinds.read().unwrap(), active_query.sheet_index) {
-            crate::log_warn!(
-                "BI",
-                "bi_refresh_connection: result block {} targets canvas sheet {}; not written",
-                active_query.region_id,
-                active_query.sheet_index
-            );
-            failure.get_or_insert_with(|| {
-                format!(
-                    "A query result block targets sheet {}, which is a canvas sheet and holds no cells; \
-                     that block was not refreshed. Insert the query result on a worksheet.",
-                    active_query.sheet_index + 1
-                )
-            });
-            continue;
-        }
         let query_request = build_engine_query(&active_query.request);
 
         let (batches, refreshed_tables) = {
@@ -3833,7 +3856,6 @@ pub async fn bi_refresh_connection(
         }
 
         let result = batches_to_result(&batches);
-
         let new_num_cols = result.columns.len() as u32;
         let new_num_data_rows = result.row_count as u32;
         let new_total_rows = new_num_data_rows + 1;
@@ -3841,189 +3863,192 @@ pub async fn bi_refresh_connection(
         let start_row = active_query.start_row;
         let start_col = active_query.start_col;
         let new_end_row = start_row + new_total_rows - 1;
-        let new_end_col = start_col + new_num_cols - 1;
+        let new_end_col = start_col + new_num_cols.max(1) - 1;
 
-        // Clear old region cells
-        {
-            // Refusal-first: the sheet-index check is the last thing that can
-            // refuse in this block, so it runs under the PENDING guard and the
-            // eager `mutates` token is minted only once it has passed.
-            let grids = state.grids.lock_pending().unwrap();
-            if active_query.sheet_index >= grids.len() {
-                return Err("Invalid sheet index".to_string());
+        // THE WRITE, on the block's sheet AS OF NOW (BUG-0138): the `.await`s
+        // above let a sheet move or delete run while the query was out, so the
+        // index `live_active_queries` resolved before them may belong to
+        // another sheet by now. `with_block_sheet` resolves the sheet again from
+        // its identity and holds both grid locks across ALL of the write -- the
+        // clear, the new block, the mirror sync, the region re-stamp and the
+        // names -- so a move cannot land in the middle of it either. Nothing
+        // below reads the block's stored index.
+        let written = with_block_sheet(&state, active_query.sheet_id, |target| {
+            let sheet_index = target.sheet_index;
+            // A result block whose sheet is a CANVAS is not written: its rows
+            // would land in the canvas's hidden grid, where nobody sees them.
+            // (`bi_insert_result` refuses a canvas, and the block's sheet is
+            // resolved from its identity, so this is a guard, not a path.)
+            if crate::sheets::is_canvas_sheet(&state.sheet_kinds.read().unwrap(), sheet_index) {
+                return BlockWrite::Canvas { sheet_index };
             }
+
+            // Refusal-first: the gates are behind us, so the effect is minted
+            // here and authorizes every write below.
             let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-            let mut grids = grids.authorize(&effect);
-            let grid = &mut grids[active_query.sheet_index];
+            let bold_style_idx = {
+                let mut styles = state.style_registry.write(&effect).unwrap();
+                let style = CellStyle::new().with_bold(true);
+                styles.get_or_create(style)
+            };
+            let mut grids = target.grids.authorize(&effect);
 
-            for r in active_query.start_row..=active_query.end_row {
-                for c in active_query.start_col..=active_query.end_col {
-                    grid.set_cell(r, c, Cell::new());
-                }
-            }
-        }
-
-        // Create bold style for headers. The clear-region block above closed
-        // its own scope (and its effect with it), and the refusal gate is
-        // behind us, so this block mints its own.
-        let header_effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-        let bold_style_idx = {
-            let mut styles = state.style_registry.write(&header_effect).unwrap();
-            let style = CellStyle::new().with_bold(true);
-            styles.get_or_create(style)
-        };
-
-        // Write new data
-        {
-            // Refusal-first: the sheet-index check is the last thing that can
-            // refuse in this block, so it runs under the PENDING guard and the
-            // eager `mutates` token is minted only once it has passed.
-            let grids = state.grids.lock_pending().unwrap();
-            if active_query.sheet_index >= grids.len() {
-                return Err("Invalid sheet index".to_string());
-            }
-            let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-            let mut grids = grids.authorize(&effect);
-            let grid = &mut grids[active_query.sheet_index];
-
-            for (col_idx, col_name) in result.columns.iter().enumerate() {
-                let mut cell = Cell::new_text(col_name.clone());
-                cell.style_index = bold_style_idx;
-                grid.set_cell(start_row, start_col + col_idx as u32, cell);
-            }
-
-            for (row_idx, row) in result.rows.iter().enumerate() {
-                let grid_row = start_row + 1 + row_idx as u32;
-                for (col_idx, value) in row.iter().enumerate() {
-                    let grid_col = start_col + col_idx as u32;
-                    let cell = match value {
-                        Some(s) => {
-                            if let Some(num) = try_parse_number(s) {
-                                Cell::new_number(num)
-                            } else {
-                                Cell::new_text(s.clone())
-                            }
-                        }
-                        None => Cell::new(),
-                    };
-                    grid.set_cell(grid_row, grid_col, cell);
-                }
-            }
-        }
-
-        // Sync to active grid
-        {
-            let active_sheet = *state.active_sheet.read().unwrap();
-            if active_query.sheet_index == active_sheet {
-                // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
-                let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-                let mut active_grid = state.grid.write(&effect).unwrap();
-                let grids = state.grids.read().unwrap();
-                if let Some(src_grid) = grids.get(active_query.sheet_index) {
-                    for r in active_query.start_row..=active_query.end_row {
-                        for c in active_query.start_col..=active_query.end_col {
-                            active_grid.set_cell(r, c, Cell::new());
-                        }
-                    }
-                    let write_end_row = std::cmp::max(active_query.end_row, new_end_row);
-                    let write_end_col = std::cmp::max(active_query.end_col, new_end_col);
-                    for r in start_row..=write_end_row {
-                        for c in start_col..=write_end_col {
-                            if let Some(cell) = src_grid.cells.get(&(r, c)) {
-                                active_grid.set_cell(r, c, cell.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // The region this query rewrote, for the PHASE B recalculation after
-        // the loop. It is the UNION of the old block (cleared above) and the
-        // new one: a refresh that returns FEWER rows blanks cells a formula
-        // was reading, and a `=SUM()` over the shrunken tail is exactly as
-        // stale as one over the rewritten head.
-        rewritten_regions.push((
-            active_query.sheet_index,
-            start_row,
-            start_col,
-            std::cmp::max(active_query.end_row, new_end_row),
-            std::cmp::max(active_query.end_col, new_end_col),
-        ));
-
-        // Update protected region bounds
-        {
-            let mut regions = state.protected_regions.lock().unwrap();
-            if let Some(region) = regions
-                .iter_mut()
-                .find(|r| r.region_type == "bi" && r.owner_id == active_query.region_id)
+            // Clear the old region, then write the new block.
             {
-                region.end_row = new_end_row;
-                region.end_col = new_end_col;
-            }
-        }
-
-        // Update named ranges
-        {
-            let sheet_names = state.sheet_names.read().unwrap();
-            let sheet_name = sheet_names
-                .get(active_query.sheet_index)
-                .cloned()
-                .unwrap_or_else(|| format!("Sheet{}", active_query.sheet_index + 1));
-
-            // Refresh rewrites the locked grid region and re-points the
-            // BIResult.* names at the new extent.
-            let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-            let mut named_ranges = state.named_ranges.write(&effect).unwrap();
-
-            for (col_idx, col_name) in result.columns.iter().enumerate() {
-                let safe_name: String = col_name
-                    .chars()
-                    .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
-                    .collect();
-                let range_name = format!("BIResult.{}", safe_name);
-                let col_letter = index_to_col(start_col + col_idx as u32);
-                let data_start_row = start_row + 2;
-                let data_end_row = new_end_row + 1;
-                let refers_to = format!(
-                    "={}!${}${}:${}${}",
-                    sheet_name, col_letter, data_start_row, col_letter, data_end_row
-                );
-
-                let key = range_name.to_uppercase();
-                named_ranges.insert(
-                    key,
-                    NamedRange {
-                        name: range_name,
-                        sheet_index: None,
-                        refers_to,
-                        comment: Some(format!("BI query result column: {}", col_name)),
-                        folder: Some("BI Results".to_string()),
-                    },
-                );
-            }
-        }
-
-        // Update active query metadata on the connection
-        {
-            let mut connections = bi_state.connections.lock().unwrap();
-            if let Some(conn) = connections.get_mut(&connection_id) {
-                if let Some(aq) = conn.active_queries.get_mut(&active_query.region_id) {
-                    aq.end_row = new_end_row;
-                    aq.end_col = new_end_col;
+                let grid = &mut grids[sheet_index];
+                for r in active_query.start_row..=active_query.end_row {
+                    for c in active_query.start_col..=active_query.end_col {
+                        grid.set_cell(r, c, Cell::new());
+                    }
                 }
-                conn.last_refreshed = Some(now_iso());
+
+                for (col_idx, col_name) in result.columns.iter().enumerate() {
+                    let mut cell = Cell::new_text(col_name.clone());
+                    cell.style_index = bold_style_idx;
+                    grid.set_cell(start_row, start_col + col_idx as u32, cell);
+                }
+
+                for (row_idx, row) in result.rows.iter().enumerate() {
+                    let grid_row = start_row + 1 + row_idx as u32;
+                    for (col_idx, value) in row.iter().enumerate() {
+                        let grid_col = start_col + col_idx as u32;
+                        let cell = match value {
+                            Some(s) => {
+                                if let Some(num) = try_parse_number(s) {
+                                    Cell::new_number(num)
+                                } else {
+                                    Cell::new_text(s.clone())
+                                }
+                            }
+                            None => Cell::new(),
+                        };
+                        grid.set_cell(grid_row, grid_col, cell);
+                    }
+                }
+            }
+
+            // Sync to the active grid (the mirror, locked first by
+            // `with_block_sheet`: canonical order).
+            let active_sheet = *state.active_sheet.read().unwrap();
+            if sheet_index == active_sheet {
+                let mut active_grid = target.mirror.authorize(&effect);
+                for r in active_query.start_row..=active_query.end_row {
+                    for c in active_query.start_col..=active_query.end_col {
+                        active_grid.set_cell(r, c, Cell::new());
+                    }
+                }
+                let src_grid = &grids[sheet_index];
+                let write_end_row = std::cmp::max(active_query.end_row, new_end_row);
+                let write_end_col = std::cmp::max(active_query.end_col, new_end_col);
+                for r in start_row..=write_end_row {
+                    for c in start_col..=write_end_col {
+                        if let Some(cell) = src_grid.cells.get(&(r, c)) {
+                            active_grid.set_cell(r, c, cell.clone());
+                        }
+                    }
+                }
+            }
+
+            // Update protected region bounds -- and its SHEET: the region guards
+            // the block where its sheet is NOW. Re-stamped under the grid locks,
+            // so a move cannot remap it in between and have that remap undone.
+            {
+                let mut regions = state.protected_regions.lock().unwrap();
+                if let Some(region) = regions
+                    .iter_mut()
+                    .find(|r| r.region_type == "bi" && r.owner_id == active_query.region_id)
+                {
+                    region.sheet_index = sheet_index;
+                    region.end_row = new_end_row;
+                    region.end_col = new_end_col;
+                }
+            }
+
+            // Re-point the BIResult.* names at the new extent, on the same sheet.
+            repoint_result_names(&state, &effect, sheet_index, active_query, &result, new_end_row);
+
+            BlockWrite::Written { sheet_index }
+        });
+
+        match written {
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+            Ok(None) => {
+                // The block's sheet was deleted while the query ran. The block
+                // went with it (the delete removed its protected region and
+                // turned its `BIResult.*` names into `#REF!`), exactly as for a
+                // delete before the refresh (`live_active_queries`): dropped
+                // from the connection, written nowhere, and not an error.
+                let mut connections = bi_state.connections.lock().unwrap();
+                if let Some(conn) = connections.get_mut(&connection_id) {
+                    conn.active_queries.remove(&active_query.region_id);
+                }
+                log_info!(
+                    "BI",
+                    "bi_refresh_connection: result block bi-{} went with its sheet, deleted during the refresh; dropped from connection {}",
+                    active_query.region_id,
+                    connection_id
+                );
+            }
+            Ok(Some(BlockWrite::Canvas { sheet_index })) => {
+                // Skipped LOUDLY -- the other blocks still refresh, and the
+                // command reports the skip at the end.
+                crate::log_warn!(
+                    "BI",
+                    "bi_refresh_connection: result block {} targets canvas sheet {}; not written",
+                    active_query.region_id,
+                    sheet_index
+                );
+                failure.get_or_insert_with(|| {
+                    format!(
+                        "A query result block targets sheet {}, which is a canvas sheet and holds no cells; \
+                         that block was not refreshed. Insert the query result on a worksheet.",
+                        sheet_index + 1
+                    )
+                });
+            }
+            Ok(Some(BlockWrite::Written { sheet_index })) => {
+                // The region this query rewrote, for the PHASE B recalculation
+                // after the loop, by the sheet's IDENTITY (PHASE B resolves it
+                // once more: the cache save awaits in between). It is the UNION
+                // of the old block (cleared above) and the new one: a refresh
+                // that returns FEWER rows blanks cells a formula was reading,
+                // and a `=SUM()` over the shrunken tail is exactly as stale as
+                // one over the rewritten head.
+                rewritten_regions.push((
+                    active_query.sheet_id,
+                    start_row,
+                    start_col,
+                    std::cmp::max(active_query.end_row, new_end_row),
+                    std::cmp::max(active_query.end_col, new_end_col),
+                ));
+
+                // Update active query metadata on the connection -- its sheet
+                // index as of the write too.
+                {
+                    let mut connections = bi_state.connections.lock().unwrap();
+                    if let Some(conn) = connections.get_mut(&connection_id) {
+                        if let Some(aq) = conn.active_queries.get_mut(&active_query.region_id) {
+                            aq.sheet_index = sheet_index;
+                            aq.end_row = new_end_row;
+                            aq.end_col = new_end_col;
+                        }
+                        conn.last_refreshed = Some(now_iso());
+                    }
+                }
+
+                log_info!(
+                    "BI",
+                    "Refreshed query region_id={}: {} rows",
+                    active_query.region_id,
+                    result.row_count
+                );
+
+                results.push(result);
             }
         }
-
-        log_info!(
-            "BI",
-            "Refreshed query region_id={}: {} rows",
-            active_query.region_id,
-            result.row_count
-        );
-
-        results.push(result);
     }
 
     // Save cache after refresh if any tables were actually refreshed
@@ -4041,10 +4066,17 @@ pub async fn bi_refresh_connection(
     // its own — so this runs as a second phase, and it goes through the ONE
     // shared cascade rather than a copy of the walk.
     if !rewritten_regions.is_empty() {
+        // Each block's sheet by IDENTITY, resolved once more: the cache save
+        // above awaits, and a sheet move in between renumbers the index the
+        // write used. A block whose sheet is gone has nothing left to recalc.
+        let sheet_ids: Vec<identity::SheetId> = state.sheet_ids.read().unwrap().clone();
         let active_sheet = *state.active_sheet.read().unwrap();
         let mut seeds: Vec<(u32, u32)> = Vec::new();
         let mut off_sheets: Vec<usize> = Vec::new();
-        for &(sheet, start_row, start_col, end_row, end_col) in &rewritten_regions {
+        for &(sheet_id, start_row, start_col, end_row, end_col) in &rewritten_regions {
+            let Some(sheet) = sheet_ids.iter().position(|id| *id == sheet_id) else {
+                continue;
+            };
             if sheet == active_sheet {
                 for r in start_row..=end_row {
                     for c in start_col..=end_col {
@@ -4085,6 +4117,166 @@ pub async fn bi_refresh_connection(
     }
 
     Ok(results)
+}
+
+/// A refreshed result block's sheet, resolved AND LOCKED for the block's write
+/// (see [`with_block_sheet`]).
+pub(crate) struct BlockSheet<'a> {
+    /// The active sheet's mirror (`state.grid`), taken first: canonical order.
+    pub(crate) mirror: crate::document_effect::PendingGuard<'a, engine::Grid>,
+    /// Every sheet's grid (`state.grids`).
+    pub(crate) grids: crate::document_effect::PendingGuard<'a, Vec<engine::Grid>>,
+    /// Where the block's sheet is -- for as long as the two guards are held.
+    pub(crate) sheet_index: usize,
+}
+
+/// Run `f` on the sheet `sheet_id` names AS OF NOW, with both grid locks held
+/// across the resolution and the whole of `f` (BUG-0138, wave-B fix-up).
+/// `None` when the sheet no longer exists.
+///
+/// `bi_refresh_connection` resolves every block's sheet from its identity
+/// before the query runs (`live_active_queries`), and then awaits the engine
+/// lock and the query itself. A sheet move or delete -- synchronous commands --
+/// runs in between, and writing at the earlier index put the block on
+/// whichever sheet had inherited it (overwriting that sheet's cells) and set
+/// the block's protected region back to the stale index after the move had
+/// remapped it. So the write resolves the sheet AGAIN, here, under the locks it
+/// writes with. Every sheet move, delete and copy holds `grid` and `grids`
+/// while it renumbers `sheet_ids` and remaps the block's "bi" region
+/// (`move_sheet_impl`, `delete_sheet_impl`, `copy_sheet_impl`), so the index
+/// handed to `f` stays the block's index until `f` returns: the clear, the
+/// write, the mirror sync, the region re-stamp and the names all see ONE
+/// sheet. `f` is synchronous, so no `.await` can open the window again.
+///
+/// Locks only; decides nothing. `f` runs the refusal gates and mints the
+/// effect (`PendingGuard::authorize`), so a gone sheet or a refused block
+/// leaves the document clean.
+pub(crate) fn with_block_sheet<R>(
+    state: &AppState,
+    sheet_id: identity::SheetId,
+    f: impl FnOnce(BlockSheet<'_>) -> R,
+) -> Result<Option<R>, String> {
+    // CANONICAL GRID LOCK ORDER: `grid` before `grids`, then everything else.
+    let mirror = state.grid.lock_pending().map_err(|e| e.to_string())?;
+    let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
+    let resolved = state
+        .sheet_ids
+        .read()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .position(|id| *id == sheet_id);
+    let Some(sheet_index) = resolved.filter(|index| *index < grids.len()) else {
+        return Ok(None);
+    };
+    Ok(Some(f(BlockSheet { mirror, grids, sheet_index })))
+}
+
+/// What the refresh's write did with one block whose sheet still exists.
+enum BlockWrite {
+    /// Written on the block's sheet, at `sheet_index` while the locks were held.
+    Written { sheet_index: usize },
+    /// The block's sheet is a canvas, which holds no cells: nothing written.
+    Canvas { sheet_index: usize },
+}
+
+/// The active queries of `connection_id`, each on the sheet it was inserted on
+/// NOW (BUG-0138).
+///
+/// A block's sheet is resolved from the sheet's IDENTITY (`ActiveQuery.sheet_id`),
+/// never from the stored index: a sheet move, delete or copy renumbers indices,
+/// and the refresh used to clear and rewrite the block on whichever sheet had
+/// inherited the index -- overwriting that sheet's cells with rows that looked
+/// exactly like fresh query data. A block whose sheet moved is re-stamped here,
+/// on the connection too; a block whose sheet was DELETED went with its sheet
+/// (the delete removed its protected region and turned its `BIResult.*` names
+/// into `#REF!`), so it is dropped from the connection rather than written
+/// anywhere. Separated from `bi_refresh_connection` so the resolution is
+/// testable without an engine (bi/active_query_sheet_tests.rs).
+///
+/// Takes `sheet_ids` (copied, released) before the connections lock; the two
+/// are never held together.
+pub(crate) fn live_active_queries(
+    state: &AppState,
+    bi_state: &BiState,
+    connection_id: ConnectionId,
+) -> Result<Vec<ActiveQuery>, String> {
+    let sheet_ids: Vec<identity::SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let mut connections = bi_state.connections.lock().unwrap();
+    let conn = connections.get_mut(&connection_id)
+        .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+    let mut gone: Vec<identity::EntityId> = Vec::new();
+    for aq in conn.active_queries.values_mut() {
+        match sheet_ids.iter().position(|id| *id == aq.sheet_id) {
+            Some(index) => aq.sheet_index = index,
+            None => gone.push(aq.region_id),
+        }
+    }
+    for region_id in gone {
+        conn.active_queries.remove(&region_id);
+        log_info!(
+            "BI",
+            "live_active_queries: result block bi-{} went with its deleted sheet; dropped from connection {}",
+            region_id,
+            connection_id
+        );
+    }
+    let mut live: Vec<ActiveQuery> = conn.active_queries.values().cloned().collect();
+    // Deterministic order: two blocks on one sheet refresh in position order.
+    live.sort_by_key(|aq| (aq.sheet_index, aq.start_row, aq.start_col));
+    Ok(live)
+}
+
+/// Re-point the `BIResult.*` defined names at a refreshed block's new extent,
+/// on the block's CURRENT sheet -- `sheet_index`, as the write resolved it under
+/// its locks (quoted where the name needs it). The caller mints `effect` once
+/// the block has passed its gates.
+pub(crate) fn repoint_result_names(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    sheet_index: usize,
+    active_query: &ActiveQuery,
+    result: &BiQueryResult,
+    new_end_row: u32,
+) {
+    let (start_row, start_col) = (active_query.start_row, active_query.start_col);
+    let sheet_names = state.sheet_names.read().unwrap();
+    // QUOTED where the name needs it: `=My Data!$A$2:$A$9` parses as the
+    // name MY intersected with a range on a sheet called DATA.
+    let sheet_name = engine::ast_render::quote_sheet_name(
+        &sheet_names
+            .get(sheet_index)
+            .cloned()
+            .unwrap_or_else(|| format!("Sheet{}", sheet_index + 1)),
+    );
+
+    let mut named_ranges = state.named_ranges.write(effect).unwrap();
+
+    for (col_idx, col_name) in result.columns.iter().enumerate() {
+        let safe_name: String = col_name
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+            .collect();
+        let range_name = format!("BIResult.{}", safe_name);
+        let col_letter = index_to_col(start_col + col_idx as u32);
+        let data_start_row = start_row + 2;
+        let data_end_row = new_end_row + 1;
+        let refers_to = format!(
+            "={}!${}${}:${}${}",
+            sheet_name, col_letter, data_start_row, col_letter, data_end_row
+        );
+
+        let key = range_name.to_uppercase();
+        named_ranges.insert(
+            key,
+            NamedRange {
+                name: range_name,
+                sheet_index: None,
+                refers_to,
+                comment: Some(format!("BI query result column: {}", col_name)),
+                folder: Some("BI Results".to_string()),
+            },
+        );
+    }
 }
 
 /// Refresh all in-memory tables on a connection, regardless of TTL.

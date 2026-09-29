@@ -72,9 +72,10 @@ function isTextEntryElement(el: EventTarget | null): boolean {
 /**
  * Whether this keystroke belongs to an EDIT rather than to Core's selection --
  * so an extension's own window key listener that ACTS on the selection
- * (AutoFilter's Ctrl+Shift+L, Grouping's Alt+Shift+Arrow, Format Painter's
- * Ctrl+Shift+C, Ctrl+K, Ctrl+E, Ctrl+Alt+M, Alt+Down, Alt+;, the bookmark
- * keys) must stand down. True when
+ * (Data Validation's Alt+Down; and the fallbacks of AutoFilter's Ctrl+Shift+L,
+ * Grouping's Alt+Shift+Arrow, Ctrl+K, Ctrl+E, Ctrl+Alt+M, Shift+F2, Alt+; and
+ * the bookmark keys, which the keybinding registry runs since BUG-0183) must
+ * stand down. True when
  *   - the keybinding dispatcher's own editing context holds
  *     (`isEditingKeystroke`: a text field or a pointer claim owns the key, or
  *     a cell edit is live -- Core's own, even with the keyboard off its editor

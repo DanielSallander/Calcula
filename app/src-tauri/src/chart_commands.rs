@@ -197,6 +197,111 @@ fn record_chart_sheet_id_stamp(
 /// Deepest JSON nesting [`count_sheet_id_stamps`] walks (serde_json's own parse limit).
 const MAX_STAMP_JSON_DEPTH: usize = 128;
 
+/// Bound on `concat` nesting for [`stamp_chart_record_sheet_ids`] -- the same
+/// bound as chartSheetRefs.ts `MAX_STAMP_DEPTH`.
+const MAX_CONCAT_STAMP_DEPTH: usize = 16;
+
+/// THE LOAD-TIME SHEET-ID STAMP, done by the backend while the sheet list is
+/// the FILE's own (BUG-0204).
+///
+/// A chart range written before ranges named their sheet by id says only
+/// `sheetIndex`, and an index is right only against the sheet list it was
+/// written for. The chart store used to stamp the id ~300 ms after a load
+/// (chartStore.ts, `migrateSheetIds`) against whatever the sheet list was BY
+/// THEN: a sheet added, deleted or moved in that window got the stamp refused
+/// -- and the reload that follows every sheet-list change then stamped the old
+/// index against the NEW list, pinning the chart to another sheet for good.
+/// Stamped here, inside `open_file`'s restore, nothing can come between the
+/// file's indices and the file's sheets.
+///
+/// THE SAME WALK AS chartSheetRefs.ts (`stampStoredChartJson`): a ref lives in
+/// `spec.data`, `spec.layers[].data`, a `lookup` transform's `from`, and
+/// `spec.concat.charts[]` recursively; a ref is an object with `startRow`
+/// whose `sheetId` is missing or empty and whose integer `sheetIndex` names a
+/// sheet. Both walks are pinned to ONE fixture
+/// (`extensions/Charts/lib/__tests__/fixtures/chartSheetIdStamp.json`), so an
+/// edit to either that the other does not make fails a test.
+///
+/// Returns the stamped record, or `None` when nothing needed a stamp (the
+/// stored text is then left byte-identical) or the text is not a JSON record.
+pub(crate) fn stamp_chart_record_sheet_ids(
+    spec_json: &str,
+    sheet_id_at: &dyn Fn(usize) -> Option<String>,
+) -> Option<String> {
+    use serde_json::Value;
+
+    fn stamp_source(source: Option<&mut Value>, sheet_id_at: &dyn Fn(usize) -> Option<String>) -> bool {
+        let Some(Value::Object(range)) = source else { return false };
+        if !range.contains_key("startRow") {
+            return false;
+        }
+        if matches!(range.get("sheetId"), Some(Value::String(id)) if !id.is_empty()) {
+            return false;
+        }
+        let Some(index) = range.get("sheetIndex").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()) else {
+            return false;
+        };
+        match sheet_id_at(index).filter(|id| !id.is_empty()) {
+            Some(id) => {
+                range.insert("sheetId".to_string(), Value::String(id));
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn stamp_spec(spec: &mut Value, sheet_id_at: &dyn Fn(usize) -> Option<String>, depth: usize) -> bool {
+        let Value::Object(spec) = spec else { return false };
+        let mut changed = stamp_source(spec.get_mut("data"), sheet_id_at);
+        if let Some(Value::Array(layers)) = spec.get_mut("layers") {
+            for layer in layers.iter_mut() {
+                if let Value::Object(layer) = layer {
+                    changed |= stamp_source(layer.get_mut("data"), sheet_id_at);
+                }
+            }
+        }
+        if let Some(Value::Array(transforms)) = spec.get_mut("transform") {
+            for t in transforms.iter_mut() {
+                if let Value::Object(t) = t {
+                    if t.get("type").and_then(Value::as_str) == Some("lookup") {
+                        changed |= stamp_source(t.get_mut("from"), sheet_id_at);
+                    }
+                }
+            }
+        }
+        if depth < MAX_CONCAT_STAMP_DEPTH {
+            if let Some(Value::Object(concat)) = spec.get_mut("concat") {
+                if let Some(Value::Array(children)) = concat.get_mut("charts") {
+                    for child in children.iter_mut() {
+                        changed |= stamp_spec(child, sheet_id_at, depth + 1);
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    let mut record: Value = serde_json::from_str(spec_json).ok()?;
+    let Value::Object(fields) = &mut record else { return None };
+    // chartSpecNormalize.ts `storedSpecOf`: a record whose `spec` is not an
+    // object but that has a string `mark` IS the spec (a raw `save_chart`).
+    let bare = !matches!(fields.get("spec"), Some(Value::Object(_)))
+        && matches!(fields.get("mark"), Some(Value::String(_)));
+    let changed = if bare {
+        stamp_spec(&mut record, sheet_id_at, 0)
+    } else {
+        match fields.get_mut("spec") {
+            Some(spec @ Value::Object(_)) => stamp_spec(spec, sheet_id_at, 0),
+            _ => false,
+        }
+    };
+    if changed {
+        serde_json::to_string(&record).ok()
+    } else {
+        None
+    }
+}
+
 /// How many `sheetId` stamps `next` adds to `stored` -- or why `next` is NOT a
 /// pure stamp of `stored`.
 ///
@@ -557,5 +662,93 @@ mod sheet_id_stamp_tests {
             count_sheet_id_stamps(&restamp, &changed_existing, &at).is_err(),
             "an EXISTING sheet id is a value, and may not change"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // BUG-0204: the load-time stamp happens in the BACKEND, at open, against
+    // the file's own sheet list.
+    // -----------------------------------------------------------------------
+
+    const STAMP_FIXTURE: &str = include_str!("../../extensions/Charts/lib/__tests__/fixtures/chartSheetIdStamp.json");
+
+    /// The backend walk and chartSheetRefs.ts `stampStoredChartJson` agree on
+    /// ONE fixture (its TypeScript twin is chartSheetIdStampParity.test.ts).
+    #[test]
+    fn the_backend_stamp_walk_matches_the_shared_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(STAMP_FIXTURE).expect("the fixture parses");
+        let ids: Vec<String> = fixture["sheetIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        let at = |i: usize| ids.get(i).cloned();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert!(cases.len() >= 9, "fixture: the cases are all there");
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let got = super::stamp_chart_record_sheet_ids(&case["record"].to_string(), &at)
+                .map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap());
+            let want = if case["expected"].is_null() { None } else { Some(case["expected"].clone()) };
+            assert_eq!(got, want, "case `{}`", name);
+        }
+    }
+
+    /// A workbook as `open_file` hands it over: `names` sheets with ids, and one
+    /// chart on sheet 0 whose range names sheet `range_sheet` by INDEX only.
+    fn file_with_index_only_chart(names: &[&str], range_sheet: usize) -> persistence::Workbook {
+        let mut wb = persistence::Workbook::new();
+        wb.sheets = names.iter().map(|n| persistence::Sheet::new(n.to_string())).collect();
+        wb.charts = vec![persistence::SavedChart {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            sheet_id: wb.sheets[0].id,
+            spec_json: serde_json::to_string(&json!({
+                "chartId": "c1", "name": "Chart 1", "sheetIndex": 0, "x": 0, "y": 0, "width": 400, "height": 300,
+                "spec": { "mark": "bar", "data": { "sheetIndex": range_sheet, "startRow": 0, "startCol": 0, "endRow": 4, "endCol": 1 } }
+            }))
+            .unwrap(),
+        }];
+        wb
+    }
+
+    #[test]
+    fn opening_a_workbook_stamps_each_range_with_the_files_own_sheet() {
+        let wb = file_with_index_only_chart(&["Sheet1", "Data", "Other"], 1);
+        let data_id = wb.sheets[1].id.to_string();
+        let state = crate::create_app_state();
+        crate::persistence::restore_charts(&wb.charts, &state, &wb);
+
+        let stored = stored_json(&state);
+        assert_eq!(
+            stored["spec"]["data"]["sheetId"],
+            json!(data_id),
+            "the range was not pinned to the file's own sheet at load: {}",
+            stored
+        );
+        // Nothing but the id was added.
+        let mut without = stored.clone();
+        without["spec"]["data"].as_object_mut().unwrap().remove("sheetId");
+        let original: serde_json::Value = serde_json::from_str(&wb.charts[0].spec_json).unwrap();
+        assert_eq!(without, original, "the load stamp changed more than the sheet id");
+    }
+
+    /// The race itself: once the load has stamped, a sheet MOVE right after the
+    /// open (the ~300 ms window the frontend stamp used to leave) changes
+    /// nothing about which sheet the chart reads -- the id travels, the index
+    /// does not matter any more.
+    #[test]
+    fn a_sheet_move_right_after_the_open_cannot_repoint_the_chart() {
+        let wb = file_with_index_only_chart(&["Sheet1", "Data", "Other"], 1);
+        let data_id = wb.sheets[1].id.to_string();
+        let state = crate::create_app_state();
+        crate::persistence::restore_charts(&wb.charts, &state, &wb);
+        // The live sheet list after the open, then "Other" moved in front of "Data".
+        *state.sheet_ids.write(&test_seed_effect()).unwrap() = vec![wb.sheets[0].id, wb.sheets[2].id, wb.sheets[1].id];
+
+        // What the chart store's late stamp would now do: nothing is left to stamp.
+        let current: Vec<String> = state.sheet_ids.read().unwrap().iter().map(|id| id.to_string()).collect();
+        let late = super::stamp_chart_record_sheet_ids(&state.charts.read().unwrap()[0].spec_json, &|i| current.get(i).cloned());
+        assert!(late.is_none(), "a late stamp still found an index-only range to pin against the NEW sheet list");
+        assert_eq!(stored_json(&state)["spec"]["data"]["sheetId"], json!(data_id));
     }
 }

@@ -15,7 +15,15 @@
 import type { GridRegion } from "@api/gridOverlays";
 import type { ObjectWheelTarget } from "../../_shared/lib/objectWheelScroll";
 import { FLOATING_RANGE_REGION_TYPE, getFloatingRangeById, type FloatingRangeEntry } from "./floatingRangeStore";
-import { FR_DEFAULT_ROW_H, clampFrScrollTo, frMaxScroll, frScrollToReveal, type FrView } from "./frDimensions";
+import {
+  FR_DEFAULT_ROW_H,
+  clampFrScrollTo,
+  contentHeight,
+  contentWidth,
+  frMaxScroll,
+  frScrollToReveal,
+  type FrView,
+} from "./frDimensions";
 import { frContentExtent, isFrExtentKnown } from "./frExtent";
 import { getFrScroll, setFrScroll } from "./frScroll";
 
@@ -79,9 +87,9 @@ function frIdOf(region: GridRegion): string | null {
  * overflow on the wheeled axis gets max 0 there, and the helper then passes
  * the wheel to the page.
  *
- * Page-mode deltas (rare; deltaMode 2) are sized by the helper from the whole
- * frame, chrome included, so a page overshoots by the chrome; the clamp keeps
- * it inside the extent.
+ * A page-mode delta (deltaMode 2) is one CELL AREA (`pageSize`): the title
+ * bar and the headers do not scroll, and a page sized by the whole frame
+ * skipped the rows under them (W16).
  */
 export function createFrWheelTarget(): ObjectWheelTarget {
   return {
@@ -102,6 +110,14 @@ export function createFrWheelTarget(): ObjectWheelTarget {
       const frId = frIdOf(region);
       if (!frId) return;
       setFrScroll(frId, left, top);
+    },
+
+    pageSize(region: GridRegion) {
+      const frId = frIdOf(region);
+      const entry = frId ? getFloatingRangeById(frId) : null;
+      const f = region.floating;
+      if (!entry) return { width: f?.width ?? 0, height: f?.height ?? 0 };
+      return { width: contentWidth(entry), height: contentHeight(entry) };
     },
   };
 }

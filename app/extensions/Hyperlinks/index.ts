@@ -1,9 +1,11 @@
 //! FILENAME: app/extensions/Hyperlinks/index.ts
 // PURPOSE: Hyperlinks extension - enables click-to-follow, cursor feedback,
-//          insert/edit dialog, context menu, and Ctrl+K shortcut.
+//          insert/edit dialog, context menu, and the Insert Hyperlink command.
 // CONTEXT: Registers a cell click interceptor (Ctrl+Click to follow) and a
 //          cursor interceptor (pointer cursor on hyperlink cells).
-//          Registers Insert Hyperlink dialog, context menu items, and keyboard shortcut.
+//          Registers Insert Hyperlink dialog, context menu items, and the
+//          `hyperlinks.insert` command the keybinding registry's Ctrl+K runs
+//          (the registry is the ONE keyboard path; there is no listener here).
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
@@ -13,13 +15,13 @@ import {
   onAppEvent,
   AppEvents,
   registerMenuItem,
+  unregisterMenuItem,
   gridExtensions,
   ExtensionRegistry,
   showDialog,
   createCoalescedRefresh,
   IconHyperlink,
   IconFollowLink,
-  isKeyClaimed,
 } from "@api";
 import type { GridContextMenuItem, GridMenuContext } from "@api";
 import {
@@ -30,7 +32,7 @@ import {
   type HyperlinkIndicator,
 } from "@api/backend";
 import { setActiveSheet, getSheets } from "@api/lib";
-import { isEditKeystroke } from "@api/editing";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 import { InsertHyperlinkDialog } from "./InsertHyperlinkDialog";
 
 // ============================================================================
@@ -173,48 +175,26 @@ function openEditDialog(row: number, col: number): void {
 // Keyboard Shortcut
 // ============================================================================
 
-let keydownHandler: ((e: KeyboardEvent) => void) | null = null;
+/**
+ * Insert Hyperlink (or Edit, on a cell that has one) at the active cell --
+ * the command the keybinding registry's `ext.hyperlinks.insert` (Ctrl+K)
+ * runs. It named this id long before anything registered it (BUG-0183).
+ */
+export const HYPERLINKS_INSERT_COMMAND = "hyperlinks.insert";
 
-/** The window-capture Ctrl+K listener (exported for tests). */
-export async function handleKeyDown(e: KeyboardEvent): Promise<void> {
-  // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
-  // field, a shape's declared hit rectangle -- is not this extension's.
-  // The tag list below cannot see a <select> or a <button>; the claim can.
-  // See core/lib/pointerClaims.ts, and the census in
-  // core/lib/globalInputListeners.ts (a new global listener adds a row).
-  if (isKeyClaimed(e)) return;
-  // Ctrl+K: Insert/Edit Hyperlink
-  if (e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k") {
-    // Don't intercept while a text field is focused or any cell edit is in
-    // progress -- the tag list this replaced could not see a floating grid's
-    // live cell edit parked with the keyboard on the grid.
-    if (isEditKeystroke(e)) return;
-
-    e.preventDefault();
-    e.stopPropagation();
-
-    if (!currentActiveCell) return;
-    const { row, col } = currentActiveCell;
-
-    // Check if cell already has a hyperlink -> edit mode
-    const existing = await getHyperlink(row, col);
-    if (existing) {
-      openEditDialog(row, col);
-    } else {
-      openInsertDialog(row, col);
-    }
-  }
-}
-
-function registerKeyboardShortcut(): void {
-  keydownHandler = handleKeyDown;
-  window.addEventListener("keydown", keydownHandler, true);
-}
-
-function unregisterKeyboardShortcut(): void {
-  if (keydownHandler) {
-    window.removeEventListener("keydown", keydownHandler, true);
-    keydownHandler = null;
+async function insertOrEditAtActiveCell(): Promise<void> {
+  // Core's active cell is HIDDEN while something else owns the selection (a
+  // floating grid's selected cell): refuse, once, rather than open the dialog
+  // for a cell the user cannot see (D4, BUG-0185 class).
+  if (refuseIfSelectionOwned("Insert Hyperlink")) return;
+  if (!currentActiveCell) return;
+  const { row, col } = currentActiveCell;
+  // Check if cell already has a hyperlink -> edit mode
+  const existing = await getHyperlink(row, col);
+  if (existing) {
+    openEditDialog(row, col);
+  } else {
+    openInsertDialog(row, col);
   }
 }
 
@@ -385,9 +365,11 @@ function activate(context: ExtensionContext): void {
   });
   cleanups.push(unsubSelection);
 
-  // 6. Register keyboard shortcut (Ctrl+K)
-  registerKeyboardShortcut();
-  cleanups.push(unregisterKeyboardShortcut);
+  // 6. The Insert Hyperlink command the registry's Ctrl+K runs. The registry
+  //    is the one keyboard path: it refuses the key in a text field, a claim
+  //    or a cell edit ("not-editing"), and a remap in Settings moves it.
+  context.commands.register(HYPERLINKS_INSERT_COMMAND, () => insertOrEditAtActiveCell());
+  cleanups.push(() => context.commands.unregister(HYPERLINKS_INSERT_COMMAND));
 
   // 7. Register context menu items
   registerContextMenuItems();
@@ -399,6 +381,7 @@ function activate(context: ExtensionContext): void {
     icon: IconHyperlink,
     shortcut: "Ctrl+K",
     action: () => {
+      if (refuseIfSelectionOwned("Insert Hyperlink")) return;
       if (currentActiveCell) {
         openInsertDialog(currentActiveCell.row, currentActiveCell.col);
       }
@@ -412,10 +395,18 @@ function activate(context: ExtensionContext): void {
     icon: IconFollowLink,
     shortcut: "Ctrl+Click",
     action: () => {
+      if (refuseIfSelectionOwned("Follow Hyperlink")) return;
       if (currentActiveCell) {
         followHyperlink(currentActiveCell.row, currentActiveCell.col);
       }
     },
+  });
+
+  // 10. Take back its OWN Insert-menu items on deactivate (wave E, Y14): the
+  //     Insert menu belongs to Standard Menus and holds everyone's items.
+  cleanups.push(() => {
+    unregisterMenuItem("insert", "insert:insertHyperlink");
+    unregisterMenuItem("insert", "insert:followHyperlink");
   });
 
   console.log("[Hyperlinks] Activated successfully.");

@@ -4205,13 +4205,17 @@ pub fn clear_range(
 
     let count = cells_to_clear.len() as u32;
 
-    // Begin undo transaction for batch operation
-    if count > 0 {
-        undo_stack.begin_transaction(format!(
+    // Begin undo transaction for batch operation -- OWNED: inside a caller's
+    // open step (a script batch) it joins, and the close below leaves that step
+    // for its owner (engine::OwnedTransaction).
+    let owned_txn = if count > 0 {
+        undo_stack.begin_owned_transaction(format!(
             "Clear range ({},{}) to ({},{})",
             start_row, start_col, end_row, end_col
-        ));
-    }
+        ))
+    } else {
+        engine::OwnedTransaction::not_opened()
+    };
 
     // Pre/post cell states collected for subscriber override capture.
     let mut override_edits: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> = Vec::new();
@@ -4263,7 +4267,7 @@ pub fn clear_range(
 
     // Commit undo transaction
     if count > 0 {
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
         // Mark workbook as dirty
         let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
@@ -4467,7 +4471,7 @@ pub(crate) fn clear_range_with_options_off_sheet(
                 ClearApplyTo::RemoveHyperlinks => "Remove hyperlinks",
                 ClearApplyTo::ResetContents => "Reset contents",
             };
-            undo_stack.begin_transaction(format!(
+            let owned_txn = undo_stack.begin_owned_transaction(format!(
                 "{} on sheet {} ({},{}) to ({},{})",
                 desc, target + 1, min_row, min_col, max_row, max_col
             ));
@@ -4476,7 +4480,7 @@ pub(crate) fn clear_range_with_options_off_sheet(
                 crate::undo_commands::script_grid_cells_snapshot_bytes(target, previous_cells),
                 desc,
             );
-            undo_stack.commit_transaction();
+            undo_stack.commit_owned(owned_txn);
         }
 
         count
@@ -4663,7 +4667,11 @@ pub fn clear_range_with_options(
     let count = cells_in_range.len() as u32;
     let mut updated_cells = Vec::new();
 
-    if count > 0 {
+    // OWNED: a script's createNamedStyle clears its scratch cell through here
+    // INSIDE the script's open batch, and the unconditional commit below
+    // closed that batch halfway -- the script's next write became a step of
+    // its own (found live 2026-09-29, e2e fixall-calp X6).
+    let owned_txn = if count > 0 {
         let desc = match apply_to {
             ClearApplyTo::All => "Clear all",
             ClearApplyTo::Contents => "Clear contents",
@@ -4672,11 +4680,13 @@ pub fn clear_range_with_options(
             ClearApplyTo::RemoveHyperlinks => "Remove hyperlinks",
             ClearApplyTo::ResetContents => "Reset contents",
         };
-        undo_stack.begin_transaction(format!(
+        undo_stack.begin_owned_transaction(format!(
             "{} ({},{}) to ({},{})",
             desc, min_row, min_col, max_row, max_col
-        ));
-    }
+        ))
+    } else {
+        engine::OwnedTransaction::not_opened()
+    };
 
     // Pre/post cell states collected for subscriber override capture.
     let mut override_edits: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> = Vec::new();
@@ -4934,7 +4944,7 @@ pub fn clear_range_with_options(
     crate::calp_commands::record_subscription_override_edits(&state, &crate::document_effect::DocumentEffect::mutates(&file_state), active_sheet, &override_edits);
 
     if count > 0 {
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
         // Mark workbook as dirty
         let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
     }
@@ -5300,7 +5310,7 @@ pub(crate) fn sort_range_off_sheet(
         }
 
         if sorted_count > 0 {
-            undo_stack.begin_transaction(format!(
+            let owned_txn = undo_stack.begin_owned_transaction(format!(
                 "Sort range on sheet {} ({},{}) to ({},{})",
                 target + 1, min_row, min_col, max_row, max_col
             ));
@@ -5309,7 +5319,7 @@ pub(crate) fn sort_range_off_sheet(
                 crate::undo_commands::script_grid_cells_snapshot_bytes(target, previous_cells),
                 "Sort range",
             );
-            undo_stack.commit_transaction();
+            undo_stack.commit_owned(owned_txn);
         }
 
         sorted_count
@@ -5697,7 +5707,7 @@ pub fn sort_range(
             });
 
             // Begin undo transaction
-            undo_stack.begin_transaction(format!(
+            let owned_txn = undo_stack.begin_owned_transaction(format!(
                 "Sort range ({},{}) to ({},{})",
                 min_row, min_col, max_row, max_col
             ));
@@ -5785,7 +5795,7 @@ pub fn sort_range(
                 }
             }
 
-            undo_stack.commit_transaction();
+            undo_stack.commit_owned(owned_txn);
 
             // Formula cells moved (and their references were shifted) —
             // rebuild the dependency maps so incremental recalc keeps
@@ -5872,7 +5882,7 @@ pub fn sort_range(
             });
 
             // Begin undo transaction
-            undo_stack.begin_transaction(format!(
+            let owned_txn = undo_stack.begin_owned_transaction(format!(
                 "Sort columns ({},{}) to ({},{})",
                 min_row, min_col, max_row, max_col
             ));
@@ -5958,7 +5968,7 @@ pub fn sort_range(
                 }
             }
 
-            undo_stack.commit_transaction();
+            undo_stack.commit_owned(owned_txn);
 
             // Formula cells moved (and their references were shifted) —
             // rebuild the dependency maps so incremental recalc keeps
@@ -6704,7 +6714,7 @@ pub fn remove_duplicates(
     }
 
     // Begin undo transaction
-    undo_stack.begin_transaction(format!(
+    let owned_txn = undo_stack.begin_owned_transaction(format!(
         "Remove duplicates ({},{}) to ({},{})",
         min_row, min_col, max_row, max_col
     ));
@@ -6802,7 +6812,7 @@ pub fn remove_duplicates(
         }
     }
 
-    undo_stack.commit_transaction();
+    undo_stack.commit_owned(owned_txn);
 
     // Formula cells were COMPACTED UPWARDS into new positions, so the
     // dependency maps still describe where they used to live — the same
@@ -7818,7 +7828,7 @@ pub fn clear_range_on_sheets(
             continue;
         }
 
-        undo_stack.begin_transaction(format!(
+        let owned_txn = undo_stack.begin_owned_transaction(format!(
             "Clear range on sheet {}",
             sheet_idx
         ));
@@ -7832,7 +7842,7 @@ pub fn clear_range_on_sheets(
             grid.clear_cell(r, c);
         }
 
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
     }
 
     // PHASE B — dependents. `recalc_after_off_sheet_write` takes its own locks
@@ -8852,9 +8862,18 @@ mod writeback_range_guard_wiring_tests {
         // A refusal must be a clean no-op: never a half-applied mutation, never
         // a dangling open transaction. That holds only if the guard precedes
         // `begin_transaction` in the command body.
+        let mut checked = 0;
         for (source, command, guard) in guarded_commands() {
             let body = body_of(source, command);
-            let Some(txn) = body.find("begin_transaction") else {
+            // Either spelling of the begin: most commands open through the
+            // owned door now (engine::OwnedTransaction), and the text
+            // "begin_owned_transaction" does not contain "begin_transaction" --
+            // searching for the old spelling alone would silently skip them.
+            let Some(txn) = ["begin_owned_transaction(", "begin_transaction("]
+                .iter()
+                .filter_map(|needle| body.find(needle))
+                .min()
+            else {
                 continue; // this command opens none
             };
             let guard_at = body.find(guard).expect("wiring test asserts presence");
@@ -8865,7 +8884,17 @@ mod writeback_range_guard_wiring_tests {
                 command,
                 guard,
             );
+            checked += 1;
         }
+        // VACUITY FLOOR. The begin is found by its TEXT, and renaming the door
+        // (it happened: begin_owned_transaction, 2026-09-29) makes every command
+        // look as if it "opens none" -- a census that checks nothing and passes.
+        assert!(
+            checked >= 6,
+            "only {} guarded command(s) were seen opening an undo transaction; the begin \
+             search no longer matches how commands open one",
+            checked
+        );
     }
 
     #[test]

@@ -42,6 +42,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { getCell, getStyle, applyFormatting } from "../../../api/lib";
 import { cellEvents } from "../../../api";
+import { refuseIfSelectionOwned } from "../../../api/selectionOwner";
 import type { GridMenuContext } from "../../../api/extensions";
 import {
   ColorSwatch,
@@ -265,11 +266,16 @@ export function MiniFormatToolbar({
     [openColour, setColourOpen],
   );
 
-  // Apply formatting helper
+  // Apply formatting helper. Resolves false when the write was REFUSED
+  // because something else holds the selection (BUG-0185: a floating grid's
+  // selected cell, Core's selection hidden under it) -- the caller then leaves
+  // its pressed/picked state alone, so the pill never shows a format it did
+  // not apply. The refusal has already been announced, once.
   const apply = useCallback(
-    async (formatting: Record<string, unknown>) => {
+    async (formatting: Record<string, unknown>, action: string): Promise<boolean> => {
+      if (refuseIfSelectionOwned(action)) return false;
       const range = getSelectionRange(context);
-      if (!range) return;
+      if (!range) return true;
       try {
         const result = await applyFormatting(range.rows, range.cols, formatting as never);
         // Emit cell change events
@@ -288,6 +294,7 @@ export function MiniFormatToolbar({
       } catch (err) {
         console.error("[MiniFormatToolbar] Failed to apply formatting:", err);
       }
+      return true;
     },
     [context],
   );
@@ -295,33 +302,33 @@ export function MiniFormatToolbar({
   // Toggle handlers
   const toggleBold = useCallback(async () => {
     const next = !style.bold;
+    if (!(await apply({ bold: next }, "Bold"))) return;
     setStyle((s) => ({ ...s, bold: next }));
-    await apply({ bold: next });
   }, [style.bold, apply]);
 
   const toggleItalic = useCallback(async () => {
     const next = !style.italic;
+    if (!(await apply({ italic: next }, "Italic"))) return;
     setStyle((s) => ({ ...s, italic: next }));
-    await apply({ italic: next });
   }, [style.italic, apply]);
 
   const toggleUnderline = useCallback(async () => {
     const next = style.underline !== "none" ? "none" as const : "single" as const;
+    if (!(await apply({ underline: next }, "Underline"))) return;
     setStyle((s) => ({ ...s, underline: next }));
-    await apply({ underline: next });
   }, [style.underline, apply]);
 
   const toggleStrikethrough = useCallback(async () => {
     const next = !style.strikethrough;
+    if (!(await apply({ strikethrough: next }, "Strikethrough"))) return;
     setStyle((s) => ({ ...s, strikethrough: next }));
-    await apply({ strikethrough: next });
   }, [style.strikethrough, apply]);
 
   const changeFontFamily = useCallback(
     async (e: React.ChangeEvent<HTMLSelectElement>) => {
       const val = e.target.value;
+      if (!(await apply({ fontFamily: val }, "Font"))) return;
       setStyle((s) => ({ ...s, fontFamily: val }));
-      await apply({ fontFamily: val });
     },
     [apply],
   );
@@ -330,8 +337,8 @@ export function MiniFormatToolbar({
     async (e: React.ChangeEvent<HTMLSelectElement>) => {
       const val = parseFloat(e.target.value);
       if (!isNaN(val) && val > 0) {
+        if (!(await apply({ fontSize: val }, "Font Size"))) return;
         setStyle((s) => ({ ...s, fontSize: val }));
-        await apply({ fontSize: val });
       }
     },
     [apply],
@@ -340,57 +347,57 @@ export function MiniFormatToolbar({
   const increaseFontSize = useCallback(async () => {
     const current = style.fontSize;
     const next = FONT_SIZES.find((s) => s > current) ?? current + 2;
+    if (!(await apply({ fontSize: next }, "Increase Font Size"))) return;
     setStyle((s) => ({ ...s, fontSize: next }));
-    await apply({ fontSize: next });
   }, [style.fontSize, apply]);
 
   const decreaseFontSize = useCallback(async () => {
     const current = style.fontSize;
     const smaller = FONT_SIZES.filter((s) => s < current);
     const next = smaller.length > 0 ? smaller[smaller.length - 1] : Math.max(1, current - 2);
+    if (!(await apply({ fontSize: next }, "Decrease Font Size"))) return;
     setStyle((s) => ({ ...s, fontSize: next }));
-    await apply({ fontSize: next });
   }, [style.fontSize, apply]);
 
   const changeTextColor = useCallback(
     async (color: string) => {
+      if (!(await apply({ textColor: color }, "Font Color"))) return;
       setStyle((s) => ({ ...s, textColor: color }));
-      await apply({ textColor: color });
     },
     [apply],
   );
 
   const changeFillColor = useCallback(
     async (color: string) => {
+      if (!(await apply({ backgroundColor: color }, "Fill Color"))) return;
       setStyle((s) => ({ ...s, backgroundColor: color }));
-      await apply({ backgroundColor: color });
     },
     [apply],
   );
 
   const changeAlign = useCallback(
     async (align: string) => {
+      if (!(await apply({ textAlign: align }, "Alignment"))) return;
       setStyle((s) => ({ ...s, textAlign: align }));
-      await apply({ textAlign: align });
     },
     [apply],
   );
 
   const applyPercentFormat = useCallback(async () => {
-    await apply({ numberFormat: "0%" });
+    await apply({ numberFormat: "0%" }, "Percent Style");
   }, [apply]);
 
   const applyCommaFormat = useCallback(async () => {
-    await apply({ numberFormat: "#,##0.00" });
+    await apply({ numberFormat: "#,##0.00" }, "Comma Style");
   }, [apply]);
 
   const increaseDecimals = useCallback(async () => {
     // A simple approach: apply a format with more decimals
-    await apply({ numberFormat: "#,##0.000" });
+    await apply({ numberFormat: "#,##0.000" }, "Increase Decimal");
   }, [apply]);
 
   const decreaseDecimals = useCallback(async () => {
-    await apply({ numberFormat: "#,##0" });
+    await apply({ numberFormat: "#,##0" }, "Decrease Decimal");
   }, [apply]);
 
   const disabled = !context.selection;

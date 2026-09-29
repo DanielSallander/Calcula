@@ -75,7 +75,7 @@ import {
   resetFrExtents,
 } from "../frExtent";
 import { getFrView, commitFrViewClamp, ensureFrCellVisible, createFrWheelTarget } from "../frView";
-import { FR_DEFAULT_ROW_H, frameWidth, frameHeight } from "../frDimensions";
+import { FR_DEFAULT_ROW_H, frameWidth, frameHeight, contentWidth, contentHeight } from "../frDimensions";
 import { registerObjectWheelTarget, handleObjectWheel } from "../../../_shared/lib/objectWheelScroll";
 
 function info(id: string, overrides: Partial<FloatingRangeInfo> = {}): FloatingRangeInfo {
@@ -391,6 +391,45 @@ describe("the wheel", () => {
     const ev = wheelOver("a", { deltaY: 1000 });
     expect(handleObjectWheel(ev)).toBe(true);
     expect(getFrScroll("a").top).toBe(40);
+  });
+
+  // W16 (wave C; E10c): a PAGE-mode wheel (deltaMode 2) moved by the whole
+  // frame -- title bar and column header included -- so one page skipped the
+  // rows under the chrome. A page is the CELL AREA (the window's cells).
+  it("a page-mode wheel moves by one page of CELLS, not by the frame with its chrome", () => {
+    upsertFromInfo(info("a")); // a 4-row window of 20px rows = an 80px cell area
+    recordFrUsedExtent("a", 40, 3);
+    setGridRegions([region("a")]);
+    const e = getFloatingRangeById("a")!;
+    expect(frameHeight(e)).toBeGreaterThan(4 * FR_DEFAULT_ROW_H); // the chrome is real
+    const ev = wheelOver("a", { deltaY: 1, deltaMode: 2 });
+    expect(handleObjectWheel(ev)).toBe(true);
+    expect(getFrScroll("a")).toEqual({ left: 0, top: 4 * FR_DEFAULT_ROW_H });
+  });
+
+  it("a horizontal page moves by the cell area's width (the row header is chrome)", () => {
+    upsertFromInfo(info("a", { colWidths: {} })); // 3 columns
+    recordFrUsedExtent("a", 4, 30);
+    setGridRegions([region("a")]);
+    const e = getFloatingRangeById("a")!;
+    expect(contentWidth(e)).toBeLessThan(frameWidth(e)); // the row header is real
+    const ev = wheelOver("a", { deltaX: 1, deltaMode: 2 });
+    expect(handleObjectWheel(ev)).toBe(true);
+    expect(getFrScroll("a").left).toBe(contentWidth(e));
+  });
+
+  // Review C: Shift turns a vertical wheel sideways -- and the helper scaled
+  // the page BEFORE it turned it, so a Shift page moved sideways by the cell
+  // area's HEIGHT (80px here) instead of one page across.
+  it("a Shift page-mode wheel moves sideways by the cell area's WIDTH, not its height", () => {
+    upsertFromInfo(info("a", { colWidths: {} })); // 3 columns, 4 rows
+    recordFrUsedExtent("a", 4, 30);
+    setGridRegions([region("a")]);
+    const e = getFloatingRangeById("a")!;
+    expect(contentWidth(e)).not.toBe(contentHeight(e)); // the two axes differ, or this proves nothing
+    const ev = wheelOver("a", { deltaY: 1, deltaMode: 2, shiftKey: true });
+    expect(handleObjectWheel(ev)).toBe(true);
+    expect(getFrScroll("a")).toEqual({ left: contentWidth(e), top: 0 });
   });
 
   it("a range with NO overflow lets the wheel through to the page", () => {

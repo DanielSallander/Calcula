@@ -56,6 +56,14 @@ export interface ObjectWheelTarget {
   setScroll(region: GridRegion, left: number, top: number): void;
   /** Pixels per wheel LINE (deltaMode 1). Default 20. */
   lineSize?: number;
+  /**
+   * One wheel PAGE (deltaMode 2), in content px: the size of the object's
+   * scrolling VIEWPORT. Default: the whole floating frame, which is right only
+   * for an object with no chrome around its content. A floating grid's
+   * viewport is its cell area -- the title bar and headers do not scroll, and
+   * a page sized by the frame skipped the rows under them (W16).
+   */
+  pageSize?(region: GridRegion): { width: number; height: number };
 }
 
 /** Where floating regions sit on the canvas right now. */
@@ -89,9 +97,11 @@ export function topFloatingRegionAt(
 }
 
 /**
- * The wheel delta in content px. Line mode multiplies by `lineSize`, page mode
- * by the object's own size; Shift with a purely vertical wheel scrolls
- * horizontally (the Windows convention).
+ * The wheel delta in content px. Shift with a purely vertical wheel scrolls
+ * horizontally (the Windows convention); then line mode multiplies by
+ * `lineSize`, page mode by the object's own size ON THE AXIS IT MOVES. The
+ * turn comes first: scaled first, a Shift page moved sideways by the
+ * viewport's HEIGHT (review C).
  */
 export function wheelDeltaPx(
   e: Pick<WheelEvent, "deltaX" | "deltaY" | "deltaMode" | "shiftKey">,
@@ -100,16 +110,16 @@ export function wheelDeltaPx(
 ): { dx: number; dy: number } {
   let dx = e.deltaX;
   let dy = e.deltaY;
+  if (e.shiftKey && dx === 0) {
+    dx = dy;
+    dy = 0;
+  }
   if (e.deltaMode === DOM_DELTA_LINE) {
     dx *= lineSize;
     dy *= lineSize;
   } else if (e.deltaMode === DOM_DELTA_PAGE) {
     dx *= page.width;
     dy *= page.height;
-  }
-  if (e.shiftKey && dx === 0) {
-    dx = dy;
-    dy = 0;
   }
   return { dx, dy };
 }
@@ -192,10 +202,8 @@ export function handleObjectWheel(e: WheelEvent): boolean {
   if (!scroll) return false;
 
   const f = region.floating!;
-  const { dx, dy } = wheelDeltaPx(e, target.lineSize ?? DEFAULT_LINE_SIZE, {
-    width: f.width,
-    height: f.height,
-  });
+  const page = target.pageSize?.(region) ?? { width: f.width, height: f.height };
+  const { dx, dy } = wheelDeltaPx(e, target.lineSize ?? DEFAULT_LINE_SIZE, page);
   const next = applyWheelDelta(scroll, dx, dy);
   if (!next) return false;
 

@@ -433,3 +433,189 @@ describe("worksheet mode is unchanged", () => {
     expect(pivotRefreshes).toBe(0);
   });
 });
+
+// Wave D, X3 (completes W24): Insert > PivotTable asks for no prefill
+// (`suppressAutoRange`) while a floating grid owns the selection: Core's
+// selection is then a cell HIDDEN under it, and the dialog detected the data
+// region around that cell and offered it as the source.
+describe("worksheet mode: the opener asks for no prefill (suppressAutoRange)", () => {
+  beforeEach(() => {
+    h.sheets = [{ index: 0, name: "Sheet1", visibility: "visible" }];
+    h.activeIndex = 0;
+    h.gridState = {
+      selection: { startRow: 0, startCol: 0, endRow: 4, endCol: 2 },
+      surface: "grid",
+      sheetContext: { activeSheetIndex: 0, activeSheetName: "Sheet1" },
+      viewport: { scrollX: 0, scrollY: 0 },
+      viewportDimensions: { width: 1000, height: 600 },
+      zoom: 1,
+    };
+    h.detectDataRegion.mockResolvedValue([0, 0, 4, 2]);
+  });
+
+  const source = () => byTestId<HTMLInputElement>("pivot-worksheet-source-range").value;
+
+  it("fixture: without the flag the source is detected around the selection", async () => {
+    await open();
+    expect(h.detectDataRegion).toHaveBeenCalled();
+    expect(source()).toBe("Sheet1!A1:C5");
+  });
+
+  it("detects nothing and leaves the source empty", async () => {
+    await open({ suppressAutoRange: true });
+    expect(h.detectDataRegion).not.toHaveBeenCalled();
+    expect(source()).toBe("");
+  });
+
+  it("does not offer the source a previous open detected", async () => {
+    await open();
+    expect(source()).toBe("Sheet1!A1:C5");
+    act(() => {
+      root.render(<CreatePivotDialog isOpen={false} onClose={onClose} onCreated={onCreated} />);
+    });
+    await flush();
+    h.detectDataRegion.mockClear();
+    await open({ suppressAutoRange: true });
+    expect(h.detectDataRegion).not.toHaveBeenCalled();
+    expect(source()).toBe("");
+  });
+
+  it("still takes a table the opener names: that is not a guess from the selection", async () => {
+    await open({ suppressAutoRange: true, tableName: "Sales" });
+    expect(h.detectDataRegion).not.toHaveBeenCalled();
+    expect(source()).toBe("Sales");
+  });
+});
+
+// BUG-0149: typing `Sheet2!A1:D9` on Sheet1 sent `sourceSheet` = the sheet
+// active when the dialog opened, and the backend strips the prefix -- the
+// pivot summarised Sheet1!A1:D9.
+describe("worksheet mode: a typed sheet prefix names the source sheet (BUG-0149)", () => {
+  beforeEach(() => {
+    h.sheets = [
+      { index: 0, name: "Sheet1", visibility: "visible" },
+      { index: 1, name: "Sheet2", visibility: "visible" },
+      { index: 2, name: "Canvas1", visibility: "visible", kind: "canvas" },
+    ];
+    h.activeIndex = 0;
+    h.gridState = {
+      selection: null,
+      surface: "grid",
+      sheetContext: { activeSheetIndex: 0, activeSheetName: "Sheet1" },
+      viewport: { scrollX: 0, scrollY: 0 },
+      viewportDimensions: { width: 1000, height: 600 },
+      zoom: 1,
+    };
+    h.detectDataRegion.mockResolvedValue([0, 0, 4, 2]);
+    h.addSheet.mockImplementation(async (name: string) => ({
+      sheets: [...h.sheets, { index: 3, name }],
+      activeIndex: 3,
+    }));
+  });
+
+  it("sends the TYPED sheet (found ignoring case), not the sheet active when the dialog opened", async () => {
+    await open({ selection: { startRow: 0, startCol: 0, endRow: 4, endCol: 2 } });
+    await typeInto(byTestId<HTMLInputElement>("pivot-worksheet-source-range"), "sheet2!A1:D9");
+    await clickOk();
+
+    expect(h.create).toHaveBeenCalledTimes(1);
+    expect(h.create.mock.calls[0][0]).toMatchObject({ sourceRange: "Sheet2!A1:D9", sourceSheet: 1 });
+  });
+
+  it("refuses a sheet no tab is named, in the dialog -- no sheet is added, nothing is created", async () => {
+    await open({ selection: { startRow: 0, startCol: 0, endRow: 4, endCol: 2 } });
+    await typeInto(byTestId<HTMLInputElement>("pivot-worksheet-source-range"), "Nope!A1:D9");
+    await clickOk();
+
+    expect(container.textContent).toContain('There is no sheet named "Nope".');
+    expect(h.addSheet).not.toHaveBeenCalled();
+    expect(h.create).not.toHaveBeenCalled();
+  });
+
+  it("refuses a canvas as the source, in the dialog", async () => {
+    await open({ selection: { startRow: 0, startCol: 0, endRow: 4, endCol: 2 } });
+    await typeInto(byTestId<HTMLInputElement>("pivot-worksheet-source-range"), "Canvas1!A1:D9");
+    await clickOk();
+
+    expect(container.textContent).toContain(canvasSourceIsCanvasMessage("Canvas1"));
+    expect(h.addSheet).not.toHaveBeenCalled();
+    expect(h.create).not.toHaveBeenCalled();
+  });
+
+  // A dialog opened from a TABLE (Table Design > Summarize with PivotTable
+  // hands the table's name and cells). The table branch overwrote the range
+  // with the table's cells on the dialog-open sheet while `sourceSheet` came
+  // from the TYPED text: one request naming two sources, and the table link
+  // switched the pivot to other data on its first refresh.
+  const TABLE_CELLS = { startRow: 0, startCol: 0, endRow: 4, endCol: 2 };
+
+  it("a table dialog sends the table on its own sheet, linked by name", async () => {
+    await open({ tableName: "Table1", selection: TABLE_CELLS });
+    await clickOk();
+
+    expect(h.create).toHaveBeenCalledTimes(1);
+    expect(h.create.mock.calls[0][0]).toMatchObject({
+      sourceRange: "Sheet1!A1:C5",
+      sourceSheet: 0,
+      sourceTableName: "Table1",
+    });
+  });
+
+  it("the table's name typed in another case still names the table", async () => {
+    await open({ tableName: "Table1", selection: TABLE_CELLS });
+    await typeInto(byTestId<HTMLInputElement>("pivot-worksheet-source-range"), " table1 ");
+    await clickOk();
+
+    expect(h.create.mock.calls[0][0]).toMatchObject({
+      sourceRange: "Sheet1!A1:C5",
+      sourceSheet: 0,
+      sourceTableName: "Table1",
+    });
+  });
+
+  it("a table dialog whose source is retyped as another sheet's range sends THAT range, unlinked", async () => {
+    await open({ tableName: "Table1", selection: TABLE_CELLS });
+    await typeInto(byTestId<HTMLInputElement>("pivot-worksheet-source-range"), "Sheet2!A1:D9");
+    await clickOk();
+
+    expect(h.create).toHaveBeenCalledTimes(1);
+    const request = h.create.mock.calls[0][0] as Record<string, unknown>;
+    expect(request).toMatchObject({ sourceRange: "Sheet2!A1:D9", sourceSheet: 1 });
+    expect(request.sourceTableName).toBeUndefined();
+  });
+
+  // The EXISTING destination named its sheet by an exact-case match and, when
+  // nothing matched, sent no sheet at all: the backend then used the active
+  // sheet, and `sheet2!B3` (or a sheet that does not exist) put the pivot on
+  // the sheet the dialog was opened from -- over its cells.
+  async function typeExistingDestination(text: string): Promise<void> {
+    const existing = container.querySelector<HTMLInputElement>('input[name="destination"][value="existing"]');
+    if (!existing) throw new Error("no Existing Worksheet option");
+    await click(existing);
+    const box = container.querySelector<HTMLInputElement>('input[placeholder="e.g., Sheet2!F1"]');
+    if (!box) throw new Error("no destination box");
+    await typeInto(box, text);
+  }
+
+  it("an existing destination names its sheet ignoring case, as the source does", async () => {
+    await open({ selection: TABLE_CELLS });
+    await typeExistingDestination("sheet2!$B$3");
+    await clickOk();
+
+    expect(h.create).toHaveBeenCalledTimes(1);
+    expect(h.create.mock.calls[0][0]).toMatchObject({ destinationSheet: 1 });
+    expect(h.setActiveSheetApi).toHaveBeenCalledWith(1);
+    expect(h.emitAppEvent).toHaveBeenCalledWith("app:sheet-changed", { sheetIndex: 1, sheetName: "Sheet2" });
+    await afterNavigationWindow();
+    expect(h.emitAppEvent).toHaveBeenCalledWith("app:navigate-to-cell", { row: 2, col: 1 });
+  });
+
+  it("refuses an existing destination on a sheet no tab is named, in the dialog", async () => {
+    await open({ selection: TABLE_CELLS });
+    await typeExistingDestination("Nope!B3");
+    await clickOk();
+
+    expect(container.textContent).toContain('There is no sheet named "Nope".');
+    expect(h.create).not.toHaveBeenCalled();
+  });
+});

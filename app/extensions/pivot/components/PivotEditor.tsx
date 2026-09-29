@@ -16,7 +16,8 @@ import { onAppEvent } from '@api/events';
 import type { SavePivotLayoutRequest } from '@api/pivot';
 import type { DesignStrategySummary } from '@api/designQueryAssist';
 import { TableFieldList } from '../../_shared/components/TableFieldList';
-import { getConnectionBiModel, getPivotFieldConfiguration, setPivotPerspective } from '../lib/pivot-api';
+import { getConnectionBiModel, getPivotFieldConfiguration, getPivotFieldUniqueValues, setPivotPerspective } from '../lib/pivot-api';
+import { useBaseFieldChoices } from './baseFieldChoices';
 import type {
   SourceField,
   ZoneField,
@@ -33,7 +34,7 @@ import type {
   DropZoneType,
   DragField,
 } from './types';
-import { buildBiUpdateRequest } from './biFieldsRequest';
+import { buildBiUpdateRequest, rangeRequestWithHiddenItemEdits } from './biFieldsRequest';
 import type { HiddenItemEditBatch } from './usePivotEditorState';
 import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
 import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
@@ -382,7 +383,9 @@ export function PivotEditor({
         console.log(`[CALP-DIAG]   biRequest: vals=${biRequest.valueFields.length} [${biRequest.valueFields.map(f => f.measureName).join(', ')}]`);
         await pivot.updateBiFields(biRequest);
       } else {
-        await pivot.updateFields(request);
+        // A range pivot sends a field's item filter only when it was edited
+        // here, the same rule (BUG-0184: an absent list now keeps).
+        await pivot.updateFields(rangeRequestWithHiddenItemEdits(request, hiddenItemEdits.edits));
       }
       // The backend took the request: the item-filter edits it carried are
       // on the pivot now, and the next edit must not resend them.
@@ -453,6 +456,7 @@ export function PivotEditor({
     setZoneFieldHiddenItems,
     setAllZones,
     takeHiddenItemEdits,
+    buildUpdateRequest,
     filterUniqueValues,
     calculatedFields,
     flushUpdate,
@@ -698,6 +702,20 @@ export function PivotEditor({
     setNumberFormatIndex(index);
   }, []);
 
+  // The Base field / Base item choices of Show Values As: this pivot's row
+  // and column fields and their items (a range pivot's items come from its
+  // source; a data-model pivot offers the fields without items).
+  const readBaseFieldItems = useCallback(
+    async (sourceIndex: number) => (await getPivotFieldUniqueValues(pivotId, sourceIndex)).uniqueValues ?? [],
+    [pivotId],
+  );
+  const baseFieldChoices = useBaseFieldChoices(
+    valueSettingsIndex !== null,
+    rows,
+    columns,
+    isBiPivot ? null : readBaseFieldItems,
+  );
+
   const handleSaveValueSettings = useCallback((settings: ValueFieldSettings) => {
     if (valueSettingsIndex !== null) {
       handleValueFieldSettings(valueSettingsIndex, settings);
@@ -755,10 +773,14 @@ export function PivotEditor({
 
     // Build and send the update request directly -- through the SAME mapping
     // as handleUpdate, so a lookup toggle never echoes a chip's stale item
-    // filter either (it used to send every row/column chip's load-time list).
+    // filter either (it used to send every row/column chip's load-time list),
+    // and from the SAME zone request (`buildUpdateRequest`). Built from the
+    // raw chips, every values chip -- a calculated field included -- became a
+    // measure reference named after it, and the request carried no layout,
+    // no calculated fields and no column order (review round 3).
     const hiddenItemEdits = takeHiddenItemEdits();
     const biRequest = buildBiUpdateRequest(
-      { pivotId, rowFields: rows, columnFields: columns, valueFields: values, filterFields: filters },
+      buildUpdateRequest(),
       { calcGroupNames, biTableNames, lookupColumns, hiddenItemEdits: hiddenItemEdits.edits },
     );
     pivot.updateBiFields(biRequest).then(() => {
@@ -767,7 +789,7 @@ export function PivotEditor({
     }).catch((err) => {
       console.error('Failed to update pivot after lookup toggle:', err);
     });
-  }, [lookupColumns, calcGroupNames, isBiPivot, biTableNames, pivotId, rows, columns, values, filters, onViewUpdate, deferUpdate, markPendingChanges, takeHiddenItemEdits]);
+  }, [lookupColumns, calcGroupNames, isBiPivot, biTableNames, pivotId, rows, columns, values, filters, onViewUpdate, deferUpdate, markPendingChanges, takeHiddenItemEdits, buildUpdateRequest]);
 
   // The calculation group currently PLACED on this pivot: the zone chip named
   // after a model calculation group, wherever it sits (rows/columns/filters).
@@ -1011,6 +1033,7 @@ export function PivotEditor({
         <ValueFieldSettingsModal
           isOpen={true}
           field={values[valueSettingsIndex]}
+          availableFields={baseFieldChoices}
           onSave={handleSaveValueSettings}
           onCancel={() => setValueSettingsIndex(null)}
         />

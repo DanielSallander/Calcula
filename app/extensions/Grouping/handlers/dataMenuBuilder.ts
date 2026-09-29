@@ -4,6 +4,7 @@
 //          Uses gridExtensions.registerContextMenuItem for right-click menu items.
 
 import type { ExtensionContext } from "@api/contract";
+import type { MenuItemDefinition } from "@api/uiTypes";
 import {
   gridExtensions,
   type GridContextMenuItem,
@@ -15,33 +16,13 @@ import {
   IconOtherOptions,
 } from "@api";
 import {
-  performGroupRows,
-  performUngroupRows,
-  performGroupColumns,
-  performUngroupColumns,
   performShowLevel,
   performClearOutline,
   getCurrentOutlineInfo,
 } from "../lib/groupingStore";
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/** Normalize a selection range so startRow <= endRow, startCol <= endCol. */
-function normalizeRange(sel: {
-  startRow: number;
-  endRow: number;
-  startCol: number;
-  endCol: number;
-}): { startRow: number; endRow: number; startCol: number; endCol: number } {
-  return {
-    startRow: Math.min(sel.startRow, sel.endRow),
-    endRow: Math.max(sel.startRow, sel.endRow),
-    startCol: Math.min(sel.startCol, sel.endCol),
-    endCol: Math.max(sel.startCol, sel.endCol),
-  };
-}
+// Group / Ungroup of Core's selection, shared by every door (menu, context
+// menu, commands): it refuses while a selection owner holds the selection.
+import { groupSelection, ungroupSelection } from "../lib/groupSelection";
 
 // ============================================================================
 // Data Menu Items
@@ -53,13 +34,16 @@ function normalizeRange(sel: {
  * Items are appended after existing filter items.
  * @param context - ExtensionContext for UI registration
  * @param getSelection - function to retrieve the current grid selection
+ * @returns the cleanup for deactivation. It takes back Grouping's own
+ *   CHILDREN of Outline, never "data:outline" itself: Subtotals adds its item
+ *   to the same submenu, which goes with the last child (X18).
  */
 export function registerGroupingMenuItems(
   context: ExtensionContext,
   getSelection: () => { startRow: number; endRow: number; startCol: number; endCol: number; type?: string } | null
-): void {
+): () => void {
   // "Outline" submenu grouping all outline/grouping commands
-  context.ui.menus.registerItem("data", {
+  const outline: MenuItemDefinition = {
     id: "data:outline",
     label: "Outline",
     icon: IconOutline,
@@ -69,32 +53,14 @@ export function registerGroupingMenuItems(
         label: "Group",
         shortcut: "Alt+Shift+Right",
         icon: IconGroup,
-        action: () => {
-          const sel = getSelection();
-          if (!sel) return;
-          const norm = normalizeRange(sel);
-          if (sel.type === "columns") {
-            performGroupColumns(norm.startCol, norm.endCol);
-          } else {
-            performGroupRows(norm.startRow, norm.endRow);
-          }
-        },
+        action: () => groupSelection(getSelection()),
       },
       {
         id: "data:outline:ungroup",
         label: "Ungroup",
         shortcut: "Alt+Shift+Left",
         icon: IconUngroup,
-        action: () => {
-          const sel = getSelection();
-          if (!sel) return;
-          const norm = normalizeRange(sel);
-          if (sel.type === "columns") {
-            performUngroupColumns(norm.startCol, norm.endCol);
-          } else {
-            performUngroupRows(norm.startRow, norm.endRow);
-          }
-        },
+        action: () => ungroupSelection(getSelection()),
       },
       {
         id: "data:outline:showLevel",
@@ -131,7 +97,14 @@ export function registerGroupingMenuItems(
         },
       },
     ],
-  });
+  };
+  // The ids come from the definition itself, so an item added above is taken
+  // back without editing a second list.
+  const ownChildIds = (outline.children ?? []).map((child) => child.id);
+  context.ui.menus.registerItem("data", outline);
+  return () => {
+    for (const id of ownChildIds) context.ui.menus.unregisterItem("data", id);
+  };
 }
 
 // ============================================================================
@@ -162,15 +135,7 @@ export function registerGroupingContextMenuItems(): () => void {
         }
         return ctx.selection.startRow !== ctx.selection.endRow;
       },
-      onClick: async (ctx) => {
-        if (!ctx.selection) return;
-        const norm = normalizeRange(ctx.selection);
-        if (ctx.selection.type === "columns") {
-          await performGroupColumns(norm.startCol, norm.endCol);
-        } else {
-          await performGroupRows(norm.startRow, norm.endRow);
-        }
-      },
+      onClick: (ctx) => groupSelection(ctx.selection ?? null),
     },
     {
       id: "grouping:ungroup",
@@ -186,15 +151,7 @@ export function registerGroupingContextMenuItems(): () => void {
         }
         return info.maxRowLevel > 0;
       },
-      onClick: async (ctx) => {
-        if (!ctx.selection) return;
-        const norm = normalizeRange(ctx.selection);
-        if (ctx.selection.type === "columns") {
-          await performUngroupColumns(norm.startCol, norm.endCol);
-        } else {
-          await performUngroupRows(norm.startRow, norm.endRow);
-        }
-      },
+      onClick: (ctx) => ungroupSelection(ctx.selection ?? null),
     },
   ];
 

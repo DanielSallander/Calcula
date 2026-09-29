@@ -6,7 +6,7 @@
 
 import React from "react";
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { IconNotebook, showToast } from "@api";
+import { IconNotebook, showToast, unregisterMenu } from "@api";
 import { listenTauriEvent } from "@api/backend";
 import {
   SCRIPT_DEFERRED_ACTIONS_EVENT,
@@ -33,6 +33,14 @@ import {
 // ============================================================================
 
 const VIEW_ID = "script-notebook";
+
+/**
+ * Toggle the Notebook panel -- the command the keybinding registry's
+ * `ext.scriptNotebook.toggle` (Ctrl+Shift+N) runs. The registry named this id
+ * long before anything registered it; the key worked only through a window
+ * listener here, which a remap in Settings could not move (BUG-0183 class).
+ */
+export const SCRIPT_NOTEBOOK_TOGGLE_COMMAND = "scriptNotebook.toggle";
 
 // ============================================================================
 // Icon
@@ -117,6 +125,10 @@ function activate(context: ExtensionContext): void {
       },
     ],
   });
+  // Taken back on deactivate (X19) -- but Developer is SHARED (AI Chat,
+  // Controls, the Macro Recorder, Scriptable Objects add their items), so it
+  // stays for as long as any of theirs is still in it.
+  cleanupFns.push(() => unregisterMenu("developer", { keepWhileShared: true }));
 
   // 2b. Data menu entry — the notebook is an ANALYSIS workbench, so it belongs
   //     next to the other data tools, not only under Developer. The Developer
@@ -130,18 +142,11 @@ function activate(context: ExtensionContext): void {
       context.ui.activityBar.toggle(VIEW_ID);
     },
   });
+  cleanupFns.push(() => context.ui.menus.unregisterItem("data", "data:notebook"));
 
-  // 3. Keyboard shortcut: Ctrl+Shift+N to toggle notebook
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.ctrlKey && e.shiftKey && e.key === "N") {
-      e.preventDefault();
-      context.ui.activityBar.toggle(VIEW_ID);
-    }
-  };
-  window.addEventListener("keydown", handleKeyDown, true);
-  cleanupFns.push(() =>
-    window.removeEventListener("keydown", handleKeyDown, true),
-  );
+  // 3. The command the registry's Ctrl+Shift+N runs (the one keyboard path).
+  context.commands.register(SCRIPT_NOTEBOOK_TOGGLE_COMMAND, () => context.ui.activityBar.toggle(VIEW_ID));
+  cleanupFns.push(() => context.commands.unregister(SCRIPT_NOTEBOOK_TOGGLE_COMMAND));
 
   // 4. Listen for deferred actions from script execution — the whole
   //    DeferredAction vocabulary (navigation, view/display toggles, fills,

@@ -200,6 +200,16 @@ export function handleBackgroundPointerDown(e: Event): void {
 
   const start = canvasToPage(d.x, d.y);
   const onMove = (ev: MouseEvent): void => {
+    // A band exists only while the primary button is HELD. A move with it up
+    // means the release was never heard -- and then the band followed the
+    // bare pointer and the next click anywhere (on an object) "released" it,
+    // selecting everything between (found live 2026-09-29, e2e fixall-canvas
+    // LIVE-2: an instant press-and-release on the empty page). The press
+    // already did what a click does (it deselected), so nothing is applied.
+    if ((ev.buttons & 1) === 0) {
+      endMarquee(false);
+      return;
+    }
     const p = clientToCanvas(ev.clientX, ev.clientY);
     if (p) updateMarquee(p.x, p.y);
   };

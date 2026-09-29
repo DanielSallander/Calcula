@@ -404,6 +404,22 @@ export function removeFloatingControlsForSheet(sheetIndex: number): void {
   floatingControls = floatingControls.filter((c) => c.sheetIndex !== sheetIndex);
 }
 
+/**
+ * Remove every control whose sheet is NOT `sheetIndex` and return the sheets
+ * that were purged.
+ *
+ * The store holds exactly one sheet (the overlay regions are sheet-blind), so
+ * on a sheet switch everything else must go -- not only the sheet the loader
+ * last recorded: a control inserted on a sheet the store had not loaded yet
+ * otherwise stays published on the next one (found live 2026-09-29, e2e
+ * fixall-canvas LIVE-1: a canvas's shape painted on Sheet1).
+ */
+export function removeFloatingControlsNotOnSheet(sheetIndex: number): number[] {
+  const purged = [...new Set(floatingControls.map((c) => c.sheetIndex))].filter((s) => s !== sheetIndex);
+  for (const s of purged) removeFloatingControlsForSheet(s);
+  return purged;
+}
+
 /** Reset the entire floating store (used during extension deactivation). */
 export function resetFloatingStore(): void {
   floatingControls = [];

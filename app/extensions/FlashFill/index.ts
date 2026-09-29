@@ -1,6 +1,7 @@
 //! FILENAME: app/extensions/FlashFill/index.ts
 // PURPOSE: Flash Fill extension entry point.
-// CONTEXT: Registers Ctrl+E keyboard shortcut and Data menu item.
+// CONTEXT: Registers the `flashfill.execute` command (the keybinding
+//          registry's Ctrl+E runs it) and the Data menu item.
 //          Detects patterns from user-provided examples and fills remaining cells.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
@@ -11,15 +12,16 @@ import {
   commitUndoTransaction,
   cancelUndoTransaction,
   registerMenuItem,
+  unregisterMenuItem,
   emitAppEvent,
   AppEvents,
   showToast,
   IconFlashFill,
-  isKeyClaimed,
 } from "@api";
 import { getGridBounds } from "@api/lib";
-import { isEditKeystroke } from "@api/editing";
 import { getGridStateSnapshot } from "@api/grid";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { ownUndoTransaction, type UndoTransactionCloses } from "@api/undoTicket";
 import { learn, applyProgram } from "./lib/patternEngine";
 import type { Example, Program } from "./lib/patternEngine";
 import type { CellData } from "@api/types";
@@ -29,6 +31,12 @@ import type { CellData } from "@api/types";
 // ============================================================================
 
 const cleanupFns: (() => void)[] = [];
+
+/** Flash Fill's closes, read when a close runs (see ownUndoTransaction). */
+const UNDO_CLOSES: UndoTransactionCloses = {
+  commitUndoTransaction: (...ticket) => commitUndoTransaction(...ticket),
+  cancelUndoTransaction: (...ticket) => cancelUndoTransaction(...ticket),
+};
 
 // ============================================================================
 // Flash Fill Logic
@@ -45,6 +53,11 @@ const cleanupFns: (() => void)[] = [];
  * 5. Apply the pattern to all remaining rows in the data region.
  */
 async function executeFlashFill(): Promise<void> {
+  // Every door (Data menu, Ctrl+E, a script) comes through here. It fills the
+  // column of Core's active cell -- HIDDEN while something else owns the
+  // selection (a floating grid's selected cell) -- so refuse, once (D4,
+  // BUG-0185 class).
+  if (refuseIfSelectionOwned("Flash Fill")) return;
   const snapshot = getGridStateSnapshot();
   if (!snapshot) return;
   const selection = snapshot.selection;
@@ -128,17 +141,19 @@ async function executeFlashFill(): Promise<void> {
   // Commit as undoable batch. The batch can now be REFUSED (sheet protection),
   // and neither call site awaits this function, so an unguarded throw would
   // surface as an unhandled rejection AND leave the transaction open for later
-  // edits to join.
-  await beginUndoTransaction("Flash Fill");
+  // edits to join. It closes ONLY what its own begin opened: run inside a
+  // script's open batch it JOINS, and the script closes that step -- a
+  // refusal never drops the batch's undo record (wave F, Z6).
+  const tx = ownUndoTransaction(await beginUndoTransaction("Flash Fill"), UNDO_CLOSES);
   try {
     await updateCellsBatch(updates);
   } catch (err) {
-    await cancelUndoTransaction().catch(() => {});
+    await tx.cancel().catch(() => {});
     const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
     showToast(msg, { variant: "error" });
     return;
   }
-  await commitUndoTransaction();
+  await tx.commit();
 
   emitAppEvent(AppEvents.GRID_REFRESH);
   showToast(
@@ -296,28 +311,16 @@ async function buildUpdates(
 }
 
 // ============================================================================
-// Keyboard Handler
+// Command
 // ============================================================================
 
-function handleKeyDown(e: KeyboardEvent): void {
-  // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
-  // field, a shape's declared hit rectangle -- is not this extension's.
-  // The tag list below cannot see a <select> or a <button>; the claim can.
-  // See core/lib/pointerClaims.ts, and the census in
-  // core/lib/globalInputListeners.ts (a new global listener adds a row).
-  if (isKeyClaimed(e)) return;
-  // Ctrl+E: Flash Fill
-  if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "e") {
-    // Don't intercept while the user is typing (a text field) or while any
-    // cell edit is in progress -- the tag list this replaced could not see a
-    // floating grid's live cell edit parked with the keyboard on the grid.
-    if (isEditKeystroke(e)) return;
-
-    e.preventDefault();
-    e.stopPropagation();
-    executeFlashFill();
-  }
-}
+/**
+ * The Flash Fill command -- script-safe, so scripts call it by this exact
+ * spelling, and the keybinding registry's `ext.flashFill` (Ctrl+E) runs it.
+ * The registry is the ONE keyboard path ("not-editing": never in a text
+ * field, a claim or a cell edit), so a remap in Settings moves the key.
+ */
+export const FLASH_FILL_COMMAND = "flashfill.execute";
 
 // ============================================================================
 // Lifecycle
@@ -327,9 +330,10 @@ function activate(context: ExtensionContext): void {
   console.log("[FlashFill] Activating...");
 
   // 1. Register command
-  context.commands.register("flashfill.execute", async () => {
+  context.commands.register(FLASH_FILL_COMMAND, async () => {
     await executeFlashFill();
   }, { scriptSafe: true });
+  cleanupFns.push(() => context.commands.unregister(FLASH_FILL_COMMAND));
 
   // 2. Register Data menu item
   registerMenuItem("data", {
@@ -341,10 +345,8 @@ function activate(context: ExtensionContext): void {
       executeFlashFill();
     },
   });
-
-  // 3. Register keyboard shortcut
-  window.addEventListener("keydown", handleKeyDown, true);
-  cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
+  // Its OWN item back on deactivate (wave E, Y14): the Data menu is AutoFilter's.
+  cleanupFns.push(() => unregisterMenuItem("data", "flashfill"));
 
   console.log("[FlashFill] Activated successfully.");
 }

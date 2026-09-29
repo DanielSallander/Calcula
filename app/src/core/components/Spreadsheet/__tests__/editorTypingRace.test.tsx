@@ -83,6 +83,8 @@ import { GridProvider, useGridContext } from "../../../state/GridContext";
 import { getInitialState } from "../../../state/gridReducer";
 import { setSelection } from "../../../state/gridActions";
 import { setGlobalIsEditing } from "../../../hooks";
+import { DISCARD_EDIT_EVENT, isEditorOpening } from "../../../lib/editOpenBuffer";
+import { isCoreCellEditOpen } from "../../../lib/cellEditFlag";
 import {
   DEFAULT_GRID_CONFIG,
   createEmptyDimensionOverrides,
@@ -452,6 +454,37 @@ describe("typing to open the inline editor", () => {
     const el = editorEl();
     expect(el).not.toBeNull();
     expect(document.activeElement).toBe(el);
+  });
+
+  // -------------------------------------------------------------------------
+  // A REPLACED document discards the open edit (E9)
+  // -------------------------------------------------------------------------
+
+  it("the document is replaced under an open edit: the editor closes, nothing is committed, the flag is down", async () => {
+    await mount();
+    await typeOnGrid("old");
+    await releaseBackend();
+    expect(editorEl()?.value).toBe("old");
+
+    // What core/lib/file-api.ts sends on newFile / openFileAtPath / any
+    // announceBackendStateReplaced (calp_checkout).
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(DISCARD_EDIT_EVENT));
+    });
+    await settle();
+
+    expect(editorEl()).toBeNull();
+    expect(committed).toEqual([]);
+    expect(isCoreCellEditOpen()).toBe(false);
+  });
+
+  it("a replacement while the editor is still OPENING drops the typed keys too", async () => {
+    await mount();
+    await typeOnGrid("ab");
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(DISCARD_EDIT_EVENT));
+    });
+    expect(isEditorOpening()).toBe(false);
   });
 });
 

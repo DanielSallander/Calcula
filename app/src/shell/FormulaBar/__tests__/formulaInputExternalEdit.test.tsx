@@ -67,6 +67,7 @@ vi.mock("../../../api/formulaAutocomplete", () => ({
 }));
 
 import { FormulaInput } from "../FormulaInput";
+import { setMoveAfterReturn, setMoveDirection } from "../../../api/editingPreferences";
 import { __resetExternalEditForTests } from "../../../core/lib/formulaEditTarget";
 import {
   createFakeExternalEdit,
@@ -325,6 +326,28 @@ describe("FormulaInput -- a live external SESSION", () => {
     expect(fake.calls.map((c) => c.fn)).toContain("cancel");
     expect(h.cancelEdit).not.toHaveBeenCalled();
     expect(commitCompletes).toBe(0);
+  });
+
+  it("(g1) Enter's move is the Move-after-Return preference (E4): off commits in place, 'right' moves right", async () => {
+    try {
+      setMoveAfterReturn(false);
+      let fake = await liveSession("=1");
+      await focusBar();
+      await key("Enter");
+      expect(fake.calls.filter((c) => c.fn === "commit")).toEqual([{ fn: "commit", args: [null] }]);
+
+      act(() => root.unmount());
+      root = createRoot(container);
+      setMoveAfterReturn(true);
+      setMoveDirection("right");
+      fake = await liveSession("=1");
+      await focusBar();
+      await key("Enter", { shiftKey: true });
+      expect(fake.calls.filter((c) => c.fn === "commit")).toEqual([{ fn: "commit", args: ["left"] }]);
+    } finally {
+      setMoveAfterReturn(true);
+      setMoveDirection("down");
+    }
   });
 
   it("(g2) Enter/Tab keep the bar focused when a NEW session opened while the commit was in flight", async () => {

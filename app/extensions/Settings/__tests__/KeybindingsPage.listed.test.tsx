@@ -18,7 +18,7 @@ import { KeybindingsPage } from "../components/KeybindingsPage";
 import { initKeybindings, registerKeybinding, isListedKeybinding } from "@api/keybindings";
 import { panelLayout, SurfaceLayoutProvider } from "@api/layout";
 import {
-  FR_REFUSED_GRID_KEYS,
+  FR_REFUSED_COMBOS,
   installFrKeyRouting,
 } from "../../FloatingRange/lib/frKeyRouting";
 
@@ -117,12 +117,15 @@ describe("KeybindingsPage: KeyBinding.listed", () => {
     expect(commandIds.filter((c) => c.startsWith("ext.floatingRange.refuse."))).toEqual([]);
     // The range's own Delete/Backspace is a real shortcut, not a refusal.
     expect(labels.filter((l) => l === "Clear Floating Range Cells")).toHaveLength(2);
-    // The keys the range refuses are still listed under their real owners.
+    // The keys whose commands refuse in their own door are still listed under
+    // their real owners.
     for (const label of ["Copy", "Paste", "Fill Down", "Insert Table", "Toggle AutoFilter", "Insert Hyperlink"]) {
       expect(labels, label).toContain(label);
     }
-    // ...and the refusals are registered (dispatch is untouched), just not shown.
-    expect(FR_REFUSED_GRID_KEYS.length).toBeGreaterThan(30);
+    // ...and the refusal is registered (dispatch is untouched), just not shown:
+    // since W18 only the one key no command stands behind (each command's own
+    // door refuses; the range refuses no command by id).
+    expect(FR_REFUSED_COMBOS.length).toBeGreaterThan(0);
   });
 
   it("a conflict warning names only listed bindings", async () => {

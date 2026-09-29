@@ -63,6 +63,7 @@ import {
   getRegionForCell,
 } from "./lib/writebackStore";
 import { openApplicationInspectorWindow } from "./lib/openApplicationInspectorWindow";
+import { designateWritebackRegion } from "./lib/designateWritebackRegion";
 import { installInspectorFormPreviewBridge } from "./lib/inspectorFormPreview";
 import {
   syncWritebackValidators,
@@ -100,6 +101,7 @@ import {
   registerSheetTabDecorationProvider,
   invalidateSheetTabDecorations,
   sheetExtensions,
+  unregisterMenu,
 } from "@api";
 import { CollaborationRoleStatusItem } from "./components/CollaborationRoleStatusItem";
 import { SUBSCRIBED_CHIP, WORKING_COPY_CHIP } from "./lib/roleChipColors";
@@ -591,30 +593,10 @@ function activate(context: ExtensionContext): void {
         label: "Designate Writeback Region...",
         icon: IconWriteback,
         order: 10,
-        action: async () => {
-          if (!currentSelection) {
-            context.ui.notifications.showToast(
-              "Select the cell range to designate first, then run this command again.",
-              { type: "info", duration: 4000 },
-            );
-            return;
-          }
-          try {
-            const sheetId = await getSheetIdForIndex(getActiveSheetIndex());
-            context.ui.dialogs.show(DESIGNATE_WRITEBACK_DIALOG_ID, {
-              sheetId,
-              startRow: currentSelection.startRow,
-              endRow: currentSelection.endRow,
-              startCol: currentSelection.startCol,
-              endCol: currentSelection.endCol,
-            });
-          } catch (err) {
-            context.ui.notifications.showToast(
-              `Cannot designate writeback region: ${err}`,
-              { type: "error", duration: 5000 },
-            );
-          }
-        },
+        action: () =>
+          designateWritebackRegion(context, currentSelection, () =>
+            getSheetIdForIndex(getActiveSheetIndex()),
+          ),
       },
       {
         id: "writeback:openPane",
@@ -640,6 +622,14 @@ function activate(context: ExtensionContext): void {
     ],
   });
 
+  // Both menus are this extension's; taken back on deactivate (X19). Kept
+  // while another extension has added an item to one of them, like every
+  // menu an extension builds for others to join.
+  cleanupFns.push(() => {
+    unregisterMenu(COLLABORATION_MENU_ID, { keepWhileShared: true });
+    unregisterMenu(WRITEBACK_MENU_ID, { keepWhileShared: true });
+  });
+
   // Model packaging lives in the consolidated Model menu — a model is
   // published FROM the Model surface, so the entry point stays there rather
   // than duplicating into the Collaboration menu above.
@@ -650,6 +640,7 @@ function activate(context: ExtensionContext): void {
     order: 50,
     action: () => context.ui.dialogs.show(PUBLISH_MODEL_DIALOG_ID),
   });
+  cleanupFns.push(() => context.ui.menus.unregisterItem("model", "model:publishModel"));
 
   context.ui.menus.registerItem("externalData", {
     id: "externalData:refreshData",
@@ -686,6 +677,7 @@ function activate(context: ExtensionContext): void {
       }
     },
   });
+  cleanupFns.push(() => context.ui.menus.unregisterItem("externalData", "externalData:refreshData"));
 
   // -----------------------------------------------------------------------
   // Phase 9: Writeback readiness — guards, interceptor, event listeners

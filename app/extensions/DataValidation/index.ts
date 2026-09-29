@@ -139,7 +139,7 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(unregGuard);
 
   // 9. Register data menu items
-  registerDataValidationMenuItems(context);
+  cleanupFns.push(registerDataValidationMenuItems(context));
 
   // 10. Subscribe to events
 

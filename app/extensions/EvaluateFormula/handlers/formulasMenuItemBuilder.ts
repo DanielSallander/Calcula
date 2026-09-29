@@ -7,6 +7,7 @@
 
 import {
   registerMenuItem,
+  unregisterMenuItem,
   DialogExtensions,
   IconEvaluateFormula,
   IconVisualizeFormula,
@@ -37,8 +38,12 @@ export function setCurrentSelection(
 /**
  * Register the "Evaluate Formula..." item in the Formulas menu.
  * Assumes the "formulas" menu was already created by Tracing.
+ *
+ * Returns the cleanup for deactivation: it takes back this extension's OWN
+ * items (Visualize Formula... goes with its parent), never the Formulas menu
+ * (wave E, Y14).
  */
-export function registerEvaluateFormulaMenuItem(): void {
+export function registerEvaluateFormulaMenuItem(): () => void {
   registerMenuItem("formulas", {
     id: "formulas:evalFormula:separator",
     label: "",
@@ -71,4 +76,9 @@ export function registerEvaluateFormulaMenuItem(): void {
       },
     ],
   });
+
+  return () => {
+    unregisterMenuItem("formulas", "formulas:evalFormula:separator");
+    unregisterMenuItem("formulas", "formulas:evalFormula");
+  };
 }

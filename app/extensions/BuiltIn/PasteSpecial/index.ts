@@ -8,6 +8,7 @@ import { CoreCommands } from "@api/commands";
 import { DialogExtensions } from "@api/ui";
 import { getGridStateSnapshot } from "@api/state";
 import { getInternalClipboard } from "@api/lib";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 import { PasteSpecialDialog } from "./PasteSpecialDialog";
 import { executePasteSpecial, executePasteLink } from "./pasteSpecialExecute";
 
@@ -37,8 +38,13 @@ function activate(context: ExtensionContext): void {
     priority: 200,
   });
 
-  // Register the PASTE_SPECIAL command
+  // Register the PASTE_SPECIAL command. The dialog pastes into Core's
+  // selection; while something else owns the selection (BUG-0185: a floating
+  // grid's selected cell, Core's selection hidden under it) it does not open.
+  // The quick commands below refuse in the execute functions they share with
+  // the dialog.
   context.commands.register(CoreCommands.PASTE_SPECIAL, () => {
+    if (refuseIfSelectionOwned("Paste Special")) return;
     DialogExtensions.openDialog("paste-special");
   });
 

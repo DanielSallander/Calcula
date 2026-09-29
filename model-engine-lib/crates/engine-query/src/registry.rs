@@ -180,6 +180,14 @@ impl AnyConnector {
     pub fn supports_expression_pushdown(&self) -> bool {
         self.capabilities().expression_pushdown
     }
+
+    /// Whether this connector answers a single-table pushed GROUP BY +
+    /// aggregates at the source (`QueryPlan::PushedAggregation`) -- see
+    /// [`ConnectorCapabilities::aggregate_pushdown`]. A fetch-only connector
+    /// is aggregated locally.
+    pub fn supports_aggregate_pushdown(&self) -> bool {
+        self.capabilities().aggregate_pushdown
+    }
 }
 
 /// Tuning for cross-source semi-join (reverse fact → dimension) pushdown.
@@ -397,6 +405,18 @@ mod capability_tests {
         let c = AnyConnector::InMemory(InMemoryConnector::new());
         assert_eq!(c.capabilities(), ConnectorCapabilities::fetch_only());
         assert!(!c.supports_expression_pushdown());
+        assert!(!c.supports_aggregate_pushdown(), "it ignores group_by / aggregates");
+    }
+
+    #[test]
+    fn postgres_advertises_aggregate_pushdown_too() {
+        assert!(test_capable_connector().supports_aggregate_pushdown());
+    }
+
+    #[test]
+    fn the_file_backed_connectors_are_fetch_only() {
+        let csv = AnyConnector::from(crate::csv_connector::CsvConnector::new(".", "csv"));
+        assert!(!csv.supports_aggregate_pushdown(), "the CSV connector ignores group_by / aggregates");
     }
 
     #[test]

@@ -19,6 +19,9 @@ import { setActiveSheet, type GridAction } from "../state/gridActions";
 // Precedent for this Core -> api/gridDispatch reach: GridContext.tsx and
 // overlayTextEditor.ts. It is the module-level dispatch bridge, not a facade.
 import { dispatchGridAction } from "../../api/gridDispatch";
+// The same leaf module Core's own editor reads the preference from
+// (useSpreadsheetEditing.ts): localStorage getters, no further imports.
+import { getMoveAfterReturn, getMoveDirection } from "../../api/editingPreferences";
 import {
   getExternalEditSession,
   isExternalSessionParked,
@@ -49,6 +52,7 @@ export type GridDispatch = (action: GridAction) => void;
 export async function switchSheetForPointMode(
   index: number,
   dispatch: GridDispatch = dispatchGridAction,
+  options: { refreshDimensions?: boolean } = {},
 ): Promise<SheetsResult> {
   const result = await setActiveSheetApi(index);
   const sheet = result.sheets.find((s) => s.index === result.activeIndex);
@@ -66,9 +70,33 @@ export async function switchSheetForPointMode(
         detail: { newSheetIndex: result.activeIndex, newSheetName: name },
       }),
     );
-    if (live) window.dispatchEvent(new CustomEvent("dimensions:refresh"));
+    if (live || options.refreshDimensions === true) {
+      window.dispatchEvent(new CustomEvent("dimensions:refresh"));
+    }
   }
   return result;
+}
+
+/**
+ * Return the grid from a PARKED session's viewed sheet to its HOST -- the
+ * switch, the refetch and the dimension refresh a live session's return gets
+ * -- whether or not the session survives until the switch lands. Resolves
+ * false when nothing is parked (nothing to return from).
+ *
+ * For an owner going away while its edit is parked (E6: the FloatingRange
+ * extension deactivated mid-pick). Its teardown unregisters the session, and
+ * unregistering clears `parked` WITHOUT a return: the grid stayed on the
+ * viewed sheet with nothing parked, so every family's published objects --
+ * still the HOST's -- painted over it, on the viewed sheet's column widths,
+ * until the next genuine switch. Call it BEFORE the teardown: the host is
+ * captured synchronously, and the refresh no longer depends on the session
+ * being live when the backend answers.
+ */
+export async function returnParkedViewToHost(dispatch: GridDispatch = dispatchGridAction): Promise<boolean> {
+  const session = getExternalEditSession();
+  if (!session || !isExternalSessionParked()) return false;
+  await switchSheetForPointMode(session.hostSheetIndex, dispatch, { refreshDimensions: true });
+  return true;
 }
 
 let ending = false;
@@ -107,6 +135,37 @@ export async function endExternalFormulaSession(
     return true;
   } finally {
     ending = false;
+  }
+}
+
+/**
+ * The move ENTER makes when it commits an external session, from the user's
+ * Move-after-Return preference (File > Options > Editing;
+ * api/editingPreferences.ts) -- the rule Core's own in-cell editor follows
+ * (useSpreadsheetEditing `handleInlineEnter`). Null when the preference is off
+ * or its direction is "none"; Shift reverses the direction.
+ *
+ * Why (E4): every door that commits a floating grid's cell on Enter -- its
+ * in-place editor, the formula bar, the grid container while the edit is
+ * parked -- passed a hard-coded "down" / "up", so a user who had turned
+ * Move-after-Return off, or pointed it right, got Excel's behaviour on the
+ * sheet and a different one in every floating grid. One function, so the
+ * doors cannot disagree.
+ */
+export function enterCommitMove(shiftKey: boolean): ExternalEditMove {
+  if (!getMoveAfterReturn()) return null;
+  const direction = getMoveDirection();
+  if (direction === "none") return null;
+  if (!shiftKey) return direction;
+  switch (direction) {
+    case "down":
+      return "up";
+    case "up":
+      return "down";
+    case "right":
+      return "left";
+    case "left":
+      return "right";
   }
 }
 

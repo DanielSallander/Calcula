@@ -131,6 +131,9 @@ function activate(context: ExtensionContext): void {
     },
     order: 20,
   });
+  // Its OWN item back on deactivate (wave E, Y14): the Developer menu is Script
+  // Notebook's, shared with the Macro Recorder, Controls and others.
+  cleanupFns.push(() => context.ui.menus.unregisterItem("developer", "developer:mcpServer"));
 
   // Add an "AI Chat" menu item under Developer for the in-app Claude chat.
   context.ui.menus.registerItem("developer", {
@@ -143,6 +146,7 @@ function activate(context: ExtensionContext): void {
     },
     order: 21,
   });
+  cleanupFns.push(() => context.ui.menus.unregisterItem("developer", "developer:aiChat"));
 
   isActivated = true;
   console.log("[AIChat] Activated successfully.");

@@ -2,13 +2,26 @@
 // PURPOSE: Registers "Get Data" menu items in the External Data menu for CSV import/export.
 // CONTEXT: Appends items to the "externalData" menu created by ExternalData extension.
 
-import { registerMenuItem, DialogExtensions, IconGetData, IconFromCsv, IconExport } from "@api";
+import {
+  registerMenuItem,
+  unregisterMenuItem,
+  DialogExtensions,
+  IconGetData,
+  IconFromCsv,
+  IconExport,
+} from "@api";
 
 // ============================================================================
 // Menu Registration
 // ============================================================================
 
-export function registerCsvMenuItems(): void {
+/**
+ * Returns the cleanup for deactivation. It takes back CSV's OWN items: the
+ * "From CSV..." CHILD, never the "Get Data" parent -- a source submenu other
+ * extensions can add their own "From ..." to; it goes with its last child
+ * (wave E, Y14) -- and "Export to CSV...".
+ */
+export function registerCsvMenuItems(): () => void {
   registerMenuItem("externalData", {
     id: "externalData:getData",
     label: "Get Data",
@@ -33,4 +46,9 @@ export function registerCsvMenuItems(): void {
       DialogExtensions.openDialog("csv-export", {});
     },
   });
+
+  return () => {
+    unregisterMenuItem("externalData", "externalData:getData:csv");
+    unregisterMenuItem("externalData", "externalData:csv:export");
+  };
 }

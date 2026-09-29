@@ -555,6 +555,26 @@ describe("ColorPopover — picking", () => {
     expect(flyout()).toBeNull();
   });
 
+  // Found live 2026-09-29 (e2e fixall-edit, Font Color): Enter applied the
+  // colour TWICE -- two applies, two undo steps. Enter commits and closes, the
+  // close returns focus and so blurs the field, and the blur committed again
+  // from the same render, whose draft STATE still held the typed text.
+  it("Enter in a FOCUSED hex field applies once, not again on the blur the close causes", async () => {
+    const onChange = vi.fn();
+    render(<ColorSwatch color="#ff0000" onChange={onChange} label="Font colour" />);
+    await click(container.querySelector("button")!);
+    await settle();
+    const hex = flyout()!.querySelector<HTMLInputElement>('input[aria-label="Hex colour"]')!;
+    act(() => hex.focus());
+    expect(document.activeElement, "precondition: the field has focus, so closing blurs it").toBe(hex);
+    setInputValue(hex, "12ab34");
+    key(hex, "Enter");
+    await settle();
+    expect(flyout()).toBeNull();
+    expect(document.activeElement, "precondition: the close moved focus off the field").not.toBe(hex);
+    expect(onChange.mock.calls).toEqual([["#12ab34"]]);
+  });
+
   it("the hex field refuses an invalid colour (aria-invalid, no onChange, stays open)", async () => {
     const onChange = vi.fn();
     render(<ColorSwatch color="#ff0000" onChange={onChange} label="Font colour" />);

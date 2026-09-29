@@ -32,8 +32,8 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.dialogs.unregister("goal-seek"));
 
-  // 2. Register menu item in Data menu
-  registerGoalSeekMenuItem(context);
+  // 2. Register menu item in Data menu (and take it back on deactivate)
+  cleanupFns.push(registerGoalSeekMenuItem(context));
 
   // 3. Track current selection (for menu item to know active cell)
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {

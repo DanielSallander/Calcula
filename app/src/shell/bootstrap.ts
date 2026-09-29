@@ -387,6 +387,7 @@ export function bootstrapShell(): void {
         data: state.data,
       }));
     },
+    isDialogOpen: (dialogId) => DialogExtensionsImpl.isDialogOpen(dialogId),
     onChange: (listener) => DialogExtensionsImpl.onChange(listener),
   };
   registerDialogService(dialogService);
@@ -482,6 +483,7 @@ export function bootstrapShell(): void {
     registerAddIn: (manifest) => legacyRibbonRouting.registerAddIn(manifest),
     unregisterAddIn: (addinId) => legacyRibbonRouting.unregisterAddIn(addinId),
     registerCommand: (command) => ExtensionRegistryImpl.registerCommand(command),
+    unregisterCommand: (command) => ExtensionRegistryImpl.unregisterCommand(command),
     getCommand: (commandId) => ExtensionRegistryImpl.getCommand(commandId),
     getAllCommands: () => ExtensionRegistryImpl.getAllCommands(),
     registerRibbonTab: (tab) => legacyRibbonRouting.registerRibbonTab(tab),

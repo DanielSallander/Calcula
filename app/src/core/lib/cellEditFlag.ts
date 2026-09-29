@@ -31,9 +31,23 @@
 
 let coreCellEditOpen = false;
 
+/**
+ * Which raising of the flag this is: bumped every time it goes UP. Lets the
+ * owner tell "the edit this flag was raised for has ended" from "a NEW edit
+ * raised it again in the meantime" -- the difference between healing a stuck
+ * flag and tearing down a live edit (useEditing's self-heal, BUG-0199).
+ */
+let coreCellEditSessionId = 0;
+
 /** Write the flag. Only useEditing calls this (setGlobalIsEditing and its isEditingRef). */
 export function setCoreCellEditFlag(open: boolean): void {
+  if (open && !coreCellEditOpen) coreCellEditSessionId += 1;
   coreCellEditOpen = open;
+}
+
+/** The current raising of the flag (see coreCellEditSessionId). */
+export function coreCellEditSession(): number {
+  return coreCellEditSessionId;
 }
 
 /** Whether Core's own cell edit is open, wherever its keyboard currently is. */

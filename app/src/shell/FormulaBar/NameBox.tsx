@@ -88,6 +88,7 @@ import {
   getExternalEditVersion,
   getExternalNameBoxAddress,
   resolveExternalAddress,
+  quoteSheetNameForFormula,
 } from "../../api/externalEdit";
 import type { NamedRange } from "../../api";
 import { resolveNamedRangeCoords } from "../../api/lib";
@@ -99,7 +100,9 @@ import {
   resolveStructuredReference,
 } from "../../api/backend";
 import type { Table } from "../../api/backend";
-import { setGlobalIsEditing } from "../../api/editing";
+// NOT Core's cell-edit flag (`setGlobalIsEditing`): this box is a text field,
+// and the flag means "Core's own cell edit is open". Raised here it had no
+// edit behind it, and an unmount while focused left it up for good (E12).
 import {
   parseNameBoxAddress,
   isAddressLike,
@@ -136,7 +139,12 @@ function formatSelectionAddress(
 
 /**
  * Build a refersTo formula string from selection coordinates.
- * Example: "=Sheet1!$A$1:$B$10"
+ * Example: "=Sheet1!$A$1:$B$10", "='My Sheet'!$A$1".
+ *
+ * The sheet is spelled by the formula PARSER's rule (quoteSheetNameForFormula,
+ * W13): it was written with no quoting at all, so a name defined on "My Sheet"
+ * referred to `=My Sheet!$A$1` -- text the parser rejects, and the name
+ * evaluated to an error.
  */
 function buildRefersTo(
   sheetName: string,
@@ -152,11 +160,12 @@ function buildRefersTo(
 
   const startRef = `$${columnToLetter(minCol)}$${minRow + 1}`;
   const endRef = `$${columnToLetter(maxCol)}$${maxRow + 1}`;
+  const sheet = quoteSheetNameForFormula(sheetName);
 
   if (minRow === maxRow && minCol === maxCol) {
-    return `=${sheetName}!${startRef}`;
+    return `=${sheet}!${startRef}`;
   }
-  return `=${sheetName}!${startRef}:${endRef}`;
+  return `=${sheet}!${startRef}:${endRef}`;
 }
 
 /**
@@ -508,7 +517,6 @@ export function NameBox(): React.ReactElement {
     const handleMouseDown = (e: MouseEvent) => {
       if (inputRef.current && !inputRef.current.contains(e.target as Node)) {
         setIsEditing(false);
-        setGlobalIsEditing(false);
         setInputValue(displayValue);
       }
     };
@@ -523,7 +531,6 @@ export function NameBox(): React.ReactElement {
 
   const handleFocus = useCallback(() => {
     setIsEditing(true);
-    setGlobalIsEditing(true);
     setShowDropdown(false);
     setTimeout(() => {
       inputRef.current?.select();
@@ -532,7 +539,6 @@ export function NameBox(): React.ReactElement {
 
   const handleBlur = useCallback(() => {
     setIsEditing(false);
-    setGlobalIsEditing(false);
     setInputValue(displayValue);
   }, [displayValue]);
 
@@ -775,7 +781,6 @@ export function NameBox(): React.ReactElement {
   /** Leave edit mode after an entry that was honoured. */
   const finishEditing = useCallback(() => {
     setIsEditing(false);
-    setGlobalIsEditing(false);
     inputRef.current?.blur();
   }, []);
 
@@ -985,7 +990,6 @@ export function NameBox(): React.ReactElement {
       } else if (e.key === "Escape") {
         e.preventDefault();
         setIsEditing(false);
-        setGlobalIsEditing(false);
         setInputValue(displayValue);
         inputRef.current?.blur();
       }

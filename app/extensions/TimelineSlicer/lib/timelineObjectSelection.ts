@@ -20,7 +20,7 @@ import {
   isTimelineSelected,
   selectTimeline,
 } from "../handlers/selectionHandler";
-import { getTimelineById } from "./timelineSlicerStore";
+import { deleteTimelinesReporting, getTimelineById } from "./timelineSlicerStore";
 
 /** The `GridRegion.type` timelines publish (see timelineSlicerStore). */
 export const TIMELINE_REGION_TYPE = "timeline-slicer";
@@ -79,7 +79,36 @@ export function createTimelineSelectionProvider(): ObjectSelectionProvider {
       const id = timelineIdOf(region);
       return id === null ? null : getTimelineById(id)?.name ?? null;
     },
+
+    // A canvas-wide Delete (a multi-selection spanning families) hands the
+    // timelines their share (W26; withheld in the review of A4 while the
+    // backend's `delete_timeline_slicer` committed whatever transaction was
+    // open, which split the seam's ONE undo step). The backend delete now
+    // JOINS an open transaction behind its `editObjects` gate (wave C, W1);
+    // `timelineDeleteObjects.test.ts` pins that pairing against the Rust
+    // delete PATH (the command and every same-file function it reaches --
+    // `delete_timeline_slicer_core` holds the logic), so a return of the old
+    // begin/commit pair fails the build of this attachment rather than
+    // splitting the user's Ctrl+Z. The Rust tier guards it too
+    // (timeline_slicer/tests.rs: a delete inside an open transaction joins
+    // it; no timeline command runs an unconditional begin/commit pair).
+    deleteObjects: deleteTimelineRegions,
   };
+}
+
+/**
+ * The timelines' share of a canvas-wide Delete, ready for the provider's
+ * `deleteObjects` (see above): resolves once every delete LANDED (the store
+ * re-read); REJECTS with the backend's reason when any was refused, so the
+ * seam keeps the refused ones selected and names them.
+ */
+export async function deleteTimelineRegions(regions: readonly GridRegion[]): Promise<void> {
+  const ids = regions.map(timelineIdOf).filter((id): id is string => id !== null);
+  if (ids.length === 0) return;
+  const refused = await deleteTimelinesReporting(ids);
+  if (refused.length > 0) {
+    throw new Error(Array.from(new Set(refused.map((r) => r.reason))).join(" "));
+  }
 }
 
 /** Register the provider; returns the cleanup for the extension's list. */

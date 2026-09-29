@@ -468,35 +468,37 @@ export function edgeMovesOrigin(edge: FrEdge): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Every index whose size the object actually tracks: the visible window, plus
- * any override that outlives it.
+ * Every index whose size a scale acts on: the visible window, every column the
+ * CONTENT reaches (`extentCols`, the scrollable extent -- M7), plus any
+ * override that outlives both.
  *
- * The second half matters. Shrinking the window HIDES columns without deleting
- * them (and their widths are kept), so scaling only the visible ones would
- * leave the hidden columns at their old size — and the object would visibly
- * skew the moment the window grew back.
+ * The override half matters. Shrinking the window HIDES columns without
+ * deleting them (and their widths are kept), so scaling only the visible ones
+ * would leave the hidden columns at their old size -- and the object would
+ * visibly skew the moment the window grew back.
  *
- * Deliberately NOT the scrollable content extent (M7). An edge drag scales the
- * object's OWN cells -- the window it is sized by, plus any size it once gave a
- * column -- and the frame size derives from the window alone, so the drag
- * already does everything the user can see it do. Materialising a width for
- * every default-width column the content happens to reach (up to 256 columns
- * and 1000 rows) would write that many overrides into the document on one
- * gesture, for cells the object never sized. The cost is that a column
- * scrolled into view from beyond the window keeps its old width after a
- * scale; that is the same "scaling acts on the window" rule, not a skew of
- * sizes the object owns.
+ * The extent half is E10 (open-items 2.af, M7 follow-ups). Scaling the window
+ * alone left every default-width column the content reaches past it at its old
+ * width: scrolled into view after a x1.5 stretch it was narrower than its
+ * neighbours, a skew the user did see. The extent is bounded by the backing
+ * sheet's USED range (not the window maxima), so this writes a width for the
+ * columns there is content in -- the ones a scroll can show -- and no more. A
+ * column content reaches only LATER starts at the default width, as a new
+ * worksheet column does.
  */
-export function trackedColIndices(entry: FloatingRangeEntry): number[] {
+export function trackedColIndices(entry: FloatingRangeEntry, extentCols = 0): number[] {
   const seen = new Set<number>();
-  for (let c = 0; c < entry.cols; c++) seen.add(c);
+  const span = Math.max(entry.cols, extentCols);
+  for (let c = 0; c < span; c++) seen.add(c);
   for (const key of Object.keys(entry.colWidths)) seen.add(Number(key));
   return [...seen].sort((a, b) => a - b);
 }
 
-export function trackedRowIndices(entry: FloatingRangeEntry): number[] {
+/** The row twin of {@link trackedColIndices} (`extentRows`: the rows the content reaches). */
+export function trackedRowIndices(entry: FloatingRangeEntry, extentRows = 0): number[] {
   const seen = new Set<number>();
-  for (let r = 0; r < entry.rows; r++) seen.add(r);
+  const span = Math.max(entry.rows, extentRows);
+  for (let r = 0; r < span; r++) seen.add(r);
   for (const key of Object.keys(entry.rowHeights)) seen.add(Number(key));
   return [...seen].sort((a, b) => a - b);
 }
@@ -542,10 +544,13 @@ export function clampScaleFactor(
  * pulled back: it may shrink, never grow (cap 1) -- the rule Core's
  * `clampResizeToPage` applies to a fixed edge already off the page.
  *
- * `trackedCount` is how many sizes the scale rounds (`scaledColWidths` /
+ * `trackedCount` is how many of the rounded sizes MAKE THE FRAME -- the
+ * window's columns (rows), `entry.cols` / `entry.rows` -- (`scaledColWidths` /
  * `scaledRowHeights` round each to 1/100 px, up to half a hundredth each), so
  * the cap leaves room for that rounding and the frame never lands a fraction
- * of a pixel past the page.
+ * of a pixel past the page. NOT every size the scale writes: since E10 (d)
+ * that is the whole content extent, and counting it left the frame pixels
+ * short of the page.
  */
 export function maxScaleWithin(
   baseFrameExtent: number,
@@ -575,9 +580,10 @@ function roundSize(v: number): number {
 export function scaledColWidths(
   entry: FloatingRangeEntry,
   scale: number,
+  extentCols = 0,
 ): Record<number, number> {
   const out: Record<number, number> = {};
-  for (const c of trackedColIndices(entry)) {
+  for (const c of trackedColIndices(entry, extentCols)) {
     out[c] = roundSize(frColWidth(entry, c) * scale);
   }
   return out;
@@ -587,9 +593,10 @@ export function scaledColWidths(
 export function scaledRowHeights(
   entry: FloatingRangeEntry,
   scale: number,
+  extentRows = 0,
 ): Record<number, number> {
   const out: Record<number, number> = {};
-  for (const r of trackedRowIndices(entry)) {
+  for (const r of trackedRowIndices(entry, extentRows)) {
     out[r] = roundSize(frRowHeight(entry, r) * scale);
   }
   return out;

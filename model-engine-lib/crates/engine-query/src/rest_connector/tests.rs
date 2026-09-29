@@ -1084,6 +1084,7 @@ async fn fetch_data_applies_filters_in_filters_and_or_groups_locally() {
                 column: "region".into(),
                 values: vec!["West".into()],
                 kind: InValueKind::Text,
+                include_null: false,
             }],
             ..fetch("rows")
         })
@@ -1099,6 +1100,7 @@ async fn fetch_data_applies_filters_in_filters_and_or_groups_locally() {
                 column: "region".into(),
                 values: vec![],
                 kind: InValueKind::Text,
+                include_null: false,
             }],
             ..fetch("rows")
         })
@@ -1141,6 +1143,7 @@ async fn fetch_data_applies_filters_in_filters_and_or_groups_locally() {
                 column: "region".into(),
                 values: vec!["East".into(), "North".into()],
                 kind: InValueKind::Text,
+                include_null: false,
             }],
             or_groups: vec![
                 vec![FilterCondition::new(

@@ -30,6 +30,14 @@ import {
   runAllCleanups,
 } from "./formatPainterState";
 import { alertAsync } from "@api/dialogs";
+import { ownUndoTransaction, type OwnedUndoTransaction, type UndoTransactionCloses } from "@api/undoTicket";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
+
+/** A stroke's closes, read when the close runs (see ownUndoTransaction). */
+const UNDO_CLOSES: UndoTransactionCloses = {
+  commitUndoTransaction: (...ticket) => commitUndoTransaction(...ticket),
+  cancelUndoTransaction: (...ticket) => cancelUndoTransaction(...ticket),
+};
 
 // ============================================================================
 // Paintbrush Cursor (SVG data URL)
@@ -84,6 +92,12 @@ export async function captureSourceFormat(
 export async function applyFormatToTarget(target: Selection): Promise<void> {
   if (!isFormatPainterActive()) return;
 
+  // The target is Core's selection. If something else holds the selection
+  // (BUG-0185: a floating grid's selected cell, Core's selection HIDDEN under
+  // it) the paint would land on a cell the user cannot see: refused, once, and
+  // the painter stays armed for a real target.
+  if (refuseIfSelectionOwned("Format Painter")) return;
+
   const sourceStyles = getSourceStyles();
   const { width: srcW, height: srcH } = getSourceDimensions();
 
@@ -94,8 +108,11 @@ export async function applyFormatToTarget(target: Selection): Promise<void> {
   const minCol = Math.min(target.startCol, target.endCol);
   const maxCol = Math.max(target.startCol, target.endCol);
 
+  // Closes ONLY the undo transaction its own begin opened: inside a script's
+  // open batch the stroke joins, and the script closes that step (wave E, Y7).
+  let tx: OwnedUndoTransaction | null = null;
   try {
-    await beginUndoTransaction("Format Painter");
+    tx = ownUndoTransaction(await beginUndoTransaction("Format Painter"), UNDO_CLOSES);
 
     for (let r = minRow; r <= maxRow; r++) {
       for (let c = minCol; c <= maxCol; c++) {
@@ -109,7 +126,7 @@ export async function applyFormatToTarget(target: Selection): Promise<void> {
       }
     }
 
-    await commitUndoTransaction();
+    await tx.commit();
 
     // Refresh style cache and grid
     window.dispatchEvent(new CustomEvent("styles:refresh"));
@@ -123,7 +140,7 @@ export async function applyFormatToTarget(target: Selection): Promise<void> {
     // Close the transaction (left open, later edits silently join it) and
     // tell the user why the paint stopped — a sheet-protection refusal names
     // the cell and the remedy.
-    try { await cancelUndoTransaction(); } catch { /* already closed */ }
+    try { await tx?.cancel(); } catch { /* already closed */ }
     void alertAsync(err instanceof Error ? err.message : String(err));
   }
 
@@ -175,6 +192,12 @@ export async function activateFormatPainter(
     return;
   }
 
+  // The SOURCE is Core's selection -- a cell hidden under a floating grid
+  // while that grid's cell is selected (BUG-0185). Every door (Ctrl+Shift+C,
+  // the ribbon, the Edit menu, Format Painter Lock) comes through here, and
+  // turning the painter OFF (above) is never refused.
+  if (refuseIfSelectionOwned("Format Painter")) return;
+
   console.log(
     `[FormatPainter] Activating (${persistent ? "persistent" : "single-use"})`,
     currentSelection
@@ -202,18 +225,27 @@ export async function activateFormatPainter(
   addCleanup(() => window.removeEventListener("mousemove", handleMouseMove));
 
   // 5. Listen for selection changes and apply on mouseup (supports drag-to-select)
-  let isFirstCallback = true;
+  //
+  // EVERY change after activation is a candidate target. This used to skip
+  // "the first callback" on the belief that the registry replays the current
+  // selection on subscribe -- it does not (ExtensionRegistry.onSelectionChange
+  // only adds the listener), so what it skipped was the USER'S FIRST CLICK:
+  // after Ctrl+Shift+C the first click on B2 painted nothing and a second one
+  // did (found live 2026-09-29, e2e fixall-edit K3). A notification that merely
+  // restates the SOURCE range is not a target: painting a range onto itself
+  // changes nothing, and re-renders can re-announce an unchanged selection.
+  const source = { ...currentSelection };
+  const isSourceRange = (s: Selection): boolean =>
+    s.startRow === source.startRow &&
+    s.startCol === source.startCol &&
+    s.endRow === source.endRow &&
+    s.endCol === source.endCol;
   let pendingTarget: Selection | null = null;
 
   const unsubSelection = ExtensionRegistry.onSelectionChange(
     (newSelection: Selection | null) => {
-      // Skip the first callback - it fires immediately with the current selection
-      if (isFirstCallback) {
-        isFirstCallback = false;
-        return;
-      }
-
       if (!isFormatPainterActive() || !newSelection) return;
+      if (isSourceRange(newSelection)) return;
 
       // Store as pending - apply will happen on mouseup
       pendingTarget = newSelection;

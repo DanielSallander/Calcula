@@ -1838,9 +1838,12 @@ export interface UndoState {
   redoDepth: number;
   /**
    * Whether an undo transaction is currently OPEN (begin without commit).
-   * Probe this before grouping your own writes: beginUndoTransaction is a
-   * no-op while a transaction is open, so an unconditional commit would close
-   * someone else's group early.
+   * A READOUT (test oracles, diagnostics) -- never the way to decide whether a
+   * close is yours: between this probe and your begin the open transaction can
+   * commit, and your "join" then OPENS one nobody closes (the W3 window). Use
+   * the answer of `beginUndoTransaction` itself: a ticket when YOUR begin
+   * opened the transaction (close it, presenting the ticket), null when it
+   * joined another caller's (close nothing) -- `ownUndoTransaction` does both.
    */
   transactionOpen: boolean;
   /**
@@ -1949,24 +1952,54 @@ export interface UndoResult {
 /**
  * Begin an undo transaction. All subsequent cell changes will be grouped
  * into a single undoable action until commitUndoTransaction() is called.
+ *
+ * Resolves a TICKET when THIS begin OPENED the transaction, or `null` when it
+ * JOINED one another caller already holds open (the join marks that step as
+ * shared). Decided by the backend under the one lock that opens it, so it is
+ * the only race-free answer to "is this commit mine?": commit (or cancel)
+ * exactly when this handed you a ticket, and PRESENT it -- the backend then
+ * closes the slot only while it still holds the transaction you opened. A
+ * sheet add / delete / rename / move / copy or a document swap ends that
+ * transaction behind your back (Excel parity), and without the ticket your
+ * close would land on whatever a stranger opened next.
  * @param description - Human-readable label for the transaction (e.g., "Paste 10 cells")
  */
-export async function beginUndoTransaction(description: string): Promise<void> {
-  return invoke<void>("begin_undo_transaction", { description });
+export async function beginUndoTransaction(description: string): Promise<UndoTransactionTicket | null> {
+  return invoke<UndoTransactionTicket | null>("begin_undo_transaction", { description });
 }
+
+/** Names the ONE undo transaction a {@link beginUndoTransaction} opened. */
+export type UndoTransactionTicket = number;
+
+// Reading a begin's answer, and closing ONLY what that begin opened, live in a
+// pure module of their own (no IPC), so a gesture can close through the very
+// commit / cancel it imports -- and a test that mocks this module wholesale
+// still gets the real reading. See undoTransactionOwnership.ts.
+export { readUndoBeginAnswer, ownUndoTransaction } from "./undoTransactionOwnership";
+export type {
+  UndoBeginAnswer,
+  OwnedUndoTransaction,
+  UndoTransactionCloses,
+} from "./undoTransactionOwnership";
 
 /**
  * Commit the current undo transaction, finalizing it as a single undo entry.
+ * With `ticket` (from the begin that opened it): only while the backend's slot
+ * still holds THAT transaction. Without: whatever is open.
  */
-export async function commitUndoTransaction(): Promise<void> {
-  return invoke<void>("commit_undo_transaction");
+export async function commitUndoTransaction(ticket?: UndoTransactionTicket | null): Promise<void> {
+  if (ticket === undefined || ticket === null) return invoke<void>("commit_undo_transaction");
+  return invoke<void>("commit_undo_transaction", { ticket });
 }
 
 /**
- * Cancel the current undo transaction without saving it.
+ * Cancel the current undo transaction without saving it: its undo record is
+ * DROPPED, its writes stay. With `ticket`: only while the backend's slot still
+ * holds THAT transaction. Without: whatever is open.
  */
-export async function cancelUndoTransaction(): Promise<void> {
-  return invoke<void>("cancel_undo_transaction");
+export async function cancelUndoTransaction(ticket?: UndoTransactionTicket | null): Promise<void> {
+  if (ticket === undefined || ticket === null) return invoke<void>("cancel_undo_transaction");
+  return invoke<void>("cancel_undo_transaction", { ticket });
 }
 
 /**

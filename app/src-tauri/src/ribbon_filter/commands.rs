@@ -97,15 +97,19 @@ pub fn create_ribbon_filter(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     ribbon_filter_state.filters.write(&effect).unwrap().insert(id, filter);
 
-    // Record undo for ribbon filter creation (undo = delete)
+    // Record undo for ribbon filter creation (undo = delete), JOINING an open
+    // transaction: every recorder in this file used to begin and commit its
+    // own, and that commit closed a caller's outer transaction half-way
+    // (BUG-0200).
     {
         #[derive(serde::Serialize)]
         struct RibbonFilterCreateSnapshot { filter_id: identity::EntityId }
         let data = serde_json::to_vec(&RibbonFilterCreateSnapshot { filter_id: id }).unwrap_or_default();
-        let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Create ribbon filter");
-        undo_stack.record_custom_restore("ribbon_filter_create".to_string(), data, "Create ribbon filter");
-        undo_stack.commit_transaction();
+        crate::undo_commands::record_restores_joining_open_transaction(
+            &state,
+            "Create ribbon filter",
+            vec![("ribbon_filter_create", data)],
+        );
     }
 
     Ok(result)
@@ -129,14 +133,17 @@ pub fn delete_ribbon_filter(
     log_debug!("RIBBON_FILTER", "delete_ribbon_filter id={}", filter_id);
 
     // Ribbon filters live in `workbook.ribbon_filters`; deleting one changes what a
-    // save writes. (The sibling pane_control family has always done this.)
+    // save writes. (The sibling pane_control family has always done this.) The
+    // unknown-id refusal runs BEFORE the effect, so it leaves the document clean.
+    let pending = ribbon_filter_state.filters.lock_pending().map_err(|e| e.to_string())?;
+    if !pending.contains_key(&filter_id) {
+        return Err(format!("Ribbon filter {} not found", filter_id));
+    }
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let removed = ribbon_filter_state
-        .filters
-        .write(&effect)
-        .unwrap()
-        .remove(&filter_id)
-        .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
+    let removed = {
+        let mut filters = pending.authorize(&effect);
+        filters.remove(&filter_id).ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?
+    };
 
     let pruned_siblings = crate::object_deps::cascade_deleted_filters(
         &ribbon_filter_state,
@@ -144,26 +151,13 @@ pub fn delete_ribbon_filter(
         &[filter_id],
     );
 
-    // Record undo for ribbon filter deletion (undo = recreate)
+    // Record undo for ribbon filter deletion (undo = recreate): the pruned
+    // cross-links and the filter as ONE step, JOINING an open transaction.
     {
-        #[derive(serde::Serialize)]
-        struct RibbonFilterSnapshot {
-            filter_id: identity::EntityId,
-            previous: RibbonFilter,
-        }
-        let data = serde_json::to_vec(&RibbonFilterSnapshot { filter_id, previous: removed }).unwrap_or_default();
-        {
-            let mut undo_stack = state.undo_stack.lock().unwrap();
-            undo_stack.begin_transaction("Delete ribbon filter");
-        }
-        crate::object_deps::record_filter_prune_undo(
-            &state,
-            &pruned_siblings,
-            "Restore filter cross-links",
-        );
-        let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.record_custom_restore("ribbon_filter_delete".to_string(), data, "Delete ribbon filter");
-        undo_stack.commit_transaction();
+        let mut restores = crate::object_deps::encode_filter_prune_restores(&pruned_siblings);
+        let (_, data) = crate::undo_commands::ribbon_filter_restore(filter_id, removed);
+        restores.push(("ribbon_filter_delete", data));
+        crate::undo_commands::record_restores_joining_open_transaction(&state, "Delete ribbon filter", restores);
     }
 
     Ok(())
@@ -178,6 +172,17 @@ pub fn update_ribbon_filter(
     filter_id: identity::EntityId,
     params: UpdateRibbonFilterParams,
 ) -> Result<RibbonFilter, String> {
+    update_ribbon_filter_core(&state, &file_state, &ribbon_filter_state, filter_id, params)
+}
+
+/// [`update_ribbon_filter`] over plain references, for the unit tier.
+pub(crate) fn update_ribbon_filter_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    ribbon_filter_state: &RibbonFilterState,
+    filter_id: identity::EntityId,
+    params: UpdateRibbonFilterParams,
+) -> Result<RibbonFilter, String> {
     log_debug!("RIBBON_FILTER", "update_ribbon_filter id={}", filter_id);
 
     // Gate before the mutating effect: a misleveled pin silently changes
@@ -186,25 +191,22 @@ pub fn update_ribbon_filter(
         crate::slicer::types::validate_filter_level(level)?;
     }
 
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut filters = ribbon_filter_state.filters.write(&effect).unwrap();
+    // Refusal (unknown id) BEFORE the effect; the store guard is dropped
+    // before the undo stack is taken (never both), and the step JOINS an open
+    // transaction -- the FilterDropdown's "level change + apply" and its
+    // Report Connections save are ONE step, so their overwrite question can
+    // take back exactly that step (BUG-0200). This used to begin and commit its
+    // own transaction, which closed the caller's half-way.
+    let pending = ribbon_filter_state.filters.lock_pending().map_err(|e| e.to_string())?;
+    let previous = pending
+        .get(&filter_id)
+        .cloned()
+        .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut filters = pending.authorize(&effect);
     let filter = filters
         .get_mut(&filter_id)
         .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
-
-    // Record undo snapshot before property changes
-    {
-        #[derive(serde::Serialize)]
-        struct RibbonFilterSnapshot {
-            filter_id: identity::EntityId,
-            previous: RibbonFilter,
-        }
-        let data = serde_json::to_vec(&RibbonFilterSnapshot { filter_id, previous: filter.clone() }).unwrap_or_default();
-        let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Update ribbon filter");
-        undo_stack.record_custom_restore("ribbon_filter".to_string(), data, "Update ribbon filter");
-        undo_stack.commit_transaction();
-    }
 
     if let Some(name) = params.name {
         filter.name = name;
@@ -264,47 +266,150 @@ pub fn update_ribbon_filter(
         filter.filter_level = filter_level;
     }
 
-    Ok(filter.clone())
+    let updated = filter.clone();
+    drop(filters);
+    crate::undo_commands::record_restores_joining_open_transaction(
+        state,
+        "Update ribbon filter",
+        vec![crate::undo_commands::ribbon_filter_restore(filter_id, previous)],
+    );
+    Ok(updated)
 }
 
 /// Update ribbon filter selection (which items are checked).
+///
+/// Without `gesture`: the selection alone, recorded JOINING an open
+/// transaction (it used to begin and commit its own, which closed any open
+/// transaction and made the selection a step of its own BENEATH the pivots'
+/// step -- BUG-0200).
+///
+/// With `gesture` -- a ribbon filter CHANGE: the selection AND every pivot
+/// write the frontend resolved for it (this filter on each target pivot, plus
+/// the other active filters that reach the same pivots), as ONE backend
+/// command that records ONE step at the end ([`apply_ribbon_filter_selection_core`]).
+/// The change used to hold a frontend transaction open across the model
+/// re-queries, so an unrelated edit made meanwhile joined its step (BUG-0187).
 #[tauri::command]
-pub fn update_ribbon_filter_selection(
-    state: State<AppState>,
-    file_state: State<crate::persistence::FileState>,
-    ribbon_filter_state: State<RibbonFilterState>,
+#[allow(clippy::too_many_arguments)]
+pub async fn update_ribbon_filter_selection(
+    state: State<'_, AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
+    ribbon_filter_state: State<'_, RibbonFilterState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
     filter_id: identity::EntityId,
     selected_items: Option<Vec<String>>,
-) -> Result<(), String> {
+    gesture: Option<crate::pivot::types::PivotFilterGesture>,
+) -> Result<Option<crate::pivot::types::PivotFilterGestureResponse>, String> {
     log_debug!(
         "RIBBON_FILTER",
-        "update_ribbon_filter_selection id={} items={:?}",
+        "update_ribbon_filter_selection id={} items={:?} gesture={}",
         filter_id,
-        selected_items.as_ref().map(|v| v.len())
+        selected_items.as_ref().map(|v| v.len()),
+        gesture.is_some()
     );
-
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut filters = ribbon_filter_state.filters.write(&effect).unwrap();
-    let filter = filters
-        .get_mut(&filter_id)
-        .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
-
-    // Record undo snapshot before selection change
-    {
-        #[derive(serde::Serialize)]
-        struct RibbonFilterSnapshot {
-            filter_id: identity::EntityId,
-            previous: RibbonFilter,
+    let Some(gesture) = gesture else {
+        if let Some(previous) =
+            write_ribbon_filter_selection_unrecorded(&file_state, &ribbon_filter_state, filter_id, selected_items)?
+        {
+            crate::undo_commands::record_restores_joining_open_transaction(
+                &state,
+                "Ribbon filter change",
+                vec![crate::undo_commands::ribbon_filter_restore(filter_id, previous)],
+            );
         }
-        let data = serde_json::to_vec(&RibbonFilterSnapshot { filter_id, previous: filter.clone() }).unwrap_or_default();
-        let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Ribbon filter change");
-        undo_stack.record_custom_restore("ribbon_filter".to_string(), data, "Ribbon filter change");
-        undo_stack.commit_transaction();
-    }
+        return Ok(None);
+    };
+    let ctx = crate::pivot::commands::PivotCmdCtx {
+        state: &state,
+        file_state: &file_state,
+        pivot_state: &pivot_state,
+        pane_control_state: &pane_control_state,
+        ribbon_filter_state: &ribbon_filter_state,
+        user_files_state: &user_files_state,
+        bi_state: &bi_state,
+        slicer_state: &slicer_state,
+        record_undo: true,
+    };
+    apply_ribbon_filter_selection_core(&ctx, filter_id, selected_items, gesture).await.map(Some)
+}
 
-    filter.selected_items = selected_items;
-    Ok(())
+/// A ribbon filter CHANGE as ONE command (BUG-0187): the selection, then every
+/// pivot write, then ONE undo step -- the pivots first, the filter LAST (so
+/// the reverse replay restores the filter first), the way `gesture.step` says
+/// (a user change is a step of its own even while an EMPTY script batch is
+/// open; one that already holds writes is joined -- `GestureStepMode::Own`).
+/// Refusal first: an unknown filter writes and records nothing. In flight
+/// from the selection write to the push, like a slicer click: an undo or redo
+/// asked for meanwhile is refused (`undo_commands::history_move_refusal`).
+pub(crate) async fn apply_ribbon_filter_selection_core(
+    ctx: &crate::pivot::commands::PivotCmdCtx<'_>,
+    filter_id: identity::EntityId,
+    selected_items: Option<Vec<String>>,
+    gesture: crate::pivot::types::PivotFilterGesture,
+) -> Result<crate::pivot::types::PivotFilterGestureResponse, String> {
+    let _in_flight = crate::undo_commands::PendingGesture::begin(ctx.state);
+    let previous = write_ribbon_filter_selection_unrecorded(
+        ctx.file_state,
+        ctx.ribbon_filter_state,
+        filter_id,
+        selected_items,
+    )?;
+    let mut run = crate::pivot::commands::run_pivot_filter_gesture(ctx, gesture.writes).await;
+    let mut restores = std::mem::take(&mut run.restores);
+    if let Some(previous) = previous {
+        restores.push(crate::undo_commands::ribbon_filter_restore(filter_id, previous));
+    }
+    let outcome = crate::undo_commands::record_gesture_step(
+        ctx.state,
+        "Ribbon filter change",
+        restores,
+        crate::slicer::commands::gesture_step_mode(gesture.step),
+    );
+    Ok(crate::slicer::commands::gesture_response(run, outcome))
+}
+
+/// Write a ribbon filter's selection WITHOUT recording it, handing back the
+/// filter as it was, or `None` when the selection already was that (nothing
+/// written, the document left clean). An unknown filter is refused first.
+pub(crate) fn write_ribbon_filter_selection_unrecorded(
+    file_state: &crate::persistence::FileState,
+    ribbon_filter_state: &RibbonFilterState,
+    filter_id: identity::EntityId,
+    selected_items: Option<Vec<String>>,
+) -> Result<Option<RibbonFilter>, String> {
+    write_ribbon_filter_selection_with(file_state, ribbon_filter_state, filter_id, |_| selected_items)
+}
+
+/// [`write_ribbon_filter_selection_unrecorded`] whose new selection is
+/// DECIDED from the stored one, under the same hold of the store that writes
+/// it (`lock_pending`): a toggle read under one lock and written under
+/// another lost a concurrent change made in between (the review of S2 --
+/// `update_ribbon_filter_selection` runs on the worker pool).
+pub(crate) fn write_ribbon_filter_selection_with(
+    file_state: &crate::persistence::FileState,
+    ribbon_filter_state: &RibbonFilterState,
+    filter_id: identity::EntityId,
+    decide: impl FnOnce(&Option<Vec<String>>) -> Option<Vec<String>>,
+) -> Result<Option<RibbonFilter>, String> {
+    let pending = ribbon_filter_state.filters.lock_pending().map_err(|e| e.to_string())?;
+    let previous = pending
+        .get(&filter_id)
+        .cloned()
+        .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
+    let selected_items = decide(&previous.selected_items);
+    if previous.selected_items == selected_items {
+        return Ok(None);
+    }
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut filters = pending.authorize(&effect);
+    if let Some(filter) = filters.get_mut(&filter_id) {
+        filter.selected_items = selected_items;
+    }
+    Ok(Some(previous))
 }
 
 // ============================================================================
@@ -352,27 +457,15 @@ pub fn clear_ribbon_filter(
 ) -> Result<(), String> {
     log_debug!("RIBBON_FILTER", "clear_ribbon_filter id={}", filter_id);
 
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut filters = ribbon_filter_state.filters.write(&effect).unwrap();
-    let filter = filters
-        .get_mut(&filter_id)
-        .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
-
-    // Record undo snapshot
-    {
-        #[derive(serde::Serialize)]
-        struct RibbonFilterSnapshot {
-            filter_id: identity::EntityId,
-            previous: RibbonFilter,
-        }
-        let data = serde_json::to_vec(&RibbonFilterSnapshot { filter_id, previous: filter.clone() }).unwrap_or_default();
-        let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Clear ribbon filter");
-        undo_stack.record_custom_restore("ribbon_filter".to_string(), data, "Clear ribbon filter");
-        undo_stack.commit_transaction();
+    // Joining an open transaction (see `update_ribbon_filter_selection`); a
+    // filter that is already clear records nothing.
+    if let Some(previous) = write_ribbon_filter_selection_unrecorded(&file_state, &ribbon_filter_state, filter_id, None)? {
+        crate::undo_commands::record_restores_joining_open_transaction(
+            &state,
+            "Clear ribbon filter",
+            vec![crate::undo_commands::ribbon_filter_restore(filter_id, previous)],
+        );
     }
-
-    filter.selected_items = None;
     Ok(())
 }
 
@@ -397,36 +490,44 @@ pub fn set_ribbon_filter_item_selected(
         selected
     );
 
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut filters = ribbon_filter_state.filters.write(&effect).unwrap();
-    let filter = filters
-        .get_mut(&filter_id)
-        .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
+    set_ribbon_filter_item_selected_core(&state, &file_state, &ribbon_filter_state, filter_id, value, selected)
+}
 
-    // Record undo snapshot before the selection change
-    {
-        #[derive(serde::Serialize)]
-        struct RibbonFilterSnapshot {
-            filter_id: identity::EntityId,
-            previous: RibbonFilter,
+/// [`set_ribbon_filter_item_selected`] over plain references. The toggle is
+/// DECIDED from the stored selection under the one hold of the store that
+/// writes it ([`write_ribbon_filter_selection_with`]) -- read, drop, write
+/// lost a concurrent change -- then recorded joining an open transaction;
+/// refusal first, and a toggle that changes nothing records nothing.
+pub(crate) fn set_ribbon_filter_item_selected_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    ribbon_filter_state: &RibbonFilterState,
+    filter_id: identity::EntityId,
+    value: String,
+    selected: bool,
+) -> Result<(), String> {
+    let toggle = |current: &Option<Vec<String>>| {
+        let mut next = current.clone().unwrap_or_default();
+        if selected {
+            if !next.contains(&value) {
+                next.push(value);
+            }
+        } else {
+            next.retain(|v| v != &value);
         }
-        let data = serde_json::to_vec(&RibbonFilterSnapshot { filter_id, previous: filter.clone() }).unwrap_or_default();
-        let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Ribbon filter item toggle");
-        undo_stack.record_custom_restore("ribbon_filter".to_string(), data, "Ribbon filter item toggle");
-        undo_stack.commit_transaction();
-    }
-
-    let mut current = filter.selected_items.clone().unwrap_or_default();
-    if selected {
-        if !current.contains(&value) {
-            current.push(value);
+        if next.is_empty() {
+            None
+        } else {
+            Some(next)
         }
-    } else {
-        current.retain(|v| v != &value);
+    };
+    if let Some(previous) = write_ribbon_filter_selection_with(file_state, ribbon_filter_state, filter_id, toggle)? {
+        crate::undo_commands::record_restores_joining_open_transaction(
+            state,
+            "Ribbon filter item toggle",
+            vec![crate::undo_commands::ribbon_filter_restore(filter_id, previous)],
+        );
     }
-    filter.selected_items = if current.is_empty() { None } else { Some(current) };
-
     Ok(())
 }
 

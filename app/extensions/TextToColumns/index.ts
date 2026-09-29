@@ -35,7 +35,7 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => context.ui.dialogs.unregister("text-to-columns"));
 
   // 2. Register menu item in Data menu
-  registerTextToColumnsMenuItem(context);
+  cleanupFns.push(registerTextToColumnsMenuItem(context));
 
   // 3. Register the script-facing provider (Wave 4): the @api seam through
   //    which api.textToColumns / range.textToColumns() run THIS extension's

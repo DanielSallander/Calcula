@@ -18,7 +18,7 @@ use engine_core::model::DataModel;
 use engine_core::types::DataType;
 
 use crate::error::{QueryError, QueryResult};
-use crate::request::{QueryRequest, TotalsMode};
+use crate::request::{is_blank_member_label, QueryRequest, TotalsMode};
 
 /// A query-level filter that some requested measure clears at (or above) its
 /// level. Withheld from every fetch's WHERE; the local executor applies it
@@ -52,6 +52,9 @@ pub enum ContestedPredicate {
     InList {
         /// The values to keep.
         values: Vec<String>,
+        /// Also keep the rows where the column is NULL -- a scoped IN-list
+        /// that named the BLANK member (`crate::request::BLANK_MEMBER_LABEL`).
+        include_null: bool,
     },
 }
 
@@ -94,22 +97,69 @@ fn owner_tables(model: &DataModel, column: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether every owner of `column` types it as `t` (per `is`).
+fn owners_type_column_as(
+    model: &DataModel,
+    owners: &[String],
+    column: &str,
+    is: fn(&DataType) -> bool,
+) -> bool {
+    owners.iter().all(|t| {
+        model
+            .table(t)
+            .ok()
+            .and_then(|tbl| tbl.column(column).ok())
+            .is_some_and(|c| is(c.data_type()))
+    })
+}
+
+/// A scoped IN-list's values, and whether they name the BLANK member.
+///
+/// A host lists a column's blank member -- its NULL rows, and on a text column
+/// its empty-string rows too, which a list shows as ONE item -- with the label
+/// [`crate::request::BLANK_MEMBER_LABEL`] (`(blank)`, any ASCII case). A
+/// selection naming it arrives here verbatim, and `column IN ('(blank)')`
+/// matches no NULL row: a PINNED slicer that kept the blank member silently
+/// dropped the blank rows. So the label becomes `include_null`; on a TEXT
+/// column the empty string joins the list (and the label stays, so a literal
+/// `(blank)` value still matches itself); on any other column the label is
+/// dropped -- it is not a value there, and rendering it would turn an integer
+/// list non-sargable or fail a numeric cast.
+fn blank_member_split(
+    model: &DataModel,
+    owners: &[String],
+    column: &str,
+    values: &[String],
+) -> (Vec<String>, bool) {
+    if !values.iter().any(|v| is_blank_member_label(v)) {
+        return (values.to_vec(), false);
+    }
+    let is_text = owners_type_column_as(model, owners, column, |t| matches!(t, DataType::String));
+    let mut out: Vec<String> = if is_text {
+        values.to_vec()
+    } else {
+        values.iter().filter(|v| !is_blank_member_label(v)).cloned().collect()
+    };
+    if is_text && !out.iter().any(String::is_empty) {
+        out.push(String::new());
+    }
+    (out, true)
+}
+
 /// Render an IN-list with integer-kind inference for integer columns
-/// (mirrors the planner's `in_filter_condition`).
+/// (mirrors the planner's `in_filter_condition`), reading the BLANK member
+/// label ([`blank_member_split`]).
 fn scoped_in_condition(
     model: &DataModel,
     owners: &[String],
     column: &str,
     values: &[String],
 ) -> InFilterCondition {
-    let is_integer = owners.iter().all(|t| {
-        model
-            .table(t)
-            .ok()
-            .and_then(|tbl| tbl.column(column).ok())
-            .is_some_and(|c| matches!(c.data_type(), DataType::Int32 | DataType::Int64))
-    });
-    let mut cond = InFilterCondition::text(column, values.to_vec());
+    let is_integer =
+        owners_type_column_as(model, owners, column, |t| matches!(t, DataType::Int32 | DataType::Int64));
+    let (values, include_null) = blank_member_split(model, owners, column, values);
+    let mut cond = InFilterCondition::text(column, values);
+    cond.include_null = include_null;
     if is_integer {
         cond.kind = InValueKind::Integer;
     }
@@ -220,6 +270,8 @@ pub(super) fn classify_query_filters(
             level: LEVEL_SLICER,
             predicate: ContestedPredicate::InList {
                 values: f.values.clone(),
+                // A legacy (unscoped) IN-list is literal.
+                include_null: false,
             },
         });
     }
@@ -292,13 +344,13 @@ pub(super) fn classify_query_filters(
                 owners.join(", ")
             )));
         }
+        let (values, include_null) =
+            blank_member_split(model, &owners, &f.filter.column, &f.filter.values);
         plan.contested.push(ContestedFilter {
             table: owners[0].clone(),
             column: f.filter.column.clone(),
             level: f.level,
-            predicate: ContestedPredicate::InList {
-                values: f.filter.values.clone(),
-            },
+            predicate: ContestedPredicate::InList { values, include_null },
         });
     }
 

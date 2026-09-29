@@ -437,7 +437,16 @@ export function ColorPopover({
   // down. Without the theme grid there is nothing to wait for.
   const [paletteSettled, setPaletteSettled] = useState(!showTheme);
   const [focused, setFocused] = useState(-1);
-  const [hexDraft, setHexDraft] = useState<string | null>(null);
+  const [hexDraft, setHexDraftState] = useState<string | null>(null);
+  // The draft is ALSO kept in a ref, cleared synchronously when it is committed:
+  // Enter commits and closes, the close blurs the field, and the blur's commit
+  // runs in the same render -- reading STATE it would still see the draft and
+  // apply the colour a second time (two applies, two undo steps).
+  const hexDraftRef = useRef<string | null>(null);
+  const setHexDraft = (next: string | null): void => {
+    hexDraftRef.current = next;
+    setHexDraftState(next);
+  };
 
   // Per-open state resets whenever the popover closes, by whichever path —
   // our own pick, Escape, an outside press, or the caller toggling `open` —
@@ -549,14 +558,15 @@ export function ColorPopover({
   const hexInvalid = hexDraft !== null && hexDraft.trim() !== "" && normalizeHex(hexDraft) === null;
 
   const commitHex = (andClose: boolean): void => {
-    if (hexDraft === null) {
+    const draft = hexDraftRef.current;
+    if (draft === null) {
       if (andClose) finish();
       return;
     }
-    const hex = normalizeHex(hexDraft);
+    const hex = normalizeHex(draft);
     if (hex === null) return;
-    if (!sameColor(hex, value)) onChange(hex);
     setHexDraft(null);
+    if (!sameColor(hex, value)) onChange(hex);
     if (andClose) finish();
   };
 

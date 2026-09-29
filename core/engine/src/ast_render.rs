@@ -342,7 +342,7 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
         Expression::NamedRef { name, .. } => out.push_str(name),
 
         Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
-            if needs_quoting(start_sheet) || needs_quoting(end_sheet) {
+            if !sheet_range_renders_bare(start_sheet, end_sheet) {
                 // ONE pair of apostrophes wraps the whole `A:B` bookend pair, so
                 // each half is escaped but not separately quoted.
                 let _ = write!(
@@ -639,12 +639,19 @@ pub fn quote_sheet_name(name: &str) -> String {
     }
 }
 
-/// True when `name` can be written without apostrophes: identifier-shaped, and
-/// not itself a cell reference (a bare `A1` would lex as one).
+/// True when `name` can be written without apostrophes: it lexes as ONE plain
+/// identifier (`read_identifier` in the parser's lexer), and nothing else.
+///
+/// Identifier-SHAPED is not enough, and the difference lost formulas: the
+/// lexer reads `TRUE` / `FALSE` (any case) as BOOLEAN literals, and it takes a
+/// `.` into an identifier only when a letter, digit or `_` follows it (a
+/// trailing dot is the trim-reference operator). So a sheet named `True`,
+/// `Q1.` or `a..b` rendered bare produced text that does not parse --
+/// `every_sheet_name_survives_render_then_parse_in_every_reference_shape`.
 fn is_bare_sheet_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+    let chars: Vec<char> = name.chars().collect();
+    match chars.first() {
+        Some(c) if c.is_ascii_alphabetic() || *c == '_' => {}
         _ => return false,
     }
     // A reference-SHAPED name (`A1`, `ZZ100`) needs no quoting: the trailing
@@ -653,11 +660,40 @@ fn is_bare_sheet_name(name: &str) -> bool {
     // also captures `Sheet1`, `Sheet2`, `Q1` -- the DEFAULT sheet names -- and
     // would have re-quoted the formula text of essentially every existing
     // workbook for nothing.
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    for (i, c) in chars.iter().enumerate() {
+        match c {
+            c if c.is_ascii_alphanumeric() || *c == '_' => {}
+            // The lexer's own continuation rule for a dot.
+            '.' => match chars.get(i + 1) {
+                Some(next) if next.is_ascii_alphanumeric() || *next == '_' => {}
+                _ => return false,
+            },
+            _ => return false,
+        }
+    }
+    // The words the lexer turns into something other than an identifier.
+    !(name.eq_ignore_ascii_case("TRUE") || name.eq_ignore_ascii_case("FALSE"))
 }
 
-fn needs_quoting(name: &str) -> bool {
-    !is_bare_sheet_name(name)
+/// May a 3-D reference's bookend PAIR be written without apostrophes?
+///
+/// Each name being bare is necessary and not sufficient: the pair is read by
+/// the parser's RANGE grammar first, so `A1:Other!B2` is the range `A1:OTHER`
+/// (and fails), and `N:Q1!B2` likewise -- a sheet named like a cell or a
+/// column is only safe bare when the parser's 3-D branch is the one that
+/// fires. Rather than copy that grammar here (a copy drifts), the bare
+/// candidate is PARSED: bare only when it reads back as a 3-D reference to
+/// the same two sheets. Rare enough (a 3-D reference) that the parse is free.
+fn sheet_range_renders_bare(start: &str, end: &str) -> bool {
+    if !is_bare_sheet_name(start) || !is_bare_sheet_name(end) {
+        return false;
+    }
+    match parser::parse(&format!("={}:{}!A1", start, end)) {
+        Ok(Expression::Sheet3DRef { start_sheet, end_sheet, .. }) => {
+            start_sheet.eq_ignore_ascii_case(start) && end_sheet.eq_ignore_ascii_case(end)
+        }
+        _ => false,
+    }
 }
 
 /// Render a TableSpecifier to its bracket notation.
@@ -1164,6 +1200,113 @@ mod tests {
                     assert_eq!(got.to_uppercase(), name.to_uppercase())
                 }
                 other => panic!("`{}` -> {:?}", name, other),
+            }
+        }
+    }
+
+    /// RENDER-THEN-PARSE IS A FIXED POINT FOR EVERY SHEET NAME, including the
+    /// identifier-shaped ones the LEXER does not read as an identifier.
+    ///
+    /// `is_bare_sheet_name` asked only "is it identifier-shaped", and two
+    /// families of identifier-shaped names are not identifiers to the lexer:
+    ///   * `TRUE` / `FALSE` in any case lex as BOOLEAN literals, so a sheet
+    ///     called `True` rendered `True!A1`, which does not parse;
+    ///   * a `.` that nothing name-like follows is NOT part of an identifier
+    ///     (it is the trim-reference operator), so `Q1.` and `a..b` rendered
+    ///     bare and stopped at the dot.
+    /// A rename to such a name (or a `.calp` collision rename onto one) made
+    /// every formula that named the sheet unreadable; `repair_all_formulas`
+    /// refuses the rename rather than corrupting the workbook, so the user
+    /// simply could not use the name. Every reference shape carries the name,
+    /// so each is checked, and so are both bookends of a 3-D reference.
+    #[test]
+    fn every_sheet_name_survives_render_then_parse_in_every_reference_shape() {
+        let names = [
+            "TRUE", "FALSE", "true", "False", "tRuE", "Q1.", "a.", "a..b", "x.1.", "Data", "Sheet1",
+            "_hidden", "a.b", "a._b", "Q1.Sales", "A1", "R1C1", "SUM", "N",
+        ];
+        let cell = |sheet: Option<String>| Expression::CellRef {
+            sheet,
+            col: "A".to_string(),
+            row: 1,
+            col_absolute: false,
+            row_absolute: false,
+            ref_site_id: Default::default(),
+        };
+        let sheet_of = |expr: &Expression| -> Vec<String> {
+            match expr {
+                Expression::CellRef { sheet: Some(s), .. }
+                | Expression::Range { sheet: Some(s), .. }
+                | Expression::ColumnRef { sheet: Some(s), .. }
+                | Expression::RowRef { sheet: Some(s), .. } => vec![s.clone()],
+                Expression::Sheet3DRef { start_sheet, end_sheet, .. } => {
+                    vec![start_sheet.clone(), end_sheet.clone()]
+                }
+                other => panic!("not a sheet reference: {:?}", other),
+            }
+        };
+        for name in names {
+            let shapes = vec![
+                cell(Some(name.to_string())),
+                Expression::Range {
+                    sheet: Some(name.to_string()),
+                    start: Box::new(cell(None)),
+                    end: Box::new(Expression::CellRef {
+                        sheet: None,
+                        col: "B".to_string(),
+                        row: 5,
+                        col_absolute: true,
+                        row_absolute: true,
+                        ref_site_id: Default::default(),
+                    }),
+                    ref_site_id: Default::default(),
+                },
+                Expression::ColumnRef {
+                    sheet: Some(name.to_string()),
+                    start_col: "A".to_string(),
+                    end_col: "C".to_string(),
+                    start_absolute: false,
+                    end_absolute: false,
+                    ref_site_id: Default::default(),
+                },
+                Expression::RowRef {
+                    sheet: Some(name.to_string()),
+                    start_row: 2,
+                    end_row: 4,
+                    start_absolute: false,
+                    end_absolute: false,
+                    ref_site_id: Default::default(),
+                },
+                Expression::Sheet3DRef {
+                    start_sheet: name.to_string(),
+                    end_sheet: "Other".to_string(),
+                    reference: Box::new(cell(None)),
+                    ref_site_id: Default::default(),
+                },
+                Expression::Sheet3DRef {
+                    start_sheet: "Other".to_string(),
+                    end_sheet: name.to_string(),
+                    reference: Box::new(cell(None)),
+                    ref_site_id: Default::default(),
+                },
+            ];
+            for shape in shapes {
+                let rendered = render_formula_raw(&shape);
+                let reparsed = parser::parse(&format!("={}", rendered)).unwrap_or_else(|e| {
+                    panic!("sheet `{}` rendered `{}`, which does not parse: {:?}", name, rendered, e)
+                });
+                // A BARE name comes back upper-cased (the lexer's rule); a
+                // quoted one keeps its spelling. Either way it is the SAME sheet.
+                let want: Vec<String> = sheet_of(&shape).iter().map(|s| s.to_uppercase()).collect();
+                let got: Vec<String> = sheet_of(&reparsed).iter().map(|s| s.to_uppercase()).collect();
+                assert_eq!(got, want, "sheet `{}` rendered `{}` and read back as another sheet", name, rendered);
+                // And the second trip changes nothing at all.
+                assert_eq!(
+                    render_formula_raw(&reparsed).to_uppercase(),
+                    rendered.to_uppercase(),
+                    "sheet `{}`: render is not a fixed point",
+                    name
+                );
             }
         }
     }

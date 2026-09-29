@@ -8,19 +8,13 @@ import {
   AppEvents,
   ExtensionRegistry,
   registerPostHeaderOverlay,
-  isKeyClaimed,
   isPointerClaimed,
 } from "@api";
 import { registerGroupingController } from "@api/groupingService";
-import { isEditKeystroke } from "@api/editing";
 import { GroupSettingsDialog } from "./components/GroupSettingsDialog";
 import { renderOutlineBar, buttonPosForLevel } from "./rendering/outlineBarRenderer";
 import {
   resetGroupingState,
-  performGroupRows,
-  performUngroupRows,
-  performGroupColumns,
-  performUngroupColumns,
   performCollapseRow,
   performExpandRow,
   performCollapseColumn,
@@ -40,6 +34,7 @@ import {
   registerGroupingMenuItems,
   registerGroupingContextMenuItems,
 } from "./handlers/dataMenuBuilder";
+import { groupSelection, ungroupSelection } from "./lib/groupSelection";
 
 // ============================================================================
 // Constants (must match outlineBarRenderer.ts)
@@ -219,67 +214,20 @@ function handleOutlineBarClick(event: MouseEvent): void {
 }
 
 // ============================================================================
-// Keyboard Shortcuts
+// Commands
 // ============================================================================
 
-function handleKeyDown(event: KeyboardEvent): void {
-  // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
-  // field, a shape's declared hit rectangle -- is not this extension's.
-  // This handler had no focus guard at all, and a longer tag list would only
-  // be a census of the widget types that exist today.
-  // See core/lib/pointerClaims.ts, and the census in
-  // core/lib/globalInputListeners.ts (a new global listener adds a row).
-  if (isKeyClaimed(event)) return;
-  if (!currentSelection) return;
-  if (!event.altKey || !event.shiftKey) return;
-  if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
-  // Not while a cell edit owns the keyboard: Core's in-cell editor, the
-  // formula bar, any text field, or a floating grid's live cell edit (whose
-  // keyboard can sit on the grid container while it picks a reference).
-  // Excel ignores this key in edit mode, and here it acted on Core's
-  // selection -- during a floating-grid edit, a HIDDEN one.
-  if (isEditKeystroke(event)) return;
+/**
+ * Group / Ungroup the selected rows (or columns, for a column selection) --
+ * the commands the keybinding registry's `ext.grouping.group` /
+ * `ext.grouping.ungroup` (Alt+Shift+Right / Left, Excel's keys) run. They
+ * named these ids long before anything registered them (BUG-0183). The
+ * registry is the ONE keyboard path ("not-editing": Excel ignores the keys in
+ * edit mode), so a remap in Settings moves them.
+ */
+export const GROUPING_GROUP_COMMAND = "grouping.group";
+export const GROUPING_UNGROUP_COMMAND = "grouping.ungroup";
 
-  // Alt+Shift+Right = Group (Excel shortcut) - auto-detect rows vs columns
-  if (event.altKey && event.shiftKey && event.key === "ArrowRight") {
-    event.preventDefault();
-    event.stopPropagation();
-    const norm = normalizeRange(currentSelection);
-    if (currentSelection.type === "columns") {
-      performGroupColumns(norm.startCol, norm.endCol);
-    } else {
-      performGroupRows(norm.startRow, norm.endRow);
-    }
-    return;
-  }
-
-  // Alt+Shift+Left = Ungroup (Excel shortcut) - auto-detect rows vs columns
-  if (event.altKey && event.shiftKey && event.key === "ArrowLeft") {
-    event.preventDefault();
-    event.stopPropagation();
-    const norm = normalizeRange(currentSelection);
-    if (currentSelection.type === "columns") {
-      performUngroupColumns(norm.startCol, norm.endCol);
-    } else {
-      performUngroupRows(norm.startRow, norm.endRow);
-    }
-    return;
-  }
-}
-
-function normalizeRange(sel: {
-  startRow: number;
-  endRow: number;
-  startCol: number;
-  endCol: number;
-}): { startRow: number; endRow: number; startCol: number; endCol: number } {
-  return {
-    startRow: Math.min(sel.startRow, sel.endRow),
-    endRow: Math.max(sel.startRow, sel.endRow),
-    startCol: Math.min(sel.startCol, sel.endCol),
-    endCol: Math.max(sel.startCol, sel.endCol),
-  };
-}
 
 // ============================================================================
 // Lifecycle
@@ -318,8 +266,9 @@ function activate(context: ExtensionContext): void {
   const unregContextMenu = registerGroupingContextMenuItems();
   cleanupFns.push(unregContextMenu);
 
-  // 4. Register Data menu items (appends to AutoFilter's "data" menu)
-  registerGroupingMenuItems(context, () => currentSelection);
+  // 4. Register Data menu items (appends to AutoFilter's "data" menu), and
+  //    take them back on deactivate
+  cleanupFns.push(registerGroupingMenuItems(context, () => currentSelection));
 
   // 5. Outline bar click handler (capture phase to intercept before grid selection)
   window.addEventListener("mousedown", handleOutlineBarClick, true);
@@ -327,11 +276,14 @@ function activate(context: ExtensionContext): void {
     window.removeEventListener("mousedown", handleOutlineBarClick, true),
   );
 
-  // 6. Keyboard shortcuts
-  window.addEventListener("keydown", handleKeyDown, true);
-  cleanupFns.push(() =>
-    window.removeEventListener("keydown", handleKeyDown, true),
-  );
+  // 6. The Group / Ungroup commands the registry's Alt+Shift+Right / Left
+  //    run.
+  //    Both refuse while a selection owner holds the selection
+  //    (lib/groupSelection.ts, shared with the Data menu and context menu).
+  context.commands.register(GROUPING_GROUP_COMMAND, () => groupSelection(currentSelection));
+  context.commands.register(GROUPING_UNGROUP_COMMAND, () => ungroupSelection(currentSelection));
+  cleanupFns.push(() => context.commands.unregister(GROUPING_GROUP_COMMAND));
+  cleanupFns.push(() => context.commands.unregister(GROUPING_UNGROUP_COMMAND));
 
   // 7. Track current selection
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {

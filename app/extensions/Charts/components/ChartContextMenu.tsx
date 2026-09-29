@@ -66,6 +66,8 @@ import {
 } from "@api/chartData";
 
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
+import { chartObjectClipboardRows } from "../lib/chartMenuSelection";
+import { noteChartMenuMounted } from "../lib/chartMenuState";
 import { getCachedChartData, invalidateChartCache } from "../rendering/chartRenderer";
 // The ONE answer to "where do this chart's error-bar options live?" — a
 // mark-dependent switch that the painter owns and this file must not re-spell.
@@ -682,14 +684,23 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
     return () => document.removeEventListener("mousedown", handler, true);
   }, [onClose]);
 
-  // Close on Escape
+  // Close on Escape -- and CONSUME it: the Escape that closes the menu is the
+  // menu's alone, so nothing behind it (the grid's own keyboard) hears it as
+  // well. The canvas binding and Charts' element walk, which run EARLIER on
+  // this path, stand down while the menu is open (lib/chartMenuState.ts).
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
     };
     document.addEventListener("keydown", handler, true);
     return () => document.removeEventListener("keydown", handler, true);
   }, [onClose]);
+
+  // Open while mounted (lib/chartMenuState.ts).
+  useEffect(() => noteChartMenuMounted(), []);
 
   // KEEP THE WHOLE MENU ON SCREEN, FROM ITS MEASURED BOX.
   //
@@ -756,6 +767,10 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
   // --------------------------------------------------------------------------
 
   const rows: MenuRow[] = [];
+
+  // On a CANVAS: Duplicate / Copy / Paste of the WHOLE object selection, every
+  // family (W25, @api/objectClipboard); none on a worksheet.
+  rows.push(...chartObjectClipboardRows());
 
   rows.push({
     id: "deleteChart",

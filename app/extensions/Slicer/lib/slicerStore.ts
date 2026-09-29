@@ -22,6 +22,7 @@ import {
   connectionsToExistingPivots,
   listPivotSlicerItemsFromModel,
   reportSlicerFilterFailures,
+  runSlicerSelectionGesture,
   type SlicerFilterFailure,
 } from "./slicerFilterBridge";
 import {
@@ -32,7 +33,7 @@ import {
 import { emitAppEvent, AppEvents } from "@api/events";
 import { runInUndoTransaction } from "@api/objectGeometry";
 import { showToast } from "@api/notifications";
-import { runStepThenConfirmOverwrite, type PivotOverwriteTally } from "@api/pivotOverwrite";
+import { confirmPivotOverwriteOrUndo } from "@api/pivotOverwrite";
 
 // ============================================================================
 // Module-level cache
@@ -105,6 +106,9 @@ export async function deleteSlicerAsync(slicerId: string): Promise<boolean> {
     return true;
   } catch (err) {
     console.error("[Slicer] Failed to delete slicer:", err);
+    // The door's user is TOLD (a sheet protected against object edits refuses
+    // the delete): the menu item used to do nothing, silently.
+    showToast(`The slicer could not be deleted. ${describeError(err)}`.trim(), { type: "error", duration: 8000 });
     return false;
   }
 }
@@ -119,8 +123,27 @@ export async function deleteSlicersAsync(
   slicerIds: readonly string[],
   label = "Delete Slicers",
 ): Promise<string[]> {
+  return (await deleteSlicersReporting(slicerIds, label)).map((r) => r.slicerId);
+}
+
+/** A slicer a delete could not remove, and the backend's reason. */
+export interface SlicerDeleteRefusal {
+  slicerId: string;
+  reason: string;
+}
+
+/**
+ * {@link deleteSlicersAsync}, handing back WHY each refused delete was
+ * refused. Resolves only once every delete has LANDED and the store (and the
+ * regions it publishes) re-read the backend -- the contract of the canvas-wide
+ * Delete (`@api/objectSelection` `deleteObjects`, wave B A4).
+ */
+export async function deleteSlicersReporting(
+  slicerIds: readonly string[],
+  label = "Delete Slicers",
+): Promise<SlicerDeleteRefusal[]> {
   if (slicerIds.length === 0) return [];
-  const failed: string[] = [];
+  const refused: SlicerDeleteRefusal[] = [];
   const effect: SlicerDeleteEffect = { pivots: false, tableFilter: false };
   await runInUndoTransaction(label, async () => {
     for (const slicerId of slicerIds) {
@@ -131,13 +154,13 @@ export async function deleteSlicersAsync(
         effect.tableFilter = effect.tableFilter || doomed.tableFilter;
       } catch (err) {
         console.error("[Slicer] Failed to delete slicer:", slicerId, err);
-        failed.push(slicerId);
+        refused.push({ slicerId, reason: describeError(err) });
       }
     }
   });
   await refreshCache();
   announceSlicersDeleted(effect);
-  return failed;
+  return refused;
 }
 
 /** What the backend's clear changes when a slicer is deleted. */
@@ -303,28 +326,27 @@ export async function commitSlicerGeometryAsync(
 
 /**
  * A slicer click: the new selection AND the filter it puts on every pivot /
- * table the slicer reaches, as ONE undo step. `update_slicer_selection`, a
- * server-side ensure and a table's AutoFilter write all record undo JOINING
- * the open transaction (a plain level-1 pivot mask records none -- the
- * reconcile re-derives it after an undo), so a single Ctrl+Z restores the
- * slicer and its targets together. The apply runs INSIDE the transaction for
- * exactly that reason: outside it, a click that had to add the column to a
- * pivot recorded a second step, and the first Ctrl+Z un-filtered the pivot
- * while the slicer still showed the selection.
+ * table the slicer reaches, as ONE undo step -- ONE backend command for the
+ * selection and every pivot write, which records the step once, at the end
+ * (`runSlicerSelectionGesture`, BUG-0187). No undo transaction is held open
+ * across a model re-query any more: an unrelated edit made during a slow
+ * click is a step of its own, and a script batch begun meanwhile never joins
+ * the click (BUG-0200). A plain level-1 pivot mask still records nothing --
+ * the reconcile re-derives it after an undo.
  *
- * A user click comes through {@link queueSlicerClick}, never straight here:
- * this holds the transaction open for the whole apply.
+ * A user click (`askBeforeOverwrite`) comes through {@link queueSlicerClick},
+ * never straight here, and is a step of its own -- unless a transaction that
+ * already holds changes is open, which it joins ("joined": it never asks). A
+ * script's call (no `askBeforeOverwrite`) joins the batch the script opened.
  *
- * OVERWRITE (`askBeforeOverwrite`, a user click): a pivot the click grows over
- * the user's cells records a step holding them INSIDE the click's step. Once
- * that step has committed, the user is asked ONCE for the whole click (every
- * pivot it filtered, how many cells) -- through `@api/pivotOverwrite`, failing
- * closed -- and a decline takes back THE WHOLE CLICK, never another step: the
- * selection comes back with its pivots, and the reconcile that the take-back's
- * refresh triggers re-derives the level-1 masks the step did not carry. A
- * click that JOINED someone else's open transaction -- the frontend's, or a
- * script batch's opened on the backend directly -- never asks: it cannot take
- * back only its own part, and Ctrl+Z restores the cells with that step.
+ * OVERWRITE (a user click): a pivot the click grows over the user's cells is
+ * recorded in the click's own step, with its cells. Once that step has
+ * landed, the user is asked ONCE for the whole click (every pivot it filtered,
+ * how many cells) -- through `@api/pivotOverwrite`, failing closed -- and a
+ * decline takes back THE WHOLE CLICK, never another step: the selection comes
+ * back with its pivots, and the reconcile that the take-back's refresh
+ * triggers re-derives the level-1 masks the step did not carry. A click whose
+ * step is not its own (nothing was recorded) never asks.
  *
  * A declined click resolves only once the store holds the RESTORED selection
  * again ({@link settleAfterTakeBack}): the next queued click computes its
@@ -341,17 +363,32 @@ export async function updateSlicerSelectionAsync(
     // Counted BEFORE the gesture: a take-back's announcement starts a
     // reconcile after this point, and the decline below waits for it.
     const reconcilesBefore = reconcilesStarted;
-    const writeAndApply = async (overwrites?: PivotOverwriteTally): Promise<void> => {
+    const slicer = cachedSlicers.find((s) => s.id === slicerId);
+    if (!slicer) {
+      // Not in the store (yet): the selection alone, nothing to filter.
       await api.updateSlicerSelection(slicerId, selectedItems);
-      // Update local cache
-      const slicer = cachedSlicers.find((s) => s.id === slicerId);
-      if (slicer) {
-        slicer.selectedItems = selectedItems;
-        await applySlicerFilter(slicer, { overwrites });
-      }
-    };
-    if (options.askBeforeOverwrite) {
-      const { outcome } = await runStepThenConfirmOverwrite("Slicer Selection", writeAndApply);
+      return;
+    }
+    // LANDING until its one step is pushed: an Undo meanwhile -- Ctrl+Z, the
+    // ribbon, the Edit menu -- is refused with a sentence (index.ts; the
+    // backend refuses it anyway). Armed before the first await, so an Undo
+    // issued right after the click already sees it.
+    landingGestures += 1;
+    let gesture: Awaited<ReturnType<typeof runSlicerSelectionGesture>>;
+    try {
+      gesture = await runSlicerSelectionGesture(
+        { ...slicer, selectedItems },
+        options.askBeforeOverwrite ? "user" : "script",
+      );
+    } finally {
+      landingGestures -= 1;
+    }
+    const { step, overwrites } = gesture;
+    // The backend holds the new selection now. The cache follows BEFORE any
+    // question: a take-back's reconcile diffs against it.
+    slicer.selectedItems = selectedItems;
+    if (options.askBeforeOverwrite && step === "pushed") {
+      const outcome = await confirmPivotOverwriteOrUndo(overwrites);
       if (outcome === "undone") {
         // Nothing about THIS selection is true any more, so nothing is
         // announced for it; the store is brought back to what came back.
@@ -359,8 +396,6 @@ export async function updateSlicerSelectionAsync(
         requestOverlayRedraw();
         return;
       }
-    } else {
-      await runInUndoTransaction("Slicer Selection", () => writeAndApply());
     }
     // Refresh items to update selection state
     await refreshSlicerItems(slicerId);
@@ -375,6 +410,19 @@ export async function updateSlicerSelectionAsync(
   }
 }
 
+/** Slicer gestures whose backend command has not landed its step yet. */
+let landingGestures = 0;
+
+/**
+ * Whether a slicer gesture's backend command is still landing its one undo
+ * step (a model re-query can take seconds). The backend refuses an undo or
+ * redo meanwhile (`undo_commands::history_move_refusal`); the keyboard's
+ * refusal asks this so the user hears why (the review of BUG-0187).
+ */
+export function isSlicerGestureLanding(): boolean {
+  return landingGestures > 0;
+}
+
 // ============================================================================
 // User clicks: one at a time
 // ============================================================================
@@ -384,23 +432,20 @@ let clickQueue: Promise<void> = Promise.resolve();
 
 /**
  * Run a USER click on a slicer (an item, the Clear button, Select All, the
- * context menu) after every earlier click has COMMITTED its undo step, and
+ * context menu) after every earlier click has LANDED its undo step, and
  * compute the new selection from `change` only then -- from the committed
  * selection and items, not from what was on screen when the button went down.
  * `change` returns the new selection, or `undefined` for "nothing to do".
  *
- * Why a queue: a click holds the undo transaction open while its filter is
- * applied, and on a model or pinned slicer that apply is a BI query that can
- * take seconds. A second click in that window JOINED the first click's
- * transaction (the frontend transaction joins whatever is open), so two
- * gestures became one Ctrl+Z; and a Ctrl+click toggle read the selection
- * before the first click had written it, so it dropped the first item.
+ * Why a queue: a click's apply is a BI query on a model or pinned slicer and
+ * can take seconds. A Ctrl+click toggle read the selection before the first
+ * click had written it, so it dropped the first item; and two clicks whose
+ * steps land in the order their queries finish would undo out of order.
  *
- * Only user clicks are queued. A caller that opened a transaction on purpose
- * (a script batch setting several slicers) calls
- * {@link updateSlicerSelectionAsync} directly and joins its own transaction;
- * queuing it behind a click whose commit waits for that same caller would
- * deadlock.
+ * Only user clicks are queued. A script that opened a batch on purpose (to
+ * set several slicers) calls {@link updateSlicerSelectionAsync} directly and
+ * joins its own batch; queuing it behind a click would make the script wait
+ * for the user.
  */
 export function queueSlicerClick(
   slicerId: string,

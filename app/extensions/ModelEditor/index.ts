@@ -78,6 +78,9 @@ function activate(context: ExtensionContext): void {
     order: 10,
     action: () => void openModelEditorWindow(),
   });
+  // Its OWN items back on deactivate (wave E, Y14): the Model menu is Model
+  // Menu's, and BI, Reports, CUBE formulas and Collaboration add to it too.
+  cleanupFns.push(() => context.ui.menus.unregisterItem("model", "model:modelEditor"));
 
   // Whole-model file I/O — the same commands the Model Editor window offers
   // in its toolbar, surfaced here for quick access (they exist in BOTH places).
@@ -101,6 +104,10 @@ function activate(context: ExtensionContext): void {
     icon: IconExport,
     order: 13,
     action: () => void exportModelFromMenu(context),
+  });
+  cleanupFns.push(() => {
+    context.ui.menus.unregisterItem("model", "model:importModel");
+    context.ui.menus.unregisterItem("model", "model:exportModel");
   });
 
   // Offer the model domain to the main-window Command Line (Ctrl+Shift+P):

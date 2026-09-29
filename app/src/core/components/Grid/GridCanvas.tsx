@@ -1004,6 +1004,31 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     }, [fetchCells]);
 
     /**
+     * BUG-0155: the WHOLE document was replaced without a window reload
+     * (`announceBackendStateReplaced()` in core/lib/file-api). Every cached cell
+     * describes the previous document, and nothing else here would notice:
+     * `needsFetch()` only asks whether the viewport is COVERED. Answered like a
+     * sheet switch -- the epoch moves, so a fetch in flight for the old
+     * document is discarded rather than committed -- and the cache is emptied
+     * at once, so a slow re-fetch paints a blank grid, never the old one.
+     */
+    useEffect(() => {
+      const handleDocumentReplaced = async () => {
+        sheetEpochRef.current += 1;
+        lastFetchRef.current = null;
+        setCells(new Map());
+        setSpillRanges([]);
+        await fetchCells(true);
+      };
+
+      window.addEventListener("grid:documentReplaced", handleDocumentReplaced);
+
+      return () => {
+        window.removeEventListener("grid:documentReplaced", handleDocumentReplaced);
+      };
+    }, [fetchCells]);
+
+    /**
      * BUG-0052: the synchronous half of a prefetched sheet switch. Layout
      * effects run after React commits the DOM (the tab strip's bold weight)
      * but BEFORE the browser paints, so drawing here puts the new sheet's

@@ -35,6 +35,7 @@ import { TransportStatusItem } from "./components/TransportStatusItem";
 import { AnimationDialog, ANIMATION_DIALOG_ID } from "./components/AnimationDialog";
 import { FilmIcon } from "./components/icons";
 import { installPlayOverlay } from "./overlay/playOverlay";
+import { installDocumentBoundaryUnload } from "./lib/documentBoundaryUnload";
 
 const PANEL_ID = "animation.timeline";
 const STATUS_BAR_ID = "animation.transport";
@@ -143,17 +144,10 @@ function activate(context: ExtensionContext): void {
     cleanupFns.push(onAppEvent(ev, () => void playbackEngine.stopAndRestore()));
   }
 
-  // Document boundaries UNLOAD the driver, they do not merely stop it. A driver
-  // is bound to cells / charts / scenarios of the workbook it was configured
-  // against; carrying it into a different document (or into no document) leaves
-  // a transport pointing at coordinates that mean something else. `clearDriver`
-  // restores first and then unloads, so this is a strict superset of
-  // `stopAndRestore` — the transient guarantee is unchanged. Excel parity: File
-  // ▸ New gives a clean workbook, with no chrome carried over from the last one.
-  const unloadOn = [AppEvents.BEFORE_OPEN, AppEvents.BEFORE_NEW, AppEvents.BEFORE_CLOSE];
-  for (const ev of unloadOn) {
-    cleanupFns.push(onAppEvent(ev, () => void playbackEngine.clearDriver()));
-  }
+  // Document boundaries UNLOAD the driver, they do not merely stop it -- and a
+  // CLOSE waits for the unload's restore before the file is written or the
+  // window goes (E8; lib/documentBoundaryUnload.ts).
+  cleanupFns.push(installDocumentBoundaryUnload(playbackEngine));
 }
 
 function deactivate(): void {

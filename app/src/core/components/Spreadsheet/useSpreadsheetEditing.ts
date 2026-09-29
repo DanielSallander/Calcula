@@ -11,22 +11,37 @@ import {
   isGlobalFormulaMode,
   setGlobalCursorPosition,
 } from "../../hooks";
-import { useGridState } from "../../state";
+import { useGridState, useGridDispatch, stopEditing } from "../../state";
+import { setGlobalEditingValue, resetArrowRefState } from "../../hooks/useEditing";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
 import { updateCellsBatch, beginUndoTransaction, commitUndoTransaction, cancelUndoTransaction, type CellUpdateInput } from "../../lib/tauri-api";
+import {
+  ownUndoTransaction,
+  type OwnedUndoTransaction,
+  type UndoTransactionCloses,
+} from "../../lib/undoTransactionOwnership";
 import { cellEvents } from "../../lib/cellEvents";
 import { checkRangeGuards } from "../../lib/editGuards";
+import { refuseIfSelectionOwned } from "../../lib/selectionOwner";
 import {
   beginEditorOpen,
   isEditorOpening,
   handleKeyWhileOpening,
   abortEditorOpen,
+  isTypedCharacterKey,
+  DISCARD_EDIT_EVENT,
 } from "../../lib/editOpenBuffer";
 import { getMoveAfterReturn, getMoveDirection, getMoveDelta } from "../../../api/editingPreferences";
 import { alertAsync } from "../../lib/dialogs";
 import { isKeyClaimed } from "../../lib/pointerClaims";
 import { getExternalEditSession, isExternalEditLive } from "../../lib/formulaEditTarget";
-import { endExternalFormulaSession, focusExternalSessionView } from "../../lib/pointModeSheetSwitch";
+import { endExternalFormulaSession, enterCommitMove, focusExternalSessionView } from "../../lib/pointModeSheetSwitch";
+
+/** The Ctrl+Enter fill's closes, read when the close runs (see ownUndoTransaction). */
+const UNDO_CLOSES: UndoTransactionCloses = {
+  commitUndoTransaction: (...ticket) => commitUndoTransaction(...ticket),
+  cancelUndoTransaction: (...ticket) => cancelUndoTransaction(...ticket),
+};
 
 type GridState = ReturnType<typeof useGridState>;
 
@@ -62,6 +77,24 @@ export function useSpreadsheetEditing({
 }: UseSpreadsheetEditingProps) {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const { selection } = state;
+
+  /**
+   * Enter's move after a COMMIT, from the Move-after-Return preference
+   * (api/editingPreferences.ts): nothing when it is off, the chosen direction
+   * otherwise, Shift reversing it. Every door that commits Core's edit on
+   * Enter asks this -- the in-cell editor, the formula bar, the grid container
+   * while the edit is parked on another sheet -- or a user who turned the
+   * option off saw the cell move from two of the three (E4).
+   */
+  const moveAfterReturn = useCallback(
+    (shiftKey: boolean) => {
+      if (!getMoveAfterReturn()) return;
+      const [dr, dc] = getMoveDelta(getMoveDirection());
+      moveActiveCell(shiftKey ? -dr : dr, shiftKey ? -dc : dc);
+      scrollToSelection();
+    },
+    [moveActiveCell, scrollToSelection],
+  );
   
   const {
     isEditing,
@@ -125,8 +158,10 @@ export function useSpreadsheetEditing({
       console.log("[useSpreadsheetEditing] formulaBar:commitComplete received:", { key, shiftKey });
 
       if (key === "Enter") {
-        moveActiveCell(shiftKey ? -1 : 1, 0);
-        scrollToSelection();
+        // The user's Move-after-Return preference, as the in-cell editor's
+        // Enter (handleInlineEnter) -- a commit from the formula bar is the
+        // same Enter (E4).
+        moveAfterReturn(shiftKey);
       } else if (key === "Tab") {
         moveActiveCell(0, shiftKey ? -1 : 1);
         scrollToSelection();
@@ -139,7 +174,30 @@ export function useSpreadsheetEditing({
     return () => {
       window.removeEventListener("formulaBar:commitComplete", handleFormulaBarCommit);
     };
-  }, [moveActiveCell, scrollToSelection, focusContainerRef]);
+  }, [moveActiveCell, scrollToSelection, focusContainerRef, moveAfterReturn]);
+
+  // A REPLACED DOCUMENT discards the open edit (E9; core/lib/file-api.ts sends
+  // DISCARD_EDIT_EVENT). The edit belongs to the document that is gone, so it
+  // is neither committed -- that would write the old document's text into the
+  // new one -- nor cancelled through cancelEdit, whose return to the edit's
+  // source sheet would switch the NEW document to whatever sheet now has that
+  // index. The open latch goes too: keys typed into the old document's opening
+  // editor must not seed an entry in the new one.
+  const gridDispatch = useGridDispatch();
+  useEffect(() => {
+    const handleDiscard = () => {
+      abortEditorOpen();
+      setGlobalIsEditing(false);
+      if (!editing) return;
+      setGlobalEditingValue("");
+      resetArrowRefState();
+      gridDispatch(stopEditing());
+    };
+    window.addEventListener(DISCARD_EDIT_EVENT, handleDiscard);
+    return () => {
+      window.removeEventListener(DISCARD_EDIT_EVENT, handleDiscard);
+    };
+  }, [editing, gridDispatch]);
 
   // FIX: Also check isGlobalFormulaMode() synchronously to prevent committing
   // when React state is stale. This handles the race where the user types an operator
@@ -316,7 +374,10 @@ export function useSpreadsheetEditing({
     const minCol = Math.min(selection.startCol, selection.endCol);
     const maxCol = Math.max(selection.startCol, selection.endCol);
 
-    // Build batch updates for every cell in the selection
+    // Build batch updates for every cell in the selection. The fill closes
+    // ONLY the undo transaction its own begin opened: inside a script's open
+    // batch it joins, and the script closes that step (wave E, Y7).
+    let tx: OwnedUndoTransaction | null = null;
     try {
       const updates: CellUpdateInput[] = [];
       for (let row = minRow; row <= maxRow; row++) {
@@ -325,9 +386,9 @@ export function useSpreadsheetEditing({
         }
       }
 
-      await beginUndoTransaction(`Fill ${updates.length} cells`);
+      tx = ownUndoTransaction(await beginUndoTransaction(`Fill ${updates.length} cells`), UNDO_CLOSES);
       const updatedCells = await updateCellsBatch(updates);
-      await commitUndoTransaction();
+      await tx.commit();
 
       console.log(`[useSpreadsheetEditing] Ctrl+Enter filled ${updates.length} cells, ${updatedCells.length} updated`);
 
@@ -345,7 +406,7 @@ export function useSpreadsheetEditing({
       // The commit above is skipped when updateCellsBatch rejects, leaving the
       // transaction open so later edits join it. Cancel, and tell the user —
       // a console.error alone reads as "Ctrl+Enter silently did nothing".
-      await cancelUndoTransaction().catch(() => {});
+      await tx?.cancel().catch(() => {});
       console.error("[useSpreadsheetEditing] Ctrl+Enter fill failed:", error);
       const msg = typeof error === "string" ? error : (error as Error)?.message;
       if (msg) void alertAsync(msg);
@@ -411,7 +472,7 @@ export function useSpreadsheetEditing({
         if (event.key === "Enter" || event.key === "Tab") {
           const move =
             event.key === "Enter"
-              ? (event.shiftKey ? "up" : "down")
+              ? enterCommitMove(event.shiftKey) // Move-after-Return (E4)
               : (event.shiftKey ? "left" : "right");
           await endExternalFormulaSession("commit", move);
           return;
@@ -421,10 +482,9 @@ export function useSpreadsheetEditing({
           return;
         }
         if (
-          event.key.length === 1 &&
-          !event.ctrlKey &&
-          !event.metaKey &&
-          !event.altKey &&
+          // A typed character, an AltGr one included ("$" in an absolute
+          // reference is AltGr+4 on sv-SE; isTypedCharacterKey).
+          isTypedCharacterKey(event) &&
           !event.nativeEvent.isComposing &&
           event.nativeEvent.keyCode !== 229
         ) {
@@ -545,9 +605,8 @@ export function useSpreadsheetEditing({
           const success = await handleCommitEdit();
           console.log("[handleContainerKeyDown] handleCommitEdit returned:", success);
           if (success) {
-            console.log("[handleContainerKeyDown] Calling moveActiveCell");
-            moveActiveCell(event.shiftKey ? -1 : 1, 0);
-            scrollToSelection();
+            // Move-after-Return, as the in-cell editor's own Enter (E4).
+            moveAfterReturn(event.shiftKey);
           }
           focusContainerRef.current?.focus();
           return;
@@ -593,6 +652,29 @@ export function useSpreadsheetEditing({
         return;
       }
 
+      // A key that would BEGIN an entry in Core's active cell -- F2, a typed
+      // character (AltGr included), or the bare Delete/Backspace that clears it
+      // -- while something else OWNS the selection (core/lib/selectionOwner.ts).
+      // A floating grid selected as a whole OBJECT keeps the keyboard on this
+      // container with Core's active cell hidden under it, and the entry opened
+      // THERE; Enter then wrote the hidden cell (the BUG-0185 class, review C).
+      // Type-to-edit is a door that writes to Core's selection, so it asks the
+      // owner and refuses, once. The owner's own cell takes its keys before
+      // they get here (a floating grid's type-to-edit swallows them). With no
+      // cell selection (a canvas) nothing would be written, so nothing refuses.
+      const isBareClear =
+        (event.key === "Delete" || event.key === "Backspace") &&
+        !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+      const beginsEntry =
+        event.key === "F2" ||
+        (isTypedCharacterKey(event) &&
+          !event.nativeEvent.isComposing &&
+          event.nativeEvent.keyCode !== 229);
+      if (selection && (beginsEntry || isBareClear) && refuseIfSelectionOwned(isBareClear ? "Clear Contents" : "Edit Cell")) {
+        event.preventDefault();
+        return;
+      }
+
       // Synchronous guard: block editing in protected ranges (e.g., pivot tables)
       if (selection) {
         const guard = checkRangeGuards(selection.endRow, selection.endCol, selection.endRow, selection.endCol);
@@ -619,10 +701,10 @@ export function useSpreadsheetEditing({
       }
 
       if (
-        event.key.length === 1 &&
-        !event.ctrlKey &&
-        !event.metaKey &&
-        !event.altKey &&
+        // A typed character STARTS an entry -- an AltGr one included: on
+        // sv-SE "@" and "$" arrive with Ctrl AND Alt set, and a "no Ctrl, no
+        // Alt" test dropped them (E13; isTypedCharacterKey).
+        isTypedCharacterKey(event) &&
         // An IME composition delivers its result to the focused element as a
         // composition/input event, not as a character keydown. Opening on it
         // would consume the key and leave the composition nowhere to land.
@@ -655,7 +737,7 @@ export function useSpreadsheetEditing({
         return;
       }
     },
-    [isEditingRef, editing, isOnDifferentSheet, startEditing, handleCommitEdit, handleInlineCtrlEnter, cancelEdit, updateValue, moveActiveCell, scrollToSelection, focusContainerRef, selection]
+    [isEditingRef, editing, isOnDifferentSheet, startEditing, handleCommitEdit, handleInlineCtrlEnter, cancelEdit, updateValue, moveActiveCell, scrollToSelection, focusContainerRef, selection, moveAfterReturn]
   );
 
   const getFormulaBarValueInternal = (): string => {

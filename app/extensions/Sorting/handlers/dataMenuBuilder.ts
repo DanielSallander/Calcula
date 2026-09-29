@@ -10,6 +10,7 @@ import {
 import type { SortRangeResult } from "@api";
 import { IconSortAZ, IconSortZA, IconCustomSort } from "@api";
 import { alertAsync } from "@api/dialogs";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 // ============================================================================
 // State
@@ -46,6 +47,10 @@ export function setCurrentSelection(
  * Auto-detects the data region from the active cell.
  */
 async function quickSort(ascending: boolean): Promise<void> {
+  // Sorts the data region around Core's active cell, which is HIDDEN while
+  // something else owns the selection (a floating grid's selected cell):
+  // refuse, once (D4, BUG-0185 class).
+  if (refuseIfSelectionOwned(ascending ? "Sort A to Z" : "Sort Z to A")) return;
   const sel = currentSelection;
   if (!sel) return;
 
@@ -92,8 +97,11 @@ async function quickSort(ascending: boolean): Promise<void> {
 /**
  * Register sort items in the Data menu.
  * Assumes the "data" menu was already created by AutoFilter.
+ *
+ * Returns the cleanup for deactivation: it takes back this extension's OWN
+ * items, never the shared Data menu (wave E, Y14).
  */
-export function registerSortMenuItems(context: ExtensionContext): void {
+export function registerSortMenuItems(context: ExtensionContext): () => void {
   // Separator before sort items
   context.ui.menus.registerItem("data", {
     id: "data:sort:separator",
@@ -123,6 +131,9 @@ export function registerSortMenuItems(context: ExtensionContext): void {
     label: "Custom Sort...",
     icon: IconCustomSort,
     action: () => {
+      // The dialog sorts the region around Core's active cell: refuse while a
+      // selection owner holds the selection (see quickSort).
+      if (refuseIfSelectionOwned("Custom Sort")) return;
       const sel = currentSelection;
       context.ui.dialogs.show("sort-dialog", {
         activeRow: sel?.activeRow ?? 0,
@@ -130,4 +141,10 @@ export function registerSortMenuItems(context: ExtensionContext): void {
       });
     },
   });
+
+  return () => {
+    for (const id of ["data:sort:separator", "data:sort:ascending", "data:sort:descending", "data:sort:custom"]) {
+      context.ui.menus.unregisterItem("data", id);
+    }
+  };
 }

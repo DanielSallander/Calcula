@@ -2037,6 +2037,205 @@ fn a_refreshed_pivot_follows_its_renamed_sheet_not_the_subscribers_same_named_on
     assert_eq!(tables[&pivot_id].0.destination_sheet.as_deref(), Some("Data (2)"));
 }
 
+// ===========================================================================
+// BUG-0151: a collision rename carries every reference to the renamed sheet
+// ===========================================================================
+
+/// The formula text of one grid cell, as the formula bar shows it.
+fn formula_at(grid: &engine::grid::Grid, row: u32, col: u32) -> Option<String> {
+    grid.get_cell(row, col).and_then(|c| c.formula_string())
+}
+
+/// ["Data" (A1 = 21), "Report" (A1 = Data!A1*2)] plus a defined name and a
+/// chart string source that both name "Data".
+fn data_and_report() -> Workbook {
+    let mut data = Sheet::new("Data".to_string());
+    data.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(21.0)));
+    let mut report = Sheet::new("Report".to_string());
+    report
+        .cells
+        .insert((0, 0), SavedCell::from_cell(&Cell::new_formula("Data!A1*2".to_string())));
+    let mut wb = Workbook::default();
+    wb.sheets = vec![data, report];
+    wb.named_ranges = vec![persistence::SavedNamedRange {
+        name: "Rate".to_string(),
+        refers_to: "=Data!$A$1".to_string(),
+        sheet_id: None,
+        comment: None,
+        folder: None,
+    }];
+    let report_id = wb.sheets[1].id;
+    wb.charts = vec![persistence::SavedChart {
+        id: new_entity(),
+        sheet_id: report_id,
+        spec_json: serde_json::json!({
+            "chartId": 1, "name": "ByName", "sheetIndex": 1,
+            "spec": { "mark": "bar", "data": "Data!A1:A1" }
+        })
+        .to_string(),
+    }];
+    wb
+}
+
+/// A harness whose one sheet is the subscriber's OWN "Data" (A1 = 1000).
+fn harness_with_own_data() -> Harness {
+    let h = Harness::new();
+    let effect = test_effect();
+    h.state.sheet_names.write(&effect).unwrap()[0] = "Data".to_string();
+    h.state.grid.write(&effect).unwrap().set_cell(0, 0, Cell::new_number(1000.0));
+    h.state.grids.write(&effect).unwrap()[0].set_cell(0, 0, Cell::new_number(1000.0));
+    h
+}
+
+/// SUBSCRIBE. The subscriber already had a "Data", so the application's arrived
+/// as "Data (2)" -- and the pulled `=Data!A1*2`, the defined name and the
+/// chart all went on naming "Data", i.e. the SUBSCRIBER's sheet: 2000 where the
+/// report says 42, and no error anywhere.
+///
+/// SABOTAGE: skip the `rename_pull` call in `materialize_pull_result`.
+#[test]
+fn a_subscribe_collision_rename_carries_every_reference_to_the_renamed_sheet() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    publish_sheets(&dir, prof.path(), &data_and_report(), vec![0, 1]);
+    let h = harness_with_own_data();
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+
+    let report = h.index_of("Report");
+    h.index_of("Data (2)");
+    let grids = h.state.grids.read().unwrap();
+    assert_eq!(
+        formula_at(&grids[report], 0, 0).as_deref(),
+        Some("'Data (2)'!A1*2"),
+        "the pulled formula still names 'Data' -- the subscriber's own sheet"
+    );
+    let names = h.state.named_ranges.read().unwrap();
+    assert_eq!(names["RATE"].refers_to, "='Data (2)'!$A$1", "the defined name follows the rename");
+    let charts = h.state.charts.read().unwrap();
+    assert!(
+        charts[0].spec_json.contains("'Data (2)'!A1:A1"),
+        "the chart's string source follows the rename: {}",
+        charts[0].spec_json
+    );
+}
+
+/// THE CHAIN. The subscriber owns "A"; the application carries "A" and
+/// "A (2)", which arrive as "A (2)" and "A (2) (2)". A formula naming both must
+/// move each name ONE step -- a pairwise rewrite sends `A!A1` through both
+/// renames onto "A (2) (2)".
+///
+/// SABOTAGE: apply the renames one pair at a time.
+#[test]
+fn a_chain_of_collision_renames_moves_each_reference_exactly_one_step() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let a = Sheet::new("A".to_string());
+    let a2 = Sheet::new("A (2)".to_string());
+    let mut report = Sheet::new("Sum".to_string());
+    report.cells.insert(
+        (0, 0),
+        SavedCell::from_cell(&Cell::new_formula("A!A1+'A (2)'!A1".to_string())),
+    );
+    let mut wb = Workbook::default();
+    wb.sheets = vec![a, a2, report];
+    publish_sheets(&dir, prof.path(), &wb, vec![0, 1, 2]);
+
+    let h = Harness::new();
+    h.state.sheet_names.write(&test_effect()).unwrap()[0] = "A".to_string();
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+
+    let sum = h.index_of("Sum");
+    h.index_of("A (2)");
+    h.index_of("A (2) (2)");
+    assert_eq!(
+        formula_at(&h.state.grids.read().unwrap()[sum], 0, 0).as_deref(),
+        Some("'A (2)'!A1+'A (2) (2)'!A1")
+    );
+}
+
+/// REFRESH. The tracked "Data" lives here as "Data (2)"; v2 changes the report
+/// formula and ADDS a sheet "Extra" that collides with one of the subscriber's
+/// own. Both references must land on the application's sheets.
+///
+/// SABOTAGE: skip the `rename_pull` call in `prepare_refresh_payloads`.
+#[test]
+fn a_refresh_carries_references_to_renamed_and_newly_colliding_sheets() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut wb = data_and_report();
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 0, 0), None);
+    let h = harness_with_own_data();
+    h.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+    // The subscriber's own "Extra", before v2 brings one.
+    crate::sheets::add_sheet_inner(
+        &h.state,
+        &crate::persistence::FileState::default(),
+        Some("Extra".to_string()),
+        ::persistence::SheetKind::Worksheet,
+    )
+    .expect("the subscriber adds a sheet of their own");
+
+    let mut extra = Sheet::new("Extra".to_string());
+    extra.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(5.0)));
+    wb.sheets.push(extra);
+    wb.sheets[1].cells.insert(
+        (0, 0),
+        SavedCell::from_cell(&Cell::new_formula("Data!A1*3+Extra!A1".to_string())),
+    );
+    publish_as(&dir, prof.path(), &wb, vec![0, 1, 2], "literals", (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "literals"))]);
+
+    let report = h.index_of("Report");
+    h.index_of("Extra (2)");
+    assert_eq!(
+        formula_at(&h.state.grids.read().unwrap()[report], 0, 0).as_deref(),
+        Some("'Data (2)'!A1*3+'Extra (2)'!A1"),
+        "a refreshed formula must read the application's sheets, not the subscriber's \
+         same-named ones"
+    );
+}
+
+/// THE PULL-SIDE PIVOT ANCHOR, case-drifted. A pivot's `destination_sheet` may
+/// spell its tab in another case (a case-only rename updates no definition, and
+/// publish compares case-insensitively). The rename map was consulted with an
+/// EXACT lookup, so "report" missed "Report" -> "Report (2)" and the
+/// case-insensitive destination lookup then found the SUBSCRIBER's own "Report"
+/// -- the active sheet -- and wrote the pivot over it.
+///
+/// SABOTAGE: look the anchors up in the rename map case-sensitively again.
+#[test]
+fn a_pulled_pivot_naming_its_sheet_in_another_case_still_follows_the_rename() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut report = Sheet::new("Report".to_string());
+    for (r, region, amount) in [(1u32, "North", 10.0), (2, "South", 20.0)] {
+        report.cells.insert((r, 0), SavedCell::from_cell(&Cell::new_text(region.to_string())));
+        report.cells.insert((r, 1), SavedCell::from_cell(&Cell::new_number(amount)));
+    }
+    report.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_text("Region".to_string())));
+    report.cells.insert((0, 1), SavedCell::from_cell(&Cell::new_text("Amount".to_string())));
+    let mut wb = Workbook::default();
+    wb.sheets = vec![report];
+    let pivot_id = new_entity();
+    wb.pivot_definitions = vec![data_pivot(pivot_id, "report", (10, 5))];
+    publish_sheets(&dir, prof.path(), &wb, vec![0]);
+
+    let h = Harness::new();
+    {
+        let effect = test_effect();
+        h.state.sheet_names.write(&effect).unwrap()[0] = "Report".to_string();
+        h.state.grid.write(&effect).unwrap().set_cell(10, 5, Cell::new_text("MINE".to_string()));
+        h.state.grids.write(&effect).unwrap()[0].set_cell(10, 5, Cell::new_text("MINE".to_string()));
+    }
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+
+    let pulled = h.index_of("Report (2)");
+    let own = h.state.grids.read().unwrap()[0].get_cell(10, 5).map(|c| c.display_value());
+    assert_eq!(own.as_deref(), Some("MINE"), "the pivot was written over the subscriber's own sheet");
+    let region = crate::pivot::operations::get_pivot_region(&h.state, pivot_id).expect("the pivot was restored");
+    assert_eq!(region.sheet_index, pulled, "on the application's own sheet, \"Report (2)\"");
+}
+
 /// `saved_floating_range_to_row` is the LOAD REPAIR both a `.cala` load and a
 /// pull go through: out-of-range geometry is CLAMPED (window counts) or DROPPED
 /// (a size override past the cap or outside the per-cell bounds), never refused
@@ -2304,4 +2503,638 @@ fn a_dev_pull_keeps_the_partition_and_brings_its_floating_ranges() {
     let pulled: Vec<_> = rows.iter().filter(|fr| fr.id == fr_id).collect();
     assert_eq!(pulled.len(), 1, "one row, replaced -- not a second beside it");
     assert_eq!(pulled[0].x, 300.0);
+}
+
+/// BUG-0154. The DEV pull appended its sheets under the source's names with no
+/// collision pass at all, so pulling a source whose sheet is "Sheet1" into a
+/// workbook that has one produced two tabs called "Sheet1" -- and every name
+/// lookup (formulas, pivots, the Name Box) then resolved to the first. Dev
+/// preview claims subscriber fidelity: the pulled sheet arrives as
+/// "Sheet1 (2)" like a real pull's, and the source's references to it follow
+/// (BUG-0151's rewrite). A dev REFRESH replaces the sheet in place, keeps the
+/// local name, and re-applies the rewrite to the fresh content.
+///
+/// SABOTAGE: drop the collision pass in `dev_subscribe_inner`.
+#[test]
+fn a_dev_pull_never_creates_two_sheets_with_one_name() {
+    let dir = TempDir::new().unwrap();
+    let source_path = dir.path().join("source.cala");
+    let mut own = Sheet::new("Sheet1".to_string());
+    own.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(7.0)));
+    let mut calc = Sheet::new("Calc".to_string());
+    calc.cells.insert(
+        (0, 0),
+        SavedCell::from_cell(&Cell::new_formula("Sheet1!A1*2".to_string())),
+    );
+    let mut wb = Workbook::default();
+    wb.sheets = vec![own, calc];
+    calcula_format::save_calcula(&wb, &source_path).expect("save the dev source");
+
+    let h = Harness::new(); // the subscriber's own "Sheet1"
+    let params = crate::calp_commands::DevSubscribeParams {
+        source_path: source_path.to_string_lossy().to_string(),
+        sheet_names: Vec::new(),
+    };
+    crate::calp_commands::dev_subscribe_inner(
+        &h.state,
+        &crate::persistence::FileState::default(),
+        &h.slicer,
+        &h.timeline,
+        &h.ribbon,
+        &params,
+    )
+    .expect("dev subscribe");
+
+    let names = h.state.sheet_names.read().unwrap().clone();
+    let mut lower: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
+    lower.sort();
+    lower.dedup();
+    assert_eq!(lower.len(), names.len(), "two sheets share a name: {names:?}");
+    assert_eq!(names, vec!["Sheet1", "Sheet1 (2)", "Calc"]);
+    let calc_idx = h.index_of("Calc");
+    assert_eq!(
+        formula_at(&h.state.grids.read().unwrap()[calc_idx], 0, 0).as_deref(),
+        Some("'Sheet1 (2)'!A1*2"),
+        "the source's reference follows its sheet, not the subscriber's own Sheet1"
+    );
+
+    // The source edits the formula; a dev refresh replaces the sheet in place.
+    wb.sheets[1].cells.insert(
+        (0, 0),
+        SavedCell::from_cell(&Cell::new_formula("Sheet1!A1*3".to_string())),
+    );
+    calcula_format::save_calcula(&wb, &source_path).expect("save the dev source again");
+    crate::calp_commands::dev_refresh_inner(
+        &h.state,
+        &crate::persistence::FileState::default(),
+        &h.slicer,
+        &h.timeline,
+        &h.ribbon,
+    )
+    .expect("dev refresh");
+    assert_eq!(
+        *h.state.sheet_names.read().unwrap(),
+        vec!["Sheet1", "Sheet1 (2)", "Calc"],
+        "a refresh neither appends a second copy nor renames the local tab"
+    );
+    assert_eq!(
+        formula_at(&h.state.grids.read().unwrap()[calc_idx], 0, 0).as_deref(),
+        Some("'Sheet1 (2)'!A1*3"),
+        "the refreshed formula follows the local name too"
+    );
+}
+
+// ===========================================================================
+// BUG-0153: a detached sheet keeps its scripts and its sheet-scoped names
+// ===========================================================================
+
+/// ["Report" (a scripted button at (5, 2)), "Other"], the script bound the way
+/// the host's publish assembly canonicalizes it (application position 0), plus
+/// a name scoped to "Report" and a workbook-scoped one.
+fn scripted_report_and_other() -> Workbook {
+    let report = Sheet::new("Report".to_string());
+    let mut other = Sheet::new("Other".to_string());
+    other.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(1.0)));
+    let mut wb = Workbook::default();
+    wb.sheets = vec![report, other];
+    let report_id = wb.sheets[0].id;
+    wb.controls = vec![button_on(report_id, "Go")];
+    wb.object_scripts = vec![persistence::SavedObjectScript {
+        id: "script-go".to_string(),
+        name: "Go".to_string(),
+        object_type: persistence::ScriptableObjectType::Button,
+        instance_id: Some("control-0-5-2".to_string()),
+        source: "export function onClick() { /* v1 */ }".to_string(),
+        access_level: Default::default(),
+        description: None,
+        provenance: Default::default(),
+        package_name: None,
+        package_version: None,
+        declared_capabilities: Vec::new(),
+    }];
+    wb.named_ranges = vec![
+        persistence::SavedNamedRange {
+            name: "LocalRate".to_string(),
+            refers_to: "=Report!$A$1".to_string(),
+            sheet_id: Some(report_id),
+            comment: None,
+            folder: None,
+        },
+        persistence::SavedNamedRange {
+            name: "Rate".to_string(),
+            refers_to: "=Other!$A$1".to_string(),
+            sheet_id: None,
+            comment: None,
+            folder: None,
+        },
+    ];
+    wb
+}
+
+/// BUG-0153 (a). The refresh's script swap removed EVERY distributed script of
+/// the application and re-bound v2's through a map that has no entry for a
+/// detached sheet, so the button on a sheet the subscriber took lost its script
+/// on the next refresh. The script stays exactly as it was consented to --
+/// distributed, restricted, v1's source -- because the sheet it serves is no
+/// longer spoken for by upstream; converting it to a local script would have
+/// bypassed consent, and dropping it broke the button.
+///
+/// SABOTAGE: drop the detached-binding exemption from the swap's `retain`.
+#[test]
+fn a_detached_sheets_control_script_survives_a_refresh() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut wb = scripted_report_and_other();
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 0, 0), None);
+    let h = Harness::new();
+    h.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+    let report = h.index_of("Report");
+    let bound = format!("control-{report}-5-2");
+    {
+        let scripts = h.state.object_scripts.read().unwrap();
+        let s = scripts.iter().find(|s| s.id == "script-go").expect("precondition: the script landed");
+        assert_eq!(s.instance_id.as_deref(), Some(bound.as_str()));
+    }
+    h.detach(report);
+
+    // v2 edits the script and a cell on the still-subscribed sheet.
+    wb.object_scripts[0].source = "export function onClick() { /* v2 */ }".to_string();
+    wb.sheets[1].cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(2.0)));
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "literals"))]);
+
+    let scripts = h.state.object_scripts.read().unwrap();
+    let kept: Vec<_> = scripts.iter().filter(|s| s.id == "script-go").collect();
+    assert_eq!(kept.len(), 1, "the detached sheet's button lost its script: {:?}", scripts.iter().map(|s| (&s.id, &s.instance_id)).collect::<Vec<_>>());
+    assert_eq!(kept[0].instance_id.as_deref(), Some(bound.as_str()), "still bound to the button");
+    assert!(kept[0].source.contains("v1"), "upstream no longer speaks for the detached sheet");
+    assert!(
+        matches!(kept[0].provenance, persistence::ScriptProvenance::Distributed),
+        "still the consented DISTRIBUTED script -- never silently turned local"
+    );
+    assert_eq!(
+        number_at(&h.state.grids.read().unwrap()[h.index_of("Other")], 0, 0),
+        Some(2.0),
+        "precondition: the refresh really ran"
+    );
+}
+
+/// BUG-0153 (b). A refresh UPSERTS the application's defined names and
+/// resolves a sheet-scoped name's sheet through the refresh map -- which has no
+/// entry for a detached sheet -- so a name scoped to a sheet the subscriber
+/// took came back WORKBOOK-scoped (`sheet_index: None`), silently widening
+/// what it resolves for. A detached sheet's names are the subscriber's; a
+/// sheet-scoped name whose sheet is not here at all is not widened either.
+///
+/// SABOTAGE: upsert every name again, resolving an unknown sheet to `None`.
+#[test]
+fn a_detached_sheets_scoped_name_stays_scoped_through_a_refresh() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut wb = scripted_report_and_other();
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 0, 0), None);
+    let h = Harness::new();
+    h.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+    let report = h.index_of("Report");
+    assert_eq!(
+        h.state.named_ranges.read().unwrap()["LOCALRATE"].sheet_index,
+        Some(report),
+        "precondition: the name arrived scoped to its sheet"
+    );
+    h.detach(report);
+
+    wb.named_ranges[1].refers_to = "=Other!$A$2".to_string();
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "literals"))]);
+
+    let names = h.state.named_ranges.read().unwrap();
+    assert_eq!(
+        names["LOCALRATE"].sheet_index,
+        Some(h.index_of("Report")),
+        "the detached sheet's name became workbook-scoped"
+    );
+    assert_eq!(names["RATE"].refers_to, "=Other!$A$2", "precondition: the refresh upserted the others");
+    assert_eq!(names["RATE"].sheet_index, None);
+    let subs = h.state.subscriptions.read().unwrap();
+    assert!(
+        !subs.subscriptions[0].objects.iter().any(|o| o.kind == "namedRange" && o.id == "LOCALRATE"),
+        "a name the refresh did not apply is not ledgered back to the application"
+    );
+}
+
+/// BUG-0151 ON CHECKOUT. Opening an application for editing is ADDITIVE, so an
+/// author who has a "Data" of their own gets the application's as "Data (2)"
+/// -- and its `=Data!A1*2` then computed from the AUTHOR's sheet while they
+/// edited the application. The working copy's references follow the rename
+/// like a subscriber's, and the push reverses both the tab name and the
+/// references (`restore_published_sheet_references`), so the package ships
+/// the application's own spelling.
+///
+/// SABOTAGE: rename the pulled references on SUBSCRIBE only.
+#[test]
+fn a_checkout_collision_rename_carries_the_working_copys_references() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    publish_sheets(&dir, prof.path(), &data_and_report(), vec![0, 1]);
+    let h = harness_with_own_data();
+    h.materialize(checkout_pull(&dir, prof.path()), MaterializeMode::Checkout);
+
+    let report = h.index_of("Report");
+    h.index_of("Data (2)");
+    assert_eq!(
+        formula_at(&h.state.grids.read().unwrap()[report], 0, 0).as_deref(),
+        Some("'Data (2)'!A1*2"),
+        "the working copy computes the application's report from the author's own Data"
+    );
+    assert_eq!(h.state.named_ranges.read().unwrap()["RATE"].refers_to, "='Data (2)'!$A$1");
+}
+
+/// The PUSH half: the carrier a working copy publishes has its collision
+/// renames undone in the references it ships -- formulas on the published
+/// sheets, defined names and chart string sources -- simultaneously, and a
+/// reference to the author's OWN same-named sheet is left as it is (it means
+/// the package's sheet there, exactly as before).
+///
+/// SABOTAGE: return early from `restore_published_sheet_references`.
+#[test]
+fn a_push_restores_the_published_names_in_the_references_it_ships() {
+    let mut report = Sheet::new("Report".to_string());
+    report.cells.insert(
+        (0, 0),
+        SavedCell::from_cell(&Cell::new_formula("'Data (2)'!A1*2+'A (2) (2)'!A1".to_string())),
+    );
+    report
+        .cells
+        .insert((1, 0), SavedCell::from_cell(&Cell::new_formula("Data!B1".to_string())));
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Data".to_string()), report];
+    wb.named_ranges = vec![persistence::SavedNamedRange {
+        name: "Rate".to_string(),
+        refers_to: "='Data (2)'!$A$1".to_string(),
+        sheet_id: None,
+        comment: None,
+        folder: None,
+    }];
+    wb.charts = vec![persistence::SavedChart {
+        id: new_entity(),
+        sheet_id: wb.sheets[1].id,
+        spec_json: serde_json::json!({ "spec": { "data": "'Data (2)'!A1:A1" } }).to_string(),
+    }];
+    // LOWERCASED local name -> published name, as `assemble_publish_workbook`
+    // builds it; a chain, so a pairwise undo would be caught too.
+    let renamed: std::collections::HashMap<String, String> = [
+        ("data (2)".to_string(), "Data".to_string()),
+        ("a (2) (2)".to_string(), "A (2)".to_string()),
+    ]
+    .into_iter()
+    .collect();
+
+    let own_reference = wb.sheets[1].cells[&(1, 0)].formula.clone();
+
+    crate::calp_commands::restore_published_sheet_references(&mut wb, &[1], &renamed);
+
+    let cells = &wb.sheets[1].cells;
+    assert_eq!(cells[&(0, 0)].formula.as_deref(), Some("Data!A1*2+'A (2)'!A1"));
+    assert_eq!(cells[&(1, 0)].formula, own_reference, "left exactly as it was");
+    assert_eq!(wb.named_ranges[0].refers_to, "=Data!$A$1");
+    assert!(wb.charts[0].spec_json.contains("Data!A1:A1") && !wb.charts[0].spec_json.contains("(2)"));
+}
+
+/// BUG-0151 ON RESET. "Reset to published" re-pulls the version the subscriber
+/// is on and rebuilds the subscribed sheets from it -- so without the rename
+/// the reset put back `=Data!A1*2` over the repaired `='Data (2)'!A1*2`, and
+/// the report read the subscriber's own "Data" again.
+///
+/// SABOTAGE: return early from `rename_pulled_references_for_reset`.
+#[test]
+fn a_reset_keeps_the_references_a_collision_rename_repaired() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    publish_sheets(&dir, prof.path(), &data_and_report(), vec![0, 1]);
+    let h = harness_with_own_data();
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+    let sub = h.state.subscriptions.read().unwrap().subscriptions[0].clone();
+
+    // The reset's own re-pull of the version the subscriber is on.
+    let mut again = subscribe_pull(&dir, prof.path());
+    let names = crate::calp_commands::rename_pulled_references_for_reset(&h.state, &sub, &mut again)
+        .expect("rename");
+    assert_eq!(names.local_name("Data"), Some("Data (2)"));
+    let report = again.sheets.iter().find(|p| p.name == "Report").expect("the pulled Report");
+    assert_eq!(
+        report.sheet.cells[&(0, 0)].formula.as_deref(),
+        Some("'Data (2)'!A1*2"),
+        "the reset would rebuild the report reading the subscriber's own Data"
+    );
+    assert_eq!(
+        again.sheets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        vec!["Data", "Report"],
+        "the pulled sheets keep the publisher's names: the reset maps them by id"
+    );
+}
+
+/// The SUBSCRIBER DIFF ("View changes", the reset preview) compares the
+/// subscriber's sheets with the published version -- and after a collision
+/// rename every repaired reference would read as a change the reset does not
+/// make. The working side's references are compared in the published spelling:
+/// this is the map that does it (applied by `restore_published_sheet_references`
+/// inside the preview publish).
+///
+/// SABOTAGE: return an empty map from `subscriber_published_names`.
+#[test]
+fn a_subscriber_diff_compares_renamed_references_in_the_published_spelling() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    publish_sheets(&dir, prof.path(), &data_and_report(), vec![0, 1]);
+    let h = harness_with_own_data();
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+    let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+    let base = reg.get_version_manifest("literals", "1.0.0").unwrap();
+
+    let names = crate::calp_commands::subscriber_published_names(&h.state, "literals", &base)
+        .expect("names");
+    assert_eq!(
+        names,
+        [("data (2)".to_string(), "Data".to_string())].into_iter().collect(),
+        "only the collision-renamed sheet, local (lowercased) -> published"
+    );
+    assert!(
+        crate::calp_commands::subscriber_published_names(&h.state, "not-subscribed", &base)
+            .unwrap()
+            .is_empty()
+    );
+
+    // The live formula, carried the way the preview carries it, comes back in
+    // the published spelling.
+    let report = h.index_of("Report");
+    let live = formula_at(&h.state.grids.read().unwrap()[report], 0, 0).unwrap();
+    let mut carrier = Workbook::default();
+    let mut sheet = Sheet::new("Report".to_string());
+    sheet
+        .cells
+        .insert((0, 0), SavedCell::from_cell(&Cell::new_formula(live.clone())));
+    carrier.sheets = vec![sheet];
+    crate::calp_commands::restore_published_sheet_references(&mut carrier, &[0], &names);
+    assert_eq!(carrier.sheets[0].cells[&(0, 0)].formula.as_deref(), Some("Data!A1*2"));
+}
+
+// ===========================================================================
+// BUG-0151 fix-up: the doors the first round missed
+// ===========================================================================
+
+/// A working copy of "literals" checked out into a workbook that already owns
+/// a "Data": the application's "Data" is here as "Data (2)", and the link names
+/// the application's sheets by their PUBLISHED names, as `calp_checkout` writes
+/// it.
+fn checked_out_over_own_data(dir: &TempDir, prof: &Path) -> Harness {
+    publish_sheets(dir, prof, &data_and_report(), vec![0, 1]);
+    let h = harness_with_own_data();
+    h.materialize(checkout_pull(dir, prof), MaterializeMode::Checkout);
+    let base_sheets: Vec<calp::WorkingCopySheetRef> = {
+        let ids = h.state.sheet_ids.read().unwrap();
+        [("Data (2)", "Data"), ("Report", "Report")]
+            .iter()
+            .map(|(local, published)| calp::WorkingCopySheetRef {
+                sheet_id: ids[h.index_of(local)],
+                name: published.to_string(),
+            })
+            .collect()
+    };
+    *h.state.working_copy_link.write(&test_effect()).unwrap() = Some(calp::WorkingCopyLink::new(
+        dir.path().to_str().unwrap(),
+        "literals",
+        "report",
+        "1.0.0",
+        "2026-09-25T01:00:00Z",
+        base_sheets,
+    ));
+    h
+}
+
+/// THE HOLD-BACK DOOR. An author whose checkout renamed the application's
+/// "Data" to "Data (2)" edits Report!A1 and unticks it in the push dialog; the
+/// hold-back lays the BASE's cell back. It laid `DATA!A1*2` back verbatim --
+/// naming the AUTHOR's own "Data" -- so its recalculation computed 2000 where
+/// the application says 42, and the push shipped that number beside a formula
+/// the diff called unchanged. The merge had learned the rename; the hold-back
+/// had not. Both now read a published version's cells through one function.
+///
+/// SABOTAGE: hand `published_cells_in_local_names` an empty `SheetRenames`
+/// from the hold-back (the census below), or skip `rename_saved_cell` in it.
+#[test]
+fn a_held_back_cell_reads_the_working_copys_renamed_sheet_not_the_authors_own() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let h = checked_out_over_own_data(&dir, prof.path());
+    let registry = dir.path().to_str().unwrap();
+
+    let renames = crate::calp_commands::working_copy_sheet_renames(&h.state, registry, "literals")
+        .expect("renames");
+    assert_eq!(renames.target("Data"), Some("Data (2)"), "the checkout's collision rename");
+
+    let report_id = h.state.sheet_ids.read().unwrap()[h.index_of("Report")].to_string();
+    let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+    let cells = crate::calp_commands::published_cells_in_local_names(
+        &reg,
+        "literals",
+        "1.0.0",
+        &report_id,
+        &[(0, 0), (9, 9)],
+        &renames,
+    )
+    .expect("read")
+    .expect("the base has the sheet");
+    assert_eq!(cells.len(), 2);
+    assert_eq!(cells[0].0, (0, 0));
+    assert_eq!(
+        cells[0].1.as_ref().and_then(|c| c.formula.as_deref()),
+        Some("'Data (2)'!A1*2"),
+        "the held-back cell must read the application's Data, not the author's"
+    );
+    assert!(cells[1].1.is_none(), "a cell the base did not have comes back empty");
+
+    // The cell the grid then takes computes the application's number.
+    let back = cells[0].1.as_ref().unwrap().to_cell();
+    assert_eq!(back.formula_string().as_deref(), Some("'Data (2)'!A1*2"));
+
+    // A sheet the base does not have is the caller's to decide about.
+    assert!(crate::calp_commands::published_cells_in_local_names(
+        &reg,
+        "literals",
+        "1.0.0",
+        &new_sheet_id().to_string(),
+        &[(0, 0)],
+        &renames,
+    )
+    .expect("read")
+    .is_none());
+
+    // Any other application's link renames nothing.
+    assert!(crate::calp_commands::working_copy_sheet_renames(&h.state, registry, "other")
+        .unwrap()
+        .is_empty());
+}
+
+/// THE SUBSCRIBER DIFF AND THE RESET, ONE RULE. The subscriber owns "Data";
+/// the application's arrived as "Data (2)" and the subscriber DETACHED it.
+/// The reset maps a detached sheet to its local copy (the refresh resolver)
+/// and so rewrites Report!A1 to what it already says; the diff's map was
+/// walked by hand over the TRACKED sheets and missed the detached one, so
+/// "View changes" listed Report!A1 with a Reset checkbox for a reset that
+/// changes nothing.
+///
+/// SABOTAGE: walk `sub.sheets` by hand again in `subscriber_published_names`.
+#[test]
+fn the_subscriber_diff_and_the_reset_agree_about_a_detached_sheet() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    publish_sheets(&dir, prof.path(), &data_and_report(), vec![0, 1]);
+    let h = harness_with_own_data();
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+    h.detach(h.index_of("Data (2)"));
+    let sub = h.state.subscriptions.read().unwrap().subscriptions[0].clone();
+    assert!(sub.sheets.iter().all(|s| s.local_name != "Data (2)"), "precondition: detached");
+
+    // What the reset would write.
+    let mut again = subscribe_pull(&dir, prof.path());
+    crate::calp_commands::rename_pulled_references_for_reset(&h.state, &sub, &mut again)
+        .expect("rename");
+    let reset_writes = again
+        .sheets
+        .iter()
+        .find(|p| p.name == "Report")
+        .and_then(|p| p.sheet.cells[&(0, 0)].formula.clone())
+        .unwrap();
+    let report = h.index_of("Report");
+    let live = formula_at(&h.state.grids.read().unwrap()[report], 0, 0).unwrap();
+    assert!(
+        calp::sheet_renames::same_formula_text(&reset_writes, &live),
+        "precondition: the reset changes nothing here ({reset_writes} vs {live})"
+    );
+
+    // What the diff compares: the live cell, in the published spelling.
+    let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+    let base = reg.get_version_manifest("literals", "1.0.0").unwrap();
+    let names =
+        crate::calp_commands::subscriber_published_names(&h.state, "literals", &base).expect("names");
+    assert_eq!(names.get("data (2)").map(String::as_str), Some("Data"), "{names:?}");
+    let mut carrier = Workbook::default();
+    let mut sheet = Sheet::new("Report".to_string());
+    sheet.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_formula(live)));
+    carrier.sheets = vec![sheet];
+    crate::calp_commands::restore_published_sheet_references(&mut carrier, &[0], &names);
+    let published = data_and_report().sheets[1].cells[&(0, 0)].formula.clone().unwrap();
+    let compared = carrier.sheets[0].cells[&(0, 0)].formula.clone().unwrap();
+    assert!(
+        calp::sheet_renames::same_formula_text(&compared, &published),
+        "the diff would list a change the reset does not make: {compared} vs {published}"
+    );
+}
+
+/// A PULLED SHEET THE SUBSCRIBER DELETED. The subscriber owns "Data"; the
+/// application's arrived as "Data (2)", which they detached and then deleted
+/// (the delete guard's own remedy), leaving Report!A1 an honest `#REF!`. The
+/// next refresh had no local name for "Data" and wrote v2's `Data!A1*3` back
+/// in the PUBLISHER's spelling -- in this workbook, the subscriber's own sheet:
+/// 3000 where there should be an error, and nothing to say so.
+///
+/// SABOTAGE: drop the `with_gone` half of `RefreshSheetNames::renames`.
+#[test]
+fn a_refresh_after_the_subscriber_deleted_a_pulled_sheet_never_reads_their_namesake() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut wb = data_and_report();
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 0, 0), None);
+    let h = harness_with_own_data();
+    h.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+    let pulled_data = h.index_of("Data (2)");
+    h.detach(pulled_data);
+    crate::sheets::delete_sheet_impl(
+        &h.state,
+        &crate::persistence::FileState::default(),
+        &h.pivot,
+        &crate::persistence::UserFilesState::default(),
+        &h.pane,
+        &h.ribbon,
+        &h.slicer,
+        &h.timeline,
+        pulled_data,
+        false,
+    )
+    .expect("the detached copy is the subscriber's to delete");
+    assert!(
+        !h.state.sheet_names.read().unwrap().iter().any(|n| n == "Data (2)"),
+        "precondition: deleted"
+    );
+
+    wb.sheets[1]
+        .cells
+        .insert((0, 0), SavedCell::from_cell(&Cell::new_formula("Data!A1*3".to_string())));
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "literals"))]);
+
+    let report = h.index_of("Report");
+    let grids = h.state.grids.read().unwrap();
+    let formula = formula_at(&grids[report], 0, 0);
+    assert_eq!(
+        formula.as_deref(),
+        Some("#REF!*3"),
+        "the refreshed formula reads the subscriber's own 'Data' ({:?})",
+        grids[report].get_cell(0, 0).map(|c| c.display_value())
+    );
+    assert_ne!(number_at(&grids[report], 0, 0), Some(3000.0));
+}
+
+/// A SECOND DEV SUBSCRIBE to the same source is refused before anything
+/// changes. A dev pull keeps the source's sheet ids, so every sheet it brings
+/// is already here: it used to be appended anyway -- two tabs per name, one id
+/// per pair -- and the source's formulas read whichever came first.
+///
+/// SABOTAGE: drop the `CALP_DEV_SHEET_ALREADY_HERE` gate.
+#[test]
+fn a_second_dev_subscribe_to_the_same_source_is_refused_and_changes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let source_path = dir.path().join("source.cala");
+    let mut own = Sheet::new("Sheet1".to_string());
+    own.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(7.0)));
+    let mut calc = Sheet::new("Calc".to_string());
+    calc.cells.insert(
+        (0, 0),
+        SavedCell::from_cell(&Cell::new_formula("Sheet1!A1*2".to_string())),
+    );
+    let mut wb = Workbook::default();
+    wb.sheets = vec![own, calc];
+    calcula_format::save_calcula(&wb, &source_path).expect("save the dev source");
+
+    let h = Harness::new();
+    let params = crate::calp_commands::DevSubscribeParams {
+        source_path: source_path.to_string_lossy().to_string(),
+        sheet_names: Vec::new(),
+    };
+    let subscribe = |file_state: &crate::persistence::FileState| {
+        crate::calp_commands::dev_subscribe_inner(
+            &h.state,
+            file_state,
+            &h.slicer,
+            &h.timeline,
+            &h.ribbon,
+            &params,
+        )
+    };
+    subscribe(&crate::persistence::FileState::default()).expect("the first dev subscribe");
+    let names_before = h.state.sheet_names.read().unwrap().clone();
+    let ids_before = h.state.sheet_ids.read().unwrap().clone();
+    let subs_before = h.state.subscriptions.read().unwrap().subscriptions.len();
+
+    let clean = crate::persistence::FileState::default();
+    let err = subscribe(&clean).expect_err("a second dev subscribe must be refused");
+    assert!(err.contains("CALP_DEV_SHEET_ALREADY_HERE"), "{err}");
+    assert!(!clean.is_dirty(), "a refusal leaves a clean workbook clean");
+    assert_eq!(*h.state.sheet_names.read().unwrap(), names_before);
+    assert_eq!(*h.state.sheet_ids.read().unwrap(), ids_before);
+    assert_eq!(h.state.subscriptions.read().unwrap().subscriptions.len(), subs_before);
+    let mut unique = ids_before.clone();
+    unique.sort_by_key(|id| id.to_string());
+    unique.dedup();
+    assert_eq!(unique.len(), ids_before.len(), "one sheet per id");
 }

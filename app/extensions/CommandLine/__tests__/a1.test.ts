@@ -119,6 +119,25 @@ describe("formatters", () => {
     expect(formatQualified(parseQualified("B3"))).toBe("B3");
   });
 
+  it("quotes a sheet name exactly when a FORMULA would have to (the parser's rule, X10)", () => {
+    const label = (sheet: string) => formatQualified({ sheet, range: parseRange("A1") });
+    // Each of these reads as something else bare: a number, a number then a
+    // name, a boolean, a subtraction.
+    expect(label("2024"), "a numeric sheet name left bare lexes as a number").toBe("'2024'!A1");
+    expect(label("2024Budget")).toBe("'2024Budget'!A1");
+    expect(label("TRUE")).toBe("'TRUE'!A1");
+    expect(label("false")).toBe("'false'!A1");
+    expect(label("Q1-2026")).toBe("'Q1-2026'!A1");
+    expect(label("It's")).toBe("'It''s'!A1");
+    // ...and the ordinary names stay bare, reference-shaped ones included.
+    expect(label("Sheet2")).toBe("Sheet2!A1");
+    expect(label("Data_2024")).toBe("Data_2024!A1");
+    // Whatever it prints, the CLI reads back as the same sheet.
+    for (const sheet of ["2024", "Q1-2026", "It's", "My Sheet", "Sheet2"]) {
+      expect(parseQualified(label(sheet)).sheet).toBe(sheet);
+    }
+  });
+
   it("isSingleCell", () => {
     expect(isSingleCell(parseRange("B3"))).toBe(true);
     expect(isSingleCell(parseRange("A1:A2"))).toBe(false);

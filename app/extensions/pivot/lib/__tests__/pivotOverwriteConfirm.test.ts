@@ -23,6 +23,7 @@ const h = vi.hoisted(() => ({
   refreshAll: vi.fn(),
   updateBi: vi.fn(),
   applyFilter: vi.fn(),
+  changeSource: vi.fn(),
   undoOverwrite: vi.fn(() => Promise.resolve()),
   confirm: vi.fn(() => Promise.resolve(false)),
 }));
@@ -33,6 +34,7 @@ vi.mock("@api/backend", async (importOriginal) => ({
   refreshAllPivotTables: (...a: unknown[]) => h.refreshAll(...a),
   updateBiPivotFields: (...a: unknown[]) => h.updateBi(...a),
   applyPivotFilter: (...a: unknown[]) => h.applyFilter(...a),
+  changePivotDataSource: (...a: unknown[]) => h.changeSource(...a),
   undoPivotOverwrite: (...a: unknown[]) => h.undoOverwrite(...a),
   cancelPivotOperation: () => Promise.resolve(),
   revertPivotOperation: () => Promise.resolve(),
@@ -45,7 +47,13 @@ vi.mock("@api", async (importOriginal) => ({
   emitAppEvent: vi.fn(),
 }));
 
-import { refreshPivotCache, refreshAllPivotTables, updateBiFields, applyPivotFilter } from "../pivot-api";
+import {
+  refreshPivotCache,
+  refreshAllPivotTables,
+  updateBiFields,
+  applyPivotFilter,
+  changePivotDataSource,
+} from "../pivot-api";
 
 /** A response; an overwriting one names its undo step (its `overwriteToken`),
  *  as the backend does for every command that records the overwritten cells. */
@@ -64,6 +72,7 @@ beforeEach(() => {
   h.refreshAll.mockReset();
   h.updateBi.mockReset();
   h.applyFilter.mockReset();
+  h.changeSource.mockReset();
   h.undoOverwrite.mockClear();
   h.confirm.mockReset().mockImplementation(() => Promise.resolve(false));
   vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -80,7 +89,7 @@ describe("Refresh (refreshPivotCache)", () => {
     expect(h.confirm.mock.calls[0][0]).toBe(
       "A PivotTable report will overwrite existing data. Do you want to continue?",
     );
-    expect(h.undoOverwrite).toHaveBeenCalledWith("pv-1", [41], undefined);
+    expect(h.undoOverwrite).toHaveBeenCalledWith("pv-1", [41]);
   });
 
   it("an OK keeps the refresh and undoes nothing", async () => {
@@ -106,7 +115,7 @@ describe("Refresh All (refreshAllPivotTables)", () => {
 
     await expect(refreshAllPivotTables()).rejects.toThrow(/would overwrite data/);
     expect(h.confirm).toHaveBeenCalledTimes(1);
-    expect(h.undoOverwrite).toHaveBeenCalledWith("pv-b", [42], undefined);
+    expect(h.undoOverwrite).toHaveBeenCalledWith("pv-b", [42]);
   });
 });
 
@@ -118,7 +127,7 @@ describe("a BI re-query (updateBiFields)", () => {
       updateBiFields({ pivotId: "pv-bi", rowFields: [], columnFields: [], valueFields: [], filterFields: [] }),
     ).rejects.toThrow(/would overwrite data/);
     expect(h.confirm).toHaveBeenCalledTimes(1);
-    expect(h.undoOverwrite).toHaveBeenCalledWith("pv-bi", [43], undefined);
+    expect(h.undoOverwrite).toHaveBeenCalledWith("pv-bi", [43]);
   });
 });
 
@@ -134,7 +143,7 @@ describe("the header dropdown's filter (applyPivotFilter)", () => {
       applyPivotFilter({ pivotId: "pv-f", fieldIndex: 0, filters: { manualFilter: { selectedItems: ["East"] } } }),
     ).rejects.toThrow(/would overwrite data/);
     expect(h.confirm).toHaveBeenCalledTimes(1);
-    expect(h.undoOverwrite).toHaveBeenCalledWith("pv-f", [44], undefined);
+    expect(h.undoOverwrite).toHaveBeenCalledWith("pv-f", [44]);
   });
 
   it("a command that named NO step takes nothing back on Cancel (it used to pop the user's previous step)", async () => {
@@ -145,5 +154,40 @@ describe("the header dropdown's filter (applyPivotFilter)", () => {
     ).rejects.toThrow(/would overwrite data/);
     expect(h.confirm).toHaveBeenCalledTimes(1);
     expect(h.undoOverwrite).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave D fix-up: Change Data Source asks too
+// ---------------------------------------------------------------------------
+
+describe("Change Data Source (changePivotDataSource)", () => {
+  // A pivot repointed at a larger range grows over the user's cells. The
+  // backend saves them and names the step, but this door never asked: the
+  // cells were overwritten with no question, as no other pivot door does.
+  it("asks through confirmAsync when the backend counts overwritten cells; a refusal takes back its step", async () => {
+    h.changeSource.mockImplementation(() => Promise.resolve(view("pv-cs", 4, 45)));
+
+    await expect(changePivotDataSource({ pivotId: "pv-cs", sourceRange: "Sheet1!A1:C40" })).rejects.toThrow(
+      /would overwrite data/,
+    );
+    expect(h.confirm).toHaveBeenCalledTimes(1);
+    expect(h.undoOverwrite).toHaveBeenCalledWith("pv-cs", [45]);
+  });
+
+  it("an OK keeps the change; a change that overwrites nothing never asks", async () => {
+    h.confirm.mockImplementation(() => Promise.resolve(true));
+    h.changeSource.mockImplementation(() => Promise.resolve(view("pv-cs2", 4, 46)));
+    await expect(changePivotDataSource({ pivotId: "pv-cs2", sourceRange: "A1:C40" })).resolves.toMatchObject({
+      pivotId: "pv-cs2",
+    });
+    expect(h.undoOverwrite).not.toHaveBeenCalled();
+
+    h.confirm.mockClear();
+    h.changeSource.mockImplementation(() => Promise.resolve(view("pv-cs3", 0)));
+    await expect(changePivotDataSource({ pivotId: "pv-cs3", sourceRange: "A1:C4" })).resolves.toMatchObject({
+      pivotId: "pv-cs3",
+    });
+    expect(h.confirm).not.toHaveBeenCalled();
   });
 });

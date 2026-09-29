@@ -15,14 +15,14 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const gridMock = {
+const gridMock = vi.hoisted(() => ({
   refreshGridData: vi.fn(),
   refreshGridDimensions: vi.fn(),
   setManuallyHiddenRows: vi.fn((rows: number[]) => ({ type: "SET_MANUALLY_HIDDEN_ROWS", rows })),
   setManuallyHiddenCols: vi.fn((cols: number[]) => ({ type: "SET_MANUALLY_HIDDEN_COLS", cols })),
-};
+}));
 vi.mock("../../grid", () => gridMock);
-const dispatchMock = { dispatchGridAction: vi.fn() };
+const dispatchMock = vi.hoisted(() => ({ dispatchGridAction: vi.fn() }));
 vi.mock("../../gridDispatch", () => dispatchMock);
 
 import { executeSetLinesHidden, executeGetHiddenLines } from "../host";

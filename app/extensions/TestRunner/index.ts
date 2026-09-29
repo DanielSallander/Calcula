@@ -11,6 +11,7 @@ import {
   unregisterTaskPane,
   openTaskPane,
   registerMenuItem,
+  unregisterMenuItem,
   showToast,
   IconRunTests,
   IconTestPanel,
@@ -106,6 +107,7 @@ import { indentFormatsSuite } from "./lib/suites/indentFormats";
 // Phase 19: Spill Ranges, Flash Fill
 import { spillRangesSuite } from "./lib/suites/spillRanges";
 import { flashFillSuite } from "./lib/suites/flashFill";
+import { checkboxSuite } from "./lib/suites/checkbox";
 // Phase 20: Paste Special, Format Painter, Subtotals
 import { pasteSpecialSuite } from "./lib/suites/pasteSpecial";
 import { formatPainterSuite } from "./lib/suites/formatPainter";
@@ -169,8 +171,22 @@ function activate(context: ExtensionContext): void {
 
   console.log("[TestRunner] Activating...");
 
+  // Every command and menu item added below is taken back on deactivate (W21,
+  // the D3 class): each registration queues its own unregister, so a door
+  // added later cannot be forgotten.
+  const commands = {
+    register: (id: string, handler: Parameters<ExtensionContext["commands"]["register"]>[1]): void => {
+      context.commands.register(id, handler);
+      cleanupFns.push(() => context.commands.unregister(id));
+    },
+  };
+  const addMenuItem = (menuId: string, item: Parameters<typeof registerMenuItem>[1]): void => {
+    registerMenuItem(menuId, item);
+    cleanupFns.push(() => unregisterMenuItem(menuId, item.id));
+  };
+
   // ---- 1. Register commands ----
-  context.commands.register("test.runAll", async () => {
+  commands.register("test.runAll", async () => {
     showToast("Running all test suites...", { variant: "info" });
     const results = await runAllSuites();
     const totalPassed = results.reduce((s, r) => s + r.passed, 0);
@@ -186,7 +202,7 @@ function activate(context: ExtensionContext): void {
     openTaskPane(TASK_PANE_ID);
   });
 
-  context.commands.register("test.runSuite", async (args) => {
+  commands.register("test.runSuite", async (args) => {
     const name = (args as { name?: string })?.name;
     if (!name) {
       showToast("Usage: test.runSuite({ name: 'suite name' })", { variant: "warning" });
@@ -197,7 +213,7 @@ function activate(context: ExtensionContext): void {
     openTaskPane(TASK_PANE_ID);
   });
 
-  context.commands.register("test.runMacro", async (args) => {
+  commands.register("test.runMacro", async (args) => {
     const name = (args as { name?: string })?.name;
     if (!name) {
       showToast("Usage: test.runMacro({ name: 'test name' })", { variant: "warning" });
@@ -207,7 +223,7 @@ function activate(context: ExtensionContext): void {
     openTaskPane(TASK_PANE_ID);
   });
 
-  context.commands.register("test.showPanel", () => {
+  commands.register("test.showPanel", () => {
     openTaskPane(TASK_PANE_ID);
   });
 
@@ -223,14 +239,14 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => unregisterTaskPane(TASK_PANE_ID));
 
   // ---- 3. Register menu items (Developer > Test Runner) ----
-  registerMenuItem("developer", {
+  addMenuItem("developer", {
     id: "test-runner.run-all",
     label: "Run All Tests",
     icon: IconRunTests,
     commandId: "test.runAll",
   });
 
-  registerMenuItem("developer", {
+  addMenuItem("developer", {
     id: "test-runner.show-panel",
     label: "Show Test Runner Panel",
     icon: IconTestPanel,
@@ -339,9 +355,13 @@ function activate(context: ExtensionContext): void {
   // Phase 18: Indent & Number Formats
   registerSuite(indentFormatsSuite);
 
-  // Phase 19: Spill Ranges, Flash Fill
+  // Phase 19: Spill Ranges, Flash Fill, Checkbox. The Checkbox suite was
+  // written and given its test area (AREA_CHECKBOX, suite 62) but never
+  // registered, so nothing in the product could run it (found live
+  // 2026-09-29, e2e fixall-edit we-core).
   registerSuite(spillRangesSuite);
   registerSuite(flashFillSuite);
+  registerSuite(checkboxSuite);
 
   // Phase 20: Paste Special, Format Painter, Subtotals
   registerSuite(pasteSpecialSuite);

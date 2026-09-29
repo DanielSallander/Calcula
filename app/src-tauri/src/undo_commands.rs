@@ -681,25 +681,192 @@ pub(crate) fn rebuild_all_dependencies_from_grid(
     }
 }
 
+// ============================================================================
+// Undo-transaction TICKETS: close only the transaction YOUR begin opened
+// ============================================================================
+//
+// The backend keeps ONE open-transaction slot, and `commit_transaction` /
+// `cancel_transaction` close WHATEVER is in it. A frontend caller that closes
+// "because my begin said it opened" is right only while the slot still holds
+// the transaction that begin opened -- and three things end that transaction
+// behind its opener's back:
+//
+//   * a sheet add / delete / rename / move / copy ENDS the history, open
+//     transaction included (`sheets::invalidate_undo_history_for_sheet_structure`
+//     -> `UndoStack::clear`), and that is Excel parity;
+//   * a document swap does the same (`reset_document_scoped_stores`);
+//   * another frontend caller that JOINED and then closed without asking
+//     (a commit / cancel that presents no ticket).
+//
+// After any of them the slot is empty or holds a STRANGER's transaction -- a
+// chart drag, a paste, another script's batch -- and the opener's commit
+// closed that one halfway, or its cancel dropped that one's undo record
+// outright (wave D review F1: `beginBatch; addSheet; <user drags a chart>;
+// commitBatch`; F3: a departed script's sweep landing in the NEXT document).
+//
+// So a begin that OPENS the transaction hands back a TICKET, and a commit or
+// cancel that presents one closes the slot only while it still holds that very
+// transaction: the ticket is the one this stack issued last, no clear has
+// happened since (`UndoStack::clears_total`), and a transaction is open.
+// Otherwise the transaction the ticket named is gone already, and the call
+// closes nothing -- the caller had nothing of its own left to close.
+//
+// A commit / cancel WITHOUT a ticket keeps the old meaning (close whatever is
+// open) for the callers that have not adopted tickets, and retires the
+// stack's ticket: the transaction it named is closed now.
+//
+// RESIDUAL, named rather than hidden: a backend command that closes a
+// frontend-opened transaction ITSELF is invisible here -- its internal
+// `begin_transaction` is a silent join (no ticket, no `absorbed_begin` mark)
+// and its commit is unconditional. `named_styles_cmd::apply_named_style_impl`
+// was one; since wave E (Y3) it begins and commits only a transaction it
+// opened itself. Others still commit whatever is open -- Insert Rows
+// (`commands/structure.rs`), Replace All (`commands/search.rs`) and the pivot
+// create door (`pivot/commands.rs`) among them -- and each such command is
+// the defect; until a clear or the next ticketed begin retires the ticket, a
+// transaction the backend opens internally after such a close could still be
+// closed by it.
+
+/// Next ticket to hand out. Process-wide and never reused, so no ticket can
+/// ever match a transaction it was not issued for -- not on another stack,
+/// and not on this one after a document swap.
+static NEXT_UNDO_TICKET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The ticket a frontend begin was handed when it OPENED the transaction now
+/// (or last) in a stack's slot, with that stack's `clears_total` at the time.
+#[derive(Debug, Clone, Copy)]
+struct IssuedUndoTicket {
+    /// The stack it belongs to, by address. Tauri manages ONE `AppState` for
+    /// the app's whole life and never moves it; the unit tests build many.
+    stack: usize,
+    ticket: u64,
+    clears_at_issue: u64,
+}
+
+/// At most one entry per stack. Locked ONLY while that stack's own lock is
+/// held, and nothing is locked under it: a leaf, adding no edge to the lock
+/// order.
+static ISSUED_UNDO_TICKETS: std::sync::Mutex<Vec<IssuedUndoTicket>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn issued_undo_tickets() -> std::sync::MutexGuard<'static, Vec<IssuedUndoTicket>> {
+    ISSUED_UNDO_TICKETS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn undo_ticket_stack_key(state: &AppState) -> usize {
+    &state.undo_stack as *const crate::undo_history::UndoHistory as usize
+}
+
+/// The begin door's body: run `begin` (which answers whether it OPENED the
+/// transaction) under the stack's lock and, when it opened, issue the ticket
+/// that names this transaction and nothing else. `None` = joined.
+pub(crate) fn open_or_join_undo_transaction(
+    state: &AppState,
+    begin: impl FnOnce(&mut engine::UndoStack) -> bool,
+) -> Option<u64> {
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    if !begin(&mut undo_stack) {
+        return None;
+    }
+    let ticket = NEXT_UNDO_TICKET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let key = undo_ticket_stack_key(state);
+    let mut issued = issued_undo_tickets();
+    // Whatever this stack issued before is stale: the transaction it named
+    // has ended, or this begin could not have opened one.
+    issued.retain(|t| t.stack != key);
+    issued.push(IssuedUndoTicket {
+        stack: key,
+        ticket,
+        clears_at_issue: undo_stack.clears_total(),
+    });
+    Some(ticket)
+}
+
+/// The commit / cancel doors' body. With a ticket: `close` runs only while the
+/// slot still holds the transaction that ticket names. Without one: `close`
+/// runs as it always did (whatever is open). Answers whether it closed an
+/// open transaction.
+fn close_undo_transaction(
+    state: &AppState,
+    ticket: Option<u64>,
+    close: impl FnOnce(&mut engine::UndoStack),
+) -> bool {
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let key = undo_ticket_stack_key(state);
+    let mut issued = issued_undo_tickets();
+    let current = issued.iter().position(|t| t.stack == key);
+    let open = undo_stack.has_open_transaction();
+    let closes = match ticket {
+        None => true,
+        Some(ticket) => {
+            open && current.is_some_and(|i| {
+                issued[i].ticket == ticket && issued[i].clears_at_issue == undo_stack.clears_total()
+            })
+        }
+    };
+    // Retire the stack's ticket when the transaction it names is closed now,
+    // or when it is THIS caller's ticket and that transaction is gone already.
+    // Another caller's live ticket is left alone.
+    if let Some(i) = current {
+        if closes || ticket == Some(issued[i].ticket) {
+            issued.remove(i);
+        }
+    }
+    drop(issued);
+    if !closes {
+        return false;
+    }
+    close(&mut undo_stack);
+    open
+}
+
+/// Commit, as a ticket-presenting frontend caller does. Exported for tests.
+pub(crate) fn commit_undo_transaction_core(state: &AppState, ticket: Option<u64>) -> bool {
+    close_undo_transaction(state, ticket, |stack| {
+        stack.commit_transaction();
+    })
+}
+
+/// Cancel, as a ticket-presenting frontend caller does. Exported for tests.
+pub(crate) fn cancel_undo_transaction_core(state: &AppState, ticket: Option<u64>) -> bool {
+    close_undo_transaction(state, ticket, |stack| stack.cancel_transaction())
+}
+
 /// Begin a transaction for batching multiple changes.
+///
+/// OWNERSHIP (BUG-0200). The backend keeps ONE open slot, so a begin while a
+/// transaction is already open still JOINS it -- but the open transaction is
+/// now marked as having absorbed another caller's begin
+/// (`Transaction::absorbed_begin`). Every frontend begin comes through here (a
+/// script's `beginBatch`, a Core gesture, the frontend's own transaction), and
+/// a take-back of "exactly my gesture" (`undo_pivot_overwrite`) refuses a step
+/// that carries the mark: it would take the other caller's writes back too.
+///
+/// Answers with a TICKET when THIS begin OPENED the transaction, `null` when
+/// it joined an open one -- decided under the one lock that does it. A caller
+/// that probed `get_undo_state` first and then begins has a window in between:
+/// the transaction it saw open can commit, and its "join" then OPENS a fresh
+/// one that nobody commits (W3). The answer closes that window: commit (or
+/// cancel) exactly when this handed you a ticket, and present it, so the close
+/// lands only on the transaction you opened (see the tickets above).
 #[tauri::command]
-pub fn begin_undo_transaction(state: State<AppState>, description: String) {
-    let mut undo_stack = state.undo_stack.lock().unwrap();
-    undo_stack.begin_transaction(description);
+pub fn begin_undo_transaction(state: State<AppState>, description: String) -> Option<u64> {
+    open_or_join_undo_transaction(&state, |stack| stack.begin_transaction_from_caller(description))
 }
 
-/// Commit the current transaction.
+/// Commit the open transaction. With `ticket` (from the begin that opened it),
+/// only while the slot still holds THAT transaction; without, whatever is open.
 #[tauri::command]
-pub fn commit_undo_transaction(state: State<AppState>) {
-    let mut undo_stack = state.undo_stack.lock().unwrap();
-    undo_stack.commit_transaction();
+pub fn commit_undo_transaction(state: State<AppState>, ticket: Option<u64>) {
+    commit_undo_transaction_core(&state, ticket);
 }
 
-/// Cancel the current transaction.
+/// Cancel the open transaction: its undo record is DROPPED, its writes stay.
+/// With `ticket`, only while the slot still holds THAT transaction; without,
+/// whatever is open.
 #[tauri::command]
-pub fn cancel_undo_transaction(state: State<AppState>) {
-    let mut undo_stack = state.undo_stack.lock().unwrap();
-    undo_stack.cancel_transaction();
+pub fn cancel_undo_transaction(state: State<AppState>, ticket: Option<u64>) {
+    cancel_undo_transaction_core(&state, ticket);
 }
 
 /// Get current undo/redo state for UI.
@@ -994,6 +1161,13 @@ pub(crate) fn apply_changes(
                 }
             }
             CellChange::SetColumnWidth { sheet, col, previous } => {
+                // GEOMETRY: the grid re-reads its column widths only when told
+                // (`dimensions:refresh`). This announced nothing, so undoing a
+                // column resize -- a header drag inside a script's batch, or on
+                // its own -- restored the backend's width and left the dragged
+                // one on screen (found live 2026-09-29, e2e fixall-edit Y6
+                // header-resize).
+                domains.extend(MutationDomains::of(MutationDomain::Dimensions));
                 // `column_widths` is the ACTIVE sheet's mirror. A resize
                 // recorded on another sheet has to reach that sheet's entry in
                 // `all_column_widths`, which needs a lock this pass must not
@@ -1018,6 +1192,8 @@ pub(crate) fn apply_changes(
                 }
             }
             CellChange::SetRowHeight { sheet, row, previous } => {
+                // GEOMETRY: see SetColumnWidth above.
+                domains.extend(MutationDomains::of(MutationDomain::Dimensions));
                 if *sheet != active_sheet {
                     deferred_geometry.push(OffSheetGeometry::RowHeight {
                         sheet: *sheet,
@@ -1632,6 +1808,7 @@ fn r_outline(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilte
 fn r_user_hidden(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_user_hidden_restore(s, e, d, inv); }
 fn r_pivot_col_widths(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_col_widths_restore(s, e, d, inv); }
 fn r_sheet_tab_state(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_sheet_tab_state_restore(s, e, d, inv); }
+fn r_canvas_stacking(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { crate::sheets::apply_canvas_stacking_restore(s, e, d, inv); }
 
 /// The kind → spec table, built once.
 static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(|| {
@@ -1777,6 +1954,13 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // reentrant, so that is the deadlock the pivot column-width restore already
     // paid for once ("the application went away").
     m.insert(SHEET_TAB_STATE_RESTORE_KIND, RestoreSpec { restore: r_sheet_tab_state, domains: MutationDomains::of(Sheets), defer: true });
+    // A canvas's stacking and locks (W5): Bring to Front / Send to Back and
+    // Lock. `Sheets`, because the canvas layout lives on the sheet's KIND and
+    // the CanvasSheet extension re-reads every layout on SHEET_CHANGED, which
+    // the translator fans `sheets` out to. DEFERRED: it takes `sheet_ids` and
+    // `sheet_kinds`, which the inline pass does not hold -- deferring keeps it
+    // clear of every grid lock the inline pass does.
+    m.insert(crate::sheets::CANVAS_STACKING_RESTORE_KIND, RestoreSpec { restore: r_canvas_stacking, domains: MutationDomains::of(Sheets), defer: true });
     m
 });
 
@@ -2711,6 +2895,12 @@ pub fn undo(
     let transaction = {
         let mut undo_stack = state.undo_stack.lock().unwrap();
 
+        // Not while a gesture that pushes its step when it lands is in flight
+        // (`history_move_refusal`), decided under the lock the pop takes.
+        if let Some(refusal) = history_move_refusal(&undo_stack) {
+            return refused_history_move(&undo_stack, refusal, active_sheet_index, active_sheet_name);
+        }
+
         // THE GUARD, INSIDE THE SAME CRITICAL SECTION AS THE POP. Deciding under
         // one lock and popping under another is the race it exists to close.
         if let ScopedUndoVerdict::Refuse(refusal) = scoped_undo_verdict(
@@ -2795,6 +2985,10 @@ pub fn redo(
     let (active_sheet_index, active_sheet_name) = active_sheet_identity(&state);
     let transaction = {
         let mut undo_stack = state.undo_stack.lock().unwrap();
+        // See `undo`: not while a gesture lands, decided under the pop's lock.
+        if let Some(refusal) = history_move_refusal(&undo_stack) {
+            return refused_history_move(&undo_stack, refusal, active_sheet_index, active_sheet_name);
+        }
         match undo_stack.pop_redo() {
             Some(t) => t,
             None => {
@@ -3148,12 +3342,24 @@ fn apply_pivot_create_restore(
 
     let pivot_id = snapshot.pivot_id;
 
+    // The pivot's sheet, copied under a brief read of `pivot_tables` and
+    // resolved with no lock held (`PivotDestSheet`): resolving reads
+    // `sheet_names`, which `delete_sheet` and the calculation pass hold while
+    // they take `pivot_tables`.
+    let dest_ref = pivot_state
+        .pivot_tables
+        .read()
+        .unwrap()
+        .get(&pivot_id)
+        .map(|(definition, _)| PivotDestSheet::of(definition));
+    let dest_sheet_idx = dest_ref.map(|dest| dest.resolve(state));
+
     // CANONICAL LOCK ORDER: `grid`, `grids`, then everything else. The two grid
     // guards are needed only inside the `old_region` branch below, but taking
     // them THERE takes them while `pivot_tables` is held -- and the
     // recalculation pass holds both grid locks and then takes `pivot_tables` on
-    // a background thread, which is a cycle. Neither `get_pivot_region` nor
-    // `resolve_dest_sheet_index` touches a grid lock, so hoisting is safe.
+    // a background thread, which is a cycle. `get_pivot_region` touches no
+    // grid lock, so hoisting is safe.
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
     // Save current state for redo (redo = re-create the pivot)
@@ -3170,13 +3376,16 @@ fn apply_pivot_create_restore(
             data: redo_data,
         });
 
-        let dest_sheet_idx = resolve_dest_sheet_index(state, definition);
-
-        // Clear the pivot grid region
+        // Clear the pivot grid region. Its sheet was resolved above; `None`
+        // only if the pivot appeared after that read, and then no grid holds
+        // anything of it to clear.
         let old_region = get_pivot_region(state, pivot_id);
-        if let Some(ref region) = old_region {
+        if let (Some(dest_sheet_idx), Some(region)) = (dest_sheet_idx, old_region.as_ref()) {
             // `grid` and `grids` were acquired at the top of the function -- see
             // the lock-order note there.
+            // The merges the pivot's output wrote go with its cells: clearing
+            // the cells alone left the user's cells there merged (BUG-0148).
+            clear_pivot_merges(state, effect, dest_sheet_idx, region);
             if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
                 clear_pivot_region_from_grid(
                     dest_grid,
@@ -4804,16 +5013,245 @@ pub(crate) fn record_restores_joining_open_transaction(
     if opened {
         undo_stack.begin_transaction(description.to_string());
     }
+    let restores = fit_restores_to_open_step(&mut undo_stack, restores);
     for (kind, data) in restores {
-        undo_stack.record_custom_restore(kind.to_string(), data, description);
+        undo_stack.record_custom_restore(kind, data, description);
     }
     if opened {
         undo_stack.commit_transaction();
     }
 }
 
+/// `restores` about to be recorded INTO the open transaction, each pivot
+/// restore fitted to what that step already holds
+/// ([`fit_pivot_restore_to_open_step`]); unchanged when none is open.
+fn fit_restores_to_open_step(undo_stack: &mut engine::UndoStack, restores: Vec<(&str, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+    let open = undo_stack.current_transaction_mut().map(|t| &*t);
+    restores
+        .into_iter()
+        .map(|(kind, data)| {
+            let data = match open {
+                Some(open) => fit_pivot_restore_to_open_step(open, kind, data),
+                None => data,
+            };
+            (kind.to_string(), data)
+        })
+        .collect()
+}
+
+/// A pivot restore JOINING an open step: the user's cells it saved (the ones
+/// its pivot grew over) are put back with the value each had when the STEP
+/// began.
+///
+/// WHY. `apply_changes` replays a step's cell restores inline and its pivot
+/// restores AFTER them (they are deferred until the grid guards drop), so a
+/// pivot restore's saved cells are what those cells END with. When the step
+/// already restores such a cell -- a script's batch wrote C, then a user's
+/// click grew a pivot over C and joined the batch -- the saved value is the
+/// script's, and undoing the step left the script's value in C instead of
+/// the one C held before either (the review of BUG-0187 / BUG-0200). So each
+/// saved cell the open step already restores by a `SetCell` takes that
+/// change's `previous` -- the EARLIEST one, the cell at the step's start --
+/// and a cell that was empty then is not written back at all. Anything else
+/// is returned untouched.
+fn fit_pivot_restore_to_open_step(open: &Transaction, kind: &str, data: Vec<u8>) -> Vec<u8> {
+    if kind != PIVOT_DEFINITION_RESTORE_KIND {
+        return data;
+    }
+    let mut at_step_start: HashMap<(usize, u32, u32), &Option<engine::Cell>> = HashMap::new();
+    for change in &open.changes {
+        if let CellChange::SetCell { sheet, row, col, previous } = change {
+            at_step_start.entry((*sheet, *row, *col)).or_insert(previous);
+        }
+    }
+    if at_step_start.is_empty() {
+        return data;
+    }
+    let Some(mut snapshot) = decode_pivot_definition_snapshot(&data) else { return data };
+    let sheet = snapshot.dest_sheet_idx;
+    let mut fitted = false;
+    snapshot.overwritten_cells.retain_mut(|saved| match at_step_start.get(&(sheet, saved.row, saved.col)) {
+        Some(Some(previous)) => {
+            saved.cell = previous.clone();
+            fitted = true;
+            true
+        }
+        Some(None) => {
+            fitted = true;
+            false
+        }
+        None => true,
+    });
+    if !fitted {
+        return data;
+    }
+    serde_json::to_vec(&snapshot).unwrap_or(data)
+}
+
 fn record_object_undo(state: &AppState, kind: &str, data: Vec<u8>, description: &str) {
     record_restores_joining_open_transaction(state, description, vec![(kind, data)]);
+}
+
+/// How a gesture step a backend command built LOCALLY lands on the stack
+/// (BUG-0187). A slicer click or a ribbon filter change used to hold the ONE
+/// global transaction open across its model re-query, so an unrelated edit
+/// made meanwhile joined the click's Ctrl+Z step and a script's `beginBatch`
+/// joined it too. The command now runs every write with its own recording
+/// switched off, collects the restores, and hands them here ONCE, at the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GestureStepMode {
+    /// A step of its own -- even while someone ELSE's transaction is open,
+    /// as long as that one has recorded NOTHING yet (it stays open and lands
+    /// on top when its owner commits, holding only what came after). A user
+    /// gesture. An open transaction that already HOLDS changes is JOINED
+    /// instead, and marked as shared: pushed beneath it, the older changes
+    /// would land ON TOP of the newer gesture, and undoing both would replay
+    /// them out of time order (the review of BUG-0187 / BUG-0200: a script
+    /// wrote C, the click grew a pivot over C, and undoing both left the
+    /// script's value in C instead of the user's).
+    Own,
+    /// Join the transaction the CALLER opened on purpose (a script batch
+    /// that sets several slicers); a step of its own when none is open. The
+    /// joined transaction is MARKED as shared, whoever opened it: a script's
+    /// call joins whatever is open, a user's save included, and that user's
+    /// Cancel must then refuse to take the script's change back.
+    Join,
+    // The two "left open" modes are gone (W2). A slicer click whose TABLE
+    // targets the frontend used to filter right after the command left its
+    // step OPEN for them -- and everything else the user did in that window
+    // joined the click. The command filters its tables itself now
+    // (`slicer::commands::filter_slicer_tables`), so every step lands whole.
+}
+
+/// Where a gesture step went (see [`record_gesture_step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GestureStepOutcome {
+    /// Nothing to record, and nothing was opened.
+    Nothing,
+    /// Pushed as a step of its own, with this history id.
+    Pushed(u64),
+    /// Recorded INTO the caller's open transaction.
+    Joined,
+}
+
+/// Record a gesture's restores as ONE step, the way `mode` says, under ONE
+/// acquisition of the stack lock. The restores are replayed in REVERSE on
+/// undo, so a caller lists them in the order `delete_slicer_core` does: the
+/// pivots first, the object whose change drove them (the slicer, the ribbon
+/// filter) last -- restored first.
+pub(crate) fn record_gesture_step(
+    state: &AppState,
+    description: &str,
+    restores: Vec<(&str, Vec<u8>)>,
+    mode: GestureStepMode,
+) -> GestureStepOutcome {
+    if restores.is_empty() {
+        return GestureStepOutcome::Nothing;
+    }
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let open = undo_stack.has_open_transaction();
+    let open_holds_changes = undo_stack.current_transaction_mut().is_some_and(|t| !t.is_empty());
+    // Into the open transaction, or beside it (see the modes).
+    let joins = open
+        && match mode {
+            GestureStepMode::Join => true,
+            GestureStepMode::Own => open_holds_changes,
+        };
+    if joins {
+        // The open step now holds this gesture's change AND its opener's: a
+        // take-back of "exactly my gesture" (a declined overwrite) by either
+        // one must refuse it (`undo_pivot_overwrite_core`).
+        if let Some(open) = undo_stack.current_transaction_mut() {
+            open.absorbed_begin = true;
+        }
+        // Fitted to what the step already restores, so undoing it ends every
+        // cell at its value from the step's start.
+        let restores = fit_restores_to_open_step(&mut undo_stack, restores);
+        for (kind, data) in restores {
+            undo_stack.record_custom_restore(kind, data, description);
+        }
+        return GestureStepOutcome::Joined;
+    }
+    let mut transaction = Transaction::new(description);
+    for (kind, data) in restores {
+        transaction.add_change(CellChange::CustomRestore { kind: kind.to_string(), data });
+    }
+    match undo_stack.push_own_step(transaction) {
+        Some(seq) => GestureStepOutcome::Pushed(seq),
+        None => GestureStepOutcome::Nothing,
+    }
+}
+
+/// Why an undo or a redo must not move the history right now: a gesture that
+/// pushes its step when it LANDS is in flight (`UndoStack::has_pending_gesture`).
+/// Taken back now, the step BEFORE it would come off the stack, the gesture
+/// would land on top and clear that undo's redo -- and a click whose previous
+/// click was undone under it left the slicer selecting one thing while its
+/// pivots showed another (the review of BUG-0187). Excel cannot undo in the
+/// middle of a click; neither can this.
+pub(crate) const HISTORY_MOVE_WHILE_A_GESTURE_LANDS: &str =
+    "A slicer or filter change is still being applied, so nothing was undone or redone. \
+     Try again once it has finished.";
+
+/// The refusal an undo or a redo must give right now, if any -- asked INSIDE
+/// the critical section that would pop, so a gesture cannot start between the
+/// answer and the pop.
+pub(crate) fn history_move_refusal(undo_stack: &engine::UndoStack) -> Option<&'static str> {
+    undo_stack.has_pending_gesture().then_some(HISTORY_MOVE_WHILE_A_GESTURE_LANDS)
+}
+
+/// An undo or redo that moved nothing because `refusal` says it must not.
+fn refused_history_move(
+    undo_stack: &engine::UndoStack,
+    refusal: &str,
+    active_sheet_index: usize,
+    active_sheet_name: String,
+) -> UndoResult {
+    UndoResult {
+        success: false,
+        description: None,
+        updated_cells: Vec::new(),
+        can_undo: undo_stack.can_undo(),
+        can_redo: undo_stack.can_redo(),
+        merge_changed: false,
+        structural_restore: false,
+        pivot_changed: false,
+        slicer_changed: false,
+        ribbon_filter_changed: false,
+        pane_control_changed: false,
+        objects_changed: false,
+        hidden_changed: false,
+        refusal: Some(refusal.to_string()),
+        refresh_domains: Vec::new(),
+        active_sheet_index,
+        active_sheet_name,
+        restored_anchor: None,
+        restored_range: None,
+    }
+}
+
+/// A gesture in flight that pushes its step when it lands (see
+/// [`history_move_refusal`]): counted from `begin` until this is DROPPED --
+/// when the gesture returns, fails or is abandoned mid-await. Take it before
+/// the gesture writes anything and hold it past its step's push; never drop
+/// it while holding the undo stack's lock (the drop takes it).
+pub(crate) struct PendingGesture<'a> {
+    state: &'a AppState,
+}
+
+impl<'a> PendingGesture<'a> {
+    pub(crate) fn begin(state: &'a AppState) -> Self {
+        state.undo_stack.lock().unwrap().begin_pending_gesture();
+        PendingGesture { state }
+    }
+}
+
+impl Drop for PendingGesture<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut undo_stack) = self.state.undo_stack.lock() {
+            undo_stack.end_pending_gesture();
+        }
+    }
 }
 
 /// Record a slicer's PRE-edit state through the existing full-struct "slicer"
@@ -4830,6 +5268,21 @@ pub(crate) fn record_slicer_undo(
     record_restores_joining_open_transaction(state, description, vec![("slicer", data)]);
 }
 
+/// The "slicer" restore of a slicer's PRE-edit state, UNRECORDED -- for a
+/// command that records its gesture as ONE step itself
+/// ([`record_gesture_step`]). Built from the restore's own `SlicerSnapshot`,
+/// like [`record_slicer_undo`].
+pub(crate) fn slicer_restore(slicer_id: identity::EntityId, previous: Slicer) -> (&'static str, Vec<u8>) {
+    ("slicer", serde_json::to_vec(&SlicerSnapshot { slicer_id, previous }).unwrap_or_default())
+}
+
+/// The "ribbon_filter" restore of a ribbon filter's PRE-edit state, built from
+/// the restore's own `RibbonFilterSnapshot` (the ribbon commands used to build
+/// private copies of it).
+pub(crate) fn ribbon_filter_restore(filter_id: identity::EntityId, previous: RibbonFilter) -> (&'static str, Vec<u8>) {
+    ("ribbon_filter", serde_json::to_vec(&RibbonFilterSnapshot { filter_id, previous }).unwrap_or_default())
+}
+
 /// Record a timeline slicer's PRE-edit state through the existing full-struct
 /// "timeline_slicer" restore, joining an open transaction. Built from the
 /// restore's own `TimelineSnapshot`, like [`record_slicer_undo`].
@@ -4841,6 +5294,23 @@ pub(crate) fn record_timeline_undo(
 ) {
     let data = serde_json::to_vec(&TimelineSnapshot { timeline_id, previous }).unwrap_or_default();
     record_restores_joining_open_transaction(state, description, vec![("timeline_slicer", data)]);
+}
+
+/// The "timeline_slicer_create" restore of a timeline just CREATED (undo =
+/// remove it), UNRECORDED, built from the restore's own
+/// `TimelineCreateSnapshot` -- the command used to build a private copy of it.
+pub(crate) fn timeline_create_restore(timeline_id: identity::EntityId) -> (&'static str, Vec<u8>) {
+    ("timeline_slicer_create", serde_json::to_vec(&TimelineCreateSnapshot { timeline_id }).unwrap_or_default())
+}
+
+/// The "timeline_slicer_delete" restore of a DELETED timeline (undo = put the
+/// whole object back), UNRECORDED, built from the restore's own
+/// `TimelineSnapshot`.
+pub(crate) fn timeline_delete_restore(
+    timeline_id: identity::EntityId,
+    previous: crate::timeline_slicer::TimelineSlicer,
+) -> (&'static str, Vec<u8>) {
+    ("timeline_slicer_delete", serde_json::to_vec(&TimelineSnapshot { timeline_id, previous }).unwrap_or_default())
 }
 
 pub(crate) fn record_chart_undo(
@@ -5133,6 +5603,10 @@ mod restore_registry_tests {
             // DEFERRED, because putting the user back on an unhidden sheet goes
             // through `activate_sheet`, whose caller must hold no state lock.
             ("sheet_tab_state", true, MutationDomains::of(Sheets)),
+            // A canvas's stacking and locks (W5): the layout lives on the
+            // sheet's kind, re-read on SHEET_CHANGED; deferred, off every grid
+            // lock.
+            ("canvas_stacking", true, MutationDomains::of(Sheets)),
         ];
         for (kind, defer, domains) in &expected {
             let spec = restore_spec(kind).unwrap_or_else(|| panic!("missing restore kind: {kind}"));
@@ -5227,7 +5701,10 @@ mod restore_registry_tests {
                 // grids vector, the widths, the heights and the merges -- every
                 // one of which `apply_changes` is still holding during the
                 // inline phase, and std's locks are not reentrant.
-                || *kind == SHEET_TAB_STATE_RESTORE_KIND;
+                || *kind == SHEET_TAB_STATE_RESTORE_KIND
+                // A canvas's stacking and locks: `sheet_ids` and `sheet_kinds`,
+                // taken after the grid locks drop like every store swap.
+                || *kind == crate::sheets::CANVAS_STACKING_RESTORE_KIND;
             assert_eq!(
                 spec.defer, legacy_deferred,
                 "defer for '{kind}' disagrees with the legacy prefix deferral"
@@ -5992,9 +6469,17 @@ mod undo_sheet_activation_tests;
 mod autofilter_table_button_tests;
 
 #[cfg(test)]
+#[path = "canvas_stacking_undo_tests.rs"]
+mod canvas_stacking_undo_tests;
+
+#[cfg(test)]
 #[path = "undo_s12_soak_leak_tests.rs"]
 mod undo_s12_soak_leak_tests;
 
 #[cfg(test)]
 #[path = "pivot_undo_cache_tests.rs"]
 mod pivot_undo_cache_tests;
+
+#[cfg(test)]
+#[path = "undo_transaction_ticket_tests.rs"]
+mod undo_transaction_ticket_tests;

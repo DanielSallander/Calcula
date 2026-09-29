@@ -13,6 +13,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { ExtensionRegistry } from "../../api/extensions";
 import type { RibbonTabDefinition, RibbonContext } from "../../api/extensions";
 import { useGridState } from "../../api/state";
+import { executeCommandAnywhere } from "../../api/commandDispatch";
 import { onAppEvent, emitAppEvent, AppEvents } from "../../api/events";
 import { panelRegistry } from "../registries/panelRegistry";
 import { PanelContextMenu } from "./PanelContextMenu";
@@ -197,10 +198,16 @@ export function RibbonContainer(): React.ReactElement {
     selection: state.selection,
     // Fix: Derive disabled state from editing (isEditing property does not exist on GridState)
     isDisabled: state.editing !== null,
+    // RUN the command, from whichever registry holds it (the one door Core's
+    // keyboard and the TestRunner use). This looked the command up in the
+    // extension registry and only LOGGED it -- a tab that asked ran nothing,
+    // and a CommandRegistry command was not even looked up (wave F, Z10).
     executeCommand: async (commandId: string) => {
-      const command = ExtensionRegistry.getCommand(commandId);
-      if (command) {
-        console.log(`[Ribbon] Executing command: ${commandId}`);
+      const outcome = await executeCommandAnywhere(commandId);
+      if (outcome === "disabled") {
+        console.warn(`[Ribbon] ${commandId} is disabled for the current selection; nothing ran`);
+      } else if (outcome === "unregistered") {
+        console.warn(`[Ribbon] ${commandId}: no registry holds this command; nothing ran`);
       }
     },
     refreshCells: async () => {

@@ -10,6 +10,7 @@ import {
   indexToCol,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
   groupRows,
   AppEvents,
   emitAppEvent,
@@ -17,6 +18,13 @@ import {
 import type { SubtotalConfig } from "../types";
 import { SUBTOTAL_FUNCTIONS } from "../types";
 import { alertAsync } from "@api/dialogs";
+import { ownUndoTransaction, type UndoTransactionCloses } from "@api/undoTicket";
+
+/** The step's closes, read when a close runs (see ownUndoTransaction). */
+const UNDO_CLOSES: UndoTransactionCloses = {
+  commitUndoTransaction: (...ticket) => commitUndoTransaction(...ticket),
+  cancelUndoTransaction: (...ticket) => cancelUndoTransaction(...ticket),
+};
 
 /** Represents a group of contiguous rows sharing the same value in the group-by column. */
 interface DataGroup {
@@ -45,7 +53,9 @@ export async function applySubtotals(config: SubtotalConfig): Promise<void> {
   const groups = await detectGroups(groupByCol, startRow, endRow);
   if (groups.length === 0) return;
 
-  await beginUndoTransaction("Subtotals");
+  // Closes ONLY what its own begin opened: run inside a script's open batch
+  // it JOINS, and the script closes that step (wave F, Z6).
+  const tx = ownUndoTransaction(await beginUndoTransaction("Subtotals"), UNDO_CLOSES);
 
   try {
     // Step 2: Insert subtotal rows bottom-up.
@@ -137,13 +147,14 @@ export async function applySubtotals(config: SubtotalConfig): Promise<void> {
       }
     }
 
-    await commitUndoTransaction();
+    await tx.commit();
     emitAppEvent(AppEvents.GRID_REFRESH);
   } catch (err) {
     console.error("[Subtotals] Error applying subtotals:", err);
-    // Commit closes the transaction so the partial result stays undoable;
-    // the alert tells the user why it stopped (sheet protection, usually).
-    await commitUndoTransaction();
+    // Commit closes OUR transaction so the partial result stays undoable (a
+    // joined run closes nothing: its holder does); the alert tells the user
+    // why it stopped (sheet protection, usually).
+    await tx.commit();
     void alertAsync(err instanceof Error ? err.message : String(err));
   }
 }

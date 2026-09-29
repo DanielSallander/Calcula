@@ -28,7 +28,7 @@ import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
 import type { DimensionOverrides } from "@api/types";
 import { registerObjectWheelTarget } from "../../_shared/lib/objectWheelScroll";
 import type { PivotViewResponse } from "./pivot-api";
-import { getPivotCellWindow, updatePivotProperties } from "./pivot-api";
+import { deletePivotTable, getPivotCellWindow, updatePivotProperties } from "./pivot-api";
 import { joinUndoTransaction, registerObjectGeometryProvider } from "@api/objectGeometry";
 import {
   createPivotVisualGeometryProvider,
@@ -36,6 +36,7 @@ import {
   type PivotFrameSave,
 } from "./pivotVisualGeometry";
 import {
+  deleteCachedPivotView,
   getCachedPivotView,
   getCellWindowCache,
   ensureCellWindow,
@@ -85,6 +86,7 @@ import {
 } from "./pivotChromeActions";
 import { runPivotCellDoubleClick } from "./pivotCellDoubleClick";
 import { registerPivotVisualSelection } from "./pivotVisualSelection";
+import { closePivotBoxMenu, handlePivotBoxContextMenu } from "./pivotVisualContextMenu";
 import {
   isPivotVisualSelected,
   selectPivotVisual,
@@ -502,7 +504,16 @@ export function installPivotVisual(
   lastPress = null;
 
   cleanups.push(registerOverlay(createPivotVisualOverlay(deps)));
-  cleanups.push(registerPivotVisualSelection());
+  cleanups.push(
+    registerPivotVisualSelection({
+      // The same delete the pivot's own menu runs; the cached view goes only
+      // once the pivot is gone (a refused delete keeps its box painted).
+      deletePivot: async (pivotId) => {
+        await deletePivotTable(pivotId);
+        deleteCachedPivotView(pivotId);
+      },
+    }),
+  );
   // Move / resize the box WITHOUT a pointer gesture (@api/objectGeometry): the
   // canvas's align, distribute, nudge and group drag.
   cleanups.push(registerObjectGeometryProvider(createPivotVisualGeometryProvider(saveCanvasFrame)));
@@ -512,6 +523,18 @@ export function installPivotVisual(
     window.addEventListener(name, handler);
     cleanups.push(() => window.removeEventListener(name, handler));
   };
+
+  // A right-click on the box: the pivot's own menu (Core opens no cell menu
+  // on a floating object). Capture phase, so it runs before the grid's
+  // handler, which stands down on a claimed (default-prevented) event.
+  const onContextMenu = (e: MouseEvent) => {
+    handlePivotBoxContextMenu(e);
+  };
+  window.addEventListener("contextmenu", onContextMenu, true);
+  cleanups.push(() => {
+    window.removeEventListener("contextmenu", onContextMenu, true);
+    closePivotBoxMenu();
+  });
 
   // A press on ANY floating object: ours selects the box (and opens the field
   // list, as clicking into a worksheet pivot does); anything else deselects it.

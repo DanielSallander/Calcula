@@ -220,7 +220,9 @@ export const BookmarkTaskPane: React.FC<TaskPaneViewProps> = () => {
   }, []);
 
   const handleClick = (bookmark: Bookmark) => {
-    navigateToBookmark(bookmark);
+    navigateToBookmark(bookmark).catch((err) => {
+      console.error("[CellBookmarks] navigation failed:", err);
+    });
   };
 
   const handleDelete = (e: React.MouseEvent, id: string) => {

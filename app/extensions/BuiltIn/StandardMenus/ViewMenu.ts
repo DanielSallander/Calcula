@@ -13,7 +13,8 @@ import {
 } from '@api/grid';
 import { useGridState } from '@api/grid';
 import { emitAppEvent, AppEvents } from '@api/events';
-import { showDialog } from '@api/ui';
+import { openGoToSpecialDialog } from './selectionDoors';
+import { refuseIfSelectionOwned } from '@api/selectionOwner';
 import type { ViewMode } from '@api';
 import {
   useIsTaskPaneOpen,
@@ -152,6 +153,10 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
         await removeSplitWindow();
         setIsSplit(false);
       } else {
+        // Splits at Core's ACTIVE cell -- HIDDEN while something else owns
+        // the selection (a floating grid's selected cell): refused, once
+        // (W24). Remove Split above is not the selection's and stays allowed.
+        if (refuseIfSelectionOwned('Split Window')) return;
         const sel = gridState.selection;
         const splitRow = sel && sel.startRow > 0 ? sel.startRow : 5;
         const splitCol = sel && sel.startCol > 0 ? sel.startCol : 3;
@@ -172,9 +177,11 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     }
   }, []);
 
-  // Go To Special handler
+  // Go To Special handler: the view.goToSpecial command's own opener -- it
+  // searches (within) Core's selection and replaces it, so it refuses while a
+  // selection owner holds the selection.
   const handleGoToSpecial = useCallback(() => {
-    showDialog("go-to-special");
+    openGoToSpecialDialog();
   }, []);
 
   // View Mode handlers

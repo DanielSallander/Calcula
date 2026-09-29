@@ -1344,6 +1344,140 @@ pub(crate) fn clear_column_criteria_on_sheet(
     Some(previous)
 }
 
+/// Filter AutoFilter column `column_index` (relative to the filter's start
+/// column) on sheet `sheet` -- ANY sheet, not only the active one -- to keep
+/// `values` (and blank cells when `include_blanks`): exactly the criteria
+/// `set_column_filter_values` writes on the active sheet. Then recompute the
+/// sheet's hidden rows.
+///
+/// For a backend gesture that filters a TABLE in its own step (a slicer click
+/// with table targets, W2): it used to be filtered by the frontend AFTER the
+/// click's backend command, which had to leave its undo step OPEN across those
+/// writes -- and anything else the user did meanwhile joined the click.
+///
+/// Returns the filter as it was BEFORE (the caller's undo record), or
+/// `Ok(None)` when the column already filters exactly so (nothing written, the
+/// document left clean). REFUSES -- before the effect, with the reason -- a
+/// sheet whose protection forbids AutoFilter use, a sheet with no AutoFilter,
+/// a filter other than `expected_filter_id` (the table no longer owns it) and
+/// a column outside the filter.
+///
+/// LOCKS: as `clear_column_criteria_on_sheet` -- the CF rules and sheet names
+/// are snapshotted and released first, then `grids` BEFORE `auto_filters`, and
+/// the gate and the write stay in one critical section. The caller holds no
+/// lock and runs the visibility recalculation afterwards.
+pub(crate) fn set_column_values_on_sheet(
+    state: &AppState,
+    file_state: &FileState,
+    sheet: usize,
+    expected_filter_id: identity::EntityId,
+    column_index: u32,
+    values: Vec<String>,
+    include_blanks: bool,
+) -> Result<Option<AutoFilter>, String> {
+    let mut filter_values = values;
+    if include_blanks {
+        filter_values.push("(Blanks)".to_string());
+    }
+    let criteria = FilterCriteria {
+        filter_on: FilterOn::Values,
+        values: filter_values,
+        filter_out_blanks: !include_blanks,
+        ..Default::default()
+    };
+    write_column_on_sheet(state, file_state, sheet, expected_filter_id, column_index, Some(criteria))
+}
+
+/// The CLEAR twin of [`set_column_values_on_sheet`]: remove column
+/// `column_index`'s criteria on sheet `sheet`, with the same refusals, the
+/// same locks and the same answer -- `Ok(None)` when the column had no
+/// criteria (nothing written, the document left clean). Unlike
+/// `clear_column_criteria_on_sheet` it mints its own effect, only when it
+/// writes, so a caller that has written nothing else stays clean.
+pub(crate) fn clear_column_values_on_sheet(
+    state: &AppState,
+    file_state: &FileState,
+    sheet: usize,
+    expected_filter_id: identity::EntityId,
+    column_index: u32,
+) -> Result<Option<AutoFilter>, String> {
+    write_column_on_sheet(state, file_state, sheet, expected_filter_id, column_index, None)
+}
+
+/// The body of [`set_column_values_on_sheet`] (`criteria`) and
+/// [`clear_column_values_on_sheet`] (`None`).
+fn write_column_on_sheet(
+    state: &AppState,
+    file_state: &FileState,
+    sheet: usize,
+    expected_filter_id: identity::EntityId,
+    column_index: u32,
+    criteria: Option<FilterCriteria>,
+) -> Result<Option<AutoFilter>, String> {
+    crate::protection::check_sheet_action(state, sheet, "autoFilter", "use AutoFilter")?;
+    let cf_rules_for_filter = crate::conditional_formatting::rules_snapshot(state, sheet);
+    let cf_sheet_names_for_filter = state
+        .sheet_names
+        .read()
+        .map(|n| n.clone())
+        .unwrap_or_default();
+
+    // CANONICAL LOCK ORDER: `grids` BEFORE `auto_filters` (see
+    // `autofilter_lock_order_tests`).
+    let grids = state.grids.read().map_err(|e| e.to_string())?;
+    let auto_filters = state.auto_filters.lock_pending().map_err(|e| e.to_string())?;
+    let previous = auto_filters
+        .get(&sheet)
+        .cloned()
+        .ok_or_else(|| "the table's sheet has no AutoFilter to filter with".to_string())?;
+    if previous.id != expected_filter_id {
+        return Err("the sheet's AutoFilter belongs to another table".to_string());
+    }
+    if column_index > previous.end_col.saturating_sub(previous.start_col) {
+        return Err(format!("column {} is outside the table's AutoFilter range", column_index));
+    }
+    let same = |a: &FilterCriteria, b: &FilterCriteria| {
+        serde_json::to_value(a).ok().is_some_and(|a| serde_json::to_value(b).ok() == Some(a))
+    };
+    let unchanged = match (&criteria, previous.column_filters.get(&column_index)) {
+        (None, None) => true,
+        (Some(wanted), Some(existing)) => same(wanted, &existing.criteria),
+        _ => false,
+    };
+    if unchanged {
+        return Ok(None);
+    }
+
+    let effect = DocumentEffect::mutates(file_state);
+    let mut auto_filters = auto_filters.authorize(&effect);
+    let auto_filter = auto_filters
+        .get_mut(&sheet)
+        .expect("presence checked immediately above, under the same lock");
+    match criteria {
+        Some(criteria) => {
+            auto_filter.column_filters.insert(column_index, ColumnFilter { column_index, criteria });
+        }
+        None => {
+            auto_filter.column_filters.remove(&column_index);
+        }
+    }
+    if sheet < grids.len() {
+        let style_registry = state.style_registry.read().map_err(|e| e.to_string())?;
+        let locale = state.locale.lock().map_err(|e| e.to_string())?;
+        let theme = state.theme.read().map_err(|e| e.to_string())?;
+        let filter_icons = resolve_filter_icons(
+            &grids[sheet],
+            &grids,
+            &cf_sheet_names_for_filter,
+            sheet,
+            &cf_rules_for_filter,
+            auto_filter,
+        );
+        recompute_hidden_rows(&grids[sheet], &style_registry, &theme, auto_filter, &locale, &filter_icons);
+    }
+    Ok(Some(previous))
+}
+
 /// Clear filter criteria for a specific column.
 #[tauri::command]
 pub fn clear_column_criteria(
@@ -3050,6 +3184,14 @@ mod autofilter_lock_order_tests {
             ("clear_column_criteria_on_sheet", Box::new(|s, f| {
                 let id = s.auto_filters.read().unwrap()[&0].id;
                 clear_column_criteria_on_sheet(s, &DocumentEffect::mutates(f), 0, id, 0);
+            })),
+            ("set_column_values_on_sheet", Box::new(|s, f| {
+                let id = s.auto_filters.read().unwrap()[&0].id;
+                let _ = set_column_values_on_sheet(s, f, 0, id, 0, vec!["West".to_string()], false);
+            })),
+            ("clear_column_values_on_sheet", Box::new(|s, f| {
+                let id = s.auto_filters.read().unwrap()[&0].id;
+                let _ = clear_column_values_on_sheet(s, f, 0, id, 0);
             })),
             ("apply_auto_filter", Box::new(|s, f| {
                 apply_auto_filter_inner(

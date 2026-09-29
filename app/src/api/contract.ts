@@ -48,7 +48,22 @@ import type { InvokeArgs } from "./backend";
 
 /** Menu registration and management */
 export interface IMenuAPI {
+  /** Build a top-level menu. Its builder takes it back on deactivation with
+   *  `unregister`. */
   register(definition: MenuDefinition): void;
+  /** Remove a menu this extension built with `register`. Call it on
+   *  deactivation, as for items and panes. Items other extensions added to the
+   *  menu are kept and come back when it is registered again. A menu other
+   *  extensions ADD to (Data, Review, Model, Developer) is shared: pass
+   *  `{ keepWhileShared: true }` and only the builder's own items go -- the
+   *  menu stays, holding the others' items, until the last of them is removed
+   *  (or the builder registers it again). */
+  unregister(menuId: string, options?: { keepWhileShared?: boolean }): void;
+  /** Add an item to a menu, built already or not yet. An item whose id is
+   *  already in the menu MERGES its children into that item: that is how
+   *  several extensions build one shared submenu (Data > What-If Analysis),
+   *  each registering the same parent id with its own child. Take it back on
+   *  deactivation with `unregisterItem`. */
   registerItem(menuId: string, item: MenuItemDefinition): void;
   /** Patch a registered item in place — label, disabled, hidden, checked.
    *  Re-registering does NOT do this: registerItem only merges children, so a
@@ -60,7 +75,11 @@ export interface IMenuAPI {
     patch: Partial<Omit<MenuItemDefinition, "id">>,
   ): void;
   /** Remove a registered item. Extensions must call this for their items on
-   *  deactivation, exactly as they unregister panes and dialogs. */
+   *  deactivation, exactly as they unregister panes and dialogs. `itemId` may
+   *  be at any depth: an extension that added a CHILD to a parent other
+   *  extensions share (registerItem merges same-id parents, e.g. Data >
+   *  What-If Analysis) takes back its child's id, never the shared parent's.
+   *  A parent left empty by the removal goes with it. */
   unregisterItem(menuId: string, itemId: string): void;
   getAll(): MenuDefinition[];
   subscribe(callback: () => void): () => void;

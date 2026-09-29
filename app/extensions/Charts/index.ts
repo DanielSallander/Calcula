@@ -56,6 +56,14 @@ const CHART_FORMAT_PANE_COMMAND = CHART_FORMAT_SELECTION_COMMAND;
  * the key is to stand in that registry with a `when` predicate.
  */
 const CHART_DELETE_SELECTION_COMMAND = "chart.delete.selection";
+
+/**
+ * Insert Chart -- the command F11 sends through Core's grid keyboard (Core
+ * only ROUTES the neutral id; this extension owns the dialog, so it answers).
+ * F11 used to be forwarded to `charts.insertChart`, which nothing registered:
+ * the key did nothing (wave F, Z9).
+ */
+const CHART_INSERT_COMMAND = "insert.chart";
 import { ChartMarksDialog } from "./components/ChartMarksDialog";
 import { ChartTransformsDialog } from "./components/ChartTransformsDialog";
 import { ChartLibraryConsentDialog } from "./components/ChartLibraryConsentDialog";
@@ -78,7 +86,8 @@ import {
 import { emitAppEvent } from "@api/events";
 import { showToast } from "@api/notifications";
 import { originPackageName, scriptOriginForStoredRecord } from "@api/scriptHost/scriptOrigin";
-import { showOverlay, hideOverlay } from "@api/ui";
+import { showOverlay, hideOverlay, showDialog } from "@api/ui";
+import { isSelectionOwned } from "@api/selectionOwner";
 
 import {
   ChartManifest,
@@ -139,6 +148,7 @@ import {
   mergeSpecPreview,
   updateChartPlacement as storeUpdateChartPlacement,
   flushPendingChartSaves,
+  type DeleteChartOptions,
 } from "./lib/chartStore";
 import { chartsBackend } from "./lib/chartsBackend";
 import { registerChartRenderingApi } from "@api/rendering";
@@ -243,14 +253,23 @@ import {
   brushKeysFromHits,
 } from "./handlers/chartPointSelection";
 import { peekRangeRefSheetIndex, resolveDataSource } from "./lib/dataSourceResolver";
-import { installSheetIdCacheInvalidation } from "./lib/sheetIdMap";
-import { chartIntersectsChanges } from "./lib/chartInvalidation";
+import { installSheetIdCacheInvalidation, peekSheetIsCanvas } from "./lib/sheetIdMap";
+import { chartIntersectsChanges, paramCellSheetIndex } from "./lib/chartInvalidation";
 import { writeParamValueToCell } from "./lib/chartParamWriteBack";
 import {
   createChartObjectSelectionProvider,
   pressArmsPendingChartClick,
+  type ChartDeleteRefusal,
 } from "./lib/chartObjectSelection";
-import { registerObjectSelectionProvider } from "@api/objectSelection";
+import { pasteChartSnapshots, snapshotChart } from "./lib/chartCopy";
+import { selectChartForCanvasMenu } from "./lib/chartMenuSelection";
+import { announceWhenDeleteLands } from "./lib/chartDeleteAnnounce";
+import { isChartMenuOpen } from "./lib/chartMenuState";
+import {
+  deleteSelectedObjects,
+  registerObjectSelectionProvider,
+  shouldActOnWholeObjectSelection,
+} from "@api/objectSelection";
 import { registerObjectGeometryProvider } from "@api/objectGeometry";
 import { createChartGeometryProvider } from "./lib/chartGeometry";
 import {
@@ -265,6 +284,7 @@ import { onAppEvent } from "@api/events";
 import { ChartEvents } from "./lib/chartEvents";
 import {
   CHART_FORMAT_SELECTION_COMMAND,
+  isDataRangeRef,
   isPivotDataSource,
   isDesignQueryDataSource,
 } from "./types";
@@ -456,19 +476,59 @@ async function emitChartSelectionEvent(): Promise<void> {
  * @returns false when there is no such chart (the registry's contract).
  */
 function performChartDelete(chartId: string): boolean {
-  if (!getChartById(chartId)) return false;
+  return performChartDeleteLanded(chartId) !== null;
+}
+
+/**
+ * {@link performChartDelete}, returning the backend delete's promise (it
+ * settles when the delete has landed -- null -- or was refused -- the reason;
+ * it never rejects), or null when there is no such chart. The canvas-wide
+ * Delete awaits it so every chart of a multi-selection is deleted inside ONE
+ * undo transaction.
+ */
+function performChartDeleteLanded(chartId: string, opts?: DeleteChartOptions): Promise<string | null> | null {
+  if (!getChartById(chartId)) return null;
 
   if (getCurrentChartId() === chartId) {
     deselectChart();
     void emitChartSelectionEvent();
   }
 
-  deleteChart(chartId);
+  // CHART_DELETED only for a delete the backend ACCEPTED (wave-B B7): a
+  // refused delete (a sheet protecting its objects) puts the chart back, and
+  // announcing it first told every listener about a deletion that never
+  // happened. The store's promise resolves to null when it landed.
+  const landed = announceWhenDeleteLands(deleteChart(chartId, opts), () =>
+    emitAppEvent(ChartEvents.CHART_DELETED, { chartId }),
+  );
   removeChartFromCache(chartId);
   syncChartRegions();
-  emitAppEvent(ChartEvents.CHART_DELETED, { chartId });
   emitAppEvent(AppEvents.GRID_REFRESH);
-  return true;
+  return landed;
+}
+
+/**
+ * The canvas-wide Delete's share for Charts (@api/objectSelection
+ * `deleteSelectedObjects`): THE chart delete for each id, awaited in turn,
+ * resolving to the charts the backend REFUSED (each with its reason). A
+ * refused delete puts the chart back in the store (chartStore `deleteChart`,
+ * which re-publishes its region); the store's own failure dialog is NOT
+ * raised -- the provider rejects with the reason, so the seam keeps the chart
+ * selected and names it in its ONE toast.
+ */
+async function deleteChartsLanded(chartIds: readonly string[]): Promise<ChartDeleteRefusal[]> {
+  const refused: ChartDeleteRefusal[] = [];
+  for (const chartId of chartIds) {
+    const landed = performChartDeleteLanded(chartId, { reportRefusal: false });
+    if (!landed) continue;
+    const reason = await landed;
+    if (reason !== null) refused.push({ chartId, reason });
+  }
+  if (refused.length > 0) {
+    syncChartRegions();
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  }
+  return refused;
 }
 
 // ============================================================================
@@ -530,6 +590,13 @@ function activate(context: ExtensionContext): void {
         // A chart carrying insight cues keeps plain Left/Right for its cue
         // step at chart level, so a canvas nudge must not take them.
         cueCountOf: (chartId) => getChartOverlay(chartId).cues.length,
+        // A canvas-wide Delete deletes every chart in the selection -- the
+        // set-held ones too -- through THE chart delete.
+        deleteCharts: deleteChartsLanded,
+        // A canvas multi-selection's Copy / Paste / Duplicate take every
+        // chart in it through THE chart copy (@api/objectClipboard, W25).
+        copyChart: snapshotChart,
+        pasteCharts: pasteChartSnapshots,
       }),
     ),
   );
@@ -649,6 +716,21 @@ function activate(context: ExtensionContext): void {
   // Register dialogs
   context.ui.dialogs.register(ChartDialogDefinition);
 
+  // F11 (and any other caller of the command): the SAME create dialog
+  // Insert > Chart... opens, by the Insert menu's rule
+  // (StandardMenus/InsertMenu.ts showCreateDialog) -- its source defaults
+  // from Core's selection, and while a selection owner holds the selection
+  // (a floating grid's cell, Core's selection HIDDEN under it) it opens
+  // with no prefill at all.
+  CommandRegistry.register(CHART_INSERT_COMMAND, () => {
+    if (isSelectionOwned()) {
+      showDialog(CHART_DIALOG_ID, { suppressAutoRange: true });
+    } else {
+      showDialog(CHART_DIALOG_ID);
+    }
+  });
+  cleanupFunctions.push(() => CommandRegistry.unregister(CHART_INSERT_COMMAND));
+
   const DATA_POINT_FORMAT_DIALOG_ID = "chart:dataPointFormat";
   context.ui.dialogs.register({
     id: DATA_POINT_FORMAT_DIALOG_ID,
@@ -760,8 +842,22 @@ function activate(context: ExtensionContext): void {
     }),
   );
 
-  // Register API commands for programmatic chart management
-  ExtensionRegistry.registerCommand({
+  // Register API commands for programmatic chart management -- each taken
+  // back on deactivate (X20, wave D). ExtensionRegistry.registerCommand had no
+  // inverse, so these outlived the extension: a script naming chart.filter.set
+  // after Charts was disabled ran against a store that had been reset.
+  const registerChartCommand = (command: Parameters<typeof ExtensionRegistry.registerCommand>[0]): void => {
+    ExtensionRegistry.registerCommand(command);
+    // The object, not the id: never another extension's command of that id.
+    cleanupFunctions.push(() => ExtensionRegistry.unregisterCommand(command));
+  };
+  // The Custom Chart Marks / Transforms items registered above (Insert menu)
+  // were never taken back either; the same census found them.
+  cleanupFunctions.push(() => {
+    context.ui.menus.unregisterItem("insert", "insert:chartMarks");
+    context.ui.menus.unregisterItem("insert", "insert:chartTransforms");
+  });
+  registerChartCommand({
     id: "chart.filter.set",
     name: "Set Chart Filters",
     execute: async (ctx) => {
@@ -775,7 +871,7 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  ExtensionRegistry.registerCommand({
+  registerChartCommand({
     id: "chart.filter.clear",
     name: "Clear Chart Filters",
     execute: async (ctx) => {
@@ -787,7 +883,7 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  ExtensionRegistry.registerCommand({
+  registerChartCommand({
     id: "chart.filter.toggleSeries",
     name: "Toggle Chart Series Visibility",
     execute: async (ctx) => {
@@ -806,7 +902,7 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  ExtensionRegistry.registerCommand({
+  registerChartCommand({
     id: "chart.filter.toggleCategory",
     name: "Toggle Chart Category Visibility",
     execute: async (ctx) => {
@@ -825,7 +921,7 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  ExtensionRegistry.registerCommand({
+  registerChartCommand({
     id: "chart.setDataPointOverride",
     name: "Set Data Point Override",
     execute: async (ctx) => {
@@ -854,7 +950,7 @@ function activate(context: ExtensionContext): void {
   // pane's own button (components/ChartFormatPane.tsx) so the command and the
   // button cannot drift: ONE resolver decides the scope from the current
   // selection, and the whole reset is ONE applySpecPatch, hence one undo entry.
-  ExtensionRegistry.registerCommand({
+  registerChartCommand({
     id: "chart.resetToMatchStyle",
     name: "Reset to Match Style",
     execute: async (ctx) => {
@@ -869,7 +965,7 @@ function activate(context: ExtensionContext): void {
   // would make "clear the data point overrides" mean "reset whichever rung
   // happens to be selected" -- a silent change of meaning for a command id
   // the scripting surface can name. The wider clear is `chart.resetToMatchStyle`.
-  ExtensionRegistry.registerCommand({
+  registerChartCommand({
     id: "chart.clearDataPointOverrides",
     name: "Clear Data Point Overrides",
     execute: async (ctx) => {
@@ -881,7 +977,7 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  ExtensionRegistry.registerCommand({
+  registerChartCommand({
     id: "chart.formatAxis",
     name: "Format Chart Axis",
     execute: async (ctx) => {
@@ -897,7 +993,7 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  ExtensionRegistry.registerCommand({
+  registerChartCommand({
     id: "chart.setGradientFill",
     name: "Set Chart Gradient Fill",
     execute: async (ctx) => {
@@ -926,7 +1022,7 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  ExtensionRegistry.registerCommand({
+  registerChartCommand({
     id: "chart.undoDelete",
     name: "Undo Chart Delete",
     execute: async () => {
@@ -939,7 +1035,7 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  ExtensionRegistry.registerCommand({
+  registerChartCommand({
     id: "chart.applyStyle",
     name: "Apply Chart Style Preset",
     execute: async (ctx) => {
@@ -1079,7 +1175,15 @@ function activate(context: ExtensionContext): void {
       let any = false;
       for (const chart of charts) {
         const sourceSheetIndex = peekRangeRefSheetIndex(chart.spec.data);
-        if (chartIntersectsChanges(chart.spec, changes, activeSheetIndex, sourceSheetIndex)) {
+        // A bound param cell is on the sheet the chart reads: its own, or on a
+        // canvas its data sheet (lib/chartInvalidation.ts paramCellSheetIndex).
+        const paramSheetIndex = paramCellSheetIndex(
+          chart.sheetIndex,
+          peekSheetIsCanvas(chart.sheetIndex),
+          sourceSheetIndex,
+          isDataRangeRef(chart.spec.data),
+        );
+        if (chartIntersectsChanges(chart.spec, changes, activeSheetIndex, sourceSheetIndex, paramSheetIndex)) {
           invalidateChartCache(chart.chartId);
           if (chart.chartId === selectedId) noteChartDataChanging();
           any = true;
@@ -1305,8 +1409,9 @@ function activate(context: ExtensionContext): void {
 
   const finalizeBrush = (d: { chartId: string; startX: number; startY: number; endX: number; endY: number }) => {
     const cached = getCachedChartData(d.chartId);
-    const param = getChartById(d.chartId)?.spec.params?.find((p) => p.select === "point" && p.brush);
-    if (cached?.hitGeometry && param) {
+    const brushed = getChartById(d.chartId);
+    const param = brushed?.spec.params?.find((p) => p.select === "point" && p.brush);
+    if (cached?.hitGeometry && param && brushed) {
       const rect = {
         x: Math.min(d.startX, d.endX),
         y: Math.min(d.startY, d.endY),
@@ -1317,10 +1422,15 @@ function activate(context: ExtensionContext): void {
       const keys = brushKeysFromHits(hitTestRect(rect, cached.hitGeometry), on);
       if (keys.length > 0) {
         setPointSelection(d.chartId, { [param.name]: { on, values: keys } });
-        // Mirror the click path's side effects: S7c writeback + S7b bus.
-        // On a canvas (no cells) the write is refused with a message instead of
-        // being attempted and silently rejected by the backend.
-        if (param.writeTo) writeParamValueToCell(param.writeTo, keys[0], param.name);
+        // Mirror the click path's side effects: S7c writeback + S7b bus. The
+        // cell is on the sheet the chart reads (on a canvas, its data sheet);
+        // with no such sheet the write is refused with a message.
+        if (param.writeTo) {
+          void writeParamValueToCell(param.writeTo, keys[0], param.name, {
+            sheetIndex: brushed.sheetIndex,
+            spec: brushed.spec,
+          });
+        }
       } else {
         clearPointSelection(d.chartId);
       }
@@ -1563,8 +1673,14 @@ function activate(context: ExtensionContext): void {
         // S7c: write the clicked label/value back to a same-sheet cell so
         // formulas / other charts can react (fire-and-forget; safe — its
         // CELLS_UPDATED only re-renders, the ephemeral selection survives).
-        // On a canvas there is no cell to write: refused with a message.
-        if (selectParam.writeTo) writeParamValueToCell(selectParam.writeTo, key, selectParam.name);
+        // The cell is on the sheet the chart reads: on a canvas, its data
+        // sheet; with no such sheet the write is refused with a message.
+        if (selectParam.writeTo) {
+          void writeParamValueToCell(selectParam.writeTo, key, selectParam.name, {
+            sheetIndex: clickedChart.sheetIndex,
+            spec: clickedChart.spec,
+          });
+        }
       } else {
         clearPointSelection(click.chartId);
       }
@@ -1725,6 +1841,11 @@ function activate(context: ExtensionContext): void {
     e.stopPropagation();
 
     // 1. MOVE THE SELECTION, exactly as a left-click on the same pixel would.
+    // On a CANVAS through the object-selection seam first: the menu's Copy /
+    // Duplicate act on the WHOLE selection there (W25), so a chart outside it
+    // becomes THE selection across families, and one inside it stays with
+    // every other member (lib/chartMenuSelection.ts).
+    selectChartForCanvasMenu(targetId);
     if (!isChartSelected(targetId)) selectChart(targetId);
     if (element === "datum" && hit) {
       // The datum ladder, not a stated rung: a first right-click on a bar
@@ -2422,6 +2543,20 @@ function activate(context: ExtensionContext): void {
     const chartId = getCurrentChartId();
     if (chartId == null) return;
 
+    // A canvas MULTI-selection -- this chart with a second chart the selection
+    // set holds, or with objects of other families -- is deleted WHOLE, as one
+    // undo step (@api/objectSelection `deleteSelectedObjects`). Deleting only
+    // the chart Charts holds left the rest selected and standing (open-items
+    // 2.af row 1); the dispatcher runs one winner per key, so this door must
+    // speak for the whole selection. CANVAS ONLY (the seam's one rule): on a
+    // worksheet a slicer clicked before this chart stays selected too, and a
+    // Delete on the chart's TITLE there must delete the title, not the chart
+    // and the slicer with it.
+    if (shouldActOnWholeObjectSelection()) {
+      void deleteSelectedObjects();
+      return;
+    }
+
     // A selected TITLE is a smaller subject than the chart, and Delete acts on
     // the smallest thing selected -- as it does for a selected data point's
     // formatting, and as Excel does. This is also how `spec.title === null`
@@ -2707,6 +2842,10 @@ function activate(context: ExtensionContext): void {
   const handleChartNavKey = (e: KeyboardEvent) => {
     const direction = CHART_NAV_ARROWS[e.key];
     if (direction === undefined && e.key !== "Escape") return;
+    // With the chart or axis menu open, Escape is THE MENU's: it closes itself
+    // (a later listener on this same path) and the chart keeps its selection
+    // and its rung (BUG-0196; lib/chartMenuState.ts).
+    if (e.key === "Escape" && isChartMenuOpen()) return;
     // Shift+arrow is the grid's range extension and Alt+arrow is its own thing;
     // only the bare and Ctrl/Cmd forms are the chart's.
     if (direction !== undefined && (e.shiftKey || e.altKey)) return;

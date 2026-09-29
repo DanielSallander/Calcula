@@ -225,3 +225,31 @@ describe("open-then-OK round trip", () => {
     });
   });
 });
+
+// W13 (wave C): the Source box spelled a sheet by its own rule, which left
+// TRUE and a trailing-dot name bare -- `=TRUE!$A$1:$A$4` is not a reference
+// the formula parser reads (TRUE lexes as a boolean, `Q1.` ends in the trim
+// operator). The box now spells a sheet the way every other reference builder
+// does: the parser's rule (quoteSheetNameForFormula, @api/externalEdit).
+describe("the sheet prefix follows the formula parser's rule", () => {
+  const NAMES = ["Sheet1", "TRUE", "Q1.", "Q1-2026", "A1", "Sheet.1"];
+  const range = (sheetIndex: number) => ({ range: { sheetIndex, startRow: 0, startCol: 0, endRow: 3, endCol: 0 } });
+
+  it.each([
+    [1, "='TRUE'!$A$1:$A$4"],
+    [2, "='Q1.'!$A$1:$A$4"],
+    [3, "='Q1-2026'!$A$1:$A$4"],
+    // Bare for the parser: the `!` after a reference-shaped name makes it a sheet.
+    [4, "=A1!$A$1:$A$4"],
+    [5, "=Sheet.1!$A$1:$A$4"],
+  ])("sheet %i is written %s", (sheetIndex, expected) => {
+    expect(formatListSourceText(range(sheetIndex), NAMES, 0)).toBe(expected);
+  });
+
+  it("every spelling reads back to the same rectangle (open-then-OK)", () => {
+    for (let sheetIndex = 1; sheetIndex < NAMES.length; sheetIndex++) {
+      const text = formatListSourceText(range(sheetIndex), NAMES, 0);
+      expect(parseListSourceText(text, NAMES, 0), text).toEqual({ kind: "range", ...range(sheetIndex) });
+    }
+  });
+});

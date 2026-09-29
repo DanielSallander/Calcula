@@ -1,28 +1,50 @@
 //! FILENAME: app/extensions/AutoFilter/__tests__/autoFilterEditKeys.test.ts
-// PURPOSE: AutoFilter's own Ctrl+Shift+L listener stands down while a cell edit
-//          owns the keyboard, and still toggles the filter when nothing is
-//          being edited.
-// CONTEXT: Fix round 4, F2. The listener had only a pointer-claim check, so
-//          Ctrl+Shift+L typed during a floating grid's cell edit (its editor or
-//          the formula bar focused, or parked with the keyboard on the grid
-//          container) toggled AutoFilter over Core's HIDDEN selection -- and
-//          in Core's own in-cell editor it did the same, where Excel ignores
-//          the key. The registry's binding for the same key is "not-editing"
-//          (keybindings.editContext.test.ts); this is the listener's half.
+// PURPOSE: Ctrl+Shift+L does not toggle AutoFilter while a cell edit owns the
+//          keyboard, and still toggles it (once) when nothing is being edited.
+// CONTEXT: Fix round 4, F2: Ctrl+Shift+L typed during a floating grid's cell
+//          edit (its editor or the formula bar focused, or parked with the
+//          keyboard on the grid container) toggled AutoFilter over Core's
+//          HIDDEN selection -- and in Core's own in-cell editor it did the
+//          same, where Excel ignores the key. That was the extension's own
+//          window listener; since wave B (D1) the keybinding registry is the
+//          ONE keyboard path and the listener is gone, so this drives the REAL
+//          dispatcher (initKeybindings, the `not-editing` binding) and the REAL
+//          command through the real activation.
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 
 const toggleFilter = vi.fn();
 vi.mock("../lib/filterStore", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/filterStore")>()),
   toggleFilter: (...args: unknown[]) => toggleFilter(...args),
+  refreshFilterState: vi.fn(async () => undefined),
 }));
 
-import { handleKeyDown } from "../index";
+import extension from "../index";
+import { CommandRegistry } from "@api/commands";
+import { initKeybindings } from "@api/keybindings";
 import { registerExternalFormulaTarget, setGlobalIsEditing } from "@api/editing";
 
 const cleanups: (() => void)[] = [];
 
+/** Every door inert, except `commands`, which are REAL. */
+function stubContext(): never {
+  const inert = (): unknown =>
+    new Proxy(() => () => {}, {
+      get: (_t, prop) => (prop === "then" ? undefined : inert()),
+      apply: () => () => {},
+    });
+  return new Proxy(inert() as Record<string, unknown>, {
+    get: (t, prop) =>
+      prop === "commands"
+        ? {
+            register: (id: string, fn: (...a: unknown[]) => unknown) => CommandRegistry.register(id, fn),
+            unregister: (id: string) => CommandRegistry.unregister(id),
+            execute: (id: string) => CommandRegistry.execute(id),
+          }
+        : (t as Record<string | symbol, unknown>)[prop as string],
+  }) as never;
+}
 function focus(el: HTMLElement): HTMLElement {
   document.body.appendChild(el);
   el.focus();
@@ -43,49 +65,53 @@ function startFloatingGridEdit(): void {
     }),
   );
 }
-function ctrlShiftL(): KeyboardEvent {
+async function ctrlShiftL(): Promise<KeyboardEvent> {
   const e = new KeyboardEvent("keydown", { key: "L", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true });
-  Object.defineProperty(e, "target", { value: document.activeElement ?? document.body });
+  (document.activeElement ?? document.body).dispatchEvent(e);
+  for (let i = 0; i < 4; i++) await Promise.resolve();
   return e;
 }
 
+beforeAll(() => {
+  initKeybindings();
+});
 beforeEach(() => {
   toggleFilter.mockClear();
+  extension.activate(stubContext());
 });
 afterEach(() => {
+  extension.deactivate?.();
   while (cleanups.length > 0) cleanups.pop()!();
   setGlobalIsEditing(false);
   document.body.innerHTML = "";
 });
 
 describe("AutoFilter Ctrl+Shift+L while a cell edit owns the keyboard", () => {
-  it("a floating grid's live edit, parked with the keyboard on the grid container: no toggle, key not taken", () => {
+  it("a floating grid's live edit, parked with the keyboard on the grid container: no toggle, key not taken", async () => {
     startFloatingGridEdit();
     focus(gridContainer());
-    const e = ctrlShiftL();
-    handleKeyDown(e);
+    const e = await ctrlShiftL();
     expect(toggleFilter).not.toHaveBeenCalled();
     expect(e.defaultPrevented).toBe(false);
   });
 
-  it("a floating grid's live edit in the formula bar: no toggle", () => {
+  it("a floating grid's live edit in the formula bar: no toggle", async () => {
     startFloatingGridEdit();
     focus(document.createElement("input"));
-    handleKeyDown(ctrlShiftL());
+    await ctrlShiftL();
     expect(toggleFilter).not.toHaveBeenCalled();
   });
 
-  it("Core's own in-cell edit: no toggle", () => {
+  it("Core's own in-cell edit: no toggle", async () => {
     setGlobalIsEditing(true);
     focus(document.createElement("textarea"));
-    handleKeyDown(ctrlShiftL());
+    await ctrlShiftL();
     expect(toggleFilter).not.toHaveBeenCalled();
   });
 
-  it("positive control: nothing being edited, grid focused -> the filter toggles", () => {
+  it("positive control: nothing being edited, grid focused -> the filter toggles ONCE", async () => {
     focus(gridContainer());
-    const e = ctrlShiftL();
-    handleKeyDown(e);
+    const e = await ctrlShiftL();
     expect(toggleFilter).toHaveBeenCalledTimes(1);
     expect(e.defaultPrevented).toBe(true);
   });

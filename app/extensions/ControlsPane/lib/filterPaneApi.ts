@@ -3,6 +3,7 @@
 
 import { filterPaneBackend } from "./filterPaneBackend";
 import type { CellData } from "@api/types";
+import type { PivotFilterGesture, PivotFilterGestureResponse } from "@api/pivotTypes";
 import type {
   RibbonFilter,
   CreateRibbonFilterParams,
@@ -33,10 +34,28 @@ export async function updateRibbonFilterSelection(
   filterId: string,
   selectedItems: string[] | null,
 ): Promise<void> {
-  return filterPaneBackend.invoke<void>("update_ribbon_filter_selection", {
+  await filterPaneBackend.invoke<unknown>("update_ribbon_filter_selection", {
     filterId,
     selectedItems,
   });
+}
+
+/**
+ * A ribbon filter CHANGE as ONE backend command (BUG-0187): the selection AND
+ * every pivot write of `gesture`, recorded as ONE undo step at the end -- no
+ * undo transaction is held open across the model re-queries.
+ */
+export async function applyRibbonFilterSelection(
+  filterId: string,
+  selectedItems: string[] | null,
+  gesture: PivotFilterGesture,
+): Promise<PivotFilterGestureResponse> {
+  const response = await filterPaneBackend.invoke<PivotFilterGestureResponse | null>(
+    "update_ribbon_filter_selection",
+    { filterId, selectedItems, gesture },
+  );
+  if (!response) throw new Error("The ribbon filter's selection command answered without its filter gesture");
+  return response;
 }
 
 export async function getAllRibbonFilters(): Promise<RibbonFilter[]> {

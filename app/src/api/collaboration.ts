@@ -1526,8 +1526,12 @@ export function myPublisherKey(): Promise<CoPublisherInfo> {
  * this working copy against that same base, then asks whether the two touched
  * any piece in common.
  */
-export function pushMergeAnalyze(): Promise<MergeAnalysisResponse> {
-  return invokeBackend("calp_push_merge_analyze", {});
+export async function pushMergeAnalyze(): Promise<MergeAnalysisResponse> {
+  // The working side is a real publish, so it needs what a push is handed: the
+  // providers' distributable objects. Without them every model overlay and
+  // report reads as a piece "you" removed (BUG-0150).
+  const customObjects = await collectDistributableObjects();
+  return invokeBackend("calp_push_merge_analyze", { params: { customObjects } });
 }
 
 /**
@@ -1537,8 +1541,11 @@ export function pushMergeAnalyze(): Promise<MergeAnalysisResponse> {
  * Re-runs the analysis server-side rather than trusting a verdict from here —
  * the workspace can move between a dialog rendering and a user confirming.
  */
-export function pushMergeApply(): Promise<MergeApplyResponse> {
-  return invokeBackend("calp_push_merge_apply", {});
+export async function pushMergeApply(): Promise<MergeApplyResponse> {
+  // The apply re-runs the analysis; it must see the same objects the analysis
+  // the user confirmed saw, or it can reach a different verdict.
+  const customObjects = await collectDistributableObjects();
+  return invokeBackend("calp_push_merge_apply", { params: { customObjects } });
 }
 
 /**
@@ -1547,7 +1554,7 @@ export function pushMergeApply(): Promise<MergeApplyResponse> {
  * With no arguments it reads the target and base from the workbook's own
  * working-copy link, which is what the push dialog wants.
  */
-export function diffWorkingCopy(params?: {
+export async function diffWorkingCopy(params?: {
   registryPath?: string;
   packageName?: string;
   /** The workspace it was subscribed from; two teams may publish the same name. */
@@ -1578,8 +1585,16 @@ export function diffWorkingCopy(params?: {
    * range's backing sheet as added — neither of which a reset touches.
    */
   scopeSheetIds?: string[];
+  /**
+   * The providers' distributable objects the working side carries. Omitted =
+   * collected here, exactly as `publishApplication` collects them: the working
+   * side is a real publish, and without them every model overlay and report
+   * the push WOULD carry reads as removed (BUG-0150).
+   */
+  customObjects?: DistributableObjectPayload[];
 }): Promise<WorkingCopyDiff> {
-  return invokeBackend("calp_diff_working_copy", { params: params ?? {} });
+  const customObjects = params?.customObjects ?? (await collectDistributableObjects());
+  return invokeBackend("calp_diff_working_copy", { params: { ...(params ?? {}), customObjects } });
 }
 
 export interface PublishModelParams {

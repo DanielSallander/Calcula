@@ -14,6 +14,9 @@ import { CalculationStatusItem } from "./components/CalculationStatusItem";
 /** Status-bar item id for the progress/Cancel/stale indicator. */
 const STATUS_ITEM_ID = "calcula.calculation-options.status";
 
+/** Takes back the Formulas-menu items the current activation added. */
+let unregisterMenuItems: (() => void) | null = null;
+
 // ============================================================================
 // Lifecycle
 // ============================================================================
@@ -22,7 +25,8 @@ function activate(_context: ExtensionContext): void {
   console.log("[CalculationOptions] Activating...");
 
   // 1. Register menu items in Formulas menu
-  registerCalculationMenuItems();
+  unregisterMenuItems?.();
+  unregisterMenuItems = registerCalculationMenuItems();
 
   // 2. Sync checked state from backend
   syncCalculationMode();
@@ -45,6 +49,8 @@ function activate(_context: ExtensionContext): void {
 
 function deactivate(): void {
   unregisterStatusBarItem(STATUS_ITEM_ID);
+  unregisterMenuItems?.();
+  unregisterMenuItems = null;
   console.log("[CalculationOptions] Deactivated.");
 }
 

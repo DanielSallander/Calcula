@@ -20,8 +20,12 @@
 //          Lock / unlock writes `locked` the same way: the whole list.
 //
 //          Both go through `patchActiveCanvasLayout` (lib/canvasActions.ts),
-//          the one door every layout change takes. Neither is undoable today:
-//          `set_canvas_layout` records no undo (open item D1).
+//          the one door every layout change takes. Each is ONE undo step: the
+//          backend records a `canvas_stacking` restore whenever the order or
+//          the lock list changes (W5, `set_canvas_layout_inner`), so Ctrl+Z
+//          puts the previous stack / locks back and Ctrl+Y re-applies them.
+//          The page, snap grid and background stay non-undoable view state
+//          (decision D1).
 
 import type { CanvasObjectRef } from "@api";
 import { getGridRegions, stackedFloatingRegions, type GridRegion } from "@api/gridOverlays";

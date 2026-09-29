@@ -12,6 +12,7 @@
 import type { GridRegion } from "@api/gridOverlays";
 import {
   registerObjectSelectionProvider,
+  type ObjectSelectionKey,
   type ObjectSelectionProvider,
 } from "@api/objectSelection";
 import { canvasObjectRef } from "@api/canvasSheet";
@@ -20,7 +21,8 @@ import {
   isSlicerSelected,
   selectSlicer,
 } from "../handlers/selectionHandler";
-import { getSlicerById } from "./slicerStore";
+import { deleteSlicersReporting, getSlicerById } from "./slicerStore";
+import { isSlicerContextMenuOpen } from "../handlers/slicerContextMenu";
 
 /** The `GridRegion.type` slicers publish (see slicerStore.syncSlicerRegions). */
 export const SLICER_REGION_TYPE = "slicer";
@@ -55,6 +57,14 @@ export function createSlicerSelectionProvider(): ObjectSelectionProvider {
       deselectSlicer();
     },
 
+    // Escape is the slicer's right-click MENU's while it is open: the menu
+    // closes itself on it (and consumes it). A canvas's Escape binding asks
+    // this first -- it runs earlier and used to deselect the slicer behind
+    // the open menu, leaving the menu open (BUG-0196, slicer part).
+    ownsKey(key: ObjectSelectionKey): boolean {
+      return key === "Escape" && isSlicerContextMenuOpen();
+    },
+
     refOf(region: GridRegion) {
       const id = slicerIdOf(region);
       return id === null ? null : canvasObjectRef("slicer", id);
@@ -79,6 +89,20 @@ export function createSlicerSelectionProvider(): ObjectSelectionProvider {
     labelOf(region: GridRegion): string | null {
       const id = slicerIdOf(region);
       return id === null ? null : getSlicerById(id)?.name ?? null;
+    },
+
+    // A canvas-wide Delete (a multi-selection spanning families) hands the
+    // slicers their share (wave B, A4). Resolves once every delete LANDED
+    // (the backend's delete joins the seam's one undo step, filter and all);
+    // REJECTS with the backend's reason when any was refused, so the seam
+    // keeps the refused ones selected and names them.
+    async deleteObjects(regions: readonly GridRegion[]): Promise<void> {
+      const ids = regions.map(slicerIdOf).filter((id): id is string => id !== null);
+      if (ids.length === 0) return;
+      const refused = await deleteSlicersReporting(ids, "Delete Objects");
+      if (refused.length > 0) {
+        throw new Error(Array.from(new Set(refused.map((r) => r.reason))).join(" "));
+      }
     },
   };
 }

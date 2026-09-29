@@ -7,6 +7,7 @@
 
 import {
   registerMenuItem,
+  unregisterMenuItem,
   cellEvents,
   emitAppEvent,
   AppEvents,
@@ -92,8 +93,13 @@ function applyCellUpdates(
  * Register the Calculation Options, Calculate Worksheet, and Calculate Workbook
  * items in the Formulas menu.
  * Assumes the "formulas" menu was already created by Tracing.
+ *
+ * Returns the cleanup for deactivation: it takes back this extension's OWN
+ * top-level items (their submenus go with them), never the Formulas menu,
+ * which Tracing builds and Defined Names, Watch Window, Evaluate Formula and
+ * others add to (wave E, Y14).
  */
-export function registerCalculationMenuItems(): void {
+export function registerCalculationMenuItems(): () => void {
   // ---- Separator ----
   registerMenuItem("formulas", {
     id: "formulas:calcOptions:separator",
@@ -295,6 +301,12 @@ export function registerCalculationMenuItems(): void {
       },
     ],
   });
+
+  return () => {
+    for (const id of ["formulas:calcOptions:separator", "formulas:calcOptions", "formulas:calculate"]) {
+      unregisterMenuItem("formulas", id);
+    }
+  };
 }
 
 /**

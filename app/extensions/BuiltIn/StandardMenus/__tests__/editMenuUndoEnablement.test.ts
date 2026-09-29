@@ -19,6 +19,7 @@ const unregisterShellComponent = vi.fn();
 
 vi.mock("@api/ui", () => ({
   registerMenu: (...a: unknown[]) => registerMenu(...a),
+  unregisterMenu: vi.fn(),
   registerShellComponent: (...a: unknown[]) => registerShellComponent(...a),
   unregisterShellComponent: (...a: unknown[]) => unregisterShellComponent(...a),
   showDialog: vi.fn(),
@@ -41,7 +42,7 @@ vi.mock("@api", () => {
   return Object.fromEntries(names.map((n) => [n, Stub]));
 });
 
-vi.mock("../FormatMenu", () => ({ registerFormatMenu: vi.fn() }));
+vi.mock("../FormatMenu", () => ({ registerFormatMenu: vi.fn(() => () => {}) }));
 vi.mock("../FileMenu", () => ({
   fileNew: vi.fn(),
   fileOpen: vi.fn(),

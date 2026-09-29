@@ -8,12 +8,15 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type { DialogProps } from "@api";
 import {
   useGridState,
-  columnToLetter,
   openTaskPane,
   addTaskPaneContextKey,
 } from "@api";
 import { createConnection, connect, getModelInfo } from "../../_shared/lib/bi-api";
-import { createModelPivot } from "../lib/modelPivot";
+import {
+  createModelPivot,
+  modelPivotDestinationAtSelection,
+  modelPivotDestinationLabel,
+} from "../lib/modelPivot";
 import { CONNECTIONS_PANE_ID } from "../manifest";
 import type { BiModelInfo, ConnectionInfo } from "../types";
 
@@ -230,21 +233,16 @@ export function ModelDialog({
 
   const handleInsertPivot = useCallback(async () => {
     if (!createdConnection || !modelInfo) return;
+    // Refused, once, while Core's active cell is hidden under something else
+    // that owns the selection (lib/modelPivot.ts).
+    const destination = modelPivotDestinationAtSelection(gridState);
+    if (destination === null) return;
 
     try {
       setLoading(true);
       setError("");
 
-      const sel = gridState.selection;
-      await createModelPivot(
-        createdConnection.id,
-        {
-          row: sel ? sel.startRow : 0,
-          col: sel ? sel.startCol : 0,
-          sheetIndex: gridState.sheetContext?.activeSheetIndex,
-        },
-        modelInfo,
-      );
+      await createModelPivot(createdConnection.id, destination, modelInfo);
 
       onClose();
     } catch (err) {
@@ -262,10 +260,10 @@ export function ModelDialog({
 
   if (!isOpen) return null;
 
-  const sel = gridState.selection;
-  const destRow = sel ? sel.startRow : 0;
-  const destCol = sel ? sel.startCol : 0;
-  const destCell = `${columnToLetter(destCol)}${destRow + 1}`;
+  // Where Insert PivotTable puts the pivot, by the rule createModelPivot uses:
+  // on a canvas a new frame, never the cell (W23's sibling, wave C review --
+  // this dialog still printed "Cell C3" there).
+  const destinationLabel = modelPivotDestinationLabel(gridState);
 
   const hasConnection = createdConnection !== null;
   // One predicate for BOTH the Create button's style and disabled prop —
@@ -388,7 +386,7 @@ export function ModelDialog({
           {hasConnection && (
             <div style={dialogStyles.section}>
               <span style={dialogStyles.label}>
-                Destination: Cell {destCell}
+                Destination: {destinationLabel}
               </span>
             </div>
           )}

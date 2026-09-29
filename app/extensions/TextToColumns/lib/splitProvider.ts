@@ -3,8 +3,9 @@
 //          this extension's split logic (Wave 4, RANGE-OPS cluster).
 // CONTEXT: Registered at activation (index.ts). Runs the SAME parser the
 //          wizard's Finish button runs (parser.ts splitDelimited) and the SAME
-//          write path (one undo transaction + updateCellsBatch + grid
-//          refresh), so a scripted split and a wizard split can never
+//          write path (writeSplit.ts: one undo step that closes only what
+//          it opened -- inside a script's own batch it JOINS -- then the
+//          grid refresh), so a scripted split and a wizard split can never
 //          disagree. Differences from the wizard, on purpose:
 //            - NO region auto-detection: the script named an explicit range,
 //              and silently growing it would write rows nobody asked about.
@@ -12,13 +13,7 @@
 //              caller chose its destination. Protection and writeback claims
 //              still refuse through the backend, and the refusal propagates.
 
-import {
-  getViewportCells,
-  updateCellsBatch,
-  beginUndoTransaction,
-  commitUndoTransaction,
-  cancelUndoTransaction,
-} from "@api";
+import { getViewportCells } from "@api";
 import type { CellUpdateInput } from "@api";
 import type {
   TextToColumnsController,
@@ -26,6 +21,7 @@ import type {
   TextToColumnsResult,
 } from "@api/textToColumnsService";
 import { splitDelimited, type DelimitedConfig } from "./parser";
+import { writeSplitAsOneStep } from "./writeSplit";
 
 /**
  * Build the wizard's DelimitedConfig from a flat delimiter list.
@@ -120,16 +116,10 @@ export async function splitTextToColumns(
     }
   }
 
-  try {
-    await beginUndoTransaction("Text to Columns");
-    await updateCellsBatch(updates);
-    await commitUndoTransaction();
-  } catch (err) {
-    // Close the transaction — left open, later edits silently join it — and
-    // propagate the BACKEND's reason (it names the refusing cell/region).
-    try { await cancelUndoTransaction(); } catch { /* already closed */ }
-    throw err;
-  }
+  // One undo step (it closes only what it opened -- a split inside the
+  // script's own batch JOINS it, wave F Z6); a refusal propagates the
+  // BACKEND's reason (it names the refusing cell/region).
+  await writeSplitAsOneStep(updates);
 
   // Same refresh the wizard fires: refetch cell data and redraw the canvas.
   window.dispatchEvent(new CustomEvent("grid:refresh"));

@@ -7,14 +7,25 @@
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   registerMenuItem,
+  unregisterMenuItem,
   dispatchGridAction,
   setSelection,
   showToast,
   IconSelectVisibleCells,
-  isKeyClaimed,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
-import { isEditKeystroke } from "@api/editing";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
+
+/**
+ * Select Visible Cells -- the command the keybinding registry's
+ * `ext.selectVisible` (Alt+;) runs. The registry named this id long before
+ * anything registered it, and this extension's listener was BUBBLE-phase, so
+ * the capture-phase dispatcher's match stopped Alt+; before it arrived: the
+ * shortcut did nothing at all (BUG-0183). The registry is the ONE keyboard
+ * path now (its layout tier also takes sv-SE's Alt+Shift+comma), and the
+ * listener is gone.
+ */
+export const SELECT_VISIBLE_CELLS_COMMAND = "selectVisibleCells.execute";
 
 // ============================================================================
 // Core Logic
@@ -33,6 +44,10 @@ import { isEditKeystroke } from "@api/editing";
  * compact (e.g. 3 visible row-bands x 2 visible col-spans = 6 ranges, not N*M cells).
  */
 function selectVisibleCells(): void {
+  // Every door (Edit menu, Alt+;) comes through here. It rebuilds Core's
+  // selection -- HIDDEN while something else owns the selection (a floating
+  // grid's selected cell) -- so refuse, once (D4, BUG-0185 class).
+  if (refuseIfSelectionOwned("Select Visible Cells")) return;
   const state = getGridStateSnapshot();
   if (!state?.selection) {
     showToast("No selection", { type: "warning" });
@@ -129,8 +144,12 @@ function selectVisibleCells(): void {
 // Lifecycle
 // ============================================================================
 
-function activate(_context: ExtensionContext): void {
+function activate(context: ExtensionContext): void {
   console.log("[SelectVisibleCells] Activating...");
+
+  // The command the registry's Alt+; runs.
+  context.commands.register(SELECT_VISIBLE_CELLS_COMMAND, () => selectVisibleCells());
+  cleanupFns.push(() => context.commands.unregister(SELECT_VISIBLE_CELLS_COMMAND));
 
   // Register in the Edit menu
   registerMenuItem("edit", {
@@ -140,26 +159,8 @@ function activate(_context: ExtensionContext): void {
     icon: IconSelectVisibleCells,
     action: selectVisibleCells,
   });
-
-  // Register keyboard shortcut handler
-  const handleKeyDown = (e: KeyboardEvent) => {
-    // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
-    // field, a shape's declared hit rectangle -- is not this extension's.
-    // The tag list below cannot see a <select> or a <button>; the claim can.
-    // See core/lib/pointerClaims.ts, and the census in
-    // core/lib/globalInputListeners.ts (a new global listener adds a row).
-    if (isKeyClaimed(e)) return;
-    if (e.altKey && e.key === ";") {
-      // Not while a text field is focused or any cell edit is in progress
-      // (the tag list this replaced could not see a floating grid's live cell
-      // edit parked with the keyboard on the grid): it moves Core's selection.
-      if (isEditKeystroke(e)) return;
-      e.preventDefault();
-      selectVisibleCells();
-    }
-  };
-  window.addEventListener("keydown", handleKeyDown);
-  cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown));
+  // Its OWN item back on deactivate (wave E, Y14): the Edit menu is Standard Menus'.
+  cleanupFns.push(() => unregisterMenuItem("edit", "edit:selectVisibleCells"));
 
   console.log("[SelectVisibleCells] Activated successfully.");
 }

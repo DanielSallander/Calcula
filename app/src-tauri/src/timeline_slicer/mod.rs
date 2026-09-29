@@ -6,3 +6,6 @@ pub mod commands;
 
 pub use types::*;
 pub use commands::*;
+
+#[cfg(test)]
+mod tests;

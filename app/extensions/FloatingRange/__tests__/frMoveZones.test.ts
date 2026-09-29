@@ -68,6 +68,7 @@ import {
 import { selectFloatingRange, resetFrSelection, clearLocalSelection } from "../lib/frSelection";
 import { frameWidth, frameHeight, FR_ROW_HDR_W, FR_DEFAULT_COL_W } from "../lib/frDimensions";
 import { getFrCursor, hitTestFloatingRange } from "../rendering/frRenderer";
+import { recordFrUsedExtent, resetFrExtents } from "../lib/frExtent";
 import { registerLayoutSurfaceProvider, type LayoutSurface } from "@api/layoutSurface";
 import type { FloatingRangeInfo } from "@api/floatingRanges";
 import type { GridRegion, OverlayHitTestContext } from "@api/gridOverlays";
@@ -158,6 +159,7 @@ beforeEach(() => {
   commitFrEditor.mockClear();
   updateFloatingRange.mockClear();
   resetFloatingRangeStore();
+  resetFrExtents();
   resetFrSelection();
   clearLocalSelection();
   load();
@@ -293,6 +295,57 @@ describe("edge-handle cell scaling", () => {
     mouse("mouseup", drag.canvasX + 30, drag.canvasY);
     await flush();
     expect(updateFloatingRange).toHaveBeenCalledTimes(1);
+  });
+
+  // E10 (d): the scale acted on the WINDOW plus existing overrides, so a
+  // default-width column the content reaches past the window kept its width:
+  // scrolled into view after a x1.5 scale it was visibly narrower than its
+  // neighbours. Every column the user can scroll to is the object's to scale.
+  it("scales every column the CONTENT reaches, not only the window's", () => {
+    recordFrUsedExtent(FR_ID, 4, 6); // window 3 columns, content 6
+    dragRightBall(SELECTED, 60);
+    const live = getFloatingRangeById(FR_ID)!;
+    const widths = live.colWidths as Record<number, number>;
+    for (const c of [0, 1, 2, 3, 4, 5]) {
+      expect(widths[c], `column ${c} kept its old width`).toBeGreaterThan(FR_DEFAULT_COL_W);
+    }
+    // One scale for all of them: the scrolled-to column matches the window's.
+    expect(widths[5]).toBe(widths[0]);
+  });
+
+  // Review B (2026-09-28): the page cap leaves room for the 1/100 px rounding
+  // of every size that MAKES THE FRAME -- the window's. E10 (d) handed it the
+  // count of every size the scale writes (the whole content extent), so with
+  // content far past the window the frame stopped pixels short of the page:
+  // ~1.3 px over 256 columns, ~5 px over 1000 rows.
+  it("with content far past the window, the dragged edge still stops AT the page border", () => {
+    surfaceWithPage({ width: 600, height: 400 });
+    const w0 = frameWidth(getFloatingRangeById(FR_ID)!);
+    load({ x: 600 - w0 - 20 });
+    recordFrUsedExtent(FR_ID, 4, 256); // window 3 columns, content 256
+    dragRightBall(SELECTED, 200);
+    const live = getFloatingRangeById(FR_ID)!;
+    const right = live.x + frameWidth(live);
+    expect(right).toBeLessThanOrEqual(600);
+    expect(right, "the frame stopped short of the page").toBeGreaterThan(600 - 0.1);
+  });
+
+  it("the same for a BOTTOM-edge drag over 1000 content rows", () => {
+    surfaceWithPage({ width: 600, height: 400 });
+    const h0 = frameHeight(getFloatingRangeById(FR_ID)!);
+    load({ y: 400 - h0 - 20 });
+    recordFrUsedExtent(FR_ID, 1000, 3); // window 4 rows, content 1000
+    const entry = getFloatingRangeById(FR_ID)!;
+    const w = frameWidth(entry);
+    const h = frameHeight(entry);
+    const ctx = ctxAt(w / 2, h, SELECTED);
+    selectFloatingRange(FR_ID);
+    claimsBodyDrag(ctx);
+    mouse("mousemove", ctx.canvasX, ctx.canvasY + 200);
+    const live = getFloatingRangeById(FR_ID)!;
+    const bottom = live.y + frameHeight(live);
+    expect(bottom).toBeLessThanOrEqual(400);
+    expect(bottom, "the frame stopped short of the page").toBeGreaterThan(400 - 0.1);
   });
 
   it("a LEFT-edge drag past the sheet origin keeps the right edge where it was", () => {

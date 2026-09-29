@@ -28,8 +28,14 @@
 //!
 //! WHY `None` WHEN NOTHING CHANGED. `serde_json` is built without
 //! `preserve_order` here, so re-serializing a spec reorders its keys. Returning
-//! `None` for an untouched spec keeps its bytes identical, which is what keeps
-//! a chart nobody edited out of a version diff.
+//! `None` for an untouched spec keeps its bytes identical.
+//!
+//! A spec that WAS rewritten does not keep them, and a rewrite can be undone:
+//! a checkout renames an application's string sources to this workbook's
+//! names and the push renames them back, so an untouched chart comes home with
+//! its keys sorted. Bytes are therefore not what a version diff compares --
+//! [`comparable_chart_spec`] is: key order and the spelling of a source's sheet
+//! prefix are not edits.
 
 use std::collections::HashMap;
 
@@ -213,6 +219,65 @@ pub fn remap_chart_spec_sheet_ids(
     }
 }
 
+/// Rename the sheet prefix of every sheet-qualified STRING source
+/// (`"Data!A1:B5"`, `"'My Data'!A1"`) through `renames`, in the four places the
+/// module header lists (BUG-0151). A string source binds its sheet by NAME, so
+/// when a pull renames the application's "Data" to "Data (2)" on arrival, the
+/// chart otherwise reads the SUBSCRIBER's own "Data". DataRangeRefs (bound by
+/// id) and unqualified strings are left alone.
+///
+/// Returns `None` when nothing changed (including malformed JSON and an empty
+/// rename set), so the caller keeps the original bytes.
+pub fn rename_chart_spec_sheet_names(
+    spec_json: &str,
+    renames: &crate::sheet_renames::SheetRenames,
+) -> Option<String> {
+    if renames.is_empty() {
+        return None;
+    }
+    let mut value: Value = serde_json::from_str(spec_json).ok()?;
+    let changed = for_each_source_mut(spec_root_mut(&mut value), 0, &mut |source| {
+        let Value::String(text) = source else {
+            return false;
+        };
+        match renames.rename_reference(text) {
+            Some(renamed) => {
+                *text = renamed;
+                true
+            }
+            None => false,
+        }
+    });
+    if changed {
+        serde_json::to_string(&value).ok()
+    } else {
+        None
+    }
+}
+
+/// A chart spec in the form two spellings of the SAME chart share: parsed
+/// (so key order is gone) with every string source's sheet prefix spelled the
+/// one comparable way (`crate::sheet_renames::comparable_reference`). `None`
+/// for text that is not JSON -- compared as bytes then, like any other string.
+///
+/// The version diff compares charts through this, because a checkout rename
+/// and the push's undo of it re-serialize an untouched spec (see the module
+/// header): byte-wise, every such chart shipped as "modified" and blocked a
+/// merge with a teammate who DID edit it.
+pub fn comparable_chart_spec(spec_json: &str) -> Option<Value> {
+    let mut value: Value = serde_json::from_str(spec_json).ok()?;
+    for_each_source_mut(spec_root_mut(&mut value), 0, &mut |source| {
+        let Value::String(text) = source else {
+            return false;
+        };
+        let comparable = crate::sheet_renames::comparable_reference(text);
+        let changed = comparable != *text;
+        *text = comparable;
+        changed
+    });
+    Some(value)
+}
+
 /// Stamp `sheetId` onto every DataRangeRef that lacks one (absent, not a
 /// string, or empty -- the TS `isUnstamped` rule), taking the id of the sheet
 /// its `sheetIndex` names in `sheet_ids` (the workbook's sheets, in index
@@ -388,6 +453,52 @@ fn visit_range_ref_mut(
         Some(m) if is_range_ref(m) => f(m),
         _ => false,
     }
+}
+
+/// Call `f` on every data SOURCE value of `spec` -- whatever its shape -- in the
+/// same places as [`collect_sources`]; true when any call reported a change.
+fn for_each_source_mut(
+    spec: &mut Value,
+    depth: usize,
+    f: &mut dyn FnMut(&mut Value) -> bool,
+) -> bool {
+    let Some(obj) = spec.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    if let Some(data) = obj.get_mut("data") {
+        changed |= f(data);
+    }
+    if let Some(layers) = obj.get_mut("layers").and_then(Value::as_array_mut) {
+        for layer in layers {
+            if let Some(data) = layer.as_object_mut().and_then(|l| l.get_mut("data")) {
+                changed |= f(data);
+            }
+        }
+    }
+    if let Some(transforms) = obj.get_mut("transform").and_then(Value::as_array_mut) {
+        for t in transforms {
+            let Some(t) = t.as_object_mut() else { continue };
+            if t.get("type").and_then(Value::as_str) != Some("lookup") {
+                continue;
+            }
+            if let Some(from) = t.get_mut("from") {
+                changed |= f(from);
+            }
+        }
+    }
+    if depth < MAX_WALK_DEPTH {
+        if let Some(children) = obj
+            .get_mut("concat")
+            .and_then(|c| c.get_mut("charts"))
+            .and_then(Value::as_array_mut)
+        {
+            for child in children {
+                changed |= for_each_source_mut(child, depth + 1, f);
+            }
+        }
+    }
+    changed
 }
 
 // ---------------------------------------------------------------------------
@@ -770,6 +881,51 @@ mod tests {
         assert_eq!(stamp_chart_spec_sheet_ids(&odd, &[sid()]), None);
     }
 
+    /// BUG-0151: a pull that renames "My Sheet" on arrival renames the chart
+    /// string sources that name it -- in all four places -- and nothing else.
+    #[test]
+    fn a_rename_reaches_every_string_source_and_only_those() {
+        let (a, c, d) = (sid(), sid(), sid());
+        let mut spec = four_path_spec(a, c, d);
+        spec["layers"][1]["data"] = Value::String("'my sheet'!B1:B3".to_string());
+        spec["concat"]["charts"][0]["data"] = Value::String("My Sheet!C1".to_string());
+        spec["concat"]["charts"][1]["concat"]["charts"][0]["layers"] =
+            json!([{ "data": "Other!A1:A2" }, { "data": "A1:A2" }]);
+        let renames = crate::sheet_renames::SheetRenames::new([("My Sheet", "My Sheet (2)")]);
+
+        let out = rename_chart_spec_sheet_names(&envelope(spec), &renames)
+            .expect("three string sources name the renamed sheet");
+        let sources = chart_spec_source_sheets(&out);
+        let names: Vec<&ChartSourceSheet> = sources
+            .iter()
+            .filter(|s| matches!(s, ChartSourceSheet::Name(_)))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                &ChartSourceSheet::Name("My Sheet (2)".to_string()),
+                &ChartSourceSheet::Name("Other".to_string()),
+            ],
+            "the lookup `from`, the layer and the concat child all moved (deduplicated), \
+             and the grandchild's unrelated source did not"
+        );
+        // The DataRangeRefs are untouched, and so is the unqualified string.
+        assert!(sources.contains(&ChartSourceSheet::Id(a)));
+        assert!(sources.contains(&ChartSourceSheet::Index(3)));
+        assert!(!out.contains("My Sheet!") && !out.contains("my sheet"));
+        assert!(out.contains("\"A1:A2\""));
+
+        // Nothing to rename: the original bytes are kept.
+        assert_eq!(
+            rename_chart_spec_sheet_names(
+                &envelope(four_path_spec(a, c, d)),
+                &crate::sheet_renames::SheetRenames::new([("Nope", "Nope (2)")])
+            ),
+            None
+        );
+        assert_eq!(rename_chart_spec_sheet_names("not json", &renames), None);
+    }
+
     #[test]
     fn concat_nesting_is_capped_at_the_ts_depth() {
         // Depth 0 is the root; a spec at depth 16 is visited, depth 17 is not --
@@ -795,5 +951,24 @@ mod tests {
         let text = serde_json::to_string(&abyss).unwrap_or_default();
         assert!(chart_spec_source_sheets(&text).is_empty());
         assert_eq!(stamp_chart_spec_sheet_ids(&text, &[sid()]), None);
+    }
+
+    /// The version diff's view of a chart: key order and the SPELLING of a
+    /// source's sheet prefix are not edits (a checkout rename and the push's
+    /// undo of it re-serialize an untouched spec with its keys sorted), while
+    /// a different source, sheet or property still is.
+    #[test]
+    fn a_re_serialized_spec_is_the_same_chart_and_an_edit_is_not() {
+        let ts_order = r#"{"chartId":1,"name":"Sales","spec":{"mark":"bar","data":"Data!A1:B5","layers":[{"data":"'My Data'!$a$1:$b$5"}]}}"#;
+        let sorted = r#"{"chartId":1,"name":"Sales","spec":{"data":"'DATA'!A1:B5","layers":[{"data":"'my data'!$A$1:$B$5"}],"mark":"bar"}}"#;
+        assert_eq!(comparable_chart_spec(ts_order), comparable_chart_spec(sorted));
+        for edited in [
+            r#"{"chartId":1,"name":"Sales","spec":{"mark":"bar","data":"Data!A1:B6","layers":[{"data":"'My Data'!$a$1:$b$5"}]}}"#,
+            r#"{"chartId":1,"name":"Sales","spec":{"mark":"bar","data":"Other!A1:B5","layers":[{"data":"'My Data'!$a$1:$b$5"}]}}"#,
+            r#"{"chartId":1,"name":"Sales 2026","spec":{"mark":"bar","data":"Data!A1:B5","layers":[{"data":"'My Data'!$a$1:$b$5"}]}}"#,
+        ] {
+            assert_ne!(comparable_chart_spec(ts_order), comparable_chart_spec(edited), "{edited}");
+        }
+        assert_eq!(comparable_chart_spec("not json"), None);
     }
 }

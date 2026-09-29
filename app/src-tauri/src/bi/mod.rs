@@ -15,6 +15,12 @@ pub mod script_source;
 pub mod writeback;
 pub mod writeback_source;
 
+#[cfg(test)]
+mod active_query_sheet_tests;
+
+#[cfg(test)]
+mod blank_member_tests;
+
 pub use commands::*;
 pub use types::{BiState, ConnectionId};
 pub use engine_registry::EngineRegistry;

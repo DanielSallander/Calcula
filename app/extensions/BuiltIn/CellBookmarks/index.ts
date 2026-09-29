@@ -51,8 +51,6 @@ import { BookmarkTaskPane } from "./components/BookmarkTaskPane";
 import { BookmarkEditOverlay } from "./components/BookmarkEditOverlay";
 import { BookmarkStatusBarWidget } from "./components/BookmarkStatusBarWidget";
 import {
-  addBookmark,
-  removeBookmark,
   hasBookmarkAt,
   removeAllBookmarks,
   toggleHighlight,
@@ -81,6 +79,15 @@ import {
 
 // Internal modules — Persistence
 import { loadBookmarks, startBookmarkWriteThrough } from "./lib/bookmarkPersistence";
+
+// Internal modules — The active-cell actions every door shares (they refuse
+// while a selection owner holds the selection)
+import {
+  addBookmarkAtSelection,
+  toggleBookmarkAtSelection,
+  removeBookmarkAtSelection,
+  editBookmarkAtSelection,
+} from "./lib/bookmarkAtSelection";
 
 // Internal modules — Script integration
 import { processBookmarkMutations } from "./lib/scriptMutationHandler";
@@ -112,10 +119,27 @@ const cleanupFns: (() => void)[] = [];
 // ============================================================================
 
 /**
- * Ctrl+Shift+B (toggle a bookmark on the active cell), Ctrl+] / Ctrl+[ (next /
- * previous bookmark) and Ctrl+Shift+V (save the current view). A window
- * BUBBLE-phase listener, installed by activate(); module level and exported
- * so its guards can be tested without activating the whole extension.
+ * Toggle a bookmark on the active cell -- the command the keybinding
+ * registry's `ext.bookmarks.toggle` (Ctrl+Shift+B) runs. The registry named
+ * this id long before anything registered it, and this extension's listener
+ * is BUBBLE-phase, so the capture-phase dispatcher's match stopped the key
+ * before it arrived: Ctrl+Shift+B did nothing at all (BUG-0183).
+ */
+export const BOOKMARKS_TOGGLE_COMMAND = "bookmarks.toggle";
+
+/**
+ * Ctrl+Shift+V (Save Current View), the one key Cell Bookmarks still listens
+ * for itself. A window BUBBLE-phase listener, installed by activate(); module
+ * level and exported so its guards can be tested without activating the
+ * whole extension.
+ *
+ * Ctrl+Shift+B and Ctrl+] / Ctrl+[ are NOT handled here: they are registry
+ * bindings running registered commands (bookmarks.toggle / next / prev), the
+ * ONE keyboard path, so a key runs once and a remap in Settings moves it; the
+ * registry's layout tier also takes sv-SE's Ctrl+AltGr+9 / 8. Ctrl+Shift+V
+ * cannot be a binding: it is Paste Special's key ON the grid (a grid-scoped
+ * binding), and only off the grid -- a ribbon button, a pane -- does this
+ * bubble-phase listener hear it.
  */
 export function handleBookmarkKeyDown(e: KeyboardEvent): void {
   // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
@@ -125,58 +149,15 @@ export function handleBookmarkKeyDown(e: KeyboardEvent): void {
   // See core/lib/pointerClaims.ts, and the census in
   // core/lib/globalInputListeners.ts (a new global listener adds a row).
   if (isKeyClaimed(e)) return;
-  const isBookmarkKey =
-    e.ctrlKey &&
-    (e.shiftKey ? e.key === "B" || e.key === "V" : e.key === "]" || e.key === "[");
-  if (!isBookmarkKey) return;
+  if (!(e.ctrlKey && e.shiftKey && !e.altKey && e.key === "V")) return;
   // Not while a cell edit owns the keyboard (Core's in-cell editor, the
-  // formula bar, any text field, or a floating grid's live cell edit): each
-  // key here acts on Core's selection -- bookmarks it, or moves it -- and
+  // formula bar, any text field, or a floating grid's live cell edit):
   // Ctrl+Shift+V in a text field is the native paste-as-text, which this
-  // listener used to cancel to open Save View. The registry's bookmark
-  // bindings are "not-editing" too, so in an edit this bubble-phase listener
-  // is no longer shadowed by them and must decline on its own.
+  // listener used to cancel to open Save View.
   if (isEditKeystroke(e)) return;
 
-  // Ctrl+Shift+B: Toggle add/remove bookmark
-  if (e.ctrlKey && e.shiftKey && e.key === "B") {
-    e.preventDefault();
-    const state = getGridStateSnapshot();
-    if (!state?.selection) return;
-    const { startRow, startCol } = state.selection;
-    const { activeSheetIndex, activeSheetName } = state.sheetContext;
-    if (hasBookmarkAt(startRow, startCol)) {
-      removeBookmark(startRow, startCol, activeSheetIndex);
-      showToast("Bookmark removed", { variant: "info" });
-    } else {
-      addBookmark(startRow, startCol, activeSheetIndex, activeSheetName);
-      showToast("Bookmark added", { variant: "success" });
-    }
-  }
-
-  // Ctrl+]: Next bookmark
-  if (e.ctrlKey && !e.shiftKey && e.key === "]") {
-    e.preventDefault();
-    const target = navigateToNextBookmark();
-    if (!target) {
-      showToast("No bookmarks", { variant: "info" });
-    }
-  }
-
-  // Ctrl+[: Previous bookmark
-  if (e.ctrlKey && !e.shiftKey && e.key === "[") {
-    e.preventDefault();
-    const target = navigateToPrevBookmark();
-    if (!target) {
-      showToast("No bookmarks", { variant: "info" });
-    }
-  }
-
-  // Ctrl+Shift+V: Save current view
-  if (e.ctrlKey && e.shiftKey && e.key === "V") {
-    e.preventDefault();
-    showOverlay(VIEW_CREATE_OVERLAY_ID, {});
-  }
+  e.preventDefault();
+  showOverlay(VIEW_CREATE_OVERLAY_ID, {});
 }
 
 // ============================================================================
@@ -251,44 +232,47 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => unregisterStatusBarItem(STATUS_BAR_ID));
 
   // ---- 6. Commands ----
-  context.commands.register("bookmarks.add", () => {
-    const state = getGridStateSnapshot();
-    if (!state?.selection) return;
-    const { startRow, startCol } = state.selection;
-    const { activeSheetIndex, activeSheetName } = state.sheetContext;
-    if (hasBookmarkAt(startRow, startCol)) {
-      showToast("Cell already bookmarked", { variant: "warning" });
-      return;
-    }
-    addBookmark(startRow, startCol, activeSheetIndex, activeSheetName);
-    showToast("Bookmark added", { variant: "success" });
+  // Every command goes through `commands.register`, which queues its
+  // unregister with the rest of the cleanup: deactivate() used to leave all
+  // of them registered, so a deactivated extension still answered the
+  // registry's Ctrl+Shift+B / Ctrl+] / Ctrl+[ through a store nothing painted
+  // or persisted any more (D3).
+  const commands: Pick<typeof context.commands, "register"> = {
+    register: (id, handler, options) => {
+      context.commands.register(id, handler, options);
+      cleanupFns.push(() => context.commands.unregister(id));
+    },
+  };
+
+  // The active-cell actions refuse while a selection owner holds the
+  // selection (lib/bookmarkAtSelection.ts, shared with the Insert menu).
+  commands.register("bookmarks.add", () => {
+    addBookmarkAtSelection();
   });
 
-  context.commands.register("bookmarks.remove", () => {
-    const state = getGridStateSnapshot();
-    if (!state?.selection) return;
-    const { startRow, startCol } = state.selection;
-    const { activeSheetIndex } = state.sheetContext;
-    if (removeBookmark(startRow, startCol, activeSheetIndex)) {
-      showToast("Bookmark removed", { variant: "info" });
-    }
+  commands.register(BOOKMARKS_TOGGLE_COMMAND, () => {
+    toggleBookmarkAtSelection();
   });
 
-  context.commands.register("bookmarks.next", () => {
+  commands.register("bookmarks.remove", () => {
+    removeBookmarkAtSelection();
+  });
+
+  commands.register("bookmarks.next", () => {
     const target = navigateToNextBookmark();
     if (!target) {
       showToast("No bookmarks", { variant: "info" });
     }
   }, { scriptSafe: true });
 
-  context.commands.register("bookmarks.prev", () => {
+  commands.register("bookmarks.prev", () => {
     const target = navigateToPrevBookmark();
     if (!target) {
       showToast("No bookmarks", { variant: "info" });
     }
   }, { scriptSafe: true });
 
-  context.commands.register("bookmarks.removeAll", () => {
+  commands.register("bookmarks.removeAll", () => {
     const count = getBookmarkCount();
     if (count === 0) {
       showToast("No bookmarks to remove", { variant: "info" });
@@ -298,32 +282,26 @@ function activate(context: ExtensionContext): void {
     showToast(`Removed ${count} bookmark${count > 1 ? "s" : ""}`, { variant: "info" });
   });
 
-  context.commands.register("bookmarks.toggleHighlight", () => {
+  commands.register("bookmarks.toggleHighlight", () => {
     const enabled = toggleHighlight();
     markSheetDirty();
     showToast(enabled ? "Bookmark highlighting on" : "Bookmark highlighting off", { variant: "info" });
   });
 
-  context.commands.register("bookmarks.showPanel", () => {
+  commands.register("bookmarks.showPanel", () => {
     openTaskPane(TASK_PANE_ID);
   });
 
-  context.commands.register("bookmarks.editAtSelection", () => {
-    const state = getGridStateSnapshot();
-    if (!state?.selection) return;
-    const { startRow, startCol } = state.selection;
-    const { activeSheetIndex } = state.sheetContext;
-    showOverlay(OVERLAY_ID, {
-      data: { row: startRow, col: startCol, sheetIndex: activeSheetIndex },
-    });
+  commands.register("bookmarks.editAtSelection", () => {
+    editBookmarkAtSelection();
   });
 
   // ---- 6b. View Bookmark Commands ----
-  context.commands.register("bookmarks.saveView", () => {
+  commands.register("bookmarks.saveView", () => {
     showOverlay(VIEW_CREATE_OVERLAY_ID, {});
   });
 
-  context.commands.register("bookmarks.activateView", async (args?: unknown) => {
+  commands.register("bookmarks.activateView", async (args?: unknown) => {
     const a = args as { id?: string } | undefined;
     if (!a?.id) return;
     const success = await activateViewBookmark(a.id);
@@ -334,7 +312,7 @@ function activate(context: ExtensionContext): void {
     }
   });
 
-  context.commands.register("bookmarks.deleteView", (args?: unknown) => {
+  commands.register("bookmarks.deleteView", (args?: unknown) => {
     const a = args as { id?: string } | undefined;
     if (!a?.id) return;
     if (removeViewBookmark(a.id)) {
@@ -342,13 +320,13 @@ function activate(context: ExtensionContext): void {
     }
   });
 
-  context.commands.register("bookmarks.editView", (args?: unknown) => {
+  commands.register("bookmarks.editView", (args?: unknown) => {
     const a = args as { id?: string } | undefined;
     if (!a?.id) return;
     showOverlay(VIEW_EDIT_OVERLAY_ID, { data: { viewBookmarkId: a.id } });
   });
 
-  context.commands.register("bookmarks.removeAllViews", () => {
+  commands.register("bookmarks.removeAllViews", () => {
     const count = getViewBookmarkCount();
     if (count === 0) {
       showToast("No view bookmarks to remove", { variant: "info" });
@@ -359,10 +337,12 @@ function activate(context: ExtensionContext): void {
   });
 
   // ---- 7. Menu Items (Insert > Bookmarks) ----
-  registerBookmarkMenuItems();
+  // Removed on deactivate like the commands above: a menu item outliving the
+  // extension still acted on the store (D3 review).
+  cleanupFns.push(registerBookmarkMenuItems());
 
   // ---- 8. Context Menu Items (grid right-click) ----
-  registerBookmarkContextMenuItems();
+  cleanupFns.push(registerBookmarkContextMenuItems());
 
   // ---- 9. Selection Change (track current selection for navigation) ----
   const unregSelection = ExtensionRegistry.onSelectionChange(() => {
@@ -402,7 +382,7 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unregDblClick);
 
-  // ---- 12. Keyboard shortcuts (handleBookmarkKeyDown, above) ----
+  // ---- 12. Ctrl+Shift+V off the grid (handleBookmarkKeyDown, above) ----
   window.addEventListener("keydown", handleBookmarkKeyDown);
   cleanupFns.push(() => window.removeEventListener("keydown", handleBookmarkKeyDown));
 

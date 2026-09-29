@@ -1120,10 +1120,18 @@ async fn query_scalar(
     measure: &str,
     filters: &[(String, String)],
 ) -> Result<f64, CubeError> {
+    // THE BLANK MEMBER (found with wave C's W6). The CUBE builder picks its
+    // members from the model value list, which offers a column's NULL and
+    // empty rows as `pivot_engine::BLANK_ITEM_LABEL` ("(blank)"). An `Equal`
+    // filter on that label matches no row (the CUBEVALUE answered `#N/A`), so
+    // such a member goes to the engine as a scoped IN-list -- which reads the
+    // label as BLANK -- at the level a plain filter takes (`LEVEL_SLICER`).
+    let (blank, plain): (Vec<&(String, String)>, Vec<&(String, String)>) =
+        filters.iter().partition(|(_, val)| bi_engine::is_blank_member_label(val));
     let req = bi_engine::QueryRequest {
         measures: vec![measure.to_string()],
         group_by: vec![],
-        filters: filters
+        filters: plain
             .iter()
             .map(|(col, val)| {
                 bi_engine::FilterCondition::new(
@@ -1131,6 +1139,14 @@ async fn query_scalar(
                     bi_engine::FilterOperator::Equal,
                     val.clone(),
                 )
+            })
+            .collect(),
+        scoped_in_filters: blank
+            .iter()
+            .map(|(col, val)| bi_engine::ScopedInFilter {
+                table: None,
+                filter: bi_engine::InFilter::new(col.clone(), [val.clone()]),
+                level: bi_engine::LEVEL_SLICER,
             })
             .collect(),
         ..Default::default()

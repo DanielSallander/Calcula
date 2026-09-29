@@ -41,9 +41,13 @@ import {
 import {
   updateWindowTitle,
   isFileModified,
-  saveFile,
-  getCurrentFilePath,
+  prepareSave,
+  writePreparedSave,
+  type PreparedSave,
 } from "../core/lib/file-api";
+// The AWAITED half of the close (E8): work BEFORE_CLOSE's subscribers start
+// and the file or the window must wait for.
+import { runClosePreparations } from "../api/lifecycleGuards";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 // The close prompt goes through the sanctioned dialog wrapper, never the
@@ -293,6 +297,17 @@ function LayoutInner(): React.ReactElement {
     // not stack a second modal.
     let prompting = false;
 
+    // The workbook's teardown, once the close is DECIDED: BEFORE_CLOSE (its
+    // synchronous listeners unmount scripts, stop the scheduler, close panes)
+    // and then every close preparation AWAITED (E8) -- a subscriber that
+    // starts async work (the recorder's store, the Animation restore, the
+    // script host's re-protect) finishes before the file is written or the
+    // window goes. Bounded per preparation; never rejects.
+    const tearDownForClose = async (): Promise<void> => {
+      emitAppEvent(AppEvents.BEFORE_CLOSE);
+      await runClosePreparations();
+    };
+
     getCurrentWindow()
       .onCloseRequested(async (event) => {
         // Cancellable Before-Close. This MUST come first: BEFORE_CLOSE is what
@@ -326,8 +341,10 @@ function LayoutInner(): React.ReactElement {
         }
 
         if (!dirty) {
-          // Nothing to ask: the window closes natively once this returns.
-          emitAppEvent(AppEvents.BEFORE_CLOSE);
+          // Nothing to ask: the window closes natively once this returns --
+          // Tauri awaits this handler, so the teardown's async work (a
+          // recording stored, a transient frame restored) finishes first.
+          await tearDownForClose();
           return;
         }
 
@@ -367,23 +384,15 @@ function LayoutInner(): React.ReactElement {
         }
 
         if (answer === "save") {
-          // Before-Save veto, asked HERE, while the scripts are still mounted.
-          // saveFile() asks the same guards, but only after the BEFORE_CLOSE
-          // below has unmounted every script and disposed its guard with it, so
-          // left to saveFile a script's onBeforeSave ("fill in the total
-          // first") never ran on this path, though the same script vetoes a
-          // Ctrl+S. Excel fires Workbook_BeforeSave for the close prompt's Save
-          // too, and BEFORE the Save As dialog (SaveAsUI) -- hence the untitled
-          // workbook is asked as a "saveAs" with no path yet. The detail
-          // mirrors saveFile's own. Each script is asked once: by the time
-          // saveFile asks again, only the trusted extension guards are left.
-          let refused: unknown;
+          // EVERY STEP THAT CAN STILL REFUSE, while the workbook is whole
+          // (E8): the destination (the Save As picker of an untitled
+          // workbook), the lossy-save consent and every Before-Save veto --
+          // the scripts' included, which the teardown below unregisters with
+          // the scripts themselves (Excel fires Workbook_BeforeSave for the
+          // close prompt's Save too). Each is asked exactly once.
+          let prepared: PreparedSave | null;
           try {
-            const path = await getCurrentFilePath();
-            refused = await checkLifecycleGuards(
-              "save",
-              path ? { path, kind: "save" } : { kind: "saveAs" }
-            );
+            prepared = await prepareSave();
           } catch (error) {
             console.error(
               "[Layout] Could not prepare the save during close; keeping the window open:",
@@ -392,28 +401,30 @@ function LayoutInner(): React.ReactElement {
             prompting = false;
             return;
           }
-          // A veto keeps everything: the window, the scripts, the document.
-          // checkLifecycleGuards has already told the user who refused and why.
-          if (refused) {
+          // `null` is "not saving": the picker was cancelled, the lossy
+          // warning declined, or a guard refused (and has told the user who and
+          // why). Nothing is torn down and nothing reached disk: the window,
+          // the scripts and the document all stay, exactly as before the close.
+          if (prepared === null) {
             prompting = false;
             return;
           }
 
-          // The close is decided. The teardown goes out BEFORE the write, not
-          // after it: the macro recorder stores the recording it was taking,
+          // The close is decided. The teardown goes out BEFORE the write, and
+          // is AWAITED: the macro recorder stores the recording it was taking,
           // the Animation driver restores its transient frame, and the script
           // host re-protects any sheet a script had lifted protection from --
-          // all of which belong in the file. (Those subscribers start async
-          // work they are not awaited on; the human wait on the old prompt used
-          // to hide that. Nothing on this side can await an event.)
-          emitAppEvent(AppEvents.BEFORE_CLOSE);
+          // all of which belong in the file.
+          await tearDownForClose();
 
-          let savedPath: string | null;
           try {
-            savedPath = await saveFile();
+            await writePreparedSave(prepared);
           } catch (error) {
-            // The save the user asked for failed. Same rule: do not close over
-            // unsaved work.
+            // The write the user asked for failed. Same rule: do not close
+            // over unsaved work. (The teardown has run -- it had to, for the
+            // file to be right -- so the window stays over a workbook whose
+            // scripts are unmounted; a failed WRITE is the one refusal that
+            // cannot be asked before it.)
             console.error(
               "[Layout] Save failed during close; keeping the window open:",
               error
@@ -421,23 +432,9 @@ function LayoutInner(): React.ReactElement {
             prompting = false;
             return;
           }
-          // `null` is saveFile's "not saved": the Save As picker was cancelled
-          // (an untitled workbook) or the lossy-save warning was declined. The
-          // scripts' Before-Save vetoes were asked above; only a trusted
-          // extension guard could refuse in there. Nothing reached disk, so
-          // closing now would discard the document exactly as "Don't Save"
-          // does. KNOWN RESIDUE: BEFORE_CLOSE has already gone out, so the
-          // window stays open over a torn-down script realm. Closing that gap
-          // needs saveFile split into "resolve the destination and every
-          // consent" and "write", so every step that can still refuse runs
-          // before the teardown.
-          if (savedPath === null) {
-            prompting = false;
-            return;
-          }
         } else {
           // "Don't Save": the close is decided, nothing is written.
-          emitAppEvent(AppEvents.BEFORE_CLOSE);
+          await tearDownForClose();
         }
 
         // User has responded and any save succeeded — now close

@@ -37,9 +37,29 @@
 //          WHY IT LIVES IN CORE. It is a property OF the renderer, published
 //          for the switch initiators (Shell's SheetTabs through `@api`, and
 //          Core's own undo/redo follow). Same shape as lib/renderSignal.
+//
+//          THE VIEW STATE RIDES THE SAME PRIME. A sheet's gridlines, display
+//          flags (headings, zeros, formulas, view mode), zoom, split and
+//          freeze are per-sheet backend state, hydrated by Spreadsheet.tsx's
+//          active-sheet effect. Hydrated AFTER the context switch -- three IPCs
+//          from an effect of the render that switched -- the first frame(s) of
+//          a worksheet reached from a CANVAS showed the canvas's headings-off,
+//          gridlines-off and zoom (open-items 2.af, "One-frame flash"). So the
+//          prime reads the target's view in parallel with its cells, into its
+//          OWN slot (GridCanvas takes the cells; the hydration effect takes the
+//          view, in a layout effect of the same flush). Same rules as the
+//          cells: one slot, keyed by sheet index, taken once, aged out, and a
+//          route that never primes keeps the async hydration.
 
+import { invoke } from "@tauri-apps/api/core";
 import type { CellData, SpillRangeInfo } from "../types";
 import { markFetchStarted, markFetchSettled } from "./renderSignal";
+import {
+  loadSheetDisplayFlags,
+  loadSheetViewState,
+  type SheetDisplayFlags,
+  type SheetViewState,
+} from "./sheetViewState";
 
 /** What a prime fetched: the same trio `GridCanvas.fetchCells` commits. */
 export interface SheetSwitchPrefetchPayload {
@@ -68,6 +88,41 @@ interface PrimedSlot {
 let slot: PrimedSlot | null = null;
 
 /**
+ * The target sheet's VIEW state, read by the same prime: what Spreadsheet's
+ * active-sheet hydration would otherwise read after the swap.
+ */
+export interface SheetSwitchViewPayload {
+  /** `get_show_gridlines`; null when that read failed (the fallback re-reads it). */
+  showGridlines: boolean | null;
+  /** Zoom (as a render factor), split and freeze. */
+  view: SheetViewState;
+  /** Display zeros, show formulas, view mode, headings. */
+  flags: SheetDisplayFlags;
+}
+
+interface PrimedViewSlot {
+  sheetIndex: number;
+  payload: SheetSwitchViewPayload;
+  primedAt: number;
+}
+
+/** The view half of the prime, taken separately from the cells. */
+let viewSlot: PrimedViewSlot | null = null;
+
+/** Read the ACTIVE sheet's view state (the backend is on the target already). Never throws. */
+async function readActiveSheetView(): Promise<SheetSwitchViewPayload> {
+  const [showGridlines, view, flags] = await Promise.all([
+    invoke<boolean>("get_show_gridlines").then(
+      (v) => (typeof v === "boolean" ? v : null),
+      () => null,
+    ),
+    loadSheetViewState(),
+    loadSheetDisplayFlags(),
+  ]);
+  return { showGridlines, view, flags };
+}
+
+/**
  * A primed payload a switch never consumed (initiator threw between prime and
  * dispatch) must not be handed to a LATER switch: past this age it is trash.
  * Generous, because the prime and its take are normally microtasks apart.
@@ -81,6 +136,7 @@ export function registerSheetSwitchPrefetcher(fn: SheetSwitchPrefetcher): () => 
     if (prefetcher === fn) {
       prefetcher = null;
       slot = null;
+      viewSlot = null;
     }
   };
 }
@@ -95,22 +151,42 @@ export function registerSheetSwitchPrefetcher(fn: SheetSwitchPrefetcher): () => 
  *
  * The fetch is bracketed with the renderSignal in-flight marks so a capture
  * polling for quiescence cannot photograph the pre-switch grid mid-prime.
+ *
+ * The target's VIEW state is read in parallel (see the header), into its own
+ * slot: a failed cell fetch does not cost the view, nor the other way round.
  */
 export async function primeSheetSwitch(newSheetIndex: number): Promise<void> {
   slot = null;
+  viewSlot = null;
   const fetch = prefetcher;
   if (!fetch) return;
   markFetchStarted();
   try {
-    const payload = await fetch();
-    if (payload) {
-      slot = { sheetIndex: newSheetIndex, payload, primedAt: performance.now() };
+    // `Promise.resolve().then` so even a SYNCHRONOUS throw from the fetcher
+    // lands as a rejection of its own half, never as a lost view.
+    const [cells, view] = await Promise.allSettled([
+      Promise.resolve().then(() => fetch()),
+      readActiveSheetView(),
+    ]);
+    const primedAt = performance.now();
+    if (cells.status === "fulfilled") {
+      if (cells.value) {
+        slot = { sheetIndex: newSheetIndex, payload: cells.value, primedAt };
+      }
+    } else {
+      console.error(
+        "[sheetSwitchPrefetch] prime failed - falling back to post-switch fetch:",
+        cells.reason,
+      );
     }
-  } catch (error) {
-    console.error(
-      "[sheetSwitchPrefetch] prime failed - falling back to post-switch fetch:",
-      error,
-    );
+    if (view.status === "fulfilled") {
+      viewSlot = { sheetIndex: newSheetIndex, payload: view.value, primedAt };
+    } else {
+      console.error(
+        "[sheetSwitchPrefetch] view prime failed - falling back to post-switch hydration:",
+        view.reason,
+      );
+    }
   } finally {
     markFetchSettled();
   }
@@ -132,8 +208,24 @@ export function takePrefetchedSheetSwitch(
   return taken.payload;
 }
 
+/**
+ * Consume the primed VIEW state for this switch, or null to take the fallback
+ * (the async hydration). Same rules as {@link takePrefetchedSheetSwitch}: a
+ * take clears the slot, and a view primed for another sheet index or left over
+ * from an abandoned switch is refused rather than applied.
+ */
+export function takePrefetchedSheetView(newSheetIndex: number): SheetSwitchViewPayload | null {
+  const taken = viewSlot;
+  viewSlot = null;
+  if (!taken) return null;
+  if (taken.sheetIndex !== newSheetIndex) return null;
+  if (performance.now() - taken.primedAt > SLOT_MAX_AGE_MS) return null;
+  return taken.payload;
+}
+
 /** Test-only reset so a suite can start from a known point. */
 export function resetSheetSwitchPrefetchForTests(): void {
   prefetcher = null;
   slot = null;
+  viewSlot = null;
 }

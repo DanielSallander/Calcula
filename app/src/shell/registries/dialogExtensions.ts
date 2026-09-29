@@ -103,6 +103,17 @@ export const DialogExtensions = {
   },
 
   /**
+   * Whether a dialog is open right now. The registry is the one authority: a
+   * component mirroring its own `isOpen` goes stale the moment the dialog is
+   * closed by a path that UNMOUNTS it (its own X, Escape), because the mirror
+   * is only ever written by the mounted component. The command line's toggle
+   * did exactly that and then could not reopen a panel closed with its X.
+   */
+  isDialogOpen(dialogId: string): boolean {
+    return registry.dialogStates.get(dialogId)?.isOpen === true;
+  },
+
+  /**
    * Get a dialog definition by ID.
    * @param dialogId - The dialog ID to get
    */

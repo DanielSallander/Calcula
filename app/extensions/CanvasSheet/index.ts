@@ -31,6 +31,9 @@
 //              (lib/groupDrag.ts) and the arrow-key NUDGE (lib/objectNudge.ts)
 //              -- every multi-object move through @api/objectGeometry, as ONE
 //              undo step,
+//            - DELETE, COPY, PASTE and DUPLICATE of the whole selection across
+//              families (lib/canvasDelete.ts, lib/canvasClipboard.ts through
+//              @api/objectClipboard), each one undo step,
 //            - the store that keeps all of it in step with the backend.
 //
 //          Core already knows the active sheet's SURFACE (it refuses cell
@@ -58,7 +61,7 @@ import {
 } from "./lib/canvasSheetStore";
 import { canvasLayoutSurfaceProvider } from "./lib/layoutSurfaceProvider";
 import { paintCanvasPage } from "./lib/pagePainter";
-import { resetCanvasTab, syncCanvasTab } from "./lib/canvasTab";
+import { installCanvasTabFollowsView, resetCanvasTab } from "./lib/canvasTab";
 import { installCanvasObjectKeyboard } from "./lib/objectCycling";
 import { canvasRegionZ, resetCanvasStacking } from "./lib/canvasStacking";
 import { CANVAS_MARQUEE_LAYER_ID, installCanvasMarquee, paintMarquee } from "./lib/marquee";
@@ -68,6 +71,9 @@ import { registerObjectStackingService } from "@api/objectStacking";
 import { canvasStackingService } from "./lib/stackingService";
 import { installCanvasGroupDrag } from "./lib/groupDrag";
 import { installCanvasObjectNudge } from "./lib/objectNudge";
+import { installCanvasObjectDelete } from "./lib/canvasDelete";
+import { installCanvasObjectClipboard } from "./lib/canvasClipboard";
+import { installCanvasLayoutRefs } from "./lib/layoutRefs";
 
 /** The id of the page layer; one per app. */
 export const CANVAS_PAGE_LAYER_ID = "canvas-sheet-page";
@@ -118,8 +124,8 @@ function activate(_context: ExtensionContext): void {
   cleanupFns.push(onObjectSelectionChanged(() => requestOverlayRedraw()));
   cleanupFns.push(...installCanvasObjectLabel());
 
-  // Every store change: the tab follows the active sheet's kind, Core re-reads
-  // the surface (snap, page extent), and the page repaints -- and with it the
+  // Every store change: Core re-reads the surface (snap, page extent), and
+  // the page repaints -- and with it the
   // objects, in the zOrder the store now holds. This is the redraw a
   // CANVAS_LAYOUT_CHANGED gets: the event re-reads the layout below and the
   // redraw follows the refreshed store (a redraw on the bare event would
@@ -133,12 +139,16 @@ function activate(_context: ExtensionContext): void {
         lastActiveIndex = snapshot.activeIndex;
         clearSetHeldObjects();
       }
-      syncCanvasTab(snapshot.active !== null);
       notifyLayoutSurfaceChanged();
       requestOverlayRedraw();
       publishCanvasObjectLabel();
     }),
   );
+
+  // The contextual tab follows the sheet ON SCREEN: every store change, and
+  // every point-mode view flip (a formula edit picking a reference on another
+  // sheet announces no SHEET_CHANGED; lib/canvasTab.ts).
+  cleanupFns.push(installCanvasTabFollowsView());
 
   const refresh = (): void => {
     void refreshCanvasSheets();
@@ -175,6 +185,17 @@ function activate(_context: ExtensionContext): void {
   cleanupFns.push(...installCanvasGroupDrag());
   // The arrow keys nudge the selection; a burst is one undo step.
   cleanupFns.push(...installCanvasObjectNudge(extension.manifest.id));
+  // Delete / Backspace on a multi-selection delete every selected object, as
+  // one undo step (lib/canvasDelete.ts).
+  cleanupFns.push(...installCanvasObjectDelete(extension.manifest.id));
+  // Ctrl+C / Ctrl+V / Ctrl+D copy, paste and duplicate every selected object,
+  // across families, through the object clipboard -- a paste or duplicate of
+  // several is one undo step (lib/canvasClipboard.ts).
+  cleanupFns.push(...installCanvasObjectClipboard(extension.manifest.id));
+  // The identities the layout still names (locked / zOrder, live or dead):
+  // a family that RECYCLES ids (Controls' anchors) never hands a new object
+  // a dead one's lock and paint slot (lib/layoutRefs.ts).
+  cleanupFns.push(installCanvasLayoutRefs());
 
   cleanupFns.push(() => resetCanvasTab());
   cleanupFns.push(() => resetCanvasSheetStore());

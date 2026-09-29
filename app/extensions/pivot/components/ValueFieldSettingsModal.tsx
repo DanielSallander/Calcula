@@ -250,15 +250,19 @@ export function ValueFieldSettingsModal({
     field.aggregation || "sum"
   );
 
-  const [customName, setCustomName] = useState(defaultName);
+  // Seeded from the FIELD: the dialog is mounted already open (its caller
+  // renders it only while it is shown), so the reset-on-open block below never
+  // runs for the first open -- and a field whose values already showed Running
+  // Total In reopened on "Normal" with no Base field.
+  const [customName, setCustomName] = useState(field.customName || defaultName);
   const [aggregation, setAggregation] = useState<AggregationType>(
     field.aggregation || "sum"
   );
-  const [showValuesAs, setShowValuesAs] = useState<ShowValuesAs>("normal");
+  const [showValuesAs, setShowValuesAs] = useState<ShowValuesAs>((field.showValuesAs as ShowValuesAs) || "normal");
   const [numberFormat, setNumberFormat] = useState<string>(field.numberFormat || "");
   const [isNumberFormatOpen, setIsNumberFormatOpen] = useState(false);
-  const [baseField, setBaseField] = useState<string>("");
-  const [baseItem, setBaseItem] = useState<string>("(previous)");
+  const [baseField, setBaseField] = useState<string>(field.baseField || availableFields[0]?.name || "");
+  const [baseItem, setBaseItem] = useState<string>(field.baseItem || "(previous)");
 
   // Reset local state when the modal opens or when the field changes.
   // Uses render-time derived state pattern (prev-prop comparison) instead of
@@ -326,10 +330,12 @@ export function ValueFieldSettingsModal({
       aggregation,
       showValuesAs,
       numberFormat,
-      baseField: needsBaseField ? baseField : undefined,
+      // A Base field is never saved empty while fields are offered: the
+      // select SHOWS the first one when nothing was chosen.
+      baseField: needsBaseField ? (baseField || availableFields[0]?.name || undefined) : undefined,
       baseItem: needsBaseItem ? baseItem : undefined,
     });
-  }, [customName, aggregation, showValuesAs, numberFormat, baseField, baseItem, needsBaseField, needsBaseItem, onSave]);
+  }, [customName, aggregation, showValuesAs, numberFormat, baseField, baseItem, needsBaseField, needsBaseItem, availableFields, onSave]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -435,7 +441,8 @@ export function ValueFieldSettingsModal({
             </div>
           )}
 
-          {needsBaseItem && baseFieldItems.length > 0 && (
+          {/* (previous) / (next) need no items: offered whenever a Base field is. */}
+          {needsBaseItem && availableFields.length > 0 && (
             <div className={modalStyles.field}>
               <label className={modalStyles.label}>Base item</label>
               <select

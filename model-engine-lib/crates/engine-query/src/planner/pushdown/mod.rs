@@ -163,6 +163,9 @@ fn in_filter_condition(
         } else {
             engine_connectors::traits::InValueKind::Text
         },
+        // A legacy (unscoped) IN-list is literal: only a SCOPED IN-list reads
+        // the BLANK member label (`scoped_filters::blank_member_split`).
+        include_null: false,
     }
 }
 
@@ -928,7 +931,18 @@ impl PushdownPlanner {
                 .is_some()
         });
 
+        // The source must ANSWER the pushed shape: a fetch-only connector
+        // (CSV, Parquet, in-memory, REST) ignores group_by / aggregates and
+        // returns raw rows the executor would read positionally as the
+        // aggregated result (ConnectorCapabilities::aggregate_pushdown).
+        let source_aggregates = unique_tables.len() == 1
+            && registry
+                .connector_for(all_tables[0])
+                .map(|c| c.supports_aggregate_pushdown())
+                .unwrap_or(false);
+
         if unique_tables.len() == 1
+            && source_aggregates
             && all_simple
             && all_pushable
             && !any_context_ops

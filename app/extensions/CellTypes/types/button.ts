@@ -96,16 +96,12 @@ async function runButtonAction(action: ButtonAction): Promise<void> {
       return;
     }
     try {
-      const { getGridStateSnapshot } = await import("../../../src/api/grid");
-      const { getCell, updateCell } = await import("../../../src/api/lib");
-      await command.execute({
-        selection: getGridStateSnapshot()?.selection ?? null,
-        getCellValue: async (row, col) => (await getCell(row, col))?.display ?? null,
-        setCellValue: async (row, col, value) => {
-          await updateCell(row, col, value);
-        },
-        refreshGrid: () => window.dispatchEvent(new CustomEvent("grid:refresh")),
-      });
+      // The ONE CommandContext builder (wave F, Z11: this was a hand-kept copy
+      // of it). Only the EXTENSION registry is asked -- what the button
+      // dialog offers: executeCommandAnywhere would widen a button, which can
+      // arrive inside a distributed workbook, to every CommandRegistry command.
+      const { buildCommandContext } = await import("../../../src/api/commandDispatch");
+      await command.execute(buildCommandContext());
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       showToast(`Button command failed: ${msg}`, { variant: "error" });

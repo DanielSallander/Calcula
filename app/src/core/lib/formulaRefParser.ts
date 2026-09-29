@@ -6,6 +6,7 @@
 
 import type { FormulaReference } from "../types";
 import { FORMULA_REFERENCE_COLORS, columnToLetter } from "../types";
+import { quoteSheetNameForFormula } from "./formulaEditTarget";
 
 /**
  * Extended FormulaReference with text position information.
@@ -97,6 +98,25 @@ function extractSheetName(prefix: string | undefined): string | undefined {
 }
 
 /**
+ * The sheet prefix a reference may carry (with its `!`, capture group 1), by
+ * the formula PARSER's grammar -- the one Core's reference builders write
+ * (quoteSheetNameForFormula / isBareSheetName, formulaEditTarget.ts; W13):
+ *   - quoted: `'...'` with an inner apostrophe DOUBLED (`'Bob''s'!`);
+ *   - bare: a letter or `_`, then letters, digits, `_`, and a dot that is
+ *     followed by one of those (`Sheet.1!`, `Q1.2026!`);
+ *   - 3-D: two bare names (`Sheet.1:Sheet.3!`) or one quoted pair
+ *     (`'Q1-2026:Q2'!`, split by extractSheetInfo).
+ * Review C: the reader kept the OLD grammar after W13 moved the builders -- a
+ * quoted name had no doubled apostrophe and a bare one no dot -- so a pick on
+ * `Bob's` highlighted sheet "s", one on `Q1.2026` highlighted Q1 and B2 on the
+ * edit's own sheet, and dragging that phantom Q1 wrote `R2.2026!B2`. Both
+ * patterns below are built from this one source so they cannot drift apart.
+ */
+const SHEET_NAME_BARE = String.raw`[A-Za-z_](?:[A-Za-z0-9_]|\.(?=[A-Za-z0-9_]))*`;
+const SHEET_NAME_QUOTED = String.raw`'(?:[^']|'')*'`;
+const SHEET_PREFIX = `((?:${SHEET_NAME_QUOTED}|${SHEET_NAME_BARE}(?::${SHEET_NAME_BARE})?)!)?`;
+
+/**
  * Parse a formula string and extract cell/range references for highlighting.
  * Handles: A1, $A$1, A1:B2, $A$1:$B$2, Sheet1!A1, 'Sheet Name'!A1:B2
  *
@@ -118,8 +138,10 @@ export function parseFormulaReferences(
   // Group 3: First row number
   // Group 4: Second column letters (for ranges, optional)
   // Group 5: Second row number (for ranges, optional)
-  const refPattern =
-    /((?:'[^']*'|[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)?)!)?\$?([A-Z]{1,3})\$?(\d{1,7})(?::\$?([A-Z]{1,3})\$?(\d{1,7}))?/gi;
+  const refPattern = new RegExp(
+    SHEET_PREFIX + String.raw`\$?([A-Z]{1,3})\$?(\d{1,7})(?::\$?([A-Z]{1,3})\$?(\d{1,7}))?`,
+    "gi",
+  );
 
   let match;
   let colorIndex = 0;
@@ -177,8 +199,10 @@ export function parseFormulaReferencesWithPositions(
   // Group 7: Second column letters (optional)
   // Group 8: $ before second row (optional)
   // Group 9: Second row number (optional)
-  const refPattern =
-    /((?:'[^']*'|[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)?)!)?(\$)?([A-Z]{1,3})(\$)?(\d{1,7})(?::(\$)?([A-Z]{1,3})(\$)?(\d{1,7}))?/gi;
+  const refPattern = new RegExp(
+    SHEET_PREFIX + String.raw`(\$)?([A-Z]{1,3})(\$)?(\d{1,7})(?::(\$)?([A-Z]{1,3})(\$)?(\d{1,7}))?`,
+    "gi",
+  );
 
   let match;
   let colorIndex = 0;
@@ -226,16 +250,13 @@ export function parseFormulaReferencesWithPositions(
 }
 
 /**
- * Format a sheet name for use in a reference.
- * Quotes the name if it contains spaces or special characters.
+ * Format a sheet name for use in a reference, by the formula PARSER's rule
+ * (W13): a reference moved or resized by dragging its highlight on another
+ * sheet was rebuilt as `Q1-2026!$C$3` / `TRUE!A1`, which the parser does not
+ * read back. The one rule is `quoteSheetNameForFormula` (formulaEditTarget.ts).
  */
 function formatSheetNameForRef(sheetName: string): string {
-  const needsQuoting = /[\s'![\]]/.test(sheetName) || /^\d/.test(sheetName);
-  if (needsQuoting) {
-    const escaped = sheetName.replace(/'/g, "''");
-    return `'${escaped}'`;
-  }
-  return sheetName;
+  return quoteSheetNameForFormula(sheetName);
 }
 
 /**

@@ -1478,12 +1478,12 @@ fn a_model_spelled_selection_masks_boolean_and_decimal_cache_values() {
 
     let mut cache = crate::pivot::operations::build_cache_from_arrow_batches(new_id(), &[batch]).unwrap();
     assert_eq!(
-        crate::pivot::commands::hidden_for_selection(&mut cache, 0, &[bool_true]),
+        crate::pivot::commands::hidden_for_selection(&mut cache, 0, &[bool_true], true),
         strings(&["FALSE"]),
         "selecting \"true\" must hide only FALSE"
     );
     assert_eq!(
-        crate::pivot::commands::hidden_for_selection(&mut cache, 1, &[price_1250]),
+        crate::pivot::commands::hidden_for_selection(&mut cache, 1, &[price_1250], true),
         strings(&["12.55"]),
         "selecting \"12.50\" must hide only 12.55"
     );
@@ -1902,7 +1902,7 @@ async fn a_pin_of_a_slicer_removed_with_its_sheet_is_dropped_and_requeried() {
         let mut tables = fx.pivots.pivot_tables.write(&test_seed_effect()).unwrap();
         let cache = &mut tables.get_mut(&pivot).unwrap().1;
         match (0..cache.fields.len()).find(|&i| cache.field_name(i).as_deref() == Some("region")) {
-            Some(idx) => crate::pivot::commands::hidden_for_selection(cache, idx, &[]).len(),
+            Some(idx) => crate::pivot::commands::hidden_for_selection(cache, idx, &[], true).len(),
             None => 3, // the column left the query with its pin: every region is back
         }
     };
@@ -2090,7 +2090,7 @@ impl Fx {
         let mut tables = self.pivots.pivot_tables.write(&test_seed_effect()).unwrap();
         let cache = &mut tables.get_mut(&pivot).unwrap().1;
         let idx = (0..cache.fields.len()).find(|&i| cache.field_name(i).as_deref() == Some("region"))?;
-        Some(sorted(crate::pivot::commands::hidden_for_selection(cache, idx, &[])))
+        Some(sorted(crate::pivot::commands::hidden_for_selection(cache, idx, &[], true)))
     }
 
     /// The pin on Sales.region, as its selected items.
@@ -2860,14 +2860,10 @@ async fn ctrl_z_after_a_level_one_filter_that_overwrote_a_cell_restores_it() {
 
 impl Fx {
     /// The header dropdown's Cancel: `undo_pivot_overwrite`'s core.
-    fn cancel_overwrite(
-        &self,
-        tokens: &[u64],
-        then_undo_seq: Option<u64>,
-    ) -> Result<(Vec<crate::undo_commands::UndoResult>, bool), String> {
+    fn cancel_overwrite(&self, tokens: &[u64]) -> Result<(Vec<crate::undo_commands::UndoResult>, bool), String> {
         crate::pivot::commands::undo_pivot_overwrite_core(
             &self.state, &self.file, &self.files, &self.pivots, &self.slicer, &self.filters, &self.pane,
-            &self.timelines, tokens, then_undo_seq,
+            &self.timelines, tokens,
         )
     }
 
@@ -2900,7 +2896,7 @@ async fn cancelling_a_level_one_overwrite_restores_the_cell_and_keeps_the_earlie
     assert!(response.overwritten_cell_count >= 1, "fixture: the filter did not grow over C");
     let token = response.overwrite_token.expect("the response names its overwrite step");
 
-    let (undone, complete) = fx.cancel_overwrite(&[token], None).expect("the Cancel takes the step back");
+    let (undone, complete) = fx.cancel_overwrite(&[token]).expect("the Cancel takes the step back");
     assert_eq!(undone.len(), 1, "the Cancel took back more or less than the one overwrite step");
     assert!(complete, "the Cancel reported a step it left behind");
     assert_eq!(fx.text_at(c).as_deref(), Some("V"), "the Cancel did not put the user's value back in C");
@@ -2929,19 +2925,19 @@ async fn a_cancel_whose_step_is_not_on_top_refuses_and_pops_nothing() {
     let seqs = fx.undo_seqs();
     let redo = fx.redo_depth();
 
-    let err = fx.cancel_overwrite(&[token], None).expect_err("a Cancel under an unrelated step must refuse");
+    let err = fx.cancel_overwrite(&[token]).expect_err("a Cancel under an unrelated step must refuse");
     assert_eq!(err, crate::pivot::commands::OVERWRITE_STEP_NOT_ON_TOP);
     assert_eq!(fx.undo_seqs(), seqs, "a refused Cancel changed the undo stack");
     assert_eq!(fx.redo_depth(), redo, "a refused Cancel changed the redo stack");
     assert_eq!(fx.text_at(y).as_deref(), Some("Y"), "a refused Cancel undid the unrelated edit");
 
     // No token at all -- the command recorded no step -- takes nothing either.
-    let err = fx.cancel_overwrite(&[], None).expect_err("a Cancel with no step must refuse");
+    let err = fx.cancel_overwrite(&[]).expect_err("a Cancel with no step must refuse");
     assert_eq!(err, crate::pivot::commands::NO_OVERWRITE_STEP);
     assert_eq!(fx.undo_seqs(), seqs, "a Cancel with no step popped something");
 
     // A token no step on the stack carries (a stale one) is refused too.
-    let err = fx.cancel_overwrite(&[token + 1_000_000], None).expect_err("a stale token must refuse");
+    let err = fx.cancel_overwrite(&[token + 1_000_000]).expect_err("a stale token must refuse");
     assert_eq!(err, crate::pivot::commands::OVERWRITE_STEP_NOT_ON_TOP);
     assert_eq!(fx.undo_seqs(), seqs, "a stale-token Cancel popped something");
 }
@@ -2993,7 +2989,7 @@ async fn a_level_one_clear_that_overwrites_is_one_step_and_its_cancel_restores_t
     assert_eq!(fx.undo_seqs().len(), seqs.len() + 1, "the clear that overwrote C recorded no step");
     let token = cleared.overwrite_token.expect("the clear names its overwrite step");
 
-    fx.cancel_overwrite(&[token], None).expect("the Cancel takes the clear back");
+    fx.cancel_overwrite(&[token]).expect("the Cancel takes the clear back");
     assert_eq!(fx.text_at(c).as_deref(), Some("V"), "the Cancel did not put C back");
     assert_eq!(fx.hidden_on(pivot, "region"), Some(strings(&["North", "West"])), "the Cancel did not restore the filter");
     assert_eq!(fx.undo_seqs(), seqs, "the Cancel disturbed the steps below its own");
@@ -3040,7 +3036,7 @@ async fn a_slicer_click_that_overwrites_is_one_step_with_the_slicers_own_record(
     let response = apply_pivot_filter_core(&fx.ctx(), request).await.unwrap();
     fx.commit();
     let token = response.overwrite_token.expect("the click's apply names its overwrite step");
-    fx.cancel_overwrite(&[token], None).expect("the click's Cancel");
+    fx.cancel_overwrite(&[token]).expect("the click's Cancel");
     assert_eq!(fx.text_at(c).as_deref(), Some("V"), "the click's Cancel did not put C back");
     assert_eq!(fx.selected(slicer), Some(strings(&["East"])), "the click's Cancel left the slicer on the declined selection");
     assert_eq!(fx.undo_seqs(), seqs, "the click's Cancel took back more than the click");
@@ -3097,7 +3093,7 @@ async fn a_pinned_apply_that_overwrites_is_restorable_and_its_cancel_is_recognis
     assert_eq!(fx.undo_seqs().len(), seqs.len() + 1, "the pinned click is not ONE step");
     let token = response.overwrite_token.expect("the pinned apply names its overwrite step");
 
-    fx.cancel_overwrite(&[token], None).expect("the pinned Cancel");
+    fx.cancel_overwrite(&[token]).expect("the pinned Cancel");
     assert_eq!(fx.text_at(c).as_deref(), Some("V"), "the pinned Cancel did not put C back");
     assert_eq!(fx.region_pin(pivot), Some(strings(&["East"])), "the pinned Cancel did not restore the East pin");
     assert_eq!(fx.selected(slicer), Some(strings(&["East"])), "the pinned Cancel did not restore the slicer");
@@ -3106,32 +3102,32 @@ async fn a_pinned_apply_that_overwrites_is_restorable_and_its_cancel_is_recognis
 
 /// A gesture that recorded its overwrite steps SEPARATELY (applies with no
 /// transaction around them) is taken back step by step, while each next step
-/// carries one of its tokens; `then_undo_seq` takes back one more named step
-/// beneath them, and only that one.
+/// carries one of its tokens -- and it STOPS there: the step beneath them (a
+/// user's edit, or any step of another caller's) carries none, so it stays,
+/// and nothing can name it by its history id (wave E, Y1).
 #[tokio::test]
-async fn a_cancel_walks_back_every_step_of_its_gesture_and_then_the_named_one() {
+async fn a_cancel_walks_back_every_step_of_its_gesture_and_stops_at_the_first_step_not_its_own() {
     let fx = Fx::new(0).await;
     let (a, ca) = fx.shrunk_worksheet_pivot().await;
     let (b, cb) = fx.shrunk_worksheet_pivot().await;
     fx.put_text(ca, "VA");
     fx.put_text(cb, "VB");
     fx.user_edit((40, 40), "X");
-    let before_selection = fx.undo_seqs();
-    // The step a ribbon filter's selection write records, beneath the pivots'.
+    // A step beneath the pivots' that is not the gesture's.
     fx.user_edit((41, 41), "S");
-    let selection_seq = *fx.undo_seqs().last().unwrap();
+    let beneath = fx.undo_seqs();
 
     let ra = apply_pivot_filter_core(&fx.ctx(), apply(a, "Sales.region", &["East", "North", "West"])).await.unwrap();
     let rb = apply_pivot_filter_core(&fx.ctx(), apply(b, "Sales.region", &["East", "North", "West"])).await.unwrap();
     let tokens = [ra.overwrite_token.expect("A's step"), rb.overwrite_token.expect("B's step")];
 
-    let (undone, complete) = fx.cancel_overwrite(&tokens, Some(selection_seq)).expect("the Cancel");
-    assert_eq!(undone.len(), 3, "the Cancel did not take back both pivot steps and the named step");
+    let (undone, complete) = fx.cancel_overwrite(&tokens).expect("the Cancel");
+    assert_eq!(undone.len(), 2, "the Cancel did not take back exactly both pivot steps");
     assert!(complete, "the Cancel reported a step it left");
     assert_eq!(fx.text_at(ca).as_deref(), Some("VA"), "A's cell is not back");
     assert_eq!(fx.text_at(cb).as_deref(), Some("VB"), "B's cell is not back");
-    assert_eq!(fx.text_at((41, 41)), None, "the named step beneath was not taken back");
-    assert_eq!(fx.undo_seqs(), before_selection, "the Cancel went past the named step");
+    assert_eq!(fx.text_at((41, 41)).as_deref(), Some("S"), "the Cancel took back the step beneath its own");
+    assert_eq!(fx.undo_seqs(), beneath, "the Cancel went past its own steps");
     assert_eq!(fx.text_at((40, 40)).as_deref(), Some("X"), "the Cancel undid the user's earlier edit");
 }
 
@@ -3181,4 +3177,1383 @@ async fn a_canvas_pivot_filter_never_counts_or_records_an_overwrite() {
     assert_eq!(response.overwritten_cell_count, 0, "a canvas pivot counted overwritten cells");
     assert_eq!(response.overwrite_token, None, "a canvas pivot named an overwrite step");
     assert_eq!(fx.undo_seqs(), seqs, "a canvas filter recorded a step");
+}
+
+// ============================================================================
+// WAVE B (A1, A2): the BLANK item. Blank cells are not interned values, so the
+// level-1 mask rule and the item lists were built from the non-empty values
+// alone: selecting "East" kept every blank-member row, and a pivot field's
+// filter could neither show nor hide `(blank)`.
+// ============================================================================
+
+/// Sales with one NULL region (the blank member), cache-warm.
+async fn fx_with_a_blank_region() -> Fx {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("region", ArrowType::Utf8, true),
+            Field::new("year", ArrowType::Utf8, true),
+            Field::new("amount", ArrowType::Float64, true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec![Some("East"), Some("West"), None, Some("North")])),
+            Arc::new(StringArray::from(vec!["Y1", "Y1", "Y2", "Y2"])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+        ],
+    )
+    .unwrap();
+    Fx::with_model(0, sales_model(), vec![("Sales", "sales", batch)], &[("Sales", "region")]).await
+}
+
+/// A1. The level-1 mask hides the blank item unless the selection names it
+/// (`(blank)` in any case, or the empty string a model spells NULL with) --
+/// and only when the list the selection was made from OFFERED it: a selection
+/// from a list without the blank item never hides it (the review of A1).
+#[test]
+fn a_level_one_selection_hides_the_blank_item_unless_it_names_it() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("region", ArrowType::Utf8, true)])),
+        vec![Arc::new(StringArray::from(vec![Some("East"), None, Some("West")]))],
+    )
+    .unwrap();
+    let mut cache = crate::pivot::operations::build_cache_from_arrow_batches(new_id(), &[batch]).unwrap();
+    assert!(cache.has_blank_values(0), "fixture: the column has a blank record");
+    let hide = |cache: &mut pivot_engine::PivotCache, selected: &[&str]| {
+        sorted(crate::pivot::commands::hidden_for_selection(cache, 0, &strings(selected), true))
+    };
+    assert_eq!(hide(&mut cache, &["East"]), strings(&["(blank)", "West"]), "selecting East kept the blank rows");
+    assert_eq!(hide(&mut cache, &["East", "(Blank)"]), strings(&["West"]), "a selection naming (Blank) hid it");
+    assert_eq!(hide(&mut cache, &["East", ""]), strings(&["West"]), "a model's NULL spelling did not name the blank item");
+    assert_eq!(
+        sorted(crate::pivot::commands::hidden_for_selection(&mut cache, 0, &strings(&["East"]), false)),
+        strings(&["West"]),
+        "a selection from a list that never offered the blank item hid it"
+    );
+}
+
+/// A1, end to end: a PIVOT slicer's level-1 click on "East" hides the
+/// blank-member rows of the pivot it filters -- its list offers the blank
+/// item, so a selection that does not name it means "not the blanks". (A
+/// MODEL list offers it too since W6: see
+/// `a_model_slicers_selection_hides_the_blank_rows_unless_it_names_the_blank`.)
+#[tokio::test]
+async fn a_level_one_click_hides_the_blank_member_rows() {
+    let fx = fx_with_a_blank_region().await;
+    let pivot = fx.add_bi_pivot(0).await;
+    fx.lay_out(pivot, &["region"], &[]).await;
+    let slicer = fx.pivot_slicer(pivot, "Sales.region");
+    fx.slicer_click(slicer, pivot, "Sales.region", &["East"]).await;
+    let hidden = fx.hidden_on(pivot, "region").expect("the region field carries the mask");
+    assert!(
+        hidden.iter().any(|h| pivot_engine::is_blank_item_label(h)),
+        "selecting East kept the blank-member rows: hidden = {hidden:?}"
+    );
+}
+
+/// A2. A pivot field's item lists show the blank item LAST: the field
+/// dropdown's (`get_pivot_field_unique_values`) and a filter-zone cell's, and
+/// the filter cell reads a hidden `(Blank)` as the blank item unselected.
+#[tokio::test]
+async fn a_pivot_fields_item_lists_include_the_blank_item() {
+    let fx = fx_with_a_blank_region().await;
+    let pivot = fx.add_bi_pivot(0).await;
+    let region = |hidden: Option<Vec<String>>| BiFieldRef {
+        table: "Sales".into(),
+        column: "region".into(),
+        is_lookup: false,
+        hidden_items: hidden,
+    };
+    let request = |hidden: Option<Vec<String>>| UpdateBiPivotFieldsRequest {
+        pivot_id: pivot,
+        row_fields: vec![BiFieldRef { table: "Sales".into(), column: "year".into(), is_lookup: false, hidden_items: None }],
+        column_fields: vec![],
+        value_fields: vec![BiValueFieldRef { measure_name: "Revenue".into(), custom_name: None }],
+        filter_fields: vec![region(hidden)],
+        slicer_fields: None,
+        row_hierarchies: vec![],
+        column_hierarchies: vec![],
+        layout: None,
+        lookup_columns: vec![],
+        calculated_fields: None,
+        value_column_order: None,
+        force_requery: false,
+    };
+    let response = update_bi_pivot_fields_core(&fx.ctx(), request(None)).await.expect("lay the pivot out");
+    let filter_row = response.filter_rows.first().expect("the region filter cell");
+    assert_eq!(filter_row.unique_values.last().map(String::as_str), Some("(blank)"), "{:?}", filter_row.unique_values);
+
+    let idx = filter_row.field_index;
+    let listed = crate::pivot::commands::pivot_field_unique_values_core(&fx.pivots, pivot, idx).expect("the list");
+    assert_eq!(listed.unique_values.last().map(String::as_str), Some("(blank)"), "{:?}", listed.unique_values);
+
+    let response = update_bi_pivot_fields_core(&fx.ctx(), request(Some(strings(&["(Blank)"])))).await.expect("hide it");
+    let filter_row = response.filter_rows.first().expect("the region filter cell");
+    assert!(
+        !filter_row.selected_values.iter().any(|v| pivot_engine::is_blank_item_label(v)),
+        "a hidden (Blank) still reads as selected: {:?}",
+        filter_row.selected_values
+    );
+    assert_eq!(filter_row.selected_values.len(), 3, "{:?}", filter_row.selected_values);
+}
+
+/// A3 (the BUG-0184 class on BI pivots). A field-list edit rebuilds every
+/// field from `PivotField::new` over the NEW cache: a sort, a subtotal
+/// setting, show-all-items or a grouping the user put on a field was reset by
+/// the next edit of the layout -- also when the field moved to another zone.
+#[tokio::test]
+async fn a_bi_field_list_edit_keeps_each_fields_own_settings() {
+    let fx = Fx::new(0).await;
+    let pivot = fx.add_bi_pivot(0).await;
+    fx.lay_out(pivot, &["region", "year"], &[]).await;
+    let grouping = pivot_engine::FieldGrouping::ManualGrouping {
+        groups: vec![pivot_engine::ManualGroup { name: "EastWest".into(), members: strings(&["East", "West"]) }],
+        ungrouped_name: "Other".into(),
+    };
+    {
+        // What sort / subtotal / show-all / grouping commands leave on the field.
+        let mut tables = fx.pivots.pivot_tables.write(&test_seed_effect()).unwrap();
+        let def = &mut tables.get_mut(&pivot).unwrap().0;
+        let region = def.row_fields.iter_mut().find(|f| f.name == "Sales.region").unwrap();
+        region.sort_order = pivot_engine::SortOrder::Descending;
+        region.show_subtotals = false;
+        region.show_all_items = true;
+        region.grouping = grouping.clone();
+    }
+    let json = |g: &pivot_engine::FieldGrouping| serde_json::to_value(g).unwrap();
+    let region_of = |fx: &Fx| {
+        let def = fx.definition(pivot);
+        def.row_fields
+            .iter()
+            .chain(def.column_fields.iter())
+            .find(|f| f.name == "Sales.region")
+            .cloned()
+            .expect("the region field")
+    };
+
+    // An edit of the layout: another field on Columns.
+    fx.lay_out(pivot, &["region"], &["year"]).await;
+    let region = region_of(&fx);
+    assert_eq!(region.sort_order, pivot_engine::SortOrder::Descending, "the edit reset the field's sort");
+    assert!(!region.show_subtotals, "the edit reset the field's subtotals");
+    assert!(region.show_all_items, "the edit reset show-all-items");
+    assert_eq!(json(&region.grouping), json(&grouping), "the edit dropped the field's grouping");
+
+    // The field dragged to Columns is the same field: its settings go with it.
+    fx.lay_out(pivot, &["year"], &["region"]).await;
+    let region = region_of(&fx);
+    assert_eq!(region.sort_order, pivot_engine::SortOrder::Descending, "the move to Columns reset the sort");
+    assert_eq!(json(&region.grouping), json(&grouping), "the move to Columns dropped the grouping");
+}
+
+// ============================================================================
+// WAVE B (S1, BUG-0187; S2, BUG-0200): a slicer click / ribbon filter change
+// is ONE backend command that records ONE step at the end -- no undo
+// transaction is held open across its model re-query -- and the backend knows
+// when a step absorbed ANOTHER caller's begin.
+// ============================================================================
+
+use crate::pivot::types::{
+    FilterGestureStep, FilterGestureStepOutcome, PivotFilterGesture, PivotFilterGestureResponse, PivotFilterWrite,
+};
+
+impl Fx {
+    /// A slicer CLICK through the one backend command: the selection plus an
+    /// apply of `selected` on `pivot` by the slicer's model column.
+    async fn gesture_click(
+        &self,
+        slicer: EntityId,
+        pivot: EntityId,
+        selected: &[&str],
+        step: FilterGestureStep,
+    ) -> PivotFilterGestureResponse {
+        let mut request = apply(pivot, "Sales.region", selected);
+        request.slicer_id = Some(slicer.to_string());
+        let gesture = PivotFilterGesture { writes: vec![PivotFilterWrite { apply: Some(request), clear: None }], step };
+        crate::slicer::commands::apply_slicer_selection_core(&self.ctx(), slicer, Some(strings(selected)), gesture)
+            .await
+            .expect("the click")
+            .gesture
+    }
+
+    /// The Tauri `begin_undo_transaction` door (a script's `beginBatch`, the
+    /// frontend's own transaction): true when it OPENED the transaction.
+    fn begin_from_caller(&self, description: &str) -> bool {
+        self.state.undo_stack.lock().unwrap().begin_transaction_from_caller(description)
+    }
+
+    fn transaction_open(&self) -> bool {
+        self.state.undo_stack.lock().unwrap().has_open_transaction()
+    }
+}
+
+/// S1 (BUG-0187). A MODEL slicer click whose pivot lacks the column (so the
+/// apply re-queries the model) holds NO undo transaction open while it waits
+/// on the engine, and an unrelated edit made meanwhile is a step of its OWN:
+/// Ctrl+Z takes back the click alone, and the edit stays. The click used to
+/// be a frontend transaction around the re-query -- the edit joined it and
+/// one Ctrl+Z undid both.
+#[tokio::test]
+async fn a_slicer_click_holds_no_transaction_open_across_its_requery_and_an_edit_made_meanwhile_is_its_own_step() {
+    let fx = Fx::new(1).await;
+    let pivot = fx.add_bi_pivot(1).await;
+    fx.lay_out(pivot, &["year"], &[]).await;
+    let slicer = fx.model_slicer(1, "Sales.region", None);
+    let depth = fx.undo_depth();
+
+    let engine_arc = fx.bi.connections.lock().unwrap()[&fx.conn].engine.clone().unwrap();
+    let busy = engine_arc.lock().await; // the engine is busy with someone else's query
+    let mut request = apply(pivot, "Sales.region", &["East"]);
+    request.slicer_id = Some(slicer.to_string());
+    let gesture = PivotFilterGesture {
+        writes: vec![PivotFilterWrite { apply: Some(request), clear: None }],
+        step: FilterGestureStep::Own,
+    };
+    let ctx = fx.ctx();
+    let mut click = Box::pin(crate::slicer::commands::apply_slicer_selection_core(
+        &ctx,
+        slicer,
+        Some(strings(&["East"])),
+        gesture,
+    ));
+    let waited = tokio::time::timeout(std::time::Duration::from_millis(150), &mut click).await;
+    assert!(waited.is_err(), "fixture: the click must be waiting on the engine");
+    assert!(!fx.transaction_open(), "the click held the global undo transaction open across a BI await");
+    fx.user_edit((40, 40), "X"); // an unrelated edit, made while the click waits
+    drop(busy);
+    let response = click.await.expect("the click").gesture;
+    assert_eq!(response.step, FilterGestureStepOutcome::Pushed, "the click is not a step of its own");
+    assert!(response.failures.is_empty(), "the click's apply refused: {:?}", response.failures);
+    assert_eq!(fx.undo_depth(), depth + 2, "the edit and the click are not two separate steps");
+    assert_eq!(fx.hidden_on(pivot, "region"), Some(strings(&["North", "West"])), "fixture: the click filtered");
+
+    fx.undo_once();
+    assert_eq!(fx.selected(slicer), None, "Ctrl+Z did not take the click's selection back");
+    assert_eq!(fx.hidden_on(pivot, "region"), None, "Ctrl+Z did not take back the column the click added");
+    assert_eq!(fx.text_at((40, 40)).as_deref(), Some("X"), "Ctrl+Z of the click took the unrelated edit back too");
+    fx.undo_once();
+    assert_eq!(fx.text_at((40, 40)), None, "the edit is not a step of its own");
+}
+
+/// S1. A click that grows a worksheet pivot over the user's cell C: ONE step
+/// (the slicer's selection AND the cells), and its Cancel -- by the token the
+/// response names -- takes back the WHOLE click and nothing else.
+#[tokio::test]
+async fn a_click_that_overwrites_is_one_step_and_its_cancel_takes_back_exactly_it() {
+    let fx = Fx::new(0).await;
+    let (pivot, c) = fx.shrunk_worksheet_pivot().await;
+    let slicer = fx.model_slicer(0, "Sales.region", Some(vec!["East"]));
+    fx.put_text(c, "V");
+    fx.user_edit((40, 40), "X");
+    let seqs = fx.undo_seqs();
+
+    let response = fx.gesture_click(slicer, pivot, &["East", "North", "West"], FilterGestureStep::Own).await;
+    assert_ne!(fx.text_at(c).as_deref(), Some("V"), "fixture: the click did not grow over C");
+    assert_eq!(fx.undo_seqs().len(), seqs.len() + 1, "the click is not ONE step");
+    assert_eq!(response.step_seq, fx.undo_seqs().last().copied(), "the response does not name the click's step");
+    let token = response.overwrite_token.expect("the click names its overwrite step");
+    assert!(
+        response.responses.iter().any(|r| r.overwrite_token == Some(token)),
+        "the pivot response that overwrote C does not carry the click's token"
+    );
+
+    fx.cancel_overwrite(&[token]).expect("the click's Cancel");
+    assert_eq!(fx.text_at(c).as_deref(), Some("V"), "the Cancel did not put C back");
+    assert_eq!(fx.selected(slicer), Some(strings(&["East"])), "the Cancel left the declined selection");
+    assert_eq!(fx.undo_seqs(), seqs, "the Cancel took back more (or less) than the click");
+    assert_eq!(fx.text_at((40, 40)).as_deref(), Some("X"), "the Cancel undid the earlier edit");
+}
+
+/// S2 (BUG-0200). A user click made while a SCRIPT BATCH is open that has
+/// recorded NOTHING yet is a step of its OWN -- beneath the batch, which stays
+/// open, untouched, and holds only what the script writes AFTER the click (so
+/// the history stays in time order). While the batch is open the click's step
+/// is on top, so its Cancel takes back the click alone; the script's writes
+/// are never touched. (A batch that already HOLDS writes is joined instead:
+/// `a_click_during_a_script_batch_that_already_wrote_joins_it_and_undoes_in_order`.)
+#[tokio::test]
+async fn a_click_made_during_a_script_batch_is_its_own_step_and_never_joins_the_batch() {
+    let fx = Fx::new(0).await;
+    let (pivot, c) = fx.shrunk_worksheet_pivot().await;
+    let slicer = fx.model_slicer(0, "Sales.region", Some(vec!["East"]));
+    fx.put_text(c, "V");
+    let seqs = fx.undo_seqs();
+    assert!(fx.begin_from_caller("Script batch"), "fixture: the script opens its batch");
+
+    let response = fx.gesture_click(slicer, pivot, &["East", "North", "West"], FilterGestureStep::Own).await;
+    assert_eq!(response.step, FilterGestureStepOutcome::Pushed, "the click joined the script's batch");
+    assert!(fx.transaction_open(), "the click closed the script's batch");
+    fx.user_edit((40, 40), "S"); // the script writes after the click
+    let token = response.overwrite_token.expect("fixture: the click overwrote C");
+
+    fx.cancel_overwrite(&[token]).expect("the click's Cancel");
+    assert_eq!(fx.text_at(c).as_deref(), Some("V"), "the Cancel did not put C back");
+    assert_eq!(fx.text_at((40, 40)).as_deref(), Some("S"), "the Cancel took the script's write back");
+    assert!(fx.transaction_open(), "the Cancel disturbed the script's open batch");
+
+    fx.commit(); // the script commits its batch: ONE step holding S only
+    assert_eq!(fx.undo_seqs().len(), seqs.len() + 1, "the script's batch is not one step of its own");
+    fx.undo_once();
+    assert_eq!(fx.text_at((40, 40)), None, "the script's step does not hold S");
+    assert_eq!(fx.selected(slicer), Some(strings(&["East"])), "the script's step held the click");
+}
+
+/// S2 (BUG-0200). The mirror image: a script's `beginBatch` arrives while a
+/// FRONTEND gesture's step is open (a Slicer Settings save). The backend has
+/// one slot, so the script's write joins the step -- but the step now says
+/// so, and the gesture's Cancel REFUSES to take it back (it would take the
+/// script's write back too) and pops nothing. The positive control: the same
+/// gesture with no script is taken back.
+#[tokio::test]
+async fn a_cancel_refuses_a_step_that_absorbed_a_script_batch() {
+    let fx = Fx::new(0).await;
+    let (pivot, c) = fx.shrunk_worksheet_pivot().await;
+    fx.put_text(c, "V");
+    let seqs = fx.undo_seqs();
+
+    let gesture = |fx: &Fx| fx.begin_from_caller("Slicer Settings");
+    assert!(gesture(&fx), "fixture: the gesture opens its step");
+    let response = apply_pivot_filter_core(&fx.ctx(), apply(pivot, "Sales.region", &["East", "North", "West"]))
+        .await
+        .expect("the apply");
+    assert!(!fx.begin_from_caller("Script batch"), "fixture: the script's begin joins");
+    fx.user_edit((40, 40), "S");
+    fx.commit();
+    let token = response.overwrite_token.expect("fixture: an overwrite step");
+    let after = fx.undo_seqs();
+
+    let err = fx.cancel_overwrite(&[token]).expect_err("a Cancel of a step holding a script's write must refuse");
+    assert_eq!(err, crate::pivot::commands::OVERWRITE_STEP_SHARED);
+    assert_eq!(fx.undo_seqs(), after, "a refused Cancel changed the undo stack");
+    assert_eq!(fx.text_at((40, 40)).as_deref(), Some("S"), "the Cancel took the script's write back");
+
+    // Positive control: the same gesture with no script is taken back.
+    fx.undo_once();
+    assert_eq!(fx.undo_seqs(), seqs, "fixture: back to the start");
+    fx.put_text(c, "V");
+    assert!(gesture(&fx));
+    let response = apply_pivot_filter_core(&fx.ctx(), apply(pivot, "Sales.region", &["East", "North", "West"]))
+        .await
+        .expect("the apply");
+    fx.commit();
+    let token = response.overwrite_token.expect("an overwrite step");
+    fx.cancel_overwrite(&[token]).expect("an unshared step is taken back");
+    assert_eq!(fx.text_at(c).as_deref(), Some("V"));
+}
+
+/// A4. A canvas-wide Delete that removes a pivot box with a chart and a slicer
+/// is ONE step: `delete_pivot_table` joins an open transaction and never
+/// commits one it did not open (its unconditional begin/commit pair committed
+/// the caller's transaction half-way). A Tauri command with nine `State`
+/// handles cannot run in process, so the rule is read from its body.
+#[test]
+fn deleting_a_pivot_never_commits_a_transaction_it_did_not_open() {
+    let src = include_str!("../pivot/commands.rs").replace("\r\n", "\n");
+    let at = src.find("pub fn delete_pivot_table(").expect("the delete command");
+    let body = &src[at..at + src[at..].find("\n}\n").expect("its body")];
+    let commit = body.find("commit_transaction()").expect("the delete records a step");
+    let guard = body[..commit]
+        .rfind("if opened {")
+        .expect("delete_pivot_table commits a transaction it did not open");
+    assert!(
+        body[guard..commit].lines().count() <= 2,
+        "the commit is not the one `if opened` guards:\n{}",
+        &body[guard..commit]
+    );
+    assert!(body.contains("let opened = !undo_stack.has_open_transaction();"), "the delete no longer asks whether a transaction is open");
+}
+
+/// S2. The Tauri `begin_undo_transaction` door is the one that MARKS: every
+/// frontend begin goes through it, and a command's internal begin must not.
+#[test]
+fn the_tauri_begin_door_marks_a_joined_transaction() {
+    let src = include_str!("../undo_commands.rs");
+    let at = src.find("pub fn begin_undo_transaction(").expect("the Tauri begin command");
+    let body = &src[at..at + src[at..].find("\n}").expect("its body")];
+    assert!(
+        body.contains("begin_transaction_from_caller("),
+        "the Tauri begin no longer marks a transaction another caller joined:\n{body}"
+    );
+}
+
+/// S2. A script's OWN slicer call (inside the batch it opened) JOINS the
+/// batch: ONE step for the script, the selection and the pivot.
+#[tokio::test]
+async fn a_scripts_slicer_call_joins_the_batch_it_opened() {
+    let fx = Fx::new(0).await;
+    let (pivot, _c) = fx.shrunk_worksheet_pivot().await;
+    let slicer = fx.model_slicer(0, "Sales.region", Some(vec!["East"]));
+    let depth = fx.undo_depth();
+    assert!(fx.begin_from_caller("Script batch"));
+    fx.user_edit((40, 40), "S");
+    let response = fx.gesture_click(slicer, pivot, &["West"], FilterGestureStep::Join).await;
+    assert_eq!(response.step, FilterGestureStepOutcome::Joined, "the script's call did not join its batch");
+    assert_eq!(response.step_seq, None);
+    fx.commit();
+    assert_eq!(fx.undo_depth(), depth + 1, "the script's batch is not ONE step");
+    fx.undo_once();
+    assert_eq!(fx.selected(slicer), Some(strings(&["East"])), "the batch's step does not hold the selection");
+    assert_eq!(fx.text_at((40, 40)), None, "the batch's step does not hold the script's write");
+}
+
+/// W2 (wave C; wb-slicer needs 3). A table slicer's click on `slicer`
+/// selecting `selected`, the way the frontend sends it: no pivot writes (a
+/// table slicer reaches no pivot), the backend filters the table itself.
+async fn table_click(
+    fx: &Fx,
+    slicer: EntityId,
+    selected: Option<&[&str]>,
+    step: FilterGestureStep,
+) -> crate::slicer::types::SlicerSelectionGestureResponse {
+    let gesture = PivotFilterGesture { writes: vec![], step };
+    crate::slicer::commands::apply_slicer_selection_core(&fx.ctx(), slicer, selected.map(strings), gesture)
+        .await
+        .expect("the table slicer's click")
+}
+
+/// W2. A click whose TABLE targets used to be filtered by the FRONTEND after
+/// the command held its step open for them (a mode since removed): every edit
+/// the user made in that window joined the click's Ctrl+Z step. The backend now
+/// filters the table in the SAME command, so the step lands whole and nothing
+/// is ever left open: ONE Ctrl+Z restores the selection AND the table's
+/// filter, and Ctrl+Y puts both back.
+#[tokio::test]
+async fn a_table_slicer_click_filters_its_table_inside_its_one_step() {
+    let fx = Fx::new(0).await;
+    let (_table, slicer) = seed_filtered_table(&fx, Some(&["East"]));
+    assert_eq!(table_filter_state(&fx), (true, vec![2, 4]), "precondition: filtered to East");
+    let depth = fx.undo_depth();
+
+    let response = table_click(&fx, slicer, Some(&["West"]), FilterGestureStep::Own).await;
+    assert_eq!(response.gesture.step, FilterGestureStepOutcome::Pushed, "the click is not a step of its own");
+    assert!(!fx.transaction_open(), "the click left a step open for writes that no longer exist");
+    assert!(response.table_failures.is_empty(), "the table refused: {:?}", response.table_failures);
+    assert_eq!(response.table_sheets, vec![0], "the response does not name the sheet whose rows moved");
+    assert_eq!(table_filter_state(&fx), (true, vec![1, 3, 4]), "the table was not filtered to West");
+    assert_eq!(fx.undo_depth(), depth + 1, "the selection and its table filter are not ONE step");
+
+    fx.undo_once();
+    assert_eq!(fx.selected(slicer), Some(strings(&["East"])), "Ctrl+Z did not take the selection back");
+    assert_eq!(table_filter_state(&fx), (true, vec![2, 4]), "Ctrl+Z did not take the table's filter back");
+    fx.redo_once();
+    assert_eq!(fx.selected(slicer), Some(strings(&["West"])));
+    assert_eq!(table_filter_state(&fx), (true, vec![1, 3, 4]), "Ctrl+Y did not put the table's filter back");
+
+    // A CLEAR (Clear Filter / no selection) takes the column's criteria off,
+    // in its own one step.
+    let response = table_click(&fx, slicer, None, FilterGestureStep::Own).await;
+    assert_eq!(response.gesture.step, FilterGestureStepOutcome::Pushed);
+    assert_eq!(table_filter_state(&fx), (false, vec![]), "the clear left the table filtered");
+    fx.undo_once();
+    assert_eq!(table_filter_state(&fx), (true, vec![1, 3, 4]), "Ctrl+Z did not put the filter back");
+
+    // The same selection again writes nothing and records nothing.
+    let depth = fx.undo_depth();
+    crate::document_effect::mark_saved(&fx.file);
+    let response = table_click(&fx, slicer, Some(&["West"]), FilterGestureStep::Own).await;
+    assert_eq!(
+        response.gesture.step,
+        FilterGestureStepOutcome::Nothing,
+        "a click that changed nothing recorded a step (the unchanged table filter was rewritten)"
+    );
+    assert!(response.table_sheets.is_empty(), "an unchanged table filter was reported as moved");
+    assert_eq!(fx.undo_depth(), depth, "a click that changed nothing recorded a step");
+    assert!(!fx.file.is_dirty(), "a click that changed nothing dirtied the document");
+}
+
+/// W2. With a STRANGER's transaction open (a script's `beginBatch` that has
+/// written nothing yet) the user's click is a step of its own beneath it --
+/// tables included, since nothing follows the command any more -- and the
+/// stranger's transaction stays open for its owner. One that already HOLDS
+/// changes is joined (marked shared), so undoing replays in time order.
+#[tokio::test]
+async fn a_table_slicer_click_during_a_strangers_transaction_is_never_split_or_left_open() {
+    let fx = Fx::new(0).await;
+    let (_table, slicer) = seed_filtered_table(&fx, Some(&["East"]));
+    let depth = fx.undo_depth();
+
+    assert!(fx.begin_from_caller("Script batch"), "fixture: a stranger's empty transaction is open");
+    let response = table_click(&fx, slicer, Some(&["West"]), FilterGestureStep::Own).await;
+    assert_eq!(response.gesture.step, FilterGestureStepOutcome::Pushed, "the click joined an EMPTY stranger's step");
+    assert!(fx.transaction_open(), "the stranger's transaction was closed by the click");
+    assert_eq!(fx.undo_depth(), depth + 1, "the click is not ONE step of its own");
+    let step = fx.state.undo_stack.lock().unwrap().pop_undo().expect("the click's step");
+    let kinds = Fx::restore_kinds(&step);
+    assert!(
+        kinds.iter().any(|k| k == "slicer") && kinds.iter().any(|k| k == "obj_autofilter"),
+        "the click's selection and its table filter are not in one step: {kinds:?}"
+    );
+    fx.commit(); // the stranger's (still empty) batch
+
+    // A stranger's transaction that already holds a write is JOINED, marked.
+    assert!(fx.begin_from_caller("Script batch"));
+    fx.user_edit((40, 40), "S");
+    let response = table_click(&fx, slicer, Some(&["North"]), FilterGestureStep::Own).await;
+    assert_eq!(response.gesture.step, FilterGestureStepOutcome::Joined);
+    assert!(fx.state.undo_stack.lock().unwrap().open_transaction_absorbed_begin(), "the joined step is not marked");
+    fx.commit();
+    let step = fx.state.undo_stack.lock().unwrap().pop_undo().expect("the joined step");
+    assert!(
+        Fx::restore_kinds(&step).iter().any(|k| k == "obj_autofilter"),
+        "the table filter did not land in the step the click joined"
+    );
+}
+
+/// W2. A SCRIPT's call joins the batch it opened -- tables included -- and
+/// one Ctrl+Z of the batch restores the selection and the table filter.
+#[tokio::test]
+async fn a_scripts_table_slicer_call_joins_its_batch_with_the_table_filter() {
+    let fx = Fx::new(0).await;
+    let (_table, slicer) = seed_filtered_table(&fx, Some(&["East"]));
+    let depth = fx.undo_depth();
+    assert!(fx.begin_from_caller("Script batch"));
+    let response = table_click(&fx, slicer, Some(&["West"]), FilterGestureStep::Join).await;
+    assert_eq!(response.gesture.step, FilterGestureStepOutcome::Joined, "the script's call left its own batch");
+    assert!(fx.transaction_open(), "the script's call closed its own batch");
+    fx.commit();
+    assert_eq!(fx.undo_depth(), depth + 1);
+    fx.undo_once();
+    assert_eq!(fx.selected(slicer), Some(strings(&["East"])));
+    assert_eq!(table_filter_state(&fx), (true, vec![2, 4]), "the batch's step does not hold the table filter");
+}
+
+/// W2. A table that cannot take the filter is REPORTED (the frontend tells
+/// the user once) and changes nothing; a CLEAR there is silent -- there is no
+/// filter of this slicer's to take off.
+#[tokio::test]
+async fn a_table_that_cannot_take_the_slicer_filter_is_reported_and_left_alone() {
+    let fx = Fx::new(0).await;
+    let (_table, slicer) = seed_filtered_table(&fx, Some(&["East"]));
+    // The sheet forbids AutoFilter use.
+    fx.state.sheet_protection.write(&test_seed_effect()).unwrap().insert(
+        0,
+        crate::protection::SheetProtection { protected: true, ..Default::default() },
+    );
+    let response = table_click(&fx, slicer, Some(&["West"]), FilterGestureStep::Own).await;
+    assert_eq!(response.table_failures.len(), 1, "the refusal was not reported");
+    assert!(!response.table_failures[0].clearing);
+    assert!(
+        response.table_failures[0].message.contains("protected"),
+        "the refusal does not say why: {}",
+        response.table_failures[0].message
+    );
+    assert!(response.table_sheets.is_empty());
+    assert_eq!(table_filter_state(&fx), (true, vec![2, 4]), "a refused table was filtered anyway");
+    fx.state.sheet_protection.write(&test_seed_effect()).unwrap().clear();
+
+    // The sheet's AutoFilter now belongs to ANOTHER table: an apply refuses
+    // (never filters someone else's columns), a clear is silent.
+    fx.state.auto_filters.write(&test_seed_effect()).unwrap().get_mut(&0).unwrap().id = new_id();
+    let response = table_click(&fx, slicer, Some(&["North"]), FilterGestureStep::Own).await;
+    assert_eq!(response.table_failures.len(), 1);
+    assert!(response.table_failures[0].message.contains("another table"), "{:?}", response.table_failures);
+    assert_eq!(table_filter_state(&fx), (true, vec![2, 4]), "another table's filter was changed");
+    let response = table_click(&fx, slicer, None, FilterGestureStep::Own).await;
+    assert!(response.table_failures.is_empty(), "a clear with nothing of this slicer's to take off was reported");
+    assert_eq!(table_filter_state(&fx), (true, vec![2, 4]));
+}
+
+/// S1. A click that changes nothing (the same selection, a mask the pivot
+/// already has) records nothing and leaves the document clean.
+#[tokio::test]
+async fn a_click_that_changes_nothing_records_nothing() {
+    let fx = Fx::new(0).await;
+    let (pivot, _c) = fx.shrunk_worksheet_pivot().await;
+    let slicer = fx.model_slicer(0, "Sales.region", Some(vec!["East"]));
+    let seqs = fx.undo_seqs();
+    let response = fx.gesture_click(slicer, pivot, &["East"], FilterGestureStep::Own).await;
+    assert_eq!(response.step, FilterGestureStepOutcome::Nothing, "a no-op click recorded a step");
+    assert_eq!(fx.undo_seqs(), seqs);
+}
+
+/// S2 (BUG-0200, "verify"). The undo/redo RECONCILE re-applies a restored
+/// selection; it must never ADD a column the pivot does not carry. An undo
+/// that removed the column the step had added came back with it, re-queried
+/// and unrecorded.
+#[tokio::test]
+async fn a_reconcile_apply_never_adds_a_column_the_pivot_does_not_carry() {
+    let fx = Fx::new(1).await;
+    let pivot = fx.add_bi_pivot(1).await;
+    fx.lay_out(pivot, &["year"], &[]).await;
+    let before = fx.cache_names(pivot);
+    let seqs = fx.undo_seqs();
+    let mut request = apply(pivot, "Sales.region", &["East"]);
+    request.reconcile = true;
+    apply_pivot_filter_core(&fx.ctx(), request).await.expect("a reconcile is a no-op, not an error");
+    assert_eq!(fx.cache_names(pivot), before, "a reconcile re-queried the pivot to add a column");
+    assert_eq!(fx.hidden_on(pivot, "region"), None, "a reconcile added a column");
+    assert_eq!(fx.undo_seqs(), seqs);
+    // A user apply still adds it (the ensure), as ONE step.
+    fx.click(pivot, "Sales.region", &["East"]).await;
+    assert_eq!(fx.hidden_on(pivot, "region"), Some(strings(&["North", "West"])));
+}
+
+/// S1 + S2 for the RIBBON filter: its change is ONE step -- the filter's
+/// selection AND its pivots -- whose Cancel takes back both; and a ribbon
+/// SETTINGS update inside an open transaction JOINS it instead of committing
+/// it half-way.
+#[tokio::test]
+async fn a_ribbon_filter_change_is_one_step_and_its_settings_update_joins_an_open_transaction() {
+    let fx = Fx::new(0).await;
+    let (pivot, c) = fx.shrunk_worksheet_pivot().await;
+    let filter_id = new_id();
+    {
+        let filter: crate::ribbon_filter::RibbonFilter = serde_json::from_value(serde_json::json!({
+            "id": filter_id.to_string(),
+            "name": "Region",
+            "connectionId": fx.conn.to_string(),
+            "fieldName": "Sales.region",
+            "fieldDataType": "text",
+            "connectionMode": "workbook",
+            "connectedPivots": [],
+            "connectedSheets": [],
+            "displayMode": "checklist",
+            "selectedItems": ["East"],
+            "crossFilterTargets": [],
+            "crossFilterSlicerTargets": [],
+            "order": 0,
+            "buttonColumns": 2,
+            "buttonRows": 0,
+            "filterLevel": 1
+        }))
+        .expect("a ribbon filter");
+        fx.filters.filters.write(&test_seed_effect()).unwrap().insert(filter_id, filter);
+    }
+    fx.put_text(c, "V");
+    let seqs = fx.undo_seqs();
+    let request = apply(pivot, "Sales.region", &["East", "North", "West"]);
+    let gesture = PivotFilterGesture {
+        writes: vec![PivotFilterWrite { apply: Some(request), clear: None }],
+        step: FilterGestureStep::Own,
+    };
+    let response = crate::ribbon_filter::commands::apply_ribbon_filter_selection_core(
+        &fx.ctx(),
+        filter_id,
+        Some(strings(&["East", "North", "West"])),
+        gesture,
+    )
+    .await
+    .expect("the change");
+    assert_eq!(fx.undo_seqs().len(), seqs.len() + 1, "the ribbon change is not ONE step");
+    let token = response.overwrite_token.expect("the change overwrote C");
+    fx.cancel_overwrite(&[token]).expect("the change's Cancel");
+    assert_eq!(fx.text_at(c).as_deref(), Some("V"), "the Cancel did not put C back");
+    let selection = fx.filters.filters.read().unwrap()[&filter_id].selected_items.clone();
+    assert_eq!(selection, Some(strings(&["East"])), "the Cancel left the declined selection on the filter");
+    assert_eq!(fx.undo_seqs(), seqs, "the Cancel took back more or less than the change");
+
+    // The settings update joins an open transaction and does not commit it.
+    fx.begin("Filter settings");
+    crate::ribbon_filter::commands::update_ribbon_filter_core(
+        &fx.state,
+        &fx.file,
+        &fx.filters,
+        filter_id,
+        serde_json::from_value(serde_json::json!({ "filterLevel": 2 })).unwrap(),
+    )
+    .expect("the settings update");
+    assert!(fx.transaction_open(), "the ribbon settings update committed the caller's transaction");
+    fx.commit();
+    assert_eq!(fx.undo_seqs().len(), seqs.len() + 1, "the settings update is not in the caller's step");
+}
+
+// ============================================================================
+// WAVE B FIX-UP (the review of WP-SLICER): the ORDER and OWNERSHIP of a
+// gesture's one step, the blank item every level-1 list must OFFER before a
+// selection may hide it, and the protection gate a canvas-wide Delete relies
+// on.
+// ============================================================================
+
+impl Fx {
+    /// A write recorded into whatever transaction is open, with the cell's
+    /// previous text (what `update_cell` records).
+    fn recorded_write(&self, cell: (u32, u32), text: &str, previous: &str) {
+        self.put_text(cell, text);
+        self.state
+            .undo_stack
+            .lock()
+            .unwrap()
+            .record_cell_change(0, cell.0, cell.1, Some(engine::Cell::new_text(previous.to_string())));
+    }
+
+    /// The kinds of the custom restores a step holds, in recording order.
+    fn restore_kinds(step: &engine::Transaction) -> Vec<String> {
+        step.changes
+            .iter()
+            .filter_map(|ch| match ch {
+                engine::CellChange::CustomRestore { kind, .. } => Some(kind.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A PIVOT slicer on `field` of `pivot`: its items are the pivot's own
+    /// cache values (`get_pivot_field_values`).
+    fn pivot_slicer(&self, pivot: EntityId, field: &str) -> EntityId {
+        let mut s = slicer_on(0, pivot, field, None);
+        s.source_type = SlicerSourceType::Pivot;
+        s.connected_sources = vec![SlicerConnection { source_type: SlicerSourceType::Pivot, source_id: pivot }];
+        let id = s.id;
+        self.slicer.slicers.write(&test_seed_effect()).unwrap().insert(id, s);
+        id
+    }
+
+    /// The values a slicer lists, in its order.
+    async fn slicer_values(&self, slicer: EntityId) -> Vec<String> {
+        get_slicer_items_core(&self.state, &self.pivots, &self.slicer, &self.filters, &self.bi, slicer)
+            .await
+            .expect("the slicer's items")
+            .into_iter()
+            .map(|i| i.value)
+            .collect()
+    }
+
+    /// A slicer's level-1 click on `pivot` as the frontend sends it: by the
+    /// model key, naming the slicer.
+    async fn slicer_click(&self, slicer: EntityId, pivot: EntityId, key: &str, selected: &[&str]) {
+        let mut request = apply(pivot, key, selected);
+        request.slicer_id = Some(slicer.to_string());
+        apply_pivot_filter_core(&self.ctx(), request).await.expect("the slicer's click");
+    }
+
+    /// Protect sheet `sheet`, with `options` deciding what stays allowed.
+    fn protect_sheet(&self, sheet: usize, options: impl FnOnce(&mut crate::protection::SheetProtectionOptions)) {
+        let mut p = crate::protection::SheetProtection::default();
+        p.protected = true;
+        options(&mut p.options);
+        self.state.sheet_protection.write(&test_seed_effect()).unwrap().insert(sheet, p);
+    }
+}
+
+/// R1 (review of S1/S2). A user click made while a script batch is open that
+/// has ALREADY recorded a change JOINS the batch (marked as shared) instead of
+/// being pushed BENEATH it. Beneath it, the older batch landed ON TOP of the
+/// newer click: undoing both wrote the batch's pre-state into the pivot's
+/// output first and then the click's saved cells over it, so C came back as
+/// the script's value instead of the user's. Joined, the reverse replay runs
+/// in time order and one Ctrl+Z brings C back to what it held before either.
+#[tokio::test]
+async fn a_click_during_a_script_batch_that_already_wrote_joins_it_and_undoes_in_order() {
+    let fx = Fx::new(0).await;
+    let (pivot, c) = fx.shrunk_worksheet_pivot().await;
+    let slicer = fx.model_slicer(0, "Sales.region", Some(vec!["East"]));
+    fx.put_text(c, "V");
+    let seqs = fx.undo_seqs();
+    assert!(fx.begin_from_caller("Script batch"), "fixture: the script opens its batch");
+    fx.recorded_write(c, "S", "V"); // the script writes C before the click
+
+    let response = fx.gesture_click(slicer, pivot, &["East", "North", "West"], FilterGestureStep::Own).await;
+    assert_ne!(fx.text_at(c).as_deref(), Some("S"), "fixture: the click grew over C");
+    assert_eq!(
+        response.step,
+        FilterGestureStepOutcome::Joined,
+        "the click was pushed BENEATH a batch that had already written"
+    );
+    assert!(
+        fx.state.undo_stack.lock().unwrap().open_transaction_absorbed_begin(),
+        "the joined batch does not say it holds a user's click too"
+    );
+    fx.commit(); // the script commits its batch
+    assert_eq!(fx.undo_seqs().len(), seqs.len() + 1, "the batch and the click are not ONE step");
+    fx.undo_once();
+    assert_eq!(
+        fx.text_at(c).as_deref(),
+        Some("V"),
+        "undoing the batch and the click did not bring C back to its value before either"
+    );
+    assert_eq!(fx.selected(slicer), Some(strings(&["East"])), "the Ctrl+Z did not take the click's selection back");
+}
+
+/// R4 (review of S2). A script's slicer call is sent "join" and joins WHATEVER
+/// is open -- here a USER gesture's frontend step (a Slicer Settings save that
+/// grew a pivot over C). The join now MARKS the step, so the user's Cancel
+/// refuses to take it back (it would take the script's selection back too) and
+/// pops nothing; Ctrl+Z still takes both back together.
+#[tokio::test]
+async fn a_scripts_call_that_joins_a_users_open_step_marks_it_and_the_users_cancel_refuses() {
+    let fx = Fx::new(0).await;
+    let (pivot, c) = fx.shrunk_worksheet_pivot().await;
+    let slicer = fx.model_slicer(0, "Sales.region", Some(vec!["East"]));
+    fx.put_text(c, "V");
+    assert!(fx.begin_from_caller("Slicer Settings"), "fixture: the user's save opens its step");
+    let response = apply_pivot_filter_core(&fx.ctx(), apply(pivot, "Sales.region", &["East", "North", "West"]))
+        .await
+        .expect("the save's apply");
+    let token = response.overwrite_token.expect("fixture: the save overwrote C");
+    // Meanwhile a script sets the slicer's selection: its call joins.
+    let gesture = PivotFilterGesture { writes: vec![], step: FilterGestureStep::Join };
+    let joined = crate::slicer::commands::apply_slicer_selection_core(&fx.ctx(), slicer, Some(strings(&["West"])), gesture)
+        .await
+        .expect("the script's call")
+        .gesture;
+    assert_eq!(joined.step, FilterGestureStepOutcome::Joined, "fixture: the script's call joined");
+    fx.commit(); // the user's save commits
+    let after = fx.undo_seqs();
+
+    let cancel = fx.cancel_overwrite(&[token]);
+    assert_eq!(
+        cancel.as_ref().err().map(String::as_str),
+        Some(crate::pivot::commands::OVERWRITE_STEP_SHARED),
+        "the user's Cancel took back a step a script's call had joined"
+    );
+    assert_eq!(fx.selected(slicer), Some(strings(&["West"])), "the Cancel took the script's selection back");
+    assert_eq!(fx.undo_seqs(), after, "a refused Cancel changed the history");
+}
+
+/// R3 (review of A4). A canvas-wide Delete relies on each family REFUSING
+/// what a protected sheet forbids -- a chart's delete refuses, a control's
+/// does -- and a slicer's did not: moving it was refused, deleting it was
+/// not. Refused BEFORE the document is marked changed.
+#[tokio::test]
+async fn deleting_a_slicer_on_a_sheet_protected_against_object_edits_is_refused_and_clean() {
+    let fx = Fx::new(0).await;
+    let slicer = fx.model_slicer(0, "Sales.region", Some(vec!["East"]));
+    fx.protect_sheet(0, |o| o.allow_edit_objects = false);
+    crate::document_effect::mark_saved(&fx.file);
+    assert!(
+        crate::slicer::commands::update_slicer_position_core(&fx.state, &fx.file, &fx.slicer, slicer, 5.0, 5.0, 100.0, 100.0)
+            .is_err(),
+        "fixture: a move on the protected sheet is refused"
+    );
+    let err = delete_slicer_core(&fx.ctx(), slicer)
+        .await
+        .expect_err("a slicer on a sheet protected against object edits was deleted");
+    assert!(err.contains("protected"), "the refusal does not say why: {err}");
+    assert!(fx.slicer.slicers.read().unwrap().contains_key(&slicer), "the refused delete removed the slicer");
+    assert!(!fx.file.is_dirty(), "a refused delete dirtied the document");
+
+    // Positive control: with object edits allowed it deletes.
+    fx.protect_sheet(0, |o| o.allow_edit_objects = true);
+    delete_slicer_core(&fx.ctx(), slicer).await.expect("an allowed delete");
+    assert!(!fx.slicer.slicers.read().unwrap().contains_key(&slicer));
+}
+
+/// R6 (review of A1). The level-1 mask hides the blank member unless the
+/// selection NAMES it, so every list a selection is made from must OFFER the
+/// blank item. A pivot slicer lists it (last): deselecting ONE item from
+/// "all" keeps the blank rows, and selecting one item alone still hides them.
+#[tokio::test]
+async fn a_pivot_slicer_lists_the_blank_item_and_deselecting_one_item_keeps_the_blank_rows() {
+    let fx = fx_with_a_blank_region().await;
+    let pivot = fx.add_bi_pivot(0).await;
+    fx.lay_out(pivot, &["region"], &[]).await;
+    let slicer = fx.pivot_slicer(pivot, "Sales.region");
+    let values = fx.slicer_values(slicer).await;
+    assert_eq!(
+        values.last().map(String::as_str),
+        Some(pivot_engine::BLANK_ITEM_LABEL),
+        "the pivot slicer does not offer the blank item: {values:?}"
+    );
+    // Ctrl+click West from "all": every listed item but West.
+    let next: Vec<&str> = values.iter().map(String::as_str).filter(|v| *v != "West").collect();
+    fx.slicer_click(slicer, pivot, "Sales.region", &next).await;
+    assert_eq!(
+        fx.hidden_on(pivot, "region"),
+        Some(strings(&["West"])),
+        "deselecting West alone hid the blank rows too"
+    );
+    // A plain click on East: the blank rows go (A1).
+    fx.slicer_click(slicer, pivot, "Sales.region", &["East"]).await;
+    assert_eq!(
+        fx.hidden_on(pivot, "region"),
+        Some(strings(&["(blank)", "North", "West"])),
+        "selecting East alone kept the blank rows"
+    );
+}
+
+/// R6, a sibling: a pivot slicer that selects the blank item keeps the
+/// records whose value is blank, and the other slicer's "has data" follows
+/// them (a blank record never matched a sibling's selection before).
+#[tokio::test]
+async fn a_sibling_slicer_selecting_the_blank_item_keeps_its_records_available() {
+    let fx = fx_with_a_blank_region().await;
+    let pivot = fx.add_bi_pivot(0).await;
+    fx.lay_out(pivot, &["region", "year"], &[]).await;
+    let region = fx.pivot_slicer(pivot, "Sales.region");
+    let year = fx.pivot_slicer(pivot, "Sales.year");
+    fx.slicer.slicers.write(&test_seed_effect()).unwrap().get_mut(&region).unwrap().selected_items =
+        Some(strings(&["(blank)"]));
+    let items = get_slicer_items_core(&fx.state, &fx.pivots, &fx.slicer, &fx.filters, &fx.bi, year).await.unwrap();
+    let with_data: Vec<&str> = items.iter().filter(|i| i.has_data).map(|i| i.value.as_str()).collect();
+    assert_eq!(with_data, vec!["Y2"], "the blank-region record's year is not available: {items:?}");
+}
+
+/// R6, the MODEL lists -- after W6 (wave C): a model slicer's (and a ribbon
+/// filter's) items come from the model's value list, which now OFFERS the
+/// blank (NULL) member as `(blank)`, last (`MODEL_VALUE_LISTS_NAME_THE_BLANK`
+/// flipped with it). A selection made from such a list says whether the blank
+/// rows show: naming `(blank)` keeps them, leaving it out hides them -- through
+/// the click AND through the page fold of every later re-query. (Before W6 the
+/// list could not offer it, so such a selection had to leave the blank rows
+/// showing; this test pinned that and failed the moment W6 landed.)
+#[tokio::test]
+async fn a_model_slicers_selection_hides_the_blank_rows_unless_it_names_the_blank() {
+    let fx = fx_with_a_blank_region().await;
+    let pivot = fx.add_bi_pivot(0).await;
+    fx.lay_out(pivot, &["region"], &[]).await;
+    let slicer = fx.model_slicer(0, "Sales.region", None);
+    let values = fx.slicer_values(slicer).await;
+    assert!(
+        values.last().is_some_and(|v| pivot_engine::is_blank_item_label(v)),
+        "the model slicer's list does not offer the blank member last: {values:?}"
+    );
+    let blank_hidden = |hidden: &Option<Vec<String>>| {
+        hidden.as_ref().is_some_and(|h| h.iter().any(|v| pivot_engine::is_blank_item_label(v)))
+    };
+    let named_hidden = |hidden: &Option<Vec<String>>| -> Vec<String> {
+        hidden
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|v| !pivot_engine::is_blank_item_label(v))
+            .collect()
+    };
+
+    // Deselect West from the list: `(blank)` stays selected, its rows stay.
+    let next: Vec<&str> = values.iter().map(String::as_str).filter(|v| *v != "West").collect();
+    fx.slicer_click(slicer, pivot, "Sales.region", &next).await;
+    let hidden = fx.hidden_on(pivot, "region");
+    assert_eq!(named_hidden(&hidden), strings(&["West"]), "deselecting West hid more than West: {hidden:?}");
+    assert!(!blank_hidden(&hidden), "a selection that names (blank) hid the blank rows: {hidden:?}");
+
+    // A ribbon filter's write (a model key, no slicer) lists from the model
+    // too: East alone hides the blank rows.
+    fx.click(pivot, "Sales.region", &["East"]).await;
+    let hidden = fx.hidden_on(pivot, "region");
+    assert_eq!(named_hidden(&hidden), strings(&["North", "West"]));
+    assert!(blank_hidden(&hidden), "a ribbon filter's East kept the blank rows its list offered: {hidden:?}");
+
+    // The page fold of a re-query folds the model slicer by the same rule.
+    fx.select(slicer, Some(&["East"]));
+    fx.lay_out(pivot, &["region"], &["year"]).await;
+    let hidden = fx.hidden_on(pivot, "region");
+    assert_eq!(named_hidden(&hidden), strings(&["North", "West"]));
+    assert!(
+        blank_hidden(&hidden),
+        "the page fold of a re-query kept the blank rows the model slicer's East left out: {hidden:?}"
+    );
+}
+
+impl Fx {
+    /// Ctrl+Z as the `undo` command decides it: refused while a gesture that
+    /// pushes its step when it lands is in flight (`history_move_refusal`,
+    /// asked under the pop's lock), otherwise one step. True when it undid.
+    fn ctrl_z(&self) -> bool {
+        let transaction = {
+            let mut stack = self.state.undo_stack.lock().unwrap();
+            if crate::undo_commands::history_move_refusal(&stack).is_some() {
+                return false;
+            }
+            match stack.pop_undo() {
+                Some(t) => t,
+                None => return false,
+            }
+        };
+        crate::undo_commands::apply_changes(
+            &self.state, &self.file, &self.files, &self.pivots, &self.slicer, &self.filters, &self.pane,
+            &self.timelines, transaction, true,
+        );
+        true
+    }
+
+    /// Whether an undo or a redo would be refused right now.
+    fn history_move_refused(&self) -> bool {
+        crate::undo_commands::history_move_refusal(&self.state.undo_stack.lock().unwrap()).is_some()
+    }
+
+    /// A workbook-mode ribbon filter on Sales.region of this connection.
+    fn ribbon_filter(&self, selected: Option<&[&str]>) -> EntityId {
+        let filter_id = new_id();
+        let filter: crate::ribbon_filter::RibbonFilter = serde_json::from_value(serde_json::json!({
+            "id": filter_id.to_string(),
+            "name": "Region",
+            "connectionId": self.conn.to_string(),
+            "fieldName": "Sales.region",
+            "fieldDataType": "text",
+            "connectionMode": "workbook",
+            "connectedPivots": [],
+            "connectedSheets": [],
+            "displayMode": "checklist",
+            "selectedItems": selected.map(strings),
+            "crossFilterTargets": [],
+            "crossFilterSlicerTargets": [],
+            "order": 0,
+            "buttonColumns": 2,
+            "buttonRows": 0,
+            "filterLevel": 1
+        }))
+        .expect("a ribbon filter");
+        self.filters.filters.write(&test_seed_effect()).unwrap().insert(filter_id, filter);
+        filter_id
+    }
+
+    fn ribbon_selection(&self, filter_id: EntityId) -> Option<Vec<String>> {
+        self.filters.filters.read().unwrap()[&filter_id].selected_items.clone()
+    }
+}
+
+/// R7 + R2 (review of S1; BUG-0187's second symptom). A Ctrl+Z pressed while a
+/// click waits on the engine is REFUSED -- the history stays whole -- and once
+/// the click lands, Ctrl+Z takes back THE CLICK (Excel's order: the click came
+/// first) and Ctrl+Y can put it back. It used to take back the step BEFORE the
+/// click: the slicer went back to "all" under the click's new selection, the
+/// click's pivot writes landed with West anyway (slicer and pivot disagreed),
+/// and the click's push then cleared that Ctrl+Z's redo.
+#[tokio::test]
+async fn a_ctrl_z_while_a_click_waits_on_the_engine_is_refused_and_the_history_stays_whole() {
+    let fx = Fx::new(1).await;
+    let pivot = fx.add_bi_pivot(1).await;
+    fx.lay_out(pivot, &["year"], &[]).await;
+    let slicer = fx.model_slicer(1, "Sales.region", None);
+    let first = fx.gesture_click(slicer, pivot, &["East"], FilterGestureStep::Own).await;
+    assert_eq!(first.step, FilterGestureStepOutcome::Pushed, "fixture: click 1 is a step");
+    let depth = fx.undo_depth();
+
+    let engine_arc = fx.bi.connections.lock().unwrap()[&fx.conn].engine.clone().unwrap();
+    let busy = engine_arc.lock().await; // the engine is busy with someone else's query
+    let mut request = apply(pivot, "Sales.region", &["West"]);
+    request.slicer_id = Some(slicer.to_string());
+    let gesture = PivotFilterGesture { writes: vec![PivotFilterWrite { apply: Some(request), clear: None }], step: FilterGestureStep::Own };
+    let ctx = fx.ctx();
+    let mut click = Box::pin(crate::slicer::commands::apply_slicer_selection_core(
+        &ctx,
+        slicer,
+        Some(strings(&["West"])),
+        gesture,
+    ));
+    let waited = tokio::time::timeout(std::time::Duration::from_millis(150), &mut click).await;
+    assert!(waited.is_err(), "fixture: click 2 must be waiting on the engine");
+    assert!(!fx.ctrl_z(), "a Ctrl+Z pressed mid-click took back the step BEFORE the click");
+    assert!(fx.history_move_refused(), "a Ctrl+Y pressed mid-click would move the history under the click");
+    assert_eq!(fx.undo_depth(), depth, "the refused Ctrl+Z changed the history");
+    drop(busy);
+    let second = click.await.expect("click 2").gesture;
+    assert_eq!(second.step, FilterGestureStepOutcome::Pushed, "click 2 is not a step of its own");
+    assert!(!fx.history_move_refused(), "the click landed and still reads as in flight");
+    assert_eq!(fx.selected(slicer), Some(strings(&["West"])), "the slicer does not select what its pivot shows");
+    assert_eq!(fx.hidden_on(pivot, "region"), Some(strings(&["East", "North"])), "the pivot does not show the slicer's West");
+
+    assert!(fx.ctrl_z(), "Ctrl+Z after the click landed was refused");
+    assert_eq!(fx.selected(slicer), Some(strings(&["East"])), "Ctrl+Z did not take back the click that landed");
+    assert_eq!(fx.redo_depth(), 1, "undoing the click left nothing to redo");
+    fx.redo_once();
+    assert_eq!(fx.selected(slicer), Some(strings(&["West"])), "Ctrl+Y did not put the click back");
+}
+
+/// The review of S1, the other two gestures that push their step when they
+/// land: a ribbon filter change waiting on its model re-query, and a slicer
+/// delete waiting on its pinned clear, each refuse an undo or redo meanwhile.
+#[tokio::test]
+async fn a_ribbon_change_and_a_slicer_delete_refuse_a_history_move_while_they_wait_on_the_engine() {
+    let fx = Fx::new(1).await;
+    let pivot = fx.add_bi_pivot(1).await;
+    fx.lay_out(pivot, &["year"], &[]).await;
+    let filter_id = fx.ribbon_filter(None);
+    let engine_arc = fx.bi.connections.lock().unwrap()[&fx.conn].engine.clone().unwrap();
+    {
+        let busy = engine_arc.lock().await;
+        let gesture = PivotFilterGesture {
+            writes: vec![PivotFilterWrite { apply: Some(apply(pivot, "Sales.region", &["East"])), clear: None }],
+            step: FilterGestureStep::Own,
+        };
+        let ctx = fx.ctx();
+        let mut change = Box::pin(crate::ribbon_filter::commands::apply_ribbon_filter_selection_core(
+            &ctx,
+            filter_id,
+            Some(strings(&["East"])),
+            gesture,
+        ));
+        let waited = tokio::time::timeout(std::time::Duration::from_millis(150), &mut change).await;
+        assert!(waited.is_err(), "fixture: the ribbon change must be waiting on the engine");
+        assert!(fx.history_move_refused(), "an undo was allowed while a ribbon change waited on the engine");
+        drop(busy);
+        change.await.expect("the ribbon change");
+    }
+    assert!(!fx.history_move_refused(), "the ribbon change landed and still reads as in flight");
+
+    // A PINNED slicer: its delete's clear re-queries.
+    let slicer = fx.model_slicer(1, "Sales.region", Some(vec!["East"]));
+    fx.set_level(slicer, 2);
+    fx.pinned_click(pivot, slicer, &["East"]).await;
+    let busy = engine_arc.lock().await;
+    let ctx = fx.ctx();
+    let mut delete = Box::pin(delete_slicer_core(&ctx, slicer));
+    let waited = tokio::time::timeout(std::time::Duration::from_millis(150), &mut delete).await;
+    assert!(waited.is_err(), "fixture: the delete must be waiting on the engine");
+    assert!(fx.history_move_refused(), "an undo was allowed while a slicer delete waited on the engine");
+    drop(busy);
+    delete.await.expect("the delete");
+    assert!(!fx.history_move_refused(), "the delete landed and still reads as in flight");
+}
+
+/// W4 (wave C; wb-slicer new 9). A SINGLE pivot filter command that records
+/// at its END -- an ensure, a pin, a pinned clear -- waits on the engine for
+/// as long as the model takes, and was invisible to the in-flight count: a
+/// Ctrl+Z pressed meanwhile took back the step BEFORE it, the command's own
+/// step then landed on top (clearing that undo's redo), and the slicer or
+/// header dropdown that drove the filter disagreed with the pivot. Counted
+/// now like a slicer click. A RECONCILE (the re-apply right after an undo)
+/// records nothing and must never refuse the next Ctrl+Z.
+#[tokio::test]
+async fn a_single_pivot_filter_command_waiting_on_the_engine_refuses_a_history_move() {
+    let fx = Fx::new(1).await;
+    let pivot = fx.add_bi_pivot(1).await;
+    fx.lay_out(pivot, &["year"], &[]).await;
+    let slicer = fx.model_slicer(1, "Sales.region", Some(vec!["East"]));
+    let engine_arc = fx.bi.connections.lock().unwrap()[&fx.conn].engine.clone().unwrap();
+    let wait = std::time::Duration::from_millis(150);
+
+    // 1. An ENSURE: the pivot does not carry region yet, so the apply adds it
+    //    (a re-query) and pushes its step when it lands.
+    let depth = fx.undo_depth();
+    {
+        let busy = engine_arc.lock().await;
+        let ctx = fx.ctx();
+        let mut ensure = Box::pin(apply_pivot_filter_core(&ctx, apply(pivot, "Sales.region", &["East"])));
+        assert!(tokio::time::timeout(wait, &mut ensure).await.is_err(), "fixture: the ensure must wait on the engine");
+        assert!(fx.history_move_refused(), "an undo was allowed while an ensure waited on the engine");
+        assert!(!fx.ctrl_z(), "a Ctrl+Z pressed mid-ensure took back the step BEFORE it");
+        drop(busy);
+        ensure.await.expect("the ensure");
+    }
+    assert!(!fx.history_move_refused(), "the ensure landed and still reads as in flight");
+    assert_eq!(fx.undo_depth(), depth + 1, "fixture: the ensure records one step");
+
+    // 2. A PIN: routed inside the engine query, re-queried, recorded at the end.
+    {
+        let busy = engine_arc.lock().await;
+        let mut request = apply(pivot, "Sales.region", &["East"]);
+        request.filter_level = 2;
+        request.slicer_id = Some(slicer.to_string());
+        let ctx = fx.ctx();
+        let mut pin = Box::pin(apply_pivot_filter_core(&ctx, request));
+        assert!(tokio::time::timeout(wait, &mut pin).await.is_err(), "fixture: the pin must wait on the engine");
+        assert!(fx.history_move_refused(), "an undo was allowed while a pin waited on the engine");
+        drop(busy);
+        pin.await.expect("the pin");
+    }
+    assert!(!fx.history_move_refused(), "the pin landed and still reads as in flight");
+
+    // 3. A pinned CLEAR: dropping the pin re-queries too.
+    {
+        let busy = engine_arc.lock().await;
+        let request = ClearPivotFilterRequest {
+            pivot_id: pivot,
+            field_index: None,
+            bi_field_key: Some("Sales.region".to_string()),
+            filter_type: None,
+            reconcile: false,
+        };
+        let ctx = fx.ctx();
+        let mut clear = Box::pin(clear_pivot_filter_core(&ctx, request));
+        assert!(tokio::time::timeout(wait, &mut clear).await.is_err(), "fixture: the clear must wait on the engine");
+        assert!(fx.history_move_refused(), "an undo was allowed while a pinned clear waited on the engine");
+        drop(busy);
+        clear.await.expect("the clear");
+    }
+    assert!(!fx.history_move_refused(), "the clear landed and still reads as in flight");
+
+    // 4. A RECONCILE records nothing: never counted, even while it waits.
+    {
+        let busy = engine_arc.lock().await;
+        let mut request = apply(pivot, "Sales.region", &["West"]);
+        request.reconcile = true;
+        let ctx = fx.ctx();
+        let mut reconcile = Box::pin(apply_pivot_filter_core(&ctx, request));
+        assert!(tokio::time::timeout(wait, &mut reconcile).await.is_err(), "fixture: the reconcile must wait on the engine");
+        assert!(
+            !fx.history_move_refused(),
+            "a reconcile (the re-apply right after an undo) refused the user's next Ctrl+Z"
+        );
+        drop(busy);
+        reconcile.await.expect("the reconcile");
+    }
+
+    // Once everything landed, Ctrl+Z takes back the last step and Ctrl+Y can
+    // put it back: nothing cleared the redo underneath.
+    assert!(fx.ctrl_z(), "Ctrl+Z after the commands landed was refused");
+    assert_eq!(fx.redo_depth(), 1, "undoing the clear left nothing to redo");
+}
+
+/// The `undo` and `redo` COMMANDS ask the refusal, under the lock their pop
+/// takes, before they pop. (They need a `tauri::AppHandle` and eight `State`
+/// handles, so the wiring is read from their bodies; the rule itself is
+/// exercised by `a_ctrl_z_while_a_click_waits_on_the_engine_...`.)
+#[test]
+fn the_undo_and_redo_commands_refuse_while_a_gesture_lands() {
+    let src = include_str!("../undo_commands.rs").replace("\r\n", "\n");
+    for (name, pop) in [("pub fn undo(", "undo_stack.pop_undo()"), ("pub fn redo(", "undo_stack.pop_redo()")] {
+        let at = src.find(name).expect("the command");
+        let body = &src[at..at + src[at..].find("\n}\n").expect("its body")];
+        let lock = body.find("state.undo_stack.lock()").expect("the pop's lock");
+        let ask = body
+            .find("history_move_refusal(&undo_stack)")
+            .unwrap_or_else(|| panic!("`{name}` never asks whether a gesture is landing"));
+        let popped = body.find(pop).expect("the pop");
+        assert!(lock < ask && ask < popped, "`{name}` does not ask under its pop's lock, before the pop");
+    }
+}
+
+/// R3 (review of A4), the PIVOT box. A worksheet pivot on a sheet protected
+/// against PivotTable changes, and a pivot box on a canvas protected against
+/// object edits, refuse their delete -- before anything is written.
+#[tokio::test]
+async fn deleting_a_pivot_on_a_sheet_protected_against_it_is_refused() {
+    let fx = Fx::new(1).await;
+    let on_sheet = fx.add_bi_pivot(0).await;
+    let on_canvas = fx.add_bi_pivot(1).await;
+    let gate = |fx: &Fx, pivot| crate::pivot::commands::refuse_a_protected_pivot_delete(&fx.state, &fx.pivots, pivot);
+    assert!(gate(&fx, on_sheet).is_ok() && gate(&fx, on_canvas).is_ok(), "fixture: unprotected sheets refuse nothing");
+
+    fx.protect_sheet(0, |o| o.allow_pivot_tables = false);
+    let err = gate(&fx, on_sheet).expect_err("a pivot on a sheet protected against PivotTable changes may be deleted");
+    assert!(err.contains("protected"), "the refusal does not say why: {err}");
+    fx.protect_sheet(0, |o| o.allow_pivot_tables = true);
+    assert!(gate(&fx, on_sheet).is_ok(), "allowing PivotTable changes still refused the delete");
+
+    fx.protect_sheet(1, |o| {
+        o.allow_edit_objects = false;
+        o.allow_pivot_tables = true;
+    });
+    assert!(gate(&fx, on_canvas).is_err(), "a pivot BOX on a canvas protected against object edits may be deleted");
+    fx.protect_sheet(1, |o| {
+        o.allow_edit_objects = true;
+        o.allow_pivot_tables = false;
+    });
+    assert!(gate(&fx, on_canvas).is_ok(), "a canvas box's delete is an object edit, not a PivotTable change");
+    assert!(gate(&fx, new_id()).is_ok(), "an unknown pivot is the existence check's to refuse");
+}
+
+/// The delete COMMAND asks the gate before it mints its effect (a refused
+/// delete leaves the document clean). It needs nine `State` handles, so the
+/// order is read from its body.
+#[test]
+fn the_pivot_delete_command_asks_the_protection_gate_before_anything_is_written() {
+    let src = include_str!("../pivot/commands.rs").replace("\r\n", "\n");
+    let at = src.find("pub fn delete_pivot_table(").expect("the delete command");
+    let body = &src[at..at + src[at..].find("\n}\n").expect("its body")];
+    let gate = body.find("refuse_a_protected_pivot_delete(").expect("delete_pivot_table never asks the protection gate");
+    let effect = body.find("pivot_exists_token(").expect("the effect");
+    assert!(gate < effect, "delete_pivot_table mints its effect before the protection gate");
+}
+
+/// The review of A1: the mask rule's model-list flag
+/// (`MODEL_VALUE_LISTS_NAME_THE_BLANK`) agrees with what the model's value
+/// list -- the one model slicers and ribbon filters list -- actually offers.
+/// When that list starts offering the blank (NULL) member, this fails until
+/// the flag is flipped, and model selections may hide the blank rows again.
+#[tokio::test]
+async fn model_value_lists_name_the_blank_exactly_when_the_mask_rule_says_so() {
+    let fx = fx_with_a_blank_region().await;
+    let values = crate::bi::commands::bi_get_column_values_core(&fx.bi, fx.conn, "Sales", "region")
+        .await
+        .expect("the model's values");
+    let offers = values.iter().any(|v| v.is_empty() || pivot_engine::is_blank_item_label(v));
+    assert_eq!(
+        offers,
+        crate::pivot::commands::MODEL_VALUE_LISTS_NAME_THE_BLANK,
+        "the model's value list {} the blank member but the mask rule says it {}: {values:?}",
+        if offers { "offers" } else { "does not offer" },
+        if offers { "does not" } else { "does" }
+    );
+}
+
+/// The review of A2: the header dropdown's CHECKED set (`get_pivot_field_info`)
+/// lists the blank item too -- last, visible unless a hidden item names it (in
+/// any spelling), and in the manual filter's selection when visible. It showed
+/// `(blank)` UNCHECKED while its rows were visible, and any OK then hid them.
+#[tokio::test]
+async fn a_pivot_fields_info_lists_the_blank_item_and_reads_its_visibility() {
+    let fx = fx_with_a_blank_region().await;
+    let pivot = fx.add_bi_pivot(0).await;
+    fx.lay_out(pivot, &["region"], &[]).await;
+    let idx = fx.row_field_index(pivot);
+    let blank_of = |info: &crate::pivot::types::PivotFieldInfo| {
+        info.items.last().filter(|i| pivot_engine::is_blank_item_label(&i.name)).map(|i| i.visible)
+    };
+    let info = crate::pivot::commands::pivot_field_info_core(&fx.pivots, pivot, idx).expect("the info");
+    assert_eq!(blank_of(&info), Some(true), "the blank item is not listed last as visible: {:?}", info.items);
+
+    // Everything but West (the blank item included), from the header's own list.
+    fx.header_select(pivot, &["East", "North", "(blank)"]).await;
+    assert_eq!(fx.hidden_on(pivot, "region"), Some(strings(&["West"])), "fixture: only West is hidden");
+    let info = crate::pivot::commands::pivot_field_info_core(&fx.pivots, pivot, idx).expect("the info");
+    assert_eq!(blank_of(&info), Some(true), "(blank) reads UNCHECKED although its rows are visible");
+    let selected = info.filters.manual_filter.expect("a filtered field").selected_items;
+    assert!(
+        selected.iter().any(|s| pivot_engine::is_blank_item_label(s)) && !selected.iter().any(|s| s == "West"),
+        "the selection the dropdown starts from would hide the blank rows on OK: {selected:?}"
+    );
+
+    // Hidden by another spelling of its label.
+    {
+        let mut tables = fx.pivots.pivot_tables.write(&test_seed_effect()).unwrap();
+        let def = &mut tables.get_mut(&pivot).unwrap().0;
+        def.row_fields.iter_mut().find(|f| f.source_index == idx).unwrap().hidden_items = strings(&["(Blank)"]);
+    }
+    let info = crate::pivot::commands::pivot_field_info_core(&fx.pivots, pivot, idx).expect("the info");
+    assert_eq!(blank_of(&info), Some(false), "a hidden (Blank) reads as visible");
+}
+
+/// The review of S2: a ribbon item toggle DECIDES from the stored selection
+/// under the same hold of the store that writes it -- it read under one lock
+/// and wrote under another, so a concurrent change in between was lost. The
+/// toggles themselves: on appends, off removes, empty clears; each a step.
+#[tokio::test]
+async fn a_ribbon_item_toggle_decides_and_writes_under_one_hold_of_the_store() {
+    let src = include_str!("../ribbon_filter/commands.rs").replace("\r\n", "\n");
+    let at = src.find("pub(crate) fn set_ribbon_filter_item_selected_core(").expect("the toggle's core");
+    let body = &src[at..at + src[at..].find("\n}\n").expect("its body")];
+    assert!(
+        body.contains("write_ribbon_filter_selection_with(") && !body.contains(".read()"),
+        "the toggle reads the store outside the hold that writes it:\n{body}"
+    );
+    let cmd_at = src.find("pub fn set_ribbon_filter_item_selected(").expect("the command");
+    let cmd = &src[cmd_at..cmd_at + src[cmd_at..].find("\n}\n").expect("its body")];
+    assert!(cmd.contains("set_ribbon_filter_item_selected_core("), "the command does not run the core");
+
+    let fx = Fx::new(0).await;
+    let filter_id = fx.ribbon_filter(Some(&["East"]));
+    let depth = fx.undo_depth();
+    let toggle = |value: &str, selected: bool| {
+        crate::ribbon_filter::commands::set_ribbon_filter_item_selected_core(
+            &fx.state,
+            &fx.file,
+            &fx.filters,
+            filter_id,
+            value.to_string(),
+            selected,
+        )
+        .expect("the toggle")
+    };
+    toggle("West", true);
+    assert_eq!(fx.ribbon_selection(filter_id), Some(strings(&["East", "West"])));
+    toggle("East", false);
+    assert_eq!(fx.ribbon_selection(filter_id), Some(strings(&["West"])));
+    toggle("West", false);
+    assert_eq!(fx.ribbon_selection(filter_id), None, "an empty selection is not the cleared filter");
+    assert_eq!(fx.undo_depth(), depth + 3, "each toggle is not a step");
+    toggle("West", false);
+    assert_eq!(fx.undo_depth(), depth + 3, "a toggle that changed nothing recorded a step");
+}
+
+/// R1, the generic path and the empty cell. A pivot write that JOINS a step
+/// which already wrote its cell -- here an ordinary apply (no gesture) inside
+/// a script batch, recorded through `record_restores_joining_open_transaction`
+/// -- is fitted to the step the same way: a C that was EMPTY when the step
+/// began comes back empty, not with the script's value (the pivot restores of
+/// a step replay after its cell restores).
+#[tokio::test]
+async fn a_pivot_write_joining_a_step_that_wrote_its_cell_undoes_to_the_steps_start() {
+    let fx = Fx::new(0).await;
+    let (pivot, c) = fx.shrunk_worksheet_pivot().await;
+    assert_eq!(fx.text_at(c), None, "fixture: C starts empty");
+    assert!(fx.begin_from_caller("Script batch"), "fixture: the script opens its batch");
+    fx.put_text(c, "S");
+    fx.state.undo_stack.lock().unwrap().record_cell_change(0, c.0, c.1, None); // C was empty
+    apply_pivot_filter_core(&fx.ctx(), apply(pivot, "Sales.region", &["East", "North", "West"]))
+        .await
+        .expect("the apply");
+    assert_ne!(fx.text_at(c).as_deref(), Some("S"), "fixture: the pivot grew over C");
+    fx.commit();
+    fx.undo_once();
+    assert_eq!(fx.text_at(c), None, "undoing the step left the script's value in a cell that was empty when it began");
 }

@@ -8,6 +8,7 @@ import {
   AppEvents,
 } from "@api";
 import { emitAppEvent } from "@api/events";
+import { onSelectionOwnershipChanged } from "@api/selectionOwner";
 import {
   removeGridRegionsByType,
   type OverlayRenderContext,
@@ -27,6 +28,8 @@ import {
   resetSelectionHandlerState,
   ensureDesignTabRegistered,
   syncDesignTabToTables,
+  syncDesignTabToSelectionOwner,
+  recheckDesignTabAfterSheetChange,
   initRequestStateListener,
   initClickInterceptor,
 } from "./handlers/selectionHandler";
@@ -206,10 +209,14 @@ function activate(context: ExtensionContext): void {
   );
 
   // Refresh table cache when the active sheet changes so tables from
-  // the previous sheet are removed and the new sheet's tables are loaded.
+  // the previous sheet are removed and the new sheet's tables are loaded --
+  // THEN re-derive the Table Design tab for the cell the new sheet shows: the
+  // selection handler's same-cell skip cannot tell B2 here from B2 there.
   cleanupFunctions.push(
     context.events.on(AppEvents.SHEET_CHANGED, () => {
-      refreshCache().catch(console.error);
+      refreshCache()
+        .then(() => recheckDesignTabAfterSheetChange())
+        .catch(console.error);
     }),
   );
 
@@ -217,6 +224,9 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(
     ExtensionRegistry.onSelectionChange(handleSelectionChange),
   );
+  // ...and to a selection owner's claim starting or ending: the tab stands
+  // aside while a floating grid's cell holds the selection (W22).
+  cleanupFunctions.push(onSelectionOwnershipChanged(() => syncDesignTabToSelectionOwner()));
 
   // Initial cache load
   refreshCache().catch(console.error);

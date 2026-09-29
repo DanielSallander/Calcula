@@ -1970,17 +1970,25 @@ pub(crate) fn collect_charts_for_save(state: &State<AppState>, sheet_ids: &[Shee
 }
 
 /// Restore charts from SavedChart format into AppState.
-fn restore_charts(saved: &[persistence::SavedChart], state: &State<AppState>, workbook: &persistence::Workbook) {
+pub(crate) fn restore_charts(saved: &[persistence::SavedChart], state: &AppState, workbook: &persistence::Workbook) {
     // Load path: rebuilding the store FROM the file is not an edit TO the document.
     let load = crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::LoadingFromDisk);
+    // THE SHEET-ID STAMP IS PART OF THE LOAD (BUG-0204): a range that names its
+    // sheet by index alone is pinned to the sheet that index names IN THIS FILE,
+    // here, before anything can add, delete or move a sheet. The chart store's
+    // own late stamp ran against whatever the sheet list was ~300 ms later.
+    let file_sheet_ids: Vec<String> = workbook.sheets.iter().map(|s| s.id.to_string()).collect();
+    let sheet_id_at = |index: usize| file_sheet_ids.get(index).cloned();
     let mut charts = state.charts.write(&load).unwrap();
     charts.clear();
     for s in saved {
         let Some(sheet_index) = sheet_id_to_index(workbook, s.sheet_id) else { continue };
+        let spec_json = crate::chart_commands::stamp_chart_record_sheet_ids(&s.spec_json, &sheet_id_at)
+            .unwrap_or_else(|| s.spec_json.clone());
         charts.push(crate::api_types::ChartEntry {
             id: s.id,
             sheet_index,
-            spec_json: s.spec_json.clone(),
+            spec_json,
         });
     }
 }
@@ -2333,6 +2341,15 @@ pub(crate) fn restore_pivot_definitions(
         Ok(g) => g,
         Err(_) => return,
     };
+    // The sheet names, COPIED and released before the pivot lock. The
+    // calculation pass (`calculate_now`, off the main thread) holds
+    // `sheet_names` while it takes `pivot_tables`; this held `pivot_tables`
+    // while it waited for `sheet_names`, a cycle waiting for the first caller
+    // that is not on the main thread (the 2.af lock-order watch item).
+    let sheet_names: Vec<String> = match state.sheet_names.read() {
+        Ok(names) => names.clone(),
+        Err(_) => return,
+    };
     let mut pivot_tables = match pivot_state.pivot_tables.write(&load) {
         Ok(pt) => pt,
         Err(_) => return,
@@ -2340,6 +2357,13 @@ pub(crate) fn restore_pivot_definitions(
 
     // Clear any existing pivot state
     pivot_tables.clear();
+
+    // Every GRID pivot's view, stored once the pivot lock is released: it is
+    // the pivot's real output, and GETPIVOTDATA reads the STORED view. None
+    // was stored, so after a load every GETPIVOTDATA answered #REF! until
+    // something fetched that pivot's view (BUG-0147). A BI pivot's view here
+    // is computed from an empty cache -- not its output -- and is not stored.
+    let mut loaded_views: Vec<(pivot_engine::PivotId, pivot_engine::PivotView)> = Vec::new();
 
     for saved in &workbook.pivot_definitions {
         // Deserialize the PivotDefinition from opaque JSON
@@ -2390,28 +2414,55 @@ pub(crate) fn restore_pivot_definitions(
 
         // Register the protected region so the frontend can discover this pivot
         if let Some(ref view) = view {
-            let sheet_names = state.sheet_names.read().unwrap();
-            let dest_sheet_name = def.destination_sheet.as_deref().unwrap_or("");
-            let dest_sheet_idx = sheet_names.iter()
-                .position(|n| n == dest_sheet_name)
-                .unwrap_or(0);
-            drop(sheet_names);
-            match bi_output_extents.get(&pivot_id) {
-                // A BI pivot's empty cache renders nothing like its saved
-                // output: cover exactly the block it wrote.
-                Some(extent) if saved.source_type != "grid" => update_pivot_region_extent(
-                    state,
+            // The destination sheet by NAME, ignoring case -- the rule every
+            // pivot write resolves by. This matched the exact spelling and fell
+            // back to sheet 0, so a stored name whose case had drifted from its
+            // tab (a case-only rename updates no definition) registered the
+            // region on the FIRST sheet, protecting cells the pivot never
+            // wrote (BUG-0147). A definition with no sheet name at all (older
+            // files) keeps sheet 0; a name this workbook has no sheet for is
+            // left unregistered, and says so, rather than landing on sheet 0.
+            let dest_sheet_idx = match def.destination_sheet.as_deref() {
+                Some(name) => crate::pivot::operations::index_of_sheet(&sheet_names, name),
+                None => Some(0),
+            };
+            match dest_sheet_idx {
+                None => crate::log_warn!(
+                    "PIVOT",
+                    "pivot {} names destination sheet {:?}, which this workbook does not have; its region is \
+                     not registered",
                     pivot_id,
-                    dest_sheet_idx,
-                    def.destination,
-                    extent.rows,
-                    extent.cols,
+                    def.destination_sheet
                 ),
-                _ => update_pivot_region(state, pivot_id, dest_sheet_idx, def.destination, view),
+                Some(dest_sheet_idx) => match bi_output_extents.get(&pivot_id) {
+                    // A BI pivot's empty cache renders nothing like its saved
+                    // output: cover exactly the block it wrote.
+                    Some(extent) if saved.source_type != "grid" => update_pivot_region_extent(
+                        state,
+                        pivot_id,
+                        dest_sheet_idx,
+                        def.destination,
+                        extent.rows,
+                        extent.cols,
+                    ),
+                    _ => update_pivot_region(state, pivot_id, dest_sheet_idx, def.destination, view),
+                },
+            }
+        }
+        if saved.source_type == "grid" {
+            if let Some(view) = view {
+                loaded_views.push((pivot_id, view));
             }
         }
 
         pivot_tables.insert(pivot_id, (def, cache));
+    }
+    drop(pivot_tables);
+    drop(grids);
+    if let Ok(mut views) = pivot_state.views.lock() {
+        for (pivot_id, view) in loaded_views {
+            views.insert(pivot_id, view);
+        }
     }
 
     // Restore BI metadata

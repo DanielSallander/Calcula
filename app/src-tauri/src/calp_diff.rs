@@ -190,6 +190,12 @@ pub struct DiffWorkingCopyParams {
     /// wants — there, every sheet in the link's base_sheets IS in scope.
     #[serde(default)]
     pub scope_sheet_ids: Option<Vec<String>>,
+    /// The frontend providers' distributable objects (the model overlay,
+    /// reports), collected the way a push collects them (BUG-0150). Absent =
+    /// the caller could not collect them, and the working side then lacks
+    /// them: every one reads as REMOVED against a base that carries it.
+    #[serde(default)]
+    pub custom_objects: Option<Vec<crate::calp_commands::FrontendCustomObject>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -288,7 +294,14 @@ pub fn calp_diff_working_copy(
         ));
     }
 
-    // The working-copy side: a real publish into memory.
+    // The working-copy side: a real publish into memory -- with the frontend's
+    // distributable objects when the caller sent them, as the push does.
+    let frontend_objects_supplied = params.custom_objects.is_some();
+    // A SUBSCRIBER's collision renames, undone in the working side's
+    // references so they compare in the published spelling (BUG-0151). Empty
+    // for a working copy, whose assembly undoes its own.
+    let published_names =
+        crate::calp_commands::subscriber_published_names(&state, &package_name, &base_manifest)?;
     let memory = calp::MemoryWorkspace::new();
     let working_version = calp::SemVer::new(0, 0, 0);
     crate::calp_commands::publish_into_for_preview(
@@ -310,6 +323,8 @@ pub fn calp_diff_working_copy(
         link.as_ref().map(|l| l.kind.as_str()).unwrap_or(""),
         params.sheet_indices.clone().unwrap_or_default(),
         params.include_comments,
+        params.custom_objects,
+        &published_names,
     )?;
     let working_version_str = working_version.to_string();
     let working_manifest = memory
@@ -334,13 +349,17 @@ pub fn calp_diff_working_copy(
         &DiffOptions { sheet_id_map, ..DiffOptions::default() },
     )
     .map_err(|e| e.to_string())?;
-    // The working side cannot see the frontend's distributable objects, one
-    // input to the version stamp -- see the helper for when that line is real.
-    crate::calp_commands::reconcile_unknowable_min_app_version(
-        &mut diff,
-        &base_manifest,
-        &working_manifest,
-    );
+    // Only a working side that could NOT see the frontend's distributable
+    // objects needs its version-stamp line reconciled -- see the helper. One
+    // that was handed them saw everything the push carries, and a stamp line
+    // it reports is real (BUG-0150).
+    if !frontend_objects_supplied {
+        crate::calp_commands::reconcile_unknowable_min_app_version(
+            &mut diff,
+            &base_manifest,
+            &working_manifest,
+        );
+    }
 
     Ok(WorkingCopyDiff {
         package_name,

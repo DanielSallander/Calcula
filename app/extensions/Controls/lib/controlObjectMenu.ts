@@ -18,6 +18,9 @@ import { floatingControlRegionAtClientPoint } from "./controlHitTest";
 import { getFloatingControl } from "./floatingStore";
 import { isFloatingControlSelected } from "../Button/floatingSelection";
 import { selectControlWithGroup } from "./controlObjectSelection";
+import { isObjectInSelection, selectObject } from "@api/objectSelection";
+import { canvasOwnsObjectClipboard } from "@api/objectClipboard";
+import type { GridRegion } from "@api/gridOverlays";
 
 export const CONTROL_CONTEXT_MENU_ID = "controls:contextMenu";
 
@@ -35,7 +38,17 @@ export const CONTROL_CONTEXT_MENU_ID = "controls:contextMenu";
  * in run mode, and a right-click must never fire a macro. The group expansion
  * is `selectControlWithGroup`, the one the keyboard selection provider uses.
  */
-function selectForMenu(controlId: string): void {
+function selectForMenu(controlId: string, region: GridRegion): void {
+  // On a CANVAS the menu acts on the whole object selection (Copy /
+  // Duplicate go through the object clipboard, W25), so a right-click on a
+  // control that is NOT in it makes the control THE selection across every
+  // family -- a chart selected before must not ride along into a Duplicate
+  // of the shape the user pointed at. The seam's `selectObject` is the
+  // press-free select (no click semantics), through Controls' own provider.
+  if (canvasOwnsObjectClipboard()) {
+    if (!isObjectInSelection(region)) selectObject(region);
+    return;
+  }
   if (isFloatingControlSelected(controlId)) return;
 
   selectControlWithGroup(controlId);
@@ -83,7 +96,7 @@ export function installControlObjectMenu(): () => void {
     e.preventDefault();
     e.stopPropagation();
 
-    selectForMenu(control.id);
+    selectForMenu(control.id, region);
 
     showOverlay(CONTROL_CONTEXT_MENU_ID, {
       data: {

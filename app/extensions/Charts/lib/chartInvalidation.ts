@@ -62,9 +62,13 @@ function hasUnboundedDeps(spec: ChartSpec): boolean {
  *     or a source sheet that has just been deleted): the answer is then true,
  *     because a skipped invalidation is the one mistake this function must
  *     never make.
- *   - A PARAM cell is read from the ACTIVE sheet (`resolveParamCell` — a param
- *     ref is same-sheet only, and the sheet it is written back to is the active
- *     one), so a param change still counts only when it is on the active sheet.
+ *   - A PARAM cell is read from the sheet the chart reads (`locateParamCell`:
+ *     the chart's own sheet, or on a canvas its data sheet), named by
+ *     `paramSheetIndex` ({@link paramCellSheetIndex} computes it): a change
+ *     counts when it is on that sheet. `null` means "not known right now" (a
+ *     cold sheet cache) and counts a change on ANY sheet -- conservative.
+ *     Omitted, it is the ACTIVE sheet (the historical rule, for a caller that
+ *     has no placed chart).
  *
  * Pure.
  */
@@ -73,6 +77,7 @@ export function chartIntersectsChanges(
   changes: ReadonlyArray<ChangedCell>,
   activeSheetIndex: number,
   sourceSheetIndex: number | null,
+  paramSheetIndex?: number | null,
 ): boolean {
   if (changes.length === 0) return false;
   if (hasUnboundedDeps(spec)) return true;
@@ -85,10 +90,35 @@ export function chartIntersectsChanges(
     if (c.row >= d.startRow && c.row <= d.endRow && c.col >= d.startCol && c.col <= d.endCol) return true;
   }
   // A change to a bound param's cell affects the chart even outside the data bbox.
+  const paramSheet = paramSheetIndex === undefined ? activeSheetIndex : paramSheetIndex;
+  const onParamSheet = (c: ChangedCell): boolean => paramSheet === null || sheetOf(c) === paramSheet;
   for (const p of spec.params ?? []) {
     if (!p.cellRef) continue;
     const t = parseParamCellTarget(p.cellRef);
-    if (t && changes.some((c) => sheetOf(c) === activeSheetIndex && c.row === t.row && c.col === t.col)) return true;
+    if (t && changes.some((c) => onParamSheet(c) && c.row === t.row && c.col === t.col)) return true;
   }
   return false;
+}
+
+/**
+ * The sheet a placed chart's unqualified param cell is on -- the SYNCHRONOUS
+ * mirror of `locateParamCell` (dataSourceResolver.ts), for the cell-change
+ * listener, which cannot await:
+ *   - host on a worksheet: the host;
+ *   - host on a canvas: the data's sheet (`sourceSheetIndex`), or -1 when the
+ *     data has no sheet (no param cell anywhere: no change can hit it);
+ *   - host kind not known (`hostIsCanvas` null: a cold sheet cache), or a
+ *     canvas whose data sheet is not known right now: null (conservative).
+ * Pure.
+ */
+export function paramCellSheetIndex(
+  hostSheetIndex: number,
+  hostIsCanvas: boolean | null,
+  sourceSheetIndex: number | null,
+  dataHasSheet: boolean,
+): number | null {
+  if (hostIsCanvas === null) return null;
+  if (!hostIsCanvas) return hostSheetIndex;
+  if (!dataHasSheet) return -1;
+  return sourceSheetIndex;
 }

@@ -2,7 +2,10 @@
 // PURPOSE: Single-select dropdown body for a pane control card. Items come
 //          from the config's source: a static list, or a cell range read via
 //          the @api CellRange facade (display strings, empties skipped),
-//          re-read on the "grid:refresh" window event and on open.
+//          re-read on the "grid:refresh" window event and on open. A range
+//          names its sheet ("Data!A1:A5") and is read from THAT sheet only: a
+//          name no sheet answers to, or a #REF! source, lists nothing
+//          (lib/dropdownCellRangeSource.ts).
 // CONTEXT: Selecting an item commits { kind: "text" } (one backend write, one
 //          undo entry, one GET.CONTROLVALUE dependent recalc).
 //
@@ -13,13 +16,13 @@
 //          and Escape listeners; the Popover owns dismissal now.
 
 import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
-import { CellRange, getSheets } from "@api";
 import { Dropdown, useSurfaceLayout } from "@api/layout";
 import type { DropdownOption } from "@api/layout";
 import { setChartParamValue } from "@api/chartParams";
 import type { ControlValue } from "@api/controlValues";
 import type { PaneControl } from "../lib/controlsPaneTypes";
 import { commitValue } from "../lib/controlsPaneStore";
+import { loadCellRangeItems } from "../lib/dropdownCellRangeSource";
 
 type DropdownConfig = Extract<PaneControl["config"], { type: "dropdown" }>;
 
@@ -28,9 +31,6 @@ const FALLBACK_CONFIG: DropdownConfig = {
   source: { type: "static", items: [] },
   placeholder: null,
 };
-
-/** Cap cell-range reads so a whole-column reference stays cheap. */
-const MAX_RANGE_CELLS = 1000;
 
 /** Band trigger width: fills a card at its minimum width. */
 const BAND_TRIGGER_WIDTH = 140;
@@ -41,45 +41,6 @@ const OPEN_KEYS = new Set(["ArrowDown", "ArrowUp", "Enter", " "]);
 /** The placeholder row's value when a source has no items. It is only ever
  *  offered when there are NO real items, so it cannot shadow one. */
 const NO_ITEMS_VALUE = "__controls_pane_no_items__";
-
-/**
- * Read a cell-range source's items: display strings in range order
- * (row-major), empties skipped. An explicit "Sheet!" prefix is resolved to
- * its sheet index (CellRange parses but does not resolve sheet names);
- * unknown sheet names fall back to the active sheet.
- */
-async function loadCellRangeItems(reference: string): Promise<string[]> {
-  let sheetIndex: number | undefined;
-  const bangIdx = reference.lastIndexOf("!");
-  if (bangIdx !== -1) {
-    const sheetName = reference
-      .substring(0, bangIdx)
-      .trim()
-      .replace(/^'+|'+$/g, "");
-    const result = await getSheets();
-    const match = result.sheets.find(
-      (s: { index: number; name: string }) =>
-        s.name.toLowerCase() === sheetName.toLowerCase(),
-    );
-    if (match) sheetIndex = match.index;
-  }
-
-  let range = CellRange.fromAddress(reference, sheetIndex);
-  if (range.cellCount > MAX_RANGE_CELLS) {
-    const rows = Math.max(1, Math.floor(MAX_RANGE_CELLS / range.colCount));
-    range = range.resize(rows, range.colCount);
-  }
-
-  const values = await range.getValues();
-  const items: string[] = [];
-  for (let r = range.startRow; r <= range.endRow; r++) {
-    for (let c = range.startCol; c <= range.endCol; c++) {
-      const display = values.get(`${r},${c}`)?.display ?? "";
-      if (display !== "") items.push(display);
-    }
-  }
-  return items;
-}
 
 interface Props {
   control: PaneControl;

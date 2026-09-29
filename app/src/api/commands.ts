@@ -4,6 +4,8 @@
 //          The CommandRegistry bridges to core/lib/gridCommands for grid operations.
 
 import { gridCommands, type GridCommand } from "../core/lib/gridCommands";
+import { commandRefusalFor } from "./commandRefusals";
+import { showToast } from "./notifications";
 
 // ============================================================================
 // Standard Command IDs (The "Well-Known" commands)
@@ -260,11 +262,30 @@ class CommandRegistryImpl implements ICommandRegistry {
 
   /**
    * Execute a command.
-   * Priority: 1) Local handlers, 2) GridCommands bridge
+   * Priority: 0) a command refusal, 1) Local handlers, 2) GridCommands bridge
    * @param commandId The command ID to execute
    * @param args Optional arguments to pass to the handler
    */
   async execute(commandId: string, args?: unknown): Promise<unknown> {
+    // 0. A REFUSED command (`@api/commandRefusals`) runs nothing from ANY door.
+    // Only the keyboard dispatcher asked the refusals, so Undo on the ribbon,
+    // the Edit menu or the Quick Access Toolbar while a slicer click was still
+    // landing reached the backend -- and could overtake the gesture's own
+    // start, taking back the step BEFORE the click (found live 2026-09-29, e2e
+    // fixall-edit W15). A refused keystroke never gets here: the dispatcher
+    // refuses it itself, so the sentence is shown once per press either way.
+    const refusal = commandRefusalFor(commandId);
+    if (refusal !== null) {
+      // Nothing ran, so nothing is recorded (like an unknown command): an
+      // unpaired "unhandled" would close an ENCLOSING command's recorder scope.
+      try {
+        showToast(refusal, { variant: "info" });
+      } catch {
+        console.warn(`[CommandRegistry] ${refusal}`);
+      }
+      return undefined;
+    }
+
     // 1. Check local handlers first — return the handler's result.
     const handler = this.handlers.get(commandId);
     if (handler) {

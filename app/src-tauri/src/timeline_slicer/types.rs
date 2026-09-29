@@ -46,7 +46,10 @@ pub struct TimelineStylePreset {
 // ============================================================================
 
 /// A timeline slicer definition — a date-specific visual filter for PivotTables.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` so an edit that changes nothing is recognised and records no
+/// undo step (`commands::update_timeline_with`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineSlicer {
     /// Unique timeline slicer ID

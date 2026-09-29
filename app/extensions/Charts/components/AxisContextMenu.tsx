@@ -10,6 +10,7 @@ import { emitAppEvent, AppEvents, showDialog } from "@api";
 
 import type { ChartSpec, AxisSpec } from "../types";
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
+import { noteChartMenuMounted } from "../lib/chartMenuState";
 import { invalidateChartCache } from "../rendering/chartRenderer";
 import { ChartEvents } from "../lib/chartEvents";
 
@@ -92,14 +93,21 @@ export function AxisContextMenu({ onClose, data }: OverlayProps): React.ReactEle
     return () => document.removeEventListener("mousedown", handler, true);
   }, [onClose]);
 
-  // Close on Escape
+  // Close on Escape -- and consume it (the ChartContextMenu rule: the Escape
+  // that closes the menu is the menu's alone; lib/chartMenuState.ts).
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
     };
     document.addEventListener("keydown", handler, true);
     return () => document.removeEventListener("keydown", handler, true);
   }, [onClose]);
+
+  // Open while mounted (lib/chartMenuState.ts).
+  useEffect(() => noteChartMenuMounted(), []);
 
   const updateSpec = useCallback(
     (updates: Partial<ChartSpec>) => {

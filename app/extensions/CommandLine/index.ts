@@ -12,11 +12,12 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { registerMenuItem, unregisterMenuItem } from "@api";
 import { registerKeybinding } from "@api/keybindings";
 import { CommandRegistry } from "@api/commands";
-import { AppCliPanel, toggleAppCliPanel } from "./components/AppCliPanel";
+import { AppCliPanel } from "./components/AppCliPanel";
+import { COMMAND_LINE_DIALOG_ID, toggleAppCliPanel } from "./panelToggle";
 
 const TOGGLE_COMMAND = "commandLine.toggle";
 const MENU_ITEM_ID = "command-line-toggle";
-const DIALOG_ID = "command-line-panel";
+const DIALOG_ID = COMMAND_LINE_DIALOG_ID;
 
 const cleanupFns: Array<() => void> = [];
 

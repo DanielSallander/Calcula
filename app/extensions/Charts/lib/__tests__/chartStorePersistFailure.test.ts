@@ -305,3 +305,29 @@ describe("CI-15 delete path: a refused delete_chart puts the chart back", () => 
     expect(alertAsync).not.toHaveBeenCalled();
   });
 });
+
+describe("deleteChart tells its caller what happened (wave A review: a refusal counted as deleted)", () => {
+  it("a refused delete RESOLVES to the backend's reason (it never rejects)", async () => {
+    await loadTwo();
+    invokeBackend.mockRejectedValue(PROTECTED);
+    await expect(deleteChart("c1")).resolves.toBe(PROTECTED);
+    expect(getChartById("c1")).not.toBeNull();
+  });
+
+  it("reportRefusal: false -- the caller names the refusal, so the store raises NO dialog", async () => {
+    await loadTwo();
+    invokeBackend.mockRejectedValue(PROTECTED);
+    const reason = await deleteChart("c1", { reportRefusal: false });
+    await settle();
+    expect(reason).toBe(PROTECTED);
+    expect(getChartById("c1"), "the refused chart is back in the store").not.toBeNull();
+    expect(alertAsync, "a second message beside the caller's one toast").not.toHaveBeenCalled();
+  });
+
+  it("a delete that landed resolves to null (positive control)", async () => {
+    await loadTwo();
+    invokeBackend.mockResolvedValue(undefined);
+    await expect(deleteChart("c1", { reportRefusal: false })).resolves.toBeNull();
+    expect(getChartById("c1")).toBeNull();
+  });
+});

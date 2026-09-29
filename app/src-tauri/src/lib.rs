@@ -222,6 +222,16 @@ mod tests;
 #[cfg(test)]
 mod eval_budget_tests;
 
+/// Enum variant fields cross the wire in camelCase (the Data Validation
+/// list-from-range rule was refused on the wire; found live 2026-09-29).
+#[cfg(test)]
+mod serde_enum_field_case_tests;
+
+/// A command commits only the undo transaction IT opened (engine::OwnedTransaction;
+/// a script batch was split by a clear run inside it, found live 2026-09-29).
+#[cfg(test)]
+mod undo_ownership_census_tests;
+
 /// BUG-0103 consequence 2 — a timeline survives undo AND redo, including as
 /// cascade collateral.
 #[cfg(test)]
@@ -260,6 +270,8 @@ mod document_effect_objects_tests;
 #[cfg(test)]
 mod calp_materialize_tests;
 #[cfg(test)]
+mod calp_validation_source_tests;
+#[cfg(test)]
 mod calp_refresh_pivot_tests;
 
 #[cfg(test)]
@@ -294,6 +306,9 @@ mod object_deps_census_tests;
 
 #[cfg(test)]
 mod object_deps_tests;
+
+#[cfg(test)]
+mod repair_3d_delete_tests;
 
 #[cfg(test)]
 mod defined_name_sheet_ops_tests;
@@ -2906,15 +2921,50 @@ pub fn expression_to_formula(expr: &ParserExpr) -> String {
 // 3D REFERENCE BOOKEND REPAIR
 // ============================================================================
 
-/// Repairs 3D reference bookends in a formula after a sheet is deleted.
-/// - If the deleted sheet is a bookend, shrink to the adjacent sheet.
-/// - If both bookends become invalid (single-sheet 3D ref deleted), returns None
-///   to indicate the formula should show #REF!.
+/// Repairs a formula after sheet `deleted_name`, which stood at
+/// `deleted_index` in the tab order, is deleted (`sheet_names_after` is the
+/// order without it).
+/// - A 3D reference with ONE endpoint on the deleted sheet keeps the rest of
+///   its range: the endpoint moves inward to its neighbour in the range
+///   (Excel's rule -- `SUM(Mid:Data!B1)` becomes `SUM(Mid:Mid!B1)`).
+/// - Any other reference to the deleted sheet (a plain one, or a 3D reference
+///   that names only it) returns None: the formula becomes #REF!.
 /// Returns Some(new_formula) if the formula was modified, None if it should become #REF!,
-/// or the original formula unchanged if no 3D refs were affected.
+/// or the original formula unchanged if no reference to the sheet was affected.
+///
+/// THE POSITION IS REQUIRED. Without it the endpoint's neighbour was guessed as
+/// the workbook's FIRST sheet (a deleted start) or LAST sheet (a deleted end),
+/// whatever the range: with Sheet1, Mid, Data, Last, Other, deleting Data
+/// turned `SUM(Mid:Data!B1)` into `SUM(Mid:Other!B1)` and `SUM(Data:Last!B1)`
+/// into `SUM(Sheet1:Last!B1)`, silently summing sheets the user never put in
+/// the range (`repair_3d_delete_tests`).
+pub fn repair_3d_refs_on_delete_at(
+    formula: &str,
+    deleted_name: &str,
+    deleted_index: usize,
+    sheet_names_after: &[String],
+) -> Option<String> {
+    repair_3d_refs_on_delete_with(formula, deleted_name, Some(deleted_index), sheet_names_after)
+}
+
+/// [`repair_3d_refs_on_delete_at`] for a test whose formulas carry no 3D
+/// ENDPOINT on the deleted sheet. It does not know where the deleted sheet
+/// stood, so such an endpoint has no neighbour to move to and the reference
+/// becomes #REF!. Test-only, so no production path can repair without the
+/// position.
+#[cfg(test)]
 pub fn repair_3d_refs_on_delete(
     formula: &str,
     deleted_name: &str,
+    sheet_names_after: &[String],
+) -> Option<String> {
+    repair_3d_refs_on_delete_with(formula, deleted_name, None, sheet_names_after)
+}
+
+fn repair_3d_refs_on_delete_with(
+    formula: &str,
+    deleted_name: &str,
+    deleted_index: Option<usize>,
     sheet_names_after: &[String],
 ) -> Option<String> {
     let ast = match parse_formula(formula) {
@@ -2922,13 +2972,49 @@ pub fn repair_3d_refs_on_delete(
         Err(_) => return Some(formula.to_string()),
     };
 
-    let (new_ast, had_ref_error) = repair_3d_delete_recursive(&ast, deleted_name, sheet_names_after);
+    let (new_ast, had_ref_error) =
+        repair_3d_delete_recursive(&ast, deleted_name, deleted_index, sheet_names_after);
     if had_ref_error {
         return None; // Entire formula becomes #REF!
     }
 
     let new_formula = format!("={}", expression_to_formula(&new_ast));
     Some(unchanged_or(formula, &ast, new_formula))
+}
+
+/// The same delete for formula TEXT kept IN PLACE -- a conditional-format,
+/// validation or control formula, an override's CURRENT text -- where a cell
+/// would become `#REF!` whole: the cells' 3D rule first (an endpoint on the
+/// deleted sheet moves inward, [`repair_3d_refs_on_delete_at`]), then every
+/// reference still naming the deleted sheet becomes `#REF!` where it stands
+/// (the `.calp` gone-walker, as Excel writes a rule: `=A1>#REF!`). `None` when
+/// the text names no deleted sheet or does not parse; a leading `=` is kept
+/// exactly when the input had one.
+///
+/// Before this, those stores went through the gone-walker alone, which turns
+/// a 3D reference with ANY endpoint gone into `#REF!`: a conditional format
+/// read `=SUM(#REF!)>0` beside its cell's `SUM(Mid:Mid!B1)`, and an override's
+/// current text -- written over the cell at the next refresh -- broke a
+/// working formula (`sheet_structure_repair_tests`).
+pub fn repair_formula_text_on_delete_at(
+    formula: &str,
+    deleted_name: &str,
+    deleted_index: usize,
+    sheet_names_after: &[String],
+) -> Option<String> {
+    let ast = parse_formula(formula).ok()?;
+    // The walk returns the tree with every movable endpoint moved and every
+    // other reference to the deleted sheet exactly as it was (its error flag
+    // is for the whole-cell caller above and is not needed here).
+    let (mut repaired, _) = repair_3d_delete_recursive(&ast, deleted_name, Some(deleted_index), sheet_names_after);
+    calp::sheet_renames::SheetRenames::default()
+        .with_gone([deleted_name])
+        .rename_expression(&mut repaired);
+    let rendered = expression_to_formula(&repaired);
+    if rendered == expression_to_formula(&ast) {
+        return None;
+    }
+    Some(if formula.trim_start().starts_with('=') { format!("={}", rendered) } else { rendered })
 }
 
 /// The repaired text, or the CALLER'S ORIGINAL TEXT when the repair changed
@@ -2963,6 +3049,9 @@ fn unchanged_or(original_text: &str, original_ast: &ParserExpr, repaired: String
 fn repair_3d_delete_recursive(
     ast: &ParserExpr,
     deleted_name: &str,
+    // Where the deleted sheet stood; `None` = unknown (a test convenience), and
+    // then a deleted 3D endpoint has no neighbour to move to.
+    deleted_index: Option<usize>,
     sheet_names_after: &[String],
 ) -> (ParserExpr, bool) {
     match ast {
@@ -2976,25 +3065,45 @@ fn repair_3d_delete_recursive(
                 return (ast.clone(), true);
             }
 
+            // The endpoint that STAYS takes the workbook's spelling when its
+            // partner moved. The lexer upper-cases a bare identifier, so
+            // `Mid:Data` parses as `MID:DATA`; the moved endpoint came back
+            // as the workbook spells it and the kept one did not, and every
+            // store without a restamp of its own -- a conditional format's
+            // rule in Manage Rules -- showed `=SUM(MID:Mid!B1)>0` (found live
+            // 2026-09-29, e2e fixall-calp W10/W11). An UNTOUCHED reference
+            // keeps its own text: re-spelling it would rewrite it on every
+            // delete (`unchanged_or`).
+            let kept = |name: &String| -> String {
+                let upper = name.to_uppercase();
+                sheet_names_after
+                    .iter()
+                    .find(|n| n.to_uppercase() == upper)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone())
+            };
+
             let new_start = if start_is_deleted {
-                // Find the next sheet after the deleted one in the post-delete order
-                // The "next" sheet is the one that was immediately after the deleted sheet
-                // in the original order. In the post-delete list, we look for the sheet
-                // that's now adjacent to where the deleted sheet was.
-                find_adjacent_sheet(deleted_name, end_sheet, sheet_names_after, true)
+                // The deleted endpoint moves inward, to its neighbour inside
+                // the range (`find_adjacent_sheet`).
+                find_adjacent_sheet(deleted_index, end_sheet, sheet_names_after)
+            } else if end_is_deleted {
+                Some(kept(start_sheet))
             } else {
                 Some(start_sheet.clone())
             };
 
             let new_end = if end_is_deleted {
-                find_adjacent_sheet(deleted_name, start_sheet, sheet_names_after, false)
+                find_adjacent_sheet(deleted_index, start_sheet, sheet_names_after)
+            } else if start_is_deleted {
+                Some(kept(end_sheet))
             } else {
                 Some(end_sheet.clone())
             };
 
             match (new_start, new_end) {
                 (Some(s), Some(e)) => {
-                    let (new_ref, err) = repair_3d_delete_recursive(reference, deleted_name, sheet_names_after);
+                    let (new_ref, err) = repair_3d_delete_recursive(reference, deleted_name, deleted_index, sheet_names_after);
                     if err { return (ast.clone(), true); }
                     (ParserExpr::Sheet3DRef {
                         start_sheet: s,
@@ -3007,8 +3116,8 @@ fn repair_3d_delete_recursive(
             }
         }
         ParserExpr::BinaryOp { left, op, right } => {
-            let (new_left, l_err) = repair_3d_delete_recursive(left, deleted_name, sheet_names_after);
-            let (new_right, r_err) = repair_3d_delete_recursive(right, deleted_name, sheet_names_after);
+            let (new_left, l_err) = repair_3d_delete_recursive(left, deleted_name, deleted_index, sheet_names_after);
+            let (new_right, r_err) = repair_3d_delete_recursive(right, deleted_name, deleted_index, sheet_names_after);
             (ParserExpr::BinaryOp {
                 left: Box::new(new_left),
                 op: *op,
@@ -3016,14 +3125,14 @@ fn repair_3d_delete_recursive(
             }, l_err || r_err)
         }
         ParserExpr::UnaryOp { op, operand } => {
-            let (new_op, err) = repair_3d_delete_recursive(operand, deleted_name, sheet_names_after);
+            let (new_op, err) = repair_3d_delete_recursive(operand, deleted_name, deleted_index, sheet_names_after);
             (ParserExpr::UnaryOp { op: *op, operand: Box::new(new_op) }, err)
         }
         ParserExpr::FunctionCall { func, args, .. } => {
             let mut new_args = Vec::new();
             let mut any_err = false;
             for arg in args {
-                let (new_arg, err) = repair_3d_delete_recursive(arg, deleted_name, sheet_names_after);
+                let (new_arg, err) = repair_3d_delete_recursive(arg, deleted_name, deleted_index, sheet_names_after);
                 any_err = any_err || err;
                 new_args.push(new_arg);
             }
@@ -3033,8 +3142,8 @@ fn repair_3d_delete_recursive(
             if names_deleted_sheet(sheet, deleted_name) {
                 return (ast.clone(), true);
             }
-            let (new_start, s_err) = repair_3d_delete_recursive(start, deleted_name, sheet_names_after);
-            let (new_end, e_err) = repair_3d_delete_recursive(end, deleted_name, sheet_names_after);
+            let (new_start, s_err) = repair_3d_delete_recursive(start, deleted_name, deleted_index, sheet_names_after);
+            let (new_end, e_err) = repair_3d_delete_recursive(end, deleted_name, deleted_index, sheet_names_after);
             (ParserExpr::Range {
                 sheet: sheet.clone(),
                 start: Box::new(new_start),
@@ -3060,8 +3169,85 @@ fn repair_3d_delete_recursive(
             (ast.clone(), true)
         }
 
-        // Leaf nodes — no 3D refs to repair
-        _ => (ast.clone(), false),
+        // THE WRAPPERS (wave C, W8 -- the delete twin of wave B's B3). Each
+        // used to fall through to the `_` leaf arm, so a reference WRAPPED in
+        // one survived its sheet's deletion verbatim: `@Data!A1:A3`,
+        // `SUM(Data!A1#)`, `Data!A1[0]`, `{1,Data!A1}`, `{"k": Data!A1}`. The
+        // evaluator resolves an unknown sheet name to the formula's OWN sheet,
+        // so the cell quietly read a local cell where a plain reference
+        // answers `#REF!`. A wrapper whose operand is `#REF!` is `#REF!` too
+        // (`@#REF!` and `#REF!#` are not formulas), so the error flag simply
+        // propagates, as it does through a function call. Pinned by
+        // `repair_3d_delete_tests`.
+        ParserExpr::ImplicitIntersection { operand } => {
+            let (new_operand, err) = repair_3d_delete_recursive(operand, deleted_name, deleted_index, sheet_names_after);
+            (ParserExpr::ImplicitIntersection { operand: Box::new(new_operand) }, err)
+        }
+        ParserExpr::SpillRef { cell, .. } => {
+            let (new_cell, err) = repair_3d_delete_recursive(cell, deleted_name, deleted_index, sheet_names_after);
+            (ParserExpr::SpillRef { cell: Box::new(new_cell), ref_site_id: Default::default() }, err)
+        }
+        ParserExpr::IndexAccess { target, index } => {
+            let (new_target, t_err) = repair_3d_delete_recursive(target, deleted_name, deleted_index, sheet_names_after);
+            let (new_index, i_err) = repair_3d_delete_recursive(index, deleted_name, deleted_index, sheet_names_after);
+            (
+                ParserExpr::IndexAccess { target: Box::new(new_target), index: Box::new(new_index) },
+                t_err || i_err,
+            )
+        }
+        ParserExpr::ArrayLiteral { rows } => {
+            let mut any_err = false;
+            let rows = rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|e| {
+                            let (new_e, err) = repair_3d_delete_recursive(e, deleted_name, deleted_index, sheet_names_after);
+                            any_err |= err;
+                            new_e
+                        })
+                        .collect()
+                })
+                .collect();
+            (ParserExpr::ArrayLiteral { rows }, any_err)
+        }
+        ParserExpr::ListLiteral { elements } => {
+            let mut any_err = false;
+            let elements = elements
+                .iter()
+                .map(|e| {
+                    let (new_e, err) = repair_3d_delete_recursive(e, deleted_name, deleted_index, sheet_names_after);
+                    any_err |= err;
+                    new_e
+                })
+                .collect();
+            (ParserExpr::ListLiteral { elements }, any_err)
+        }
+        ParserExpr::DictLiteral { entries } => {
+            let mut any_err = false;
+            let entries = entries
+                .iter()
+                .map(|(k, v)| {
+                    let (new_k, k_err) = repair_3d_delete_recursive(k, deleted_name, deleted_index, sheet_names_after);
+                    let (new_v, v_err) = repair_3d_delete_recursive(v, deleted_name, deleted_index, sheet_names_after);
+                    any_err |= k_err || v_err;
+                    (new_k, new_v)
+                })
+                .collect();
+            (ParserExpr::DictLiteral { entries }, any_err)
+        }
+
+        // THE TRUE LEAVES, named one by one rather than by a `_` arm (the
+        // rename twin's rule): a node added to the parser must be decided
+        // here, not silently skipped -- which is how the six wrappers above
+        // escaped every delete. A sheet-qualified reference to ANOTHER sheet
+        // is a leaf too (the guarded arm above took the deleted one).
+        ParserExpr::Literal(_)
+        | ParserExpr::NamedRef { .. }
+        | ParserExpr::TableRef { .. }
+        | ParserExpr::CellRef { .. }
+        | ParserExpr::ColumnRef { .. }
+        | ParserExpr::RowRef { .. } => (ast.clone(), false),
     }
 }
 
@@ -3073,41 +3259,38 @@ fn names_deleted_sheet(sheet: &Option<String>, deleted_name: &str) -> bool {
         .is_some_and(|s| s.to_uppercase() == deleted_name.to_uppercase())
 }
 
-/// Finds the sheet adjacent to the deleted one, constrained by the other bookend.
-/// If `toward_start` is true, finds the first sheet in post-delete order.
-/// If `toward_start` is false, finds the last sheet before the other bookend.
+/// The sheet a 3D reference's DELETED endpoint moves to: its neighbour inside
+/// the range, whichever way round the reference spells it. A 3D range covers
+/// the tabs between its endpoints in tab order (`get_sheets_in_range` takes the
+/// lower and higher position), so when the deleted sheet was the range's
+/// FIRST tab the range now starts at the tab that followed it -- which sits at
+/// `deleted_index` once it is gone -- and when it was the LAST the range now
+/// ends at the tab before it (`deleted_index - 1`). `other_bookend` is the
+/// endpoint that survives; `None` when it is not a sheet of the workbook, or
+/// when the deleted sheet's position is unknown (then the reference becomes
+/// `#REF!` rather than a guess).
+///
+/// The guess this replaces answered the workbook's first sheet for a deleted
+/// start and its last sheet for a deleted end, so the range silently grew over
+/// sheets the user never put in it.
 fn find_adjacent_sheet(
-    _deleted_name: &str,
+    deleted_index: Option<usize>,
     other_bookend: &str,
     sheet_names_after: &[String],
-    toward_start: bool,
 ) -> Option<String> {
-    // The remaining bookend is `other_bookend`. We just need the first (or last)
-    // sheet in the post-delete order. Since the deleted sheet is already removed
-    // from sheet_names_after, the adjacent sheet is the first/last in the range
-    // that includes the other bookend.
+    let deleted_index = deleted_index?;
     let other_upper = other_bookend.to_uppercase();
-    let other_idx = sheet_names_after.iter()
-        .position(|s| s.to_uppercase() == other_upper)?;
-
-    if toward_start {
-        // The start bookend was deleted — new start is the sheet at the same position
-        // (which was the next sheet after the deleted one in the original order)
-        // In the simplest case, the first sheet in the remaining names works
-        if other_idx > 0 {
-            Some(sheet_names_after[0].clone())
-        } else {
-            Some(sheet_names_after[0].clone())
-        }
+    let other_after = sheet_names_after.iter().position(|s| s.to_uppercase() == other_upper)?;
+    // Where the surviving endpoint stood BEFORE the delete.
+    let other_before = if other_after >= deleted_index { other_after + 1 } else { other_after };
+    let neighbour = if other_before > deleted_index {
+        // The deleted sheet was the range's first tab.
+        deleted_index
     } else {
-        // The end bookend was deleted — new end is the sheet just before other_bookend's position
-        // in the post-delete order, or the last sheet
-        if other_idx < sheet_names_after.len() - 1 {
-            Some(sheet_names_after[sheet_names_after.len() - 1].clone())
-        } else {
-            Some(sheet_names_after[sheet_names_after.len() - 1].clone())
-        }
-    }
+        // It was the range's last tab.
+        deleted_index.checked_sub(1)?
+    };
+    sheet_names_after.get(neighbour).cloned()
 }
 
 /// Repairs 3D reference bookends in a formula after a sheet is renamed.
@@ -3225,8 +3408,51 @@ fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) 
             end: Box::new(repair_3d_rename_recursive(end, old_name, new_name)),
             ref_site_id: Default::default(),
         },
-        // Leaf nodes — no changes
-        _ => ast.clone(),
+        // THE WRAPPERS. Each used to fall through to the leaf arm below, so a
+        // reference inside one kept the OLD sheet name through a rename:
+        // `@Data!A1:A3`, `SUM(Data!A1#)`, `Data!A1[0]`, `{1,Data!A1}` all read
+        // an unknown sheet (#REF!) -- or a later sheet that took the old name.
+        // Pinned by `sheet_rename_repair_tests`.
+        ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
+            operand: Box::new(repair_3d_rename_recursive(operand, old_name, new_name)),
+        },
+        ParserExpr::SpillRef { cell, .. } => ParserExpr::SpillRef {
+            cell: Box::new(repair_3d_rename_recursive(cell, old_name, new_name)),
+            ref_site_id: Default::default(),
+        },
+        ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
+            target: Box::new(repair_3d_rename_recursive(target, old_name, new_name)),
+            index: Box::new(repair_3d_rename_recursive(index, old_name, new_name)),
+        },
+        ParserExpr::ArrayLiteral { rows } => ParserExpr::ArrayLiteral {
+            rows: rows
+                .iter()
+                .map(|row| row.iter().map(|e| repair_3d_rename_recursive(e, old_name, new_name)).collect())
+                .collect(),
+        },
+        ParserExpr::ListLiteral { elements } => ParserExpr::ListLiteral {
+            elements: elements.iter().map(|e| repair_3d_rename_recursive(e, old_name, new_name)).collect(),
+        },
+        ParserExpr::DictLiteral { entries } => ParserExpr::DictLiteral {
+            entries: entries
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        repair_3d_rename_recursive(k, old_name, new_name),
+                        repair_3d_rename_recursive(v, old_name, new_name),
+                    )
+                })
+                .collect(),
+        },
+        // THE TRUE LEAVES, named one by one rather than by a `_` arm: a node
+        // added to the parser must be decided here, not silently skipped --
+        // which is how the four wrappers above escaped every rename.
+        ParserExpr::Literal(_)
+        | ParserExpr::NamedRef { .. }
+        | ParserExpr::TableRef { .. }
+        | ParserExpr::CellRef { sheet: None, .. }
+        | ParserExpr::ColumnRef { sheet: None, .. }
+        | ParserExpr::RowRef { sheet: None, .. } => ast.clone(),
     }
 }
 
@@ -5114,6 +5340,7 @@ pub fn run() {
             floating_range::update_floating_range,
             floating_range::update_floating_range_cell,
             floating_range::get_floating_range_cells,
+            floating_range::get_floating_range_spill_ranges,
             floating_range::rename_floating_range,
             floating_range::delete_floating_range,
             sheets::set_freeze_panes,

@@ -12,7 +12,7 @@ import {
   type CellCoords,
 } from "@api/styleInterceptors";
 import { onAppEvent, AppEvents, emitAppEvent } from "@api/events";
-import { registerMenu } from "@api/ui";
+import { registerMenu, unregisterMenu } from "@api/ui";
 import type { ConditionalRule, RuleSet, RangeContext } from "./types";
 import { 
   evaluateRule, 
@@ -378,6 +378,9 @@ function deactivate(): void {
     cleanupSheetListener = null;
   }
   
+  // The menu activate built (X19: it was never taken back).
+  unregisterMenu(CONDITIONAL_FORMATTING_MENU_ID, { keepWhileShared: true });
+
   // Clear all rules and caches
   ruleSets.clear();
   cellDataCache.clear();
@@ -386,6 +389,8 @@ function deactivate(): void {
   
   console.log("[ConditionalFormatting] Extension deactivated");
 }
+
+const CONDITIONAL_FORMATTING_MENU_ID = "conditional-formatting";
 
 /**
  * Register the Conditional Formatting menu in the ribbon.
@@ -399,7 +404,7 @@ function registerConditionalFormattingMenu(): void {
   };
 
   registerMenu({
-    id: "conditional-formatting",
+    id: CONDITIONAL_FORMATTING_MENU_ID,
     label: "Conditional Formatting",
     order: 50, // Position in menu bar
     items: [

@@ -853,3 +853,231 @@ fn a_moved_floating_range_and_an_added_timeline_are_reported_by_domain() {
         diff.objects
     );
 }
+
+// ---------------------------------------------------------------------------
+// BUG-0151: a collision rename's round trip is not an edit
+// ---------------------------------------------------------------------------
+
+/// The TS chart store's envelope, in ITS key order (not alphabetical).
+const CHART_SPEC: &str = r#"{"chartId":1,"name":"Sales","sheetIndex":1,"x":10,"y":10,"width":300,"height":200,"spec":{"mark":"bar","data":"Data!A1:B5"}}"#;
+
+/// ["Data" (A1 = 21), "Report" (A1 = Data!A1*2)], a defined name and a chart
+/// string source that both name "Data" -- the three places a checkout's
+/// collision rename rewrites.
+fn data_and_report() -> Workbook {
+    let mut data = Sheet::new("Data".to_string());
+    data.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(21.0)));
+    let mut report = Sheet::new("Report".to_string());
+    report
+        .cells
+        .insert((0, 0), SavedCell::from_cell(&Cell::new_formula("Data!A1*2".to_string())));
+    let report_id = report.id;
+    let mut wb = Workbook::default();
+    wb.sheets = vec![data, report];
+    wb.named_ranges = vec![persistence::SavedNamedRange {
+        name: "Rate".to_string(),
+        refers_to: "=DATA!$A$1".to_string(),
+        sheet_id: None,
+        comment: None,
+        folder: None,
+    }];
+    wb.charts = vec![persistence::SavedChart {
+        id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+        sheet_id: report_id,
+        spec_json: CHART_SPEC.to_string(),
+    }];
+    wb
+}
+
+/// What an UNTOUCHED working copy ships: the author owns a "Data", so the
+/// checkout renamed the application's references to "Data (2)", and the push
+/// renamed them back (`restore_published_sheet_references` in the host) --
+/// the same two rewrites, nothing else.
+fn through_a_checkout_rename_and_back(wb: &Workbook) -> Workbook {
+    let mut w = wb.clone();
+    let checkout = calp::sheet_renames::SheetRenames::new([("Data", "Data (2)")]);
+    let push = calp::sheet_renames::SheetRenames::new([("data (2)", "Data")]);
+    for renames in [&checkout, &push] {
+        for sheet in w.sheets.iter_mut() {
+            renames.rename_sheet_formulas(sheet);
+        }
+        for nr in w.named_ranges.iter_mut() {
+            if let Some(text) = renames.rename_formula(&nr.refers_to) {
+                nr.refers_to = text;
+            }
+        }
+        for chart in w.charts.iter_mut() {
+            if let Some(spec) =
+                calp::chart_refs::rename_chart_spec_sheet_names(&chart.spec_json, renames)
+            {
+                chart.spec_json = spec;
+            }
+        }
+    }
+    w
+}
+
+/// The working copy diffed against its base, the way the push preview and the
+/// merge analysis take it: published into memory, compared with the base.
+fn yours_against(f: &Fixture, base: &str, working: &Workbook) -> calp::diff::VersionDiff {
+    let mem = MemoryWorkspace::new();
+    publish_version(&mem, f._prof.path(), working, SemVer::new(9, 9, 9), PushMode::CreateNew);
+    let base_manifest = f.reg.get_version_manifest(PKG, base).unwrap();
+    let manifest = mem.get_version_manifest(PKG, "9.9.9").unwrap();
+    let artifacts = mem.artifacts_of(PKG, "9.9.9");
+    diff_sides(
+        &DiffSide::Published {
+            transport: &f.reg,
+            package: PKG,
+            version: base,
+            manifest: &base_manifest,
+        },
+        &DiffSide::InMemory { manifest: &manifest, artifacts: &artifacts },
+        &DiffOptions::default(),
+    )
+    .unwrap()
+}
+
+/// AN UNTOUCHED WORKING COPY HAS NOTHING TO PUSH. The rename round trip is not
+/// the identity on bytes: the lexer stored the author's `Data!A1*2` as
+/// `DATA!A1*2` and it comes home as `Data!A1*2`; the defined name likewise;
+/// and the chart's spec is re-serialized with its keys SORTED. Byte-wise the
+/// push preview listed all three as changed, the push shipped them to every
+/// subscriber, and the published version's own diff said so too.
+///
+/// SABOTAGE: compare `f` byte-wise in `cells_equal`, or items with `==` in
+/// `push_grouped` -- each turns its row back on.
+#[test]
+fn an_untouched_working_copy_through_a_collision_rename_reports_nothing() {
+    let f = Fixture::new();
+    let base = data_and_report();
+    f.publish(&base, SemVer::new(1, 0, 0), PushMode::CreateNew);
+    let working = through_a_checkout_rename_and_back(&base);
+    // Preconditions: the round trip really did re-spell all three.
+    assert_ne!(working.sheets[1].cells[&(0, 0)].formula, base.sheets[1].cells[&(0, 0)].formula);
+    assert_ne!(working.named_ranges[0].refers_to, base.named_ranges[0].refers_to);
+    assert_ne!(working.charts[0].spec_json, base.charts[0].spec_json);
+
+    let preview = yours_against(&f, "1.0.0", &working);
+    f.publish(
+        &working,
+        SemVer::new(1, 0, 1),
+        PushMode::Update { expected_base: SemVer::new(1, 0, 0) },
+    );
+    let shipped = f.diff("1.0.0", "1.0.1");
+    for (what, diff) in [("the push preview", &preview), ("the shipped version", &shipped)] {
+        assert_eq!(diff.totals.cells_changed, 0, "{what}: {:?}", diff.sheets);
+        assert!(
+            diff.objects.is_empty(),
+            "{what}: the author changed nothing: {:?}",
+            diff.objects.iter().map(|o| (&o.domain, &o.change)).collect::<Vec<_>>()
+        );
+    }
+
+    // ...while a REAL edit through the same round trip is still a change.
+    let mut edited = working.clone();
+    edited.sheets[1]
+        .cells
+        .insert((0, 0), SavedCell::from_cell(&Cell::new_formula("Data!A1*3".to_string())));
+    let diff = yours_against(&f, "1.0.0", &edited);
+    assert_eq!(diff.totals.cells_changed, 1);
+    assert_eq!(diff.sheets.iter().map(|s| s.formula_changes).sum::<usize>(), 1);
+}
+
+/// AND IT DOES NOT COLLIDE WITH A TEAMMATE. A teammate who really edited the
+/// cell (or the chart) the round trip merely re-spelled has not conflicted
+/// with an author who never touched it. Byte-wise both read as "changed on
+/// both sides": a refused merge for the cell, and a false Conflict for the
+/// chart where the honest answer is "this build cannot apply a chart".
+///
+/// SABOTAGE: the same two as above.
+#[test]
+fn a_re_spelled_piece_does_not_collide_with_a_teammates_real_edit() {
+    let f = Fixture::new();
+    let base = data_and_report();
+    f.publish(&base, SemVer::new(1, 0, 0), PushMode::CreateNew);
+    let mut theirs_cell = base.clone();
+    theirs_cell.sheets[1]
+        .cells
+        .insert((0, 0), SavedCell::from_cell(&Cell::new_formula("Data!A1*4".to_string())));
+    f.publish(
+        &theirs_cell,
+        SemVer::new(1, 1, 0),
+        PushMode::Update { expected_base: SemVer::new(1, 0, 0) },
+    );
+    let mut theirs_chart = base.clone();
+    theirs_chart.charts[0].spec_json = CHART_SPEC.replace("\"Sales\"", "\"Sales 2026\"");
+    f.publish(
+        &theirs_chart,
+        SemVer::new(1, 2, 0),
+        PushMode::Update { expected_base: SemVer::new(1, 1, 0) },
+    );
+
+    // The author: the round trip, plus one real edit elsewhere.
+    let mut working = through_a_checkout_rename_and_back(&base);
+    working.sheets[0]
+        .cells
+        .insert((5, 5), SavedCell::from_cell(&Cell::new_number(1.0)));
+    let yours = yours_against(&f, "1.0.0", &working);
+
+    let cell_merge = calp::merge::analyze(&f.diff("1.0.0", "1.1.0"), &yours);
+    assert_eq!(
+        cell_merge.verdict,
+        calp::merge::MergeVerdict::CanMerge,
+        "the author never touched Report!A1: {:?}",
+        cell_merge.collisions
+    );
+    // v1.2.0 against v1.0.0 is exactly the teammate's chart edit (v1.2.0 was
+    // published from the base with only the chart's title changed).
+    let chart_merge = calp::merge::analyze(&f.diff("1.0.0", "1.2.0"), &yours);
+    assert!(
+        chart_merge.collisions.is_empty()
+            && chart_merge.verdict != calp::merge::MergeVerdict::Conflict,
+        "the author never touched the chart: {:?} {:?}",
+        chart_merge.verdict,
+        chart_merge.collisions
+    );
+}
+
+/// TWO NAMES SCOPED TO ONE SHEET are two objects. The diff keyed a defined
+/// name by its SHEET id when it had one, so every name scoped to a sheet shared
+/// one key and only the last survived: editing any other of them was not
+/// reported, and the merge analysis could not see it collide. Whichever of the
+/// two is edited, the diff names it.
+///
+/// SABOTAGE: key `namedRange` items like any other domain (sheetId first).
+#[test]
+fn every_name_scoped_to_one_sheet_is_its_own_object() {
+    let f = Fixture::new();
+    let mut base = base_workbook();
+    let data_id = base.sheets[1].id;
+    let scoped = |name: &str, refers_to: &str| persistence::SavedNamedRange {
+        name: name.to_string(),
+        refers_to: refers_to.to_string(),
+        sheet_id: Some(data_id),
+        comment: None,
+        folder: None,
+    };
+    base.named_ranges = vec![scoped("First", "=Data!$A$1"), scoped("Second", "=Data!$A$2")];
+    f.publish(&base, SemVer::new(1, 0, 0), PushMode::CreateNew);
+
+    let mut first = base.clone();
+    first.named_ranges[0].refers_to = "=Data!$A$3".to_string();
+    f.publish(&first, SemVer::new(1, 1, 0), PushMode::Update { expected_base: SemVer::new(1, 0, 0) });
+    let mut second = base.clone();
+    second.named_ranges[1].refers_to = "=Data!$A$4".to_string();
+    f.publish(&second, SemVer::new(1, 2, 0), PushMode::Update { expected_base: SemVer::new(1, 1, 0) });
+
+    for (to, edited) in [("1.1.0", "First"), ("1.2.0", "Second")] {
+        let diff = f.diff("1.0.0", to);
+        let rows: Vec<_> = diff.objects.iter().filter(|o| o.domain == "namedRange").collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "v{to} edited the name '{edited}': {:?}",
+            diff.objects.iter().map(|o| (&o.domain, &o.id, &o.change)).collect::<Vec<_>>()
+        );
+        assert_eq!(rows[0].change, "modified");
+        assert!(rows[0].id.ends_with(edited), "the row names the edited name: {}", rows[0].id);
+    }
+}

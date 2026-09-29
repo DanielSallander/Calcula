@@ -136,9 +136,9 @@ pub fn create_pane_control(
         struct PaneControlCreateSnapshot { control_id: identity::EntityId }
         let data = serde_json::to_vec(&PaneControlCreateSnapshot { control_id: id }).unwrap_or_default();
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Create pane control");
+        let owned_txn = undo_stack.begin_owned_transaction("Create pane control");
         undo_stack.record_custom_restore("pane_control_create".to_string(), data, "Create pane control");
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
     }
 
     // Pane controls are persisted workbook entities — mark the file dirty.
@@ -189,9 +189,9 @@ pub fn delete_pane_control(
         }
         let data = serde_json::to_vec(&PaneControlSnapshot { control_id, previous: removed }).unwrap_or_default();
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Delete pane control");
+        let owned_txn = undo_stack.begin_owned_transaction("Delete pane control");
         undo_stack.record_custom_restore("pane_control_delete".to_string(), data, "Delete pane control");
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
     }
 
     // Pane controls are persisted workbook entities — mark the file dirty.
@@ -260,9 +260,9 @@ pub fn update_pane_control(
         }
         let data = serde_json::to_vec(&PaneControlSnapshot { control_id, previous: previous.clone() }).unwrap_or_default();
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Update pane control");
+        let owned_txn = undo_stack.begin_owned_transaction("Update pane control");
         undo_stack.record_custom_restore("pane_control".to_string(), data, "Update pane control");
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
     }
 
     let control = controls
@@ -316,9 +316,9 @@ pub fn set_pane_control_value(
         }
         let data = serde_json::to_vec(&PaneControlSnapshot { control_id, previous: control.clone() }).unwrap_or_default();
         let mut undo_stack = state.undo_stack.lock().unwrap();
-        undo_stack.begin_transaction("Pane control change");
+        let owned_txn = undo_stack.begin_owned_transaction("Pane control change");
         undo_stack.record_custom_restore("pane_control".to_string(), data, "Pane control change");
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
     }
 
     control.value = Some(value);

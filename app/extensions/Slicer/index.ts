@@ -15,6 +15,7 @@ import {
   setSlicerStyleOverride,
 } from "./rendering/customRenderers";
 import {
+  getGridRegions,
   requestOverlayRedraw,
   type OverlayRenderContext,
 } from "@api/gridOverlays";
@@ -60,9 +61,14 @@ import {
   updateCachedSlicerPosition,
   updateCachedSlicerBounds,
   refreshSlicerItems,
+  isSlicerGestureLanding,
   type SlicerGeometryWrite,
 } from "./lib/slicerStore";
-import { registerObjectGeometryProvider } from "@api/objectGeometry";
+import {
+  coMovedMemberRect,
+  refuseUndoWhileAGestureLands,
+  registerObjectGeometryProvider,
+} from "@api/objectGeometry";
 import { createSlicerGeometryProvider } from "./lib/slicerGeometry";
 
 import {
@@ -188,6 +194,10 @@ function activate(context: ExtensionContext): void {
   // below, which arms a pending click the next mouseup anywhere would complete.
   cleanupFunctions.push(registerSlicerObjectSelection());
 
+  // A keyboard Ctrl+Z / Ctrl+Y while a click lands is refused with a sentence
+  // (the backend refuses it silently): @api/objectGeometry.
+  cleanupFunctions.push(refuseUndoWhileAGestureLands(isSlicerGestureLanding));
+
   // Move / resize slicers WITHOUT a pointer gesture (@api/objectGeometry): the
   // canvas's align, distribute, nudge and group drag.
   cleanupFunctions.push(
@@ -250,6 +260,28 @@ function activate(context: ExtensionContext): void {
     window.removeEventListener("floatingObject:selected", handleFloatingSelected);
   });
 
+  // Where a slicer this drag CO-MOVES goes (a member of the selection, not the
+  // pressed lead): the rule a Core-led canvas group drag applies
+  // (@api/objectGeometry `coMovedMemberRect`) -- its press-time position
+  // shifted by the lead's snapped delta, KEPT ON THE PAGE on a canvas, and a
+  // LOCKED member stays put. It used to be clamped at 0 only, so a slicer-led
+  // drag pushed the other selected slicers off the page and moved locked ones.
+  const coMovedSlicerAt = (
+    slicer: { id: string; sheetIndex: number; width: number; height: number },
+    startPos: { x: number; y: number },
+    dx: number,
+    dy: number,
+  ): { x: number; y: number } => {
+    const region = getGridRegions().find((r) => r.id === `slicer-${slicer.id}`) ?? null;
+    const at = coMovedMemberRect(
+      slicer.sheetIndex,
+      { x: startPos.x, y: startPos.y, width: slicer.width, height: slicer.height },
+      { dx, dy },
+      region,
+    );
+    return { x: at.x, y: at.y };
+  };
+
   // Handle floating object move completion (drag ended)
   const handleMoveComplete = (e: Event) => {
     const detail = (e as CustomEvent).detail;
@@ -282,9 +314,10 @@ function activate(context: ExtensionContext): void {
       for (const [id, startPos] of dragStartPositions!) {
         const slicer = getSlicerById(id);
         if (!slicer) continue;
-        const newX = Math.max(0, startPos.x + dx);
-        const newY = Math.max(0, startPos.y + dy);
-        writes.push({ slicerId: id, x: newX, y: newY, width: slicer.width, height: slicer.height });
+        // The lead is where Core put it; every other member follows the
+        // Core-led group-drag rule.
+        const at = id === primaryId ? { x: detail.x, y: detail.y } : coMovedSlicerAt(slicer, startPos, dx, dy);
+        writes.push({ slicerId: id, x: at.x, y: at.y, width: slicer.width, height: slicer.height });
       }
     }
 
@@ -322,9 +355,10 @@ function activate(context: ExtensionContext): void {
       const dy = detail.y - primaryStart.y;
 
       for (const [id, startPos] of dragStartPositions!) {
-        const newX = Math.max(0, startPos.x + dx);
-        const newY = Math.max(0, startPos.y + dy);
-        updateCachedSlicerPosition(id, newX, newY);
+        const slicer = getSlicerById(id);
+        if (!slicer) continue;
+        const at = id === primaryId ? { x: detail.x, y: detail.y } : coMovedSlicerAt(slicer, startPos, dx, dy);
+        updateCachedSlicerPosition(id, at.x, at.y);
       }
     }
 
@@ -490,9 +524,10 @@ function activate(context: ExtensionContext): void {
   // Filter bridge: apply filters when slicer selection changes
   // -----------------------------------------------------------------------
 
-  // The filter itself is applied by `updateSlicerSelectionAsync`, INSIDE the
-  // click's undo transaction (one Ctrl+Z restores slicer and pivots). This
-  // listener only refreshes the cross-filtered items of the siblings.
+  // The filter itself is applied by `updateSlicerSelectionAsync`, in the
+  // click's ONE backend command and undo step (one Ctrl+Z restores slicer and
+  // pivots). This listener only refreshes the cross-filtered items of the
+  // siblings.
   const handleSelectionChanged = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     const slicerId = detail?.slicerId as string;

@@ -99,6 +99,7 @@ vi.mock("../manifest", () => ({
 vi.mock("../lib/filterPaneStore", () => ({
   refreshCache: () => undefined,
   clearCache: () => undefined,
+  isRibbonFilterChangeLanding: () => false,
 }));
 vi.mock("../lib/controlsPaneStore", () => ({
   // The entry point's imports...

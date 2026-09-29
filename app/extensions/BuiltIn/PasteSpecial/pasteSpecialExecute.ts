@@ -26,6 +26,19 @@ import {
 } from "@api/lib";
 import { cellEvents } from "@api";
 import { alertAsync } from "@api/dialogs";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { ownUndoTransaction, type UndoTransactionCloses } from "@api/undoTicket";
+
+// The closes this module's gestures make, bound to each begin's answer by
+// ownUndoTransaction: a gesture closes ONLY the undo transaction its own begin
+// OPENED. Inside a script's open batch (or a command-line run) the begin JOINS,
+// the gesture's writes become part of that holder's step, and the holder closes
+// it -- an unconditional commit ended the batch halfway, and a cancel dropped
+// its undo record (wave E, Y7).
+const UNDO_CLOSES: UndoTransactionCloses = {
+  commitUndoTransaction: (...ticket) => commitUndoTransaction(...ticket),
+  cancelUndoTransaction: (...ticket) => cancelUndoTransaction(...ticket),
+};
 
 // ============================================================================
 // Helpers
@@ -101,6 +114,12 @@ export async function executePasteSpecial(
   totalRows: number,
   totalCols: number
 ): Promise<void> {
+  // THE Paste Special door: the dialog's OK and the quick commands (Paste
+  // Values / Formulas / Formatting) all land here, and the target is Core's
+  // selection. While something else owns the selection (BUG-0185) that is a
+  // cell the user cannot see: refused, once, nothing written.
+  if (refuseIfSelectionOwned("Paste Special")) return;
+
   const { pasteAttribute, operation, skipBlanks, transpose } = options;
   const cellsToPaste = clipboard.cells;
 
@@ -195,7 +214,10 @@ export async function executePasteSpecial(
 
   // Begin undo transaction
   const cellCount = actualPasteHeight * actualPasteWidth;
-  await beginUndoTransaction(`Paste Special (${pasteAttribute}) ${cellCount} cells`);
+  const tx = ownUndoTransaction(
+    await beginUndoTransaction(`Paste Special (${pasteAttribute}) ${cellCount} cells`),
+    UNDO_CLOSES,
+  );
 
   let failedCells = 0;
   let firstFailure: string | null = null;
@@ -242,7 +264,7 @@ export async function executePasteSpecial(
 
     // Commit whatever applied (an all-refused paste commits an empty
     // transaction, which is a no-op) so a partial paste stays undoable.
-    await commitUndoTransaction();
+    await tx.commit();
 
     // Refresh grid
     window.dispatchEvent(new CustomEvent("styles:refresh"));
@@ -250,7 +272,7 @@ export async function executePasteSpecial(
   } catch (error) {
     // Close the transaction — left open, every subsequent edit silently joins
     // it and collapses into one giant Ctrl+Z step.
-    try { await cancelUndoTransaction(); } catch { /* already closed */ }
+    try { await tx.cancel(); } catch { /* already closed */ }
     void alertAsync(error instanceof Error ? error.message : String(error));
     throw error;
   }
@@ -271,6 +293,10 @@ export async function executePasteLink(
   totalRows: number,
   totalCols: number
 ): Promise<void> {
+  // Same door as executePasteSpecial (the dialog's Paste Link, the Edit menu's
+  // Paste Link): refused while the selection is not Core's (BUG-0185).
+  if (refuseIfSelectionOwned("Paste Link")) return;
+
   const cellsToPaste = clipboard.cells;
   if (!cellsToPaste || cellsToPaste.length === 0) return;
 
@@ -287,7 +313,10 @@ export async function executePasteLink(
   const actualPasteHeight = Math.min(pasteHeight, totalRows - targetRow);
   const actualPasteWidth = Math.min(pasteWidth, totalCols - targetCol);
 
-  await beginUndoTransaction(`Paste Link ${actualPasteHeight * actualPasteWidth} cells`);
+  const tx = ownUndoTransaction(
+    await beginUndoTransaction(`Paste Link ${actualPasteHeight * actualPasteWidth} cells`),
+    UNDO_CLOSES,
+  );
 
   let failedCells = 0;
   let firstFailure: string | null = null;
@@ -324,12 +353,12 @@ export async function executePasteLink(
       }
     }
 
-    await commitUndoTransaction();
+    await tx.commit();
 
     window.dispatchEvent(new CustomEvent("styles:refresh"));
     window.dispatchEvent(new CustomEvent("grid:refresh"));
   } catch (error) {
-    try { await cancelUndoTransaction(); } catch { /* already closed */ }
+    try { await tx.cancel(); } catch { /* already closed */ }
     void alertAsync(error instanceof Error ? error.message : String(error));
     throw error;
   }
@@ -791,7 +820,7 @@ async function pasteColumnWidths(
   const sourceSel = clipboard.sourceSelection;
   const sourceMinCol = Math.min(sourceSel.startCol, sourceSel.endCol);
 
-  await beginUndoTransaction(`Paste Column Widths`);
+  const tx = ownUndoTransaction(await beginUndoTransaction(`Paste Column Widths`), UNDO_CLOSES);
 
   try {
     for (let c = 0; c < sourceWidth; c++) {
@@ -806,11 +835,11 @@ async function pasteColumnWidths(
       }
     }
 
-    await commitUndoTransaction();
+    await tx.commit();
     window.dispatchEvent(new CustomEvent("grid:refresh"));
   } catch (error) {
     console.error("[PasteSpecial] Column widths paste failed:", error);
-    try { await cancelUndoTransaction(); } catch { /* already closed */ }
+    try { await tx.cancel(); } catch { /* already closed */ }
     void alertAsync(error instanceof Error ? error.message : String(error));
     throw error;
   }

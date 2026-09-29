@@ -34,9 +34,26 @@ vi.mock("../filterPaneApi", () => ({
 const mockApplyRibbonFilter = vi.fn();
 const mockClearRibbonFilter = vi.fn();
 
+// The store's change is ONE backend gesture (wave B, BUG-0187): this double
+// writes the selection and applies (or clears) the filter the way the real
+// gesture's one command does, and reports a step of its own.
+const mockGesture = vi.fn(async (f: { id: string; selectedItems: string[] | null }) => {
+  await mockUpdateRibbonFilterSelection(f.id, f.selectedItems);
+  if (f.selectedItems === null) await mockClearRibbonFilter(f);
+  else await mockApplyRibbonFilter(f);
+  return {
+    step: "pushed",
+    overwrites: { note: () => undefined, cellCount: 0, pivotIds: [], tokens: [], unrecorded: false },
+  };
+});
+
 vi.mock("../filterPaneFilterBridge", () => ({
   applyRibbonFilter: (...args: unknown[]) => mockApplyRibbonFilter(...args),
   clearRibbonFilter: (...args: unknown[]) => mockClearRibbonFilter(...args),
+  clearModelColumnOnPivots: vi.fn(),
+  reportRibbonFilterFailures: vi.fn(),
+  resolveTargetPivots: vi.fn(async () => []),
+  runRibbonFilterSelectionGesture: (f: { id: string; selectedItems: string[] | null }) => mockGesture(f),
 }));
 
 vi.mock("../filterPaneEvents", () => ({

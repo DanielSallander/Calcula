@@ -11,8 +11,10 @@ import {
   IconSparklineLine,
   IconSparklineColumn,
   IconSparklineWinLoss,
+  type CommandDefinition,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
+import { refuseIfSelectionOwned, onSelectionOwnershipChanged } from "@api/selectionOwner";
 import { drawSparkline } from "./rendering";
 import {
   createSparklineGroup,
@@ -27,7 +29,12 @@ import {
   setOnMutationCallback,
 } from "./store";
 import { CreateSparklineDialog } from "./components/CreateSparklineDialog";
-import { handleSelectionChange, resetSelectionHandlerState, ensureDesignTabRegistered } from "./handlers/selectionHandler";
+import {
+  handleSelectionChange,
+  resetSelectionHandlerState,
+  ensureDesignTabRegistered,
+  syncDesignTabToSelectionOwner,
+} from "./handlers/selectionHandler";
 import { handleFillCompleted } from "./handlers/fillHandler";
 import { emitAppEvent } from "@api/events";
 import type { FillCompletedPayload } from "@api/events";
@@ -77,6 +84,9 @@ export function saveNow(): void {
 // Lifecycle
 // ============================================================================
 
+/** The add-in whose contributions are the sparklines.* commands. */
+const SPARKLINE_COMMANDS_ADDIN_ID = "calcula.sparklines.commands";
+
 function activate(context: ExtensionContext): void {
   if (isActivated) {
     console.warn("[Sparklines] Already activated, skipping.");
@@ -107,7 +117,14 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.dialogs.unregister(SPARKLINE_DIALOG_ID));
 
-  // 3. Register menu items under Insert > Sparklines
+  // 3. Register menu items under Insert > Sparklines. The dialog places the
+  //    sparklines in Core's selection -- HIDDEN while something else owns the
+  //    selection (a floating grid's selected cell) -- so every type refuses,
+  //    once (D4, BUG-0185 class).
+  const openCreateDialog = (sparklineType: SparklineType): void => {
+    if (refuseIfSelectionOwned("Insert Sparklines")) return;
+    context.ui.dialogs.show(SPARKLINE_DIALOG_ID, { sparklineType });
+  };
   context.ui.menus.registerItem("insert", {
     id: "insert.sparklines",
     label: "Sparklines",
@@ -117,25 +134,32 @@ function activate(context: ExtensionContext): void {
         id: "insert.sparklines.line",
         label: "Line",
         icon: IconSparklineLine,
-        action: () => context.ui.dialogs.show(SPARKLINE_DIALOG_ID, { sparklineType: "line" as SparklineType }),
+        action: () => openCreateDialog("line"),
       },
       {
         id: "insert.sparklines.column",
         label: "Column",
         icon: IconSparklineColumn,
-        action: () => context.ui.dialogs.show(SPARKLINE_DIALOG_ID, { sparklineType: "column" as SparklineType }),
+        action: () => openCreateDialog("column"),
       },
       {
         id: "insert.sparklines.winloss",
         label: "Win/Loss",
         icon: IconSparklineWinLoss,
-        action: () => context.ui.dialogs.show(SPARKLINE_DIALOG_ID, { sparklineType: "winloss" as SparklineType }),
+        action: () => openCreateDialog("winloss"),
       },
     ],
   });
 
-  // 3b. Register API commands for programmatic sparkline management
-  ExtensionRegistry.registerCommand({
+  // 3b. Register API commands for programmatic sparkline management. They are
+  //     an add-in's contributions, taken away WITH the extension by one
+  //     unregisterAddIn (the D3 / W21 class: before registerCommand had an
+  //     inverse, sparklines.* outlived deactivate; ExtensionRegistry
+  //     .unregisterCommand exists since wave D, and the add-in stays the one
+  //     call for the three), as is the Insert > Sparklines item.
+  cleanupFns.push(() => context.ui.menus.unregisterItem("insert", "insert.sparklines"));
+  const sparklineCommands: CommandDefinition[] = [];
+  sparklineCommands.push({
     id: "sparklines.create",
     name: "Create Sparkline",
     execute: async (ctx) => {
@@ -159,7 +183,7 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  ExtensionRegistry.registerCommand({
+  sparklineCommands.push({
     id: "sparklines.delete",
     name: "Delete Sparkline Group",
     execute: async (ctx) => {
@@ -170,7 +194,7 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  ExtensionRegistry.registerCommand({
+  sparklineCommands.push({
     id: "sparklines.update",
     name: "Update Sparkline Group",
     execute: async (ctx) => {
@@ -181,7 +205,7 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  ExtensionRegistry.registerCommand({
+  sparklineCommands.push({
     id: "sparklines.clearAll",
     name: "Clear All Sparklines",
     execute: async () => {
@@ -189,6 +213,14 @@ function activate(context: ExtensionContext): void {
       emitAppEvent(AppEvents.GRID_REFRESH);
     },
   });
+  ExtensionRegistry.registerAddIn({
+    id: SPARKLINE_COMMANDS_ADDIN_ID,
+    name: "Sparklines",
+    version: "1.0.0",
+    description: "Sparkline commands (create, delete, update, clear all).",
+    commands: sparklineCommands,
+  });
+  cleanupFns.push(() => ExtensionRegistry.unregisterAddIn(SPARKLINE_COMMANDS_ADDIN_ID));
 
   // 4. Subscribe to cell data changes to invalidate sparkline data cache
   const unsubCells = cellEvents.subscribe(() => {
@@ -235,6 +267,9 @@ function activate(context: ExtensionContext): void {
   // 6. Subscribe to selection changes for the contextual Sparkline ribbon tab
   const unsubSelection = ExtensionRegistry.onSelectionChange(handleSelectionChange);
   cleanupFns.push(unsubSelection);
+  // ...and to a selection owner's claim starting or ending: the tab stands
+  // aside while a floating grid's cell holds the selection (W22).
+  cleanupFns.push(onSelectionOwnershipChanged(() => syncDesignTabToSelectionOwner()));
 
   // 7. Subscribe to fill-completed events for sparkline propagation
   const unsubFill = context.events.on<FillCompletedPayload>(

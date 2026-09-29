@@ -8,10 +8,11 @@ import {
   useGridState,
   updateCellsBatch,
   addSheet,
-  setActiveSheetApi,
+  activateSheet,
   showToast,
 } from "@api";
 import type { CellUpdateInput } from "@api";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 import { ResultTable } from "../../_shared/components/ResultTable";
 import type { NotebookOutputItem } from "../types";
 
@@ -77,6 +78,11 @@ function TableOutput({
 
   const sendToGrid = async (target: "selection" | "newSheet") => {
     setSendOpen(false);
+    // "At selection" anchors the table at Core's active cell -- HIDDEN while
+    // something else owns the selection (a floating grid's selected cell) --
+    // so refuse, once, and write nothing (BUG-0185 class). "On new sheet" has
+    // no anchor in the selection and stays allowed.
+    if (target === "selection" && refuseIfSelectionOwned("Send to Grid")) return;
     setBusy(true);
     try {
       let startRow = 0;
@@ -87,7 +93,8 @@ function TableOutput({
         startCol = sel ? sel.startCol : 0;
       } else {
         const result = await addSheet();
-        await setActiveSheetApi(result.sheets.length - 1);
+        // The whole switch, so the grid shows the sheet the rows land on.
+        await activateSheet(result.sheets.length - 1);
       }
       await updateCellsBatch(tableToUpdates(item.columns, item.rows, startRow, startCol));
       window.dispatchEvent(new CustomEvent("grid:refresh"));

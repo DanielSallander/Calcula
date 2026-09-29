@@ -17,6 +17,9 @@
 //          Model menu is strictly for model-backed surfaces.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { unregisterMenu } from "@api";
+
+const MODEL_MENU_ID = "model";
 
 // ============================================================================
 // Lifecycle
@@ -29,7 +32,7 @@ function activate(context: ExtensionContext): void {
   // 43 and Formulas at 45). Section separators are placed via item `order`;
   // contributors slot their items into the sections listed above.
   context.ui.menus.register({
-    id: "model",
+    id: MODEL_MENU_ID,
     label: "Model",
     order: 44,
     items: [
@@ -43,7 +46,10 @@ function activate(context: ExtensionContext): void {
 }
 
 function deactivate(): void {
-  // Menu is automatically cleaned up by the registry
+  // Nothing removed it before (X19): the registry never cleans up a menu on
+  // its own. Every item but the section separators belongs to another
+  // extension (list above), so the menu stays for as long as one is there.
+  unregisterMenu(MODEL_MENU_ID, { keepWhileShared: true });
 }
 
 // ============================================================================

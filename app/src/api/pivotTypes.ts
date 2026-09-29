@@ -140,7 +140,16 @@ export interface CreatePivotRequest {
   canvasFrame?: CanvasFrameConfig;
 }
 
-/** Field configuration for row/column areas */
+/** Field configuration for row/column/filter areas.
+ *
+ *  On `update_pivot_fields` every setting is TRI-STATE: an ABSENT key keeps
+ *  what the pivot holds for this field now -- found by `sourceIndex`, in any
+ *  zone, so a field moved between zones or renamed keeps its sort, grouping,
+ *  subtotals and item filter -- and a value sets it (BUG-0184: every sent
+ *  field used to be rebuilt from the defaults). A zone that is sent is still
+ *  REPLACED by the fields it lists. `collapsed` / `collapsedItems` apply only
+ *  to a field new to the pivot: the expand/collapse commands own a placed
+ *  field's collapse state. */
 export interface PivotFieldConfig {
   /** Source column index (0-based) */
   sourceIndex: number;
@@ -152,10 +161,9 @@ export interface PivotFieldConfig {
   showSubtotals?: boolean;
   /** Whether field is collapsed (field-level: collapses ALL items) */
   collapsed?: boolean;
-  /** Items to hide (filter out). On `update_pivot_fields` an ABSENT list
-   *  builds a field that hides nothing -- it CLEARS the field's filter (unlike
-   *  `BiFieldRef.hiddenItems`, where absent means keep). A caller that means
-   *  "keep" sends the definition's current list. */
+  /** Items to hide (filter out). THREE states, as `BiFieldRef.hiddenItems`:
+   *  ABSENT keeps what the field hides now, a list is exactly these, and
+   *  `[]` removes the filter. */
   hiddenItems?: string[];
   /** Per-item collapse tracking: specific item labels that are collapsed */
   collapsedItems?: string[];
@@ -453,14 +461,20 @@ export interface ZoneFieldInfo {
   /** Items the field hides. Present on row, column and filter fields that hide
    *  any (a placed calculation group's item subset included); never on value
    *  fields. A SNAPSHOT of the definition at read time: filters change behind
-   *  a reader's back (the header dropdown, slicers, ribbon filters). For a
-   *  model pivot an editor that seeds its chips from it must not send it back
-   *  as if it were an edit -- see `BiFieldRef.hiddenItems`; a range pivot's
-   *  `update_pivot_fields` does need it sent back (absent = clear), so read it
-   *  again after the pivot's view changes rather than trusting the seed. */
+   *  a reader's back (the header dropdown, slicers, ribbon filters). An
+   *  editor that seeds its chips from it must not send it back as if it were
+   *  an edit -- see `BiFieldRef.hiddenItems` and `PivotFieldConfig.hiddenItems`
+   *  (both keep an unsent list) -- and should read it again after the pivot's
+   *  view changes rather than trust the seed for display. */
   hiddenItems?: string[];
   /** User-provided custom display name override. */
   customName?: string;
+  /** A VALUE field's number format (absent on every other zone). */
+  numberFormat?: string;
+  /** A VALUE field's Show Values As with its base field and item (absent on
+   *  every other zone, and for "No Calculation"). The update REPLACES the value
+   *  fields, so an editor seeded from this list must carry it back. */
+  showAs?: ShowAsRule;
 }
 
 /** Current field configuration for the pivot editor */
@@ -849,6 +863,12 @@ export interface PivotTableInfo {
   useCustomSortLists: boolean;
   hasHeaders: boolean;
   sourceTableName?: string;
+  /** The sheet the pivot's output is on. Set by the pivot LISTING (`getAll`,
+   *  `get_all_pivot_tables` -- Rust `PivotTableListing`): the destination
+   *  sheet by name, ignoring case, else the sheet its output is registered
+   *  on; `null` when neither is known -- never the active sheet by
+   *  assumption. Absent on a single pivot's info. */
+  sheetIndex?: number | null;
   /** Source field info (available when queried with detail) */
   sourceFields?: SourceFieldInfo[];
   /** Row hierarchy info (available when queried with detail) */
@@ -911,13 +931,22 @@ export interface RowColumnHierarchyInfo {
   position: number;
 }
 
-/** All hierarchies info response */
+/** All hierarchies info response (mirrors Rust `PivotHierarchiesInfo`,
+ *  pivot/types.rs; pinned field by field by
+ *  extensions/Pivot/__tests__/pivotHierarchiesInfoMirror.test.ts). */
 export interface PivotHierarchiesInfo {
   hierarchies: SourceFieldInfo[];
   rowHierarchies: RowColumnHierarchyInfo[];
   columnHierarchies: RowColumnHierarchyInfo[];
   dataHierarchies: DataHierarchyInfo[];
   filterHierarchies: RowColumnHierarchyInfo[];
+  /** Slicer filter fields ("Table.Column"): in the query's GROUP BY for the
+   *  pivot's slicers, never shown as filter rows. */
+  slicerFilterFields: string[];
+  /** Present ONLY for a pivot that reads a data model -- the backend's own
+   *  answer to "is this a BI pivot" (the same record its range-change refusal
+   *  reads). Absent for a range or table pivot. */
+  biModel?: BiPivotModelInfo;
 }
 
 // ============================================================================
@@ -942,6 +971,11 @@ export interface UpdatePivotPropertiesRequest {
 /** Request to change pivot data source range */
 export interface ChangePivotDataSourceRequest {
   pivotId: PivotId;
+  /**
+   * A range in A1 notation ("Sheet1!A1:D100"), or a table's name ("Table1"),
+   * which reads the table and links the pivot to it. A range unlinks a table
+   * pivot, so its next refresh reads the typed range.
+   */
   sourceRange: string;
   sourceSheet?: number;
 }
@@ -1029,6 +1063,62 @@ export interface ClearPivotFilterRequest {
   filterType?: PivotFilterType;
   /** A re-clear by the undo/redo reconcile: records NO undo step. */
   reconcile?: boolean;
+}
+
+/**
+ * One pivot filter write of a GESTURE (a slicer click, a ribbon filter
+ * change): exactly one of `apply` / `clear`. The gesture's ONE backend command
+ * runs them in order with their own undo recording off and records ONE step
+ * at the end (BUG-0187). Mirrors `PivotFilterWrite` in pivot/types.rs.
+ */
+export interface PivotFilterWrite {
+  apply?: ApplyPivotFilterRequest;
+  clear?: ClearPivotFilterRequest;
+}
+
+/**
+ * How a gesture's ONE undo step lands:
+ * - "own": a step of its own, even while someone else's transaction is open
+ *   that has recorded nothing yet (it lands on top, holding only what came
+ *   after); an open transaction that already HOLDS changes is joined instead
+ *   and marked shared ("joined"), so undoing replays in time order;
+ * - "join": join the transaction that is open (a script batch), marking it
+ *   shared -- a user's own Cancel then refuses to take it back; its own step
+ *   when none is open.
+ * No step is ever LEFT OPEN for the caller (W2): a slicer click filters its
+ * table targets inside the same backend command. Only an outcome of "pushed"
+ * is the gesture's OWN step: only then may it ask about an overwrite and take
+ * the step back. Mirrors `FilterGestureStep` in pivot/types.rs.
+ */
+export type FilterGestureStep = "own" | "join";
+
+/** The pivot writes of one gesture and how its step lands. */
+export interface PivotFilterGesture {
+  writes: PivotFilterWrite[];
+  step: FilterGestureStep;
+}
+
+/** A gesture write the backend refused (the others still ran). */
+export interface PivotFilterWriteFailure {
+  pivotId: PivotId;
+  clearing: boolean;
+  message: string;
+}
+
+/** Where a gesture's step went: "nothing" recorded, "pushed" as its own step
+ *  (`stepSeq`), or "joined" into the caller's transaction. Mirrors
+ *  `FilterGestureStepOutcome` in pivot/types.rs. */
+export type FilterGestureStepOutcome = "nothing" | "pushed" | "joined";
+
+/** What a gesture did. Mirrors `PivotFilterGestureResponse` in pivot/types.rs. */
+export interface PivotFilterGestureResponse {
+  /** Every successful write's response, in order; a response whose write grew
+   *  a pivot over the user's cells carries the gesture's `overwriteToken`. */
+  responses: PivotViewResponse[];
+  failures: PivotFilterWriteFailure[];
+  step: FilterGestureStepOutcome;
+  stepSeq?: number | null;
+  overwriteToken?: number | null;
 }
 
 /** What a declined overwrite took back (`undo_pivot_overwrite`). Mirrors

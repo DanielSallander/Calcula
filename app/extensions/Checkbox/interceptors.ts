@@ -6,6 +6,7 @@
 
 import type { Selection, StyleData } from "@api";
 import type { IStyleOverride, BaseStyleInfo, CellCoords } from "@api/styleInterceptors";
+import { showToast } from "@api/notifications";
 
 // ============================================================================
 // State
@@ -224,7 +225,17 @@ export async function toggleCheckboxesInSelection(): Promise<void> {
   }
 
   if (updates.length > 0) {
-    await updateCellsBatch(updates);
+    try {
+      await updateCellsBatch(updates);
+    } catch (err) {
+      // REFUSED -- a checkbox inside a pivot / report output region, or a
+      // protected sheet. Say why, ONCE, with the backend's reason (it names
+      // the cell); nothing changed, so nothing repaints. Never rethrown: the
+      // doors that run checkbox.toggle (Space, a button bound to it) would
+      // only drop the rejection or say it a second time (wave F, Z7).
+      showToast(err instanceof Error ? err.message : String(err), { variant: "error" });
+      return;
+    }
     // Trigger renderer refresh so the checkbox graphics update
     window.dispatchEvent(new CustomEvent("styles:refresh"));
   }

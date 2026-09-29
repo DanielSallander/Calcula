@@ -29,6 +29,7 @@ import {
 } from "./a1";
 import type { RangeRef } from "./a1";
 import type { AppCliSession } from "./appSession";
+import { resumeRunBatchAfterHistoryEnded } from "./appSession";
 import { macroOriginPhrase, macroProvenanceNotice } from "./macroProvenance";
 
 // ---------------------------------------------------------------------------
@@ -487,6 +488,7 @@ export async function runAppWrite(cmd: GenericCommand, s: AppCliSession, io: Cli
           : await s.gateway.addSheet(action.name ?? undefined, action.kind);
       s.sheets = res.sheets;
       s.activeSheetIndex = res.activeIndex;
+      await resumeRunBatchAfterHistoryEnded(s);
       const created = action.name ?? res.sheets[res.activeIndex]?.name ?? "sheet";
       io.print(`Added ${action.kind === "canvas" ? "canvas" : "sheet"} '${created}'.`);
       return;
@@ -496,6 +498,7 @@ export async function runAppWrite(cmd: GenericCommand, s: AppCliSession, io: Cli
       const res = await s.gateway.renameSheet(sheet.index, action.newName);
       s.sheets = res.sheets;
       s.activeSheetIndex = res.activeIndex;
+      await resumeRunBatchAfterHistoryEnded(s);
       io.print(`Renamed sheet '${sheet.name}' to '${action.newName}'.`);
       return;
     }
@@ -504,6 +507,7 @@ export async function runAppWrite(cmd: GenericCommand, s: AppCliSession, io: Cli
       const res = await s.gateway.deleteSheet(sheet.index);
       s.sheets = res.sheets;
       s.activeSheetIndex = res.activeIndex;
+      await resumeRunBatchAfterHistoryEnded(s);
       io.print(`Deleted sheet '${sheet.name}'.`);
       return;
     }

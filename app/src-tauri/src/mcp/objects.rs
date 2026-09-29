@@ -1276,10 +1276,14 @@ pub fn rename_sheet(handle: &AppHandle, index: usize, new_name: &str) -> Result<
             .cloned()
             .ok_or_else(|| format!("Sheet index {} out of range. Use list_sheets.", index))?
     };
+    // Through the COMMAND, so the tool carries the pane-control dropdowns that
+    // name the sheet exactly as the rename_sheet command does
+    // (`sheets::with_pane_controls_following_rename`, wave C W7).
     crate::sheets::rename_sheet(
         handle.state::<AppState>(),
         handle.state::<crate::persistence::FileState>(),
         handle.state::<crate::pivot::types::PivotState>(),
+        handle.state::<crate::pane_control::PaneControlState>(),
         index,
         new_name.to_string(),
     )?;

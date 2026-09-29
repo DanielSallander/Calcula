@@ -383,6 +383,150 @@ fn a_destination_this_workbook_does_not_have_is_skipped_not_written_to_sheet_zer
 }
 
 // ===========================================================================
+// The PULL path's restore (`restore_pulled_pivots`): the active mirror, and
+// the lock it must not hold while it waits (BUG-0152, C7)
+// ===========================================================================
+
+/// Occupied cells of one grid, sorted.
+fn occupied(grid: &engine::Grid) -> Vec<(u32, u32)> {
+    let mut v: Vec<(u32, u32)> = grid.cells.keys().copied().collect();
+    v.sort();
+    v
+}
+
+/// BUG-0152. `state.grid` is the ACTIVE sheet's authoritative copy and
+/// `run_calculation_pass` opens with `grids[active] = grid.clone()` -- a
+/// whole-grid REPLACEMENT. `restore_pulled_pivots` wrote a pulled pivot into
+/// `grids` only, so a pivot whose destination is the active sheet was erased by
+/// the very next recalculation. The refresh path (`update_pivot_in_grid`)
+/// always dual-wrote; the pull path assumed its destination could never be the
+/// active sheet, and a destination resolved BY NAME can be.
+///
+/// SABOTAGE: pass `None` for the active-grid dual-write again.
+#[test]
+fn a_pulled_pivot_written_onto_the_active_sheet_reaches_the_mirror() {
+    let state = two_sheet_state(); // "Data" (active, mirrored) + "Report"
+    let pivot_state = PivotState::new();
+    let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+    // Output on the ACTIVE sheet, clear of its source table.
+    let defs = vec![saved_pivot(id, "Data", (10, 5))];
+
+    crate::calp_commands::restore_pulled_pivots(
+        &effect(),
+        &defs,
+        &[],
+        &state,
+        &pivot_state,
+        &[0, 1],
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+
+    let grids = state.grids.read().unwrap();
+    assert!(
+        grids[0].get_cell(10, 5).is_some(),
+        "precondition: the pivot's output landed on the active sheet's grid"
+    );
+    let mirror = state.grid.read().unwrap();
+    assert_eq!(
+        occupied(&mirror),
+        occupied(&grids[0]),
+        "the active sheet's mirror is missing the pivot's cells, so the next \
+         recalculation (grids[active] = grid.clone()) deletes them"
+    );
+}
+
+/// C7 (lock order). `restore_pulled_pivots` held `pivot_tables` (and `grids`)
+/// while it waited for `sheet_names`; `calp_get_application_objects` takes
+/// `sheet_names` first and `pivot_tables` after, and so does every name
+/// authority. Two orders over one pair of locks is a deadlock waiting for its
+/// interleaving, with no panic and nothing in the log.
+///
+/// Measured, not read off the source: this thread holds `sheet_names`, the
+/// restore runs beside it, and a probe asks for `pivot_tables`. If the restore
+/// is sitting on `pivot_tables` while it waits for `sheet_names`, the probe
+/// cannot get it. (A false GREEN is possible if the restore has not reached its
+/// locks within the pause; a false RED is not.)
+///
+/// SABOTAGE: take `sheet_names` after `pivot_tables` again.
+#[test]
+fn restoring_pulled_pivots_never_holds_pivot_tables_while_waiting_for_sheet_names() {
+    let state = two_sheet_state();
+    let pivot_state = PivotState::new();
+    let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+    let defs = vec![saved_pivot(id, "Report", (0, 0))];
+    let eff = effect();
+
+    let probe_got_pivot_tables = std::thread::scope(|scope| {
+        let names_guard = state.sheet_names.read().unwrap();
+        let restore = scope.spawn(|| {
+            crate::calp_commands::restore_pulled_pivots(
+                &eff,
+                &defs,
+                &[],
+                &state,
+                &pivot_state,
+                &[0, 1],
+                &HashMap::new(),
+                &HashMap::new(),
+            );
+        });
+        // Let the restore run up to whatever it blocks on.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probed = &pivot_state;
+        let probe = scope.spawn(move || {
+            let _pt = probed.pivot_tables.read().unwrap();
+            let _ = tx.send(());
+        });
+        let got = rx.recv_timeout(std::time::Duration::from_millis(1500)).is_ok();
+        drop(names_guard);
+        restore.join().unwrap();
+        probe.join().unwrap();
+        got
+    });
+
+    assert!(
+        probe_got_pivot_tables,
+        "restore_pulled_pivots held `pivot_tables` while it waited for `sheet_names` -- \
+         the inverse of the order every name authority (and \
+         calp_get_application_objects) takes them in"
+    );
+    assert!(
+        pivot_state.pivot_tables.read().unwrap().contains_key(&id),
+        "and once `sheet_names` was free the restore completed"
+    );
+}
+
+/// C7's other half: `calp_get_application_objects` COPIES the sheet names and
+/// releases them before it takes the object stores (`pivot_tables` among
+/// them), so it holds no pair at all. A Tauri command with nine `State`s and a
+/// window cannot be driven from a unit test, so this reads its code.
+#[test]
+fn application_objects_copy_the_sheet_names_before_the_object_stores() {
+    let src = calp_commands_code();
+    let start = src
+        .find("pub fn calp_get_application_objects(")
+        .expect("calp_get_application_objects moved");
+    let body = &src[start..];
+    let end = body.find("\n}\n").expect("end of calp_get_application_objects");
+    let body = &body[..end];
+    let names_at = body
+        .find("state.sheet_names.read()")
+        .expect("the command no longer reads sheet_names");
+    let statement_end = body[names_at..].find(';').map(|i| names_at + i).unwrap();
+    let statement = &body[names_at..statement_end];
+    assert!(
+        statement.contains(".clone()"),
+        "`sheet_names` is held as a guard across the object stores again: {statement}"
+    );
+    let pivots_at = body
+        .find("pivot_tables.read()")
+        .expect("the command no longer reads pivot_tables");
+    assert!(names_at < pivots_at, "the canonical order is sheet_names, then pivot_tables");
+}
+
+// ===========================================================================
 // The WIRING, which none of the tests above can see
 // ===========================================================================
 //
@@ -465,19 +609,41 @@ fn the_refresh_path_captures_sheet_names_before_the_collision_pass() {
     // not, and the first draft of this fix reused the post-collision names.
     // (The BEHAVIOUR is pinned by the refresh-orchestration tests in
     // calp_materialize_tests.rs; this keeps the ordering visible at the source.)
+    //
+    // BUG-0151 moved the resolution into ONE core function the refresh PREVIEW
+    // shares (`calp::refresh::resolve_refresh_sheet_names`, whose own test pins
+    // the capture-before-collision order), so the host must call THAT and must
+    // not run a collision pass of its own beside it.
     let src = calp_commands_code();
     let start = src
         .find("pub(crate) fn prepare_refresh_payloads(")
         .expect("the refresh path no longer resolves its sheet names in prepare_refresh_payloads");
     let body = &src[start..];
-    let capture = body.find("let original_names");
-    let collide = body.find("calp::pull::resolve_sheet_name_collisions(");
-    assert!(capture.is_some(), "the refresh path no longer captures the publisher's names at all");
-    if let (Some(c), Some(r)) = (capture, collide) {
-        assert!(
-            c < r,
-            "the publisher's names are captured AFTER the collision pass, so the map \
-             sends resolved names to themselves and the remap is a no-op",
-        );
-    }
+    let end = body.find("\n}\n").expect("end of prepare_refresh_payloads");
+    let body = &body[..end];
+    assert!(
+        body.contains("calp::refresh::resolve_refresh_sheet_names("),
+        "the refresh path no longer resolves names through the resolver the preview shares"
+    );
+    assert!(
+        !body.contains("calp::pull::resolve_sheet_name_collisions("),
+        "the refresh path runs its own collision pass again -- the preview cannot see it, \
+         so the two stop agreeing about which references a rename rewrites"
+    );
+    let core = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/calp/src/refresh.rs"),
+    )
+    .expect("core/calp/src/refresh.rs must be readable");
+    let resolver = &core[core
+        .find("pub fn resolve_refresh_sheet_names(")
+        .expect("the shared resolver moved")..];
+    let capture = resolver.find("let original: Vec<String>").expect("the resolver captures names");
+    let collide = resolver
+        .find("crate::pull::resolve_name_collisions(")
+        .expect("the resolver runs the collision pass");
+    assert!(
+        capture < collide,
+        "the publisher's names are captured AFTER the collision pass, so the map \
+         sends resolved names to themselves and the remap is a no-op",
+    );
 }

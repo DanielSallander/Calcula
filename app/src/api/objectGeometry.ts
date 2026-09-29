@@ -42,11 +42,30 @@
 //          box's frame) joins it through `runInUndoTransaction` /
 //          `joinUndoTransaction`, and the canvas commits once at mouseup.
 //
+//          The frontend's nesting cannot see a transaction opened on the
+//          BACKEND by another caller -- a script's `beginBatch`, a Core
+//          gesture's own begin. The backend's begin answers whether it OPENED
+//          the transaction (W3); a frontend opener whose begin only JOINED one
+//          never commits it -- the caller that opened it does. Committing
+//          anyway closed a script's batch half-way: a timeline selection made
+//          inside `beginBatch` split the batch into two Ctrl+Z steps. And an
+//          opener commits with the TICKET its begin was handed: a sheet change
+//          in between ends its transaction (Excel parity), and a bare commit
+//          then closed whatever a stranger had opened since.
+//
 //          Seams point one way: this module imports nothing from extensions.
 
 import { requestOverlayRedraw, type GridRegion } from "./gridOverlays";
 import { showToast } from "./notifications";
-import { beginUndoTransaction, commitUndoTransaction } from "../core/lib/tauri-api";
+import { clampMoveToPage, getLayoutSurface, isRegionLocked } from "./layoutSurface";
+import {
+  beginUndoTransaction,
+  commitUndoTransaction,
+  readUndoBeginAnswer,
+  type UndoTransactionTicket,
+} from "../core/lib/tauri-api";
+import { registerCommandRefusal } from "./keybindings";
+import { CoreCommands } from "./commands";
 
 // ============================================================================
 // Types
@@ -170,6 +189,41 @@ export function canResizeObject(region: GridRegion): boolean {
 /** Whether the object's family co-moves its own selection with a dragged member. */
 export function familyCoMovesOwnSelection(region: GridRegion): boolean {
   return providers.get(region.type)?.coMovesOwnSelection === true;
+}
+
+/**
+ * Where a member a FAMILY co-moves with its dragged lead goes -- Controls,
+ * Slicer and Timeline move their own multi-selection along with a dragged
+ * member (`coMovesOwnSelection`) -- by the SAME rule the canvas group drag
+ * applies to the members it moves itself (CanvasSheet lib/groupDrag.ts
+ * `moverChanges`):
+ *
+ *   - `from` is the member's rect when the drag BEGAN and `delta` the lead's
+ *     total move so far, already snapped by Core -- never a per-frame
+ *     increment, which a clamp turns into drift (a member pushed against an
+ *     edge and brought back ended up displaced);
+ *   - on a sheet with a PAGE (a canvas) the result is kept on the page
+ *     (`clampMoveToPage`: the size is kept, the origin clamped), exactly as the
+ *     lead was;
+ *   - a member the surface LOCKS stays where it was (pass its `region`);
+ *   - off a page (a worksheet) the families' historical clamp at 0 holds.
+ *
+ * Until this existed each family clamped its members at 0 only, so a family-
+ * led drag on a canvas pushed its other members off the page that a
+ * Core-led drag of the very same selection kept them on, and moved locked
+ * ones.
+ */
+export function coMovedMemberRect(
+  sheetIndex: number,
+  from: ObjectRect,
+  delta: { dx: number; dy: number },
+  region?: GridRegion | null,
+): ObjectRect {
+  const surface = getLayoutSurface(sheetIndex);
+  if (region && isRegionLocked(surface, region)) return { ...from };
+  const moved = { x: from.x + delta.dx, y: from.y + delta.dy, width: from.width, height: from.height };
+  if (surface?.page) return clampMoveToPage(moved, surface.page);
+  return { ...moved, x: Math.max(0, moved.x), y: Math.max(0, moved.y) };
 }
 
 /** Test hook: forget every provider and any open frontend transaction. */
@@ -320,15 +374,39 @@ export interface UndoTransactionHandle {
   run<T>(fn: () => Promise<T> | T): Promise<T>;
   /**
    * The opener: wait for every piece of tracked work (including work joined
-   * while waiting), then commit the backend transaction. A joined handle's
-   * commit does nothing -- the opener commits.
+   * while waiting), then commit the backend transaction -- only when its
+   * begin OPENED it; one whose begin joined another caller's backend
+   * transaction leaves it to that caller. A joined handle's commit does
+   * nothing -- the opener commits.
    */
   commit(): Promise<void>;
+  /**
+   * Whether THIS handle's backend begin OPENED the transaction -- the
+   * backend's own answer, decided under the one lock that opens. False for a
+   * joined handle, and for a begin that joined another caller's backend
+   * transaction (a script's batch). A caller deciding "was this step mine?"
+   * asks THIS, never a probe taken before the begin, which can be stale by the
+   * time the begin lands in either direction.
+   */
+  openedBackend(): Promise<boolean>;
 }
 
 interface TransactionState {
   label: string;
   ready: Promise<void>;
+  /**
+   * Whether this transaction's backend begin OPENED the backend transaction.
+   * False when it JOINED one another caller holds open (the begin answered
+   * `null`): that caller commits it, never this one. Settled with `ready`.
+   */
+  opensBackend: boolean;
+  /**
+   * The ticket the opening begin was handed. The commit presents it, so it
+   * closes the backend slot only while the slot still holds THIS transaction
+   * -- a sheet change or a document swap in between ends it (Excel parity),
+   * and a bare commit then closed whatever a stranger had opened since.
+   */
+  ticket: UndoTransactionTicket | null;
   pending: Set<Promise<unknown>>;
   closing: boolean;
   done: Promise<void> | null;
@@ -363,21 +441,42 @@ export function openUndoTransaction(label: string): UndoTransactionHandle {
       joined: true,
       run: (fn) => tracked(open, fn),
       commit: async () => {},
+      openedBackend: async () => false,
     };
   }
   const after = lastClosing ?? Promise.resolve();
   const tx: TransactionState = {
     label,
-    ready: after.catch(() => {}).then(() => beginUndoTransaction(label)),
+    ready: Promise.resolve(),
+    opensBackend: true,
+    ticket: null,
     pending: new Set(),
     closing: false,
     done: null,
   };
+  tx.ready = after
+    .catch(() => {})
+    .then(() => beginUndoTransaction(label))
+    .then((answer) => {
+      // Only a "joined" (null) hands the commit to the other caller; the
+      // backend decides it under the one lock that opens.
+      const own = readUndoBeginAnswer(answer);
+      tx.opensBackend = own.opened;
+      tx.ticket = own.ticket;
+    });
   tx.ready.catch(() => {});
   current = tx;
   return {
     joined: false,
     run: (fn) => tracked(tx, fn),
+    openedBackend: async () => {
+      try {
+        await tx.ready;
+      } catch {
+        return false;
+      }
+      return tx.opensBackend;
+    },
     commit: () => {
       if (tx.done) return tx.done;
       tx.done = (async () => {
@@ -396,8 +495,14 @@ export function openUndoTransaction(label: string): UndoTransactionHandle {
           await Promise.allSettled(Array.from(tx.pending));
         }
         tx.closing = true;
+        if (!tx.opensBackend) {
+          // Joined another caller's BACKEND transaction: everything tracked
+          // has landed inside it, and its opener commits it.
+          if (current === tx) current = null;
+          return;
+        }
         try {
-          await commitUndoTransaction();
+          await (tx.ticket === null ? commitUndoTransaction() : commitUndoTransaction(tx.ticket));
         } finally {
           if (current === tx) current = null;
         }
@@ -438,4 +543,52 @@ export function joinUndoTransaction<T>(fn: () => Promise<T> | T): Promise<T> {
 /** Whether the frontend holds an open undo transaction right now. */
 export function isUndoTransactionOpen(): boolean {
   return current !== null && !current.closing;
+}
+
+/**
+ * Settles once the frontend's last undo transaction that started COMMITTING
+ * has finished (never rejects). While a commit is in flight the BACKEND still
+ * reports its transaction open, so a gesture that asks "is a transaction open
+ * anywhere?" in that window was falsely told it JOINED one -- and was never
+ * asked about the cells it overwrote (BUG-0200). Such a gesture waits for
+ * this first. Never await it from work tracked INSIDE an open transaction:
+ * that transaction's own commit waits for the work (`isAnyUndoTransactionOpen`
+ * answers "open" before it would wait).
+ */
+export function undoCommitsSettled(): Promise<void> {
+  return lastClosing ?? Promise.resolve();
+}
+
+// ============================================================================
+// Gestures that LAND their undo step at the end (the review of BUG-0187)
+// ============================================================================
+//
+// A slicer click or a ribbon filter change is ONE backend command that pushes
+// its step when it lands, after a model re-query that can take seconds. The
+// backend REFUSES an undo or redo meanwhile (`undo_commands::
+// history_move_refusal`): taken back under the gesture, the step before it came
+// off, the gesture landed on top of it -- clearing that undo's redo -- and a
+// click whose previous click was undone underneath left the slicer and its
+// pivots disagreeing. The refusal is silent where Core ignores its result, so
+// the frontend says it, once per press, while such a gesture lands -- at the
+// keyboard's Ctrl+Z / Ctrl+Y AND at every other door (CommandRegistry.execute:
+// the ribbon, the Edit menu, the Quick Access Toolbar). Only the keyboard asked
+// until 2026-09-29 (e2e fixall-edit W15), and a ribbon Undo could overtake the
+// gesture's start and reach the backend before its refusal was armed.
+
+/** What a refused undo or redo says while a gesture lands. */
+export const UNDO_WHILE_A_GESTURE_LANDS =
+  "A slicer or filter change is still being applied. Undo or redo once it has finished.";
+
+/**
+ * Refuse Undo / Redo from every door, with {@link UNDO_WHILE_A_GESTURE_LANDS},
+ * while `isLanding()` says a gesture of the caller's that pushes its step
+ * when it lands is in flight (a slicer click, a ribbon filter change). Asked
+ * at every keystroke; returns the cleanup.
+ */
+export function refuseUndoWhileAGestureLands(isLanding: () => boolean): () => void {
+  return registerCommandRefusal({
+    commandIds: [CoreCommands.UNDO, CoreCommands.REDO],
+    refuse: () => (isLanding() ? UNDO_WHILE_A_GESTURE_LANDS : null),
+  });
 }

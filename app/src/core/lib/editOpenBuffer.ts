@@ -76,6 +76,49 @@ export type OpenKeyOutcome =
   /** Not ours -- the caller must handle it exactly as it would have before. */
   | { kind: "passthrough" };
 
+/**
+ * The window event Core's editing hook (useSpreadsheetEditing) answers by
+ * DISCARDING its open cell edit -- no commit, no return to the edit's source
+ * sheet. Sent when the document is REPLACED (core/lib/file-api.ts): the edit
+ * belongs to the document that is gone (E9). Lives here, in a module with no
+ * imports, so the hook does not load the file API to name it.
+ */
+export const DISCARD_EDIT_EVENT = "grid:discardEdit";
+
+/** The subset of a keyboard event {@link isTypedCharacterKey} reads. */
+export interface TypedKeyLike {
+  key: string;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  altKey: boolean;
+}
+
+/** A character a layout's AltGr level produces, never a shortcut's letter or digit. */
+const PLAIN_SHORTCUT_KEY = /^[A-Za-z0-9]$/;
+
+/**
+ * Whether a keydown TYPES its character -- in ready mode it starts an entry,
+ * while an editor opens it is appended -- rather than being a shortcut.
+ *
+ * ALTGR (E13). Windows reports AltGr as Ctrl+Alt, so Chromium delivers the
+ * third-level characters of a layout with ctrlKey AND altKey set: on sv-SE
+ * "@" (AltGr+2), "$" (AltGr+4), "{ [ ] }" (AltGr+7..0), "\" (AltGr++), "|",
+ * "~" and the euro sign (AltGr+E). Every "no Ctrl and no Alt" test threw them
+ * away, so on the owner's own keyboard a cell entry could not begin with "@"
+ * or "$" at all -- the key started nothing. A Ctrl+Alt keystroke TYPES when
+ * the character it produced is not a plain ASCII letter or digit: a real
+ * Ctrl+Alt shortcut (Paste Special's Ctrl+Alt+V, New Comment's Ctrl+Alt+M)
+ * produces its plain letter, a layout's AltGr level a symbol or an accented
+ * letter. Ctrl alone, Alt alone and Meta never type.
+ */
+export function isTypedCharacterKey(event: TypedKeyLike): boolean {
+  if (event.key.length !== 1) return false;
+  if (event.metaKey) return false;
+  if (!event.ctrlKey && !event.altKey) return true;
+  if (!(event.ctrlKey && event.altKey)) return false;
+  return !PLAIN_SHORTCUT_KEY.test(event.key);
+}
+
 interface OpenWindow {
   /** Everything typed since the open began, in order. */
   value: string;
@@ -169,7 +212,8 @@ export function handleKeyWhileOpening(event: OpenKeyLike): OpenKeyOutcome {
     return { kind: "text", value: openWindow.value };
   }
 
-  if (key.length === 1 && !ctrlKey && !metaKey && !altKey) {
+  // A typed character -- an AltGr one included (see isTypedCharacterKey).
+  if (isTypedCharacterKey(event)) {
     openWindow.value += key;
     armWatchdog();
     return { kind: "text", value: openWindow.value };

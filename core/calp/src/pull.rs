@@ -225,25 +225,12 @@ pub fn resolve_sheet_name_collisions(
     taken: &mut Vec<String>,
     skip: &std::collections::HashSet<SheetId>,
 ) {
-    let mut taken_lower: std::collections::HashSet<String> =
-        taken.iter().map(|n| n.to_lowercase()).collect();
-
-    for ps in sheets.iter_mut() {
-        if skip.contains(&ps.package_sheet_id) {
-            continue;
-        }
-        let mut resolved = ps.name.clone();
-        if taken_lower.contains(&resolved.to_lowercase()) {
-            let mut n = 2usize;
-            loop {
-                let candidate = format!("{} ({})", ps.name, n);
-                if !taken_lower.contains(&candidate.to_lowercase()) {
-                    resolved = candidate;
-                    break;
-                }
-                n += 1;
-            }
-        }
+    let mut names: Vec<(SheetId, String)> = sheets
+        .iter()
+        .map(|ps| (ps.package_sheet_id, ps.name.clone()))
+        .collect();
+    resolve_name_collisions(&mut names, taken, skip);
+    for (ps, (_, resolved)) in sheets.iter_mut().zip(names) {
         if resolved != ps.name {
             if let Some(entry) = subscribed
                 .iter_mut()
@@ -251,7 +238,42 @@ pub fn resolve_sheet_name_collisions(
             {
                 entry.local_name = resolved.clone();
             }
-            ps.name = resolved.clone();
+            ps.name = resolved;
+        }
+    }
+}
+
+/// [`resolve_sheet_name_collisions`] over bare `(application sheet id, name)`
+/// pairs, renaming in place. THE rule, in one place: the refresh PREVIEW has
+/// only the version manifest's sheet names (no pulled sheets), and it has to
+/// reach the name every NEW sheet will be given exactly as the apply does, or
+/// the two disagree about which references a collision rename rewrites.
+pub fn resolve_name_collisions(
+    names: &mut [(SheetId, String)],
+    taken: &mut Vec<String>,
+    skip: &std::collections::HashSet<SheetId>,
+) {
+    let mut taken_lower: std::collections::HashSet<String> =
+        taken.iter().map(|n| n.to_lowercase()).collect();
+
+    for (package_sheet_id, name) in names.iter_mut() {
+        if skip.contains(package_sheet_id) {
+            continue;
+        }
+        let mut resolved = name.clone();
+        if taken_lower.contains(&resolved.to_lowercase()) {
+            let mut n = 2usize;
+            loop {
+                let candidate = format!("{} ({})", name, n);
+                if !taken_lower.contains(&candidate.to_lowercase()) {
+                    resolved = candidate;
+                    break;
+                }
+                n += 1;
+            }
+        }
+        if resolved != *name {
+            *name = resolved.clone();
         }
         taken_lower.insert(resolved.to_lowercase());
         taken.push(resolved);

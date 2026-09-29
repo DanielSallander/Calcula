@@ -42,7 +42,7 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => DialogExtensions.unregisterDialog("csv-export"));
 
   // 2. Register menu items in Data menu
-  registerCsvMenuItems();
+  cleanupFns.push(registerCsvMenuItems());
 
   console.log("[CsvImportExport] Activated successfully.");
 }

@@ -4,6 +4,7 @@
 //          Uses dedicated test area to avoid mock data overlap.
 
 import type { TestSuite } from "../types";
+import { applyFormatting, getStyle, clearRangeWithOptions } from "@api/lib";
 import { assertTrue, expectCellValue } from "../assertions";
 import { TEST_AREA } from "../testArea";
 
@@ -19,6 +20,8 @@ export const formattingSuite: TestSuite = {
       { row: R, col: C, value: "" },
       { row: R, col: C + 1, value: "" },
     ]);
+    // ...and the style the first test applied, so no other suite inherits it.
+    await clearRangeWithOptions(R, C, R, C + 1, "formats");
     await ctx.settle();
   },
 
@@ -36,17 +39,18 @@ export const formattingSuite: TestSuite = {
         ctx.setSelection({ startRow: R, startCol: C, endRow: R, endCol: C });
         await ctx.settle();
 
-        // Try to apply bold (this depends on the formatting extension being loaded)
-        try {
-          await ctx.executeCommand("format.bold");
-        } catch {
-          ctx.log("format.bold command not available (formatting extension may not be loaded)");
-        }
+        // Apply bold through @api/lib, as the Home tab does. The test used to
+        // run `format.bold` -- an id NO registry holds -- inside a try/catch,
+        // so no style ever changed and the test passed anyway.
+        await applyFormatting([R], [C], { bold: true });
         await ctx.settle();
 
-        // Value should remain unchanged regardless of style
+        // Value should remain unchanged by the style change...
         const cell = await ctx.getCell(R, C);
         expectCellValue(cell, "StyledText", "TestArea");
+        // ...and the style change must actually have happened.
+        const style = await getStyle(cell!.styleIndex);
+        assertTrue(style.bold === true, "the cell is not bold after applying bold");
       },
     },
     {

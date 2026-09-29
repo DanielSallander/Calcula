@@ -241,6 +241,16 @@ describe("A1 strings keep their old rules", () => {
     h.gridState = { sheetContext: { activeSheetIndex: 1, activeSheetName: "Sheet2" } };
     expect((await resolveDataSource("A1:B5")).sheetIndex).toBe(1);
   });
+
+  // Found live 2026-09-29 (e2e fixall-calp R5): a chart over a sheet named
+  // Rock'!Roll never plotted, even for its publisher. The parser stripped the
+  // outer quotes but left the doubled quote doubled, and asked for a sheet
+  // called Rock''!Roll.
+  it("a quoted name with an escaped quote and a '!' inside resolves to that sheet", async () => {
+    listIs([sheet(0, "Sheet1", "id-A"), sheet(1, "Rock'!Roll", "id-R")]);
+    const out = await resolveDataSource("'Rock''!Roll'!$A$1:$B$3");
+    expect(out).toEqual({ sheetIndex: 1, startRow: 0, startCol: 0, endRow: 2, endCol: 1 });
+  });
 });
 
 // ============================================================================

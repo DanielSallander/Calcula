@@ -14,8 +14,8 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
 use crate::cache::{
-    CacheValue, GroupKey, OrderedFloat, PivotCache, ValueId, VALUE_ID_EMPTY,
-    parse_cache_value_as_date,
+    member_id, CacheValue, GroupKey, OrderedFloat, PivotCache, ValueId, VALUE_ID_BLANK,
+    VALUE_ID_EMPTY, parse_cache_value_as_date,
 };
 use crate::definition::{
     AggregationType, DateGroupLevel, FieldGrouping, FieldIndex, HierarchyConfig,
@@ -123,6 +123,13 @@ pub(crate) struct FlatAxisItem {
     /// Populated during flattening for items at the depth that owns each attribute.
     /// One entry per attribute field, in definition order.
     pub(crate) attribute_labels: Vec<String>,
+
+    /// The value field this item STANDS FOR when the value fields are a level
+    /// of this axis (`expand_axis_for_values`: several values on rows or on
+    /// columns); `None` for every other item. Read by the data cells of a
+    /// values-on-rows pivot: each value row shows its OWN value field, not
+    /// every one of them (e2e fixall-pivot R4, 2026-09-29).
+    pub(crate) value_field: Option<usize>,
 }
 
 /// Pre-computed row-axis data for visual calculations, built once per view
@@ -196,6 +203,23 @@ pub struct PivotCalculator<'a> {
     /// Reusable buffer for building group keys in compute_aggregate.
     /// Avoids allocating a new Vec per cell (590K+ calls).
     agg_key_buf: Vec<ValueId>,
+
+    /// Every member id of each base field, blank member included, in
+    /// ascending order (see [`Self::get_ordered_items_for_field`]): the walk
+    /// for a cell whose siblings the axis does not list, and the answer to
+    /// "does this field have a blank member". Built once per field per
+    /// calculation: it is read for EVERY such cell, and the blank member
+    /// costs a scan of the records to find.
+    base_field_items: FxHashMap<FieldIndex, Vec<ValueId>>,
+
+    /// The items Show Values As walks, IN THE ORDER THE AXIS SHOWS THEM: per
+    /// row level, each parent path (the member ids of the levels above)
+    /// mapped to its children as built -- sorted by the field's own order,
+    /// hidden items gone. See [`Self::resolve_base_field`].
+    row_sibling_order: Vec<FxHashMap<Vec<ValueId>, Vec<ValueId>>>,
+
+    /// [`Self::row_sibling_order`] for the column levels.
+    col_sibling_order: Vec<FxHashMap<Vec<ValueId>, Vec<ValueId>>>,
 }
 
 impl<'a> PivotCalculator<'a> {
@@ -233,12 +257,17 @@ impl<'a> PivotCalculator<'a> {
             col_attribute_fields: Vec::new(),
             grand_totals: Vec::new(),
             agg_key_buf: Vec::new(),
+            base_field_items: FxHashMap::default(),
+            row_sibling_order: Vec::new(),
+            col_sibling_order: Vec::new(),
         }
     }
 
     /// Executes the full calculation and returns the rendered view.
     pub fn calculate(&mut self) -> PivotView {
         let t_total = Instant::now();
+        // Built over THIS calculation's records and virtual fields.
+        self.base_field_items.clear();
 
         // Step 1: Apply filters from definition to cache
         let t0 = Instant::now();
@@ -266,6 +295,9 @@ impl<'a> PivotCalculator<'a> {
                 apply_ragged_behavior(&mut col_tree, hc, 0);
             }
         }
+        // What Show Values As walks: the items as the axis shows them.
+        self.row_sibling_order = sibling_order_of(&row_tree, row_fields.len());
+        self.col_sibling_order = sibling_order_of(&col_tree, col_fields.len());
         let _tree_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 3: Flatten trees into ordered lists
@@ -362,9 +394,10 @@ impl<'a> PivotCalculator<'a> {
 
         for (record_idx, record) in self.cache.records.iter().enumerate() {
             for attr in attrs.iter_mut() {
-                // Get the parent GROUP field's value_id for this record
+                // The parent GROUP field's MEMBER id for this record -- the
+                // id the axis items carry (a blank parent is VALUE_ID_BLANK)
                 let parent_field = &group_fields[attr.parent_group_index];
-                let parent_vid = record_value_at(
+                let parent_vid = record_member_at(
                     record,
                     record_idx,
                     parent_field.source_index,
@@ -511,52 +544,105 @@ impl<'a> PivotCalculator<'a> {
         }
     }
 
-    /// Finds the base field position and ordered items for a value field's base_field_index.
+    /// Finds where a value field's base field sits and the items to walk for
+    /// the cell at `row_values` x `col_values`.
     /// Returns (is_row_field, position_in_axis, ordered_item_value_ids).
+    ///
+    /// THE ITEMS ARE THE CELL'S SIBLINGS AS THE AXIS SHOWS THEM (wave E, Y2):
+    /// the base field's items under the cell's own parent path, in the
+    /// field's sort order -- descending, by another field, manual -- with
+    /// hidden items gone. Running Total, (previous) / (next) and Rank are
+    /// about the rows (or columns) on screen. The walk was every item of the
+    /// field in ASCENDING order whatever the sort, so a Z-A Region read West
+    /// 65, East 45, (blank) 35 where Excel reads 20, 30, 65, and a hidden
+    /// item was ranked and stepped onto.
+    ///
+    /// A cell whose parent path the axis does not list (a subtotal or grand
+    /// total cell of a base field below it, where the path holds the "all
+    /// values" padding) walks every item of the field
+    /// ([`Self::get_ordered_items_for_field`]); its own item is the padding,
+    /// which matches none of them, so the order does not matter there.
     fn resolve_base_field(
-        &self,
+        &mut self,
         vf_idx: usize,
+        row_values: &[ValueId],
+        col_values: &[ValueId],
     ) -> Option<(bool, usize, Vec<ValueId>)> {
         let vf = &self.definition.value_fields[vf_idx];
         let base_fi = vf.base_field_index?;
 
-        // Check row fields first
-        for (pos, rf) in self.effective_row_fields.iter().enumerate() {
-            if rf.source_index == base_fi {
-                let items = self.get_ordered_items_for_field(base_fi);
-                return Some((true, pos, items));
-            }
-        }
-        // Check column fields
-        for (pos, cf) in self.effective_col_fields.iter().enumerate() {
-            if cf.source_index == base_fi {
-                let items = self.get_ordered_items_for_field(base_fi);
-                return Some((false, pos, items));
-            }
-        }
-        None
+        // Row fields first, then column fields.
+        let (is_row, pos) = match self.effective_row_fields.iter().position(|rf| rf.source_index == base_fi) {
+            Some(pos) => (true, pos),
+            None => (false, self.effective_col_fields.iter().position(|cf| cf.source_index == base_fi)?),
+        };
+        let (orders, values) = if is_row {
+            (&self.row_sibling_order, row_values)
+        } else {
+            (&self.col_sibling_order, col_values)
+        };
+        let shown: Option<Vec<ValueId>> =
+            values.get(..pos).and_then(|parent| orders.get(pos)?.get(parent)).cloned();
+        let items = match shown {
+            Some(items) => items,
+            None => self.get_ordered_items_for_field(base_fi),
+        };
+        Some((is_row, pos, items))
     }
 
-    /// Returns the ordered list of ValueIds for a field (sorted ascending).
-    fn get_ordered_items_for_field(&self, field_index: FieldIndex) -> Vec<ValueId> {
-        if let Some(fc) = self.cache.get_field(field_index) {
-            // Use the field cache's sorted order
-            let mut fc_clone = fc.clone();
-            fc_clone.sorted_ids().to_vec()
-        } else {
-            Vec::new()
+    /// Every MEMBER id of a field in ascending order: the walk for a cell
+    /// whose siblings the axis does not list (see [`Self::resolve_base_field`],
+    /// which walks the items as SHOWN wherever it can), and what
+    /// [`Self::resolve_base_item_id`] asks "does this field have a blank
+    /// member" of.
+    ///
+    /// THE BLANK MEMBER IS ONE OF THEM (wave D, X1). Blanks are never
+    /// interned, so the field's sorted values never name the blank member
+    /// (`VALUE_ID_BLANK` in a group key): its running total never met its own
+    /// row and summed every OTHER item, rank left it out of the siblings, and
+    /// (previous) / (next) found no position for it -- nor for the item next
+    /// to it. When any record of the field is blank it is listed FIRST, where
+    /// the ascending axis shows it (`compare_values` sorts `CacheValue::Empty`
+    /// before every value).
+    fn get_ordered_items_for_field(&mut self, field_index: FieldIndex) -> Vec<ValueId> {
+        if let Some(items) = self.base_field_items.get(&field_index) {
+            return items.clone();
         }
+        let items = match self.cache.get_field(field_index) {
+            Some(fc) => {
+                // Use the field cache's sorted order
+                let mut fc_clone = fc.clone();
+                let sorted = fc_clone.sorted_ids();
+                let has_blank = (0..self.cache.records.len())
+                    .any(|ri| self.cache.get_record_value_id(ri, field_index) == VALUE_ID_EMPTY);
+                let mut items = Vec::with_capacity(sorted.len() + usize::from(has_blank));
+                if has_blank {
+                    items.push(VALUE_ID_BLANK);
+                }
+                items.extend_from_slice(sorted);
+                items
+            }
+            None => Vec::new(),
+        };
+        self.base_field_items.insert(field_index, items.clone());
+        items
     }
 
     /// Finds the ValueId for a named base_item within a field.
     /// Special values: "(previous)" and "(next)" return None (handled by caller).
+    /// "(blank)" (any case) names the blank member when the field has one.
     fn resolve_base_item_id(
-        &self,
+        &mut self,
         field_index: FieldIndex,
         base_item: &str,
     ) -> Option<ValueId> {
         if base_item == "(previous)" || base_item == "(next)" {
             return None; // Sentinel - caller handles positional logic
+        }
+        if crate::cache::is_blank_item_label(base_item)
+            && self.get_ordered_items_for_field(field_index).first() == Some(&VALUE_ID_BLANK)
+        {
+            return Some(VALUE_ID_BLANK);
         }
         let fc = self.cache.get_field(field_index)?;
         // Search by label
@@ -579,7 +665,7 @@ impl<'a> PivotCalculator<'a> {
         aggregation: AggregationType,
         is_percent: bool,
     ) -> f64 {
-        let resolved = self.resolve_base_field(vf_idx);
+        let resolved = self.resolve_base_field(vf_idx, row_values, col_values);
         let (is_row, pos, ordered_items) = match resolved {
             Some(v) => v,
             None => return value,
@@ -655,7 +741,7 @@ impl<'a> PivotCalculator<'a> {
         aggregation: AggregationType,
         is_percent: bool,
     ) -> f64 {
-        let resolved = self.resolve_base_field(vf_idx);
+        let resolved = self.resolve_base_field(vf_idx, row_values, col_values);
         let (is_row, pos, ordered_items) = match resolved {
             Some(v) => v,
             None => return _value,
@@ -708,7 +794,7 @@ impl<'a> PivotCalculator<'a> {
         aggregation: AggregationType,
         descending: bool,
     ) -> f64 {
-        let resolved = self.resolve_base_field(vf_idx);
+        let resolved = self.resolve_base_field(vf_idx, row_values, col_values);
         let (is_row, pos, ordered_items) = match resolved {
             Some(v) => v,
             None => return value,
@@ -812,9 +898,18 @@ impl<'a> PivotCalculator<'a> {
     }
 
     /// Resolves string hidden items to ValueIds by comparing display strings.
+    ///
+    /// The blank item's label ("(blank)", any case) resolves to
+    /// `VALUE_ID_EMPTY`: blanks are never interned, so the scan over the
+    /// interned values below could never find them, and hiding "(blank)" --
+    /// or an inclusion `Region = ("East")` inverted into "hide every other
+    /// item" -- kept every blank record (BUG-0197).
     fn resolve_hidden_ids(field_cache: &crate::cache::FieldCache, hidden_items: &[String]) -> Vec<ValueId> {
         let mut ids = Vec::new();
         for hidden_str in hidden_items {
+            if crate::cache::is_blank_item_label(hidden_str) && !ids.contains(&VALUE_ID_EMPTY) {
+                ids.push(VALUE_ID_EMPTY);
+            }
             for id in 0..field_cache.unique_count() as ValueId {
                 if let Some(value) = field_cache.get_value(id) {
                     if Self::cache_value_display(value) == *hidden_str {
@@ -1265,7 +1360,9 @@ impl<'a> PivotCalculator<'a> {
 
             path.clear();
             for (level, field) in fields.iter().enumerate() {
-                let value_id = record_value_at(
+                // The MEMBER id: a blank value is the blank member
+                // (VALUE_ID_BLANK), never the subtotal padding.
+                let value_id = record_member_at(
                     record,
                     record_idx,
                     field.source_index,
@@ -1290,8 +1387,57 @@ impl<'a> PivotCalculator<'a> {
             }
         }
 
+        // "Show items with no data" lists every member of the field, the
+        // blank member included when ANY record of the field is blank (the
+        // interned values alone never name it). Scanned only for such fields.
+        let blank_in_field: Vec<bool> = fields
+            .iter()
+            .map(|f| {
+                f.show_all_items
+                    && (0..self.cache.records.len())
+                        .any(|ri| self.cache.get_record_value_id(ri, f.source_index) == VALUE_ID_EMPTY)
+            })
+            .collect();
+
+        // DATA-SOURCE ORDER (wave F, Z2): for every level shown in Manual or
+        // DataSourceOrder, the record index at which the SOURCE first shows
+        // each item. Scanned over EVERY record, the filtered-out ones too, so
+        // the order is the source's and hiding a year never reorders the
+        // regions; ONE order per field, which the items under every parent
+        // follow (Excel keeps one item order per field). The level's
+        // FxHashSet order used to stand in for it.
+        let source_order: Vec<Option<FxHashMap<ValueId, usize>>> = fields
+            .iter()
+            .map(|field| {
+                use crate::definition::SortOrder;
+                if !matches!(field.sort_order, SortOrder::Manual | SortOrder::DataSourceOrder) {
+                    return None;
+                }
+                let mut first_shown: FxHashMap<ValueId, usize> = FxHashMap::default();
+                for (record_idx, record) in self.cache.records.iter().enumerate() {
+                    let member = record_member_at(
+                        record,
+                        record_idx,
+                        field.source_index,
+                        base_field_count,
+                        &self.cache.virtual_records,
+                    );
+                    first_shown.entry(member).or_insert(record_idx);
+                }
+                Some(first_shown)
+            })
+            .collect();
+
         // Build tree recursively using the pre-computed index
-        self.build_tree_level_indexed(fields, 0, &unique_per_level, &children_index, &[])
+        self.build_tree_level_indexed(
+            fields,
+            0,
+            &unique_per_level,
+            &children_index,
+            &blank_in_field,
+            &source_order,
+            &[],
+        )
     }
 
     /// Recursively builds one level of the axis tree using a pre-computed children index.
@@ -1301,6 +1447,8 @@ impl<'a> PivotCalculator<'a> {
         level: usize,
         unique_values: &[FxHashSet<ValueId>],
         children_index: &[FxHashMap<Vec<ValueId>, FxHashSet<ValueId>>],
+        blank_in_field: &[bool],
+        source_order: &[Option<FxHashMap<ValueId, usize>>],
         parent_path: &[ValueId],
     ) -> Vec<AxisNode> {
         if level >= fields.len() {
@@ -1318,7 +1466,9 @@ impl<'a> PivotCalculator<'a> {
         // (Cartesian product), not just those present in the filtered data.
         let all_values_set: FxHashSet<ValueId>;
         let values_at_level = if field.show_all_items {
-            all_values_set = (0..field_cache.unique_count() as ValueId).collect();
+            all_values_set = (0..field_cache.unique_count() as ValueId)
+                .chain(blank_in_field.get(level).copied().unwrap_or(false).then_some(VALUE_ID_BLANK))
+                .collect();
             &all_values_set
         } else if level == 0 {
             // Level 0: use the unique values from the single-pass scan
@@ -1349,7 +1499,8 @@ impl<'a> PivotCalculator<'a> {
                 if !self.cache.filter_mask[rec_idx] {
                     continue;
                 }
-                let display_vid = record_value_at(
+                // Keyed by MEMBER id, the id the level's sorted values carry.
+                let display_vid = record_member_at(
                     record, rec_idx, field.source_index,
                     base_field_count, &self.cache.virtual_records,
                 );
@@ -1363,7 +1514,13 @@ impl<'a> PivotCalculator<'a> {
             }
             Some((sort_fi, mapping))
         });
-        self.sort_value_ids(&mut sorted_ids, field_cache, &field.sort_order, &sort_by_map);
+        self.sort_value_ids(
+            &mut sorted_ids,
+            field_cache,
+            &field.sort_order,
+            &sort_by_map,
+            source_order.get(level).and_then(Option::as_ref),
+        );
 
         let mut nodes = Vec::with_capacity(sorted_ids.len());
 
@@ -1410,6 +1567,8 @@ impl<'a> PivotCalculator<'a> {
                     level + 1,
                     unique_values,
                     children_index,
+                    blank_in_field,
+                    source_order,
                     &child_path,
                 );
             }
@@ -1423,12 +1582,15 @@ impl<'a> PivotCalculator<'a> {
     /// Sorts value IDs based on sort order.
     /// When `sort_by_map` is provided (sort-by-column), items are compared using
     /// the mapped sort-by field's values instead of the display field's own values.
+    /// `source_order` is the record index at which the source first shows each
+    /// item (built by `build_axis_tree` for a Manual / DataSourceOrder level).
     fn sort_value_ids(
         &self,
         ids: &mut Vec<ValueId>,
         field_cache: &crate::cache::FieldCache,
         sort_order: &crate::definition::SortOrder,
         sort_by_map: &Option<(FieldIndex, FxHashMap<ValueId, ValueId>)>,
+        source_order: Option<&FxHashMap<ValueId, usize>>,
     ) {
         use crate::definition::SortOrder;
 
@@ -1464,7 +1626,17 @@ impl<'a> PivotCalculator<'a> {
                 }
             }
             SortOrder::Manual | SortOrder::DataSourceOrder => {
-                // Manual sort overrides sort-by-column; keep original order
+                // The order the SOURCE first shows each item (wave F, Z2),
+                // never the order a hash set yields them. MANUAL is the same
+                // order: a definition stores no manual item order, so the
+                // source's is the one there is. Both override sort-by-column.
+                // An item no record shows (show items with no data: a
+                // calculation group's declared items, pre-interned in
+                // declaration order) follows, in the cache's own order -- its
+                // ValueId, which is also the tiebreak that keeps this total.
+                ids.sort_unstable_by_key(|&id| {
+                    (source_order.and_then(|first| first.get(&id)).copied().unwrap_or(usize::MAX), id)
+                });
             }
         }
     }
@@ -1497,7 +1669,7 @@ impl<'a> PivotCalculator<'a> {
                     (CacheValue::Number(_), _) => Ordering::Less,
                     (_, CacheValue::Number(_)) => Ordering::Greater,
                     
-                    (CacheValue::Text(ta), CacheValue::Text(tb)) => ta.cmp(tb),
+                    (CacheValue::Text(ta), CacheValue::Text(tb)) => crate::cache::compare_text_excel(ta, tb),
                     (CacheValue::Text(_), _) => Ordering::Less,
                     (_, CacheValue::Text(_)) => Ordering::Greater,
                     
@@ -1518,7 +1690,7 @@ impl<'a> PivotCalculator<'a> {
         field_cache: &crate::cache::FieldCache,
         value_id: ValueId,
     ) -> String {
-        if value_id == VALUE_ID_EMPTY {
+        if value_id == VALUE_ID_EMPTY || value_id == VALUE_ID_BLANK {
             return "(blank)".to_string();
         }
 
@@ -1577,6 +1749,7 @@ impl<'a> PivotCalculator<'a> {
                 parent_index: -1,
                 field_indices: fields.iter().map(|f| f.source_index).collect(),
                 attribute_labels: Vec::new(),
+                value_field: None,
             });
         }
 
@@ -1660,7 +1833,7 @@ impl<'a> PivotCalculator<'a> {
                     parent_index,
                     field_indices: fields.iter().map(|f| f.source_index).collect(),
                     attribute_labels: Vec::new(),
-
+                    value_field: None,
                 });
 
                 // Fix up direct children's parent_index from placeholder to actual
@@ -1696,7 +1869,7 @@ impl<'a> PivotCalculator<'a> {
                         parent_index: my_index,
                         field_indices: fields.iter().map(|f| f.source_index).collect(),
                         attribute_labels: Vec::new(),
-    
+                        value_field: None,
                     }
                 };
 
@@ -1717,7 +1890,7 @@ impl<'a> PivotCalculator<'a> {
                     parent_index,
                     field_indices: fields.iter().map(|f| f.source_index).collect(),
                     attribute_labels: Vec::new(),
-
+                    value_field: None,
                 });
 
                 // Recurse into children if not collapsed
@@ -1741,6 +1914,39 @@ impl<'a> PivotCalculator<'a> {
         }
     }
     
+    /// Several value fields are a level of the ROW axis: every value row stands
+    /// for ONE value field (its `FlatAxisItem::value_field`), and with no
+    /// column field the view has ONE value column, not one per value field.
+    fn values_on_rows(&self) -> bool {
+        self.definition.value_fields.len() > 1
+            && matches!(self.definition.layout.values_position, ValuesPosition::Rows)
+    }
+
+    /// The unified value-column order of a view with NO column field: every
+    /// value field and calculated field, in order -- or, with the values on
+    /// rows, ONE column for "the row's own value" (the first value slot)
+    /// followed by the calculated fields.
+    fn value_columns_without_col_fields(&self) -> Vec<ValueColumnRef> {
+        let order = self.definition.effective_value_column_order();
+        if !self.values_on_rows() {
+            return order;
+        }
+        let mut out = Vec::with_capacity(order.len());
+        let mut value_slot_taken = false;
+        for col_ref in order {
+            match col_ref {
+                ValueColumnRef::Value(i) => {
+                    if !value_slot_taken {
+                        value_slot_taken = true;
+                        out.push(ValueColumnRef::Value(i));
+                    }
+                }
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
     /// Handles ValuesPosition (multiple value fields as rows or columns).
     fn apply_values_position(&mut self) {
         let value_count = self.definition.value_fields.len();
@@ -1997,7 +2203,10 @@ impl<'a> PivotCalculator<'a> {
         Self::find_ancestor_at_depth(col_items, item.parent_index as usize, target_depth)
     }
 
-    /// Builds the group_path vector from a FlatAxisItem's group_values.
+    /// Builds the group_path vector from a FlatAxisItem's group_values. Only
+    /// the "all values" padding is left out: a blank MEMBER is
+    /// `VALUE_ID_BLANK`, so it is named like any other member (every other
+    /// group-path builder in this file follows the same rule).
     fn build_group_path(item: &FlatAxisItem) -> Vec<(usize, ValueId)> {
         let mut gp = Vec::new();
         for (i, &val) in item.group_values.iter().enumerate() {
@@ -2011,7 +2220,7 @@ impl<'a> PivotCalculator<'a> {
     /// Generates column descriptors.
     fn generate_column_descriptors(&self, row_label_cols: usize) -> Vec<PivotColumnDescriptor> {
         let mut descriptors = Vec::new();
-        let col_order = self.definition.effective_value_column_order();
+        let col_order = self.value_columns_without_col_fields();
         let total_value_cols = col_order.len();
 
         // Row label columns
@@ -2046,6 +2255,9 @@ impl<'a> PivotCalculator<'a> {
                 for (i, col_ref) in col_order.iter().enumerate() {
                     let col_idx = row_label_cols + i;
                     let group_values = match col_ref {
+                        // Values on rows: the one value column is every
+                        // value field's (the row says which).
+                        ValueColumnRef::Value(_) if self.values_on_rows() => Vec::new(),
                         ValueColumnRef::Value(vi) => vec![*vi as ValueId],
                         ValueColumnRef::Calculated(_) => Vec::new(),
                     };
@@ -2202,7 +2414,7 @@ impl<'a> PivotCalculator<'a> {
             if self.effective_col_fields.is_empty() {
                 // No column fields - show value field names (or blank if no values)
                 // Generate headers using the unified value column order
-                let col_order = self.definition.effective_value_column_order();
+                let col_order = self.value_columns_without_col_fields();
                 if col_order.is_empty() {
                     // No value or calculated fields - add blank header
                     if is_last_header {
@@ -2213,6 +2425,9 @@ impl<'a> PivotCalculator<'a> {
                 } else {
                     for col_ref in &col_order {
                         let name = match col_ref {
+                            // Values on rows: the row labels name the
+                            // values; the one value column needs no name.
+                            ValueColumnRef::Value(_) if self.values_on_rows() => String::new(),
                             ValueColumnRef::Value(i) => {
                                 let vf = &self.definition.value_fields[*i];
                                 vf.custom_name.clone().unwrap_or_else(|| vf.name.clone())
@@ -2634,6 +2849,7 @@ impl<'a> PivotCalculator<'a> {
             parent_index: -1,
             field_indices: self.row_field_indices.clone(),
             attribute_labels: Vec::new(),
+            value_field: None,
         };
 
         let col_items = std::mem::take(&mut self.col_items);
@@ -2722,11 +2938,25 @@ impl<'a> PivotCalculator<'a> {
                 field_values.insert(vf.name.clone(), aggregate);
             }
 
-            let col_order = self.definition.effective_value_column_order();
+            let values_on_rows = self.values_on_rows();
+            let col_order = self.value_columns_without_col_fields();
             for col_ref in col_order.iter() {
                 match col_ref {
                     ValueColumnRef::Value(vf_idx) => {
-                        let vf_idx = *vf_idx;
+                        // Values on rows: the ONE value column shows the
+                        // row's own value field; a row that stands for none
+                        // (a total row of the value level) shows nothing.
+                        let vf_idx = if values_on_rows {
+                            match row_item.value_field {
+                                Some(own) => own,
+                                None => {
+                                    cells.push(PivotViewCell::blank());
+                                    continue;
+                                }
+                            }
+                        } else {
+                            *vf_idx
+                        };
                         if vf_idx >= value_fields.len() { continue; }
                         let vf = &value_fields[vf_idx];
                         let aggregate = vf_aggregates[vf_idx];
@@ -2739,6 +2969,17 @@ impl<'a> PivotCalculator<'a> {
                         let mut cell = PivotViewCell::data(display_value);
                         cell.number_format = vf.number_format.clone();
                         cell.value_field_index = Some(vf_idx);
+                        // The row's identity. Every consumer of a value cell
+                        // reads it: GETPIVOTDATA's field/item form matches on
+                        // it (an empty path matched nothing, so every
+                        // `=GETPIVOTDATA("Sum of Sales";E1;"Region";"North")`
+                        // on a pivot without column fields answered #REF!,
+                        // BUG-0146), the point-mode pick builds its pairs from
+                        // it (an empty path wrote the GRAND-TOTAL form for
+                        // every cell), and a drill-through sends it (an empty
+                        // path drilled the whole dataset). The column-field
+                        // branch below and the calculated cells always set it.
+                        cell.group_path = Self::build_group_path(row_item);
 
                         if matches!(vf.show_values_as,
                             ShowValuesAs::PercentOfGrandTotal | ShowValuesAs::PercentOfRowTotal |
@@ -2832,6 +3073,14 @@ impl<'a> PivotCalculator<'a> {
                     values_position,
                 );
 
+                // Values on rows: the ROW names the value field (the column
+                // cannot -- `extract_value_field_from_column` answers 0 when
+                // the values are not on columns, and every value row used to
+                // show the first value field's numbers).
+                let vf_idx = match (values_position, row_item.value_field) {
+                    (ValuesPosition::Rows, Some(own)) if value_fields.len() > 1 => own,
+                    _ => vf_idx,
+                };
                 // Safety check: ensure vf_idx is valid
                 let vf_idx = vf_idx.min(value_fields.len().saturating_sub(1));
 
@@ -3245,6 +3494,20 @@ pub fn record_value_at(
     }
 }
 
+/// [`record_value_at`] as a MEMBER id -- the id an axis item and a group key
+/// carry (a blank value is `VALUE_ID_BLANK`; see `crate::cache::member_id`).
+/// `record_value_at` itself keeps the record's own spelling: the tablix
+/// engine reads it.
+fn record_member_at(
+    record: &crate::cache::CacheRecord,
+    record_idx: usize,
+    field_source_index: usize,
+    base_field_count: usize,
+    virtual_records: &[Vec<ValueId>],
+) -> ValueId {
+    member_id(record_value_at(record, record_idx, field_source_index, base_field_count, virtual_records))
+}
+
 // ============================================================================
 // HELPER FUNCTIONS (outside impl to avoid borrow issues)
 // ============================================================================
@@ -3272,8 +3535,17 @@ fn expand_axis_for_values(
                 has_children: false,
                 is_collapsed: false,
                 parent_index: -1,
-                field_indices: vec![vf.source_index],
+                // NO field: the Values level is not an item of any source
+                // column, exactly as the pushed pseudo-id below is never
+                // matched to one (it sits past `field_indices`). Naming the
+                // value field's source column here turned the value-field
+                // INDEX into an "item" of that column in every group path
+                // built from this item -- a drill-through listed the one
+                // record whose value was that id, and the point-mode
+                // GETPIVOTDATA pick wrote `"Sales";"150"`.
+                field_indices: Vec::new(),
                 attribute_labels: Vec::new(),
+                value_field: Some(i),
             });
         }
         return;
@@ -3292,6 +3564,7 @@ fn expand_axis_for_values(
                 let display = vf.custom_name.clone().unwrap_or_else(|| vf.name.clone());
                 let mut new_item = item.clone();
                 new_item.group_values.push(i as ValueId);
+                new_item.value_field = Some(i);
                 new_item.label = if item.is_grand_total {
                     format!("Grand Total - {}", display)
                 } else {
@@ -3305,6 +3578,7 @@ fn expand_axis_for_values(
                 let display = vf.custom_name.clone().unwrap_or_else(|| vf.name.clone());
                 let mut new_item = item.clone();
                 new_item.group_values.push(i as ValueId);
+                new_item.value_field = Some(i);
                 new_item.label = display;
                 new_item.depth += 1;
                 new_item.has_children = false;
@@ -3360,6 +3634,11 @@ pub fn calculate_pivot(
 }
 
 /// Performs a drill-down operation to get source records for a cell.
+///
+/// `group_path` holds MEMBER ids, as the view's cells carry them: a blank
+/// member is `VALUE_ID_BLANK` and matches the records whose value is blank. A
+/// grouped (virtual) field -- a date level, a number bin, a manual group --
+/// is read from the virtual records; `record.values` has no entry for it.
 pub fn drill_down(
     definition: &PivotDefinition,
     cache: &PivotCache,
@@ -3380,12 +3659,10 @@ pub fn drill_down(
     
     // Find matching records
     let mut count = 0;
-    for record in cache.filtered_records() {
+    for (record_idx, record) in cache.filtered_records_indexed() {
         // Check if record matches all group path filters
         let matches = group_path.iter().all(|(field_idx, value_id)| {
-            record.values.get(*field_idx)
-                .copied()
-                .unwrap_or(VALUE_ID_EMPTY) == *value_id
+            member_id(cache.get_record_value_id(record_idx, *field_idx)) == *value_id
         });
         
         if matches {
@@ -3408,6 +3685,35 @@ pub fn drill_down(
 /// Determines if a label represents a blank/null value in the hierarchy.
 fn is_blank_label(label: &str) -> bool {
     label == "(blank)" || label.is_empty()
+}
+
+/// Per tree level, every parent path (the member ids of the levels above,
+/// as the flattened items carry them in `group_values`) mapped to its
+/// children's member ids IN THE ORDER THE AXIS SHOWS THEM -- the siblings
+/// Show Values As walks (`PivotCalculator::resolve_base_field`). Built from
+/// the finished tree, so every sort order (including the ones that keep the
+/// order the tree was built in) and every hidden item is already applied.
+fn sibling_order_of(tree: &[AxisNode], levels: usize) -> Vec<FxHashMap<Vec<ValueId>, Vec<ValueId>>> {
+    fn walk(
+        nodes: &[AxisNode],
+        level: usize,
+        path: &mut Vec<ValueId>,
+        orders: &mut [FxHashMap<Vec<ValueId>, Vec<ValueId>>],
+    ) {
+        if nodes.is_empty() || level >= orders.len() {
+            return;
+        }
+        orders[level].insert(path.clone(), nodes.iter().map(|n| n.value_id).collect());
+        for node in nodes {
+            path.push(node.value_id);
+            walk(&node.children, level + 1, path, orders);
+            path.pop();
+        }
+    }
+    let mut orders = vec![FxHashMap::default(); levels];
+    let mut path = Vec::with_capacity(levels);
+    walk(tree, 0, &mut path, &mut orders);
+    orders
 }
 
 /// Applies ragged hierarchy behavior to a tree of axis nodes.
@@ -3965,5 +4271,1054 @@ mod tests {
         }
         assert!(found_high, "an aggregate > 300 should produce a 'High' text cell");
         assert!(found_low, "an aggregate <= 300 should produce a 'Low' text cell");
+    }
+
+    /// BUG-0146: a value cell of a pivot WITHOUT column fields must carry its
+    /// row's group path -- the field/item form of GETPIVOTDATA, the point-mode
+    /// GETPIVOTDATA pick and the drill-through all identify a cell by it. A
+    /// parent (subtotal) row names only its own level, and the grand total
+    /// names nothing.
+    #[test]
+    fn value_cells_without_column_fields_carry_the_rows_group_path() {
+        let mut cache = create_test_cache();
+        let mut definition = PivotDefinition::new(test_pivot_id(), (0, 0), (4, 2));
+        definition.row_fields.push(PivotField::new(0, "Region".to_string()));
+        definition.row_fields.push(PivotField::new(1, "Product".to_string()));
+        definition.value_fields.push(ValueField::new(2, "Sum of Sales".to_string(), AggregationType::Sum));
+
+        let view = calculate_pivot(&definition, &mut cache);
+
+        let label = |field: usize, id: ValueId| cache.get_value_label(field, id).unwrap_or_default();
+        let mut paths: Vec<(Vec<(usize, String)>, f64)> = Vec::new();
+        for row_cells in &view.cells {
+            for cell in row_cells {
+                if cell.value_field_index != Some(0) {
+                    continue;
+                }
+                if let crate::view::PivotCellValue::Number(n) = cell.value {
+                    let path = cell.group_path.iter().map(|&(f, id)| (f, label(f, id))).collect();
+                    paths.push((path, n));
+                }
+            }
+        }
+        let find = |want: &[(usize, &str)]| -> Option<f64> {
+            paths.iter().find_map(|(p, n)| {
+                let same = p.len() == want.len()
+                    && p.iter().zip(want.iter()).all(|((f, l), (wf, wl))| f == wf && l == wl);
+                if same { Some(*n) } else { None }
+            })
+        };
+        assert_eq!(find(&[(0, "North"), (1, "Apples")]), Some(100.0), "a leaf cell names both levels: {paths:?}");
+        assert_eq!(find(&[(0, "South"), (1, "Oranges")]), Some(250.0), "a leaf cell names both levels: {paths:?}");
+        assert_eq!(find(&[(0, "North")]), Some(250.0), "a parent row names only its own level: {paths:?}");
+        assert_eq!(find(&[]), Some(700.0), "the grand total names nothing: {paths:?}");
+    }
+
+    /// Values on ROWS with no row field: every value cell stands for the whole
+    /// dataset, so its group path names nothing and a drill-through lists
+    /// every record. The Values pseudo-items were built with the value
+    /// field's SOURCE column as their field and the value-field index as their
+    /// item id, so each cell (and each value label) carried a bogus
+    /// `(Sales, 0)` / `(Sales, 1)` pair: a drill-through listed the one
+    /// record whose Sales was that "item", and the point-mode GETPIVOTDATA
+    /// pick wrote `"Sales";"150"`.
+    #[test]
+    fn values_on_rows_without_row_fields_name_no_item() {
+        for (row_gt, col_gt) in [(true, true), (false, true), (true, false), (false, false)] {
+            let mut cache = create_test_cache();
+            let mut definition = PivotDefinition::new(test_pivot_id(), (0, 0), (4, 2));
+            definition.value_fields.push(ValueField::new(2, "Sum of Sales".to_string(), AggregationType::Sum));
+            definition.value_fields.push(ValueField::new(2, "Count of Sales".to_string(), AggregationType::Count));
+            definition.layout.values_position = ValuesPosition::Rows;
+            definition.layout.show_row_grand_totals = row_gt;
+            definition.layout.show_column_grand_totals = col_gt;
+
+            let view = calculate_pivot(&definition, &mut cache);
+
+            let mut value_cells = 0;
+            for row_cells in &view.cells {
+                for cell in row_cells {
+                    let is_value_label = cell.cell_type == crate::view::PivotCellType::RowHeader
+                        && (cell.formatted_value == "Sum of Sales" || cell.formatted_value == "Count of Sales");
+                    if is_value_label {
+                        assert!(
+                            cell.group_path.is_empty(),
+                            "row_gt={row_gt} col_gt={col_gt}: the value label '{}' names an item: {:?}",
+                            cell.formatted_value,
+                            cell.group_path
+                        );
+                    }
+                    if cell.value_field_index.is_none() {
+                        continue;
+                    }
+                    value_cells += 1;
+                    assert!(
+                        cell.group_path.is_empty(),
+                        "row_gt={row_gt} col_gt={col_gt}: a whole-dataset value cell names an item: {:?}",
+                        cell.group_path
+                    );
+                    let drilled = drill_down(&definition, &cache, &cell.group_path, 100);
+                    assert_eq!(
+                        drilled.source_rows.len(),
+                        4,
+                        "row_gt={row_gt} col_gt={col_gt}: the drill-through of a whole-dataset cell listed a subset"
+                    );
+                }
+            }
+            assert!(value_cells >= 2, "row_gt={row_gt} col_gt={col_gt}: fixture: one cell per value field");
+        }
+    }
+
+    /// "(blank)" is how the view labels a blank item, and hiding it hides the
+    /// records whose value is blank. Blanks are never interned (they are
+    /// `VALUE_ID_EMPTY`), so resolving the hidden labels against the interned
+    /// values alone could never find them: `Region = ("East")`, inverted into
+    /// "hide every other item", kept the blank-Region rows (BUG-0197).
+    #[test]
+    fn hiding_the_blank_item_hides_the_records_whose_value_is_blank() {
+        use crate::definition::{FilterCondition, PivotFilter};
+        let build = || {
+            let mut cache = PivotCache::new(test_pivot_id(), 3);
+            cache.set_field_name(0, "Region".to_string());
+            cache.set_field_name(1, "Year".to_string());
+            cache.set_field_name(2, "Revenue".to_string());
+            let rows: [(Option<&str>, f64, f64); 4] = [
+                (Some("East"), 2023.0, 10.0),
+                (Some("West"), 2023.0, 20.0),
+                (None, 2024.0, 30.0),
+                (Some("East"), 2024.0, 40.0),
+            ];
+            for (i, (region, year, revenue)) in rows.iter().enumerate() {
+                let region = match region {
+                    Some(s) => CellValue::Text(s.to_string()),
+                    None => CellValue::Empty,
+                };
+                cache.add_record(i as u32, &[region, CellValue::Number(*year), CellValue::Number(*revenue)]);
+            }
+            cache
+        };
+        let grand_total = |hidden: &[&str]| -> Option<f64> {
+            let mut cache = build();
+            let mut definition = PivotDefinition::new(test_pivot_id(), (0, 0), (4, 2));
+            definition.row_fields.push(PivotField::new(1, "Year".to_string()));
+            let mut region = PivotField::new(0, "Region".to_string());
+            region.hidden_items = hidden.iter().map(|s| s.to_string()).collect();
+            definition.filter_fields.push(PivotFilter { field: region, condition: FilterCondition::ValueList(Vec::new()) });
+            definition.value_fields.push(ValueField::new(2, "Revenue".to_string(), AggregationType::Sum));
+            let view = calculate_pivot(&definition, &mut cache);
+            view.cells.iter().flatten().find(|c| c.cell_type == crate::view::PivotCellType::GrandTotal).and_then(|c| {
+                match c.value {
+                    crate::view::PivotCellValue::Number(n) => Some(n),
+                    _ => None,
+                }
+            })
+        };
+
+        assert_eq!(grand_total(&[]), Some(100.0), "fixture: every record");
+        assert_eq!(grand_total(&["West"]), Some(80.0), "fixture: an interned item hides");
+        assert_eq!(grand_total(&["West", "(blank)"]), Some(50.0), "hiding (blank) kept the blank-Region record");
+        assert_eq!(grand_total(&["(Blank)"]), Some(70.0), "the host spells it (Blank); the label ignores case");
+    }
+    /// The value cells of every row whose label names a value field, as
+    /// (label, [(value field index, number)]) in view order.
+    fn value_rows(view: &crate::view::PivotView) -> Vec<(String, Vec<(usize, f64)>)> {
+        let mut out = Vec::new();
+        for row in &view.cells {
+            let label = row.iter().find(|c| c.cell_type == crate::view::PivotCellType::RowHeader).map(|c| c.formatted_value.clone()).unwrap_or_default();
+            let cells: Vec<(usize, f64)> = row
+                .iter()
+                .filter_map(|c| match (c.value_field_index, &c.value) {
+                    (Some(i), crate::view::PivotCellValue::Number(n)) => Some((i, *n)),
+                    _ => None,
+                })
+                .collect();
+            if !cells.is_empty() {
+                out.push((label, cells));
+            }
+        }
+        out
+    }
+
+    /// Excel sorts pivot items IGNORING CASE: "YoY" before "YTD" (the byte order
+    /// put every capital first). Wave F review finding, 2026-09-29.
+    #[test]
+    fn row_items_sort_ignoring_case() {
+        let mut cache = PivotCache::new(test_pivot_id(), 2);
+        cache.set_field_name(0, "Name".to_string());
+        cache.set_field_name(1, "Sales".to_string());
+        for (i, name) in ["YTD", "YoY", "apple", "Banana"].iter().enumerate() {
+            cache.add_record(i as u32, &[CellValue::Text(name.to_string()), CellValue::Number(1.0)]);
+        }
+        let mut definition = PivotDefinition::new(test_pivot_id(), (0, 0), (4, 1));
+        definition.row_fields.push(PivotField::new(0, "Name".to_string()));
+        definition.value_fields.push(ValueField::new(1, "Sum of Sales".to_string(), AggregationType::Sum));
+        let view = calculate_pivot(&definition, &mut cache);
+        let labels: Vec<String> = view
+            .cells
+            .iter()
+            .filter_map(|row| row.first())
+            .filter(|c| c.cell_type == crate::view::PivotCellType::RowHeader)
+            .map(|c| c.formatted_value.clone())
+            .filter(|l| ["YTD", "YoY", "apple", "Banana"].contains(&l.as_str()))
+            .collect();
+        assert_eq!(labels, vec!["apple", "Banana", "YoY", "YTD"]);
+    }
+
+    /// Found live 2026-09-29 (e2e fixall-pivot R4): values on ROWS with no row
+    /// or column field showed a 2x2 block -- both value rows carried BOTH
+    /// values, the header named both fields -- where Excel shows one column.
+    #[test]
+    fn values_on_rows_without_fields_show_one_value_per_row() {
+        let mut cache = create_test_cache();
+        let mut definition = PivotDefinition::new(test_pivot_id(), (0, 0), (4, 2));
+        definition.value_fields.push(ValueField::new(2, "Sum of Sales".to_string(), AggregationType::Sum));
+        definition.value_fields.push(ValueField::new(2, "Count of Sales".to_string(), AggregationType::Count));
+        definition.layout.values_position = ValuesPosition::Rows;
+        definition.layout.show_row_grand_totals = false;
+        let view = calculate_pivot(&definition, &mut cache);
+        let rows = value_rows(&view);
+        assert_eq!(
+            rows,
+            vec![
+                ("Sum of Sales".to_string(), vec![(0, 700.0)]),
+                ("Count of Sales".to_string(), vec![(1, 4.0)]),
+            ],
+            "each value row shows ONLY its own value"
+        );
+        assert_eq!(view.col_count, 2, "one label column and ONE value column");
+    }
+
+    /// Values on ROWS with a column field: the Count row counts. Every value
+    /// row read value field 0 (`extract_value_field_from_column` answers 0
+    /// whenever values are not on columns), so the Count row repeated the Sums.
+    #[test]
+    fn values_on_rows_with_a_column_field_show_each_rows_own_value() {
+        let mut cache = create_test_cache();
+        let mut definition = PivotDefinition::new(test_pivot_id(), (0, 0), (4, 2));
+        definition.column_fields.push(PivotField::new(1, "Product".to_string()));
+        definition.value_fields.push(ValueField::new(2, "Sum of Sales".to_string(), AggregationType::Sum));
+        definition.value_fields.push(ValueField::new(2, "Count of Sales".to_string(), AggregationType::Count));
+        definition.layout.values_position = ValuesPosition::Rows;
+        let view = calculate_pivot(&definition, &mut cache);
+        let rows: Vec<Vec<(usize, f64)>> = value_rows(&view).into_iter().map(|(_, cells)| cells).collect();
+        assert_eq!(
+            rows,
+            vec![
+                vec![(0, 300.0), (0, 400.0), (0, 700.0)],
+                vec![(1, 2.0), (1, 2.0), (1, 4.0)],
+            ],
+            "each value row shows its OWN value field across the columns (the Count row repeated the Sums)"
+        );
+    }
+
+}
+
+/// A BLANK member (a record whose value is empty) is a member like any other:
+/// its row / column reads ITS records, and every total counts them once.
+///
+/// Records store a blank as `VALUE_ID_EMPTY`, and group keys used the same id
+/// as their "all values" padding, so a blank member's key WAS the key of the
+/// total one level up: a (blank) row showed the grand total, and a rolled-up
+/// total counted the blank records twice (once as their own member, once as
+/// the total they collided with). Every pivot with a blank on rows or columns,
+/// grid pivots included.
+#[cfg(test)]
+mod blank_member_tests {
+    use super::*;
+    use engine::CellValue;
+    use crate::definition::{AggregationType, PivotField, PivotId, ValueField};
+    use crate::view::{PivotCellValue, PivotRowType};
+
+    fn pid() -> PivotId {
+        PivotId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7])
+    }
+
+    fn text(v: Option<&str>) -> CellValue {
+        match v {
+            Some(s) => CellValue::Text(s.to_string()),
+            None => CellValue::Empty,
+        }
+    }
+
+    /// Fields: 0 Region, 1 Product, 2 Year, 3 Amount.
+    fn cache_of(rows: &[(Option<&str>, Option<&str>, &str, f64)]) -> PivotCache {
+        let mut cache = PivotCache::new(pid(), 4);
+        for (i, name) in ["Region", "Product", "Year", "Amount"].iter().enumerate() {
+            cache.set_field_name(i, name.to_string());
+        }
+        for (i, (region, product, year, amount)) in rows.iter().enumerate() {
+            cache.add_record(
+                i as u32,
+                &[text(*region), text(*product), CellValue::Text(year.to_string()), CellValue::Number(*amount)],
+            );
+        }
+        cache
+    }
+
+    fn sum_def(rows: &[(usize, &str)], cols: &[(usize, &str)], hidden: &[(usize, &[&str])]) -> PivotDefinition {
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        let field = |(i, n): &(usize, &str)| {
+            let mut f = PivotField::new(*i, n.to_string());
+            if let Some((_, h)) = hidden.iter().find(|(hi, _)| hi == i) {
+                f.hidden_items = h.iter().map(|s| s.to_string()).collect();
+            }
+            f
+        };
+        def.row_fields = rows.iter().map(field).collect();
+        def.column_fields = cols.iter().map(field).collect();
+        def.value_fields = vec![ValueField::new(3, "Sum of Amount".to_string(), AggregationType::Sum)];
+        def
+    }
+
+    /// Every body row as (indented label, its numbers), in view order.
+    fn body(view: &PivotView) -> Vec<(String, Vec<f64>)> {
+        let lc = view.row_label_col_count;
+        view.rows
+            .iter()
+            .zip(view.cells.iter())
+            .filter(|(d, _)| matches!(d.row_type, PivotRowType::Data | PivotRowType::Subtotal | PivotRowType::GrandTotal))
+            .map(|(_, cells)| {
+                let head = &cells[0];
+                let label = format!("{}{}", "  ".repeat(head.indent_level as usize), head.formatted_value);
+                let numbers = cells[lc..]
+                    .iter()
+                    .filter_map(|c| match c.value {
+                        PivotCellValue::Number(n) => Some(n),
+                        _ => None,
+                    })
+                    .collect();
+                (label, numbers)
+            })
+            .collect()
+    }
+
+    fn owned(rows: &[(&str, &[f64])]) -> Vec<(String, Vec<f64>)> {
+        rows.iter().map(|(l, n)| (l.to_string(), n.to_vec())).collect()
+    }
+
+    fn east_blank_west() -> PivotCache {
+        cache_of(&[
+            (Some("East"), None, "Y1", 10.0),
+            (None, None, "Y1", 30.0),
+            (Some("West"), None, "Y2", 20.0),
+            (None, None, "Y2", 5.0),
+        ])
+    }
+
+    #[test]
+    fn a_blank_member_on_rows_reads_its_own_records_and_the_total_counts_them_once() {
+        let mut cache = east_blank_west();
+        let view = calculate_pivot(&sum_def(&[(0, "Region")], &[], &[]), &mut cache);
+        assert_eq!(
+            body(&view),
+            owned(&[("(blank)", &[35.0]), ("East", &[10.0]), ("West", &[20.0]), ("Grand Total", &[65.0])]),
+        );
+
+        let mut cache = east_blank_west();
+        let view = calculate_pivot(&sum_def(&[(0, "Region")], &[], &[(0, &["West"])]), &mut cache);
+        assert_eq!(
+            body(&view),
+            owned(&[("(blank)", &[35.0]), ("East", &[10.0]), ("Grand Total", &[45.0])]),
+            "with West hidden",
+        );
+    }
+
+    #[test]
+    fn a_blank_member_on_rows_crossed_with_columns_reads_its_own_cells() {
+        let mut cache = east_blank_west();
+        let view = calculate_pivot(&sum_def(&[(0, "Region")], &[(2, "Year")], &[]), &mut cache);
+        assert_eq!(
+            body(&view),
+            owned(&[
+                ("(blank)", &[30.0, 5.0, 35.0]),
+                ("East", &[10.0, 0.0, 10.0]),
+                ("West", &[0.0, 20.0, 20.0]),
+                ("Grand Total", &[40.0, 25.0, 65.0]),
+            ]),
+        );
+
+        let mut cache = east_blank_west();
+        let view = calculate_pivot(&sum_def(&[(0, "Region")], &[(2, "Year")], &[(0, &["East"])]), &mut cache);
+        assert_eq!(
+            body(&view),
+            owned(&[("(blank)", &[30.0, 5.0, 35.0]), ("West", &[0.0, 20.0, 20.0]), ("Grand Total", &[30.0, 25.0, 55.0])]),
+            "with East hidden",
+        );
+    }
+
+    #[test]
+    fn a_blank_member_on_columns_reads_its_own_column_and_the_row_totals_count_it_once() {
+        let mut cache = east_blank_west();
+        let view = calculate_pivot(&sum_def(&[(2, "Year")], &[(0, "Region")], &[]), &mut cache);
+        // Columns: (blank), East, West, Grand Total.
+        assert_eq!(
+            body(&view),
+            owned(&[
+                ("Y1", &[30.0, 10.0, 0.0, 40.0]),
+                ("Y2", &[5.0, 0.0, 20.0, 25.0]),
+                ("Grand Total", &[35.0, 10.0, 20.0, 65.0]),
+            ]),
+        );
+
+        let mut cache = east_blank_west();
+        let view = calculate_pivot(&sum_def(&[(2, "Year")], &[(0, "Region")], &[(0, &["West"])]), &mut cache);
+        assert_eq!(
+            body(&view),
+            owned(&[("Y1", &[30.0, 10.0, 40.0]), ("Y2", &[5.0, 0.0, 5.0]), ("Grand Total", &[35.0, 10.0, 45.0])]),
+            "with West hidden",
+        );
+    }
+
+    /// Two levels, a blank at BOTH: (blank)/(blank) was the grand-total key,
+    /// East/(blank) was East's subtotal key, and (blank)/Apples read
+    /// "every region's Apples".
+    fn two_levels() -> PivotCache {
+        cache_of(&[
+            (Some("East"), Some("Apples"), "Y1", 1.0),
+            (Some("East"), None, "Y1", 2.0),
+            (None, Some("Apples"), "Y1", 4.0),
+            (None, None, "Y1", 8.0),
+            (Some("West"), Some("Pears"), "Y1", 16.0),
+        ])
+    }
+
+    #[test]
+    fn a_blank_member_at_either_row_level_keeps_its_subtotal_and_the_grand_total_apart() {
+        let mut cache = two_levels();
+        let view = calculate_pivot(&sum_def(&[(0, "Region"), (1, "Product")], &[], &[]), &mut cache);
+        assert_eq!(
+            body(&view),
+            owned(&[
+                ("(blank)", &[12.0]),
+                ("  (blank)", &[8.0]),
+                ("  Apples", &[4.0]),
+                ("East", &[3.0]),
+                ("  (blank)", &[2.0]),
+                ("  Apples", &[1.0]),
+                ("West", &[16.0]),
+                ("  Pears", &[16.0]),
+                ("Grand Total", &[31.0]),
+            ]),
+        );
+
+        // Hide the blank PRODUCT: every (blank) product row goes, the blank
+        // REGION stays with only its Apples.
+        let mut cache = two_levels();
+        let view = calculate_pivot(&sum_def(&[(0, "Region"), (1, "Product")], &[], &[(1, &["(blank)"])]), &mut cache);
+        assert_eq!(
+            body(&view),
+            owned(&[
+                ("(blank)", &[4.0]),
+                ("  Apples", &[4.0]),
+                ("East", &[1.0]),
+                ("  Apples", &[1.0]),
+                ("West", &[16.0]),
+                ("  Pears", &[16.0]),
+                ("Grand Total", &[21.0]),
+            ]),
+            "with the blank product hidden",
+        );
+    }
+
+    #[test]
+    fn a_blank_member_at_either_column_level_keeps_its_own_slot() {
+        let mut cache = two_levels();
+        let view = calculate_pivot(&sum_def(&[(2, "Year")], &[(0, "Region"), (1, "Product")], &[]), &mut cache);
+        // Columns (children before their parent's total column):
+        // (blank)/(blank), (blank)/Apples, (blank) Total, East/(blank),
+        // East/Apples, East Total, West/Pears, West Total, Grand Total.
+        let expected: &[f64] = &[8.0, 4.0, 12.0, 2.0, 1.0, 3.0, 16.0, 16.0, 31.0];
+        assert_eq!(body(&view), owned(&[("Y1", expected), ("Grand Total", expected)]));
+    }
+
+    /// Show Values As reads other cells by key, so it read the grand total in
+    /// place of the (blank) member too.
+    #[test]
+    fn percent_of_grand_total_of_a_blank_member_is_its_share() {
+        let mut cache = east_blank_west();
+        let mut def = sum_def(&[(0, "Region")], &[], &[]);
+        def.value_fields[0].show_values_as = crate::definition::ShowValuesAs::PercentOfGrandTotal;
+        let view = calculate_pivot(&def, &mut cache);
+        let blank = body(&view).into_iter().find(|(l, _)| l == "(blank)").expect("a (blank) row");
+        assert!((blank.1[0] - 35.0 / 65.0).abs() < 1e-12, "(blank) share: {:?}", blank.1);
+    }
+
+    /// The (blank) member's cells NAME it in their group path, so a
+    /// drill-through lists exactly its records (an unnamed blank level drilled
+    /// the level above: the whole dataset for a one-field pivot).
+    #[test]
+    fn a_blank_members_cell_drills_to_its_own_records() {
+        let mut cache = east_blank_west();
+        let def = sum_def(&[(0, "Region")], &[(2, "Year")], &[]);
+        let view = calculate_pivot(&def, &mut cache);
+        let body_rows: Vec<&Vec<crate::view::PivotViewCell>> = view
+            .rows
+            .iter()
+            .zip(view.cells.iter())
+            .filter(|(d, _)| d.row_type == PivotRowType::Data)
+            .map(|(_, c)| c)
+            .collect();
+        let blank_row = body_rows.iter().find(|c| c[0].formatted_value == "(blank)").expect("a (blank) row");
+        let lc = view.row_label_col_count;
+        // (blank) x Y1 -> record 1; (blank) x Grand Total -> records 1 and 3.
+        let y1 = &blank_row[lc];
+        let total = &blank_row[lc + 2];
+        let mut rows = drill_down(&def, &cache, &y1.group_path, 100).source_rows;
+        rows.sort();
+        assert_eq!(rows, vec![1], "the (blank) x Y1 cell drilled {:?}", y1.group_path);
+        let mut rows = drill_down(&def, &cache, &total.group_path, 100).source_rows;
+        rows.sort();
+        assert_eq!(rows, vec![1, 3], "the (blank) row's total drilled {:?}", total.group_path);
+        let mut rows = drill_down(&def, &cache, &blank_row[0].group_path, 100).source_rows;
+        rows.sort();
+        assert_eq!(rows, vec![1, 3], "the (blank) row header drilled {:?}", blank_row[0].group_path);
+        // The label of the blank's id is the blank's label, as the header shows.
+        let &(field, id) = blank_row[0].group_path.last().expect("the header names its member");
+        assert_eq!(field, 0);
+        assert_ne!(id, VALUE_ID_EMPTY, "the header names its member by the padding id");
+        assert_eq!(cache.get_value_label(0, id).as_deref(), Some(""), "the raw label of the blank member");
+    }
+
+    /// A GROUPED field (here a number binning) lives in the virtual records,
+    /// not in `record.values`: the drill read only the latter, so a bin's
+    /// cell drilled nothing -- and, with the blank member named, the (blank)
+    /// bin would have drilled EVERY record (a missing value reads as blank).
+    #[test]
+    fn a_grouped_fields_cells_drill_to_their_own_records_blank_bin_included() {
+        let mut cache = PivotCache::new(pid(), 2);
+        cache.set_field_name(0, "Score".to_string());
+        cache.set_field_name(1, "Amount".to_string());
+        let rows: [(Option<f64>, f64); 4] = [(Some(5.0), 10.0), (Some(15.0), 20.0), (None, 40.0), (Some(7.0), 1.0)];
+        for (i, (score, amount)) in rows.iter().enumerate() {
+            let score = score.map(CellValue::Number).unwrap_or(CellValue::Empty);
+            cache.add_record(i as u32, &[score, CellValue::Number(*amount)]);
+        }
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        let mut score = PivotField::new(0, "Score".to_string());
+        score.grouping = crate::definition::FieldGrouping::NumberBinning { start: 0.0, end: 20.0, interval: 10.0 };
+        def.row_fields = vec![score];
+        def.value_fields = vec![ValueField::new(1, "Sum of Amount".to_string(), AggregationType::Sum)];
+        let view = calculate_pivot(&def, &mut cache);
+        assert_eq!(
+            body(&view),
+            owned(&[("(blank)", &[40.0]), ("0-9", &[11.0]), ("10-19", &[20.0]), ("Grand Total", &[71.0])]),
+        );
+        let lc = view.row_label_col_count;
+        let drilled = |label: &str| -> Vec<u32> {
+            let row = view.cells.iter().find(|c| c[0].formatted_value == label).expect(label);
+            let mut rows = drill_down(&def, &cache, &row[lc].group_path, 100).source_rows;
+            rows.sort();
+            rows
+        };
+        assert_eq!(drilled("0-9"), vec![0, 3], "a bin drills its own records");
+        assert_eq!(drilled("(blank)"), vec![2], "the (blank) bin drills only the blank record");
+    }
+
+    /// "Show items with no data" lists every item of the field -- the blank
+    /// member too when the field has one. It listed only the interned values,
+    /// so the (blank) row vanished while the grand total still counted it.
+    #[test]
+    fn show_items_with_no_data_keeps_the_blank_member() {
+        let mut cache = east_blank_west();
+        let mut def = sum_def(&[(0, "Region")], &[], &[]);
+        def.row_fields[0].show_all_items = true;
+        let view = calculate_pivot(&def, &mut cache);
+        assert_eq!(
+            body(&view),
+            owned(&[("(blank)", &[35.0]), ("East", &[10.0]), ("West", &[20.0]), ("Grand Total", &[65.0])]),
+        );
+
+        // Under a parent that has no blank records the (blank) child shows
+        // with no data, like every other item without data there.
+        let mut cache = two_levels();
+        let mut def = sum_def(&[(0, "Region"), (1, "Product")], &[], &[]);
+        def.row_fields[1].show_all_items = true;
+        let view = calculate_pivot(&def, &mut cache);
+        let west: Vec<(String, Vec<f64>)> =
+            body(&view).into_iter().skip_while(|(l, _)| l != "West").take(4).collect();
+        assert_eq!(
+            west,
+            owned(&[("West", &[16.0]), ("  (blank)", &[0.0]), ("  Apples", &[0.0]), ("  Pears", &[16.0])]),
+        );
+    }
+
+    /// Region = (blank) 35 (30 + 5), East 10, West 20, shown as `show_as`
+    /// along Region: each ITEM row's single number, in view order.
+    fn shown_along_region(show_as: crate::definition::ShowValuesAs, base_item: Option<&str>) -> Vec<(String, f64)> {
+        let mut cache = east_blank_west();
+        let mut def = sum_def(&[(0, "Region")], &[], &[]);
+        def.value_fields[0].show_values_as = show_as;
+        def.value_fields[0].base_field_index = Some(0);
+        def.value_fields[0].base_item = base_item.map(str::to_string);
+        let view = calculate_pivot(&def, &mut cache);
+        view.rows
+            .iter()
+            .zip(view.cells.iter())
+            .filter(|(d, _)| d.row_type == PivotRowType::Data)
+            .map(|(_, cells)| {
+                let n = match cells[view.row_label_col_count].value {
+                    PivotCellValue::Number(n) => n,
+                    _ => f64::NAN,
+                };
+                (cells[0].formatted_value.clone(), n)
+            })
+            .collect()
+    }
+
+    /// Show Values As walks the base field's items -- the interned values
+    /// only, so the (blank) member was never among them: its running total
+    /// never met its own row (it summed every OTHER item and left out its
+    /// own 35) and no row reached the column total.
+    #[test]
+    fn running_total_along_a_field_with_a_blank_member_counts_the_blank_in_its_place() {
+        use crate::definition::ShowValuesAs;
+        let rows = shown_along_region(ShowValuesAs::RunningTotal, None);
+        assert_eq!(
+            rows,
+            vec![("(blank)".to_string(), 35.0), ("East".to_string(), 45.0), ("West".to_string(), 65.0)],
+        );
+        let pct = shown_along_region(ShowValuesAs::PercentOfRunningTotal, None);
+        let last = pct.last().expect("a last item").1;
+        assert!((last - 1.0).abs() < 1e-12, "the last item's % running total is 100%: {pct:?}");
+    }
+
+    /// Rank ranks against the siblings: without the blank member, (blank) 35
+    /// and West 20 tied at 1.
+    #[test]
+    fn rank_along_a_field_with_a_blank_member_ranks_against_the_blank_too() {
+        use crate::definition::ShowValuesAs;
+        let rank = |rows: &[(String, f64)], label: &str| rows.iter().find(|(l, _)| l == label).expect(label).1;
+        let desc = shown_along_region(ShowValuesAs::RankDescending, None);
+        assert_eq!((rank(&desc, "(blank)"), rank(&desc, "West"), rank(&desc, "East")), (1.0, 2.0, 3.0), "{desc:?}");
+        let asc = shown_along_region(ShowValuesAs::RankAscending, None);
+        assert_eq!((rank(&asc, "East"), rank(&asc, "West"), rank(&asc, "(blank)")), (1.0, 2.0, 3.0), "{asc:?}");
+    }
+
+    /// Difference from (previous) / (next) walks the same list: the blank
+    /// row found no position (NaN), and East -- the item after it -- found
+    /// none before it. A named "(blank)" base item resolved to nothing.
+    #[test]
+    fn difference_along_a_field_with_a_blank_member_steps_through_the_blank() {
+        use crate::definition::ShowValuesAs;
+        let prev = shown_along_region(ShowValuesAs::Difference, Some("(previous)"));
+        assert_eq!(prev.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(), vec!["(blank)", "East", "West"]);
+        assert!(prev[0].1.is_nan(), "the first item has no previous: {prev:?}");
+        assert_eq!((prev[1].1, prev[2].1), (10.0 - 35.0, 20.0 - 10.0), "{prev:?}");
+
+        let next = shown_along_region(ShowValuesAs::Difference, Some("(next)"));
+        assert_eq!((next[0].1, next[1].1), (35.0 - 10.0, 10.0 - 20.0), "{next:?}");
+        assert!(next[2].1.is_nan(), "the last item has no next: {next:?}");
+
+        let from_blank = shown_along_region(ShowValuesAs::Difference, Some("(blank)"));
+        assert_eq!(
+            from_blank,
+            vec![("(blank)".to_string(), 0.0), ("East".to_string(), 10.0 - 35.0), ("West".to_string(), 20.0 - 35.0)],
+        );
+    }
+
+    /// A field with NO blank records has no blank member to walk: the lists
+    /// are exactly the interned values, and a "(blank)" base item names
+    /// nothing (NaN), as any item the field does not have.
+    #[test]
+    fn a_field_without_blank_records_walks_no_blank_member() {
+        use crate::definition::ShowValuesAs;
+        let run = |show_as: ShowValuesAs, base_item: Option<&str>| {
+            let mut cache = cache_of(&[(Some("East"), None, "Y1", 10.0), (Some("West"), None, "Y2", 20.0)]);
+            let mut def = sum_def(&[(0, "Region")], &[], &[]);
+            def.value_fields[0].show_values_as = show_as;
+            def.value_fields[0].base_field_index = Some(0);
+            def.value_fields[0].base_item = base_item.map(str::to_string);
+            let view = calculate_pivot(&def, &mut cache);
+            view.rows
+                .iter()
+                .zip(view.cells.iter())
+                .filter(|(d, _)| d.row_type == PivotRowType::Data)
+                .map(|(_, c)| match c[view.row_label_col_count].value {
+                    PivotCellValue::Number(n) => n,
+                    _ => f64::NAN,
+                })
+                .collect::<Vec<f64>>()
+        };
+        assert_eq!(run(ShowValuesAs::RunningTotal, None), vec![10.0, 30.0]);
+        assert!(run(ShowValuesAs::Difference, Some("(previous)"))[0].is_nan(), "East is first");
+        assert!(run(ShowValuesAs::Difference, Some("(blank)")).iter().all(|n| n.is_nan()), "no (blank) item");
+    }
+
+    // ------------------------------------------------------------------
+    // Show Values As walks the base field's items IN THE ORDER THE AXIS
+    // SHOWS THEM (wave E, Y2). The walk was the field's items in ASCENDING
+    // order whatever the field's sort -- descending, sort-by-field, manual --
+    // so a Z-A Region with Running Total In Region read West 65, East 45,
+    // (blank) 35 where Excel reads 20, 30, 65, and (previous) / (next)
+    // stepped to the alphabetical neighbour instead of the row above or
+    // below. It also listed items the axis does not show (a hidden item),
+    // which Rank counted and (previous) stepped onto.
+    // ------------------------------------------------------------------
+
+    fn calc(def: &PivotDefinition, mut cache: PivotCache) -> PivotView {
+        calculate_pivot(def, &mut cache)
+    }
+
+    /// `def` with its (only) value field shown as `show_as` along `base`.
+    fn along(
+        mut def: PivotDefinition,
+        show_as: crate::definition::ShowValuesAs,
+        base: usize,
+        base_item: Option<&str>,
+    ) -> PivotDefinition {
+        def.value_fields[0].show_values_as = show_as;
+        def.value_fields[0].base_field_index = Some(base);
+        def.value_fields[0].base_item = base_item.map(str::to_string);
+        def
+    }
+
+    /// Every Data row as (indented label, its FIRST number -- NaN when the
+    /// cell holds none), in view order.
+    fn data_rows(view: &PivotView) -> Vec<(String, f64)> {
+        view.rows
+            .iter()
+            .zip(view.cells.iter())
+            .filter(|(d, _)| d.row_type == PivotRowType::Data)
+            .map(|(_, cells)| {
+                let head = &cells[0];
+                let n = match cells[view.row_label_col_count].value {
+                    PivotCellValue::Number(n) => n,
+                    _ => f64::NAN,
+                };
+                (format!("{}{}", "  ".repeat(head.indent_level as usize), head.formatted_value), n)
+            })
+            .collect()
+    }
+
+    fn labels(rows: &[(String, f64)]) -> Vec<&str> {
+        rows.iter().map(|(l, _)| l.as_str()).collect()
+    }
+
+    /// Region sorted Z-A, Running Total In Region: West 20, East 20+10,
+    /// (blank) 30+35 -- the order the rows show. The walk was ascending:
+    /// West 65, East 45, (blank) 35.
+    #[test]
+    fn running_total_follows_a_descending_sort() {
+        use crate::definition::{ShowValuesAs, SortOrder};
+        let mut def = sum_def(&[(0, "Region")], &[], &[]);
+        def.row_fields[0].sort_order = SortOrder::Descending;
+        let rows = data_rows(&calc(&along(def.clone(), ShowValuesAs::RunningTotal, 0, None), east_blank_west()));
+        assert_eq!(
+            rows,
+            vec![("West".to_string(), 20.0), ("East".to_string(), 30.0), ("(blank)".to_string(), 65.0)],
+        );
+        let pct = data_rows(&calc(&along(def, ShowValuesAs::PercentOfRunningTotal, 0, None), east_blank_west()));
+        assert!((pct[0].1 - 20.0 / 65.0).abs() < 1e-12, "the FIRST row shown starts the % running total: {pct:?}");
+        assert!((pct[2].1 - 1.0).abs() < 1e-12, "the LAST row shown reaches 100%: {pct:?}");
+    }
+
+    /// Difference From (previous) / (next) is the row above / below as
+    /// shown. Z-A: West has no previous, East's previous is West, (blank)'s
+    /// is East.
+    #[test]
+    fn difference_from_previous_and_next_follows_a_descending_sort() {
+        use crate::definition::{ShowValuesAs, SortOrder};
+        let mut def = sum_def(&[(0, "Region")], &[], &[]);
+        def.row_fields[0].sort_order = SortOrder::Descending;
+
+        let prev = data_rows(&calc(&along(def.clone(), ShowValuesAs::Difference, 0, Some("(previous)")), east_blank_west()));
+        assert_eq!(labels(&prev), vec!["West", "East", "(blank)"]);
+        assert!(prev[0].1.is_nan(), "the first row shown has no previous: {prev:?}");
+        assert_eq!((prev[1].1, prev[2].1), (10.0 - 20.0, 35.0 - 10.0), "{prev:?}");
+
+        let next = data_rows(&calc(&along(def, ShowValuesAs::Difference, 0, Some("(next)")), east_blank_west()));
+        assert_eq!((next[0].1, next[1].1), (20.0 - 10.0, 10.0 - 35.0), "{next:?}");
+        assert!(next[2].1.is_nan(), "the last row shown has no next: {next:?}");
+    }
+
+    /// Sort-by-field: Region ordered by Year (Y1 West, Y2 North, Y3 East).
+    /// The running total walks West, North, East -- not the alphabet.
+    #[test]
+    fn running_total_follows_a_sort_by_field() {
+        use crate::definition::ShowValuesAs;
+        let by_year = || {
+            cache_of(&[
+                (Some("East"), None, "Y3", 10.0),
+                (Some("West"), None, "Y1", 20.0),
+                (Some("North"), None, "Y2", 5.0),
+            ])
+        };
+        let mut def = sum_def(&[(0, "Region")], &[], &[]);
+        def.row_fields[0].sort_by_field_index = Some(2);
+        let rows = data_rows(&calc(&along(def, ShowValuesAs::RunningTotal, 0, None), by_year()));
+        assert_eq!(
+            rows,
+            vec![("West".to_string(), 20.0), ("North".to_string(), 25.0), ("East".to_string(), 35.0)],
+        );
+    }
+
+    /// Whatever the order -- ascending, descending, manual, data source
+    /// order, or by another field in either direction -- the running total
+    /// of the rows AS SHOWN is the running sum of their plain values, the
+    /// (previous) difference is each row minus the one above, and the rank
+    /// is the rank among the rows shown. Eight items entered out of the
+    /// alphabet's order, so a manual / data-source-order axis (the entry
+    /// order, Z2) is not accidentally alphabetical.
+    #[test]
+    fn show_values_as_follows_the_displayed_order_for_every_sort() {
+        use crate::definition::{ShowValuesAs, SortOrder};
+        let eight = || {
+            cache_of(&[
+                (Some("Delta"), None, "k5", 4.0),
+                (Some("Alpha"), None, "k8", 7.0),
+                (Some("Hotel"), None, "k2", 1.0),
+                (Some("Bravo"), None, "k7", 30.0),
+                (Some("Golf"), None, "k1", 11.0),
+                (Some("Charlie"), None, "k6", 2.0),
+                (Some("Foxtrot"), None, "k3", 19.0),
+                (Some("Echo"), None, "k4", 5.0),
+            ])
+        };
+        let orders = [SortOrder::Ascending, SortOrder::Descending, SortOrder::Manual, SortOrder::DataSourceOrder];
+        for order in orders {
+            for sort_by in [None, Some(2)] {
+                let mut def = sum_def(&[(0, "Region")], &[], &[]);
+                def.row_fields[0].sort_order = order.clone();
+                def.row_fields[0].sort_by_field_index = sort_by;
+                let case = format!("{order:?} sort_by={sort_by:?}");
+
+                let plain = data_rows(&calc(&def, eight()));
+                let shown: Vec<&str> = labels(&plain);
+                let mut sum = 0.0;
+                let running: Vec<f64> = plain.iter().map(|(_, v)| { sum += v; sum }).collect();
+
+                let rt = data_rows(&calc(&along(def.clone(), ShowValuesAs::RunningTotal, 0, None), eight()));
+                assert_eq!(labels(&rt), shown, "{case}: the rows moved");
+                assert_eq!(rt.iter().map(|(_, v)| *v).collect::<Vec<_>>(), running, "{case}: running total");
+
+                let prev = data_rows(&calc(&along(def.clone(), ShowValuesAs::Difference, 0, Some("(previous)")), eight()));
+                assert!(prev[0].1.is_nan(), "{case}: the first row shown has no previous: {prev:?}");
+                for i in 1..plain.len() {
+                    assert_eq!(prev[i].1, plain[i].1 - plain[i - 1].1, "{case}: (previous) of {}", plain[i].0);
+                }
+
+                let rank = data_rows(&calc(&along(def, ShowValuesAs::RankDescending, 0, None), eight()));
+                for (label, v) in &plain {
+                    let expected = plain.iter().filter(|(_, o)| o > v).count() as f64 + 1.0;
+                    let got = rank.iter().find(|(l, _)| l == label).expect("the row").1;
+                    assert_eq!(got, expected, "{case}: rank of {label}");
+                }
+            }
+        }
+    }
+
+    /// Two row levels, the INNER field sorted Z-A and the base: each
+    /// region's products are walked as they show under it. Then the OUTER
+    /// field Z-A as the base with the inner one below it.
+    #[test]
+    fn running_total_along_either_level_of_two_follows_the_rows_as_shown() {
+        use crate::definition::{ShowValuesAs, SortOrder};
+        let mut def = sum_def(&[(0, "Region"), (1, "Product")], &[], &[]);
+        def.row_fields[1].sort_order = SortOrder::Descending;
+        let view = calc(&along(def, ShowValuesAs::RunningTotal, 1, None), two_levels());
+        let leaves: Vec<(String, f64)> = data_rows(&view).into_iter().filter(|(l, _)| l.starts_with("  ")).collect();
+        assert_eq!(
+            leaves,
+            vec![
+                ("  Apples".to_string(), 4.0),
+                ("  (blank)".to_string(), 12.0),
+                ("  Apples".to_string(), 1.0),
+                ("  (blank)".to_string(), 3.0),
+                ("  Pears".to_string(), 16.0),
+            ],
+            "Running Total In Product, products Z-A under each region",
+        );
+
+        let mut def = sum_def(&[(0, "Region"), (1, "Product")], &[], &[]);
+        def.row_fields[0].sort_order = SortOrder::Descending;
+        let view = calc(&along(def, ShowValuesAs::RunningTotal, 0, None), two_levels());
+        assert_eq!(
+            body(&view),
+            owned(&[
+                ("West", &[16.0]),
+                ("  Pears", &[16.0]),
+                ("East", &[19.0]),
+                ("  (blank)", &[2.0]),
+                ("  Apples", &[1.0]),
+                ("(blank)", &[31.0]),
+                ("  (blank)", &[10.0]),
+                ("  Apples", &[5.0]),
+                ("Grand Total", &[31.0]),
+            ]),
+            "Running Total In Region, regions Z-A: each product accumulates West, East, (blank)",
+        );
+    }
+
+    /// The base field on COLUMNS, sorted Z-A: each row accumulates across
+    /// its columns as they show (West, East, (blank)).
+    #[test]
+    fn running_total_along_a_column_field_follows_the_columns_as_shown() {
+        use crate::definition::{ShowValuesAs, SortOrder};
+        let mut def = sum_def(&[(2, "Year")], &[(0, "Region")], &[]);
+        def.column_fields[0].sort_order = SortOrder::Descending;
+        let view = calc(&along(def, ShowValuesAs::RunningTotal, 0, None), east_blank_west());
+        // Columns: West, East, (blank), Grand Total.
+        assert_eq!(
+            body(&view),
+            owned(&[
+                ("Y1", &[0.0, 10.0, 40.0, 40.0]),
+                ("Y2", &[20.0, 20.0, 25.0, 25.0]),
+                ("Grand Total", &[20.0, 30.0, 65.0, 65.0]),
+            ]),
+        );
+    }
+
+    /// A hidden item is not shown, so it is nobody's sibling: Rank ranks the
+    /// rows shown, and (previous) is the row shown above. The walk listed
+    /// the hidden item with a value of nothing, which ranked below every
+    /// positive row and was the "previous" of the row after it.
+    #[test]
+    fn a_hidden_item_is_not_walked() {
+        use crate::definition::ShowValuesAs;
+        let three = || {
+            cache_of(&[
+                (Some("East"), None, "Y1", 10.0),
+                (Some("North"), None, "Y1", 5.0),
+                (Some("West"), None, "Y1", 20.0),
+            ])
+        };
+        let def = sum_def(&[(0, "Region")], &[], &[(0, &["North"])]);
+        let asc = data_rows(&calc(&along(def.clone(), ShowValuesAs::RankAscending, 0, None), three()));
+        assert_eq!(asc, vec![("East".to_string(), 1.0), ("West".to_string(), 2.0)], "rank among the rows shown");
+
+        let prev = data_rows(&calc(&along(def, ShowValuesAs::Difference, 0, Some("(previous)")), three()));
+        assert!(prev[0].1.is_nan(), "{prev:?}");
+        assert_eq!(prev[1], ("West".to_string(), 20.0 - 10.0), "West's previous is East, the row above it");
+    }
+
+    // ------------------------------------------------------------------
+    // DATA-SOURCE ORDER is the order the source first shows each item
+    // (wave F, Z2). The Manual / DataSourceOrder arm of `sort_value_ids`
+    // kept whatever order the level's FxHashSet iterated in: eight regions
+    // entered Delta, Alpha, Hotel, Bravo, Golf, Charlie, Foxtrot, Echo showed
+    // as Delta, Echo, Bravo, Foxtrot, Hotel, Charlie, Alpha, Golf. The host
+    // relies on this order for a calculation group's items in declaration
+    // order (pivot/commands.rs, `make_calc_group_field`).
+    // ------------------------------------------------------------------
+
+    const ENTERED: [&str; 8] = ["Delta", "Alpha", "Hotel", "Bravo", "Golf", "Charlie", "Foxtrot", "Echo"];
+    const ENTERED_AMOUNTS: [f64; 8] = [4.0, 7.0, 1.0, 30.0, 11.0, 2.0, 19.0, 5.0];
+
+    /// The eight regions in the order they were entered, one record each.
+    fn entered_eight() -> PivotCache {
+        let rows: Vec<(Option<&str>, Option<&str>, &str, f64)> =
+            ENTERED.iter().zip(ENTERED_AMOUNTS).map(|(r, a)| (Some(*r), None, "Y1", a)).collect();
+        cache_of(&rows)
+    }
+
+    #[test]
+    fn data_source_order_and_manual_list_the_items_as_the_source_first_shows_them() {
+        use crate::definition::SortOrder;
+        for order in [SortOrder::DataSourceOrder, SortOrder::Manual] {
+            // On rows.
+            let mut def = sum_def(&[(0, "Region")], &[], &[]);
+            def.row_fields[0].sort_order = order;
+            let rows = data_rows(&calc(&def, entered_eight()));
+            assert_eq!(labels(&rows), ENTERED.to_vec(), "{order:?} on rows");
+
+            // On columns: the grand-total row reads the columns in their order.
+            let mut def = sum_def(&[(1, "Product")], &[(0, "Region")], &[]);
+            def.column_fields[0].sort_order = order;
+            let view = calc(&def, entered_eight());
+            let total = body(&view).into_iter().find(|(l, _)| l == "Grand Total").expect("the grand-total row").1;
+            let mut expected = ENTERED_AMOUNTS.to_vec();
+            expected.push(ENTERED_AMOUNTS.iter().sum());
+            assert_eq!(total, expected, "{order:?} on columns");
+        }
+    }
+
+    /// The blank member takes ITS place in the source too: entered second, it
+    /// shows second -- not first as A-Z puts it, not wherever a hash lands it.
+    #[test]
+    fn data_source_order_puts_the_blank_member_where_the_source_first_shows_it() {
+        use crate::definition::SortOrder;
+        let cache = || {
+            cache_of(&[
+                (Some("Delta"), None, "Y1", 1.0),
+                (None, None, "Y1", 2.0),
+                (Some("Alpha"), None, "Y1", 4.0),
+                (Some("Delta"), None, "Y1", 8.0),
+            ])
+        };
+        let mut def = sum_def(&[(0, "Region")], &[], &[]);
+        def.row_fields[0].sort_order = SortOrder::DataSourceOrder;
+        assert_eq!(
+            data_rows(&calc(&def, cache())),
+            vec![("Delta".to_string(), 9.0), ("(blank)".to_string(), 2.0), ("Alpha".to_string(), 4.0)],
+        );
+    }
+
+    /// A field has ONE item order, as Excel keeps one per field: under every
+    /// parent its items follow it -- the source's first showing of each item
+    /// anywhere -- so East lists Pears before Apples because the SOURCE shows
+    /// Pears first (under West), and Kiwis last.
+    #[test]
+    fn an_inner_fields_items_follow_the_fields_one_source_order_under_every_parent() {
+        use crate::definition::SortOrder;
+        let cache = cache_of(&[
+            (Some("West"), Some("Pears"), "Y1", 1.0),
+            (Some("East"), Some("Apples"), "Y1", 2.0),
+            (Some("West"), Some("Apples"), "Y1", 4.0),
+            (Some("East"), Some("Kiwis"), "Y1", 8.0),
+            (Some("East"), Some("Pears"), "Y1", 16.0),
+        ]);
+        let mut def = sum_def(&[(0, "Region"), (1, "Product")], &[], &[]);
+        def.row_fields[0].sort_order = SortOrder::DataSourceOrder;
+        def.row_fields[1].sort_order = SortOrder::DataSourceOrder;
+        let shown: Vec<String> = body(&calc(&def, cache)).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(
+            shown,
+            vec!["West", "  Pears", "  Apples", "East", "  Pears", "  Apples", "  Kiwis", "Grand Total"],
+        );
+    }
+
+    /// The order is the SOURCE's, not the filtered rows': Bravo's first record
+    /// is filtered out (its year is hidden), and Bravo still shows before
+    /// Alpha -- so hiding and showing a year never reorders the regions.
+    #[test]
+    fn data_source_order_does_not_move_when_a_filter_hides_an_items_first_record() {
+        use crate::definition::SortOrder;
+        let cache = || {
+            cache_of(&[
+                (Some("Bravo"), None, "Y2", 1.0),
+                (Some("Alpha"), None, "Y1", 2.0),
+                (Some("Bravo"), None, "Y1", 4.0),
+            ])
+        };
+        for hidden in [&[][..], &["Y2"][..]] {
+            let mut def = sum_def(&[(0, "Region")], &[(2, "Year")], &[(2, hidden)]);
+            def.row_fields[0].sort_order = SortOrder::DataSourceOrder;
+            assert_eq!(labels(&data_rows(&calc(&def, cache()))), vec!["Bravo", "Alpha"], "hidden years {hidden:?}");
+        }
+    }
+
+    /// Items the cache knows that no record shows ("show items with no data":
+    /// a calculation group's declared items, pre-interned in declaration
+    /// order) follow the ones the source shows, in the cache's own order.
+    #[test]
+    fn items_no_record_shows_follow_in_the_caches_own_order() {
+        use crate::definition::SortOrder;
+        let mut cache = PivotCache::new(pid(), 4);
+        for (i, name) in ["Region", "Product", "Year", "Amount"].iter().enumerate() {
+            cache.set_field_name(i, name.to_string());
+        }
+        for item in ["Q1", "Q2", "Q3", "Q4"] {
+            cache.get_field_mut(0).expect("the Region field").intern(CacheValue::Text(item.to_string()));
+        }
+        for (i, item) in ["Q3", "Q1", "Q3"].iter().enumerate() {
+            cache.add_record(
+                i as u32,
+                &[text(Some(*item)), text(None), CellValue::Text("Y1".to_string()), CellValue::Number(1.0)],
+            );
+        }
+        let mut def = sum_def(&[(0, "Region")], &[], &[]);
+        def.row_fields[0].sort_order = SortOrder::DataSourceOrder;
+        def.row_fields[0].show_all_items = true;
+        assert_eq!(labels(&data_rows(&calc(&def, cache))), vec!["Q3", "Q1", "Q2", "Q4"]);
     }
 }

@@ -287,7 +287,7 @@ pub(crate) fn replace_all_off_sheet(
     }
 
     if replacement_count > 0 {
-        undo_stack.begin_transaction(format!(
+        let owned_txn = undo_stack.begin_owned_transaction(format!(
             "Replace All: '{}' -> '{}' ({} cells)",
             search, replacement, replacement_count
         ));
@@ -296,7 +296,7 @@ pub(crate) fn replace_all_off_sheet(
             crate::undo_commands::script_grid_cells_snapshot_bytes(target, previous_cells),
             "Replace All",
         );
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
     }
 
     drop(undo_stack);
@@ -435,7 +435,7 @@ pub fn replace_all(
     let mut grids = grids.authorize(&effect);
 
     // Begin atomic transaction for undo
-    undo_stack.begin_transaction(format!(
+    let owned_txn = undo_stack.begin_owned_transaction(format!(
         "Replace All: '{}' -> '{}' ({} cells)",
         search, replacement, matches.len()
     ));
@@ -526,7 +526,7 @@ pub fn replace_all(
     }
 
     // Commit the atomic transaction
-    undo_stack.commit_transaction();
+    undo_stack.commit_owned(owned_txn);
 
     // PHASE B — dependents (§2c). The off-sheet twin `replace_all_off_sheet`
     // has always recalculated through `recalc_after_off_sheet_write`; this
@@ -676,7 +676,7 @@ pub(crate) fn replace_single_off_sheet(
         let mut grids = grids.authorize(&effect);
         let grid = &mut grids[target];
 
-        undo_stack.begin_transaction("Replace".to_string());
+        let owned_txn = undo_stack.begin_owned_transaction("Replace".to_string());
         undo_stack.record_custom_restore(
             "script_grid_cells".to_string(),
             crate::undo_commands::script_grid_cells_snapshot_bytes(
@@ -685,7 +685,7 @@ pub(crate) fn replace_single_off_sheet(
             ),
             "Replace",
         );
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
 
         grid.set_cell(row, col, new_cell);
         true

@@ -313,3 +313,46 @@ one Ctrl+Z restores both; model slicers reach pivots and pivot charts now, desig
 | No key or grid command reaches Core's hidden cell while a floating-grid cell is selected | `frKeyRouting.test.ts`, `gridCommandDrift.test.ts`, `keybindings.editContext.test.ts` |
 | A model slicer: offered by Insert Slicers, items from the model, filters its canvas's pivots and not another sheet's, one Ctrl+Z per click, delete clears and Ctrl+Z restores, survives save/reopen and a refresh | `canvas.spec.ts` #11; `slicer/model_slicer_tests.rs` |
 | Undo of a pinned apply restores the state before it | `undoing_a_pinned_apply_restores_the_pre_pin_definition`, `undoing_a_level_change_to_pinned_restores_the_mask` |
+
+
+## 12. The fix-all programme (2026-09-28/29)
+
+Every defect the canvas work and its reviews had filed was fixed in six adversarially reviewed waves,
+then driven through the real app (`app/e2e/journeys/fixall-*.spec.ts`), which found about thirty more.
+What changed in the rules a reader of this file relies on:
+
+- **A selection owner.** While a floating grid's cell holds the selection, every door that would act
+  on Core's hidden cell refuses once (`@api/selectionOwner`): formatting, Format Painter, paste,
+  insert, the contextual tabs.
+- **One undo step, owned.** A backend command commits only the step its OWN begin opened
+  (`engine::OwnedTransaction`); a gesture, a script batch and a command-line run each close only what
+  they opened (the begin answers with a ticket); a canvas multi-selection's delete / copy / paste /
+  duplicate is ONE step; z-order and lock are undoable (`canvas_stacking` restore).
+- **Floating controls follow the ACTIVE sheet.** They used to load sheet 0's controls always
+  (`GridConfig.activeSheet` was never set; the field is gone — read `sheetContext.activeSheetIndex`).
+- **A sheet switch from an extension is a tab click.** Bookmarks, view bookmarks, the Application
+  Explorer, Go To, CSV import and a notebook's Send to grid switch through ONE door (`@api`
+  `activateSheet`, `app/src/api/sheetSwitch.ts`): beforeSwitch, the backend switch AWAITED, the prime,
+  the context with the sheet's own surface, normalSwitch, SHEET_CHANGED. An unawaited switch let the
+  tab strip's re-read dispatch the canvas back, so Next Bookmark from a canvas left the grid on it.
+- **Undo is refused at every door while a gesture lands**, not only at Ctrl+Z: the refusal registry
+  (`app/src/api/commandRefusals.ts`) is asked by `CommandRegistry.execute` too (ribbon, menus, QAT).
+- **The marquee** exists only while the primary button is held; a move with it up ends the band
+  unapplied.
+- **A pane dropdown may name a floating range** (`Float1!A1:A3`); it reads the range by id.
+- **Model slicers** are ONE backend gesture with no transaction held across the model re-query, and
+  a DirectQuery CSV/Parquet/REST source now aggregates locally (model-engine-lib
+  `ConnectorCapabilities::aggregate_pushdown`) — it used to return raw rows as aggregates, so a Year
+  slicer listed regions.
+- **Values on rows** show one value column, each row its own value field; Show Values As can be set
+  in the Value Field Settings dialog (Base field / Base item), the base reaches the backend as the
+  `showAs` rule, and a reopened editor sends each value field's Show Values As and number format back
+  (the update replaces the value fields); GETPIVOTDATA with no field/item pairs reads a values-on-rows
+  total; pivot text sorts ignoring case.
+- **Timelines** read typed dates correctly (the pivot cache uses `engine::date_serial`), offer only
+  date-formatted numeric columns, and no longer arm a phantom range drag on a click.
+
+Live proofs: `fixall-canvas.spec.ts` (LIVE-1 controls per sheet, LIVE-2 marquee, V1–V6, W25/W26,
+B5/B6), `fixall-calp.spec.ts` (subscribe/checkout/refresh renames, validation wires, undo batches, the
+command line), `fixall-edit.spec.ts`, `fixall-pivot.spec.ts`, `fixall-lifecycle.spec.ts`. The ledger
+entries carry the fix notes (`tests/regression/bug-ledger.json`).

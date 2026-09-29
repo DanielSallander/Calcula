@@ -4,9 +4,13 @@
 //          2: the same "update_pivot_fields rebuilds what it is given" class).
 //
 //          The toggle already sent the whole zone, but each field WITHOUT its
-//          hidden items, and `update_pivot_fields` builds a field sent without
+//          hidden items, and `update_pivot_fields` built a field sent without
 //          a list as one that hides nothing: toggling Product's subtotals
-//          cleared Region's filter.
+//          cleared Region's filter. Round 3 made the toggle echo every list;
+//          since BUG-0184 the command KEEPS whatever it is not sent (pinned in
+//          pivot/regression_tests.rs), so the toggle sends the zone and the
+//          one flipped setting only -- an echoed list could only race a filter
+//          changed since the click.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -93,7 +97,7 @@ beforeEach(() => {
 });
 
 describe('Subtotal "<field>" from the context menu', () => {
-  it("sends the zone with every field's current item filter, and only the clicked field's subtotals flipped", async () => {
+  it("sends the whole zone with only the clicked field's subtotals flipped, echoing no item filter", async () => {
     registerPivotContextMenuItems();
     const toggle = h.items.find((i) => i.id === "pivot:subtotal")!;
     await toggle.onClick({ clickedCell: { row: 3, col: 0 } });
@@ -102,8 +106,8 @@ describe('Subtotal "<field>" from the context menu', () => {
       {
         pivotId: "p1",
         rowFields: [
-          { sourceIndex: 0, name: "Region", hiddenItems: ["West"] },
-          { sourceIndex: 1, name: "Product", hiddenItems: ["Pens"], showSubtotals: false },
+          { sourceIndex: 0, name: "Region" },
+          { sourceIndex: 1, name: "Product", showSubtotals: false },
         ],
       },
     ]);

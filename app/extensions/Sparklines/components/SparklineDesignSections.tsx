@@ -33,6 +33,7 @@ import { RibbonIcon } from "@api/ribbonIcons";
 import { useGridState } from "@api/state";
 import { showDialog } from "@api/ui";
 import { AppEvents, emitAppEvent, onAppEvent } from "@api/events";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 import {
   Button,
   Checkbox,
@@ -497,6 +498,12 @@ export function SparklineGroupSection(_props: PanelSectionProps): React.ReactEle
         data-testid="sparkline-group"
         onClick={() => {
           if (!sel) return;
+          // Group reads its RANGE from Core's selection -- hidden while
+          // something else owns the selection (a floating grid's selected
+          // cell), since this tab follows Core's selection alone -- so it
+          // refuses, once (BUG-0185 class). Ungroup and Clear act on the group
+          // the tab shows, as Table Design's actions act on the table it names.
+          if (refuseIfSelectionOwned("Group Sparklines")) return;
           const result = groupSparklinesFn(sel.startRow, sel.startCol, sel.endRow, sel.endCol);
           if (result) {
             refresh();

@@ -5,6 +5,7 @@
 //          in the formula bar and highlight the source data ranges on the sheet.
 
 import { columnToLetter } from "@api";
+import { quoteSheetNameForFormula } from "@api/externalEdit";
 import type { ChartSpec, DataRangeRef } from "../types";
 import { isPivotDataSource, isDesignQueryDataSource } from "../types";
 import { resolveDataSource } from "./dataSourceResolver";
@@ -205,14 +206,13 @@ export function formatAbsoluteRef(range: ResolvedRange): string {
 }
 
 /**
- * Format a sheet name for use in a reference, quoting if necessary.
+ * Format a sheet name for use in a reference, by the formula PARSER's rule
+ * (quoteSheetNameForFormula, @api/externalEdit). W13: a display rule of its
+ * own (whitespace, ' ! [ ] and a leading digit) left Q1-2026, TRUE and `Q1.`
+ * bare, and `=SERIES(Q1-2026!$B$1,...)` is not a formula the parser reads.
  */
 export function formatSheetName(name: string): string {
-  const needsQuoting = /[\s'![\]]/.test(name) || /^\d/.test(name);
-  if (needsQuoting) {
-    return `'${name.replace(/'/g, "''")}'`;
-  }
-  return name;
+  return quoteSheetNameForFormula(name);
 }
 
 /**

@@ -18,6 +18,7 @@ import {
 } from "@api";
 import type { AutocompleteAcceptedPayload } from "@api";
 import { isValidName, formatRefersTo } from "../lib/nameUtils";
+import { isSelectionOwned } from "@api/selectionOwner";
 
 const v = (name: string) => `var(${name})`;
 
@@ -196,8 +197,14 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
       setScopeIndex(null);
       setComment("");
       setFolder("");
-      // Auto-populate refersTo from current selection
-      if (gridState.selection) {
+      // Auto-populate refersTo from current selection -- never while
+      // something else owns the selection (a floating grid's selected cell):
+      // Core's selection is then a cell hidden under it, and a name must not
+      // quietly point at a range nobody chose. The Name Manager's New...
+      // opens anyway, with Refers to EMPTY (W24).
+      if (isSelectionOwned()) {
+        setRefersTo("");
+      } else if (gridState.selection) {
         const sel = gridState.selection;
         const sheetName = gridState.sheetContext.activeSheetName;
         setRefersTo(

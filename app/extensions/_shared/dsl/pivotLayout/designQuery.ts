@@ -18,12 +18,18 @@ import type {
   ZoneField,
 } from '../../components/types';
 
-/** A field reference (table.column). Mirrors the Rust `BiFieldRef`. */
+/** A field reference (table.column). Mirrors the Rust `DesignQueryFieldRef`
+ *  (pivot/headless.rs): a `BiFieldRef` plus `includedItems`. */
 export interface DesignQueryFieldRef {
   table: string;
   column: string;
   isLookup?: boolean;
+  /** Items to hide (`NOT IN (...)`). */
   hiddenItems?: string[];
+  /** Items to KEEP (`= (...)`): every other item of the field is hidden. The
+   *  backend inverts it against the query's own result -- a design query has
+   *  no pivot whose item list could invert it here (BUG-0197). */
+  includedItems?: string[];
 }
 
 /** A measure reference. Mirrors the Rust `BiValueFieldRef`. */
@@ -87,14 +93,29 @@ export function compileDesignQuery(
   }
 
   const biTableNames = biModel.tables.map((t) => t.name);
+  // A ROWS / COLUMNS field's `NOT IN (...)` list. The mapping used to copy
+  // none, so the query ran with every item of the field.
+  const axisRef = (f: ZoneField): DesignQueryFieldRef => {
+    const ref = splitRef(f.name, biTableNames, f.isLookup);
+    return f.hiddenItems && f.hiddenItems.length > 0 ? { ...ref, hiddenItems: [...f.hiddenItems] } : ref;
+  };
+  // A FILTERS inclusion `= (...)` cannot be inverted here (there is no item
+  // list to invert it against; the compiler says so in
+  // `unresolvedInclusions`), so it travels as the items to KEEP and the
+  // backend inverts it. It used to travel as nothing, and the query ran
+  // UNFILTERED with no warning (BUG-0197).
+  const inclusions = new Map(result.unresolvedInclusions.map((u) => [u.fieldName, u.values]));
+  const filterRef = (f: ZoneField): DesignQueryFieldRef => {
+    const ref = { ...splitRef(f.name, biTableNames, f.isLookup), hiddenItems: f.hiddenItems ?? [] };
+    const included = inclusions.get(f.name);
+    return included ? { ...ref, includedItems: [...included] } : ref;
+  };
   const request: DesignQueryRequest = {
     connectionId,
-    rowFields: result.rows.filter(isBiField).map((f) => splitRef(f.name, biTableNames, f.isLookup)),
-    columnFields: result.columns.filter(isBiField).map((f) => splitRef(f.name, biTableNames, f.isLookup)),
+    rowFields: result.rows.filter(isBiField).map(axisRef),
+    columnFields: result.columns.filter(isBiField).map(axisRef),
     valueFields: result.values.map((f) => valueRef(f.name, f.customName)),
-    filterFields: result.filters
-      .filter(isBiField)
-      .map((f) => ({ ...splitRef(f.name, biTableNames, f.isLookup), hiddenItems: f.hiddenItems ?? [] })),
+    filterFields: result.filters.filter(isBiField).map(filterRef),
     calculatedFields: result.calculatedFields.length > 0 ? result.calculatedFields : undefined,
     valueColumnOrder: result.valueColumnOrder.length > 0 ? result.valueColumnOrder : undefined,
     layout: result.layout,

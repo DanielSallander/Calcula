@@ -527,20 +527,18 @@ export async function revertPivotOperation(pivotId: string): Promise<void> {
 /**
  * Take back EXACTLY the undo step(s) a declined "overwrite existing data?"
  * names -- the steps carrying `overwriteTokens` (each command's response
- * `overwriteToken`), then `thenUndoSeq` when it is the next entry on top -- and
- * nothing else. REJECTS, having popped nothing, when no token was given (the
- * command recorded no step) or no such step is the last change in the history.
- * Callers go through `@api/pivotOverwrite`, which also announces what came back.
+ * `overwriteToken`) -- and nothing else. REJECTS, having popped nothing, when
+ * no token was given (the command recorded no step) or no such step is the
+ * last change in the history. Callers go through `@api/pivotOverwrite`, which
+ * also announces what came back.
  */
 export async function undoPivotOverwrite(
   pivotId: string,
   overwriteTokens: readonly number[],
-  thenUndoSeq?: number | null,
 ): Promise<PivotOverwriteUndoResponse> {
   return invoke<PivotOverwriteUndoResponse>("undo_pivot_overwrite", {
     pivotId,
     overwriteTokens: [...overwriteTokens],
-    thenUndoSeq: thenUndoSeq ?? null,
   });
 }
 

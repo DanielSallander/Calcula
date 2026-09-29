@@ -25,6 +25,14 @@ const cleanupFns: Array<() => void> = [];
 
 const ADDINS_PANEL_ID = "extensions.addins";
 
+/**
+ * Toggle the Extensions panel -- the command the keybinding registry's
+ * `ext.extensionsManager.toggle` (Ctrl+Shift+X) runs. The registry named this
+ * id long before anything registered it; the key worked only through a window
+ * listener here, which a remap in Settings could not move (BUG-0183 class).
+ */
+export const EXTENSIONS_MANAGER_TOGGLE_COMMAND = "extensionsManager.toggle";
+
 /** The host's add-in glyph, as the Add-ins tab / rail icon (20px). */
 const AddInsIcon = React.createElement(AddInGlyph, { size: ICON_SIZE_SM });
 
@@ -48,15 +56,9 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.activityBar.unregister("extensions"));
 
-  // Keyboard shortcut: Ctrl+Shift+X
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.ctrlKey && e.shiftKey && e.key === "X") {
-      e.preventDefault();
-      context.ui.activityBar.toggle("extensions");
-    }
-  };
-  window.addEventListener("keydown", handleKeyDown, true);
-  cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
+  // The command the registry's Ctrl+Shift+X runs (the one keyboard path).
+  context.commands.register(EXTENSIONS_MANAGER_TOGGLE_COMMAND, () => context.ui.activityBar.toggle("extensions"));
+  cleanupFns.push(() => context.commands.unregister(EXTENSIONS_MANAGER_TOGGLE_COMMAND));
 
   // The "Add-ins" ribbon tab. Registered lazily and re-registered when the set
   // of contribution GROUPS changes, so an install with no ribbon buttons never

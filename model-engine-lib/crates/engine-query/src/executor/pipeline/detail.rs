@@ -309,6 +309,7 @@ impl QueryExecutor {
                 column: detail_col,
                 values,
                 kind,
+                include_null: false,
             });
         }
 

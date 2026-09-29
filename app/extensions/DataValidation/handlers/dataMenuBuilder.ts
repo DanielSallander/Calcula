@@ -11,13 +11,18 @@ import {
   IconClearCircles,
 } from "@api";
 import { toggleCircleInvalidData, clearCircles } from "../lib/validationStore";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 const DIALOG_ID = "data-validation-dialog";
 
 /**
  * Register Data Validation menu items under a "Validation" submenu in the Data menu.
+ *
+ * Returns the cleanup for deactivation: it takes back this extension's OWN
+ * items (the Validation submenu's children go with it), never the shared Data
+ * menu (wave E, Y14).
  */
-export function registerDataValidationMenuItems(context: ExtensionContext): void {
+export function registerDataValidationMenuItems(context: ExtensionContext): () => void {
   // Separator before validation submenu
   context.ui.menus.registerItem("data", {
     id: "data:validation-separator",
@@ -36,6 +41,11 @@ export function registerDataValidationMenuItems(context: ExtensionContext): void
         label: "Data Validation...",
         icon: IconDataValidation,
         action: () => {
+          // The dialog edits the validation of Core's selection -- HIDDEN
+          // while something else owns the selection (a floating grid's
+          // selected cell) -- so refuse, once (D4, BUG-0185 class). Circle
+          // Invalid Data and Clear Circles are sheet-level and stay allowed.
+          if (refuseIfSelectionOwned("Data Validation")) return;
           showDialog(DIALOG_ID);
         },
       },
@@ -62,4 +72,9 @@ export function registerDataValidationMenuItems(context: ExtensionContext): void
       },
     ],
   });
+
+  return () => {
+    context.ui.menus.unregisterItem("data", "data:validation-separator");
+    context.ui.menus.unregisterItem("data", "data:validation");
+  };
 }

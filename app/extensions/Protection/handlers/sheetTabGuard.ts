@@ -8,11 +8,26 @@ import { promptAsync } from "@api/dialogs";
 
 const PROTECTION_WARNING_DIALOG_ID = "protection-warning";
 
+/** The core sheet-tab items this guard replaces while it is active. */
+const OVERRIDDEN_ITEM_IDS = ["core:rename", "core:delete", "core:insertSheet"];
+
 /**
  * Register sheet tab context menu overrides for workbook protection.
  * Re-registers the core menu items with a `disabled` callback that checks workbook protection.
+ *
+ * Returns the cleanup for deactivation, which puts back the items it replaced
+ * (in place: the registry keeps an item's position when it is re-registered).
+ * Without it the overrides outlived the extension, pointing at a warning
+ * dialog that was no longer registered.
  */
-export function registerSheetTabProtection(): void {
+export function registerSheetTabProtection(): () => void {
+  const replaced = new Map(
+    sheetExtensions
+      .getContextMenuItems()
+      .filter((item) => OVERRIDDEN_ITEM_IDS.includes(item.id))
+      .map((item) => [item.id, item] as const),
+  );
+
   // Override "Rename" - disable when workbook protected
   sheetExtensions.registerContextMenuItem({
     id: "core:rename",
@@ -74,4 +89,12 @@ export function registerSheetTabProtection(): void {
       window.dispatchEvent(event);
     },
   });
+
+  return () => {
+    for (const id of OVERRIDDEN_ITEM_IDS) {
+      const original = replaced.get(id);
+      if (original) sheetExtensions.registerContextMenuItem(original);
+      else sheetExtensions.unregisterContextMenuItem(id);
+    }
+  };
 }

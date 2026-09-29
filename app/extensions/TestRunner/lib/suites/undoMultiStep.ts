@@ -15,6 +15,8 @@ import {
   clearDataValidation,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
+  ownUndoTransaction,
   createWholeNumberRule,
   DEFAULT_ERROR_ALERT,
   DEFAULT_PROMPT,
@@ -150,7 +152,10 @@ export const undoMultiStepSuite: TestSuite = {
       name: "Transaction groups multiple operations",
       description: "beginUndoTransaction + 3 setCells + commit = single undo reverts all.",
       run: async (ctx) => {
-        await beginUndoTransaction("batch test");
+        const tx = ownUndoTransaction(await beginUndoTransaction("batch test"), {
+          commitUndoTransaction,
+          cancelUndoTransaction,
+        });
 
         // finally-commit: a failing setCells must not leave the transaction
         // open — every later test's edits would silently join it.
@@ -161,7 +166,7 @@ export const undoMultiStepSuite: TestSuite = {
             { row: A.row + 2, col: A.col, value: "Three" },
           ]);
         } finally {
-          await commitUndoTransaction();
+          await tx.commit();
         }
         await ctx.settle();
 

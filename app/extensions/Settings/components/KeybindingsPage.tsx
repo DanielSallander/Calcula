@@ -8,8 +8,15 @@
 //          tokens), the buttons, text fields and selects are the @api/layout
 //          Button / Input / Select, and every colour is an LT token, so the
 //          page follows the skin (the old literals left a white form and green
-//          category labels on a Dark skin). The table, the inline key capture
-//          and every handler are unchanged.
+//          category labels on a Dark skin).
+//
+//          KEY CAPTURE. Both capture boxes (a row's Edit, the Add Shortcut
+//          form) register with the keybinding dispatcher while they are open
+//          (@api/keybindings beginShortcutCapture), which hands them every key
+//          pressed in them -- an already-bound combination included -- instead
+//          of running it. Through React's onKeyDown alone they came second to
+//          the window-capture dispatcher: Ctrl+S in the box saved the workbook
+//          and recorded nothing (BUG-0199).
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { css } from "@emotion/css";
@@ -30,6 +37,7 @@ import {
   removeCustomKeybinding,
   revokeScriptKeybinding,
   getAvailableCommands,
+  beginShortcutCapture,
   type KeyBinding,
 } from "@api/keybindings";
 import { confirmAsync } from "@api/dialogs";
@@ -70,25 +78,15 @@ function KeybindingRow(props: KeybindingRowProps): React.ReactElement {
   const [conflicts, setConflicts] = useState<KeyBinding[]>([]);
   const captureRef = useRef<HTMLDivElement>(null);
 
-  // Focus the capture element when editing starts
-  useEffect(() => {
-    if (editing && captureRef.current) {
-      captureRef.current.focus();
-    }
-  }, [editing]);
-
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-
+  const handleCapturedKey = useCallback(
+    (e: KeyboardEvent) => {
       // Escape cancels
       if (e.key === "Escape") {
         onCancelEdit();
         return;
       }
 
-      const combo = eventToCombo(e.nativeEvent);
+      const combo = eventToCombo(e);
       if (!combo) return; // Pure modifier key
 
       const formatted = formatCombo(combo);
@@ -100,6 +98,31 @@ function KeybindingRow(props: KeybindingRowProps): React.ReactElement {
       setConflicts(conflictList);
     },
     [binding.id, onCancelEdit]
+  );
+
+  // Focus the capture box when editing starts, and make it a CAPTURE box for
+  // as long as it is open: the keybinding dispatcher hands it every key
+  // pressed in it -- an already-bound one too -- instead of running that key's
+  // command (BUG-0199: Ctrl+S here SAVED the workbook and recorded nothing).
+  useEffect(() => {
+    if (editing && captureRef.current) {
+      captureRef.current.focus();
+    }
+  }, [editing]);
+  useEffect(() => {
+    const el = captureRef.current;
+    if (!editing || !el) return;
+    return beginShortcutCapture(el, handleCapturedKey);
+  }, [editing, handleCapturedKey]);
+
+  // A host without the dispatcher (nothing else hands the box its keys).
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      handleCapturedKey(e.nativeEvent);
+    },
+    [handleCapturedKey]
   );
 
   const handleSave = useCallback(() => {
@@ -247,6 +270,19 @@ export function KeybindingsPage(): React.ReactElement {
   const [addCategory, setAddCategory] = useState("Custom");
   const [addContext, setAddContext] = useState<"always" | "editing" | "not-editing">("always");
   const addCaptureRef = useRef<HTMLDivElement>(null);
+
+  // The Add Shortcut form's key box records every key pressed in it, an
+  // already-bound one included, instead of running it (see the row's box).
+  const handleAddCapturedKey = useCallback((e: KeyboardEvent) => {
+    if (e.key === "Escape") { setAddCombo(""); return; }
+    const combo = eventToCombo(e);
+    if (combo) setAddCombo(formatCombo(combo));
+  }, []);
+  useEffect(() => {
+    const el = addCaptureRef.current;
+    if (!showAddForm || !el) return;
+    return beginShortcutCapture(el, handleAddCapturedKey);
+  }, [showAddForm, handleAddCapturedKey]);
 
   // Re-render when keybindings change
   useEffect(() => {
@@ -400,11 +436,10 @@ export function KeybindingsPage(): React.ReactElement {
           }}
           onFocus={() => { /* ready to capture */ }}
           onKeyDown={(e: React.KeyboardEvent) => {
+            // A host without the dispatcher (it otherwise hands the box its keys).
             e.preventDefault();
             e.stopPropagation();
-            if (e.key === "Escape") { setAddCombo(""); return; }
-            const combo = eventToCombo(e.nativeEvent);
-            if (combo) setAddCombo(formatCombo(combo));
+            handleAddCapturedKey(e.nativeEvent);
           }}
         >
           {addCombo || "Click here and press a key combination..."}

@@ -213,6 +213,7 @@ pub(super) async fn compute_bidirectional_filters(
                         column: dim_key_col.to_string(),
                         values,
                         kind,
+                        include_null: false,
                     },
                     via_fact: fact_name.to_string(),
                 });
@@ -250,8 +251,7 @@ async fn fetch_fact_keys(
         // IN filters propagated from other dimensions locally.
         let mut filtered = batches.clone();
         for in_filter in fact_in_filters {
-            filtered =
-                filter_batches_by_in_values(&filtered, &in_filter.column, &in_filter.values)?;
+            filtered = filter_batches_by_in_filter(&filtered, in_filter)?;
         }
         return Ok(extract_column_values(&filtered, fact_key_col));
     }
@@ -287,6 +287,28 @@ pub(super) fn filter_batches_by_in_values(
     column: &str,
     values: &[String],
 ) -> QueryResult<Vec<RecordBatch>> {
+    filter_batches_matching(batches, column, values, false)
+}
+
+/// [`filter_batches_by_in_values`] for a whole [`InFilterCondition`]:
+/// honors [`InFilterCondition::include_null`] (a scoped IN-list naming the
+/// BLANK member also keeps the NULL rows), so the local path agrees with every
+/// connector's rendering of the same condition.
+pub(super) fn filter_batches_by_in_filter(
+    batches: &[RecordBatch],
+    in_filter: &InFilterCondition,
+) -> QueryResult<Vec<RecordBatch>> {
+    filter_batches_matching(batches, &in_filter.column, &in_filter.values, in_filter.include_null)
+}
+
+/// Keep the rows whose `column` (cast to text) is in `values` -- and, when
+/// `include_null`, the rows where it is NULL.
+fn filter_batches_matching(
+    batches: &[RecordBatch],
+    column: &str,
+    values: &[String],
+    include_null: bool,
+) -> QueryResult<Vec<RecordBatch>> {
     let allowed: std::collections::HashSet<&str> = values.iter().map(String::as_str).collect();
     let mut filtered = Vec::with_capacity(batches.len());
     for batch in batches {
@@ -306,7 +328,13 @@ pub(super) fn filter_batches_by_in_values(
                 ))
             })?;
         let mask: BooleanArray = (0..str_arr.len())
-            .map(|i| Some(!str_arr.is_null(i) && allowed.contains(str_arr.value(i))))
+            .map(|i| {
+                Some(if str_arr.is_null(i) {
+                    include_null
+                } else {
+                    allowed.contains(str_arr.value(i))
+                })
+            })
             .collect();
         filtered.push(arrow::compute::filter_record_batch(batch, &mask)?);
     }
@@ -531,6 +559,7 @@ mod tests {
                 column: "customer_id".to_string(),
                 values: vec!["10".to_string()],
                 kind: InValueKind::Integer,
+                include_null: false,
             }],
         );
 

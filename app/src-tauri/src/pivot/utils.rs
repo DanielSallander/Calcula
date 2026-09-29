@@ -25,12 +25,26 @@ pub(crate) fn strip_sheet_prefix(reference: &str) -> &str {
 /// Excel-compatible max row count (1-indexed).
 const MAX_ROWS: u32 = 1_048_576;
 
+/// Drops the absolute-reference markers of Excel's `$A$1` / `$A1` / `A$1`
+/// forms: at most one `$` before the column letters and one before the row
+/// digits. Any other `$` is left in place, so the parse below refuses it.
+fn strip_absolute_markers(reference: &str) -> String {
+    let rest = reference.strip_prefix('$').unwrap_or(reference);
+    let letters = rest.chars().take_while(|c| c.is_ascii_alphabetic()).count();
+    let (col, tail) = rest.split_at(letters);
+    let tail = if letters > 0 { tail.strip_prefix('$').unwrap_or(tail) } else { tail };
+    format!("{}{}", col, tail)
+}
+
 /// Parses a cell reference like "A1" into (row, col) 0-indexed coordinates.
-/// Also handles references with sheet prefixes like "Sheet1!A1".
+/// Also handles references with sheet prefixes like "Sheet1!A1", and the
+/// absolute forms "$A$1", "$A1" and "A$1" -- what Excel writes for a picked
+/// range. Without them `Sheet2!$A$1:$D$9` was refused ("no column letters")
+/// at every pivot door but the canvas dialog, which strips `$` itself.
 pub(crate) fn parse_cell_ref(cell_ref: &str) -> Result<(u32, u32), String> {
     // Strip any sheet prefix first
     let cell_ref = strip_sheet_prefix(cell_ref);
-    let cell_ref = cell_ref.trim().to_uppercase();
+    let cell_ref = strip_absolute_markers(&cell_ref.trim().to_uppercase());
 
     let col_end = cell_ref
         .chars()
@@ -61,10 +75,12 @@ pub(crate) fn parse_cell_ref(cell_ref: &str) -> Result<(u32, u32), String> {
     Ok((row - 1, col)) // Convert to 0-indexed
 }
 
-/// Tries to parse a column-only reference like "A" into a 0-indexed column index.
-/// Returns None if the string contains non-alphabetic characters.
+/// Tries to parse a column-only reference like "A" (or absolute "$A") into a
+/// 0-indexed column index. Returns None if the string contains other
+/// non-alphabetic characters.
 fn try_parse_col_only(s: &str) -> Option<u32> {
     let s = s.trim();
+    let s = s.strip_prefix('$').unwrap_or(s);
     if s.is_empty() || !s.chars().all(|c| c.is_ascii_alphabetic()) {
         return None;
     }
@@ -141,14 +157,136 @@ pub(crate) fn preserve_collapse_state(new_fields: &mut [PivotField], old_fields:
     }
 }
 
+/// Carry each field's own SETTINGS -- sort order, subtotals, show-all-items
+/// and grouping -- from the field of the same NAME the pivot held before a
+/// rebuild, found in ANY zone (a field dragged from Rows to Columns is still
+/// the same field and keeps its settings, as in Excel).
+///
+/// A BI pivot's field-list edit rebuilds every field from `PivotField::new`
+/// over the NEW cache, whose column indices change -- so a sort, a grouping or
+/// a subtotal setting the user applied was reset by the next edit of the
+/// layout (wave B, A3: the BUG-0184 class on BI pivots). What the request
+/// itself carries (hidden items, lookup-ness, the sort-by column, the model's
+/// number format) and the collapse state ([`preserve_collapse_state`]) are
+/// left alone.
+pub(crate) fn preserve_field_settings(new_fields: &mut [PivotField], old_fields: &[PivotField]) {
+    for new_field in new_fields.iter_mut() {
+        if let Some(old) = old_fields.iter().find(|o| o.name == new_field.name) {
+            new_field.sort_order = old.sort_order;
+            new_field.show_subtotals = old.show_subtotals;
+            new_field.show_all_items = old.show_all_items;
+            new_field.grouping = old.grouping.clone();
+        }
+    }
+}
+
 // ============================================================================
 // CONFIG CONVERTERS
 // ============================================================================
 
-/// Converts PivotFieldConfig to engine PivotField
-pub(crate) fn config_to_pivot_field(config: &PivotFieldConfig) -> PivotField {
-    let mut field = PivotField::new(config.source_index, config.name.clone());
-    
+/// The zone a field config is sent to.
+#[derive(Clone, Copy)]
+enum FieldZone {
+    Rows,
+    Columns,
+    Filters,
+}
+
+/// Apply an `update_pivot_fields` request's row, column and filter zones to
+/// `definition`. A zone the request leaves out is kept as it is; a zone it
+/// sends is REPLACED by the fields it lists, in their order.
+///
+/// Each listed field starts from what the pivot holds for that field NOW --
+/// found by its source column, in the zone it is sent to first and then in the
+/// others (a field dragged from Rows to Columns is still the same field, and
+/// keeps its settings, as in Excel) -- and only the settings the config SENDS
+/// change it ([`merge_pivot_field_config`]). This rebuilt every field it was
+/// sent from `PivotField::new` (BUG-0184): any field-list edit on a range
+/// pivot reset the sort order, grouping, subtotals and show-all-items of every
+/// field it listed, and read an absent hidden-items list as "hide nothing", so
+/// a filter set elsewhere within one round trip of a field-list edit was
+/// reverted.
+pub(crate) fn apply_zone_field_configs(
+    definition: &mut pivot_engine::PivotDefinition,
+    request: &crate::pivot::types::UpdatePivotFieldsRequest,
+) {
+    let old_rows = definition.row_fields.clone();
+    let old_columns = definition.column_fields.clone();
+    let old_filters = definition.filter_fields.clone();
+    let existing = |zone: FieldZone, source_index: usize| -> Option<&PivotField> {
+        let in_rows = || old_rows.iter().find(|f| f.source_index == source_index);
+        let in_columns = || old_columns.iter().find(|f| f.source_index == source_index);
+        let in_filters = || old_filters.iter().map(|pf| &pf.field).find(|f| f.source_index == source_index);
+        match zone {
+            FieldZone::Rows => in_rows().or_else(in_columns).or_else(in_filters),
+            FieldZone::Columns => in_columns().or_else(in_rows).or_else(in_filters),
+            FieldZone::Filters => in_filters().or_else(in_rows).or_else(in_columns),
+        }
+    };
+
+    if let Some(ref row_configs) = request.row_fields {
+        definition.row_fields = row_configs
+            .iter()
+            .map(|c| merge_pivot_field_config(c, existing(FieldZone::Rows, c.source_index)))
+            .collect();
+    }
+    if let Some(ref col_configs) = request.column_fields {
+        definition.column_fields = col_configs
+            .iter()
+            .map(|c| merge_pivot_field_config(c, existing(FieldZone::Columns, c.source_index)))
+            .collect();
+    }
+    if let Some(ref filter_configs) = request.filter_fields {
+        definition.filter_fields = filter_configs
+            .iter()
+            .map(|c| {
+                // A report filter that stays one keeps its condition too.
+                let condition = old_filters
+                    .iter()
+                    .find(|pf| pf.field.source_index == c.source_index)
+                    .map(|pf| pf.condition.clone())
+                    .unwrap_or_else(|| FilterCondition::ValueList(Vec::new()));
+                PivotFilter {
+                    field: merge_pivot_field_config(c, existing(FieldZone::Filters, c.source_index)),
+                    condition,
+                }
+            })
+            .collect();
+    }
+}
+
+/// The engine field for `config`: `existing` (what the pivot holds for this
+/// source column now) with only the settings the config SENDS applied, or a
+/// fresh field when the column is new to the pivot. Every setting is
+/// tri-state on the wire -- absent keeps, a value sets -- and so is the item
+/// filter, exactly like `BiFieldRef::hidden_items`: absent keeps, a list sets,
+/// `[]` clears. The name is always the config's (the Field Settings dialog
+/// renames a field through it).
+///
+/// Collapse state belongs to the expand/collapse commands: a field already in
+/// the pivot keeps its own whatever the config says (callers such as the
+/// script API's `createFieldConfig` send `collapsed: false` by default), as it
+/// always did; a new field takes the config's.
+pub(crate) fn merge_pivot_field_config(config: &PivotFieldConfig, existing: Option<&PivotField>) -> PivotField {
+    let mut field = match existing {
+        Some(old) => {
+            let mut field = old.clone();
+            field.source_index = config.source_index;
+            field.name = config.name.clone();
+            field
+        }
+        None => {
+            let mut field = PivotField::new(config.source_index, config.name.clone());
+            if let Some(collapsed) = config.collapsed {
+                field.collapsed = collapsed;
+            }
+            if let Some(ref collapsed_items) = config.collapsed_items {
+                field.collapsed_items = collapsed_items.clone();
+            }
+            field
+        }
+    };
+
     if let Some(ref sort) = config.sort_order {
         field.sort_order = match sort.to_lowercase().as_str() {
             "desc" | "descending" => SortOrder::Descending,
@@ -157,27 +295,15 @@ pub(crate) fn config_to_pivot_field(config: &PivotFieldConfig) -> PivotField {
             _ => SortOrder::Ascending,
         };
     }
-    
     if let Some(subtotals) = config.show_subtotals {
         field.show_subtotals = subtotals;
     }
-    
-    if let Some(collapsed) = config.collapsed {
-        field.collapsed = collapsed;
-    }
-    
     if let Some(ref hidden) = config.hidden_items {
         field.hidden_items = hidden.clone();
     }
-
-    if let Some(ref collapsed_items) = config.collapsed_items {
-        field.collapsed_items = collapsed_items.clone();
-    }
-
     if let Some(show_all) = config.show_all_items {
         field.show_all_items = show_all;
     }
-
     if let Some(ref grouping_config) = config.grouping {
         field.grouping = api_grouping_config_to_engine(grouping_config);
     }
@@ -246,28 +372,6 @@ pub(crate) fn config_to_value_field(config: &ValueFieldConfig) -> ValueField {
     }
 
     field
-}
-
-/// Converts PivotFieldConfig to engine PivotFilter (for filter area)
-pub(crate) fn config_to_pivot_filter(config: &PivotFieldConfig) -> PivotFilter {
-    let field = config_to_pivot_field(config);
-
-    // Default to showing all values (empty ValueList means include all)
-    // If hidden_items are specified, we'll exclude those
-    let condition = if let Some(ref hidden) = config.hidden_items {
-        if hidden.is_empty() {
-            // No hidden items means show all
-            FilterCondition::ValueList(Vec::new())
-        } else {
-            // hidden_items represents items to exclude
-            // For now, we use ValueList but the engine handles hidden_items on the field
-            FilterCondition::ValueList(Vec::new())
-        }
-    } else {
-        FilterCondition::ValueList(Vec::new())
-    };
-
-    PivotFilter { field, condition }
 }
 
 /// Applies layout config to PivotLayout
@@ -579,8 +683,11 @@ pub(crate) fn view_to_response(
             let field_index = filter.field.source_index;
             let field_name = filter.field.name.clone();
 
-            // Get unique values from cache
-            let unique_values: Vec<String> = if let Some(field_cache) = cache.fields.get_mut(field_index) {
+            // Get unique values from cache -- and the BLANK item last, when
+            // the column has blank records (wave B, A2: Excel lists it, and
+            // without it the filter cell could not show or hide blank rows).
+            let has_blank = field_index < cache.fields.len() && cache.has_blank_values(field_index);
+            let mut unique_values: Vec<String> = if let Some(field_cache) = cache.fields.get_mut(field_index) {
                 // Clone sorted_ids to end the mutable borrow before calling get_value
                 let sorted_ids = field_cache.sorted_ids().to_vec();
                 sorted_ids
@@ -595,12 +702,20 @@ pub(crate) fn view_to_response(
             } else {
                 Vec::new()
             };
+            if has_blank {
+                unique_values.push(pivot_engine::BLANK_ITEM_LABEL.to_string());
+            }
 
-            // Get selected values (all values minus hidden items)
+            // Get selected values (all values minus hidden items; the blank
+            // item is hidden by any spelling of its label)
             let hidden_items = &filter.field.hidden_items;
             let selected_values: Vec<String> = unique_values
                 .iter()
-                .filter(|v| !hidden_items.contains(v))
+                .filter(|v| {
+                    !hidden_items.iter().any(|h| {
+                        h == *v || (pivot_engine::is_blank_item_label(h) && pivot_engine::is_blank_item_label(v))
+                    })
+                })
                 .cloned()
                 .collect();
 

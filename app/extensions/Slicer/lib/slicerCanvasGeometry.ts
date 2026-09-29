@@ -29,7 +29,11 @@ import {
   resolveHeaderSizes,
   paintedDisplayHeadings,
 } from "@api/grid";
-import { topFloatingRegionAt, type FloatingHitGeometry } from "@api/gridOverlays";
+import {
+  isPointModeOnForeignSheet,
+  topFloatingRegionAt,
+  type FloatingHitGeometry,
+} from "@api/gridOverlays";
 import { getAllSlicers, getSlicerById } from "./slicerStore";
 import { SLICER_REGION_TYPE, slicerIdOf } from "./slicerObjectSelection";
 import type { Slicer } from "./slicerTypes";
@@ -71,8 +75,16 @@ export function slicerCanvasBounds(
  * answer; any OTHER object on top refuses the point (it is that object's
  * gesture). Only when no published region is there does the slicer store
  * itself answer (active sheet, last first), with the same painted gutters.
+ *
+ * NOTHING while a formula is picking a reference on a sheet other than its
+ * own (`isPointModeOnForeignSheet`): the grid then paints and hit-tests no
+ * object at all (`getLiveGridRegions`), and the "active sheet" of the store
+ * fallback is the sheet being SHOWN -- whose own slicers are not painted, so a
+ * right-click there opened the menu of a slicer nobody could see (open-items
+ * 2.af row 5).
  */
 export function slicerAtCanvasPoint(canvasX: number, canvasY: number): Slicer | null {
+  if (isPointModeOnForeignSheet()) return null;
   const geo = slicerHitGeometry();
   if (!geo) return null;
   const top = topFloatingRegionAt(canvasX, canvasY, geo);

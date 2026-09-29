@@ -52,6 +52,24 @@ pub struct ControlMetadata {
 /// and is script-visible with no schema change.
 pub const PIN_TO_GRID_PROPERTY: &str = "pinToGrid";
 
+/// The properties that place, size or orient a control: what the geometry
+/// batch writes (`x`, `y`, `width`, `height`, `offsetX`/`offsetY`), whether
+/// it moves with its cells, and its rotation and flips. Writing any of them is
+/// an OBJECT EDIT, refused on a sheet whose protection does not allow editing
+/// objects (`set_control_property_core`), exactly as a drag is.
+pub const GEOMETRY_PROPERTIES: &[&str] = &[
+    "x",
+    "y",
+    "width",
+    "height",
+    "offsetX",
+    "offsetY",
+    PIN_TO_GRID_PROPERTY,
+    "rotation",
+    "flipH",
+    "flipV",
+];
+
 /// Does this control move when the grid shifts under it?
 ///
 /// * Absent -> YES. Every control authored before this existed is IN-CELL, and
@@ -186,6 +204,13 @@ pub const EXECUTABLE_CONTROL_PROPERTIES: &[&str] = &[ON_SELECT_PROPERTY, MACRO_R
 ///
 /// The set of slots stripped is `EXECUTABLE_CONTROL_PROPERTIES` and is never
 /// re-typed here: see that constant for why.
+///
+/// AN EMPTY SLOT IS NOT WIRING, and it stays. Every button the Controls recipe
+/// writes carries `onSelect: ""`; stripping that changed nothing a click could
+/// do and made an untouched working copy differ from the application it was
+/// checked out of -- the push preview listed every button as modified (found
+/// live 2026-09-29, e2e fixall-calp C1-checkout). Only the EXACTLY empty string
+/// is kept: whitespace is non-empty source to the script runner.
 pub fn sanitize_distributed_controls(
     saved: &[persistence::SavedSheetControls],
 ) -> Vec<persistence::SavedSheetControls> {
@@ -200,7 +225,14 @@ pub fn sanitize_distributed_controls(
                         .and_then(|p| p.as_object_mut())
                     {
                         for key in EXECUTABLE_CONTROL_PROPERTIES {
-                            props.remove(*key);
+                            let holds_no_code = props
+                                .get(*key)
+                                .and_then(|p| p.get("value"))
+                                .and_then(|v| v.as_str())
+                                .is_some_and(str::is_empty);
+                            if !holds_no_code {
+                                props.remove(*key);
+                            }
                         }
                     }
                 }
@@ -379,7 +411,45 @@ pub fn set_control_property(
     value_type: String,
     value: String,
 ) -> Result<ControlMetadata, String> {
+    set_control_property_core(
+        &state, &file_state, sheet_index, row, col, control_type, property_name, value_type, value,
+    )
+}
+
+/// [`set_control_property`] over plain references, for the unit tier.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn set_control_property_core(
+    state: &AppState,
+    file_state: &FileState,
+    sheet_index: usize,
+    row: u32,
+    col: u32,
+    control_type: String,
+    property_name: String,
+    value_type: String,
+    value: String,
+) -> Result<ControlMetadata, String> {
     check_property_value(&property_name, &value)?;
+
+    // MOVING, RESIZING, PINNING, ROTATING OR FLIPPING a control is an object
+    // edit whether it arrives as a geometry batch or as one property at a time
+    // (wave-B fix-up): `set_control_geometry` refuses a drag on a sheet whose
+    // protection does not allow editing objects, and this door used to write
+    // the same keys anyway -- the Properties pane's Width/Height and a script's
+    // geometry writes resized the button the drag was refused for. Refused
+    // before the store is locked (the gate takes its own locks) and before the
+    // effect. Every other property of an EXISTING control (a caption, a
+    // colour) is not an object edit.
+    if GEOMETRY_PROPERTIES.contains(&property_name.as_str()) {
+        crate::protection::check_sheet_action(state, sheet_index, "editObjects", "move, resize or rotate a control")?;
+    }
+
+    // The `editObjects` answer for a CREATE (wave-B B5), computed before the
+    // store is locked -- the gate takes its own locks, as in the geometry
+    // batch -- and applied below only when this write creates the control. An
+    // existing control's property write is not an object insert.
+    let create_gate =
+        crate::protection::check_sheet_action(state, sheet_index, "editObjects", "insert a control");
 
     // Gate, then decide, WITHOUT releasing the lock in between: Tauri dispatches
     // commands on a thread pool, so a read()-drop-write() pair would leave a
@@ -394,6 +464,9 @@ pub fn set_control_property(
         &control_type,
     )
     .map_err(|why| format!("Control at sheet {} r{}c{}: {}", sheet_index, row, col, why))?;
+    if !pending.contains_key(&key) {
+        create_gate?;
+    }
 
     // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
     // formula-driven properties -- and written only by the save path.
@@ -433,12 +506,28 @@ pub fn set_control_metadata(
     col: u32,
     metadata: ControlMetadata,
 ) -> Result<ControlMetadata, String> {
+    set_control_metadata_core(&state, &file_state, sheet_index, row, col, metadata)
+}
+
+/// [`set_control_metadata`] over plain references, for the unit tier.
+pub(crate) fn set_control_metadata_core(
+    state: &AppState,
+    file_state: &FileState,
+    sheet_index: usize,
+    row: u32,
+    col: u32,
+    metadata: ControlMetadata,
+) -> Result<ControlMetadata, String> {
     for (name, prop) in &metadata.properties {
         check_property_value(name, &prop.value)?;
     }
     if metadata.control_type.is_empty() {
         return Err("A control must have a controlType.".to_string());
     }
+    // `editObjects`, like `delete_chart` and the geometry batch (wave-B B5):
+    // creating or replacing a control on a sheet whose protection does not
+    // allow editing objects is refused, before the effect.
+    crate::protection::check_sheet_action(state, sheet_index, "editObjects", "insert or replace a control")?;
 
     // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
     // formula-driven properties -- and written only by the save path.
@@ -464,6 +553,10 @@ pub fn set_control_metadata(
 }
 
 /// Remove control metadata for a specific cell.
+///
+/// `Ok(false)` when no control is there; `Err` when the removal is REFUSED
+/// (see [`remove_control_metadata_core`]), so a caller never tears down what
+/// hangs off a control the backend kept.
 #[tauri::command]
 pub fn remove_control_metadata(
     state: State<AppState>,
@@ -471,34 +564,45 @@ pub fn remove_control_metadata(
     sheet_index: usize,
     row: u32,
     col: u32,
-) -> bool {
+) -> Result<bool, String> {
+    remove_control_metadata_core(&state, &file_state, sheet_index, row, col)
+}
+
+/// [`remove_control_metadata`] over plain references, for the unit tier.
+pub(crate) fn remove_control_metadata_core(
+    state: &AppState,
+    file_state: &FileState,
+    sheet_index: usize,
+    row: u32,
+    col: u32,
+) -> Result<bool, String> {
     // REFUSAL FIRST. Removing a control that is not there changes nothing, so it
     // must neither dirty the document nor push an undo entry -- an undo step
     // that restores the state it was recorded in makes Ctrl+Z a no-op the user
     // has to press twice. Resolved under a READ guard, before
     // `DocumentEffect::mutates` sets the flag in its constructor.
     let previous: Vec<((usize, u32, u32), ControlMetadata)> = {
-        let store = match state.controls.read() {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
+        let store = state.controls.read().map_err(|e| e.to_string())?;
         if !store.contains_key(&(sheet_index, row, col)) {
-            return false;
+            return Ok(false);
         }
         store.iter().map(|(k, v)| (*k, v.clone())).collect()
     };
+    // `editObjects` (wave-B B5), taken with the store released -- the gate
+    // takes its own locks -- and before the effect.
+    crate::protection::check_sheet_action(state, sheet_index, "editObjects", "delete a control")?;
 
     // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
     // formula-driven properties -- and written only by the save path.
-    let effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(file_state);
     let removed = {
         let mut controls = state.controls.write(&effect).unwrap();
         controls.remove(&(sheet_index, row, col)).is_some()
     };
     if removed {
-        crate::undo_commands::record_controls_undo(&state, previous, "Delete control");
+        crate::undo_commands::record_controls_undo(state, previous, "Delete control");
     }
-    removed
+    Ok(removed)
 }
 
 // ============================================================================
@@ -935,6 +1039,39 @@ mod persistence_tests {
     }
 
     #[test]
+    fn an_empty_executable_slot_holds_no_code_and_survives_the_strip() {
+        // Every button the Controls recipe writes carries `onSelect: ""`.
+        // Stripping it made an untouched working copy's push preview list the
+        // button as modified (e2e fixall-calp C1-checkout, 2026-09-29).
+        let saved = vec![persistence::SavedSheetControls {
+            sheet_id: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
+            controls: serde_json::json!([
+                { "row": 0, "col": 0, "controlType": "button", "properties": {
+                    "onSelect": { "valueType": "static", "value": "" },
+                    "macroRef": { "valueType": "static", "value": "" },
+                    "text": { "valueType": "static", "value": "Go" }
+                } },
+                { "row": 1, "col": 0, "controlType": "button", "properties": {
+                    "onSelect": { "valueType": "static", "value": " " },
+                    "macroRef": { "valueType": "static", "value": "macro-x" }
+                } }
+            ]),
+        }];
+        let out = sanitize_distributed_controls(&saved);
+        let kept = &out[0].controls[0]["properties"];
+        for key in EXECUTABLE_CONTROL_PROPERTIES {
+            assert_eq!(kept[*key]["value"], "", "an empty '{}' holds no code and must survive", key);
+        }
+        assert_eq!(kept["text"]["value"], "Go");
+        // Positive control: anything else in the slot is code (whitespace too:
+        // the runner is handed the string) and is stripped.
+        let armed = out[0].controls[1]["properties"].as_object().expect("properties");
+        for key in EXECUTABLE_CONTROL_PROPERTIES {
+            assert!(!armed.contains_key(*key), "'{}' with a value must be stripped: {:?}", key, armed.get(*key));
+        }
+    }
+
+    #[test]
     fn a_pulled_button_cannot_fire_a_macro_on_a_single_click() {
         // THE DEFECT, restated. The sanitizer named `onSelect` and nothing else,
         // so `macroRef` rode through a pull intact — and `runFloatingButtonClick`
@@ -1127,5 +1264,205 @@ mod placement_tests {
         // Fail toward the historical behaviour: a typo or a value from a newer
         // version must not silently pin controls in place.
         assert!(moves_with_cells(&control_with(Some("somethingElse"))));
+    }
+}
+
+#[cfg(test)]
+mod edit_objects_gate_tests {
+    //! Wave-B B5: control CREATION and REMOVAL had no `editObjects` protection
+    //! gate, unlike `delete_chart` and the controls' own geometry batch. On a
+    //! protected sheet that does not allow editing objects, a button could be
+    //! added or deleted through the menu, a script or MCP -- the protection the
+    //! user set was simply not asked. Each door now refuses BEFORE its effect:
+    //! nothing written, the document clean, no undo step.
+    use super::*;
+    use crate::document_effect::test_seed_effect;
+
+    fn protected_state() -> (AppState, FileState) {
+        let state = crate::create_app_state();
+        state.sheet_protection.write(&test_seed_effect()).unwrap().insert(
+            0,
+            crate::protection::SheetProtection { protected: true, ..Default::default() },
+        );
+        (state, FileState::default())
+    }
+
+    fn button() -> ControlMetadata {
+        let mut properties = HashMap::new();
+        properties.insert("text".to_string(), ControlPropertyValue { value_type: "static".into(), value: "Go".into() });
+        ControlMetadata { control_type: "button".into(), properties }
+    }
+
+    fn has_undo(state: &AppState) -> bool {
+        state.undo_stack.lock().unwrap().can_undo()
+    }
+
+    #[test]
+    fn creating_a_control_on_a_sheet_that_protects_its_objects_is_refused() {
+        let (state, file) = protected_state();
+        let refused = set_control_metadata_core(&state, &file, 0, 2, 1, button());
+        assert!(refused.is_err_and(|e| e.contains("protected")), "set_control_metadata created a control on a protected sheet");
+        let refused = set_control_property_core(
+            &state, &file, 0, 3, 1, "button".into(), "text".into(), "static".into(), "Go".into(),
+        );
+        assert!(refused.is_err_and(|e| e.contains("protected")), "set_control_property created a control on a protected sheet");
+        assert!(state.controls.read().unwrap().is_empty(), "a refused create wrote a control");
+        assert!(!file.is_dirty(), "a refused create dirtied the document");
+        assert!(!has_undo(&state), "a refused create recorded an undo step");
+    }
+
+    #[test]
+    fn removing_a_control_on_a_sheet_that_protects_its_objects_is_refused() {
+        let (state, file) = protected_state();
+        state.controls.write(&test_seed_effect()).unwrap().insert((0, 2, 1), button());
+        let refused = remove_control_metadata_core(&state, &file, 0, 2, 1);
+        assert!(refused.is_err_and(|e| e.contains("protected")), "remove_control_metadata deleted a protected sheet's control");
+        assert!(state.controls.read().unwrap().contains_key(&(0, 2, 1)), "the control is gone");
+        assert!(!file.is_dirty());
+        assert!(!has_undo(&state), "a refused removal recorded an undo step");
+    }
+
+    #[test]
+    fn an_existing_controls_property_edit_is_not_an_object_edit() {
+        // Positive control, and the line the gate deliberately does not cross:
+        // a script or the Properties pane changing an EXISTING control's text is
+        // allowed (the gate is on creation and removal, as B5 asked).
+        let (state, file) = protected_state();
+        state.controls.write(&test_seed_effect()).unwrap().insert((0, 2, 1), button());
+        set_control_property_core(&state, &file, 0, 2, 1, "".into(), "text".into(), "static".into(), "Stop".into())
+            .expect("an existing control's property");
+        assert_eq!(state.controls.read().unwrap()[&(0, 2, 1)].properties["text"].value, "Stop");
+    }
+
+    /// Wave-B fix-up. `set_control_geometry` refuses to move or resize a
+    /// control on such a sheet, and `set_control_property` then wrote the SAME
+    /// keys one at a time -- the Properties pane's Width/Height fields and a
+    /// script's geometry writes resized a button the drag was refused for.
+    /// Moving, resizing, pinning, rotating and flipping are object edits; a
+    /// caption is not (above).
+    #[test]
+    fn moving_resizing_or_rotating_an_existing_control_by_property_is_refused() {
+        let (state, file) = protected_state();
+        state.controls.write(&test_seed_effect()).unwrap().insert((0, 2, 1), button());
+        for (key, value) in [
+            ("x", "40"),
+            ("y", "40"),
+            ("width", "90"),
+            ("height", "30"),
+            ("offsetX", "4"),
+            ("offsetY", "4"),
+            ("pinToGrid", "false"),
+            ("rotation", "90"),
+            ("flipH", "true"),
+            ("flipV", "true"),
+        ] {
+            let refused = set_control_property_core(
+                &state, &file, 0, 2, 1, "".into(), key.into(), "static".into(), value.into(),
+            );
+            assert!(
+                refused.as_ref().is_err_and(|e| e.contains("protected")),
+                "set_control_property wrote `{}` of a control on a sheet that protects its objects: {:?}",
+                key,
+                refused
+            );
+        }
+        assert_eq!(
+            state.controls.read().unwrap()[&(0, 2, 1)].properties.len(),
+            1,
+            "a refused geometry write reached the store"
+        );
+        assert!(!file.is_dirty(), "a refused geometry write dirtied the document");
+        assert!(!has_undo(&state), "a refused geometry write recorded an undo step");
+    }
+
+    /// X11 (wave D). The wave-C canvas report said pasting shapes onto a
+    /// CANVAS protected against object edits succeeded -- that control
+    /// creation had no `editObjects` gate. It has one on every creating door
+    /// (B5 above); what was never pinned is a CANVAS sheet, where the gate
+    /// must hold as an OBJECT-scope action (`check_sheet_action` refuses every
+    /// cell-scope action on a canvas outright and lets `editObjects` through
+    /// to the protection lookup). The doors are the ones the Controls paste,
+    /// duplicate and canvas Insert take (`setControlMetadata`), a script's
+    /// property write that creates, and the Delete.
+    #[test]
+    fn a_canvas_that_protects_its_objects_refuses_every_control_create_and_delete() {
+        let state = crate::create_app_state();
+        let canvas = crate::sheets::add_sheet_inner(
+            &state,
+            &FileState::default(),
+            None,
+            ::persistence::SheetKind::new_canvas(),
+        )
+        .expect("add a canvas")
+        .active_index;
+        state.sheet_protection.write(&test_seed_effect()).unwrap().insert(
+            canvas,
+            crate::protection::SheetProtection { protected: true, ..Default::default() },
+        );
+        state.controls.write(&test_seed_effect()).unwrap().insert((canvas, 0, 7), button());
+        let file = FileState::default();
+        let depth = state.undo_stack.lock().unwrap().undo_depth();
+
+        let pasted = set_control_metadata_core(&state, &file, canvas, 0, 9, button());
+        assert!(
+            pasted.as_ref().is_err_and(|e| e.contains("protected")),
+            "a shape was pasted onto a canvas that protects its objects: {:?}",
+            pasted
+        );
+        let created = set_control_property_core(
+            &state, &file, canvas, 0, 10, "shape".into(), "text".into(), "static".into(), "Go".into(),
+        );
+        assert!(
+            created.as_ref().is_err_and(|e| e.contains("protected")),
+            "set_control_property created a control on a protected canvas: {:?}",
+            created
+        );
+        let removed = remove_control_metadata_core(&state, &file, canvas, 0, 7);
+        assert!(removed.is_err_and(|e| e.contains("protected")), "a protected canvas's control was deleted");
+
+        let controls = state.controls.read().unwrap();
+        assert_eq!(controls.len(), 1, "a refused door changed the canvas's controls");
+        assert!(controls.contains_key(&(canvas, 0, 7)));
+        drop(controls);
+        assert!(!file.is_dirty(), "a refused door dirtied the document");
+        assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), depth, "a refused door recorded an undo step");
+    }
+
+    /// The positive control of the canvas case: protection that ALLOWS
+    /// editing objects creates as before.
+    #[test]
+    fn a_protected_canvas_that_allows_object_edits_creates() {
+        let state = crate::create_app_state();
+        let canvas = crate::sheets::add_sheet_inner(
+            &state,
+            &FileState::default(),
+            None,
+            ::persistence::SheetKind::new_canvas(),
+        )
+        .expect("add a canvas")
+        .active_index;
+        state.sheet_protection.write(&test_seed_effect()).unwrap().insert(
+            canvas,
+            crate::protection::SheetProtection {
+                protected: true,
+                options: crate::protection::SheetProtectionOptions {
+                    allow_edit_objects: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let file = FileState::default();
+        set_control_metadata_core(&state, &file, canvas, 0, 9, button()).expect("allowed object edit");
+        assert!(state.controls.read().unwrap().contains_key(&(canvas, 0, 9)));
+    }
+
+    #[test]
+    fn an_unprotected_sheet_creates_and_removes() {
+        let state = crate::create_app_state();
+        let file = FileState::default();
+        set_control_metadata_core(&state, &file, 0, 2, 1, button()).expect("create");
+        assert_eq!(remove_control_metadata_core(&state, &file, 0, 2, 1), Ok(true));
+        assert_eq!(remove_control_metadata_core(&state, &file, 0, 2, 1), Ok(false), "nothing left to remove");
     }
 }

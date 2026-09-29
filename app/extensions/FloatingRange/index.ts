@@ -37,6 +37,8 @@ import {
   getParkedViewSheetIndex,
   isExternalSessionParked,
   registerExternalAddressResolver,
+  isTypedCharacterKey,
+  returnParkedViewToHost,
 } from "@api/externalEdit";
 import { confirmAsync, promptAsync } from "@api/dialogs";
 import { registerCellClickInterceptor, onGridCellPressed } from "@api/cellClickInterceptors";
@@ -55,7 +57,6 @@ import {
   updateFloatingRangeCell,
   renameFloatingRange,
   deleteFloatingRange,
-  getFloatingRangeCells,
   FLOATING_RANGE_MAX_ROWS,
   FLOATING_RANGE_MAX_COLS,
   FLOATING_RANGE_MIN_COL_W,
@@ -88,6 +89,7 @@ import {
   frameAtCanvasPoint,
 } from "./lib/frCanvasGeometry";
 import { getFrView, ensureFrCellVisible, createFrWheelTarget } from "./lib/frView";
+import { createFrAutoScroller, frAutoScrollStep } from "./lib/frDragAutoScroll";
 import { installFrMovePersistence } from "./lib/frMove";
 import { pruneFrScrolls } from "./lib/frScroll";
 import { invalidateAllFrExtents } from "./lib/frExtent";
@@ -154,7 +156,11 @@ import {
   destroyFrEditor,
 } from "./editor/frEditor";
 import { buildQualifiedRef } from "./lib/frRefs";
-import { installFrKeyRouting, frOwnsGridKeys } from "./lib/frKeyRouting";
+import {
+  installFrKeyRouting,
+  frOwnsGridKeys,
+  handOverToWholeSelectionDelete,
+} from "./lib/frKeyRouting";
 import { registerFloatingRangeObjectSelection, frIdOf } from "./lib/frObjectSelection";
 import { registerObjectGeometryProvider } from "@api/objectGeometry";
 import { createFloatingRangeGeometryProvider } from "./lib/frGeometry";
@@ -429,6 +435,50 @@ async function confirmAndDeleteFr(frId: string): Promise<void> {
 }
 
 /**
+ * Delete SEVERAL ranges for a canvas-wide Delete (@api/objectSelection
+ * `deleteSelectedObjects`, through the provider's `deleteObjects`): ONE
+ * confirmation naming every range -- a delete ends the undo history, and the
+ * user must hear that once, not once per range -- then each delete in turn.
+ * Resolves when every delete has LANDED. REJECTS when the user declines (all
+ * of them stay) or the backend refuses one (the refused ones stay; the seam
+ * names what is still standing, so a partial success is reported correctly).
+ * Exported for the unit tier.
+ */
+export async function deleteFrObjectsConfirmed(frIds: readonly string[]): Promise<void> {
+  const entries = frIds
+    .map((id) => getFloatingRangeById(id))
+    .filter((e): e is FloatingRangeEntry => !!e);
+  if (entries.length === 0) return;
+  const names = entries.map((e) => `"${e.name}"`).join(", ");
+  const ok = await confirmAsync(
+    (entries.length === 1
+      ? `Delete floating range ${names}?`
+      : `Delete ${entries.length} floating ranges (${names})?`) +
+      `\n\nFormulas that reference ${entries.length === 1 ? "it" : "them"} will show #REF!, ` +
+      `and the undo history will be cleared.`,
+    { title: entries.length === 1 ? "Delete Floating Range" : "Delete Floating Ranges" },
+  );
+  if (!ok) {
+    throw new Error(
+      entries.length === 1
+        ? "Deleting the floating range was cancelled."
+        : "Deleting the floating ranges was cancelled.",
+    );
+  }
+  const reasons: string[] = [];
+  for (const entry of entries) {
+    try {
+      await deleteFrObject(entry.id);
+    } catch (err) {
+      reasons.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+  if (reasons.length > 0) {
+    throw new Error(`The floating range could not be deleted: ${Array.from(new Set(reasons)).join(" ")}`);
+  }
+}
+
+/**
  * Clear the CONTENT of the local selection (only cells that actually hold
  * something — the read bounds the write batch). Undoable per cell.
  *
@@ -576,10 +626,14 @@ function startEdgeResizeDrag(
   const baseExtent = axis === "cols" ? contentWidth(entry) : contentHeight(entry);
   const baseFrameW = frameWidth(entry);
   const baseFrameH = frameHeight(entry);
+  // Every column (row) the CONTENT reaches is scaled with the window's (E10):
+  // a default-width column scrolled into view after the stretch used to keep
+  // its old width beside the stretched ones.
+  const extent = getFrView(entry);
   const baseSizes =
     axis === "cols"
-      ? trackedColIndices(entry).map((c) => frColWidth(entry, c))
-      : trackedRowIndices(entry).map((r) => frRowHeight(entry, r));
+      ? trackedColIndices(entry, extent.cols).map((c) => frColWidth(entry, c))
+      : trackedRowIndices(entry, extent.rows).map((r) => frRowHeight(entry, r));
   const min = axis === "cols" ? FLOATING_RANGE_MIN_COL_W : FLOATING_RANGE_MIN_ROW_H;
   const max = axis === "cols" ? FLOATING_RANGE_MAX_COL_W : FLOATING_RANGE_MAX_ROW_H;
 
@@ -598,7 +652,12 @@ function startEdgeResizeDrag(
     : page
       ? (axis === "cols" ? page.width - baseX : page.height - baseY)
       : Infinity;
-  const scaleCap = maxScaleWithin(baseFrameExtent, baseExtent, maxFrameExtent, baseSizes.length);
+  // The rounding slack is for the sizes that MAKE the frame -- the window's
+  // (contentWidth/contentHeight sum entry.cols/entry.rows) -- not every size
+  // the scale writes: counting the whole content extent stopped the frame
+  // ~5 px short of the page over 1000 content rows (review B, 2026-09-28).
+  const frameSizeCount = axis === "cols" ? entry.cols : entry.rows;
+  const scaleCap = maxScaleWithin(baseFrameExtent, baseExtent, maxFrameExtent, frameSizeCount);
 
   const applyScale = (scale: number) => {
     const live = getFloatingRangeById(frId);
@@ -607,8 +666,8 @@ function startEdgeResizeDrag(
     // START, never compounded onto the previous frame.
     live.colWidths = { ...baseWidths };
     live.rowHeights = { ...baseHeights };
-    if (axis === "cols") live.colWidths = scaledColWidths(live, scale);
-    else live.rowHeights = scaledRowHeights(live, scale);
+    if (axis === "cols") live.colWidths = scaledColWidths(live, scale, extent.cols);
+    else live.rowHeights = scaledRowHeights(live, scale, extent.rows);
     if (movesOrigin) {
       // The dragged edge moves; the opposite one stays where it was.
       if (axis === "cols") live.x = Math.max(0, baseX + baseFrameW - frameWidth(live));
@@ -1061,17 +1120,37 @@ function setupFloatingObjectEvents(): void {
 
     // Drag-extend via window listeners (Charts brush precedent).
     activeDragCleanup?.();
+    // Held past an edge of the cell area, the range scrolls that way and the
+    // selection's moving end follows it, one cell per tick (E10,
+    // lib/frDragAutoScroll.ts) -- it used to stop at the window's edge.
+    const autoScroller = createFrAutoScroller((step) => {
+      const liveEntry = getFloatingRangeById(frId);
+      const sel = getLocalSelection();
+      if (!liveEntry || !sel || sel.frId !== frId) return;
+      const liveView = getFrView(liveEntry);
+      const row = Math.max(0, Math.min(liveView.rows - 1, sel.endRow + step.dRow));
+      const col = Math.max(0, Math.min(liveView.cols - 1, sel.endCol + step.dCol));
+      if (row === sel.endRow && col === sel.endCol) return;
+      extendLocalSelection(row, col);
+      ensureFrCellVisible(liveEntry, row, col);
+      requestOverlayRedraw();
+    });
     const onMove = (ev: MouseEvent) => {
       const canvas = clientToCanvas(ev.clientX, ev.clientY);
       const liveEntry = getFloatingRangeById(frId);
       const liveBounds = liveEntry ? frameCanvasBounds(liveEntry) : null;
       const sel = getLocalSelection();
-      if (!canvas || !liveEntry || !liveBounds || !sel || sel.frId !== frId) return;
-      const cell = clampedCellFromFramePoint(
-        liveEntry,
-        canvas.x - liveBounds.x,
-        canvas.y - liveBounds.y,
-      );
+      if (!canvas || !liveEntry || !liveBounds || !sel || sel.frId !== frId) {
+        autoScroller.stop();
+        return;
+      }
+      const dx = canvas.x - liveBounds.x;
+      const dy = canvas.y - liveBounds.y;
+      autoScroller.update(frAutoScrollStep(liveEntry, dx, dy));
+      // The cell under the pointer, clamped into the cells on screen -- past
+      // an edge that is the edge cell, which the ticker has just scrolled the
+      // selection's end to, so the two agree.
+      const cell = clampedCellFromFramePoint(liveEntry, dx, dy);
       if (cell.row !== sel.endRow || cell.col !== sel.endCol) {
         // Through the selection's own door, never in place: the formula bar
         // and the Name Box follow the extended range.
@@ -1081,6 +1160,7 @@ function setupFloatingObjectEvents(): void {
     };
     const onUp = () => activeDragCleanup?.();
     activeDragCleanup = () => {
+      autoScroller.stop();
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       activeDragCleanup = null;
@@ -1108,6 +1188,18 @@ export function handleFrKeyDown(e: KeyboardEvent): void {
   // See core/lib/pointerClaims.ts, and the census in
   // core/lib/globalInputListeners.ts (a new global listener adds a row).
   if (isKeyClaimed(e)) return;
+  // A key the keybinding dispatcher already TOOK is not this listener's
+  // (review C, W18). The dispatcher is a window-capture listener installed at
+  // bootstrap, so it runs first on this same target and phase, where its
+  // stopPropagation cannot reach this listener. It ran a command for the key,
+  // and that command's own door decided -- Group refused while the range owns
+  // the selection, and this listener then ALSO read Alt+Shift+Right as
+  // Shift+Right and extended the range's selection; Shift+F2 (New Note) opened
+  // the range's cell editor as F2. The range's own keys (arrows, Enter, Tab,
+  // Escape, F2, typing) are bound to nothing while its cell is selected (the
+  // canvas's Tab/Escape/nudge bindings ask the object's `ownsKey` and stand
+  // down), so they still arrive here undecided.
+  if (e.defaultPrevented) return;
   const target = e.target as HTMLElement | null;
   if (
     target &&
@@ -1205,8 +1297,12 @@ export function handleFrKeyDown(e: KeyboardEvent): void {
       // clear-contents over Core's hidden cell -- while this listener, on the
       // same target, cleared the range's cell as well.
       default:
-        // Type-to-edit: a printable character opens the editor seeded with it.
-        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // Type-to-edit: a printable character opens the editor seeded with it
+        // -- an AltGr one included ("@" is Ctrl+Alt+2 on sv-SE as Windows
+        // reports it; the grid's own rule, isTypedCharacterKey). Never a key
+        // the keybinding dispatcher already took (it runs first, on the same
+        // window-capture phase, and prevents what it matches).
+        if (!e.defaultPrevented && isTypedCharacterKey(e)) {
           swallow();
           ensureFrCellVisible(entry, sel.anchorRow, sel.anchorCol);
           openFrEditor(sel.frId, sel.anchorRow, sel.anchorCol, e.key);
@@ -1221,8 +1317,16 @@ export function handleFrKeyDown(e: KeyboardEvent): void {
  * (lib/frKeyRouting.ts): the LOCAL cell selection always wins -- its cells are
  * cleared; with only the OBJECT selected, the object is deleted (confirmed,
  * because delete ends the undo history). Exported for the unit tier.
+ *
+ * A CANVAS selection that spans families (a range beside a chart, or a second
+ * range the selection set holds), with no inner cell selection, is not the
+ * range's alone: the dispatcher runs ONE winner per Delete, so whichever
+ * family's binding wins hands the WHOLE selection to the seam
+ * (`handOverToWholeSelectionDelete`, lib/frKeyRouting.ts), which deletes every
+ * member through its family's `deleteObjects` -- this range's included.
  */
 export function deleteFrSelection(): void {
+  if (handOverToWholeSelectionDelete()) return;
   const sel = getLocalSelection();
   if (sel) {
     if (!getFloatingRangeById(sel.frId)) {
@@ -1264,8 +1368,11 @@ function activate(context: ExtensionContext): void {
   //     sheet's Tab cycling selects ranges through this, and asks `ownsKey`
   //     first: while a range has an inner cell selection, Tab and Escape are
   //     handleFrKeyDown's (below), and a second window-capture listener cannot
-  //     stop this one from also seeing the key.
-  cleanupFns.push(registerFloatingRangeObjectSelection());
+  //     stop this one from also seeing the key. A canvas-wide Delete deletes
+  //     the range's share of a multi-selection through `deleteRanges`.
+  cleanupFns.push(
+    registerFloatingRangeObjectSelection({ deleteRanges: deleteFrObjectsConfirmed }),
+  );
 
   // 1c. Geometry without a pointer gesture (@api/objectGeometry): the canvas's
   //     align, distribute, nudge and group drag -- position only.
@@ -1280,10 +1387,13 @@ function activate(context: ExtensionContext): void {
     window.removeEventListener("keydown", handleFrKeyDown, true),
   );
 
-  // 3a. The grid's selection-acting keys and commands while the range owns
-  //     the selection: Delete/Backspace are the range's, copy/cut/paste/fill/
-  //     format/merge are refused, the grid commands' other doors are guarded
-  //     -- none may act on Core's hidden active cell (lib/frKeyRouting.ts).
+  // 3a. While the range owns the selection nothing may act on Core's hidden
+  //     active cell (lib/frKeyRouting.ts): Delete/Backspace are the range's;
+  //     the range CLAIMS the selection (@api/selectionOwner), so every door
+  //     that writes to Core's selection -- the grid commands, the grid
+  //     keyboard, the formatting doors, the extensions' selection commands --
+  //     refuses in its own door, whatever key reached it (W18); only Data
+  //     Validation's Alt+Down, with no command behind it, is a combination.
   cleanupFns.push(
     installFrKeyRouting({
       extensionId: "calcula.floating-range",
@@ -1470,8 +1580,10 @@ function activate(context: ExtensionContext): void {
       resize: (id, rows, cols) => resizeFr(id, rows, cols),
       rename: (id, name) => renameFr(id, name),
       delete: (id) => deleteFrObject(id),
+      // In bands the backend accepts (lib/frCellReads.ts): one read of more
+      // than 100,000 cells is refused, and a window can hold 256,000 (E10).
       getCells: (id, startRow, startCol, endRow, endCol) =>
-        getFloatingRangeCells(id, startRow, startCol, endRow, endCol),
+        readFrCells(id, { startRow, startCol, endRow, endCol }),
       setCells: async (id, startRow, startCol, values) => {
         for (let r = 0; r < values.length; r++) {
           const rowValues = values[r];
@@ -1792,6 +1904,17 @@ function activate(context: ExtensionContext): void {
 }
 
 function deactivate(): void {
+  // An edit PARKED on another sheet (a formula picking a reference there):
+  // tearing the editor down unregisters the session, which clears the park
+  // WITHOUT returning -- the grid stayed on the viewed sheet with every
+  // family's HOST objects painted over it until the next switch (E6). Start
+  // the return first (the host is captured now; the switch lands after this
+  // synchronous teardown), then discard the edit as before.
+  if (isFrEditorOpen() && isExternalSessionParked()) {
+    void returnParkedViewToHost().catch((err) => {
+      console.error("[FloatingRange] could not return to the edit's sheet on deactivate:", err);
+    });
+  }
   destroyFrEditor();
   for (let i = cleanupFns.length - 1; i >= 0; i--) {
     try {

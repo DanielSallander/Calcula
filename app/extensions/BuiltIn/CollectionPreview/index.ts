@@ -12,6 +12,7 @@ import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
   registerMenuItem,
+  unregisterMenuItem,
   notifyMenusChanged,
 } from "@api/ui";
 import { ExtensionRegistry, IconOtherOptions, IconEye } from "@api";
@@ -95,6 +96,9 @@ function activate(context: ExtensionContext): void {
     ],
   };
   registerMenuItem("view", menuItem);
+  // Gone on deactivate like the command below: the item outlived the extension
+  // (D3 review).
+  cleanupFns.push(() => unregisterMenuItem("view", menuItem.id));
 
   // Register command to toggle panel manually
   context.commands.register("collection-preview.toggle", async () => {
@@ -107,6 +111,7 @@ function activate(context: ExtensionContext): void {
       });
     }
   });
+  cleanupFns.push(() => context.commands.unregister("collection-preview.toggle"));
 
   isActivated = true;
   console.log("[CollectionPreview] Activated.");

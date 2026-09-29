@@ -49,10 +49,19 @@ import { emitAppEvent, onAppEvent } from "@api/events";
 import { showToast } from "@api/notifications";
 import type { OverlayRenderContext } from "@api/gridOverlays";
 import {
+  getGridRegions,
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
   overlaySheetToCanvas,
 } from "@api/gridOverlays";
+import { runFloatingControlDelete } from "./lib/controlDelete";
+import { insertAnchorOrRefuse } from "./lib/insertAnchor";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import {
+  coMovedControlPositions,
+  snapshotControlDrag,
+  type ControlDragSnapshot,
+} from "./lib/controlCoMove";
 import {
   loadButtonScriptModules,
   planInlineButtonRun,
@@ -159,6 +168,7 @@ import {
   removeFloatingControlsForSheet,
   recalcPinnedOffset,
   setSnapResolver,
+  removeFloatingControlsNotOnSheet,
 } from "./lib/floatingStore";
 import {
   getDesignMode,
@@ -178,19 +188,25 @@ import {
   setControlGeometry,
 } from "./lib/controlApi";
 import { registerObjectGeometryProvider, joinUndoTransaction } from "@api/objectGeometry";
+import { deleteSelectedObjects, shouldActOnWholeObjectSelection } from "@api/objectSelection";
 import { controlGeometryChangesOf, createControlGeometryProvider } from "./lib/controlGeometry";
+import { setShapePropertyAsOneStep } from "./lib/shapePropertyStep";
 import { withControlAnchor, requestedSize } from "./lib/controlAnchors";
 import { registerControlObjectSelection } from "./lib/controlObjectSelection";
+import { installControlClipboardKeys } from "./lib/controlKeys";
 import { controlsBackend } from "./lib/controlsBackend";
 import { PropertiesPane } from "./PropertiesPane/PropertiesPane";
 import { registerControlContextMenu } from "./lib/controlContextMenu";
 import { installControlObjectMenu } from "./lib/controlObjectMenu";
 import { hitTestFloatingControl } from "./lib/controlHitTest";
 import {
-  copyControl,
+  copyControls,
   pasteControl,
-  duplicateControl,
+  pasteControlSnapshots,
+  duplicateControls,
   hasClipboardControl,
+  snapshotControls,
+  setControlCopyCellOrigin,
 } from "./lib/controlClipboard";
 
 // ============================================================================
@@ -501,8 +517,15 @@ function activate(context: ExtensionContext): void {
   //     be the route: that event means "a left press landed here", and its
   //     handler below RUNS a button's script in run mode, emits shape:clicked
   //     and opens the Properties pane. The provider selects and does nothing
-  //     else.
-  cleanupFns.push(registerControlObjectSelection());
+  //     else -- and takes Controls' share of a canvas-wide Delete, and of every
+  //     Copy / Paste / Duplicate through the object clipboard (W25).
+  cleanupFns.push(
+    registerControlObjectSelection({
+      deleteControls: deleteControlsWithGroups,
+      copyControls: snapshotControls,
+      pasteControls: pasteControlSnapshots,
+    }),
+  );
 
   // 0e. GEOMETRY without a pointer gesture (@api/objectGeometry): the canvas's
   //     align, distribute, nudge and group drag. One `set_control_geometry`
@@ -646,6 +669,11 @@ function activate(context: ExtensionContext): void {
     return { x: snappedX, y: snappedY };
   });
   cleanupFns.push(() => setSnapResolver(null));
+  // A PINNED control's pasted / duplicated copy measures its offsets from its
+  // OWN (new) anchor with the same walk the reposition pass replays
+  // (lib/controlClipboard.ts `pinCopyToAnchor`).
+  setControlCopyCellOrigin(cellOriginPixels);
+  cleanupFns.push(() => setControlCopyCellOrigin(null));
 
   // 6b-3. Keep the floating store's pin flag in step with the metadata the
   //     Properties Pane just wrote, so the re-anchor above can read it
@@ -841,6 +869,17 @@ function activate(context: ExtensionContext): void {
   };
   designModeMenuItem = menuItem;
   context.ui.menus.registerItem("developer", menuItem);
+
+  // 9b. Take back the menu items above -- this extension's OWN ids only (wave
+  // E, Y14). Insert > Controls holds its Button as a CHILD, so the submenu is
+  // left to go with its last child, as any submenu another extension could add
+  // a control to; Insert and Developer belong to other extensions.
+  cleanupFns.push(() => {
+    context.ui.menus.unregisterItem("insert", "insert.controls.button");
+    context.ui.menus.unregisterItem("insert", "insert.shapes");
+    context.ui.menus.unregisterItem("insert", "insert.image");
+    context.ui.menus.unregisterItem("developer", DESIGN_MODE_MENU_ITEM_ID);
+  });
 
   // 10. Listen to design mode changes for auto-show/hide
   const unregDesignMode = onDesignModeChange((_isDesignMode) => {
@@ -1081,9 +1120,11 @@ function activate(context: ExtensionContext): void {
   const reloadForSheetChange = () => {
     documentReloadQueue = documentReloadQueue.then(async () => {
       const nextSheet = await getActiveSheet();
-      if (nextSheet === loadedSheetIndex) return;
-
-      if (loadedSheetIndex !== null) removeFloatingControlsForSheet(loadedSheetIndex);
+      // The store holds ONE sheet. A control of another sheet can still be in it
+      // (an insert on a sheet the store had not loaded yet), so every sheet
+      // other than the next one is purged -- not only the one we recorded.
+      const purged = removeFloatingControlsNotOnSheet(nextSheet);
+      if (nextSheet === loadedSheetIndex && purged.length === 0) return;
       deselectFloatingControl();
       const { closeTaskPane: closeTP } = await import("../../src/api/ui");
       closeTP(PROPERTIES_PANE_ID);
@@ -1092,7 +1133,7 @@ function activate(context: ExtensionContext): void {
       invalidateAllShapeCaches();
       invalidateAllImageCaches();
 
-      await loadFloatingControls();
+      await loadFloatingControls(nextSheet);
       emitAppEvent(AppEvents.GRID_REFRESH);
     }).catch((err) => {
       console.error("[Controls] Sheet-change reload failed:", err);
@@ -1157,8 +1198,31 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(unregContextMenu);
 
   // -----------------------------------------------------------------------
-  // 21. Handle Ctrl+C / Ctrl+V / Ctrl+D for floating controls
+  // 21. Ctrl+C / Ctrl+V / Ctrl+D / Ctrl+G for floating controls go through the
+  //     keybinding REGISTRY (lib/controlKeys.ts): as a `document` listener
+  //     they were pre-empted by the built-in Copy / Paste / Fill Down / Go To
+  //     Special, which then acted on the cells under the control. Only
+  //     Ctrl+Shift+G (ungroup), which no built-in binds, stays on the listener
+  //     below.
   // -----------------------------------------------------------------------
+  cleanupFns.push(
+    installControlClipboardKeys("calcula.controls", {
+      selectedIds: () => [...getSelectedFloatingControls()],
+      hasClipboard: hasClipboardControl,
+      copy: copyControls,
+      // Synchronous up to the paste: it takes its place on the object
+      // clipboard's queue in the order the keys were pressed (a dynamic
+      // import awaited first let a later Ctrl+D queue ahead of it).
+      paste: () => pasteControl(getGridStateSnapshot()?.sheetContext?.activeSheetIndex ?? 0),
+      duplicate: duplicateControls,
+      group: (ids) => {
+        groupControls(ids);
+        syncFloatingControlRegions();
+        emitAppEvent(AppEvents.GRID_REFRESH);
+      },
+    }),
+  );
+
   const handleControlKeyboard = async (e: KeyboardEvent) => {
     // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
     // field, a shape's declared hit rectangle -- is not this extension's.
@@ -1176,32 +1240,7 @@ function activate(context: ExtensionContext): void {
 
     const selectedId = getSelectedFloatingControl();
 
-    if (e.ctrlKey && e.key === "c" && selectedId) {
-      e.preventDefault();
-      e.stopPropagation();
-      await copyControl(selectedId);
-    } else if (e.ctrlKey && e.key === "v" && selectedId && hasClipboardControl()) {
-      // Only intercept Ctrl+V when a floating control is selected,
-      // otherwise let the grid handle normal cell paste
-      e.preventDefault();
-      e.stopPropagation();
-      const { getGridStateSnapshot } = await import("../../src/api/grid");
-      const gridState = getGridStateSnapshot();
-      const sheetIndex = gridState?.config?.activeSheet ?? 0;
-      await pasteControl(sheetIndex);
-    } else if (e.ctrlKey && e.key === "d" && selectedId) {
-      e.preventDefault();
-      e.stopPropagation();
-      await duplicateControl(selectedId);
-    } else if (e.ctrlKey && !e.shiftKey && e.key === "g" && getSelectedControlCount() >= 2) {
-      // Ctrl+G: Group selected controls
-      e.preventDefault();
-      e.stopPropagation();
-      const ids = [...getSelectedFloatingControls()];
-      groupControls(ids);
-      syncFloatingControlRegions();
-      emitAppEvent(AppEvents.GRID_REFRESH);
-    } else if (e.ctrlKey && e.shiftKey && e.key === "G" && selectedId) {
+    if (e.ctrlKey && e.shiftKey && e.key === "G" && selectedId) {
       // Ctrl+Shift+G: Ungroup
       e.preventDefault();
       e.stopPropagation();
@@ -1238,38 +1277,19 @@ function activate(context: ExtensionContext): void {
     if (!loc) return;
     const { sheetIndex: si, row: r, col: c } = loc;
 
-    // Wrap in an undo transaction so the change is reversible. The transaction
-    // is GUARANTEED to close — commit on success, cancel on any failure — so
-    // the engine's current_transaction can never be left dangling (a dangling
-    // transaction silently swallows every subsequent edit).
-    const { beginUndoTransaction, commitUndoTransaction, cancelUndoTransaction } =
-      await import("@api/lib");
-    let txOpen = false;
+    // One undo step so the change is reversible -- GUARANTEED to close when
+    // this handler opened it, and closing NOTHING when the script that set the
+    // property holds its own open batch: the write joins that batch and the
+    // script closes it (wave F, Z6; lib/shapePropertyStep.ts).
     try {
-      await beginUndoTransaction("Shape property: " + d.key);
-      txOpen = true;
-    } catch {
-      // Undo-transaction API unavailable; apply the property without grouping.
-    }
-    try {
-      await setControlProperty(si, r, c, "shape", d.key, "static", d.value);
-      if (txOpen) {
-        await commitUndoTransaction();
-        txOpen = false;
-      }
+      await setShapePropertyAsOneStep(d.key, () =>
+        setControlProperty(si, r, c, "shape", d.key, "static", d.value),
+      );
     } catch (err) {
       // Property write (or commit) failed: skip the refresh/propertyChanged
       // fan-out below — nothing actually changed.
       console.error("[Controls] shape:setProperty failed for", d.instanceId, err);
       return;
-    } finally {
-      if (txOpen) {
-        try {
-          await cancelUndoTransaction();
-        } catch {
-          // Best effort — nothing else can close the transaction.
-        }
-      }
     }
 
     // Invalidate cache and redraw
@@ -1840,20 +1860,32 @@ async function insertButton(): Promise<void> {
   const { restoreFocusToGrid } = await import("../../src/api/events");
   const { getGridStateSnapshot } = await import("../../src/api/grid");
 
-  // Get current selection
-  const sel = getCurrentSelectionFromInterceptor();
+  // Get current selection -- unless another feature owns it (wave-B B8:
+  // Core's selection is then a cell hidden under that object).
+  const sel = insertAnchorOrRefuse("Insert Button", getCurrentSelectionFromInterceptor);
   if (!sel) return;
 
   // Get grid state for the active sheet
   const gridState = getGridStateSnapshot();
   if (!gridState) return;
 
-  await createButtonControlAt({
-    sheetIndex: gridState.config?.activeSheet ?? 0,
-    row: sel.endRow,
-    col: sel.endCol,
-    label: "Button",
-  });
+  // A REFUSAL IS SAID, once -- as the shape insert says it. A sheet protected
+  // against object edits refuses the button at the backend (wave-B B5), and
+  // this menu action used to drop the rejection: nothing appeared and nothing
+  // said why (found live 2026-09-29, e2e fixall-canvas B5).
+  try {
+    await createButtonControlAt({
+      sheetIndex: gridState.sheetContext?.activeSheetIndex ?? 0,
+      row: sel.endRow,
+      col: sel.endCol,
+      label: "Button",
+    });
+  } catch (err) {
+    showToast(
+      `The button could not be inserted: ${err instanceof Error ? err.message : String(err)}`,
+      { type: "error", duration: 9000 },
+    );
+  }
 
   restoreFocusToGrid();
 }
@@ -2088,8 +2120,8 @@ async function deleteControlByInstanceId(instanceId: string): Promise<boolean> {
 async function insertShape(shapeType: string): Promise<void> {
   const { restoreFocusToGrid } = await import("../../src/api/events");
 
-  // Get current selection
-  const sel = getCurrentSelectionFromInterceptor();
+  // Get current selection -- unless another feature owns it (wave-B B8).
+  const sel = insertAnchorOrRefuse("Insert Shape", getCurrentSelectionFromInterceptor);
   if (!sel) return;
 
   // Get grid state for the active sheet
@@ -2098,7 +2130,7 @@ async function insertShape(shapeType: string): Promise<void> {
 
   try {
     await createShapeControlAt({
-      sheetIndex: gridState.config?.activeSheet ?? 0,
+      sheetIndex: gridState.sheetContext?.activeSheetIndex ?? 0,
       row: sel.endRow,
       col: sel.endCol,
       shapeType,
@@ -2148,6 +2180,14 @@ async function insertImage(): Promise<void> {
   const { getGridStateSnapshot } = await import("../../src/api/grid");
   const { getColumnWidth, getRowHeight } = await import("../../src/api/dimensions");
 
+  // The selection owner is asked FIRST (wave-B B8): while another feature owns
+  // the selection there is no anchor to place a picture at, and choosing a file
+  // only to be refused afterwards would waste the user's pick.
+  if (refuseIfSelectionOwned("Insert Image")) {
+    restoreFocusToGrid();
+    return;
+  }
+
   // The NATIVE picker, because the host needs a PATH: a WebView `<input
   // type="file">` yields a File object whose bytes only the WebView can read,
   // which is precisely the ingress being retired. `pickValidatedImage` returns
@@ -2159,8 +2199,8 @@ async function insertImage(): Promise<void> {
     return;
   }
 
-  // Get current selection
-  const sel = getCurrentSelectionFromInterceptor();
+  // Get current selection -- asked again: the picker was open in between.
+  const sel = insertAnchorOrRefuse("Insert Image", getCurrentSelectionFromInterceptor);
   if (!sel) return;
 
   const row = sel.endRow;
@@ -2170,7 +2210,7 @@ async function insertImage(): Promise<void> {
   const gridState = getGridStateSnapshot();
   if (!gridState) return;
 
-  const sheetIndex = gridState.config?.activeSheet ?? 0;
+  const sheetIndex = gridState.sheetContext?.activeSheetIndex ?? 0;
   const defaultCellWidth = gridState.config?.defaultCellWidth ?? 100;
   const defaultCellHeight = gridState.config?.defaultCellHeight ?? 24;
   const columnWidths = gridState.dimensions?.columnWidths ?? new Map();
@@ -2264,49 +2304,56 @@ async function deleteFloatingControl(controlId: string): Promise<void> {
 
   const { removeControlMetadata } = await import("./lib/controlApi");
 
-  // Instance-keyed cleanup: scripts, declared properties, custom renderers,
-  // HTML overlays.
-  //
-  // THIS USED TO BE GATED ON `controlType === "shape"`, and that gate leaked a
-  // control's OBJECT SCRIPT on every other type. An instanceId is derived from
-  // the ANCHOR, so a button deleted at B3 left `control-0-2-1`'s script behind,
-  // and the next control created at B3 — a button, a picture, anything —
-  // silently INHERITED it: code the new control's author never wrote, running on
-  // their click. The side tables below are keyed by the same id and have the
-  // same failure mode. Nothing here is shape-specific; deleting an entry that
-  // does not exist is a no-op for every one of them, so the honest gate is no
-  // gate at all.
-  try {
-    const { deleteObjectScriptsForInstance } = await import("../../src/api/objectScriptBackend");
-    await deleteObjectScriptsForInstance(controlId);
-  } catch {
-    // Ignore errors — script may not exist
-  }
-  clearDeclaredProperties(controlId);
-  removeCustomCanvasRenderer(controlId);
-  removeShapeHtmlOverlay(controlId);
-  unmarkShapeHasScript(controlId);
+  // THE BACKEND FIRST (wave-B B6, `runFloatingControlDelete`). The script and
+  // the side tables used to go before the backend was asked, so a REFUSED
+  // delete (a sheet protecting its objects) left the control standing with its
+  // script gone. A refusal now rejects before anything below is touched.
+  await runFloatingControlDelete({
+    removeMetadata: () => removeControlMetadata(ctrl.sheetIndex, ctrl.row, ctrl.col),
 
-  // Remove backend metadata
-  await removeControlMetadata(ctrl.sheetIndex, ctrl.row, ctrl.col);
+    // Instance-keyed cleanup: scripts, declared properties, custom renderers,
+    // HTML overlays.
+    //
+    // THIS USED TO BE GATED ON `controlType === "shape"`, and that gate leaked a
+    // control's OBJECT SCRIPT on every other type. An instanceId is derived from
+    // the ANCHOR, so a button deleted at B3 left `control-0-2-1`'s script behind,
+    // and the next control created at B3 — a button, a picture, anything —
+    // silently INHERITED it: code the new control's author never wrote, running on
+    // their click. The side tables below are keyed by the same id and have the
+    // same failure mode. Nothing here is shape-specific; deleting an entry that
+    // does not exist is a no-op for every one of them, so the honest gate is no
+    // gate at all.
+    deleteScripts: async () => {
+      const { deleteObjectScriptsForInstance } = await import("../../src/api/objectScriptBackend");
+      await deleteObjectScriptsForInstance(controlId);
+    },
+    clearSideTables: () => {
+      clearDeclaredProperties(controlId);
+      removeCustomCanvasRenderer(controlId);
+      removeShapeHtmlOverlay(controlId);
+      unmarkShapeHasScript(controlId);
+    },
 
-  // Remove from in-memory store
-  removeFloatingControl(controlId);
+    finish: async () => {
+      // Remove from in-memory store
+      removeFloatingControl(controlId);
 
-  // Clear selection and close properties pane
-  deselectFloatingControl();
-  const { closeTaskPane: closeTP } = await import("../../src/api/ui");
-  closeTP(PROPERTIES_PANE_ID);
-  lastPropertiesCell = null;
+      // Clear selection and close properties pane
+      deselectFloatingControl();
+      const { closeTaskPane: closeTP } = await import("../../src/api/ui");
+      closeTP(PROPERTIES_PANE_ID);
+      lastPropertiesCell = null;
 
-  // Invalidate caches and refresh. The image cache is FORGOTTEN rather than
-  // marked stale: the control is gone, so the blob URL held for its picture has
-  // nothing left pointing at it and must be revoked, not re-fetched.
-  invalidateFloatingButtonCache(controlId);
-  invalidateShapeCache(controlId);
-  forgetImageControl(controlId);
-  syncFloatingControlRegions();
-  emitAppEvent(AppEvents.GRID_REFRESH);
+      // Invalidate caches and refresh. The image cache is FORGOTTEN rather than
+      // marked stale: the control is gone, so the blob URL held for its picture has
+      // nothing left pointing at it and must be revoked, not re-fetched.
+      invalidateFloatingButtonCache(controlId);
+      invalidateShapeCache(controlId);
+      forgetImageControl(controlId);
+      syncFloatingControlRegions();
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    },
+  });
 }
 
 // ============================================================================
@@ -2321,9 +2368,37 @@ async function deleteSelectedControls(): Promise<void> {
   const selectedIds = getSelectedFloatingControls();
   if (selectedIds.size === 0) return;
 
+  // A canvas MULTI-selection that also holds objects of other families (a
+  // chart, a slicer) is deleted WHOLE, as one undo step
+  // (@api/objectSelection `deleteSelectedObjects`, which hands Controls its
+  // share back through `deleteControlsWithGroups`). Deleting only the controls
+  // left the rest selected and standing (open-items 2.af row 1). CANVAS ONLY
+  // (the seam's one rule): a worksheet keeps every family's own Delete.
+  if (shouldActOnWholeObjectSelection()) {
+    await deleteSelectedObjects();
+    return;
+  }
+
+  try {
+    await deleteControlsWithGroups([...selectedIds]);
+  } catch (err) {
+    // The backend REFUSED (wave-B B5/B6: a sheet protecting its objects). The
+    // control stands, with everything that hangs off it; say why, once.
+    showToast(`The control could not be deleted: ${err instanceof Error ? err.message : String(err)}`, {
+      type: "error",
+    });
+  }
+}
+
+/**
+ * Delete these controls and, for each grouped one, its whole group -- the
+ * rule Controls' Delete has always followed. Resolves when every backend
+ * delete has landed.
+ */
+async function deleteControlsWithGroups(controlIds: readonly string[]): Promise<void> {
   // Collect all IDs to delete (expand groups)
   const idsToDelete = new Set<string>();
-  for (const id of selectedIds) {
+  for (const id of controlIds) {
     idsToDelete.add(id);
     const groupId = getGroupForControl(id);
     if (groupId) {
@@ -2469,6 +2544,63 @@ function setupFloatingObjectEvents(): void {
   window.addEventListener("floatingObject:selected", handleFloatingSelected);
   cleanupFns.push(() => window.removeEventListener("floatingObject:selected", handleFloatingSelected));
 
+  // THE PRESS-TIME PICTURE of a control-led drag (lib/controlCoMove.ts): every
+  // control the drag moves (the rest of the selection, the dragged control's
+  // group) where it was when the drag began. Taken at the drag's first preview
+  // frame -- BEFORE the lead moves -- and dropped at its moveComplete and at
+  // every press, so a click that never became a drag leaves nothing behind for
+  // the next one. Each frame then places a co-moved control at its press-time
+  // rect shifted by the lead's TOTAL (snapped) move, through the seam's one
+  // co-move rule: kept on a canvas page, a locked control stays put -- the
+  // rule a Core-led canvas group drag applies. It used to add each frame's
+  // increment to the current position and clamp at 0 only, which pushed
+  // members off the page, moved locked ones, and drifted after an edge.
+  let controlDrag: ControlDragSnapshot | null = null;
+  const dropControlDrag = () => {
+    controlDrag = null;
+  };
+  window.addEventListener("floatingObject:selected", dropControlDrag);
+  cleanupFns.push(() => window.removeEventListener("floatingObject:selected", dropControlDrag));
+
+  /** The drag's snapshot for `controlId`, taken now when this is its first frame. */
+  const controlDragFor = (controlId: string): ControlDragSnapshot => {
+    if (!controlDrag || controlDrag.leadId !== controlId) {
+      controlDrag = snapshotControlDrag(controlId, getCoMovingControlIds(controlId), (id) => {
+        const c = getFloatingControl(id);
+        return c ? { x: c.x, y: c.y, width: c.width, height: c.height } : null;
+      });
+    }
+    return controlDrag;
+  };
+
+  /**
+   * Put every co-moved control where the lead's current position says; returns
+   * the ids that ended somewhere other than where the drag found them.
+   */
+  const placeCoMovedControls = (
+    snapshot: ControlDragSnapshot,
+    controlId: string,
+    recalcPinned: boolean,
+  ): string[] => {
+    const lead = getFloatingControl(controlId);
+    if (!lead) return [];
+    const moved: string[] = [];
+    const positions = coMovedControlPositions(
+      snapshot,
+      { x: lead.x, y: lead.y },
+      lead.sheetIndex,
+      (id) => getGridRegions().find((r) => r.id === id) ?? null,
+    );
+    for (const [otherId, at] of positions) {
+      if (!getFloatingControl(otherId)) continue;
+      moveFloatingControl(otherId, at.x, at.y);
+      if (recalcPinned) recalcPinnedOffset(otherId, cellOriginPixels);
+      const from = snapshot.rects.get(otherId);
+      if (!from || from.x !== at.x || from.y !== at.y) moved.push(otherId);
+    }
+    return moved;
+  };
+
   // Handle floating object move preview (live position during drag)
   const handleMovePreview = (e: Event) => {
     const detail = (e as CustomEvent).detail;
@@ -2478,36 +2610,20 @@ function setupFloatingObjectEvents(): void {
     const newX = detail.x as number;
     const newY = detail.y as number;
 
-    // Get the dragged control's current position to compute delta
-    const draggedCtrl = getFloatingControl(controlId);
-    if (!draggedCtrl) return;
-
-    // Delta from the lead's EFFECTIVE movement, measured after snapping.
-    // A pinned lead snaps to cell boundaries, so raw-pointer deltas differ
-    // from how far it actually moved — co-selected controls accumulated that
-    // difference every frame and ran away from the group.
-    const prevX = draggedCtrl.x;
-    const prevY = draggedCtrl.y;
+    if (!getFloatingControl(controlId)) return;
+    // Before the lead moves: the first frame of a drag takes the picture.
+    const snapshot = controlDragFor(controlId);
 
     // Move the dragged control
     moveFloatingControl(controlId, newX, newY);
     // Re-derive the offset from the anchor so a later row/column resize
     // replays where the user actually put it, not a stale value.
     recalcPinnedOffset(controlId, cellOriginPixels);
-    const draggedAfter = getFloatingControl(controlId);
-    const deltaX = (draggedAfter?.x ?? newX) - prevX;
-    const deltaY = (draggedAfter?.y ?? newY) - prevY;
 
-    // Move all other selected/grouped controls by the same delta
-    const idsToMove = getCoMovingControlIds(controlId);
-    for (const otherId of idsToMove) {
-      if (otherId === controlId) continue;
-      const otherCtrl = getFloatingControl(otherId);
-      if (otherCtrl) {
-        moveFloatingControl(otherId, Math.max(0, otherCtrl.x + deltaX), Math.max(0, otherCtrl.y + deltaY));
-        recalcPinnedOffset(otherId, cellOriginPixels);
-      }
-    }
+    // Every other selected/grouped control follows the lead's EFFECTIVE total
+    // move, measured after snapping (a pinned lead snaps to cell boundaries,
+    // so raw-pointer deltas differ from how far it actually moved).
+    placeCoMovedControls(snapshot, controlId, true);
 
     syncFloatingControlRegions();
     emitAppEvent(AppEvents.GRID_REFRESH);
@@ -2524,35 +2640,27 @@ function setupFloatingObjectEvents(): void {
     const newX = detail.x as number;
     const newY = detail.y as number;
 
-    // Get the dragged control's current position to compute delta
-    const draggedCtrl = getFloatingControl(controlId);
-    if (!draggedCtrl) return;
-
-    // Same post-snap delta rule as the move preview above.
-    const prevX = draggedCtrl.x;
-    const prevY = draggedCtrl.y;
+    if (!getFloatingControl(controlId)) {
+      controlDrag = null;
+      return;
+    }
+    // The drag's press-time picture (taken now if no preview frame took it).
+    const snapshot = controlDragFor(controlId);
+    controlDrag = null;
 
     // Move the dragged control
     moveFloatingControl(controlId, newX, newY);
     recalcPinnedOffset(controlId, cellOriginPixels);
-    const draggedAfter = getFloatingControl(controlId);
-    const deltaX = (draggedAfter?.x ?? newX) - prevX;
-    const deltaY = (draggedAfter?.y ?? newY) - prevY;
 
-    // Move all other selected/grouped controls by the same delta
-    const idsToMove = getCoMovingControlIds(controlId);
-    for (const otherId of idsToMove) {
-      if (otherId === controlId) continue;
-      const otherCtrl = getFloatingControl(otherId);
-      if (otherCtrl) {
-        moveFloatingControl(otherId, Math.max(0, otherCtrl.x + deltaX), Math.max(0, otherCtrl.y + deltaY));
-      }
-    }
+    // Same rule as the move preview above: the co-moved controls follow the
+    // lead's total move from where the drag found them.
+    const moved = placeCoMovedControls(snapshot, controlId, true);
 
     syncFloatingControlRegions();
 
-    // Persist every moved control in ONE batch (one undo step).
-    void persistFloatingGeometry([controlId, ...Array.from(idsToMove).filter((id) => id !== controlId)]);
+    // Persist every control that moved in ONE batch (one undo step). A locked
+    // or edge-bound member that ended where it started is not rewritten.
+    void persistFloatingGeometry([controlId, ...moved]);
 
     emitAppEvent(AppEvents.GRID_REFRESH);
   };
@@ -3087,11 +3195,22 @@ function isEmbeddedControl(
   return controlType === "button" ? properties.embedded?.value !== "false" : false;
 }
 
-async function loadFloatingControls(): Promise<void> {
+/**
+ * Load the floating controls of ONE sheet into the store: `sheetIndex` when the
+ * caller already knows it (the sheet-change reload asks the backend), else the
+ * backend's active sheet.
+ *
+ * It used to read `gridState.config.activeSheet`, a GridConfig field nothing in
+ * Core ever set, so every load fell back to sheet 0: a canvas's (or any later
+ * sheet's) own shapes never came back after a reopen, Sheet1's controls were
+ * loaded wherever the user was, and `loadedSheetIndex` said 0 on every sheet --
+ * which is how a shape inserted on a canvas stayed published on Sheet1 (found
+ * live 2026-09-29, e2e fixall-canvas LIVE-1). The backend is the one answer
+ * `reloadForSheetChange` already uses, so the two cannot disagree.
+ */
+async function loadFloatingControls(knownSheetIndex?: number): Promise<void> {
   try {
-    const { getGridStateSnapshot } = await import("../../src/api/grid");
-    const gridState = getGridStateSnapshot();
-    const sheetIndex = gridState?.config?.activeSheet ?? 0;
+    const sheetIndex = knownSheetIndex ?? (await getActiveSheet());
     loadedSheetIndex = sheetIndex;
 
     const controls = await getAllControls(sheetIndex);
@@ -3250,7 +3369,7 @@ async function evaluatePropertiesPaneVisibility(
       const { getGridStateSnapshot } = await import("../../src/api/grid");
       const { openTaskPane: openTP } = await import("../../src/api/ui");
       const gridState = getGridStateSnapshot();
-      const sheetIndex = gridState?.config?.activeSheet ?? 0;
+      const sheetIndex = gridState?.sheetContext?.activeSheetIndex ?? 0;
 
       openTP(PROPERTIES_PANE_ID, {
         row,

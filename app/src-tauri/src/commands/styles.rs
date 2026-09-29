@@ -541,7 +541,7 @@ pub fn apply_formatting_to_sheets(
             continue;
         }
 
-        undo_stack.begin_transaction(format!(
+        let owned_txn = undo_stack.begin_owned_transaction(format!(
             "Format {} cells on sheet {}",
             cell_count, sheet_idx
         ));
@@ -664,7 +664,7 @@ pub fn apply_formatting_to_sheets(
             }
         }
 
-        undo_stack.commit_transaction();
+        undo_stack.commit_owned(owned_txn);
     }
 
     // Mark workbook as dirty

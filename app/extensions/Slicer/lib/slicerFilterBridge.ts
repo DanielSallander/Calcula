@@ -37,20 +37,29 @@
 //          AutoFilter): an APPLY there throws into the same report. A CLEAR
 //          there is a no-op -- there is no filter of this slicer to take off.
 
-import type { Slicer, SlicerConnection, SlicerItem, SlicerSourceType } from "./slicerTypes";
 import type {
-  ApplyPivotFilterRequest,
+  Slicer,
+  SlicerConnection,
+  SlicerItem,
+  SlicerSelectionGestureResponse,
+  SlicerSourceType,
+} from "./slicerTypes";
+import type {
   BiPivotModelInfo,
-  ClearPivotFilterRequest,
+  FilterGestureStep,
+  FilterGestureStepOutcome,
+  PivotFilterWrite,
   PivotViewResponse,
 } from "@api/pivotTypes";
 import { surfacePivotNotices } from "@api/pivotNotices";
-import type { PivotOverwriteTally } from "@api/pivotOverwrite";
+import { createPivotOverwriteTally, type PivotOverwriteTally } from "@api/pivotOverwrite";
 import { requireAutoFilterController } from "@api/autoFilterService";
 import { emitAppEvent, AppEvents } from "@api";
+import type { MutationRefreshPayload } from "@api/events";
 import { showToast } from "@api/notifications";
 import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 import { slicerBackend } from "./slicerBackend";
+import { applySlicerSelection } from "./slicer-api";
 
 // ============================================================================
 // Failures: told once per gesture
@@ -489,33 +498,56 @@ async function applyModelColumnFilter(
   slicerId: string,
   run: FilterRun,
 ): Promise<void> {
+  await sendPivotWrite(modelColumnWrite(pivotId, key, selectedItems, filterLevel, slicerId, run.reconcile), run);
+}
+
+/**
+ * The ONE builder of a slicer's write on a BI pivot by a model column: a
+ * clear (null selection) or an apply. The click's backend command runs the
+ * same writes the reconcile sends one by one, so the two cannot drift.
+ * `reconcile: true` on the reconcile's requests only (absent otherwise).
+ */
+function modelColumnWrite(
+  pivotId: string,
+  key: string,
+  selectedItems: string[] | null,
+  filterLevel: number,
+  slicerId: string,
+  reconcile: boolean,
+): PivotFilterWrite {
+  const quiet = reconcile ? { reconcile: true } : {};
   if (selectedItems === null) {
-    const request: ClearPivotFilterRequest = { pivotId, biFieldKey: key, ...reconcileFlag(run) };
-    notePivotResponse(run, await slicerBackend.invoke<PivotViewResponse>("clear_pivot_filter", { request }));
+    return { clear: { pivotId, biFieldKey: key, ...quiet } };
+  }
+  return {
+    apply: {
+      pivotId,
+      biFieldKey: key,
+      filters: { manualFilter: { selectedItems } },
+      // Level >= 2 routes the selection INSIDE the BI query (a pinned filter
+      // that measure CLEAR/RESET semantics honor); the slicer id preserves
+      // origin.
+      filterLevel,
+      slicerId,
+      ...quiet,
+    },
+  };
+}
+
+/** Send ONE write on its own (the reconcile, the Settings and Connections
+ *  saves): tell the user its notices, and note what it overwrote for the
+ *  gesture's one question. The write is awaited on its own line --
+ *  `run.overwrites?.note(await ...)` would skip the WRITE whenever there is
+ *  no tally. */
+async function sendPivotWrite(write: PivotFilterWrite, run: FilterRun): Promise<void> {
+  let response: PivotViewResponse;
+  if (write.clear) {
+    response = await slicerBackend.invoke<PivotViewResponse>("clear_pivot_filter", { request: write.clear });
+  } else if (write.apply) {
+    response = await slicerBackend.invoke<PivotViewResponse>("apply_pivot_filter", { request: write.apply });
+  } else {
     return;
   }
-  const request: ApplyPivotFilterRequest = {
-    pivotId,
-    biFieldKey: key,
-    filters: { manualFilter: { selectedItems } },
-    // Level >= 2 routes the selection INSIDE the BI query (a pinned filter
-    // that measure CLEAR/RESET semantics honor); the slicer id preserves
-    // origin.
-    filterLevel,
-    slicerId,
-    ...reconcileFlag(run),
-  };
-  notePivotResponse(run, await slicerBackend.invoke<PivotViewResponse>("apply_pivot_filter", { request }));
-}
-
-/** `reconcile: true` on the reconcile's requests only (absent otherwise). */
-function reconcileFlag(run: FilterRun): { reconcile?: true } {
-  return run.reconcile ? { reconcile: true } : {};
-}
-
-/** Tell the user a response's notices, and note what it overwrote for the
- *  gesture's one question. */
-function notePivotResponse(run: FilterRun, response: PivotViewResponse | null | undefined): void {
   surfacePivotNotices(response);
   run.overwrites?.note(response);
 }
@@ -555,36 +587,198 @@ async function applyPivotFilterForSource(
   slicerId: string,
   run: FilterRun,
 ): Promise<void> {
+  const write = await pivotSourceWrite(pivotId, fieldName, selectedItems, filterLevel, slicerId, run.reconcile);
+  // A range pivot grows over the user's cells exactly as a BI pivot does: its
+  // response is noted for the gesture's one question too.
+  if (write) await sendPivotWrite(write, run);
+}
+
+/**
+ * The write a slicer puts on a Report Connections pivot, resolved: a BI pivot
+ * by the model key (the backend resolves it; a bare column name would be
+ * ambiguous between two tables that share it), a range pivot by its field --
+ * the exact name, else the model key's column (`rangePivotField`). A pivot
+ * without the field: an apply THROWS (reported), a clear is `null` (nothing
+ * of this slicer's is there).
+ */
+async function pivotSourceWrite(
+  pivotId: string,
+  fieldName: string,
+  selectedItems: string[] | null,
+  filterLevel: number,
+  slicerId: string,
+  reconcile: boolean,
+): Promise<PivotFilterWrite | null> {
   const info = await slicerBackend.invoke<PivotHierarchiesInfo>("get_pivot_hierarchies", { pivotId });
   if (info?.biModel && isModelKey(fieldName)) {
-    await applyModelColumnFilter(pivotId, fieldName, selectedItems, filterLevel, slicerId, run);
-    return;
+    return modelColumnWrite(pivotId, fieldName, selectedItems, filterLevel, slicerId, reconcile);
   }
   const field = rangePivotField(info?.hierarchies ?? [], fieldName);
   if (!field) {
     cannotFilter(selectedItems, `the PivotTable has no field "${fieldName}"`);
-    return;
+    return null;
   }
-  // A range pivot grows over the user's cells exactly as a BI pivot does: its
-  // response is noted for the gesture's one question too. (The write is
-  // awaited on its own line: `run.overwrites?.note(await ...)` would skip the
-  // WRITE, not just the note, whenever there is no tally.)
+  const quiet = reconcile ? { reconcile: true } : {};
   if (selectedItems === null) {
-    const request: ClearPivotFilterRequest = { pivotId, fieldIndex: field.index, ...reconcileFlag(run) };
-    const response = await slicerBackend.invoke<PivotViewResponse>("clear_pivot_filter", { request });
-    run.overwrites?.note(response);
-  } else {
-    const request: ApplyPivotFilterRequest = {
+    return { clear: { pivotId, fieldIndex: field.index, ...quiet } };
+  }
+  return {
+    apply: {
       pivotId,
       fieldIndex: field.index,
       filters: { manualFilter: { selectedItems } },
       filterLevel,
       slicerId,
-      ...reconcileFlag(run),
-    };
-    const response = await slicerBackend.invoke<PivotViewResponse>("apply_pivot_filter", { request });
-    run.overwrites?.note(response);
+      ...quiet,
+    },
+  };
+}
+
+// ============================================================================
+// The CLICK: ONE backend command for the selection and every pivot
+// ============================================================================
+
+/**
+ * What one slicer gesture writes, resolved on the frontend: every PIVOT write
+ * (sent together, in order, to the backend's one command) and the pivots they
+ * touch (for the loading overlays). TABLE targets are not planned here: the
+ * same backend command resolves the slicer's table connections itself and
+ * filters them inside the click's step (W2).
+ */
+export interface SlicerFilterPlan {
+  writes: PivotFilterWrite[];
+  pivotIds: string[];
+}
+
+/**
+ * Resolve `slicer`'s selection into its writes. A target that cannot be
+ * resolved (its pivot has no such field, its model's pivots cannot be
+ * listed) goes into `failures` -- the gesture's one report -- and the others
+ * still filter. Reads only.
+ */
+export async function planSlicerFilterWrites(
+  slicer: Slicer,
+  failures: SlicerFilterFailure[],
+): Promise<SlicerFilterPlan> {
+  const selectedItems = slicer.selectedItems;
+  const clearing = selectedItems === null;
+  const level = slicer.filterLevel ?? 1;
+  const plan: SlicerFilterPlan = { writes: [], pivotIds: [] };
+  const targets = await resolveFilterTargets(slicer, slicer.connectedSources ?? [], failures, clearing);
+  for (const target of targets) {
+    try {
+      switch (target.kind) {
+        case "table":
+          // Filtered by the click's backend command itself (W2).
+          break;
+        case "modelPivot":
+          plan.writes.push(modelColumnWrite(target.pivotId, slicer.fieldName, selectedItems, level, slicer.id, false));
+          plan.pivotIds.push(target.pivotId);
+          break;
+        case "pivot": {
+          const write = await pivotSourceWrite(target.pivotId, slicer.fieldName, selectedItems, level, slicer.id, false);
+          if (write) {
+            plan.writes.push(write);
+            plan.pivotIds.push(target.pivotId);
+          }
+          break;
+        }
+        default:
+          assertNever(target, "slicer filter target");
+      }
+    } catch (err) {
+      failures.push({
+        slicer: slicer.name,
+        target: target.kind === "table" ? "table" : "pivot",
+        clearing,
+        message: errorText(err),
+      });
+    }
   }
+  return plan;
+}
+
+/** Who made a slicer gesture: the USER (a click -- a step of its own, even
+ *  while a script batch that has recorded nothing yet is open; a batch that
+ *  already HOLDS writes is joined and marked shared, so the history stays in
+ *  time order), or a SCRIPT inside the batch it opened (its call joins that
+ *  batch). */
+export type SlicerGestureActor = "user" | "script";
+
+/** What {@link runSlicerSelectionGesture} did. */
+export interface SlicerGestureResult {
+  /** Where the gesture's ONE undo step went. Only `"pushed"` is the
+   *  gesture's OWN step: only then may it ask about an overwrite and take the
+   *  step back. */
+  step: FilterGestureStepOutcome;
+  /** Every pivot response of the gesture, noted for the one question. */
+  overwrites: PivotOverwriteTally;
+}
+
+/**
+ * A slicer's new selection AND its filter on everything it reaches, as ONE
+ * undo step (BUG-0187). The pivot writes and the selection go to the backend
+ * in ONE command (`update_slicer_selection` with a gesture), which runs them
+ * with their own recording off and records the step once, at the end -- so
+ * no undo transaction is held open across a model re-query, and an unrelated
+ * edit made during a slow click is a step of its own. It used to be a
+ * frontend transaction around every write.
+ *
+ * TABLE targets are filtered by the SAME backend command, inside the same
+ * step (W2): the command resolves the slicer's table connections itself and
+ * writes each AutoFilter column on its table's own sheet. They used to be
+ * filtered here, through the AutoFilter owner, AFTER the command -- which had
+ * to hold its step open for them, so anything the user did in that window
+ * joined the click (that mode is gone). The owner is then told, the way an undo
+ * of the same filter tells it: the `objects` domain, which the Shell fans out
+ * to the AutoFilter's re-read (it repaints the chevrons and pushes the hidden
+ * rows). A script's call joins the batch it opened (`join`).
+ *
+ * `slicer` carries the NEW selection. The command's own refusal (an unknown
+ * slicer) rejects; a target that refuses is told in ONE toast.
+ */
+export async function runSlicerSelectionGesture(
+  slicer: Slicer,
+  actor: SlicerGestureActor,
+): Promise<SlicerGestureResult> {
+  const failures: SlicerFilterFailure[] = [];
+  const overwrites = createPivotOverwriteTally();
+  const plan = await planSlicerFilterWrites(slicer, failures);
+  const step: FilterGestureStep = actor === "user" ? "own" : "join";
+  const stage = slicer.selectedItems === null ? "Clearing filter..." : "Applying filter...";
+  for (const pivotId of plan.pivotIds) {
+    window.dispatchEvent(new CustomEvent("pivot:set-loading", { detail: { pivotId, stage } }));
+  }
+  let response: SlicerSelectionGestureResponse;
+  try {
+    response = await applySlicerSelection(slicer.id, slicer.selectedItems, { writes: plan.writes, step });
+  } finally {
+    for (const pivotId of plan.pivotIds) {
+      window.dispatchEvent(new CustomEvent("pivot:clear-loading", { detail: { pivotId } }));
+    }
+  }
+  for (const r of response.responses) {
+    surfacePivotNotices(r);
+    overwrites.note(r);
+  }
+  for (const f of response.failures) {
+    failures.push({ slicer: slicer.name, target: "pivot", clearing: f.clearing, message: f.message });
+  }
+  for (const f of response.tableFailures ?? []) {
+    failures.push({ slicer: slicer.name, target: "table", clearing: f.clearing, message: f.message });
+  }
+  const tablesMoved = (response.tableSheets ?? []).length > 0;
+  if (tablesMoved) {
+    // The AutoFilter changed on the backend: its owner re-reads it -- the
+    // announcement an undo of the same restore makes (`obj_autofilter` is an
+    // `objects` restore), reached through the Shell with no extension named.
+    const refresh: MutationRefreshPayload = { domains: ["objects"], source: "commit" };
+    emitAppEvent(AppEvents.MUTATION_REFRESH, refresh);
+  }
+  if (plan.pivotIds.length > 0) window.dispatchEvent(new Event("pivot:refresh"));
+  if (plan.pivotIds.length > 0 || tablesMoved) emitAppEvent(AppEvents.GRID_REFRESH);
+  reportSlicerFilterFailures(failures);
+  return { step: response.step, overwrites };
 }
 
 /**

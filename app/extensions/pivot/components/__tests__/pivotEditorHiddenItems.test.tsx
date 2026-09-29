@@ -310,6 +310,44 @@ describe("a field-list edit never echoes a chip's seeded item filter", () => {
     expect(ref(req.columnFields, "Sales.Year")).not.toHaveProperty("hiddenItems");
     expect(ref(req.rowFields, "Time Intelligence").hiddenItems).toEqual(["YoY"]);
   });
+
+  it("the LOOKUP toggle sends calculated fields as calculated fields, with the layout (round 3)", async () => {
+    // Mapped from the raw chips, the toggle turned a calculated field into a
+    // MEASURE reference named after it and sent no layout, no calculated
+    // fields and no column order -- the pivot lost its CALC column and its
+    // layout on a lookup toggle.
+    await act(async () => {
+      root.render(
+        React.createElement(PivotEditor, {
+          pivotId: "pv",
+          sourceFields: [],
+          initialRows: seededRows(),
+          initialColumns: seededColumns(),
+          initialValues: seededValues(),
+          initialFilters: seededFilters(),
+          initialLayout: { reportLayout: "tabular" },
+          initialCalculatedFields: [{ name: "Margin", formula: "'[Revenue]' * 0.1" }],
+          biModel,
+        }),
+      );
+    });
+    await settle();
+    await act(async () => {
+      (h.fieldList!.onLookupToggle as (t: string, c: string) => void)("Geo", "City");
+    });
+    await settle();
+
+    expect(h.sent).toHaveLength(1);
+    const req = last();
+    expect(req.valueFields.map((v) => v.measureName)).toEqual(["Revenue"]);
+    expect(req.calculatedFields).toEqual([{ name: "Margin", formula: "'[Revenue]' * 0.1", numberFormat: undefined }]);
+    expect(req.valueColumnOrder).toEqual([
+      { type: "value", index: 0 },
+      { type: "calculated", index: 0 },
+    ]);
+    expect(req.layout).toEqual({ reportLayout: "tabular" });
+    expect(ref(req.rowFields, "Geo.City").isLookup).toBe(true);
+  });
 });
 
 describe("the Pivot Layout DSL is the editor's item-filter control", () => {
@@ -472,13 +510,32 @@ describe("the chips follow the pivot's definition (review3 findings 1 and 6)", (
       Promise.resolve({ rowFields: [def(0, "Region")], columnFields: [], valueFields: [], filterFields: [], layout: {} });
     await viewUpdated(2);
 
-    // An unrelated field-list edit. update_pivot_fields reads an absent list
-    // as CLEAR, so the range request must carry each chip's list -- and it
-    // must be the pivot's current one, or West comes silently back.
+    // An unrelated field-list edit. `update_pivot_fields` now KEEPS a field's
+    // filter when no list is sent (BUG-0184), so the range request sends none
+    // for a field the user did not edit here -- and West, cleared elsewhere,
+    // cannot come back through a stale echo.
     await act(async () => h.rangeFieldList!.onFieldToggle({ index: 1, name: "Product", isNumeric: false }, true));
     await settle();
     const region = h.rangeSent[h.rangeSent.length - 1].rowFields!.find((f) => f.name === "Region")!;
-    expect(region.hiddenItems ?? []).toEqual([]);
+    expect(region).not.toHaveProperty("hiddenItems");
+    // The chip still SHOWS what the pivot hides now (display only).
+    expect(h.dropZones!.rows.find((f) => f.name === "Region")!.hiddenItems ?? []).toEqual([]);
+  });
+
+  it("a RANGE pivot sends an item filter only for a field the user edited here (BUG-0184)", async () => {
+    await mountRange();
+    // An unrelated edit: Region's seeded list is display, not an edit.
+    await act(async () => h.rangeFieldList!.onFieldToggle({ index: 1, name: "Product", isNumeric: false }, true));
+    await settle();
+    let sent = h.rangeSent[h.rangeSent.length - 1];
+    expect(sent.rowFields!.find((f) => f.name === "Region")).not.toHaveProperty("hiddenItems");
+    expect(sent.rowFields!.find((f) => f.name === "Product")).not.toHaveProperty("hiddenItems");
+
+    // The Pivot Layout DSL deletes Region's NOT IN: an edit to [] -- a clear.
+    await applyDsl([rchip(0, "Region"), rchip(1, "Product")], [], []);
+    sent = h.rangeSent[h.rangeSent.length - 1];
+    expect(sent.rowFields!.find((f) => f.name === "Region")!.hiddenItems).toEqual([]);
+    expect(sent.rowFields!.find((f) => f.name === "Product")).not.toHaveProperty("hiddenItems");
   });
 
   it("a model pivot's chips -- and so the DSL -- show what the pivot hides now, and the re-sync is no edit", async () => {
@@ -605,7 +662,7 @@ describe("dragging a chip to another zone keeps its item filter (review3 finding
     expect(last().rowFields.some((f) => f.column === "Time Intelligence")).toBe(false);
   });
 
-  it("a RANGE field keeps its filter (its request would otherwise CLEAR it)", async () => {
+  it("a RANGE field keeps its filter: the move sends none, and the backend keeps the moved field's", async () => {
     await mountRange();
     await act(async () => {
       h.dropZones!.onDrop("columns", { name: "Region", sourceIndex: 0, isNumeric: false, fromZone: "rows", fromIndex: 0 });
@@ -613,6 +670,10 @@ describe("dragging a chip to another zone keeps its item filter (review3 finding
     await settle();
     const sent = h.rangeSent[h.rangeSent.length - 1];
     expect(sent.rowFields).toEqual([]);
-    expect(sent.columnFields!.find((f) => f.name === "Region")!.hiddenItems).toEqual(["West"]);
+    // A move is no item-filter edit. `update_pivot_fields` finds a moved field
+    // by its source column and keeps its filter, sort and grouping (BUG-0184,
+    // pinned in pivot/regression_tests.rs); the chip keeps showing the list.
+    expect(sent.columnFields!.find((f) => f.name === "Region")).not.toHaveProperty("hiddenItems");
+    expect(h.dropZones!.columns.find((f) => f.name === "Region")!.hiddenItems).toEqual(["West"]);
   });
 });

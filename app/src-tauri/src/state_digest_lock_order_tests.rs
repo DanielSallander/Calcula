@@ -328,8 +328,15 @@ fn strip_cfg_test_items(text: &str) -> String {
             out.push('\n');
             continue;
         }
+        // BLANKED, NOT REMOVED (C9): every removed line leaves an empty line
+        // behind, so a line number a census measures in the stripped text is
+        // the file's own line. Removing them moved every reported line below a
+        // test module up by the module's length, and the message pointed at
+        // unrelated code.
+        out.push('\n');
         let mut started = false;
         for inner in lines.by_ref() {
+            out.push('\n');
             if !started {
                 if inner.trim_end().ends_with(';') {
                     // `#[cfg(test)] #[path = "..."] mod x;` — no body to skip.
@@ -1892,6 +1899,38 @@ fn the_recalculation_pass_still_takes_sheet_names_first() {
              background thread"
         );
     }
+}
+
+/// C9 (tooling). The census reports `line {}` so a reader can go straight to the
+/// offence, and it measured that line in the text AFTER `strip_cfg_test_items`
+/// had removed every `#[cfg(test)]` item. A test module ABOVE the offending
+/// function therefore moved every reported line up by the module's length, so
+/// the message pointed at unrelated code. The strip now keeps one blank line
+/// per removed line, and every census built on it reports the file's own line.
+#[test]
+fn a_reported_line_is_the_files_own_line_even_after_a_test_module() {
+    let src = "#[cfg(test)]\nmod tests {\n    fn helper() {\n        let x = \"}\";\n    }\n}\n\npub fn f(state: &AppState) {\n    let tables = state.tables.read().ok();\n    let sheet_names = state.sheet_names.read().ok();\n}\n";
+    let found = pair_inversions("planted.rs", src, "tables", "sheet_names");
+    assert_eq!(found.len(), 1, "the planted inversion must be found");
+    let actual = src
+        .lines()
+        .position(|l| l.contains("state.sheet_names.read("))
+        .unwrap()
+        + 1;
+    assert_eq!(
+        found[0].line, actual,
+        "the census must report the file's own line ({actual}), not a line counted after \
+         the test module was removed"
+    );
+    // The strip keeps the file's shape: same number of lines, test lines blank.
+    let stripped = strip_cfg_test_items(src);
+    assert_eq!(stripped.lines().count(), src.lines().count());
+    assert!(!stripped.contains("helper"), "the test module's body is still removed");
+    // A `#[cfg(test)] mod x;` declaration (no body) keeps the shape too.
+    let decl = "#[cfg(test)]\n#[path = \"x_tests.rs\"]\nmod x_tests;\nfn g() {}\n";
+    let stripped_decl = strip_cfg_test_items(decl);
+    assert_eq!(stripped_decl.lines().count(), decl.lines().count());
+    assert_eq!(stripped_decl.lines().nth(3), Some("fn g() {}"));
 }
 
 #[test]

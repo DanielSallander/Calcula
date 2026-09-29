@@ -4,6 +4,7 @@
 
 import type { ExtensionContext } from "@api/contract";
 import { getCurrentRegion, IconDataForm } from "@api";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 // ============================================================================
 // State
@@ -29,13 +30,20 @@ export function setCurrentSelection(
 
 /**
  * Register "Data Form..." as a top-level item in the Data menu.
+ *
+ * Returns the cleanup for deactivation: it takes back this extension's OWN
+ * item, never the shared Data menu (wave E, Y14).
  */
-export function registerDataFormMenuItem(context: ExtensionContext): void {
+export function registerDataFormMenuItem(context: ExtensionContext): () => void {
   context.ui.menus.registerItem("data", {
     id: "data:dataForm",
     label: "Data Form...",
     icon: IconDataForm,
     action: async () => {
+      // The form edits the region around Core's active cell, which is HIDDEN
+      // while something else owns the selection (a floating grid's selected
+      // cell): refuse, once (D4, BUG-0185 class).
+      if (refuseIfSelectionOwned("Data Form")) return;
       const sel = currentSelection;
       const row = sel?.activeRow ?? 0;
       const col = sel?.activeCol ?? 0;
@@ -62,4 +70,6 @@ export function registerDataFormMenuItem(context: ExtensionContext): void {
       });
     },
   });
+
+  return () => context.ui.menus.unregisterItem("data", "data:dataForm");
 }

@@ -109,6 +109,19 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
       // Don't change selection, don't start drag
       // Context menu will be handled by onContextMenu event
       event.preventDefault();
+      // ...but the press IS on the sheet's selection: an object that keeps
+      // its own selection over the grid (a floating grid's cell, with Core's
+      // selection hidden under it) must drop it before the grid's menu opens
+      // on Core's cell (BUG-0186).
+      notifyGridCellPressed({
+        row,
+        col,
+        button: event.button,
+        shiftKey,
+        ctrlKey: event.ctrlKey,
+        target: "cell",
+        keptSelection: true,
+      });
       return true;
     }
 
@@ -185,14 +198,16 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
     // cell selection over the grid (a floating grid's selected cell) that the
     // user clicked back onto the sheet: it kept its cell, and the formula bar
     // wrote the next entry there instead of into the cell just clicked. (A
-    // right-press INSIDE the selection returned above: it keeps the selection
-    // for the context menu and announces nothing.)
+    // right-press INSIDE the selection returned above, announced as a press
+    // that KEPT the selection.)
     notifyGridCellPressed({
       row,
       col,
       button: event.button,
       shiftKey,
       ctrlKey: event.ctrlKey,
+      target: "cell",
+      keptSelection: false,
     });
 
     return true;

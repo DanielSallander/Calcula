@@ -21,6 +21,7 @@ import { macroRecorderBackend } from "./lib/macroRecorderBackend";
 import { showDialog } from "@api/ui";
 import { showToast } from "@api/notifications";
 import { onAppEvent } from "@api/events";
+import { registerClosePreparation } from "@api/lifecycleGuards";
 import { StartRecordingDialog } from "./components/StartRecordingDialog";
 import { RecordedMacroDialog } from "./components/RecordedMacroDialog";
 import { MacroLibraryDialog } from "./components/MacroLibraryDialog";
@@ -168,18 +169,41 @@ function activate(context: ExtensionContext): void {
   //    session — which stores what was captured while the store still exists,
   //    shows the source, and (because the indicator and the menu both derive
   //    from the session) leaves neither of them claiming a recording is live.
+  //
+  //    The store is ASYNC (it reserves a name and saves the module), and on a
+  //    CLOSE the file is written right after the teardown -- so the close
+  //    AWAITS it (E8): the session ends on BEFORE_CLOSE like on the other two,
+  //    and a close preparation (@api/lifecycleGuards) holds the save and the
+  //    window until the store has landed. Without it a close-then-Save could
+  //    write the workbook before the recording reached it.
+  let storing: Promise<void> | null = null;
+  const endSession = (): void => {
+    if (getRecorderSnapshot().status === "idle") return;
+    const store = finishRecording();
+    storing = store;
+    void store
+      .catch((err) => {
+        console.error("[MacroRecorder] storing the recording at a workbook swap failed:", err);
+      })
+      .finally(() => {
+        if (storing === store) storing = null;
+      });
+  };
   for (const event of [
     AppEvents.BEFORE_OPEN,
     AppEvents.BEFORE_NEW,
     AppEvents.BEFORE_CLOSE,
   ]) {
-    cleanupFns.push(
-      onAppEvent(event, () => {
-        if (getRecorderSnapshot().status === "idle") return;
-        void finishRecording();
-      }),
-    );
+    cleanupFns.push(onAppEvent(event, endSession));
   }
+  cleanupFns.push(
+    registerClosePreparation("Macro Recorder: store the recording", async () => {
+      // BEFORE_CLOSE has normally ended the session already; a close that
+      // reaches the preparations without it ends it here.
+      endSession();
+      if (storing) await storing;
+    }),
+  );
 
   // 7. Ctrl+Shift+R toggles record/stop — the gesture people expect, and the
   //    reason stopping never requires finding a menu.

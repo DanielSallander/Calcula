@@ -345,11 +345,12 @@ async function resyncChartStoreToBackend(page: Page): Promise<void> {
  * THE PREVIOUS DOCUMENT'S GROUPS INTO THE NEW ONE. That is corruption authored by
  * the harness, reported as a product finding.
  *
- * PANE CONTROLS ARE A LEAK RATHER THAN A RACE: nothing in the reset reaches them
- * at all. Their only other trigger is a `sheet:activated` listener that no code in
- * `app/` dispatches — recorded in open-items as a product question, because if
- * that listener is genuinely dead then a pane control's cached value can outlive a
- * sheet switch in the PRODUCT, not only in this harness.
+ * PANE CONTROLS NEED NO STEP HERE. `resetToNewWorkbook` runs the app's OWN
+ * `newFile` (BUG-0205: never a raw `new_file`), which announces AFTER_NEW, and
+ * the Controls pane re-reads its controls on AFTER_NEW / AFTER_OPEN (and on
+ * SHEET_CHANGED, `app:sheet-changed`, wave D X13), so the pane follows the new
+ * document on its own. (It used to listen to a `sheet:activated` window event
+ * that nothing in `app/` dispatches -- the leak this comment once recorded.)
  */
 async function resyncObjectStoresToBackend(page: Page): Promise<void> {
   await resyncOneStore(page, {

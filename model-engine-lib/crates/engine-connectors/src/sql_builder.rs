@@ -406,7 +406,7 @@ pub(crate) fn build_filter_conditions(
 ///   [`SqlDialect::inline_in_text_column`]).
 pub(crate) fn build_inline_in(dialect: &impl SqlDialect, in_filter: &InFilterCondition) -> String {
     let column = dialect.quote_ident(&in_filter.column);
-    match in_filter.effective_kind() {
+    let condition = match in_filter.effective_kind() {
         InValueKind::Integer => format!("{column} IN ({})", in_filter.values.join(", ")),
         InValueKind::Text => {
             let quoted: Vec<String> = in_filter
@@ -420,6 +420,35 @@ pub(crate) fn build_inline_in(dialect: &impl SqlDialect, in_filter: &InFilterCon
                 quoted.join(", ")
             )
         }
+    };
+    with_null_match(dialect, in_filter, condition)
+}
+
+/// `condition` (an IN condition for `in_filter`), widened to keep the rows
+/// whose column is NULL when the filter names the BLANK member
+/// ([`InFilterCondition::include_null`]): `(condition OR col IS NULL)`.
+/// Unchanged otherwise. Every IN rendering -- inline and temp-table -- ends
+/// here, so no path can drop the NULL half.
+pub(crate) fn with_null_match(
+    dialect: &impl SqlDialect,
+    in_filter: &InFilterCondition,
+    condition: String,
+) -> String {
+    if in_filter.include_null {
+        format!("({condition} OR {} IS NULL)", dialect.quote_ident(&in_filter.column))
+    } else {
+        condition
+    }
+}
+
+/// The condition for an IN filter whose value set is EMPTY: nothing
+/// ([`FALSE_PREDICATE`]) -- or, when it names the BLANK member
+/// ([`InFilterCondition::include_null`]), the NULL rows only.
+pub(crate) fn empty_in_condition(dialect: &impl SqlDialect, in_filter: &InFilterCondition) -> String {
+    if in_filter.include_null {
+        format!("{} IS NULL", dialect.quote_ident(&in_filter.column))
+    } else {
+        FALSE_PREDICATE.to_string()
     }
 }
 
@@ -508,7 +537,7 @@ fn request_conditions(
     let mut conditions = build_filter_conditions(dialect, &request.filters, params);
     for in_filter in &request.in_filters {
         if in_filter.values.is_empty() {
-            conditions.push(FALSE_PREDICATE.to_string());
+            conditions.push(empty_in_condition(dialect, in_filter));
         } else {
             conditions.push(build_inline_in(dialect, in_filter));
         }
@@ -784,7 +813,43 @@ mod tests {
             column: column.into(),
             values: values.iter().map(|v| v.to_string()).collect(),
             kind,
+            include_null: false,
         }
+    }
+
+    /// The BLANK member (W6): an IN filter that includes NULL renders as
+    /// `(col IN (...) OR col IS NULL)` on both dialects, and an EMPTY one as
+    /// `col IS NULL` -- never the always-false predicate, never unrestricted.
+    #[test]
+    fn an_in_filter_including_null_keeps_the_null_rows_on_both_dialects() {
+        let mut text = in_filter("region", &["East", ""], InValueKind::Text);
+        text.include_null = true;
+        let mut ints = in_filter("code", &["1"], InValueKind::Integer);
+        ints.include_null = true;
+        assert_eq!(
+            build_inline_in(&PostgresDialect, &text),
+            "(\"region\" IN ('East', '') OR \"region\" IS NULL)"
+        );
+        assert_eq!(
+            build_inline_in(&PostgresDialect, &ints),
+            "(\"code\" IN (1) OR \"code\" IS NULL)"
+        );
+        let ss = build_inline_in(&SqlServerDialect, &ints);
+        assert_eq!(ss, "([code] IN (1) OR [code] IS NULL)");
+        let mut empty = in_filter("code", &[], InValueKind::Integer);
+        empty.include_null = true;
+        let request = FetchRequest {
+            table: "t".into(),
+            in_filters: vec![empty],
+            ..Default::default()
+        };
+        let (sql, _) = build_select_sql(&PostgresDialect, &request);
+        assert!(sql.ends_with("WHERE \"code\" IS NULL"), "{sql}");
+        // Without the flag nothing changes.
+        assert_eq!(
+            build_inline_in(&PostgresDialect, &in_filter("code", &["1"], InValueKind::Integer)),
+            "\"code\" IN (1)"
+        );
     }
 
     // -- Dialect primitives -------------------------------------------------

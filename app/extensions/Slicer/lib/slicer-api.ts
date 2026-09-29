@@ -2,12 +2,14 @@
 // PURPOSE: Tauri command wrappers for slicer backend operations.
 
 import { slicerBackend } from "./slicerBackend";
+import type { PivotFilterGesture } from "@api/pivotTypes";
 import type {
   Slicer,
   SlicerItem,
   CreateSlicerParams,
   UpdateSlicerParams,
   SlicerComputedPropertyResult,
+  SlicerSelectionGestureResponse,
 } from "./slicerTypes";
 
 export async function createSlicer(params: CreateSlicerParams): Promise<Slicer> {
@@ -45,10 +47,30 @@ export async function updateSlicerSelection(
   slicerId: string,
   selectedItems: string[] | null,
 ): Promise<void> {
-  return slicerBackend.invoke<void>("update_slicer_selection", {
+  await slicerBackend.invoke<unknown>("update_slicer_selection", {
     slicerId,
     selectedItems,
   });
+}
+
+/**
+ * A slicer CLICK as ONE backend command (BUG-0187): the selection AND every
+ * pivot write of `gesture` AND the slicer's TABLE targets (W2), recorded as
+ * ONE undo step at the end -- no undo transaction is held open across the
+ * model re-query, and none is left open for the tables.
+ */
+export async function applySlicerSelection(
+  slicerId: string,
+  selectedItems: string[] | null,
+  gesture: PivotFilterGesture,
+): Promise<SlicerSelectionGestureResponse> {
+  const response = await slicerBackend.invoke<SlicerSelectionGestureResponse | null>("update_slicer_selection", {
+    slicerId,
+    selectedItems,
+    gesture,
+  });
+  if (!response) throw new Error("The slicer's selection command answered without its filter gesture");
+  return response;
 }
 
 export async function getAllSlicers(): Promise<Slicer[]> {

@@ -125,11 +125,12 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.dialogs.unregister(CELL_PROTECTION_DIALOG_ID));
 
-  // 3. Register "Review" menu with protection items
-  registerReviewMenu(context);
+  // 3. Register "Review" menu with protection items (taken back on deactivate)
+  cleanupFns.push(registerReviewMenu(context));
 
   // 4. Register sheet tab context menu modifications for workbook protection
-  registerSheetTabProtection();
+  //    (the replaced core items are put back on deactivate)
+  cleanupFns.push(registerSheetTabProtection());
 
   // 5. Subscribe to events
 

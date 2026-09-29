@@ -5,19 +5,15 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import type { DialogProps } from "@api/uiTypes";
 import {
-  updateCellsBatch,
-  beginUndoTransaction,
-  commitUndoTransaction,
-  cancelUndoTransaction,
   restoreFocusToGrid,
   showToast,
   addSheet,
-  setActiveSheetApi,
+  activateSheet,
   getSheets,
 } from "@api";
-import type { CellUpdateInput } from "@api";
 import { open } from "@tauri-apps/plugin-dialog";
 import { csvBackend } from "../lib/csvBackend";
+import { writeCsvImportAsOneStep } from "../lib/csvImportWrite";
 import {
   parseCsv,
   parseCsvPreview,
@@ -331,46 +327,17 @@ export const CsvImportDialog: React.FC<DialogProps> = ({ onClose }) => {
       if (importTarget === "new") {
         const sheetsResult = await addSheet();
         const newIdx = sheetsResult.sheets.length - 1;
-        await setActiveSheetApi(newIdx);
+        // The whole switch, so the grid shows the sheet the rows land on.
+        await activateSheet(newIdx);
         // Dispatch to frontend
         window.dispatchEvent(
           new CustomEvent("sheets:changed", { detail: sheetsResult }),
         );
       }
 
-      await beginUndoTransaction("CSV Import");
-
-      // Build cell updates
-      const updates: CellUpdateInput[] = [];
-      let writeRow = 0;
-
-      // Write headers if present
-      if (headerRow) {
-        for (let c = 0; c < headerRow.length; c++) {
-          updates.push({ row: writeRow, col: c, value: headerRow[c] });
-        }
-        writeRow++;
-      }
-
-      // Write data rows
-      for (const row of dataRows) {
-        for (let c = 0; c < row.length; c++) {
-          const val = row[c];
-          if (val !== "") {
-            updates.push({ row: writeRow, col: c, value: val });
-          }
-        }
-        writeRow++;
-      }
-
-      // Batch update in chunks to avoid overwhelming the backend
-      const CHUNK_SIZE = 5000;
-      for (let i = 0; i < updates.length; i += CHUNK_SIZE) {
-        const chunk = updates.slice(i, i + CHUNK_SIZE);
-        await updateCellsBatch(chunk);
-      }
-
-      await commitUndoTransaction();
+      // The header and data rows as ONE undo step that closes only what it
+      // opened (wave F, Z6).
+      await writeCsvImportAsOneStep(headerRow, dataRows);
 
       window.dispatchEvent(new CustomEvent("grid:refresh"));
 
@@ -379,9 +346,7 @@ export const CsvImportDialog: React.FC<DialogProps> = ({ onClose }) => {
       restoreFocusToGrid();
       onClose();
     } catch (err) {
-      // Close the "CSV Import" transaction — left open, every subsequent edit
-      // silently joins it and collapses into one Ctrl+Z step.
-      try { await cancelUndoTransaction(); } catch { /* already closed */ }
+      // writeCsvImportAsOneStep already closed its own step.
       showToast(`Import failed: ${err}`, { type: "error", duration: 5000 });
     } finally {
       setImporting(false);

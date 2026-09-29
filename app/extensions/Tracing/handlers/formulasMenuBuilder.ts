@@ -18,6 +18,7 @@ import {
   removeAllArrows,
 } from "../lib/tracingStore";
 import { getGridStateSnapshot } from "@api/grid";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 // ============================================================================
 // Constants
@@ -31,9 +32,12 @@ const FORMULAS_MENU_ORDER = 45; // After Data (~42), before Conditional Formatti
 // ============================================================================
 
 /**
- * Register the "Formulas" menu in the menu bar.
+ * Register the "Formulas" menu in the menu bar. Returns the teardown: the
+ * menu is this extension's (it BUILDS it; others only add items), so it goes
+ * on deactivate -- the items other extensions added are kept by the registry
+ * and come back with it (W20).
  */
-export function registerFormulasMenu(context: ExtensionContext): void {
+export function registerFormulasMenu(context: ExtensionContext): () => void {
   const menu: MenuDefinition = {
     id: FORMULAS_MENU_ID,
     label: "Formulas",
@@ -44,6 +48,10 @@ export function registerFormulasMenu(context: ExtensionContext): void {
         label: "Trace Precedents",
         icon: IconTracePrecedents,
         action: () => {
+          // Traces Core's ACTIVE cell -- HIDDEN while something else owns the
+          // selection (a floating grid's selected cell), so the arrows would
+          // start at a cell the user cannot see: refused, once (W24).
+          if (refuseIfSelectionOwned("Trace Precedents")) return;
           addPrecedentLevel();
         },
       },
@@ -52,6 +60,7 @@ export function registerFormulasMenu(context: ExtensionContext): void {
         label: "Trace Dependents",
         icon: IconTraceDependents,
         action: () => {
+          if (refuseIfSelectionOwned("Trace Dependents")) return;
           addDependentLevel();
         },
       },
@@ -89,4 +98,5 @@ export function registerFormulasMenu(context: ExtensionContext): void {
   };
 
   context.ui.menus.register(menu);
+  return () => context.ui.menus.unregister(FORMULAS_MENU_ID);
 }

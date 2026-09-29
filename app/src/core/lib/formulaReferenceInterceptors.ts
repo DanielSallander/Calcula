@@ -6,6 +6,9 @@
 // is replaced with the interceptor's custom formula text.
 // NOTE: This is a Core primitive. The API layer re-exports it for extensions.
 
+import { columnToLetter } from "../types";
+import { quoteSheetNameForFormula } from "./formulaEditTarget";
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -73,6 +76,51 @@ export async function checkFormulaReferenceInterceptors(
     } catch (error) {
       console.error("Error in formula reference interceptor:", error);
     }
+  }
+  return null;
+}
+
+// ============================================================================
+// A pick's text made on ANOTHER sheet than the formula's
+// ============================================================================
+
+/** A character that continues a name or a reference (so a match beside it is part of something longer). */
+const REF_NEIGHBOUR_BEFORE = /[A-Za-z0-9_.!$']/;
+const REF_NEIGHBOUR_AFTER = /[A-Za-z0-9_(]/;
+
+/**
+ * Qualify the cell reference an intercepted pick's TEXT carries -- the pivot
+ * cell of a GETPIVOTDATA call, `$C$3` -- with the sheet it was picked on, so
+ * the text means the same cell from a formula that lives elsewhere: an
+ * external edit's formula (E2: a floating grid's formula lives on its backing
+ * sheet) or Core's own edit parked on another sheet (W14). An interceptor
+ * builds its text from the cell's coordinates alone and cannot know where the
+ * formula lives. The reference is the interceptor's highlight cell, found as a
+ * standalone token in any of its four `$` forms, outside string literals and
+ * not already sheet-qualified; the sheet is spelled by the parser's rule
+ * (quoteSheetNameForFormula). Null when the text carries no such token: the
+ * caller inserts the plain qualified cell reference rather than a formula that
+ * points at the wrong sheet.
+ */
+export function qualifyInterceptedCellRef(
+  text: string,
+  row: number,
+  col: number,
+  sheetName: string,
+): string | null {
+  if (!sheetName) return null;
+  const token = new RegExp(`\\$?${columnToLetter(col)}\\$?${row + 1}`, "gi");
+  let match: RegExpExecArray | null;
+  while ((match = token.exec(text)) !== null) {
+    const at = match.index;
+    const end = at + match[0].length;
+    // Inside a string literal? Excel doubles a quote to escape it, so the
+    // parity of the quotes before the match answers either way.
+    const quotesBefore = (text.slice(0, at).match(/"/g) ?? []).length;
+    if (quotesBefore % 2 === 1) continue;
+    if (at > 0 && REF_NEIGHBOUR_BEFORE.test(text[at - 1])) continue;
+    if (end < text.length && REF_NEIGHBOUR_AFTER.test(text[end])) continue;
+    return `${text.slice(0, at)}${quoteSheetNameForFormula(sheetName)}!${text.slice(at)}`;
   }
   return null;
 }

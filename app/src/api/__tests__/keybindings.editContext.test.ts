@@ -32,7 +32,7 @@ import { registerExternalFormulaTarget } from "../../core/lib/formulaEditTarget"
 const SELECTION_KEYS: [string, KeyboardEventInit, string][] = [
   ["Ctrl+T", { key: "t", ctrlKey: true }, "insert.table"],
   ["Ctrl+Shift+L", { key: "L", ctrlKey: true, shiftKey: true }, "autofilter.toggle"],
-  ["Ctrl+E", { key: "e", ctrlKey: true }, "flashFill.execute"],
+  ["Ctrl+E", { key: "e", ctrlKey: true }, "flashfill.execute"],
   ["Ctrl+K", { key: "k", ctrlKey: true }, "hyperlinks.insert"],
   ["Ctrl+Shift+B", { key: "B", ctrlKey: true, shiftKey: true }, "bookmarks.toggle"],
   ["Ctrl+]", { key: "]", ctrlKey: true }, "bookmarks.next"],

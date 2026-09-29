@@ -116,6 +116,17 @@ pub struct Transaction {
     /// inherits this seq, so undo-then-redo puts the SAME id back on the
     /// stack rather than a fresh one.
     pub seq: u64,
+    /// A `begin` from ANOTHER caller arrived while this transaction was open
+    /// and JOINED it: the backend keeps ONE open slot, so whatever that
+    /// caller wrote is part of this step now. Set only by
+    /// [`UndoStack::begin_transaction_from_caller`] -- the door every
+    /// frontend begin goes through (a script's `beginBatch`, a Core gesture,
+    /// the frontend's own transaction) -- never by a command's internal
+    /// begin. A caller that means to take back EXACTLY its own gesture (a
+    /// declined "overwrite existing data?") must refuse a step carrying it:
+    /// taking it back would take back the other caller's writes too
+    /// (BUG-0200). Not carried by the inverse a restore builds.
+    pub absorbed_begin: bool,
 }
 
 impl Transaction {
@@ -124,6 +135,7 @@ impl Transaction {
             description: description.into(),
             changes: Vec::new(),
             seq: 0,
+            absorbed_begin: false,
         }
     }
 
@@ -225,6 +237,39 @@ impl Transaction {
     }
 }
 
+/// What [`UndoStack::begin_owned_transaction`] answered: did THIS begin OPEN
+/// the transaction, or JOIN one a caller already holds open?
+///
+/// WHY A TOKEN. `begin_transaction` is a no-op while a transaction is open,
+/// but `commit_transaction` is not: a command that begins and commits
+/// unconditionally, run INSIDE a caller's open step (a script's
+/// `beginBatch`, a command-line run, a gesture), closes that caller's step
+/// at its own commit, and everything the caller writes after it lands in steps
+/// of its own. A script's `createNamedStyle` inside a batch split the batch
+/// in two that way (found live 2026-09-29, e2e fixall-calp X6), and thirty
+/// commands carried the same unconditional pair. The token makes "commit only
+/// what I opened" the ONE way to close: [`UndoStack::commit_owned`] and
+/// [`UndoStack::cancel_owned`] act only for a token that opened, and a JOINED
+/// token leaves the caller's step open for its owner to close.
+#[must_use = "close it with commit_owned / cancel_owned, or the transaction this begin opened stays open"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnedTransaction {
+    opened: bool,
+}
+
+impl OwnedTransaction {
+    /// A token that opened nothing: for a command whose begin is conditional
+    /// (nothing to record) but whose close sits on another path.
+    pub const fn not_opened() -> Self {
+        OwnedTransaction { opened: false }
+    }
+
+    /// Whether the begin that produced this token OPENED the transaction.
+    pub fn opened(&self) -> bool {
+        self.opened
+    }
+}
+
 /// The history stack for undo/redo operations.
 #[derive(Debug)]
 pub struct UndoStack {
@@ -274,6 +319,16 @@ pub struct UndoStack {
     /// false alarm BUG-0005's fix removed for the non-empty case and left
     /// standing for this one.
     clears_total: u64,
+    /// Gestures in flight that build their step OUTSIDE the stack and push it
+    /// when they land -- a slicer click or a ribbon filter change awaiting its
+    /// model re-query, a slicer delete awaiting its clears. While any is in
+    /// flight an undo or a redo must not move the history: it would take back
+    /// the step BEFORE the gesture's, which the gesture then lands on top of --
+    /// clearing that undo's redo, and, when the undone step restored the very
+    /// object the gesture is changing, leaving it and its pivots disagreeing
+    /// (BUG-0187). Not history: `clear()` leaves it alone, and a wholesale
+    /// replacement starts at zero (an end past zero saturates).
+    pending_gestures: u32,
 }
 
 impl UndoStack {
@@ -287,6 +342,7 @@ impl UndoStack {
             evicted_total: 0,
             cleared_total: 0,
             clears_total: 0,
+            pending_gestures: 0,
         }
     }
 
@@ -300,7 +356,26 @@ impl UndoStack {
             evicted_total: 0,
             cleared_total: 0,
             clears_total: 0,
+            pending_gestures: 0,
         }
+    }
+
+    /// A gesture that will push its step when it LANDS has started (see
+    /// `pending_gestures`). Pair every call with [`Self::end_pending_gesture`].
+    pub fn begin_pending_gesture(&mut self) {
+        self.pending_gestures = self.pending_gestures.saturating_add(1);
+    }
+
+    /// A gesture begun with [`Self::begin_pending_gesture`] has landed (or
+    /// was abandoned). Saturates at zero.
+    pub fn end_pending_gesture(&mut self) {
+        self.pending_gestures = self.pending_gestures.saturating_sub(1);
+    }
+
+    /// Whether a gesture that will push its step when it lands is in flight:
+    /// an undo or a redo must not move the history under it.
+    pub fn has_pending_gesture(&self) -> bool {
+        self.pending_gestures > 0
     }
 
     /// Check if a transaction is currently open.
@@ -316,6 +391,47 @@ impl UndoStack {
         if self.current_transaction.is_none() {
             self.current_transaction = Some(Transaction::new(description));
         }
+    }
+
+    /// [`begin_transaction`](Self::begin_transaction) for a caller OUTSIDE the
+    /// backend: the Tauri `begin_undo_transaction` command. Returns true when
+    /// it OPENED the transaction. When one is already open the begin is a
+    /// no-op as always -- the caller JOINS it -- and the open transaction is
+    /// marked [`Transaction::absorbed_begin`], so a later take-back of "my own
+    /// gesture" can see that the step also holds someone else's writes.
+    pub fn begin_transaction_from_caller(&mut self, description: impl Into<String>) -> bool {
+        match self.current_transaction.as_mut() {
+            Some(open) => {
+                open.absorbed_begin = true;
+                false
+            }
+            None => {
+                self.current_transaction = Some(Transaction::new(description));
+                true
+            }
+        }
+    }
+
+    /// Whether the open transaction (if any) has absorbed another caller's
+    /// begin. `false` when none is open.
+    pub fn open_transaction_absorbed_begin(&self) -> bool {
+        self.current_transaction.as_ref().is_some_and(|t| t.absorbed_begin)
+    }
+
+    /// Push `transaction` as a step of ITS OWN, returning its id -- even while
+    /// ANOTHER transaction is open, which stays open and untouched (it lands
+    /// on top of this one when its owner commits). For a backend command that
+    /// builds its gesture's step LOCALLY across an await and pushes it once at
+    /// the end: holding the one global slot open across the await would
+    /// swallow every concurrent edit into the gesture (BUG-0187), and joining
+    /// whatever happens to be open at the END would put the gesture into a
+    /// stranger's step (a script batch begun meanwhile). Clears the redo stack
+    /// like every new step. An empty transaction pushes nothing (`None`).
+    pub fn push_own_step(&mut self, transaction: Transaction) -> Option<u64> {
+        if transaction.is_empty() {
+            return None;
+        }
+        Some(self.push_transaction(transaction))
     }
 
     /// Commit the current transaction to the undo stack, returning the id it
@@ -341,6 +457,40 @@ impl UndoStack {
     /// Cancel the current transaction without saving it.
     pub fn cancel_transaction(&mut self) {
         self.current_transaction = None;
+    }
+
+    /// Begin a transaction for a command's OWN step, or join the one a caller
+    /// holds open. The answer says which; close with [`Self::commit_owned`] or
+    /// [`Self::cancel_owned`] and the right thing happens either way (see
+    /// [`OwnedTransaction`]). A command's internal begin: it never marks the
+    /// open step `absorbed_begin` -- that is the frontend caller's door
+    /// ([`Self::begin_transaction_from_caller`]).
+    pub fn begin_owned_transaction(&mut self, description: impl Into<String>) -> OwnedTransaction {
+        let opened = self.current_transaction.is_none();
+        if opened {
+            self.current_transaction = Some(Transaction::new(description));
+        }
+        OwnedTransaction { opened }
+    }
+
+    /// Commit the transaction `token`'s begin OPENED, returning its id. A token
+    /// that JOINED commits nothing and returns `None`: the caller who opened the
+    /// step closes it, and this command's changes are part of that step.
+    pub fn commit_owned(&mut self, token: OwnedTransaction) -> Option<u64> {
+        if token.opened {
+            self.commit_transaction()
+        } else {
+            None
+        }
+    }
+
+    /// Cancel the transaction `token`'s begin OPENED. A token that JOINED cancels
+    /// nothing: dropping the open step would strand the caller's own writes
+    /// with no undo record.
+    pub fn cancel_owned(&mut self, token: OwnedTransaction) {
+        if token.opened {
+            self.cancel_transaction();
+        }
     }
 
     /// Record a cell change. If a transaction is open, add to it.
@@ -742,6 +892,69 @@ mod tests {
         
         assert!(stack.can_redo()); // Redo should still be available
         assert!(stack.can_undo());
+    }
+
+    // OWNED TRANSACTIONS. A command run inside a caller's open step must not
+    // close it (e2e fixall-calp X6, 2026-09-29: createNamedStyle inside a
+    // script batch split the batch).
+    #[test]
+    fn an_owned_begin_inside_an_open_step_joins_it_and_its_commit_leaves_it_open() {
+        let mut stack = UndoStack::new();
+        assert!(stack.begin_transaction_from_caller("Batch"));
+        stack.record_cell_change(0, 0, 0, None);
+
+        let inner = stack.begin_owned_transaction("Clear range");
+        assert!(!inner.opened(), "the command JOINED the caller's step");
+        stack.record_cell_change(0, 1, 0, None);
+        assert_eq!(stack.commit_owned(inner), None, "a joined commit pushes nothing");
+        assert!(stack.has_open_transaction(), "the caller's step was closed by a command inside it");
+        assert!(!stack.can_undo());
+
+        stack.record_cell_change(0, 2, 0, None);
+        stack.commit_transaction();
+        let step = stack.pop_undo().expect("the caller's step");
+        assert_eq!(step.description, "Batch");
+        assert_eq!(step.changes.len(), 3, "all three writes are ONE step");
+        assert!(stack.pop_undo().is_none());
+    }
+
+    #[test]
+    fn an_owned_begin_with_nothing_open_is_its_own_step() {
+        let mut stack = UndoStack::new();
+        let own = stack.begin_owned_transaction("Clear range");
+        assert!(own.opened());
+        stack.record_cell_change(0, 0, 0, None);
+        assert!(stack.commit_owned(own).is_some());
+        assert!(!stack.has_open_transaction());
+        assert_eq!(stack.pop_undo().unwrap().description, "Clear range");
+    }
+
+    #[test]
+    fn a_joined_cancel_leaves_the_callers_step_and_its_writes_alone() {
+        let mut stack = UndoStack::new();
+        stack.begin_transaction("Batch");
+        stack.record_cell_change(0, 0, 0, None);
+        let inner = stack.begin_owned_transaction("Insert rows");
+        stack.cancel_owned(inner);
+        assert!(stack.has_open_transaction(), "a joined cancel dropped the caller's undo record");
+        stack.commit_transaction();
+        assert_eq!(stack.pop_undo().unwrap().changes.len(), 1);
+
+        let own = stack.begin_owned_transaction("Insert rows");
+        stack.record_cell_change(0, 0, 0, None);
+        stack.cancel_owned(own);
+        assert!(!stack.has_open_transaction());
+        assert!(!stack.can_undo(), "an opened cancel drops its own record");
+    }
+
+    #[test]
+    fn a_not_opened_token_closes_nothing() {
+        let mut stack = UndoStack::new();
+        stack.begin_transaction("Batch");
+        stack.record_cell_change(0, 0, 0, None);
+        assert_eq!(stack.commit_owned(OwnedTransaction::not_opened()), None);
+        stack.cancel_owned(OwnedTransaction::not_opened());
+        assert!(stack.has_open_transaction());
     }
 }
 #[cfg(test)]
@@ -1165,5 +1378,84 @@ mod history_horizon_tests {
                 sheet
             );
         }
+    }
+
+    /// BUG-0200 (ownership). A second caller's begin while a transaction is
+    /// open still JOINS it (one global slot), but the step now SAYS so, so a
+    /// take-back of "my own gesture" can refuse a step that holds someone
+    /// else's writes. The opener is told it opened; the joiner that it did not.
+    #[test]
+    fn a_begin_that_joins_an_open_transaction_marks_the_step() {
+        let mut stack = UndoStack::new();
+        assert!(stack.begin_transaction_from_caller("Slicer Selection"), "the first begin opens");
+        assert!(!stack.open_transaction_absorbed_begin());
+        stack.record_cell_change(0, 0, 0, None);
+        assert!(!stack.begin_transaction_from_caller("Script batch"), "a begin while open joins");
+        assert!(stack.open_transaction_absorbed_begin());
+        stack.record_cell_change(0, 1, 1, None);
+        stack.commit_transaction();
+        let step = stack.pop_undo().expect("one step");
+        assert_eq!(step.changes.len(), 2, "the joiner's write is in the opener's step");
+        assert!(step.absorbed_begin, "the step does not say it absorbed another caller's begin");
+
+        // An internal begin (a command's own pair) never marks anything.
+        stack.begin_transaction("outer");
+        stack.begin_transaction("a command's own begin");
+        stack.record_cell_change(0, 2, 2, None);
+        stack.commit_transaction();
+        assert!(!stack.pop_undo().unwrap().absorbed_begin, "an internal begin marked the step");
+
+        // Nor does a transaction nobody joined.
+        assert!(stack.begin_transaction_from_caller("alone"));
+        stack.record_cell_change(0, 3, 3, None);
+        stack.commit_transaction();
+        assert!(!stack.pop_undo().unwrap().absorbed_begin);
+    }
+
+    /// BUG-0187. A command that built its gesture's step LOCALLY pushes it as
+    /// a step of its own even while someone else's transaction is open -- the
+    /// open one stays open, untouched, and lands on top when it commits.
+    #[test]
+    fn an_own_step_is_pushed_beside_an_open_transaction_without_joining_it() {
+        let mut stack = UndoStack::new();
+        stack.record_cell_change(0, 9, 9, None); // something to redo
+        let undone = stack.pop_undo().unwrap();
+        stack.push_redo(undone);
+        assert!(stack.begin_transaction_from_caller("Script batch"));
+        stack.record_cell_change(0, 0, 0, None);
+
+        let mut gesture = Transaction::new("Slicer Selection");
+        gesture.add_change(CellChange::SetCell { sheet: 0, row: 5, col: 5, previous: None });
+        let seq = stack.push_own_step(gesture).expect("a non-empty step is pushed");
+        assert_eq!(stack.top_undo_seq(), Some(seq));
+        assert!(stack.has_open_transaction(), "the other caller's transaction was closed");
+        assert_eq!(stack.redo_depth(), 0, "a new step must clear the redo stack");
+
+        let script_seq = stack.commit_transaction().expect("the script's step");
+        assert_eq!(stack.undo_seqs(), vec![seq, script_seq], "the script's step must land ON TOP of the gesture");
+        let top = stack.pop_undo().unwrap();
+        assert_eq!(top.changes.len(), 1, "the gesture joined the script's transaction");
+
+        assert_eq!(stack.push_own_step(Transaction::new("nothing")), None, "an empty step was pushed");
+    }
+
+    /// BUG-0187 (Ctrl+Z mid-click). A gesture that pushes its step when it
+    /// lands says so while it is in flight; the count nests, survives a
+    /// history `clear()`, and an unmatched end saturates at zero.
+    #[test]
+    fn a_pending_gesture_is_counted_until_it_lands() {
+        let mut stack = UndoStack::new();
+        assert!(!stack.has_pending_gesture());
+        stack.begin_pending_gesture();
+        stack.begin_pending_gesture();
+        assert!(stack.has_pending_gesture());
+        stack.clear();
+        assert!(stack.has_pending_gesture(), "clearing the HISTORY forgot a gesture still in flight");
+        stack.end_pending_gesture();
+        assert!(stack.has_pending_gesture(), "one of two gestures landed and the other was forgotten");
+        stack.end_pending_gesture();
+        assert!(!stack.has_pending_gesture(), "both gestures landed and one still reads as in flight");
+        stack.end_pending_gesture();
+        assert!(!stack.has_pending_gesture(), "an unmatched end wrapped the count");
     }
 }

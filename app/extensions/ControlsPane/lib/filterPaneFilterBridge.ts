@@ -14,18 +14,19 @@
 
 import type { RibbonFilter } from "./filterPaneTypes";
 import type {
-  ApplyPivotFilterRequest,
-  ClearPivotFilterRequest,
+  FilterGestureStepOutcome,
+  PivotFilterGestureResponse,
+  PivotFilterWrite,
   PivotViewResponse,
 } from "@api/pivotTypes";
 import { surfacePivotNotices } from "@api/pivotNotices";
-import type { PivotOverwriteTally } from "@api/pivotOverwrite";
+import { createPivotOverwriteTally, type PivotOverwriteTally } from "@api/pivotOverwrite";
 import { emitAppEvent, AppEvents } from "@api";
 import { showToast } from "@api/notifications";
 import { runInUndoTransaction } from "@api/objectGeometry";
 import { filterPaneBackend } from "./filterPaneBackend";
 import { getAllFilters } from "./filterPaneStore";
-import { getPivotsForBiConnection } from "./filterPaneApi";
+import { applyRibbonFilterSelection, getPivotsForBiConnection } from "./filterPaneApi";
 
 // ============================================================================
 // Failures: told once per gesture
@@ -99,26 +100,42 @@ async function filterPivotByModelColumn(
   overwrites?: PivotOverwriteTally,
   reconcile = false,
 ): Promise<void> {
-  const quiet = reconcile ? { reconcile: true } : {};
-  if (selectedItems === null) {
-    const request: ClearPivotFilterRequest = { pivotId, biFieldKey: fieldKey, ...quiet };
-    const response = await filterPaneBackend.invoke<PivotViewResponse>("clear_pivot_filter", { request });
-    surfacePivotNotices(response);
-    overwrites?.note(response);
-    return;
-  }
-  const request: ApplyPivotFilterRequest = {
-    pivotId,
-    biFieldKey: fieldKey,
-    filters: { manualFilter: { selectedItems } },
-    // Level >= 2 routes the selection INSIDE the BI query (a pinned filter
-    // that measure CLEAR/RESET semantics honor).
-    filterLevel,
-    ...quiet,
-  };
-  const response = await filterPaneBackend.invoke<PivotViewResponse>("apply_pivot_filter", { request });
+  const write = modelColumnWrite(pivotId, fieldKey, selectedItems, filterLevel, reconcile);
+  const response = write.clear
+    ? await filterPaneBackend.invoke<PivotViewResponse>("clear_pivot_filter", { request: write.clear })
+    : await filterPaneBackend.invoke<PivotViewResponse>("apply_pivot_filter", { request: write.apply });
   surfacePivotNotices(response);
   overwrites?.note(response);
+}
+
+/**
+ * The ONE builder of a ribbon filter's write on a pivot: a clear (null
+ * selection) or an apply by the "Table.Column" key. The change's ONE backend
+ * command runs the same writes the Settings / Connections saves and the
+ * reconcile send one by one, so the paths cannot drift.
+ */
+function modelColumnWrite(
+  pivotId: string,
+  fieldKey: string,
+  selectedItems: string[] | null,
+  filterLevel: number,
+  reconcile: boolean,
+): PivotFilterWrite {
+  const quiet = reconcile ? { reconcile: true } : {};
+  if (selectedItems === null) {
+    return { clear: { pivotId, biFieldKey: fieldKey, ...quiet } };
+  }
+  return {
+    apply: {
+      pivotId,
+      biFieldKey: fieldKey,
+      filters: { manualFilter: { selectedItems } },
+      // Level >= 2 routes the selection INSIDE the BI query (a pinned filter
+      // that measure CLEAR/RESET semantics honor).
+      filterLevel,
+      ...quiet,
+    },
+  };
 }
 
 /**
@@ -128,10 +145,10 @@ async function filterPivotByModelColumn(
  * change is one pivot step, not one per missing column (three active filters
  * on a new pivot used to leave three separate "Pivot table field change"
  * steps, each undoing one column while the filter still showed its
- * selection). The selection write (`update_ribbon_filter_selection`)
- * records its own step BEFORE this opens and is deliberately not inside it:
- * that command begins and commits a transaction itself, and its commit would
- * close this one half-way.
+ * selection). A caller's own transaction (the Settings and Connections
+ * saves) is JOINED, so the save and its pivot writes are one step. A
+ * selection CHANGE does not come through here at all: it is ONE backend
+ * command that records its own one step ({@link runRibbonFilterSelectionGesture}).
  */
 export const RIBBON_FILTER_PIVOT_STEP = "Ribbon filter change";
 
@@ -174,7 +191,7 @@ function writtenPivots(targets: readonly string[], reconcile?: RibbonFilterRecon
  * A listing that FAILS throws: the caller reports it (review3 finding 7).
  * Swallowed into "no pivots", the filter reached nothing and said nothing.
  */
-async function resolveTargetPivots(filter: RibbonFilter): Promise<string[]> {
+export async function resolveTargetPivots(filter: RibbonFilter): Promise<string[]> {
   const candidates = await getPivotsForBiConnection(filter.connectionId);
 
   const mode = filter.connectionMode ?? "manual";
@@ -433,4 +450,118 @@ export async function clearModelColumnOnPivots(
   else await runInUndoTransaction(RIBBON_FILTER_PIVOT_STEP, clearAll);
   if (options.failures) options.failures.push(...refused);
   else reportRibbonFilterFailures(refused);
+}
+
+// ============================================================================
+// A filter CHANGE: ONE backend command for the selection and every pivot
+// ============================================================================
+
+/** What one ribbon filter change writes, resolved on the frontend. */
+export interface RibbonFilterPlan {
+  writes: PivotFilterWrite[];
+  /** The pivots the writes touch (for the loading overlays). */
+  pivotIds: string[];
+}
+
+/**
+ * The writes of `filter`'s (new) selection: on every target pivot, this
+ * filter -- a clear when its selection is null -- and, for an apply, every
+ * OTHER active filter that reaches the same pivot (so a pivot that appeared
+ * after those filters were set picks them up too), the rule
+ * {@link applyRibbonFilter} applies. A listing that fails throws; another
+ * filter whose targets cannot be listed is reported in `refused` and skipped.
+ */
+export async function planRibbonFilterWrites(
+  filter: RibbonFilter,
+  refused: RibbonFilterFailure[],
+): Promise<RibbonFilterPlan> {
+  const pivotIds = await resolveTargetPivots(filter);
+  const plan: RibbonFilterPlan = { writes: [], pivotIds };
+  if (pivotIds.length === 0) return plan;
+  if (filter.selectedItems === null) {
+    for (const pivotId of pivotIds) {
+      plan.writes.push(modelColumnWrite(pivotId, filter.fieldName, null, 1, false));
+    }
+    return plan;
+  }
+  const others = getAllFilters().filter((f) => f.id !== filter.id && f.selectedItems !== null);
+  const otherTargets = new Map<string, string[]>();
+  for (const other of others) {
+    try {
+      otherTargets.set(other.id, await resolveTargetPivots(other));
+    } catch (err) {
+      refused.push({ filter: other.name, pivotId: "", clearing: false, message: errorText(err) });
+      otherTargets.set(other.id, []);
+    }
+  }
+  for (const pivotId of pivotIds) {
+    plan.writes.push(modelColumnWrite(pivotId, filter.fieldName, filter.selectedItems, filter.filterLevel ?? 1, false));
+    for (const other of others) {
+      if ((otherTargets.get(other.id) ?? []).includes(pivotId)) {
+        plan.writes.push(
+          modelColumnWrite(pivotId, other.fieldName, other.selectedItems, other.filterLevel ?? 1, false),
+        );
+      }
+    }
+  }
+  return plan;
+}
+
+/** What {@link runRibbonFilterSelectionGesture} did. */
+export interface RibbonFilterGestureResult {
+  /** Where the change's ONE undo step went (`"pushed"`: its own). */
+  step: FilterGestureStepOutcome;
+  /** Every pivot response of the change, noted for the one question. */
+  overwrites: PivotOverwriteTally;
+}
+
+/**
+ * A ribbon filter's new selection AND its filter on every target pivot, as
+ * ONE backend command that records ONE undo step at the end (BUG-0187). It
+ * used to be the selection as a step of its own -- the backend committed it
+ * -- followed by a frontend transaction held open across the pivots' model
+ * re-queries, so an unrelated edit made meanwhile joined the pivots' step.
+ * A user change is a step of its own ("own"), even while a script batch
+ * that has recorded nothing yet is open; a batch that already holds writes is
+ * joined ("joined": it never asks). The pivots that refuse are told in ONE
+ * toast.
+ *
+ * `filter` carries the NEW selection. The command's own refusal (an unknown
+ * filter) rejects: nothing was written.
+ */
+export async function runRibbonFilterSelectionGesture(filter: RibbonFilter): Promise<RibbonFilterGestureResult> {
+  const refused: RibbonFilterFailure[] = [];
+  const overwrites = createPivotOverwriteTally();
+  let plan: RibbonFilterPlan = { writes: [], pivotIds: [] };
+  try {
+    plan = await planRibbonFilterWrites(filter, refused);
+  } catch (err) {
+    // The selection still changes; the pivots could not even be listed.
+    refused.push({ filter: filter.name, pivotId: "", clearing: filter.selectedItems === null, message: errorText(err) });
+  }
+  const stage = filter.selectedItems === null ? "Clearing filter..." : "Applying filter...";
+  for (const pivotId of plan.pivotIds) {
+    window.dispatchEvent(new CustomEvent("pivot:set-loading", { detail: { pivotId, stage } }));
+  }
+  let response: PivotFilterGestureResponse;
+  try {
+    response = await applyRibbonFilterSelection(filter.id, filter.selectedItems, { writes: plan.writes, step: "own" });
+  } finally {
+    for (const pivotId of plan.pivotIds) {
+      window.dispatchEvent(new CustomEvent("pivot:clear-loading", { detail: { pivotId } }));
+    }
+  }
+  for (const r of response.responses) {
+    surfacePivotNotices(r);
+    overwrites.note(r);
+  }
+  for (const f of response.failures) {
+    refused.push({ filter: filter.name, pivotId: f.pivotId, clearing: f.clearing, message: f.message });
+  }
+  if (plan.pivotIds.length > 0) {
+    window.dispatchEvent(new Event("pivot:refresh"));
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  }
+  reportRibbonFilterFailures(refused);
+  return { step: response.step, overwrites };
 }

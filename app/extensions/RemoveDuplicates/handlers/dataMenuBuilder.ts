@@ -4,6 +4,7 @@
 
 import type { ExtensionContext } from "@api/contract";
 import { IconRemoveDuplicates } from "@api";
+import { refuseIfSelectionOwned } from "@api/selectionOwner";
 
 // ============================================================================
 // State
@@ -38,8 +39,11 @@ export function setCurrentSelection(
 /**
  * Register the "Remove Duplicates..." item in the Data menu.
  * Assumes the "data" menu was already created by AutoFilter.
+ *
+ * Returns the cleanup for deactivation: it takes back this extension's OWN
+ * items, never the shared Data menu (wave E, Y14).
  */
-export function registerRemoveDuplicatesMenuItem(context: ExtensionContext): void {
+export function registerRemoveDuplicatesMenuItem(context: ExtensionContext): () => void {
   context.ui.menus.registerItem("data", {
     id: "data:removeDuplicates:separator",
     label: "",
@@ -51,6 +55,10 @@ export function registerRemoveDuplicatesMenuItem(context: ExtensionContext): voi
     label: "Remove Duplicates...",
     icon: IconRemoveDuplicates,
     action: () => {
+      // The dialog works on Core's selection, which is HIDDEN while something
+      // else owns the selection (a floating grid's selected cell): refuse, once
+      // (D4, BUG-0185 class).
+      if (refuseIfSelectionOwned("Remove Duplicates")) return;
       const sel = currentSelection;
       context.ui.dialogs.show("remove-duplicates", {
         activeRow: sel?.startRow ?? 0,
@@ -58,4 +66,9 @@ export function registerRemoveDuplicatesMenuItem(context: ExtensionContext): voi
       });
     },
   });
+
+  return () => {
+    context.ui.menus.unregisterItem("data", "data:removeDuplicates:separator");
+    context.ui.menus.unregisterItem("data", "data:removeDuplicates");
+  };
 }

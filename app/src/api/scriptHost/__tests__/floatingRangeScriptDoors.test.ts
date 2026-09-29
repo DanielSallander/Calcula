@@ -18,7 +18,7 @@ vi.mock("../../backend", async (importOriginal) => ({
   invokeBackend: (...args: unknown[]) => invokeBackend(...args),
 }));
 
-import { executeCreateFloatingRange, executeFloatingRangeResize } from "../host";
+import { executeCreateFloatingRange, executeFloatingRangeResize, executeFloatingRangeGetCells } from "../host";
 import { BrokerError } from "../broker";
 import {
   registerFloatingRangeProvider,
@@ -132,5 +132,73 @@ describe("api.createFloatingRange announces the row even when its resize is refu
     } finally {
       off();
     }
+  });
+});
+
+// E10 (a): a script's read of a floating range asked the backend for the whole
+// window in ONE call, and `get_range_cells_typed` refuses more than 100,000
+// cells -- a window may be 1000 x 256 -- so `floatingRangeGetCells` failed on
+// every large range. It also mapped each cell's `kind` from a field the wire
+// does not carry (`type` is), so every cell came back with `kind: undefined`.
+//
+// Review B (2026-09-28): the first fix cut the read into bands HERE, a second
+// copy of the extension's own banding (lib/frCellReads.ts) beside the
+// backend's ceiling -- the copied recipe the Seam Rule forbids. The read now
+// goes through the owning extension's seam (@api/floatingRangeService
+// `getCells`), exactly as `api.floatingRangeResize` does; the banding is
+// the provider's (pinned in FloatingRange's frSheetChange.test.ts).
+describe("api.floatingRangeGetCells reads through the extension's seam (E10)", () => {
+  function backendWith(rows: number, cols: number): string[] {
+    const commands: string[] = [];
+    invokeBackend.mockImplementation(async (...args: unknown[]) => {
+      const cmd = args[0] as string;
+      commands.push(cmd);
+      if (cmd === "list_floating_ranges") return [{ ...info(rows, cols) }];
+      return null;
+    });
+    return commands;
+  }
+
+  function readingProvider(): { getCells: ReturnType<typeof vi.fn> } {
+    const getCells = vi.fn(async () => [
+      { row: 999, col: 255, value: 7, display: "7", formula: "=3+4", type: "number" },
+      { row: 3, col: 1, value: "x", display: "x", formula: null, type: "text" },
+    ]);
+    registerFloatingRangeProvider({ ...provider(vi.fn()), getCells } as unknown as FloatingRangeProvider);
+    return { getCells };
+  }
+
+  it("asks the provider for the WHOLE window once -- never get_floating_range_cells -- and maps type to kind", async () => {
+    const commands = backendWith(1000, 256);
+    const { getCells } = readingProvider();
+    const result = (await executeFloatingRangeGetCells([ID])) as {
+      rowCount: number;
+      colCount: number;
+      cells: Array<{ row: number; col: number; kind: string; value: unknown; formula?: string }>;
+    };
+    expect(getCells).toHaveBeenCalledTimes(1);
+    expect(getCells).toHaveBeenCalledWith(ID, 0, 0, 999, 255);
+    expect(commands).not.toContain("get_floating_range_cells");
+    expect(result.rowCount).toBe(1000);
+    expect(result.colCount).toBe(256);
+    expect(result.cells).toEqual([
+      { row: 999, col: 255, kind: "number", value: 7, formula: "=3+4" },
+      { row: 3, col: 1, kind: "text", value: "x", formula: undefined },
+    ]);
+  });
+
+  it("with the extension not loaded, it refuses loudly and reads nothing from the backend", async () => {
+    const commands = backendWith(4, 3);
+    await expect(executeFloatingRangeGetCells([ID])).rejects.toMatchObject({ code: "HostError" });
+    expect(commands).not.toContain("get_floating_range_cells");
+  });
+
+  it("control: an unknown id is a ValidationError, and the provider is not asked", async () => {
+    backendWith(4, 3);
+    const { getCells } = readingProvider();
+    await expect(executeFloatingRangeGetCells(["22222222-2222-7222-8222-222222222222"])).rejects.toMatchObject({
+      code: "ValidationError",
+    });
+    expect(getCells).not.toHaveBeenCalled();
   });
 });

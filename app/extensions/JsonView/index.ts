@@ -11,6 +11,7 @@ import {
   registerDialog,
   unregisterDialog,
   registerMenuItem,
+  unregisterMenuItem,
   registerActivityView,
   unregisterActivityView,
   toggleActivityView,
@@ -95,6 +96,13 @@ function activate(): void {
       openTaskPane(TASK_PANE_ID);
     },
     priority: 80,
+  });
+
+  // Take back its OWN items on deactivate (wave E, Y14): Developer and View
+  // belong to other extensions.
+  cleanupFns.push(() => {
+    unregisterMenuItem("developer", "developer:workbookExplorer");
+    unregisterMenuItem("view", "jsonView.openPane");
   });
 
   isActivated = true;

@@ -1123,18 +1123,18 @@ export const chartSpecJsonSchema: object = {
     },
     ParamSpec: {
       type: "object",
-      description: "A named parameter referenceable from filter/calculate expressions as [Name]. Value is a literal OR a live single same-sheet cell (cellRef, e.g. \"=B1\"); cell-bound params re-evaluate as that cell changes.",
+      description: "A named parameter referenceable from filter/calculate expressions as [Name]. Value is a literal OR a live single cell on the sheet the chart reads (cellRef, e.g. \"=B1\"; for a chart on a canvas sheet, its data sheet); cell-bound params re-evaluate as that cell changes.",
       required: ["name"],
       properties: {
         name: { type: "string", description: "Identifier used in expressions as [Name]. Must not be a reserved name ($index/$category/value/$value)." },
         value: { type: ["number", "string", "boolean"], description: "Literal default value (used when there is no cellRef or the cell is empty)." },
-        cellRef: { type: "string", description: "Single same-sheet cell reference (e.g. \"=B1\") read live for the value." },
+        cellRef: { type: "string", description: "Single unqualified cell reference (e.g. \"=B1\") read live for the value, on the sheet the chart reads: its own, or for a chart on a canvas sheet its data sheet." },
         description: { type: "string", description: "Optional human description." },
         select: { type: "string", enum: ["point"], description: "Makes this an interactive selection param: 'point' = clicking a datum sets it. Reference via a condition's inSelection to highlight." },
         on: { type: "string", enum: ["category", "series"], description: "What a click selects on: the datum's category label (default) or series." },
         filter: { type: "boolean", description: "With select:'point' + on:'category', a click also filters the chart to the selected categories (empty selection = full data)." },
         sharedAs: { type: "string", description: "Cross-chart link key: select params sharing this value mirror each other's selection." },
-        writeTo: { type: "string", description: "Single same-sheet cell (e.g. \"=B1\") to write the clicked label/value back to on each point selection." },
+        writeTo: { type: "string", description: "Single unqualified cell (e.g. \"=B1\") to write the clicked label/value back to on each point selection, on the sheet the chart reads: its own, or for a chart on a canvas sheet its data sheet." },
         brush: { type: "boolean", description: "With select:'point', selection becomes a drag-to-brush interval (a click selects one datum, a drag selects the covered set). Brushable marks only." },
         bind: {
           type: "object",

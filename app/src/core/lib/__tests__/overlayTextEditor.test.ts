@@ -198,6 +198,21 @@ describe("overlay text editor: formula reference picking", () => {
     expect(handle.getText()).toBe("=Sheet1!A1");
   });
 
+  // W13: the prefix is spelled by the PARSER's rule (quoteSheetNameForFormula),
+  // not the old display rule, which left Q1-2026 / TRUE / Q1. bare -- a chart
+  // title's `=Q1-2026!A1` then failed to parse.
+  it.each([
+    ["Q1-2026", "='Q1-2026'!A1:B2"],
+    ["TRUE", "='TRUE'!A1:B2"],
+    ["Q1.", "='Q1.'!A1:B2"],
+    ["Sheet.1", "=Sheet.1!A1:B2"],
+  ])("a pick on sheet %s is spelled %s", (sheetName, expected) => {
+    const { handle } = openTestEditor({ acceptsFormulaReferences: true, initialText: "=" });
+    getExternalFormulaTarget()!.insertReference({ sheetName, startRow: 0, startCol: 0, endRow: 1, endCol: 1 });
+    expect(handle.getText()).toBe(expected);
+    handle.cancel();
+  });
+
   it("A PICK DOES NOT COMMIT THE EDITOR, even when the pick's click blurred it", () => {
     const { handle, onCommit } = openTestEditor({
       acceptsFormulaReferences: true,

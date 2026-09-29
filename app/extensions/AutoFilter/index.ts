@@ -1,6 +1,7 @@
 //! FILENAME: app/extensions/AutoFilter/index.ts
 // PURPOSE: AutoFilter extension entry point (ExtensionModule pattern).
-// CONTEXT: Registers grid overlay, cell click interceptor, menu, events, and keyboard shortcuts.
+// CONTEXT: Registers grid overlay, cell click interceptor, menu, events, and the
+//          Toggle AutoFilter command the keybinding registry's Ctrl+Shift+L runs.
 // NOTE: Default exports an ExtensionModule object per the contract.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
@@ -12,9 +13,7 @@ import {
   AppEvents,
   registerAutoFitContributor,
   type OverlayRegistration,
-  isKeyClaimed,
 } from "@api";
-import { isEditKeystroke } from "@api/editing";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { renderFilterChevrons, hitTestFilterChevron, isClickOnChevronButton, getFilterChevronCursor, getFilterChevronCanvas, BUTTON_SIZE, BUTTON_MARGIN } from "./rendering/filterChevronRenderer";
 import {
@@ -48,31 +47,18 @@ let isActivated = false;
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Keyboard shortcut handler
+// Command
 // ============================================================================
 
-/** The window-capture Ctrl+Shift+L listener (exported for tests). */
-export function handleKeyDown(e: KeyboardEvent): void {
-  // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
-  // field, a shape's declared hit rectangle -- is not this extension's.
-  // This handler had no focus guard at all, and a longer tag list would only
-  // be a census of the widget types that exist today.
-  // See core/lib/pointerClaims.ts, and the census in
-  // core/lib/globalInputListeners.ts (a new global listener adds a row).
-  if (isKeyClaimed(e)) return;
-  // Ctrl+Shift+L = Toggle Filter
-  if (e.ctrlKey && e.shiftKey && e.key === "L") {
-    // Not while a cell edit owns the keyboard: Core's in-cell editor, the
-    // formula bar, any text field, or a floating grid's live cell edit (whose
-    // keyboard can sit on the grid container while it picks a reference).
-    // Excel ignores this key in edit mode, and here it acted on Core's
-    // selection -- during a floating-grid edit, a HIDDEN one.
-    if (isEditKeystroke(e)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    toggleFilter();
-  }
-}
+/**
+ * Toggle AutoFilter over Core's selection -- the command the keybinding
+ * registry's `ext.autofilter.toggle` (Ctrl+Shift+L) runs. It named this id
+ * long before anything registered it (BUG-0183). The registry is the ONE
+ * keyboard path ("not-editing": Excel ignores the key in edit mode, and here
+ * it would act on Core's selection -- during a floating-grid edit, a HIDDEN
+ * one), so a remap in Settings moves the key.
+ */
+export const AUTOFILTER_TOGGLE_COMMAND = "autofilter.toggle";
 
 // ============================================================================
 // Activation
@@ -182,11 +168,11 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(unregClick);
 
   // 4. Register the Data menu
-  registerDataMenu(context);
+  cleanupFns.push(registerDataMenu(context));
 
-  // 5. Register keyboard shortcut
-  window.addEventListener("keydown", handleKeyDown, true);
-  cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
+  // 5. The Toggle AutoFilter command the registry's Ctrl+Shift+L runs.
+  context.commands.register(AUTOFILTER_TOGGLE_COMMAND, () => toggleFilter());
+  cleanupFns.push(() => context.commands.unregister(AUTOFILTER_TOGGLE_COMMAND));
 
   // 6. Cursor change on chevron hover is handled by getCursor in the overlay registration
 

@@ -140,8 +140,14 @@ pub struct ListRule {
 }
 
 /// Source of list values.
+///
+/// `rename_all_fields` as well as `rename_all`: `rename_all` on an enum renames
+/// only the VARIANTS, so `Range { start_row, .. }` crossed the wire as
+/// `start_row` while the frontend sends and reads `startRow` -- the Data
+/// Validation dialog's list-from-range rule was refused outright ("missing
+/// field `start_row`"). Pinned by `serde_enum_field_case_tests`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ListSource {
     /// Literal list of string values
     Values(Vec<String>),

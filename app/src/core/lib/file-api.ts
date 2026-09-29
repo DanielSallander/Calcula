@@ -5,6 +5,28 @@ import { confirmAsync } from './dialogs';
 import type { CellData } from '../types/types';
 import { emitAppEvent, AppEvents } from './events';
 import { checkLifecycleGuards } from './lifecycleGuards';
+import { setCoreCellEditFlag } from './cellEditFlag';
+import { DISCARD_EDIT_EVENT } from './editOpenBuffer';
+
+/**
+ * A replaced document's open CORE cell edit is discarded, at once (E9).
+ *
+ * The edit belongs to the document that is gone: committing it would write the
+ * old document's text into the new one, and leaving it open left Core's edit
+ * flag up for a cell edit that no longer existed -- Undo/Redo and the
+ * grid-scoped keys stood down, and every E2E spec after a `newFile()` with an
+ * edit open inherited it (the real File > New reloads the window, so only the
+ * in-place replacements met it: this module's own newFile/openFileAtPath, the
+ * E2E harness, scripts and calp_checkout). Lowered here, synchronously, before
+ * AFTER_NEW / AFTER_OPEN, whose listeners act on the new document; the React
+ * half (the editor's state) answers {@link DISCARD_EDIT_EVENT}.
+ */
+function discardEditOfReplacedDocument(): void {
+  setCoreCellEditFlag(false);
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(DISCARD_EDIT_EVENT));
+  }
+}
 
 const CALCULA_FILTER = {
   name: 'Calcula Workbook',
@@ -135,39 +157,91 @@ async function confirmLossySave(path: string): Promise<boolean> {
 }
 
 /**
+ * A save whose every REFUSING step has run (see {@link prepareSave}): where it
+ * goes, how it was asked for, and the passphrase it carries.
+ */
+export interface PreparedSave {
+  path: string;
+  /** "save" = the workbook's own path; "saveAs" = a destination was picked. */
+  kind: 'save' | 'saveAs';
+  password?: string;
+}
+
+/**
+ * THE REFUSING HALF of a save (E8). Resolves the destination -- the current
+ * path, or the Save As picker when the workbook has none or `saveAs` is asked
+ * -- then asks the lossy-save consent and the Before-Save guards. Writes
+ * nothing and broadcasts nothing. Null means "not saving": the picker was
+ * cancelled, the lossy warning declined, or a guard refused (the guard's
+ * refusal has already been reported, attributed to its script).
+ *
+ * WHY IT IS ITS OWN STEP. The close prompt's Save must run every step that can
+ * still refuse BEFORE the workbook's teardown (BEFORE_CLOSE unmounts every
+ * script, stops the scheduler, closes the panes): a picker cancelled or a
+ * warning declined after it left the window open over a workbook whose scripts
+ * were gone. The shell prepares, tears down, then writes
+ * ({@link writePreparedSave}); Ctrl+S does the same two halves back to back.
+ */
+export async function prepareSave(
+  options: { password?: string; saveAs?: boolean } = {},
+): Promise<PreparedSave | null> {
+  const currentPath = options.saveAs ? null : await getCurrentFilePath();
+  if (currentPath) {
+    // Same lossy-save consent as Save As. Ctrl+S onto an already-open .xlsx
+    // is the COMMON way to reach a lossy save, not the rare one.
+    if (!(await confirmLossySave(currentPath))) return null;
+    // Cancellable Before-Save. Returning null means "not saved", which every
+    // caller already handles as the user-cancelled case.
+    if (await checkLifecycleGuards('save', { path: currentPath, kind: 'save' })) return null;
+    return { path: currentPath, kind: 'save', password: options.password };
+  }
+
+  const path = await save({
+    filters: [CALCULA_FILTER, XLSX_FILTER, ALL_FILTER],
+    defaultPath: 'Workbook.cala',
+  });
+  if (!path) return null;
+  // Lossy-save consent: .xlsx cannot carry every Calcula feature. Silent
+  // destruction on save is the trust-killer — list what will be lost and
+  // let the user confirm (or cancel and pick .cala).
+  if (!(await confirmLossySave(path))) return null;
+  // Cancellable Before-Save. Guards run BEFORE the BEFORE_SAVE broadcast so a
+  // cancelled save never makes subscribers do save-prep work for a save that
+  // will not happen. checkLifecycleGuards reports the cancellation to the user
+  // (attributed to the script by name) — never a silent no-op. kind:
+  // "saveAs" — the user picked a destination. A Save of a workbook that was
+  // never saved falls through to here, and that IS a Save As (the picker
+  // opened), so the flavour is decided by which branch runs, not by which
+  // command the user clicked.
+  if (await checkLifecycleGuards('save', { path, kind: 'saveAs' })) return null;
+  return { path, kind: 'saveAs', password: options.password };
+}
+
+/**
+ * THE WRITING HALF of a save (E8): BEFORE_SAVE, the write, AFTER_SAVE and the
+ * clean-state announcements. Refuses nothing -- every refusal ran in
+ * {@link prepareSave} -- and throws only when the write itself fails.
+ */
+export async function writePreparedSave(prepared: PreparedSave): Promise<string> {
+  const { path, password } = prepared;
+  emitAppEvent(AppEvents.BEFORE_SAVE, { path });
+  await tracedInvoke('save_file', { path, password });
+  emitAppEvent(AppEvents.AFTER_SAVE, { path });
+  emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: false });
+  emitAppEvent(ENCRYPTION_STATE_CHANGED);
+  updateWindowTitle();
+  return path;
+}
+
+/**
  * Save As. `password` is optional; when omitted the backend falls back to the
  * session passphrase so an encrypted document stays encrypted.
  */
 export async function saveFileAs(password?: string): Promise<string | null> {
   try {
-    const path = await save({
-      filters: [CALCULA_FILTER, XLSX_FILTER, ALL_FILTER],
-      defaultPath: 'Workbook.cala',
-    });
-
-    if (path) {
-      // Lossy-save consent: .xlsx cannot carry every Calcula feature. Silent
-      // destruction on save is the trust-killer — list what will be lost and
-      // let the user confirm (or cancel and pick .cala).
-      if (!(await confirmLossySave(path))) return null;
-      // Cancellable Before-Save. Guards run BEFORE the BEFORE_SAVE broadcast so
-      // a cancelled save never makes subscribers do save-prep work for a save
-      // that will not happen. checkLifecycleGuards reports the cancellation to
-      // the user (attributed to the script by name) — never a silent no-op.
-      // kind: "saveAs" — the user picked a destination. saveFile() falls
-      // through to here when the workbook has never been saved, and that IS a
-      // Save As (the picker opened), so the flavour is decided by which
-      // function runs, not by which one the user clicked.
-      if (await checkLifecycleGuards('save', { path, kind: 'saveAs' })) return null;
-      emitAppEvent(AppEvents.BEFORE_SAVE, { path });
-      await tracedInvoke('save_file', { path, password });
-      emitAppEvent(AppEvents.AFTER_SAVE, { path });
-      emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: false });
-      emitAppEvent(ENCRYPTION_STATE_CHANGED);
-      updateWindowTitle();
-      return path;
-    }
-    return null;
+    const prepared = await prepareSave({ password, saveAs: true });
+    if (prepared === null) return null;
+    return await writePreparedSave(prepared);
   } catch (error) {
     console.error('[FILE] saveFileAs error:', error);
     throw error;
@@ -180,25 +254,9 @@ export async function saveFileAs(password?: string): Promise<string | null> {
  */
 export async function saveFile(password?: string): Promise<string | null> {
   try {
-    const currentPath = await getCurrentFilePath();
-
-    if (currentPath) {
-      // Same lossy-save consent as Save As. Ctrl+S onto an already-open .xlsx
-      // is the COMMON way to reach a lossy save, not the rare one.
-      if (!(await confirmLossySave(currentPath))) return null;
-      // Cancellable Before-Save (see saveFileAs). Returning null means "not
-      // saved", which every caller already handles as the user-cancelled case.
-      if (await checkLifecycleGuards('save', { path: currentPath, kind: 'save' })) return null;
-      emitAppEvent(AppEvents.BEFORE_SAVE, { path: currentPath });
-      await tracedInvoke('save_file', { path: currentPath, password });
-      emitAppEvent(AppEvents.AFTER_SAVE, { path: currentPath });
-      emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: false });
-      emitAppEvent(ENCRYPTION_STATE_CHANGED);
-      updateWindowTitle();
-      return currentPath;
-    }
-
-    return saveFileAs(password);
+    const prepared = await prepareSave({ password });
+    if (prepared === null) return null;
+    return await writePreparedSave(prepared);
   } catch (error) {
     console.error('[FILE] saveFile error:', error);
     throw error;
@@ -252,6 +310,7 @@ export async function openFileAtPath(path: string): Promise<CellData[] | null> {
       if (pendingRemember && password) {
         await keychainSet(path, password);
       }
+      discardEditOfReplacedDocument();
       emitAppEvent(AppEvents.AFTER_OPEN, { path });
       announceBackendStateReplaced();
       emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: false });
@@ -327,6 +386,10 @@ export async function openFileAtPath(path: string): Promise<CellData[] | null> {
  * THIS; none of them writes its own sequence.
  */
 export function announceBackendStateReplaced(): void {
+  // An open Core cell edit belonged to the replaced document (E9). newFile and
+  // openFileAtPath already discarded it before their AFTER_* event; this line
+  // covers every other replacement (calp_checkout). Idempotent.
+  discardEditOfReplacedDocument();
   emitAppEvent(AppEvents.OUTLINE_CHANGED, { command: 'document_replaced' });
   emitAppEvent(AppEvents.HYPERLINKS_CHANGED, { sheetIndex: null });
   emitAppEvent(AppEvents.VALIDATIONS_CHANGED, {});
@@ -350,12 +413,25 @@ export function announceBackendStateReplaced(): void {
   // normalSwitch` window event that SheetTabs emits, which is a different event
   // with a different meaning (a user picked another tab), and this is not one.
   emitAppEvent(AppEvents.SHEET_DISPLAY_FLAGS_CHANGED);
+  // The GRID'S CELL CACHE is replaced too (BUG-0155). GridCanvas re-reads cells
+  // only on `grid:refresh`, a sheet switch, or a scroll past its buffered range,
+  // and none of the events above is one of those -- so after a replacement with
+  // no window reload (`calp_checkout`, and this module's own `newFile` /
+  // `openFileAtPath`, which the E2E harness and scripts drive) the viewport read
+  // as covered and the PREVIOUS document's cells stayed painted. A dedicated
+  // event rather than `grid:refresh`, because a fetch already in flight was
+  // issued against the previous document and must be discarded, not committed:
+  // GridCanvas answers it the way it answers a sheet switch.
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('grid:documentReplaced'));
+  }
 }
 
 export async function newFile(): Promise<void> {
   try {
     emitAppEvent(AppEvents.BEFORE_NEW);
     await tracedInvoke('new_file', {});
+    discardEditOfReplacedDocument();
     emitAppEvent(AppEvents.AFTER_NEW);
     announceBackendStateReplaced();
     emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: false });

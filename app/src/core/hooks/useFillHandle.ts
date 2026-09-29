@@ -13,6 +13,7 @@ import { useCallback, useRef, useState, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
 import { setSelection, scrollBy } from "../state/gridActions";
 import { getCell, getViewportCells, updateCellsBatch, beginUndoTransaction, commitUndoTransaction, cancelUndoTransaction } from "../lib/tauri-api";
+import { ownUndoTransaction, type UndoTransactionCloses } from "../lib/undoTransactionOwnership";
 import { cellEvents, cellToChange } from "../lib/cellEvents";
 import type { Selection, GridConfig } from "../types";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY, calculateVisibleRange } from "../lib/gridRenderer";
@@ -30,6 +31,17 @@ import {
 import { alertAsync } from "../lib/dialogs";
 
 export type { FillDirection } from "../lib/fillEngine";
+
+/**
+ * The closes both fill gestures make, bound to the begin's answer by
+ * ownUndoTransaction: a fill closes ONLY the undo transaction its own begin
+ * OPENED. Inside a script's open batch the begin JOINS, the fill's writes
+ * become part of that batch's step, and the script closes it (wave E, Y7).
+ */
+const UNDO_CLOSES: UndoTransactionCloses = {
+  commitUndoTransaction: (...ticket) => commitUndoTransaction(...ticket),
+  cancelUndoTransaction: (...ticket) => cancelUndoTransaction(...ticket),
+};
 
 /**
  * Fill handle state.
@@ -462,7 +474,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
       }
     }
 
-    await beginUndoTransaction("Fill series");
+    const tx = ownUndoTransaction(await beginUndoTransaction("Fill series"), UNDO_CLOSES);
     try {
       // OPTIMIZATION: Fetch all source cells in a single IPC call
       const sourceCells = await getViewportCells(selMinRow, selMinCol, selMaxRow, selMaxCol);
@@ -627,7 +639,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
           // orphaned transaction instead of forming its own undo step — so the
           // user's next Ctrl+Z reverts an unbounded amount of unrelated work.
           // Sheet protection can now refuse this batch, making that routine.
-          await cancelUndoTransaction().catch(() => {});
+          await tx.cancel().catch(() => {});
           void alertAsync(msg);
           setFillState({ isDragging: false, direction: null, targetRow: 0, targetCol: 0, previewRange: null });
           dragStartRef.current = null;
@@ -659,7 +671,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
         );
       }
 
-      await commitUndoTransaction();
+      await tx.commit();
       console.log("[FillHandle] Fill complete");
 
       // Emit FILL_COMPLETED event for extensions (e.g., sparklines)
@@ -694,7 +706,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
       }
     } catch (error) {
       console.error("[FillHandle] Fill failed:", error);
-      await commitUndoTransaction();
+      await tx.commit();
     }
 
     setFillState({
@@ -781,7 +793,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
 
     console.log("[FillHandle] autoFillToEdge: Filling down to row", edgeRow);
 
-    await beginUndoTransaction("Auto-fill to edge");
+    const tx = ownUndoTransaction(await beginUndoTransaction("Auto-fill to edge"), UNDO_CLOSES);
     try {
       // OPTIMIZATION: Fetch all source cells in a single IPC call
       const sourceCells = await getViewportCells(selMinRow, selMinCol, selMaxRow, selMaxCol);
@@ -855,7 +867,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
           const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
           // Same leak as completeFill above: without this the transaction
           // opened at "Auto-fill to edge" stays open and swallows later edits.
-          await cancelUndoTransaction().catch(() => {});
+          await tx.cancel().catch(() => {});
           void alertAsync(msg);
           return;
         }
@@ -883,7 +895,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
         "down",
       );
 
-      await commitUndoTransaction();
+      await tx.commit();
       console.log("[FillHandle] autoFillToEdge complete");
 
       // Emit FILL_COMPLETED event for extensions (e.g., sparklines)
@@ -914,7 +926,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
       }));
     } catch (error) {
       console.error("[FillHandle] autoFillToEdge failed:", error);
-      await commitUndoTransaction();
+      await tx.commit();
     }
   }, [selection, dispatch]);
 

@@ -135,7 +135,9 @@ export function TimelineFilterSection(): React.ReactElement | null {
 
   const handleClearFilter = async () => {
     if (!timeline) return;
-    await updateTimelineSelectionAsync(timeline.id, null, null);
+    // A USER gesture: a clear that grows a pivot over the user's cells is
+    // asked about once, and a decline takes it back (the review of S2).
+    await updateTimelineSelectionAsync(timeline.id, null, null, { askBeforeOverwrite: true });
     const tl = getTimelineById(timeline.id);
     if (tl) setTimeline(tl);
   };

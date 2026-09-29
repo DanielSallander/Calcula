@@ -61,6 +61,18 @@ describe("pivotSource", () => {
     expect(sourceLabel(src)).toBe("PT (PivotTable, Report)");
   });
 
+  it("reads the backend listing's shape: a sheet per pivot, null when its sheet is unknown", () => {
+    // `get_all_pivot_tables` rows (Rust `PivotTableListing`, camelCase).
+    const listing = [
+      { id: "p1", name: "OnCanvas", sourceRange: "Data!A1:D9", destination: "A1", sheetIndex: 2 },
+      { id: "p2", name: "Stranded", sourceRange: "A1:B2", destination: "C3", sheetIndex: null },
+    ];
+    const [onCanvas, stranded] = listing.map((pv) => pivotSource(pv, ["A"], SHEETS));
+    expect(sourceLabel(onCanvas)).toBe("OnCanvas (PivotTable, Canvas)");
+    expect(stranded.sheetIndex).toBeNull();
+    expect(sourceLabel(stranded)).toBe("Stranded (PivotTable)");
+  });
+
   it("labels a BI pivot as a PivotTable ON a model, never as the model itself", () => {
     const src = pivotSource({ id: "p2", name: "Model" }, ["T.c"], SHEETS, {
       tables: [],

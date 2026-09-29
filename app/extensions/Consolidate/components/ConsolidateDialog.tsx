@@ -7,17 +7,14 @@ import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import {
   getSheets,
-  consolidateData,
   columnToLetter,
   letterToColumn,
-  beginUndoTransaction,
-  commitUndoTransaction,
-  cancelUndoTransaction,
   restoreFocusToGrid,
 } from "@api";
 import type { ConsolidationFunction } from "@api";
 import { CONSOLIDATION_FUNCTIONS } from "../types";
 import type { SourceRangeEntry } from "../types";
+import { consolidateAsOneStep } from "../lib/consolidateAsOneStep";
 
 // ============================================================================
 // Styles (CSS variables from app theme)
@@ -433,9 +430,8 @@ export function ConsolidateDialog(
 
     setIsLoading(true);
     try {
-      await beginUndoTransaction("Data Consolidation");
-
-      const result = await consolidateData({
+      // ONE undo step that closes only what it opened (wave F, Z6).
+      const result = await consolidateAsOneStep({
         function: selectedFunction,
         sourceRanges: sourceRanges.map((r) => ({
           sheetIndex: r.sheetIndex,
@@ -451,8 +447,6 @@ export function ConsolidateDialog(
         useLeftColumn,
       });
 
-      await commitUndoTransaction();
-
       if (!result.success) {
         setValidationError(result.error ?? "Consolidation failed.");
         setIsLoading(false);
@@ -464,9 +458,7 @@ export function ConsolidateDialog(
       restoreFocusToGrid();
       onClose();
     } catch (err) {
-      // Close the transaction opened above — left open, every subsequent edit
-      // silently joins it and collapses into one Ctrl+Z step.
-      try { await cancelUndoTransaction(); } catch { /* already closed */ }
+      // consolidateAsOneStep already closed its own step.
       setValidationError(`Consolidation failed: ${err}`);
     } finally {
       setIsLoading(false);

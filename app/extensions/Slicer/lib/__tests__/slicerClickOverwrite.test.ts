@@ -2,15 +2,15 @@
 // PURPOSE: A slicer CLICK that grows pivots over the user's cells (fix round
 //          5, F6). The backend records the overwritten cells INSIDE the
 //          click's own undo step and names it (`overwriteToken`); the store
-//          then asks ONCE for the whole click, after that step has committed,
+//          then asks ONCE for the whole click, after that step has landed,
 //          naming how many cells -- through `@api/pivotOverwrite`, whose
 //          `confirmAsync` double has the Tauri shape and FAILS CLOSED -- and a
 //          decline hands back exactly the click's tokens, so the backend takes
 //          back THE WHOLE CLICK (the selection with its pivots), never another
-//          step. The undo reconcile never asks; a click that joined someone
-//          else's open transaction never asks either -- including one a
-//          script batch opened on the BACKEND directly, which the frontend's
-//          own flag cannot see (fix round 5 review, finding 3).
+//          step. The click is ONE backend gesture (wave B, BUG-0187) and a
+//          user click is ALWAYS a step of its own -- even while a script batch
+//          is open -- so it always asks; a gesture whose step JOINED a batch
+//          (a script's own call) never does. The undo reconcile never asks.
 //
 //          A DECLINED click resolves only once the store holds the RESTORED
 //          selection, and every user click waits for the reconciles in flight
@@ -40,6 +40,8 @@ const h = vi.hoisted(() => ({
   items: [] as Array<{ value: string; selected: boolean; hasData: boolean }>,
   /** Every selection written, in order. */
   history: [] as Array<string[] | null>,
+  /** Where the backend put the gesture's step. */
+  gestureStep: "pushed" as string,
 }));
 
 // The backend's undo state, which `@api/pivotOverwrite` reads to tell whether
@@ -71,6 +73,7 @@ vi.mock("@api/dialogs", () => ({
 vi.mock("@api/backend", () => ({ undoPivotOverwrite: (...a: unknown[]) => h.undo(...a) }));
 vi.mock("@api/objectGeometry", () => ({
   isUndoTransactionOpen: () => h.txDepth > 0,
+  undoCommitsSettled: () => Promise.resolve(),
   runInUndoTransaction: async (_label: string, fn: () => Promise<unknown>) => {
     const opener = h.txDepth === 0;
     h.txDepth++;
@@ -86,6 +89,17 @@ vi.mock("../slicerFilterBridge", () => ({
   applySlicerFilter: (s: Slicer, options?: unknown) => h.apply(s, options),
   listPivotSlicerItemsFromModel: async () => null,
   reportSlicerFilterFailures: vi.fn(),
+  // The click's ONE backend gesture: the selection written, then its pivot
+  // writes (the `h.apply` doubles note what they overwrote), then its step.
+  runSlicerSelectionGesture: async (sl: Slicer, _actor: string) => {
+    h.order.push("select");
+    h.history.push(sl.selectedItems);
+    h.backend = h.backend.map((b) => (b.id === sl.id ? { ...b, selectedItems: sl.selectedItems } : b));
+    const { createPivotOverwriteTally } = await import("@api/pivotOverwrite");
+    const overwrites = createPivotOverwriteTally();
+    await h.apply(sl, { overwrites });
+    return { step: h.gestureStep, overwrites };
+  },
 }));
 vi.mock("../slicer-api", () => ({
   getAllSlicers: async () => {
@@ -167,6 +181,7 @@ beforeEach(async () => {
   h.ipcDelay = false;
   h.items = [];
   h.history.length = 0;
+  h.gestureStep = "pushed";
   h.confirm.mockReset().mockImplementation(() => Promise.resolve(false));
   h.undo.mockReset().mockImplementation(() =>
     Promise.resolve({ stepsUndone: 1, complete: true, refreshDomains: ["slicer", "pivot"] }),
@@ -189,7 +204,8 @@ describe("a slicer click that grows pivots over the user's cells", () => {
 
     expect(h.confirm).toHaveBeenCalledTimes(1);
     expect(h.confirm.mock.calls[0][0]).toContain("5 cells");
-    expect(h.order).toEqual(["select", "apply", "commit", "ask"]);
+    // One gesture (the selection and its pivots), THEN the question.
+    expect(h.order).toEqual(["select", "apply", "ask"]);
     expect(h.undo).not.toHaveBeenCalled();
     expect(selectionChanged).toHaveLength(1);
   });
@@ -200,7 +216,7 @@ describe("a slicer click that grows pivots over the user's cells", () => {
     await clickSlicerItem("s1", "West", false);
 
     expect(h.undo).toHaveBeenCalledTimes(1);
-    expect(h.undo).toHaveBeenCalledWith("pA", [11, 12], undefined);
+    expect(h.undo).toHaveBeenCalledWith("pA", [11, 12]);
     // What came back is announced as an undo announces it (the store re-reads
     // the restored selection on the "slicer" domain), and the declined
     // selection is never announced as the new one.
@@ -215,7 +231,7 @@ describe("a slicer click that grows pivots over the user's cells", () => {
 
     await clickSlicerItem("s1", "West", false);
 
-    expect(h.undo).toHaveBeenCalledWith("pA", [11, 12], undefined);
+    expect(h.undo).toHaveBeenCalledWith("pA", [11, 12]);
   });
 
   it("a click that overwrote nothing asks nothing", async () => {
@@ -228,9 +244,9 @@ describe("a slicer click that grows pivots over the user's cells", () => {
     expect(selectionChanged).toHaveLength(1);
   });
 
-  it("a selection set INSIDE someone else's open transaction never asks (it cannot take back only its part)", async () => {
+  it("a gesture whose step JOINED a caller's transaction never asks (it cannot take back only its part)", async () => {
     applyThatOverwrites();
-    h.txDepth = 1; // a caller (a script batch) holds the transaction open
+    h.gestureStep = "joined";
 
     await updateSlicerSelectionAsync("s1", ["West"], { askBeforeOverwrite: true });
 
@@ -238,15 +254,16 @@ describe("a slicer click that grows pivots over the user's cells", () => {
     expect(h.undo).not.toHaveBeenCalled();
   });
 
-  it("a click while a script batch holds a BACKEND transaction open never asks (its step is the script's)", async () => {
+  it("a click while a script batch is open is a step of its OWN: it asks, and a decline takes back exactly its tokens", async () => {
     applyThatOverwrites();
-    // `api.beginBatch` went straight to the backend: the frontend flag is clear.
+    // `api.beginBatch` went straight to the backend; the click never joins it
+    // any more (wave B): its step is pushed beside the batch.
     h.backendTxOpen = true;
 
     await clickSlicerItem("s1", "West", false);
 
-    expect(h.confirm).not.toHaveBeenCalled();
-    expect(h.undo).not.toHaveBeenCalled();
+    expect(h.confirm).toHaveBeenCalledTimes(1);
+    expect(h.undo).toHaveBeenCalledWith("pA", [11, 12]);
   });
 
   it("a scripted selection (no user click) never asks", async () => {

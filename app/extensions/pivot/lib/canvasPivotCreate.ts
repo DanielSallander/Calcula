@@ -14,7 +14,8 @@
 //          data. This module says the same things FIRST, in the reader's terms,
 //          so a canvas source is a sentence in the dialog, never a thrown error.
 //
-//          Worksheet mode never calls into this module.
+//          Worksheet mode uses one function here, `resolveWorksheetPivotSource`:
+//          a typed sheet prefix names the source sheet there too (BUG-0149).
 
 import { indexToCol } from "@api";
 import type { CanvasPivotPlacement } from "../../_shared/lib/canvasPivotFrame";
@@ -207,6 +208,78 @@ export async function resolveCanvasPivotSource(
     sourceSheet: sheet.index,
     sourceTableName: table.name,
   };
+}
+
+/** What the WORKSHEET dialog sends for its source, or the sentence to show. */
+export type WorksheetPivotSource =
+  | { ok: true; sourceRange: string; sourceSheet: number | undefined }
+  | { ok: false; message: string };
+
+/**
+ * Resolve the worksheet dialog's source text to its SHEET.
+ *   - "Sheet2!A1:D9": that sheet (case-insensitive, as the backend resolves
+ *     names), refused when no sheet has that name or it is a CANVAS; the range
+ *     is re-qualified with the sheet's own spelling.
+ *   - anything else (a bare range, a table name): `fallbackSheet` -- the sheet
+ *     that was active when the dialog opened, exactly as before.
+ * The create door strips a range's sheet prefix and reads `sourceSheet`, so
+ * sending the dialog-open sheet for a typed `Sheet2!A1:D9` built the pivot
+ * from the WRONG sheet's cells (BUG-0149).
+ */
+export function resolveWorksheetPivotSource(
+  text: string,
+  sheets: readonly CanvasSourceSheet[],
+  fallbackSheet: number | undefined,
+): WorksheetPivotSource {
+  const trimmed = text.trim();
+  const { sheetName, rest } = splitSheetPrefix(trimmed);
+  if (sheetName === null || sheetName === "") {
+    return { ok: true, sourceRange: trimmed, sourceSheet: fallbackSheet };
+  }
+  const wanted = sheetName.toLowerCase();
+  const sheet = sheets.find((s) => s.name.toLowerCase() === wanted);
+  if (!sheet) return { ok: false, message: unknownSourceSheetMessage(sheetName) };
+  if (isCanvas(sheet)) return { ok: false, message: canvasSourceIsCanvasMessage(sheet.name) };
+  return { ok: true, sourceRange: qualifySourceRange(sheet.name, rest), sourceSheet: sheet.index };
+}
+
+/**
+ * True while the worksheet dialog's source text still names the table the
+ * dialog was opened from (Table Design > Summarize with PivotTable), ignoring
+ * case and surrounding space as table names are. Once the text is retyped --
+ * as `Sheet2!A1:D9`, say -- the TEXT is the source and the pivot is not
+ * linked to the table: overwriting it with the table's cells on the
+ * dialog-open sheet while `sourceSheet` came from the typed text sent one
+ * request naming two sources, and the link switched the pivot to the table's
+ * data on its first refresh.
+ */
+export function sourceTextNamesTable(text: string, tableName: string | undefined): boolean {
+  return !!tableName && text.trim().toLowerCase() === tableName.trim().toLowerCase();
+}
+
+/** What the worksheet dialog's EXISTING destination names, or the sentence to show. */
+export type WorksheetPivotDestination =
+  | { ok: true; sheet: CanvasSourceSheet | null }
+  | { ok: false; message: string };
+
+/**
+ * Resolve the worksheet dialog's EXISTING destination ("Sheet2!F1") to its
+ * sheet, ignoring case as the source does. `sheet` is null when the text has
+ * no sheet prefix (the create door then uses the active sheet, the one the
+ * dialog was opened on). A name no sheet answers to is refused: the dialog
+ * matched names exactly and, finding none, sent no sheet at all, so
+ * `sheet2!B3` put the pivot on the dialog-open sheet, over its cells.
+ */
+export function resolveWorksheetPivotDestination(
+  text: string,
+  sheets: readonly CanvasSourceSheet[],
+): WorksheetPivotDestination {
+  const { sheetName } = splitSheetPrefix(text);
+  if (sheetName === null || sheetName === "") return { ok: true, sheet: null };
+  const wanted = sheetName.toLowerCase();
+  const sheet = sheets.find((s) => s.name.toLowerCase() === wanted);
+  if (!sheet) return { ok: false, message: unknownSourceSheetMessage(sheetName) };
+  return { ok: true, sheet };
 }
 
 /** A used-range / current-region answer (the `getUsedRange` / `getCurrentRegion` shape). */

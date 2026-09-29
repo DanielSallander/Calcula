@@ -295,10 +295,10 @@ export function FieldSettingsDialog({
       // used to send a one-entry list, so saving the settings of one row
       // field removed every OTHER row field from the pivot, with its filter
       // (review3 finding 2). Send the whole zone as the definition holds it
-      // NOW -- each field with the items it hides, sent explicitly, because
-      // an absent list clears -- with only this field's settings changed.
-      // (Per-field state the zone listing does not carry -- a sort order, a
-      // grouping -- is still reset by that command; see open items.)
+      // NOW, with only this field's settings changed. Nothing else is sent
+      // per field: the command keeps every setting it is not sent -- the item
+      // filter, sort order, grouping -- since BUG-0184, so an echoed list
+      // could only race a filter changed elsewhere.
       const config = await getPivotFieldConfiguration(pivotId);
       if (!config) {
         throw new Error(`PivotTable ${pivotId} is not on the active sheet`);
@@ -310,13 +310,8 @@ export function FieldSettingsDialog({
       }
       const fields: PivotFieldConfig[] = zone.map((f) =>
         f.sourceIndex === fieldIndex
-          ? {
-              sourceIndex: f.sourceIndex,
-              name: customName || sourceName,
-              hiddenItems: [...(f.hiddenItems ?? [])],
-              showSubtotals,
-            }
-          : { sourceIndex: f.sourceIndex, name: f.name, hiddenItems: [...(f.hiddenItems ?? [])] },
+          ? { sourceIndex: f.sourceIndex, name: customName || sourceName, showSubtotals }
+          : { sourceIndex: f.sourceIndex, name: f.name },
       );
 
       const updateRequest =

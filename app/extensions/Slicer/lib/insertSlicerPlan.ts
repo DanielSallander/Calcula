@@ -74,8 +74,11 @@ export interface TableListing {
 }
 
 /** The slice of a pivot listing this module reads (`getAllPivotTables()`).
- *  `sheetIndex` is optional because the backend's listing does not carry one
- *  today; when a build adds it, labels pick it up with no change here. */
+ *  The backend's listing carries each pivot's `sheetIndex` (Rust
+ *  `PivotTableListing`, open-items 2.af): the sheet its output is on, or
+ *  `null` when its destination names no sheet of the workbook. Typed
+ *  `unknown` and checked, so an older listing without it labels no sheet
+ *  rather than a wrong one. */
 export interface PivotListing {
   id: string;
   name: string;

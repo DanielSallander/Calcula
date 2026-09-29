@@ -32,7 +32,7 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => context.ui.dialogs.unregister("evaluate-formula"));
 
   // 2. Register menu item in Formulas menu
-  registerEvaluateFormulaMenuItem();
+  cleanupFns.push(registerEvaluateFormulaMenuItem());
 
   // 3. Track current selection (for menu item to know active cell)
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {

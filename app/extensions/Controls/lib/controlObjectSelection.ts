@@ -24,8 +24,12 @@ import { emitAppEvent } from "@api/events";
 import type { GridRegion } from "@api/gridOverlays";
 import {
   registerObjectSelectionProvider,
+  type ObjectPasteResult,
+  type ObjectPasteTarget,
+  type ObjectSelectionKey,
   type ObjectSelectionProvider,
 } from "@api/objectSelection";
+import { isControlMenuOpen } from "./controlMenuState";
 import { canvasObjectRef } from "@api/canvasSheet";
 import type { CanvasObjectRef } from "@api";
 import { FLOATING_CONTROL_REGION_TYPE } from "./controlHitTest";
@@ -101,10 +105,31 @@ export function controlLabelOf(region: GridRegion): string | null {
   return CONTROL_TYPE_LABELS.get(type) ?? type.charAt(0).toUpperCase() + type.slice(1);
 }
 
+/** What the provider needs from the extension (index.ts), injected. */
+export interface ControlObjectSelectionDeps {
+  /**
+   * Delete these controls -- each expanded to its group, as Controls' own
+   * Delete does -- resolving when every backend delete has landed. Present =
+   * Controls takes part in a canvas-wide Delete (`deleteSelectedObjects`,
+   * @api/objectSelection).
+   */
+  deleteControls?: (controlIds: readonly string[]) => Promise<void>;
+  /**
+   * Snapshot these controls for the object clipboard, in order; null for one
+   * that is gone (lib/controlClipboard.ts `snapshotControls`). Present
+   * together with `pasteControls` = Controls take part in a canvas
+   * multi-selection's Copy / Paste / Duplicate (@api/objectClipboard), and in
+   * every paste of the object clipboard.
+   */
+  copyControls?: (controlIds: readonly string[]) => Promise<ReadonlyArray<unknown>>;
+  /** Create controls from clipboard snapshots (lib/controlClipboard.ts `pasteControlSnapshots`). */
+  pasteControls?: (snapshots: ReadonlyArray<unknown>, target: ObjectPasteTarget) => Promise<ObjectPasteResult>;
+}
+
 /** The provider object (exported for tests; register it through
  *  `registerControlObjectSelection`). */
-export function createControlSelectionProvider(): ObjectSelectionProvider {
-  return {
+export function createControlSelectionProvider(deps: ControlObjectSelectionDeps = {}): ObjectSelectionProvider {
+  const provider: ObjectSelectionProvider = {
     types: [FLOATING_CONTROL_REGION_TYPE],
 
     isSelected(region: GridRegion): boolean {
@@ -129,6 +154,16 @@ export function createControlSelectionProvider(): ObjectSelectionProvider {
 
     refOf: controlRefOf,
 
+    // The control's right-click menu, while open, owns Escape: it closes
+    // itself. The canvas's Escape binding runs EARLIER (the dispatcher's
+    // window-capture listener) and stops the key, so unless Controls claims
+    // it here, Escape deselected the control and left its menu open
+    // (BUG-0196; lib/controlMenuState.ts). A control has no inner selection,
+    // so nothing else is ever Controls'.
+    ownsKey(key: ObjectSelectionKey): boolean {
+      return key === "Escape" && isControlMenuOpen();
+    },
+
     // Controls hold several (the Ctrl+click set), so a canvas multi-selection
     // keeps every control in it -- and the Controls drag co-moves them. A
     // grouped control joins and leaves together with its group, the rule
@@ -147,9 +182,25 @@ export function createControlSelectionProvider(): ObjectSelectionProvider {
 
     labelOf: controlLabelOf,
   };
+  // A canvas-wide Delete hands Controls its share of the selection.
+  const deleteControls = deps.deleteControls;
+  if (deleteControls) {
+    provider.deleteObjects = (regions: readonly GridRegion[]) => deleteControls(regions.map((r) => r.id));
+  }
+  // The object clipboard (W25) snapshots and re-creates Controls' share of a
+  // copy through Controls' own clipboard code -- the same snapshots Controls'
+  // worksheet Ctrl+C puts there -- so a pasted shape is created exactly as a
+  // duplicated one is.
+  const copyControls = deps.copyControls;
+  const pasteControls = deps.pasteControls;
+  if (copyControls && pasteControls) {
+    provider.copyObjects = (regions: readonly GridRegion[]) => copyControls(regions.map((r) => r.id));
+    provider.pasteObjects = (snapshots, target) => pasteControls(snapshots, target);
+  }
+  return provider;
 }
 
 /** Register the provider; returns the cleanup for the extension's list. */
-export function registerControlObjectSelection(): () => void {
-  return registerObjectSelectionProvider(createControlSelectionProvider());
+export function registerControlObjectSelection(deps: ControlObjectSelectionDeps = {}): () => void {
+  return registerObjectSelectionProvider(createControlSelectionProvider(deps));
 }

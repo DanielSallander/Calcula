@@ -72,6 +72,8 @@ import {
   switchSheetForPointMode,
 } from "@api/externalEdit";
 import { AutocompleteEvents } from "@api/formulaAutocomplete";
+import { setMoveAfterReturn, setMoveDirection } from "@api/editingPreferences";
+import { enterCommitMove } from "@api/externalEdit";
 import {
   openFrEditor,
   commitFrEditor,
@@ -553,5 +555,81 @@ describe("a session object held past its edit", () => {
     } finally {
       off();
     }
+  });
+});
+
+// E4: a floating-grid commit follows the user's Move-after-Return preference
+// (File > Options > Editing), as Core's own in-cell editor does. Every Enter
+// door passed a hard-coded "down" / "up".
+describe("Enter follows the Move-after-Return preference (E4)", () => {
+  afterEach(() => {
+    setMoveAfterReturn(true);
+    setMoveDirection("down");
+  });
+
+  async function enterAt(row: number, col: number, init: KeyboardEventInit = {}): Promise<void> {
+    setLocalSelection({ frId: FR_ID, anchorRow: row, anchorCol: col, endRow: row, endCol: col });
+    openFrEditor(FR_ID, row, col, "7");
+    textarea().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...init }));
+    await flush();
+  }
+
+  it("Move-after-Return OFF: Enter commits and the selection STAYS on the cell", async () => {
+    setMoveAfterReturn(false);
+    await enterAt(1, 1);
+    expect(updateFloatingRangeCell).toHaveBeenCalledWith(FR_ID, 1, 1, "7");
+    expect(getLocalSelection()).toMatchObject({ anchorRow: 1, anchorCol: 1 });
+  });
+
+  it("direction RIGHT: Enter moves right, Shift+Enter moves left", async () => {
+    setMoveDirection("right");
+    await enterAt(1, 1);
+    expect(getLocalSelection()).toMatchObject({ anchorRow: 1, anchorCol: 2 });
+    await enterAt(1, 1, { shiftKey: true });
+    expect(getLocalSelection()).toMatchObject({ anchorRow: 1, anchorCol: 0 });
+  });
+
+  it("control: the default (on, down) still moves down, and Shift+Enter up", async () => {
+    await enterAt(1, 1);
+    expect(getLocalSelection()).toMatchObject({ anchorRow: 2, anchorCol: 1 });
+    await enterAt(1, 1, { shiftKey: true });
+    expect(getLocalSelection()).toMatchObject({ anchorRow: 0, anchorCol: 1 });
+  });
+
+  it("enterCommitMove is the one rule every Enter door asks", () => {
+    expect(enterCommitMove(false)).toBe("down");
+    expect(enterCommitMove(true)).toBe("up");
+    setMoveDirection("left");
+    expect(enterCommitMove(false)).toBe("left");
+    expect(enterCommitMove(true)).toBe("right");
+    setMoveDirection("none");
+    expect(enterCommitMove(false)).toBeNull();
+    setMoveDirection("down");
+    setMoveAfterReturn(false);
+    expect(enterCommitMove(true)).toBeNull();
+  });
+});
+
+// E2: a header pick (whole column/row), the select-all corner and a
+// GETPIVOTDATA pick arrive as already-built, sheet-qualified TEXT
+// (ExternalFormulaTarget.insertText); the range's edit takes it at the caret.
+describe("text picks reach the range's edit (E2)", () => {
+  it("insertText lands at the caret and marks the edit touched", async () => {
+    openFrEditor(FR_ID, 0, 0, "=SUM(");
+    const target = getExternalFormulaTarget()!;
+    expect(target.isExpectingReference()).toBe(true);
+    target.insertText!("Sheet1!C:C");
+    expect(textarea().value).toBe("=SUM(Sheet1!C:C");
+    await commitFrEditor(null);
+    expect(updateFloatingRangeCell).toHaveBeenCalledWith(FR_ID, 0, 0, "=SUM(Sheet1!C:C");
+  });
+
+  it("a stale target's insertText cannot write into a newer edit", async () => {
+    openFrEditor(FR_ID, 0, 0, "=");
+    const stale = getExternalFormulaTarget()!;
+    await commitFrEditor(null);
+    openFrEditor(FR_ID, 1, 1, "=");
+    stale.insertText!("Sheet1!1:1");
+    expect(textarea().value).toBe("=");
   });
 });
