@@ -97,8 +97,9 @@ const TOPICS: Record<string, string> = {
   Unknown names list close matches. The macro's own edits are undoable the
   same way they would be from a button.
   A macro that arrived inside a distributed application is announced BEFORE it
-  runs, and the outcome names its origin. Such code runs sandboxed at the
-  restricted tier, and only if you approved that application's code.`,
+  runs, and the outcome names its origin. Such code runs only if you approved
+  that application's code. Run from here, by you, it may read and change cells
+  on any sheet; started by another script, it may not.`,
   recalc: `recalc:
   recalc                   recalculate the WHOLE workbook (Excel's F9).`,
   ls: `ls:

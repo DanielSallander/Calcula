@@ -626,7 +626,23 @@ function callFire(rt: WorkerRuntime, method: string, args: unknown[]): void {
   });
 }
 
+/**
+ * The refusal a RUN-ONLY realm (owner decision B: an application's macro a
+ * person ran, holding cell access while it runs) gets for a hook or an exposed
+ * method. The host refuses both too (brokerPolicy.ts, host.ts wireWorker); this
+ * makes the refusal the script's own error instead of a silent no-op.
+ */
+function assertNotRunOnly(rt: WorkerRuntime, what: string): void {
+  if (rt.spec.explicitRunCells === true) {
+    throw new Error(
+      `${what}: an application's macro that you run gets cell access only while it runs, ` +
+        "so it cannot leave handlers or exposed methods behind for other code to call.",
+    );
+  }
+}
+
 function registerHook(rt: WorkerRuntime, hook: string, handler: Handler): CleanupFn {
+  assertNotRunOnly(rt, hook);
   let handlers = rt.hooks.get(hook);
   if (!handlers) {
     handlers = [];
@@ -923,6 +939,7 @@ function buildBase(rt: WorkerRuntime): Record<string, unknown> {
     package: packageInfo,
 
     expose(name: string, handler: (...args: unknown[]) => unknown, options?: { public?: boolean }): CleanupFn {
+      assertNotRunOnly(rt, "expose");
       rt.exposed.set(name, handler);
       callFire(rt, "base.expose", [name, options?.public === true]);
       return () => {
@@ -958,7 +975,11 @@ function buildBase(rt: WorkerRuntime): Record<string, unknown> {
       callFire(rt, "base.notify", [message, type]);
     },
 
-    api: spec.tier === "unlocked" ? buildUnlockedShim(rt) : null,
+    // The FULL unlocked shape for an explicit run's realm too (owner decision
+    // B), so a recorded macro runs unchanged and a method outside its cell
+    // access is refused by the broker with a sentence, not a TypeError. The
+    // tier (accessLevel above) stays "restricted"; enforcement is host-side.
+    api: spec.tier === "unlocked" || spec.explicitRunCells === true ? buildUnlockedShim(rt) : null,
 
     // Capabilities are orthogonal to tier — exposed to every script; the broker
     // enforces the grant (and Rust re-checks net.fetch authoritatively). An

@@ -5,7 +5,7 @@
 // disconnected model source, tries saved sign-in silently and only then opens
 // the shared ConnectSourceDialog credentials window (no window.prompt).
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import type { DialogProps, ConnectionInfo, CapabilityId } from "@api";
 import {
   subscribeToApplication,
@@ -40,6 +40,13 @@ import { getConnections, connect, updateConnection } from "../../_shared/lib/bi-
 import { ConnectSourceDialog, type ConnectSourceFields } from "../../_shared/components/ConnectSourceDialog";
 import { pivot } from "@api/pivot";
 import { promptAsync } from "@api/dialogs";
+import {
+  ButtonActionsNotice,
+  ButtonLinksNotice,
+  InlineButtonCodeNotice,
+  describeButtonLinksHeld,
+  describeInlineButtonCodeHeld,
+} from "./ButtonActionsNotice";
 
 /**
  * Short human phrase for a declared capability id (R19), for the review box —
@@ -243,6 +250,21 @@ export function SubscribeDialog({ onClose }: DialogProps) {
   const [showPinControls, setShowPinControls] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Button-cell actions the pull REMOVED (BUG-0260), one sentence each. While
+  // any are listed the dialog stays open after the pull, so the list can be
+  // read rather than flashing past on the auto-close.
+  const [removedButtonActions, setRemovedButtonActions] = useState<string[]>([]);
+  // Button CONTROLS' macro links the pull removed (phase 3 of BUG-0257): the
+  // link named a macro this pull did not bring in. Listed the same way.
+  const [removedButtonLinks, setRemovedButtonLinks] = useState<string[]>([]);
+  // Button CONTROLS' inline code the pull removed (phase 4 of BUG-0257): code
+  // written as a formula, which cannot be approved as exact bytes. Listed the
+  // same way; static inline code is HELD instead and counted in the status.
+  const [removedInlineButtonCode, setRemovedInlineButtonCode] = useState<string[]>([]);
+  const keepOpenRef = useRef(false);
+  const closeSoon = () => {
+    if (!keepOpenRef.current) setTimeout(() => onClose(), 1200);
+  };
   const [inspection, setInspection] = useState<ApplicationInspection | null>(null);
 
   // The applications found in the chosen workspace (D6 — no more blind text entry).
@@ -364,7 +386,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
     setStatus(
       `Connected to ${connName} and refreshed ${refreshed} pivot table(s)`
     );
-    setTimeout(() => onClose(), 1200);
+    closeSoon();
   };
 
   // Explicit fields from the ConnectSourceDialog. Throws to keep that
@@ -394,7 +416,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
     } catch {
       // Refresh is best-effort; the connection itself succeeded.
       setStatus(`Connected to ${connName}`);
-      setTimeout(() => onClose(), 1200);
+      closeSoon();
     }
   };
 
@@ -421,6 +443,18 @@ export function SubscribeDialog({ onClose }: DialogProps) {
         // forgets to ask cannot pin past a conflict.
         acceptNameConflict: inspection?.trustStatus === "notPinnedNameConflict",
       });
+
+      // The button-cell actions the pull removed (BUG-0260), the button
+      // controls' macro links it removed (phase 3 of BUG-0257), and their
+      // inline code it removed (phase 4): shown below the status, and the
+      // dialog stays open so they can be read.
+      const removed = result.buttonActionsRemoved ?? [];
+      const removedLinks = result.buttonLinksRemoved ?? [];
+      const removedInline = result.inlineButtonCodeRemoved ?? [];
+      keepOpenRef.current = removed.length > 0 || removedLinks.length > 0 || removedInline.length > 0;
+      setRemovedButtonActions(removed);
+      setRemovedButtonLinks(removedLinks);
+      setRemovedInlineButtonCode(removedInline);
 
       // Notify the app that sheets have changed so UI refreshes
       emitAppEvent(AppEvents.SHEET_CHANGED, {});
@@ -470,12 +504,20 @@ export function SubscribeDialog({ onClose }: DialogProps) {
         scriptsPulled: result.scriptsPulled,
       } satisfies ApplicationUpdatedPayload);
 
+      // The buttons that kept a link to the application's macros, and the
+      // buttons whose own code arrived held (phase 4), are COUNTED: they are
+      // armed-after-approval, not inert, and the user should know what the
+      // approval screen that follows will switch on.
+      const linksHeld = describeButtonLinksHeld(result.buttonLinksHeld ?? 0);
+      const inlineHeld = describeInlineButtonCodeHeld(result.inlineButtonCodeHeld ?? 0);
       setStatus(
         `Pulled ${result.packageName} v${result.resolvedVersion}: ` +
         `${result.sheetsPulled} sheet(s)` +
         (result.scriptsPulled > 0
           ? `, ${result.scriptsPulled} script(s) (restricted, consent required)`
-          : "")
+          : "") +
+        (linksHeld ? `, ${linksHeld}` : "") +
+        (inlineHeld ? `, ${inlineHeld}` : "")
       );
 
       // Bring the application's model source(s) live: silent saved-sign-in first
@@ -499,12 +541,12 @@ export function SubscribeDialog({ onClose }: DialogProps) {
           }
         } else {
           // Nothing to connect — close after a brief moment.
-          setTimeout(() => onClose(), 1200);
+          closeSoon();
         }
       } catch (err2) {
         // Connection check itself failed — don't fail the pull
         console.warn("[Subscribe] Post-pull connect check failed:", err2);
-        setTimeout(() => onClose(), 1200);
+        closeSoon();
       }
     } catch (err: unknown) {
       setError(String(err));
@@ -608,6 +650,9 @@ export function SubscribeDialog({ onClose }: DialogProps) {
     <>
       {error && <div style={{ color: "var(--text-error, #d33)", marginBottom: "8px", fontSize: "12px" }}>{error}</div>}
       {status && <div style={{ color: "green", marginBottom: "8px", fontSize: "12px" }}>{status}</div>}
+      <ButtonActionsNotice actions={removedButtonActions} mode="removed" testId="subscribe-button-actions-removed" />
+      <ButtonLinksNotice links={removedButtonLinks} testId="subscribe-button-links-removed" />
+      <InlineButtonCodeNotice removed={removedInlineButtonCode} testId="subscribe-inline-button-code-removed" />
     </>
   );
 
@@ -808,9 +853,26 @@ export function SubscribeDialog({ onClose }: DialogProps) {
             {inspection.pivotCount > 0 && <div>{inspection.pivotCount} pivot table(s)</div>}
             {inspection.controlSheetCount > 0 && (
               <div>
-                {inspection.controlSheetCount} sheet(s) with buttons/checkboxes — they
-                arrive with their click actions disarmed; any package scripts are
-                listed above and require consent
+                {/* THE TRUTH ABOUT BUTTONS (BUG-0260). This line used to say every
+                    button "arrives with its click actions disarmed", which was never
+                    true of a button CELL: its action travelled armed. Since phase 3
+                    of BUG-0257 a button CONTROL's link to one of this application's
+                    own macros is kept (held, stamped -- DistributedWiring::LinkLanded),
+                    exactly like a button cell's action: both run only once you approve
+                    this application's code, and the approval screen lists them under
+                    each macro. Since phase 4 a button control's own INLINE code is no
+                    longer removed either: static code arrives held and stamped, and
+                    the Rust button door runs it only after the approval screen has
+                    shown its exact bytes with every place it sits; code written as a
+                    formula cannot be approved and is removed and listed. Pinned by
+                    buttonCellActionsDisclosure.test.tsx. */}
+                {inspection.controlSheetCount} sheet(s) with buttons/checkboxes. A button
+                control&apos;s own code arrives held and runs only after you approve it; the
+                approval screen shows that code with every place it sits. A button control
+                keeps its link, and a button cell its action, only when it runs one of this
+                application&apos;s own macros, which run only once you approve the
+                application&apos;s code. Any other button action, link or code is removed and
+                listed after you subscribe.
               </div>
             )}
             {inspection.paneControlCount > 0 && (

@@ -39,6 +39,31 @@ const EVENT_META: Record<string, { label: string; category: Category }> = {
   writeback_invalidated: { label: "Writeback invalidated", category: "writeback" },
   writeback_reviewed: { label: "Writeback reviewed", category: "writeback" },
   published: { label: "Published", category: "publish" },
+  checked_out: { label: "Opened for editing", category: "publish" },
+  // Always recorded: the refusal names ids somebody else shipped, and a
+  // colleague's module id that blocks every developer who owns the same one is
+  // only visible if the refusals are kept (BUG-0264; the ids are in `extra`).
+  checkout_refused: { label: "Checkout refused", category: "publish" },
+  // Always recorded (the BUG-0257 guardrail: every refusal of application code
+  // leaves a trail). A version refused for WHO SIGNED IT -- at checkout, the
+  // push merge or the hold-back -- names the signer and key fingerprint.
+  signer_refused: { label: "Signer refused", category: "publish" },
+  // A push refused over held or unacknowledged button code, and a click on a
+  // button cell whose action is not its application's to run.
+  button_code_refused: { label: "Button code refused", category: "script" },
+  // Always recorded: this computer was told to forget who created an
+  // application it develops (the developer anchor) -- the one guard a
+  // share-writer cannot forge, dropped on purpose.
+  developer_anchor_forgotten: { label: "Remembered creator forgotten", category: "publish" },
+  // Always recorded (phase 3 of BUG-0257): an application's macro ran, or was
+  // refused before it ran (not approved, the developer's own sheets beside a
+  // working copy, a button the store does not back). `extra` names the
+  // application, the macro and -- when a button asked -- the button.
+  application_code_run: { label: "Application code ran", category: "script" },
+  application_code_refused: { label: "Application code refused", category: "script" },
+  // Always recorded (phase 4): "Make this my own" moved an application's button
+  // code into the user's own slots, where it runs with no approval.
+  button_code_adopted: { label: "Button code made your own", category: "script" },
   // Sandboxed script grid mutations (run_script / notebook / MCP) — always
   // recorded (unified Rust-QuickJS audit trail), so scripts are never invisible.
   script_executed: { label: "Script ran", category: "script" },

@@ -28,6 +28,28 @@ export interface CommandDefinition {
   shortcut?: string;
   isEnabled?: (context: CommandContext) => boolean;
   execute: (context: CommandContext) => void | Promise<void>;
+  /**
+   * OPT IN: a button cell that came with an APPLICATION (a .calp) may run this
+   * command, after the user approves it on the application's approval screen
+   * (plan_M8, BUG-0257 phase 5). Without it such a button's command is removed
+   * when the application arrives and refused at the click; the user's OWN
+   * buttons run any command whatever this says.
+   *
+   * Necessary, not sufficient: the id must ALSO be on Rust's list,
+   * `DISTRIBUTABLE_BUTTON_COMMANDS` (app/src-tauri/src/button_cells.rs), which
+   * decides at admission and again at the click -- a drift test
+   * (src/api/__tests__/buttonCommandListDrift.test.ts) holds the two lists equal,
+   * so flag a command only together with that reviewed owner decision.
+   *
+   * The click reads this off the LIVE registered object, never a remembered
+   * copy: a later registration may shadow an id (`registerCommand` stacks), so
+   * a command registered over this id must opt in itself -- and an application's
+   * button refuses an id that is shadowed at all ({@link ExtensionRegistryService.isCommandShadowed}),
+   * because a shadow could set this flag on itself. A command registered with
+   * this flag is FROZEN by the registry as it is registered: register a fresh
+   * object rather than editing one in place.
+   */
+  distributableTrigger?: true;
 }
 
 export interface CommandContext {
@@ -202,6 +224,18 @@ export interface ExtensionRegistryService {
    *  that was registered), never another extension's of the same id. */
   unregisterCommand(command: CommandDefinition): void;
   getCommand(commandId: string): CommandDefinition | undefined;
+  /**
+   * True when the live registration of `commandId` may not be the original:
+   * a later registration is standing over an earlier one (registerCommand
+   * stacks; the live one is the latest), or the live one is not the FIRST
+   * registration made under the id this session (one taken back and replaced
+   * by a copy), or it carries `distributableTrigger` without having been
+   * registered with it (flagged commands are frozen as they are registered).
+   * A button cell that came with an application refuses a shadowed id even
+   * when the live registration opts in: any main-realm code can take back and
+   * register commands, and such a shadow can set the flag itself.
+   */
+  isCommandShadowed(commandId: string): boolean;
   getAllCommands(): CommandDefinition[];
   registerRibbonTab(tab: RibbonTabDefinition): void;
   unregisterRibbonTab(tabId: string): void;
@@ -300,6 +334,16 @@ export const ExtensionRegistry = {
   },
   getCommand(commandId: string): CommandDefinition | undefined {
     return extensionRegistryService?.getCommand(commandId);
+  },
+  /**
+   * Whether the live registration of `commandId` may not be the original (see
+   * {@link ExtensionRegistryService.isCommandShadowed}). FAILS CLOSED: with no registry service, or one that cannot answer, the id
+   * counts as shadowed -- the one caller that asks (an application's button
+   * command) then refuses rather than run on an answer nobody gave.
+   */
+  isCommandShadowed(commandId: string): boolean {
+    const service = extensionRegistryService as Partial<ExtensionRegistryService> | undefined;
+    return typeof service?.isCommandShadowed === "function" ? service.isCommandShadowed(commandId) : true;
   },
   getAllCommands(): CommandDefinition[] {
     return extensionRegistryService?.getAllCommands() ?? [];

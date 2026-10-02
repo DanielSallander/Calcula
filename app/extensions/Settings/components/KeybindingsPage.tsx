@@ -17,6 +17,15 @@
 //          of running it. Through React's onKeyDown alone they came second to
 //          the window-capture dispatcher: Ctrl+S in the box saved the workbook
 //          and recorded nothing (BUG-0199).
+//
+//          A BARE KEY IS REFUSED (owner call 23). A recorded Space, Enter or
+//          printable character with no modifier shows the refusal sentence of
+//          @api/keybindings bareKeyShortcutRefusal where the conflict warning
+//          goes, and the row offers no Accept / the form's Add stays off: it
+//          would take that key from every text field and from the first
+//          keystroke of every cell entry. The box keeps recording, so the
+//          next combination pressed replaces it. (A key the grid owns, such as
+//          Ctrl+Space, is still only WARNED: the user's binding wins it.)
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { css } from "@emotion/css";
@@ -38,6 +47,7 @@ import {
   revokeScriptKeybinding,
   getAvailableCommands,
   beginShortcutCapture,
+  bareKeyShortcutRefusal,
   type KeyBinding,
 } from "@api/keybindings";
 import { confirmAsync } from "@api/dialogs";
@@ -76,6 +86,9 @@ function KeybindingRow(props: KeybindingRowProps): React.ReactElement {
   const { binding, effectiveCombo, isOverridden, isEditing: editing, onStartEdit, onCancelEdit, onSaveEdit, onReset, onDelete } = props;
   const [capturedCombo, setCapturedCombo] = useState<string | null>(null);
   const [conflicts, setConflicts] = useState<KeyBinding[]>([]);
+  // A bare Space, Enter or printable character is REFUSED (owner call 23):
+  // the sentence takes the conflict warning's place and there is no Accept.
+  const refusal = capturedCombo ? bareKeyShortcutRefusal(capturedCombo) : null;
   const captureRef = useRef<HTMLDivElement>(null);
 
   const handleCapturedKey = useCallback(
@@ -126,12 +139,12 @@ function KeybindingRow(props: KeybindingRowProps): React.ReactElement {
   );
 
   const handleSave = useCallback(() => {
-    if (capturedCombo) {
+    if (capturedCombo && refusal === null) {
       onSaveEdit(capturedCombo);
       setCapturedCombo(null);
       setConflicts([]);
     }
-  }, [capturedCombo, onSaveEdit]);
+  }, [capturedCombo, refusal, onSaveEdit]);
 
   const handleCancel = useCallback(() => {
     setCapturedCombo(null);
@@ -172,15 +185,17 @@ function KeybindingRow(props: KeybindingRowProps): React.ReactElement {
             ? h("span", { style: rowStyles.capturedText }, capturedCombo)
             : h("span", { style: rowStyles.captureHint }, "Press key combination...")}
         </div>,
-        conflicts.length > 0 && h("div", { style: rowStyles.conflictWarning },
-          "Conflict with: " + conflicts.map((c) => c.label).join(", ")
-        ),
+        refusal !== null
+          ? h("div", { style: rowStyles.refusal, role: "alert", "data-shortcut-refusal": "" }, refusal)
+          : conflicts.length > 0 && h("div", { style: rowStyles.conflictWarning },
+            "Conflict with: " + conflicts.map((c) => c.label).join(", ")
+          ),
       ),
       // Source
       h("td", { style: rowStyles.cellSource }, sourceLabel),
       // Actions
       h("td", { style: rowStyles.cellActions },
-        capturedCombo && h(Button, {
+        capturedCombo && refusal === null && h(Button, {
           type: "button",
           variant: "outlined",
           size: "sm",
@@ -298,6 +313,7 @@ export function KeybindingsPage(): React.ReactElement {
   const allBindings = getAllKeybindings().filter(isListedKeybinding);
   const categories = getCategories();
   const addConflicts = addCombo ? findConflicts(addCombo).filter(isListedKeybinding) : [];
+  const addRefusal = addCombo ? bareKeyShortcutRefusal(addCombo) : null;
 
   // Filter
   const normalizedSearch = searchTerm.toLowerCase().trim();
@@ -357,7 +373,7 @@ export function KeybindingsPage(): React.ReactElement {
   }, []);
 
   const handleAddSubmit = useCallback(() => {
-    if (!addCombo || !addCommandId) return;
+    if (!addCombo || !addCommandId || addRefusal !== null) return;
     addCustomKeybinding(addCombo, addCommandId, addLabel || addCommandId, addCategory, addContext);
     setShowAddForm(false);
     setAddLabel("");
@@ -365,7 +381,7 @@ export function KeybindingsPage(): React.ReactElement {
     setAddCombo("");
     setAddCategory("Custom");
     setAddContext("always");
-  }, [addCombo, addCommandId, addLabel, addCategory, addContext]);
+  }, [addCombo, addCommandId, addRefusal, addLabel, addCategory, addContext]);
 
   const handleAddCancel = useCallback(() => {
     setShowAddForm(false);
@@ -466,16 +482,18 @@ export function KeybindingsPage(): React.ReactElement {
           h("option", { value: "editing" }, "When editing"),
         ),
       ),
-      addConflicts.length > 0 && h("div", { style: pageStyles.addFormConflict },
-        "Warning: conflicts with ", addConflicts.map((c) => c.label).join(", "),
-      ),
+      addRefusal !== null
+        ? h("div", { style: pageStyles.addFormConflict, role: "alert", "data-shortcut-refusal": "" }, addRefusal)
+        : addConflicts.length > 0 && h("div", { style: pageStyles.addFormConflict },
+          "Warning: conflicts with ", addConflicts.map((c) => c.label).join(", "),
+        ),
       h("div", { style: pageStyles.addFormActions },
         h(Button, {
           type: "button",
           variant: "outlined",
           size: "sm",
           onClick: handleAddSubmit,
-          disabled: !addCombo || !addCommandId,
+          disabled: !addCombo || !addCommandId || addRefusal !== null,
         }, "Add"),
         h(Button, {
           type: "button",
@@ -761,6 +779,16 @@ const rowStyles: Record<string, React.CSSProperties> = {
     fontSize: 10,
     color: LT.warnFg,
     fontWeight: 500,
+  },
+  /** A refused key (a bare Space, Enter or character): the danger tone, and
+   *  wrapped -- the sentence is longer than the box. */
+  refusal: {
+    marginTop: 4,
+    maxWidth: 260,
+    fontSize: 10,
+    color: LT.dangerFg,
+    fontWeight: 500,
+    whiteSpace: "normal" as const,
   },
   cellSource: {
     padding: "6px 8px",

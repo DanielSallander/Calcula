@@ -8,9 +8,17 @@
 //          in a .calp is listed with its application, choosing it shows what
 //          the button will actually do (run the published code, unchanged, only
 //          once the application is approved), and "Function to call" is
-//          withheld for it — `planStoredModuleRun` refuses that composition at
-//          click time, and a field the planner will refuse is a field that
-//          should not be offered. See extensions/_shared/lib/scriptModuleProvenance.ts.
+//          withheld for it — the Rust button door's planner (`plan_cell_action`,
+//          app/src-tauri/src/scripting/control_action.rs) refuses that
+//          composition at click time, and a field the planner will refuse is a
+//          field that should not be offered. See
+//          extensions/_shared/lib/scriptModuleProvenance.ts.
+//
+//          The same for a COMMAND (plan_M8 S2): under the picker, one sentence
+//          says what the button does once the workbook is published as an
+//          application -- a command whose registration opts in
+//          (`distributableTrigger`) runs for subscribers after they approve
+//          it; any other is removed when the application arrives.
 
 import React, { useEffect, useMemo, useState } from "react";
 import type { DialogProps } from "@api";
@@ -24,6 +32,7 @@ import {
   scriptPickerLabel,
 } from "../../_shared/lib/scriptModuleProvenance";
 import type { ButtonAction } from "../types/button";
+import { describeButtonCommandReach } from "../lib/buttonCommandRun";
 
 const fieldStyle: React.CSSProperties = {
   display: "flex",
@@ -86,6 +95,10 @@ export function ButtonActionDialog({ isOpen, onClose, data }: DialogProps): Reac
   if (!isOpen) return null;
 
   const canApply = kind === "command" ? commandId !== "" : scriptId !== "";
+
+  // The chosen command's LIVE registration -- the object a click reads -- says
+  // what this button does once the workbook is published as an application.
+  const selectedCommand = commandId !== "" ? (commands.find((c) => c.id === commandId) ?? null) : null;
 
   // Derived from the LISTED row, which carries the `sourcePackage` stamp — the
   // one authority on whether this is the user's code or a publisher's.
@@ -166,6 +179,16 @@ export function ButtonActionDialog({ isOpen, onClose, data }: DialogProps): Reac
               </option>
             ))}
           </select>
+          {selectedCommand ? (
+            <span
+              style={noteStyle}
+              data-button-command-reach={
+                selectedCommand.distributableTrigger === true ? "distributable" : "workbookOnly"
+              }
+            >
+              {describeButtonCommandReach(selectedCommand)}
+            </span>
+          ) : null}
         </div>
       ) : (
         <>

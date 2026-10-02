@@ -574,8 +574,10 @@ pub const MAX_DISTRIBUTED_CONTROL_BYTES: usize = 32 * 1024 * 1024;
 /// below are for.
 ///
 /// THE HARM BEING BOUNDED IS PERSISTENCE, NOT EXECUTION. There is no script path
-/// here: `onSelect` is stripped, an SVG in an `<img>` is rendered in secure static
-/// mode, and the CSP has no `data:` in `script-src`. What was unbounded is the
+/// here: `onSelect` is stripped or HELD (at a checkout, and -- static code only --
+/// at a subscribe or refresh, BUG-0257), where only the button door reads it, after
+/// the approval of its exact bytes; an SVG in an `<img>` is rendered in secure static mode, and the CSP
+/// has no `data:` in `script-src`. What was unbounded is the
 /// subscriber's DOCUMENT — the media GC prunes the media store, but an inline
 /// string is not in the media store, it *is* the document, so nothing ever
 /// reclaims it. A durable, silent bloating of the victim's own file, delivered
@@ -664,7 +666,35 @@ pub fn refuse_if_over_aggregate_budget(report: &MediaMigration) -> Result<(), St
 pub fn migrate_distributed_inline_images(
     saved: &[persistence::SavedSheetControls],
 ) -> (Vec<persistence::SavedSheetControls>, MediaStore, MediaMigration) {
-    let mut admitted = crate::controls::sanitize_distributed_controls(saved);
+    let (admitted, bytes, report, _) = migrate_distributed_inline_images_with(
+        saved,
+        &crate::held_button_code::DistributedWiring::Strip,
+    );
+    (admitted, bytes, report)
+}
+
+/// [`migrate_distributed_inline_images`] with the executable-wiring step chosen
+/// by the caller: STRIP for subscribe, refresh and dev pull, HOLD for a
+/// checkout (BUG-0257).
+///
+/// THAT STEP IS THE ONLY ONE THAT VARIES. The image migration, the per-value
+/// clamp and the aggregate budget run identically for every door: a working
+/// copy is where the developer's next SIGNED push comes from, so an admission
+/// exemption for it would be the route by which unvalidated bytes (the BUG-0086
+/// class) reach every subscriber. The clamp CAN clear a held value -- a slot
+/// over 64 KiB, which the local write door would refuse anyway -- and the count
+/// travels back in the report (`oversized`) rather than vanishing; the push
+/// then refuses to publish the emptied slot as the application's code.
+pub fn migrate_distributed_inline_images_with(
+    saved: &[persistence::SavedSheetControls],
+    wiring: &crate::held_button_code::DistributedWiring,
+) -> (
+    Vec<persistence::SavedSheetControls>,
+    MediaStore,
+    MediaMigration,
+    crate::held_button_code::WiringAdmission,
+) {
+    let (mut admitted, wiring_report) = crate::held_button_code::admit_wiring(saved, wiring);
     let mut bytes = MediaStore::new();
     let mut report = MediaMigration::default();
     for sheet_controls in &mut admitted {
@@ -680,7 +710,18 @@ pub fn migrate_distributed_inline_images(
         .iter()
         .map(|sc| serde_json::to_string(&sc.controls).map(|s| s.len()).unwrap_or(0))
         .sum();
-    (admitted, bytes, report)
+    (admitted, bytes, report, wiring_report)
+}
+
+/// What `admit_distributed_controls` hands back: the payload to materialize,
+/// and the two counts a checkout reports instead of dropping them silently.
+#[derive(Debug, Clone)]
+pub struct AdmittedControls {
+    pub controls: Vec<persistence::SavedSheetControls>,
+    /// What happened to the executable wiring (held at a checkout).
+    pub wiring: crate::held_button_code::WiringAdmission,
+    /// Values CLEARED because they were over the per-value bound.
+    pub oversized: usize,
 }
 
 /// Admit a DISTRIBUTED control payload into this document: strip executable
@@ -725,8 +766,13 @@ pub fn admit_distributed_controls(
     state: &AppState,
     effect: &DocumentEffect,
     saved: &[persistence::SavedSheetControls],
-) -> Result<Vec<persistence::SavedSheetControls>, String> {
-    let (admitted, bytes, report) = migrate_distributed_inline_images(saved);
+    // Strip (subscribe, refresh, dev pull) or hold (checkout): the ONE step of
+    // this admission that varies by door. See
+    // `migrate_distributed_inline_images_with`.
+    wiring: &crate::held_button_code::DistributedWiring,
+) -> Result<AdmittedControls, String> {
+    let (admitted, bytes, report, wiring_report) =
+        migrate_distributed_inline_images_with(saved, wiring);
 
     // THE AGGREGATE BUDGET. Enforced here because this is the boundary that HAS an
     // error channel; the decision itself lives in one pure function so the test
@@ -752,7 +798,11 @@ pub fn admit_distributed_controls(
             MAX_DISTRIBUTED_CONTROL_BYTES
         );
     }
-    Ok(admitted)
+    Ok(AdmittedControls {
+        controls: admitted,
+        wiring: wiring_report,
+        oversized: report.oversized,
+    })
 }
 
 /// Validate media arriving from OUTSIDE this machine (a `.calp` package) before

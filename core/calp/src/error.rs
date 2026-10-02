@@ -140,6 +140,12 @@ pub enum CalpError {
     #[error("Another publish to this workspace is in progress — try again in a minute. (Workspace: {workspace})")]
     WorkspaceBusy { workspace: String },
 
+    /// The lockfile could not be created because this computer cannot create
+    /// ANY file in the workspace folder -- told apart from a lock that is merely
+    /// still being released (BUG-0275), which is waited for.
+    #[error("Cannot publish to this workspace: this computer cannot create files in its folder ({reason}). Ask whoever manages the folder for write access, or publish to a workspace you can write to. (Workspace: {workspace})")]
+    WorkspaceNotWritable { workspace: String, reason: String },
+
     // -- Co-publishing (delegation) -----------------------------------------
 
     #[error("The list of who may publish '{package}' cannot be trusted: {reason}. Until that is resolved, only the publisher who created the package can push to it.")]
@@ -147,6 +153,60 @@ pub enum CalpError {
 
     #[error("'{package}' does not list this computer's publisher key among those allowed to publish it. Ask {root_holder} — the publisher who created the package — to add you as a co-publisher, or to push this change for you.")]
     NotAuthorizedPublisher { package: String, root_holder: String },
+
+    // -- Who signed what a DEVELOPER opens (BUG-0262) -------------------------
+    // A working copy is where the next signed push comes from, so the version
+    // it is made from — and every version a push merge brings into it — must be
+    // signed by a publisher the application authorises. The anchor is the ROOT
+    // (the first version, proved by its own signature), never the head or the
+    // predecessor: one or two planted versions would vouch for themselves.
+
+    #[error("Calcula cannot establish who may publish '{package}': {reason}. The first version is the anchor every later signature is checked against, so nothing from '{package}' is opened for editing or merged until the publisher who created it repairs it.")]
+    ApplicationRootUnverifiable { package: String, reason: String },
+
+    #[error("{package}@{version} is signed by {signer_name} (key {signer_fingerprint}), who is not an authorised publisher of '{package}'. Only {root_holder}, who created it, and the co-publishers they list may publish it. Calcula refuses to open or merge this version: anyone who can write to the workspace folder can place a version there, and a valid signature only proves the bytes were not changed, not that an authorised publisher made them.")]
+    SignerNotAuthorized {
+        package: String,
+        version: String,
+        /// The name the version's own (verified) manifest gives. Display only.
+        signer_name: String,
+        /// `signing::key_fingerprint` of the key that actually signed it.
+        signer_fingerprint: String,
+        /// The root publisher, named with their key fingerprint.
+        root_holder: String,
+    },
+
+    // -- What THIS COMPUTER remembers (the developer anchor) -------------------
+    // The root above is PROVED by its own signature but FOUND through the
+    // unsigned version listing, so a share-writer can plant a first version of
+    // their own. The one thing they cannot forge is this machine's memory of the
+    // root it saw before (`developer_anchor.rs`), and of the highest
+    // co-publisher list revision it saw.
+
+    #[error("'{package}' in {scope} does not match what this computer remembers. On {anchored_on} this computer recorded that '{remembered_application}' was created by {remembered_name} (key {remembered_fingerprint}), and the first version of an application can never change. The workspace now names v{claimed_root_version} as its first version, created by {claimed_name} (key {claimed_fingerprint}). Anyone who can write to the workspace folder can place a version there, so Calcula refuses to open, merge or push '{package}' from here. Ask the application's creator which key is genuine. Only if they confirm the new one (for example, because they deleted and re-created the application) should you forget the remembered creator on this computer and try again.")]
+    DeveloperAnchorContradicted {
+        package: String,
+        /// The workspace, in the USER'S spelling.
+        scope: String,
+        /// The application name as it was spelled when it was remembered.
+        remembered_application: String,
+        remembered_name: String,
+        /// `signing::key_fingerprint` of the remembered root key.
+        remembered_fingerprint: String,
+        /// The date the root was remembered (YYYY-MM-DD).
+        anchored_on: String,
+        /// The first version the workspace lists now.
+        claimed_root_version: String,
+        claimed_name: String,
+        /// `signing::key_fingerprint` of the root the workspace names now.
+        claimed_fingerprint: String,
+    },
+
+    #[error("The list of who may publish '{package}' has been rolled back: the workspace serves revision {found}, and this computer has already seen revision {seen}. An older list the creator really signed can be put back together with its signature, and it would authorise again a co-publisher the creator has since removed, so Calcula refuses to open, merge or push '{package}' from here. Ask the application's creator to save the list of who may publish it again (Who can publish this?), which writes a newer revision.")]
+    PublisherListRolledBack { package: String, seen: u64, found: u64 },
+
+    #[error("This computer's record of who created the applications you develop cannot be read ({path}: {reason}). Calcula refuses to open, merge or push applications for editing until it is repaired or removed: an unreadable record must never read as 'nothing remembered'.")]
+    DeveloperAnchorStoreUnreadable { path: String, reason: String },
 
     // -- Environments (the promotion pipeline) ------------------------------
     // Same rule as the push gates above: these strings ARE the user-facing

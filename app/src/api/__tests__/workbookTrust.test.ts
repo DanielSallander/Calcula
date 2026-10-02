@@ -10,12 +10,15 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+import { createConsentStoreDouble } from "./helpers/consentStoreDouble";
+
 // ---------------------------------------------------------------------------
-// Backend double. distributedConsent imports readVirtualFile/createVirtualFile
-// from the SAME module, so the mock must supply all three exports — and
-// createVirtualFile doubles as the tripwire proving trust never touches the
-// workbook's virtual filesystem.
+// Backend double. Two tripwires prove trust never travels with the workbook:
+// createVirtualFile (nothing written into its virtual filesystem) and the
+// shared consent-store double (no `record_script_consent` -- trust is never
+// recorded as a package approval, which Rust keeps inside the workbook).
 // ---------------------------------------------------------------------------
+const consentStore = createConsentStoreDouble();
 const invokeMock = vi.fn();
 const createVirtualFileMock = vi.fn();
 const readVirtualFileMock = vi.fn(async () => {
@@ -40,6 +43,8 @@ interface FakeUnit {
   name: string;
   source: string;
   provenance: "local" | "distributed";
+  /** Set on a MODULE unit (codeInventory, owner decision B follow-up F7). */
+  module?: { runtime: "objectScript" | "workbookScript"; cellAccessWhenYouRunIt: boolean };
 }
 let inventory: FakeUnit[] = [];
 /** When set, the inventory FAILS instead of returning — the case the gate used
@@ -103,7 +108,8 @@ const distributedUnit = (): FakeUnit => ({
 
 /** Route backend calls by command name so tests don't depend on call ORDER. */
 function backend(status: "allowed" | "disabled" | "needsApproval") {
-  invokeMock.mockImplementation(async (cmd: string) => {
+  invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+    if (consentStore.handles(cmd)) return consentStore.invoke(cmd, args);
     if (cmd === "script_execution_status") return status;
     return undefined;
   });
@@ -113,6 +119,7 @@ beforeEach(() => {
   localStorage.clear();
   invokeMock.mockReset();
   createVirtualFileMock.mockReset();
+  consentStore.reset();
   currentPath = "C:\\Books\\Q4 Report.cala";
   inventory = [localUnit(SCRIPT_SRC)];
   inventoryError = null;
@@ -166,6 +173,7 @@ describe("trust persists across a restart", () => {
   it("trust is stored ONLY on this machine — never written into the workbook", async () => {
     await trustCurrentWorkbook();
     expect(createVirtualFileMock).not.toHaveBeenCalled();
+    expect(consentStore.requests).toEqual([]);
     // and it really is in localStorage, the host-side store
     expect(localStorage.getItem("calcula.scriptTrust.v1")).toContain(KEY);
   });
@@ -344,6 +352,30 @@ describe("revoke", () => {
 });
 
 // ===========================================================================
+// A MODULE IS KEYED BY THE MODULE STORE, WHATEVER SURFACE IT RUNS ON (owner
+// decision B, follow-up F7). A macro written as an object script is listed on the
+// object-script surface now; keyed by that surface, a recorded macro and an
+// object script sharing an id would collapse into one trusted entry.
+// SABOTAGE: drop the `u.module ?` branch in collectLocalWorkbookScripts -> the
+// two entries share the id "object-script:shared-id".
+describe("a macro written as an object script keeps its module trust id", () => {
+  it("is keyed one-off-script:<id>, apart from an object script of the same id", async () => {
+    inventory = [
+      { surfaceId: "object-script", id: "shared-id", name: "Button", source: "function setup(){}", provenance: "local" },
+      {
+        surfaceId: "object-script",
+        id: "shared-id",
+        name: "Recorded",
+        source: "function setup(context){}",
+        provenance: "local",
+        module: { runtime: "objectScript", cellAccessWhenYouRunIt: false },
+      },
+    ];
+    const collected = await collectLocalWorkbookScripts();
+    expect(collected.map((s) => s.id)).toEqual(["object-script:shared-id", "one-off-script:shared-id"]);
+  });
+});
+
 describe("distributed (.calp) code is unaffected", () => {
   it("is excluded from the trusted set entirely", async () => {
     inventory = [localUnit(SCRIPT_SRC), distributedUnit()];
@@ -372,6 +404,8 @@ describe("distributed (.calp) code is unaffected", () => {
     inventory = [localUnit(SCRIPT_SRC), distributedUnit()];
     await trustCurrentWorkbook();
     expect(createVirtualFileMock).not.toHaveBeenCalled();
+    expect(consentStore.requests, "trust was recorded as a package approval").toEqual([]);
+    expect(invokeMock).not.toHaveBeenCalledWith("record_script_consent", expect.anything());
   });
 });
 

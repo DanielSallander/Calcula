@@ -21,6 +21,15 @@
 //          word OLDER, and a version list restricted to what this environment
 //          has actually held. Offering "any older version" would be offering an
 //          untested promotion wearing a rollback's clothes.
+//
+//          THE CODE COMES FIRST (plan_M8 S5). Before any cell, the dialog says
+//          which macros, scripts, functions, notebooks, buttons and validators
+//          change for everyone in the environment, and whether they will be
+//          asked to approve the application's code again -- on a FIRST
+//          promotion too, where every piece of code is new and there used to be
+//          nothing to read at all. The confirm names the same changes. A
+//          comparison that fails is SAID, in the dialog and in the confirm, and
+//          never blocks the promotion.
 
 import React, { useCallback, useEffect, useState } from "react";
 import type { DialogProps } from "@api";
@@ -40,6 +49,14 @@ import {
 import { confirmAsync } from "@api/dialogs";
 import { useDialogWindow } from "@api/dialogWindow";
 import { VersionDiffView } from "./VersionDiffView";
+import { PromotionCodeSummary } from "./PromotionCodeSummary";
+import {
+  PROMOTION_CODE_LOADING,
+  promotionCodeConfirm,
+  promotionCodeFailed,
+  promotionCodeFromImpact,
+  type PromotionCodeState,
+} from "../lib/promotionCode";
 import {
   describePromotion,
   isRollback,
@@ -115,6 +132,14 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
   const [impact, setImpact] = useState<string>("");
 
   /**
+   * What this promotion does to the application's CODE, from the same impact
+   * read. `null` while there is nothing to move. A rejected read is a
+   * `failed` state that says why -- it used to be swallowed, and a summary
+   * that vanishes on failure reads exactly like "no code changes".
+   */
+  const [code, setCode] = useState<PromotionCodeState | null>(null);
+
+  /**
    * EVERY SHOW STARTS CLEAN.
    *
    * `DialogContainer` keys by dialog id, so opening this for `prod` right after
@@ -126,6 +151,7 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
   useEffect(() => {
     setInfo(null);
     setImpact("");
+    setCode(null);
     setResult(null);
     setError(null);
     setLoadError(null);
@@ -200,24 +226,26 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
     }
   }, [req?.mode, chosenVersion, candidates]);
 
-  // The diff every subscriber of THIS environment will experience.
+  // The code summary, the writeback report and the diff every subscriber of
+  // THIS environment will experience.
   useEffect(() => {
-    if (!req || !currentVersion || !toVersion || currentVersion === toVersion) {
+    if (!req || !toVersion || currentVersion === toVersion) {
       setDiff(null);
       setDiffError(null);
       // AND THE IMPACT BANNER. Without this a "nothing to move" state rendered
       // under a "Data already collected" warning left over from the previous
       // target, which is a warning about a promotion that is not happening.
       setImpact("");
+      setCode(null);
       return;
     }
     let cancelled = false;
-    setDiffing(true);
-    setDiffError(null);
     setDrilled({});
     setImpact("");
-    // Best effort and independent of the cell diff: an application with no
-    // writeback answers empty, and a failure here must not hide the diff.
+    // THE IMPACT IS READ ON A FIRST PROMOTION TOO. It carries the code summary,
+    // and an environment with no version is exactly where every piece of the
+    // application's code reaches its subscribers for the first time.
+    setCode(PROMOTION_CODE_LOADING);
     void promotionImpact({
       registryPath: req.registryPath,
       packageName: req.packageName,
@@ -225,9 +253,27 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
       version: toVersion,
     })
       .then((r) => {
-        if (!cancelled) setImpact(r.writebackReport);
+        if (cancelled) return;
+        setImpact(r.writebackReport);
+        setCode(promotionCodeFromImpact(r));
       })
-      .catch(() => undefined);
+      .catch((e: unknown) => {
+        // NEVER SWALLOWED. The writeback banner stays empty (there is nothing
+        // to say about it), but the code summary says the comparison failed,
+        // and so does the confirm. Promote stays available.
+        if (!cancelled) setCode(promotionCodeFailed(e));
+      });
+    // The CELL diff needs a version on both sides; a first promotion has none.
+    if (!currentVersion) {
+      setDiff(null);
+      setDiffError(null);
+      setDiffing(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    setDiffing(true);
+    setDiffError(null);
     (async () => {
       try {
         const d = await diffVersions({
@@ -247,7 +293,7 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [req?.registryPath, req?.packageName, currentVersion, toVersion]);
+  }, [req?.registryPath, req?.packageName, req?.environment, currentVersion, toVersion]);
 
   const handleDrillDown = async (sheetId: string) => {
     if (!req || !currentVersion || !toVersion || drilled[sheetId]) return;
@@ -300,6 +346,9 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
           sourceLabel: rollbackMode ? `${target.name}'s own history` : source.label,
           // The DIRECTION, so the confirm says OLDER exactly when the move is.
           mode: movesBackwards ? "rollback" : "promote",
+          // WHAT CODE CHANGES, named -- or that the comparison failed, or had
+          // not finished. Never silence.
+          code: promotionCodeConfirm(code ?? PROMOTION_CODE_LOADING),
         });
     // Fails CLOSED: a dialog that cannot be shown is a refusal, never consent.
     const ok = await confirmAsync(confirmText.message, {
@@ -517,6 +566,16 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
                   it never ran would be a new, untested promotion, not a rollback.
                 </div>
               </div>
+            )}
+
+            {/* THE CODE, FIRST. Not in a repair: the version does not change. */}
+            {!repairMode && code && toVersion && (
+              <PromotionCodeSummary
+                state={code}
+                environment={target.name}
+                firstPromotion={!currentVersion}
+                toVersion={toVersion}
+              />
             )}
 
             {/* THE WARNING FOLLOWS THE MOVE, not the button. A "Promote →" that

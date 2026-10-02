@@ -55,6 +55,11 @@ class ExtensionRegistryImpl {
    *  first. The live one is in `commands`; when its owner takes it back, the
    *  most recent one still standing under it is live again. */
   private shadowedCommands: Map<string, Command[]> = new Map();
+  /** The FIRST registration ever made under each id this session. Never
+   *  cleared by unregisterCommand -- a tombstone -- so taking a command back
+   *  and registering a copy over its id cannot make the copy read as the
+   *  original (see isShadowed). */
+  private firstRegistrations: Map<string, Command> = new Map();
   private ribbonTabs: Map<string, RibbonTabDefinition> = new Map();
   private ribbonGroups: Map<string, RibbonGroupDefinition> = new Map();
   private addins: Map<string, AddInManifest> = new Map();
@@ -121,6 +126,12 @@ class ExtensionRegistryImpl {
   registerCommand(command: Command): void {
     const live = this.commands.get(command.id);
     if (live === command) return; // the same registration again: nothing to stack
+    // A command that OPTS IN to running from an application's button is frozen
+    // as it is registered: the page judges the live object at the click and
+    // then runs that object, so nothing may swap its `execute` (or its flag, or
+    // its `isEnabled`) in between, or after the judgement was made once.
+    if (command.distributableTrigger === true && !Object.isFrozen(command)) Object.freeze(command);
+    if (!this.firstRegistrations.has(command.id)) this.firstRegistrations.set(command.id, command);
     if (live) {
       console.warn(`[ExtensionRegistry] Command "${command.id}" already registered, overwriting.`);
       const shadowed = this.shadowedCommands.get(command.id) ?? [];
@@ -158,6 +169,33 @@ class ExtensionRegistryImpl {
 
   getCommand(commandId: string): Command | undefined {
     return this.commands.get(commandId);
+  }
+
+  /**
+   * True when the live registration of `commandId` may not be the one the
+   * application's button command was approved for. A button cell that came
+   * with an application refuses such an id (plan_M8 S2): the live-flag read
+   * alone cannot tell Calcula's own opted-in command from a registration laid
+   * over it that set `distributableTrigger` itself. It is shadowed when
+   *   - a registration it overwrote is still standing under it;
+   *   - it is not the FIRST registration ever made under the id this session
+   *     (the tombstone): `window.__CALCULA_EXTENSION_REGISTRY__` hands
+   *     getCommand, unregisterCommand and registerCommand to any main-realm
+   *     code, which could take the original back and register a copy with its
+   *     own `execute` -- the stack alone would then be empty again. The price:
+   *     an extension that is turned off and on again in one session registers
+   *     new objects, and its commands stay refused from an application's
+   *     buttons until the next start -- closed, never open;
+   *   - it carries the flag but is not frozen: every flagged command is frozen
+   *     as it is registered, so an unfrozen one had the flag set on it in place
+   *     afterwards.
+   */
+  isShadowed(commandId: string): boolean {
+    if ((this.shadowedCommands.get(commandId)?.length ?? 0) > 0) return true;
+    const live = this.commands.get(commandId);
+    if (!live) return false;
+    if (this.firstRegistrations.get(commandId) !== live) return true;
+    return live.distributableTrigger === true && !Object.isFrozen(live);
   }
 
   getAllCommands(): Command[] {
@@ -323,6 +361,7 @@ class ExtensionRegistryImpl {
   clear(): void {
     this.commands.clear();
     this.shadowedCommands.clear();
+    this.firstRegistrations.clear();
     this.ribbonTabs.clear();
     this.ribbonGroups.clear();
     this.addins.clear();

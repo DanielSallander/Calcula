@@ -114,6 +114,14 @@ export interface MountSpec {
   packageInfo?: MountPackageInfo;
   /** Set ONLY for a mount the user opened a debug session on. */
   debug?: DebugSpec;
+  /**
+   * Set ONLY on the realm of an explicit, person-started run of an approved
+   * application macro (owner decision B). SHIM SHAPING ONLY: `context.api`
+   * exists (the tier stays "restricted"), and hooks and `expose` throw. The
+   * broker enforces the grant against the host-side handle (brokerPolicy.ts),
+   * never against this field.
+   */
+  explicitRunCells?: true;
   /** Mirror seeds for sync getters (workbook/shape/panel props, slicer selection). */
   snapshot: {
     properties?: Record<string, unknown>;

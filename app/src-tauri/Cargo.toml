@@ -64,6 +64,11 @@ rustc-hash = "2"
 # The on-board model is downloaded on first use and refused unless its sha256
 # is the pinned one (ai/builtin_model.rs). Already in the lockfile via `calp`.
 sha2 = "0.10"
+# Approvals of distributed code are sealed to this computer (consent_seal.rs):
+# HMAC-SHA256 under a 32-byte key minted from the OS RNG. Both are already in
+# the lockfile (hmac 0.12.1, rand_core 0.6.4 via `calp` / `calcula-crypto`).
+hmac = "0.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
 # JobObjects + Threading: the bundled inference runtime is a child process held
 # in a job object with KILL_ON_JOB_CLOSE, so it cannot outlive the app
 # (ai/runtime.rs). Threading is needed because the extended limit struct

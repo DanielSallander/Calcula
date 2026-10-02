@@ -14,6 +14,13 @@
 //          active cell, hidden under the floating grid. Precedence: a Core edit >
 //          an external session > a chart SERIES formula > a selected external
 //          cell > the Core selection.
+// FIX (BUG-0270 review): while an OBJECT holds the selection (a slicer, a
+//          timeline, a chart, a shape, a floating grid selected whole --
+//          @api/selectionOwner), Core's active cell is hidden behind it. The
+//          bar showed that cell and, on focus, opened an edit of it: Enter
+//          wrote the cell behind the slicer. It now shows nothing, is
+//          read-only, and a focus refuses with the owner's sentence (Excel
+//          greys the bar out while a slicer or a chart is selected).
 
 import React, { useCallback, useRef, useEffect, useSyncExternalStore } from "react";
 import { useGridContext, getCell, getMergeInfo, isSheetProtected, getCellProtection, checkRangeGuards, getSpillRanges } from "../../api";
@@ -33,6 +40,7 @@ import { parseFormulaReferences } from "../../core/lib/formulaRefParser";
 import { formulaA1ToR1C1 } from "../../core/lib/r1c1";
 import { setFormulaReferences, clearFormulaReferences } from "../../core/state/gridActions";
 import { isFormulaAutocompleteVisible, AutocompleteEvents } from "../../api/formulaAutocomplete";
+import { isSelectionOwned, onSelectionOwnershipChanged, refuseIfSelectionOwned } from "../../api/selectionOwner";
 import { AppEvents } from "../../api/events";
 import { FORMULA_BAR_DEFAULT_EXPANDED_HEIGHT } from "../../core/types";
 import * as S from './FormulaInput.styles';
@@ -47,6 +55,11 @@ type FormulaEditorElement = HTMLInputElement | HTMLTextAreaElement;
 
 /** "No external source" -- also what a CORE edit reads as: a Core edit wins over everything. */
 const NO_SOURCE: FormulaBarSource = Object.freeze({ kind: "none" as const });
+
+/** Re-render when an object starts or stops holding the selection (@api/selectionOwner). */
+function subscribeSelectionOwnership(onChange: () => void): () => void {
+  return onSelectionOwnershipChanged(() => onChange());
+}
 
 /** Whether focus has fallen to nowhere, or to the grid (a reference pick took it there). */
 function focusIsLostToGrid(): boolean {
@@ -103,12 +116,19 @@ export function FormulaInput({
   // which left the grid's and the floating grid's keyboards dead).
   const nothingToEdit =
     !editing && ext.kind === "none" && !state.selection && state.surface === "canvas";
+  // An OBJECT holds the selection (BUG-0270 review): Core's active cell is
+  // hidden behind it, so the bar shows nothing and edits nothing -- a chart
+  // SERIES formula excepted, which the bar shows read-only as before.
+  const selectionOwned = useSyncExternalStore(subscribeSelectionOwnership, isSelectionOwned);
+  const objectHoldsSelection =
+    !editing && ext.kind === "none" && chartSeriesFormula === null && selectionOwned;
   const shownValue =
     editing ? displayValue
     : ext.kind === "session" ? ext.session.getText()
     : chartSeriesFormula !== null ? displayValue
     // content null = the read is in flight: show nothing, never another cell's text.
     : ext.kind === "cell" ? (ext.cell.content ?? "")
+    : objectHoldsSelection ? ""
     : displayValue;
 
   /**
@@ -492,6 +512,22 @@ export function FormulaInput({
         setIsFocused(true);
         return;
       }
+      // An OBJECT holds the selection (a slicer, a chart, a shape, a floating
+      // grid selected whole): Core's active cell is hidden behind it, and the
+      // Core branch below would open an edit of THAT cell -- Enter then wrote
+      // the user's entry into the cell behind the slicer (BUG-0270 review).
+      // Asked at the moment of focus, never cached.
+      if (src.kind === "none" && isSelectionOwned()) {
+        if (chartSeriesFormula !== null) {
+          // A chart SERIES formula, shown read-only: the bar may hold the
+          // focus (to select and copy it), and opens nothing.
+          setIsFocused(true);
+          return;
+        }
+        inputRef.current?.blur();
+        refuseIfSelectionOwned("Edit Cell");
+        return;
+      }
     }
 
     // Block editing in spill ref cells (non-origin spill cells are read-only)
@@ -767,7 +803,7 @@ export function FormulaInput({
   const isReadOnly =
     !editing && ext.kind === "session" ? false
     : !editing && ext.kind === "cell" && chartSeriesFormula === null ? ext.cell.readOnly
-    : nothingToEdit || isProtectedCell || chartSeriesFormula !== null || isSpillRef;
+    : nothingToEdit || objectHoldsSelection || isProtectedCell || chartSeriesFormula !== null || isSpillRef;
 
   /**
    * One ref for two element types. A callback ref takes the union without the

@@ -17,7 +17,7 @@ use windows::core::PWSTR;
 const TARGET_PREFIX: &str = "Calcula:";
 
 /// Build a credential target name from server + database.
-fn make_target(server: &str, database: &str) -> String {
+pub(crate) fn make_target(server: &str, database: &str) -> String {
     format!("{}{}|{}", TARGET_PREFIX, server.to_lowercase(), database.to_lowercase())
 }
 

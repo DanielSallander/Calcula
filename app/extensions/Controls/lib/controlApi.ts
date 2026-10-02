@@ -3,6 +3,7 @@
 // CONTEXT: Uses the API facade (src/api/backend.ts) for sandboxed backend access.
 
 import { controlsBackend } from "./controlsBackend";
+import { trackControlGeometryWrite } from "./geometryWriteOrder";
 import type { ControlMetadata, ControlEntry, ControlGeometryChange } from "./types";
 
 // ============================================================================
@@ -43,6 +44,63 @@ export async function setControlProperty(
   });
 }
 
+/**
+ * "Remove the application's code" (BUG-0257): discard a working copy button's
+ * HELD code -- both held slots and the stamp -- as ONE undoable "Change button
+ * code" step, leaving the button with no code. Call it only after the held code
+ * has been SHOWN and the author confirmed (`requestHeldRemoval`): the backend
+ * treats an empty code write as the tab-through no-op unless this flag says the
+ * removal was asked for. Without it a developer could not remove an application
+ * button's action at all -- the next push restored it.
+ */
+export async function removeApplicationButtonCode(
+  sheetIndex: number,
+  row: number,
+  col: number,
+  controlType: string,
+): Promise<ControlMetadata> {
+  return controlsBackend.invoke<ControlMetadata>("set_control_property", {
+    sheetIndex,
+    row,
+    col,
+    controlType,
+    propertyName: "onSelect",
+    valueType: "static",
+    value: "",
+    replaceHeld: true,
+  });
+}
+
+/**
+ * "Make this my own" (phase 4 of BUG-0257): MOVE a button's held application
+ * code into its live slots, so it becomes the author's own code -- the one way
+ * an application's button code becomes code of the user's own. Rust
+ * (`controls::adopt_held_button_code`) does it as ONE undoable step ("Make
+ * button code my own"), always audited (`button_code_adopted`).
+ *
+ * `shownOnSelect` / `shownMacroRef` are EXACTLY the texts the confirm showed
+ * (null for a slot it did not show), never a fresh read: Rust compares them with
+ * what the button holds under the same lock as the move, and refuses with
+ * nothing written when the code changed after it was shown. Refused too when
+ * nothing is held, the control is not a button, or the button already runs code
+ * of the author's own. Main window only; `codeExecution` for everyone else.
+ */
+export async function adoptHeldButtonCode(
+  sheetIndex: number,
+  row: number,
+  col: number,
+  shownOnSelect: string | null,
+  shownMacroRef: string | null,
+): Promise<ControlMetadata> {
+  return controlsBackend.invoke<ControlMetadata>("adopt_held_button_code", {
+    sheetIndex,
+    row,
+    col,
+    shownOnSelect,
+    shownMacroRef,
+  });
+}
+
 /** Set the full control metadata for a cell (replaces existing). */
 export async function setControlMetadata(
   sheetIndex: number,
@@ -55,6 +113,36 @@ export async function setControlMetadata(
     row,
     col,
     metadata,
+  });
+}
+
+/**
+ * MOVE a control to another anchor cell on the same sheet, with every property
+ * it has, as ONE undoable step ("Move control"), writing `overrides` over it in
+ * the same step.
+ *
+ * Not `setControlMetadata` + `removeControlMetadata`: the metadata door strips
+ * a button's HELD code (it is the paste door, and a copy is the author's own),
+ * so re-creating a working copy's button at a new cell lost its application's
+ * code, and the next push published the button empty (BUG-0257). `overrides`
+ * may not name a code key. Refused, with nothing written, when another control
+ * already sits at the target.
+ */
+export async function moveControl(
+  sheetIndex: number,
+  fromRow: number,
+  fromCol: number,
+  toRow: number,
+  toCol: number,
+  overrides: Record<string, ControlMetadata["properties"][string]> = {},
+): Promise<ControlMetadata> {
+  return controlsBackend.invoke<ControlMetadata>("move_control", {
+    sheetIndex,
+    fromRow,
+    fromCol,
+    toRow,
+    toCol,
+    properties: overrides,
   });
 }
 
@@ -80,11 +168,20 @@ export async function removeControlMetadata(
  * malformed, names a control that does not exist, or targets a protected sheet
  * that does not allow editing objects. Resolves to how many controls actually
  * changed (0 = nothing to do: no dirty flag, no undo step).
+ *
+ * The write is TRACKED from the moment it is issued (lib/geometryWriteOrder.ts):
+ * a renderer's property read of these controls waits for it, and a read that
+ * was already on its way is not written back over the new geometry (BUG-0268).
+ * Every geometry persist of this extension comes through here, so none can
+ * skip that ordering.
  */
 export async function setControlGeometry(
   changes: ControlGeometryChange[],
 ): Promise<number> {
-  return controlsBackend.invoke<number>("set_control_geometry", { changes });
+  return trackControlGeometryWrite(
+    changes,
+    controlsBackend.invoke<number>("set_control_geometry", { changes }),
+  );
 }
 
 /** Get all controls for a specific sheet. */

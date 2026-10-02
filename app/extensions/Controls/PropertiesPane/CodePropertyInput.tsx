@@ -144,12 +144,13 @@ export function sanitizeScriptName(name: string): string {
  * Pure, so the provenance a row shows can be pinned without driving the
  * textarea: a distributed module's row names its application and describes the
  * terms (published code, unchanged, only once approved) that the `Name()` it
- * inserts will run under — `planInlineButtonRun` runs exactly that stored
+ * inserts will run under — the Rust button door's planner (`plan_own_inline`,
+ * app/src-tauri/src/scripting/control_action.rs) runs exactly that stored
  * source and refuses everything else.
  */
 export function buildScriptSuggestions(scripts: ScriptPickerEntry[]): AutocompleteSuggestion[] {
-  // The rows must describe what the inserted `Name()` will DO, and the planner
-  // (`planInlineButtonRun`) resolves a bare `Name()` by name with local-wins and
+  // The rows must describe what the inserted `Name()` will DO, and the door's
+  // planner (`plan_own_inline`) resolves a bare `Name()` by name with local-wins and
   // refuses a name two applications answer to. So: a distributed row whose
   // identifier a local module also answers to is NOT offered — inserting it
   // would run the user's own module while the row promised the publisher's —

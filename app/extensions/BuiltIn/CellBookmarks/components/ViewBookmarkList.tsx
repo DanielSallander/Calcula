@@ -176,7 +176,8 @@ export const ViewBookmarkList: React.FC = () => {
   }, [refresh]);
 
   const handleActivate = async (vb: ViewBookmark) => {
-    const success = await activateViewBookmark(vb.id);
+    // The user clicked it in the list: a person's activation.
+    const success = await activateViewBookmark(vb.id, "person");
     if (success) {
       showToast(`View "${vb.label}" activated`, { variant: "success" });
     }

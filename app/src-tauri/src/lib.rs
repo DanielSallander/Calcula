@@ -116,6 +116,15 @@ pub mod consolidate;
 pub mod status_bar;
 pub mod computed_properties;
 pub mod controls;
+/// The held compartment for an application's button code in a working copy
+/// (BUG-0257): checkout holds it inert, a push restores it after matching the
+/// signed base.
+pub mod held_button_code;
+/// Button CELLS from an application (BUG-0260): stamped with it at every door,
+/// a script action kept only when it names a macro the pull applied, the rest
+/// held at a checkout (restored at push after matching the signed base) or
+/// removed with a notice.
+pub mod button_cells;
 pub mod media;
 pub mod cell_types;
 pub mod cell_behaviors;
@@ -136,7 +145,16 @@ pub mod chart_commands;
 pub mod sparkline_commands;
 pub mod json_view;
 pub mod r1c1;
+/// Where the per-user profile lives, and why a test never reaches the real one.
+mod profile_dir;
+/// Approvals of distributed code, sealed to this computer: the key, the sealed
+/// writer (`record_script_consent`) and the verified reader every gate uses.
+pub mod consent_seal;
 pub mod calp_commands;
+pub mod calp_push_scope;
+/// Checkout refuses an application whose macro, notebook or defined name has the
+/// same identity as one the workbook already holds (BUG-0264).
+pub mod checkout_collisions;
 pub mod calp_diff;
 pub mod calp_merge;
 pub mod calp_environments;
@@ -278,10 +296,22 @@ mod calp_refresh_pivot_tests;
 mod calp_push_gate_tests;
 
 #[cfg(test)]
+mod calp_signer_trust_tests;
+
+#[cfg(test)]
+mod calp_developer_anchor_tests;
+
+#[cfg(test)]
+mod calp_include_tests;
+
+#[cfg(test)]
 mod subscribed_sheet_tests;
 
 #[cfg(test)]
 mod calp_environments_tests;
+
+#[cfg(test)]
+mod calp_push_code_summary_tests;
 
 #[cfg(test)]
 mod refresh_resolution_tests;
@@ -5228,6 +5258,10 @@ pub fn run() {
             undo_commands::begin_undo_transaction,
             undo_commands::commit_undo_transaction,
             undo_commands::cancel_undo_transaction,
+            // A run of an application's macro that a person started is undone
+            // whole if it fails part-way (owner decision B: follow-up F9).
+            undo_commands::begin_undo_savepoint,
+            undo_commands::roll_back_to_undo_savepoint,
             undo_commands::get_undo_state,
             undo_commands::undo,
             undo_commands::redo,
@@ -5319,6 +5353,9 @@ pub fn run() {
             persistence::create_virtual_folder,
             persistence::delete_virtual_file,
             persistence::rename_virtual_file,
+            // Approvals of distributed code sealed to this computer (M6).
+            consent_seal::record_script_consent,
+            consent_seal::list_script_consents,
             persistence::get_ai_context,
             persistence::read_text_file,
             persistence::write_text_file,
@@ -5770,6 +5807,21 @@ pub fn run() {
             // the only half a COMPOSED realm source (prelude + merged bodies)
             // can be judged on (app/src/api/scriptHost/host.ts).
             scripting::check_distributed_mount_consent,
+            // THE BUTTON DOOR (phase 4 of BUG-0257): a click names its button,
+            // never code; Rust reads the code from its own store, asks the
+            // approval of its exact bytes, the private-sheet rule and Script
+            // Security, records every run and refusal, and runs it.
+            scripting::control_action::run_control_action,
+            // The second question of an application's button COMMAND (plan_M8
+            // S1): the cell still holds that command and the command gate says
+            // yes again before the page runs it; it writes the run row.
+            scripting::control_action::authorize_button_command,
+            // The trail of an application macro a PERSON ran with cell access
+            // (owner decision B): which cells the granted run wrote (F15), and
+            // a run refused before it started for reaching outside that
+            // access (F8). Audit rows only; Rust names the application.
+            scripting::explicit_run_audit::audit_explicit_run_writes,
+            scripting::explicit_run_audit::audit_explicit_run_refusal,
             scripting::get_script_security_level,
             scripting::set_script_security_level,
             scripting::get_mcp_access_level,
@@ -5835,6 +5887,11 @@ pub fn run() {
             controls::set_control_metadata,
             controls::remove_control_metadata,
             controls::set_control_geometry,
+            controls::move_control,
+            // "Make this my own" (phase 4 of BUG-0257): the one way an
+            // application's button code becomes the user's own -- shown first,
+            // moved as one undo step, always audited.
+            controls::adopt_held_button_code,
             controls::get_all_controls,
             controls::list_controls_referencing_macro,
             controls::resolve_control_properties,
@@ -5847,6 +5904,10 @@ pub fn run() {
             cell_types::clear_cell_type_range,
             cell_types::get_cell_type,
             cell_types::get_all_cell_types,
+            // The always-on trail of a click's refusal of an application's
+            // button -- a button cell's action (BUG-0260) or a button control's
+            // held macro link (phase 3 of BUG-0257; the audit guardrail).
+            button_cells::audit_button_refusal,
             // Cell-behavior binding commands (granular bricks phase 2)
             cell_behaviors::set_cell_behavior,
             cell_behaviors::remove_cell_behavior,
@@ -6014,6 +6075,7 @@ pub fn run() {
             calp_commands::calp_get_application_connection_skips,
             calp_commands::calp_subscription_trust,
             calp_commands::calp_list_trusted_publishers,
+            calp_commands::calp_forget_developer_anchor,
             calp_commands::calp_get_application_objects,
             calp_commands::calp_get_overrides,
             calp_commands::calp_revert_override,

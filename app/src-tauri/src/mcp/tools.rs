@@ -1336,6 +1336,34 @@ pub(crate) async fn run_script_isolated(
     }
 
     let state = handle.state::<AppState>();
+
+    // OWNER DECISION B ON THIS ROUTE TOO (review of M6b). An agent's script is a
+    // run a SCRIPT starts, so it never gets an application macro's reach -- the
+    // module-runtime run gate asks exactly what it asks of a `run_script` no
+    // person started: an application's module macro (the agent ran its source
+    // verbatim) is refused -- for its approval when that is missing, else as not
+    // started by you -- and an application's HELD button code runs only from its
+    // button, through the button door. Each refusal is on the audit trail. The
+    // user's own modules and the agent's own code pass untouched. (Like every
+    // such rule it matches bytes: code the agent writes itself is the agent's,
+    // governed by the MCP access ceiling above.)
+    {
+        let script_state = handle.state::<crate::scripting::types::ScriptState>();
+        let scripts: Vec<(Option<String>, String, String)> = {
+            let map = script_state.workbook_scripts.read().map_err(|e| e.to_string())?;
+            map.values().map(|s| (s.source_package.clone(), s.id.clone(), s.source.clone())).collect()
+        };
+        let consent_file = crate::calp_commands::read_script_consent_file(handle);
+        crate::scripting::application_code_gate::distributed_run_gate(
+            &state,
+            &scripts,
+            consent_file.as_ref(),
+            code,
+            None,
+            &crate::scripting::types::RunStartedBy::Script,
+        )?;
+    }
+
     // Clone data for isolated execution (same pattern as scripting/commands.rs)
     let mut grids = state.grids.read().map_err(|e| e.to_string())?.clone();
     let style_registry = state.style_registry.read().map_err(|e| e.to_string())?.clone();

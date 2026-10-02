@@ -37,16 +37,24 @@ import type {
   ScriptDialogAnswer,
   ScriptDialogRequestPayload,
 } from "@api";
+// The one runtime-marker reader, through the same door consentButtonActions.ts
+// uses (a sub-path: the screen asks it of every macro it lists).
+import { parseModuleScriptRuntime } from "@api/workbookScripts";
 import { listTemplates, stampFromTemplate, loadTemplate } from "./lib/templateManager";
-import { loadConsents, recordConsent, getChangedScripts } from "./lib/consentStore";
-import type { CapabilityGrant, ConsentRecord } from "./lib/consentStore";
+import { loadConsentReport, recordConsent, getChangedScripts } from "./lib/consentStore";
+import type { CapabilityGrant, ConsentRecord, IgnoredConsent } from "./lib/consentStore";
 import {
+  commandConsentPlan,
   isPackageConsentCurrent,
+  listCommandsByPackage,
   listMacrosByPackage,
   listPackageMacros,
   packageConsentPlan,
 } from "./lib/packageConsentSet";
-import type { ConsentArtifact, PackageMacro } from "./lib/packageConsentSet";
+import type { ConsentArtifact, PackageCommand, PackageMacro } from "./lib/packageConsentSet";
+import { collectMacroButtons } from "./lib/consentMacroButtons";
+import { toConsentButtonActions } from "./lib/consentButtonActions";
+import { buttonCommandConsentKey, listHeldButtonActions, type HeldButtonAction } from "@api/heldButtonCode";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import {
   SCRIPT_FORM_CLOSE_EVENT,
@@ -199,6 +207,11 @@ interface PendingConsentGrant {
   promptId: string;
   /** Exactly what the prompt enumerated, in the order it will be recorded. */
   artifacts: ConsentArtifact[];
+  /**
+   * The COMMANDS the prompt showed as approvable (plan_M8 S3), recorded under
+   * `button-commands:<application>` -- never in the bare record above.
+   */
+  commandArtifacts: ConsentArtifact[];
   /** The capability union the prompt showed, over the OBJECT scripts alone. */
   granted: CapabilityGrant[];
 }
@@ -367,6 +380,65 @@ function computePackageCapabilities(
 }
 
 /**
+ * What the consent store says right now: the approvals that count on THIS
+ * computer, and the records the workbook carries that do not (sealed on another
+ * computer, or before approvals were tied to one). FAILS CLOSED, like
+ * `loadConsents`: a store Rust cannot list approves nothing, so the screen asks.
+ */
+async function loadConsentState(): Promise<{ consents: ConsentRecord[]; ignored: IgnoredConsent[] }> {
+  try {
+    return await loadConsentReport();
+  } catch (e) {
+    console.warn("[ScriptableObjects] Could not list approvals:", e);
+    return { consents: [], ignored: [] };
+  }
+}
+
+/**
+ * Whether the workbook carries an approval for `pkg` that does not count here
+ * because it was made elsewhere: on another computer, or before approvals were
+ * sealed to one. The screen says so, so a user who approved this application
+ * before is not left wondering why they are asked again.
+ */
+function approvalMadeElsewhereFor(ignored: readonly IgnoredConsent[], pkg: string): boolean {
+  return ignored.some(
+    (i) => i.packageName === pkg && (i.reason === "otherComputer" || i.reason === "unsealed"),
+  );
+}
+
+/**
+ * The button actions of each application, for the load pass. A listing that
+ * fails is said in the console and degrades to "none", exactly as the macro
+ * listing does: the application is then judged without them, and the Rust
+ * door -- which asks the approval of the exact bytes at every click -- refuses
+ * them, so the failure costs a prompt, never an unapproved run.
+ */
+async function listButtonActionsForLoad(): Promise<Map<string, HeldButtonAction[]>> {
+  try {
+    return await listHeldButtonActions();
+  } catch (e) {
+    console.warn("[ScriptableObjects] Button-code listing failed:", e);
+    return new Map();
+  }
+}
+
+/**
+ * The command buttons of each application, for the load pass (plan_M8 S3). A
+ * listing that fails degrades to "none", like the button-code listing: the
+ * application is judged without them, and Rust's command gate -- which asks
+ * the approval at every click -- refuses them, so the failure costs a prompt,
+ * never an unapproved run.
+ */
+async function listCommandsForLoad(): Promise<Map<string, PackageCommand[]>> {
+  try {
+    return await listCommandsByPackage();
+  } catch (e) {
+    console.warn("[ScriptableObjects] Command-button listing failed:", e);
+    return new Map();
+  }
+}
+
+/**
  * Build ONE application's consent screen, remember exactly what it enumerated,
  * and emit it.
  *
@@ -379,20 +451,46 @@ async function emitPackageConsentPrompt(
   pkg: string,
   pkgScripts: ObjectScriptDefinition[],
   pkgMacros: PackageMacro[],
+  pkgButtonActions: readonly HeldButtonAction[],
+  pkgCommands: readonly PackageCommand[],
+  ignored: readonly IgnoredConsent[],
 ): Promise<void> {
-  // The capability union stays over the OBJECT scripts alone. A macro's
-  // `// @capability` pragmas are not folded in: nothing grants a macro
-  // capabilities out of this record (see lib/packageConsentSet.ts), so adding
-  // them would only put a capability the prompt never attributed to the
-  // object-script realm into the application's grant.
-  const { requested, granted } = computePackageCapabilities(pkgScripts);
-
   // WHAT THIS RECORD CAN AND CANNOT COVER. A macro whose id is already claimed
   // by an object script cannot go into a flat id-keyed record, so Allow will not
   // approve it and the prompt must not imply otherwise — it is named separately,
-  // as something that stays refused.
-  const plan = packageConsentPlan(pkgScripts, pkgMacros);
+  // as something that stays refused. The same holds for anything whose id sits
+  // in the `buttonAction:` namespace, which belongs to button actions alone.
+  const plan = packageConsentPlan(pkgScripts, pkgMacros, pkgButtonActions);
   const approvableMacros = plan.covered;
+  const approvableScripts = plan.objectScripts;
+  // ...and the application's COMMAND buttons (plan_M8 S3), approved under their
+  // OWN key. Only a command a click could run is approvable; any other is named
+  // as one that will not run, and never recorded.
+  const commandPlan = commandConsentPlan(pkgCommands);
+
+  // NOTHING ALLOW COULD RECORD, SO NOTHING TO ASK. An application whose only
+  // code sits in the reserved `buttonAction:` id space (a crafted workbook --
+  // Rust refuses such ids at pull) would get a screen whose Allow can only fail:
+  // Rust refuses an approval that lists no code. That is the prompt-the-user-
+  // cannot-satisfy failure; the items stay refused at mount, and Code in This
+  // File still lists them. So is an application whose only commands are ones no
+  // click can run.
+  if (plan.artifacts.length === 0 && commandPlan.artifacts.length === 0) {
+    console.warn(
+      `[ScriptableObjects] "${pkg}" carries nothing an approval can cover; ` +
+        `reserved ids: ${plan.reserved.map((r) => r.id).join(", ") || "(none)"}`,
+    );
+    pendingGrants.delete(pkg);
+    return;
+  }
+
+  // The capability union stays over the OBJECT scripts alone -- the ones this
+  // record covers. A macro's `// @capability` pragmas are not folded in:
+  // nothing grants a macro capabilities out of this record (see
+  // lib/packageConsentSet.ts), so adding them would only put a capability the
+  // prompt never attributed to the object-script realm into the application's
+  // grant. A button action declares nothing either.
+  const { requested, granted } = computePackageCapabilities(approvableScripts);
 
   // The DIFF spans both kinds — a macro whose source changed upstream is
   // exactly what a re-consent prompt must show, and it is why the grant is
@@ -400,23 +498,44 @@ async function emitPackageConsentPrompt(
   // id-colliding macro shares an id with an object script's record entry, so
   // diffing it would compare the macro's source against the object script's
   // approved source and report a change that is really a collision.
+  //
+  // Button actions are not diffed: their id IS the hash of their bytes, so a
+  // changed action is a new id with no "before" to compare, and the screen shows
+  // its code in full instead.
   const changed = await getChangedScripts(persistedConsents, pkg, [
-    ...pkgScripts,
+    ...approvableScripts,
     ...approvableMacros,
   ]);
   const changedScripts = changed.map((c) => ({
     id: c.id,
     name:
-      pkgScripts.find((s) => s.id === c.id)?.name ??
+      approvableScripts.find((s) => s.id === c.id)?.name ??
       approvableMacros.find((m) => m.id === c.id)?.name ??
       c.id,
     oldSource: c.oldSource,
     newSource: c.newSource,
   }));
 
+  // WHAT ALLOWING ARMS, BY BUTTON (phase 3 of BUG-0257). A button control or
+  // cell this application brought keeps its link to the application's macro,
+  // and one click runs it once this grant exists -- so the screen lists, under
+  // each macro, the buttons of THIS application that run it (Sheet!A1 +
+  // caption). Another application's buttons and the user's own are not listed.
+  const macroButtons = await collectMacroButtons(
+    pkg,
+    approvableMacros.map((m) => m.id),
+  );
+
+  // WHAT ALLOWING ARMS, AS CODE (M6, phase 4 of BUG-0257). The application's
+  // held inline button code runs only through the Rust button door, after the
+  // approval of its exact bytes -- which this grant records. So the screen shows
+  // each piece verbatim, with every place it sits and, when it is only a call of
+  // one of the application's macros, which macro a click runs.
+  const buttonActions = toConsentButtonActions(plan.buttonActions, approvableMacros, plan.unapprovable);
+
   promptSequence += 1;
   const promptId = `consent-${promptSequence}`;
-  pendingGrants.set(pkg, { promptId, artifacts: plan.artifacts, granted });
+  pendingGrants.set(pkg, { promptId, artifacts: plan.artifacts, commandArtifacts: commandPlan.artifacts, granted });
 
   emitAppEvent(ScriptableObjectEvents.SCRIPT_CONSENT_NEEDED, {
     // THE SCREEN'S IDENTITY. Allow echoes it back, and a grant that does not
@@ -424,9 +543,9 @@ async function emitPackageConsentPrompt(
     // whatever the workbook holds by then.
     promptId,
     packageName: pkg,
-    scriptCount: pkgScripts.length,
-    scriptNames: pkgScripts.map((s) => s.name),
-    scriptIds: pkgScripts.map((s) => s.id),
+    scriptCount: approvableScripts.length,
+    scriptNames: approvableScripts.map((s) => s.name),
+    scriptIds: approvableScripts.map((s) => s.id),
     // WHAT IS GRANTED IS WHAT IS SHOWN. The macros go into the record, so they
     // are named on the prompt that writes it — and the ids travel with the names
     // so the prompt's Inspect affordance can open one. An application that
@@ -435,9 +554,42 @@ async function emitPackageConsentPrompt(
     // worse than no button.
     moduleScriptNames: approvableMacros.map((m) => m.name),
     moduleScriptIds: approvableMacros.map((m) => m.id),
+    // ...and which of them are WRITTEN AS OBJECT SCRIPTS (owner decision B):
+    // they run in a restricted realm, and a run you start may change the cells
+    // of any sheet -- the screen says so in a paragraph of their own. The
+    // runtime marker is the one the run routes read (macroRunRoute).
+    objectScriptMacroIds: approvableMacros
+      .filter((m) => parseModuleScriptRuntime(m.description) === "objectScript")
+      .map((m) => m.id),
+    // macro id -> the buttons of this application that run it.
+    macroButtons,
     // ...and what it CANNOT grant, said out loud. Pressing Allow will not make
     // these run, so the screen may not leave the user pressing it again.
     unapprovableMacroNames: plan.unapprovable.map((m) => m.name),
+    // Object scripts and macros whose id sits in the button-action namespace.
+    reservedIdNames: plan.reserved.map((r) => r.name),
+    // The application's inline button code, by the hash of its exact bytes.
+    buttonActions,
+    // The Calcula commands its button cells run (plan_M8 S3): the ones Allow
+    // records under `button-commands:<application>`, each with the buttons
+    // that run it -- and the ones no click can run, named with why.
+    commandButtons: commandPlan.approvable.map((c) => ({
+      commandId: c.commandId,
+      commandName: c.commandName,
+      buttons: c.buttons,
+    })),
+    commandsWontRun: commandPlan.wontRun.map((c) => ({
+      commandId: c.commandId,
+      commandName: c.commandName,
+      why: c.wontRunBecause,
+      buttons: c.buttons,
+    })),
+    // An approval this workbook carries for the application that does not
+    // count here (another computer, or before approvals were sealed) -- under
+    // either of its keys.
+    approvalMadeElsewhere:
+      approvalMadeElsewhereFor(ignored, pkg) ||
+      (commandPlan.artifacts.length > 0 && approvalMadeElsewhereFor(ignored, buttonCommandConsentKey(pkg))),
     requestedCapabilities: requested,
     changedScripts,
   });
@@ -466,12 +618,16 @@ async function repromptPackage(packageName: string): Promise<void> {
   } catch (e) {
     console.warn("[ScriptableObjects] Module-script listing failed:", e);
   }
+  const buttonActions = (await listButtonActionsForLoad()).get(packageName) ?? [];
+  const commands = (await listCommandsForLoad()).get(packageName) ?? [];
   // The application left the workbook entirely (an unsubscribe landed while the
   // prompt was open). There is nothing to approve, so there is nothing to ask.
-  if (scripts.length === 0 && macros.length === 0) return;
+  // An application whose only code is its buttons' -- their code, or the
+  // Calcula commands they run -- still has something to ask.
+  if (scripts.length === 0 && macros.length === 0 && buttonActions.length === 0 && commands.length === 0) return;
 
-  const persistedConsents = await loadConsents();
-  await emitPackageConsentPrompt(persistedConsents, packageName, scripts, macros);
+  const { consents, ignored } = await loadConsentState();
+  await emitPackageConsentPrompt(consents, packageName, scripts, macros, buttonActions, commands, ignored);
 }
 
 /**
@@ -589,6 +745,20 @@ async function loadAndMountScripts(cause?: "open"): Promise<void> {
     console.warn("[ScriptableObjects] Module-script listing failed:", e);
   }
 
+  // The application's held INLINE button code (M6, phase 4 of BUG-0257), grouped
+  // the same way. A subscribe or refresh holds a button's static inline code,
+  // and the Rust button door runs it only after the approval of its exact bytes
+  // -- which only this pass can ask for. Grouped under the SAME verbatim key as
+  // the macros (the stamp's application name), so an application's macros and
+  // button actions are one screen and one bare record.
+  const buttonActionsByPackage = await listButtonActionsForLoad();
+
+  // The application's COMMAND buttons (plan_M8 S3): button cells it brought
+  // whose action is a Calcula command. Rust's command gate asks an approval
+  // under `button-commands:<application>`, which only this pass can ask for --
+  // so an application whose only code is command buttons is asked too.
+  const commandsByPackage = await listCommandsForLoad();
+
   const byPackage = new Map<string, typeof distributedScripts>();
   for (const script of distributedScripts) {
     const pkg = objectScriptPackageKey(script);
@@ -596,18 +766,30 @@ async function loadAndMountScripts(cause?: "open"): Promise<void> {
     byPackage.get(pkg)!.push(script);
   }
 
-  // THE UNION OF BOTH STORES drives the pass. An application contributes a
-  // package here if it shipped object scripts, or macros, or both — and each is
-  // evaluated with whatever the other store holds for the same key, which is
-  // also what `packageConsentArtifacts` will write into the record.
-  const packageNames = [...new Set([...byPackage.keys(), ...macrosByPackage.keys()])];
+  // THE UNION OF ALL FOUR drives the pass. An application contributes a
+  // package here if it shipped object scripts, or macros, or button code, or
+  // command buttons, or any mix -- and each is evaluated with whatever the
+  // others hold for the same key, which is also what Allow will write. Without
+  // the button actions in this union, an application that ships ONLY inline
+  // button code would never prompt and be refused at every click; without the
+  // commands, one whose only code is command buttons would never prompt either.
+  const packageNames = [
+    ...new Set([
+      ...byPackage.keys(),
+      ...macrosByPackage.keys(),
+      ...buttonActionsByPackage.keys(),
+      ...commandsByPackage.keys(),
+    ]),
+  ];
 
   if (packageNames.length > 0) {
-    const persistedConsents = await loadConsents();
+    const { consents: persistedConsents, ignored } = await loadConsentState();
 
     for (const pkg of packageNames) {
       const pkgScripts = byPackage.get(pkg) ?? [];
       const pkgMacros = macrosByPackage.get(pkg) ?? [];
+      const pkgButtonActions = buttonActionsByPackage.get(pkg) ?? [];
+      const pkgCommands = commandsByPackage.get(pkg) ?? [];
 
       // Register all distributed scripts (so they appear in the UI)
       for (const script of pkgScripts) {
@@ -636,7 +818,14 @@ async function loadAndMountScripts(cause?: "open"): Promise<void> {
       // this check), and Allow re-records and re-mounts.
       let current = false;
       try {
-        current = await isPackageConsentCurrent(persistedConsents, pkg, pkgScripts, pkgMacros);
+        current = await isPackageConsentCurrent(
+          persistedConsents,
+          pkg,
+          pkgScripts,
+          pkgMacros,
+          pkgButtonActions,
+          pkgCommands,
+        );
       } catch (e) {
         // FAILS CLOSED. "I could not find out whether you approved this
         // application's code" is not approval, because the thing that threw is
@@ -668,7 +857,15 @@ async function loadAndMountScripts(cause?: "open"): Promise<void> {
       } else {
         // Ask. The screen is built — and REMEMBERED — by the one emitter, so
         // the artifact set the user reads is the artifact set Allow records.
-        await emitPackageConsentPrompt(persistedConsents, pkg, pkgScripts, pkgMacros);
+        await emitPackageConsentPrompt(
+          persistedConsents,
+          pkg,
+          pkgScripts,
+          pkgMacros,
+          pkgButtonActions,
+          pkgCommands,
+          ignored,
+        );
       }
     }
   }
@@ -1140,14 +1337,25 @@ async function activate(context: ExtensionContext): Promise<void> {
       const scripts = (await loadAllObjectScripts()).filter(
         (s) => s.provenance === "distributed" && objectScriptPackageKey(s) === packageName,
       );
+      // The button actions are re-derived with the rest (M6): a refresh that
+      // changed a button's code while the screen was open must refuse the grant
+      // and ask again, exactly as a changed macro does -- the fingerprint covers
+      // their ids, which are the hashes of their bytes.
+      // ...and so are the COMMAND buttons (plan_M8 S3): a refresh that brought
+      // another command button while the screen was open must refuse the grant
+      // too, so Allow never records a command set other than the one shown.
       let liveArtifacts: ConsentArtifact[] | null = null;
+      let liveCommandArtifacts: ConsentArtifact[] = [];
       try {
         const macros = await listPackageMacros(packageName);
-        liveArtifacts = packageConsentPlan(scripts, macros).artifacts;
+        const buttonActions = (await listHeldButtonActions()).get(packageName) ?? [];
+        const commands = (await listCommandsByPackage()).get(packageName) ?? [];
+        liveArtifacts = packageConsentPlan(scripts, macros, buttonActions).artifacts;
+        liveCommandArtifacts = commandConsentPlan(commands).artifacts;
       } catch (e) {
         // FAILS CLOSED. "I cannot tell you whether this is still the code you
         // read" is not a yes.
-        console.warn("[ScriptableObjects] Module-script listing failed:", e);
+        console.warn("[ScriptableObjects] Module-script, button-code or command-button listing failed:", e);
         liveArtifacts = null;
       }
       if (liveArtifacts === null) {
@@ -1158,13 +1366,16 @@ async function activate(context: ExtensionContext): Promise<void> {
         // forever with no press that can ever satisfy it. Say it once and leave
         // the application unapproved until the listing recovers.
         showToast(
-          `Calcula could not read this workbook's macros, so nothing from ` +
+          `Calcula could not read this workbook's macros or button code, so nothing from ` +
             `"${packageName}" was approved. Try again in a moment.`,
           { type: "error", duration: 0 },
         );
         return;
       }
-      if (artifactFingerprint(liveArtifacts) !== artifactFingerprint(pending.artifacts)) {
+      if (
+        artifactFingerprint(liveArtifacts) !== artifactFingerprint(pending.artifacts) ||
+        artifactFingerprint(liveCommandArtifacts) !== artifactFingerprint(pending.commandArtifacts)
+      ) {
         await refuseGrantAndReprompt(
           packageName,
           "the application changed while its approval screen was open.",
@@ -1192,16 +1403,60 @@ async function activate(context: ExtensionContext): Promise<void> {
       // module scripts; they are disclosed on the subscribe review and named on
       // the prompt this handler answers, and the Rust module gate looks for them
       // in THIS record by id + source hash. Recording only the object scripts is
-      // what refused every distributed macro forever.
+      // what refused every distributed macro forever. And its BUTTON ACTIONS
+      // (`buttonAction:<sha256>`, M6): the Rust button door asks this record for
+      // them, and Rust replaces this computer's whole record for the
+      // application, so everything the screen showed is sent in one call.
       //
       // BOTH ARGUMENTS COME FROM THE PROMPT, not from a second listing:
       // `granted` is the capability union the screen enumerated (over the OBJECT
       // scripts — no path grants a macro capabilities from this record at all),
       // and `artifacts` is the artifact list it named.
-      try {
-        await recordConsent(packageName, pending.artifacts, pending.granted);
-      } catch (e) {
-        console.warn("[ScriptableObjects] Failed to persist consent:", e);
+      //
+      // A REFUSED RECORD IS SAID, AND NOTHING MOUNTS. The approval is sealed to
+      // this computer by Rust (record_script_consent), which can refuse -- this
+      // computer's approvals key cannot be read, say. Every mount below would
+      // then be refused by the same Rust gate, and carrying on would end in a
+      // toast saying the scripts are enabled over mounts that all failed.
+      //
+      // THE BARE RECORD ONLY WHEN THE SCREEN SHOWED SOMETHING THAT LIVES UNDER
+      // IT (plan_M8 S3). An application whose only code is command buttons
+      // writes none: an empty record would approve nothing (Rust refuses it),
+      // and a NON-empty one is what opens the object-script mount floor.
+      if (pending.artifacts.length > 0) {
+        try {
+          await recordConsent(packageName, pending.artifacts, pending.granted);
+        } catch (e) {
+          const reason = typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
+          console.warn("[ScriptableObjects] The approval was not recorded:", e);
+          showToast(`Nothing was approved for "${packageName}": ${reason}`, {
+            type: "error",
+            duration: 0,
+          });
+          return;
+        }
+      }
+
+      // THE COMMANDS UNDER THEIR OWN KEY, `button-commands:<application>`, the
+      // one Rust's command gate asks. `recordConsent` replaces a key's whole
+      // record, which is exactly why they never join the bare record above:
+      // there, each approval would erase the other. A command grants no
+      // capability. A refusal here leaves the scripts approved above standing
+      // and says so.
+      let commandsRecorded = true;
+      if (pending.commandArtifacts.length > 0) {
+        try {
+          await recordConsent(buttonCommandConsentKey(packageName), pending.commandArtifacts, []);
+        } catch (e) {
+          commandsRecorded = false;
+          const reason = typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
+          console.warn("[ScriptableObjects] The approval of the command buttons was not recorded:", e);
+          showToast(
+            `The command buttons from "${packageName}" were not approved: ${reason}`,
+            { type: "error", duration: 0 },
+          );
+          if (pending.artifacts.length === 0) return;
+        }
       }
 
       // Mount the distributed scripts for this package. Allowing grants ALL
@@ -1242,6 +1497,11 @@ async function activate(context: ExtensionContext): Promise<void> {
           `Scripts from "${packageName}" approved, but ${failedToMount} did not start.`,
           { type: "error" },
         );
+      } else if (pending.artifacts.length === 0) {
+        // Only command buttons were approved: there are no scripts to enable.
+        if (commandsRecorded) {
+          showToast(`The command buttons from "${packageName}" are approved.`, { type: "success" });
+        }
       } else {
         showToast(`Scripts from "${packageName}" enabled.`, { type: "success" });
       }

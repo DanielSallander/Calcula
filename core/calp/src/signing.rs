@@ -185,6 +185,27 @@ impl PublisherKeypair {
     }
 }
 
+/// The short form of a publisher key that a person reads and compares: its
+/// first 16 lowercase hex characters, followed by `...` when the key is longer.
+///
+/// The SAME prefix the Collaboration surfaces show (`key.slice(0, 16)`), so a
+/// fingerprint named in a refusal can be matched against the one on screen.
+/// Display only — authorisation always compares the full key. An empty key
+/// (an unsigned version) reads as "(none)" rather than an empty string, so a
+/// message never says "key " followed by nothing.
+pub fn key_fingerprint(key_hex: &str) -> String {
+    let key = key_hex.trim();
+    if key.is_empty() {
+        return "(none)".to_string();
+    }
+    let prefix: String = key.chars().take(16).collect::<String>().to_lowercase();
+    if key.chars().count() > 16 {
+        format!("{prefix}...")
+    } else {
+        prefix
+    }
+}
+
 /// Does the keypair in `profile_dir` prove ownership of `publisher_key`?
 ///
 /// Returns `true` iff this profile has a `publisher-key.json` whose Ed25519
@@ -854,6 +875,18 @@ pub fn check_extension_code_hash(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// The short form a refusal names and the Checkout dialog shows. It must be
+    /// the same prefix the other Collaboration surfaces print
+    /// (`key.slice(0, 16)`), or a person cannot match one against the other.
+    #[test]
+    fn a_key_fingerprint_is_the_16_character_prefix_people_compare() {
+        let key = "A1B2C3D4E5F6A7B8".repeat(4);
+        assert_eq!(key_fingerprint(&key), "a1b2c3d4e5f6a7b8...");
+        assert_eq!(key_fingerprint("abcd"), "abcd", "a short value is shown whole");
+        assert_eq!(key_fingerprint(""), "(none)", "never 'key ' followed by nothing");
+        assert_eq!(key_fingerprint("   "), "(none)");
+    }
 
     #[test]
     fn hex_roundtrip() {

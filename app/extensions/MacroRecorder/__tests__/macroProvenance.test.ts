@@ -203,6 +203,145 @@ describe("the library carries each module's origin", () => {
     expect(objectRoute).toMatch(/never unlocked/i);
   });
 
+  // OWNER DECISION B (2026-09-30). The sentence must be true on the day it
+  // ships: the Macros dialog, a button's click (ownerB follow-ups F1/F6) and
+  // the command line's `run` (F2) carry a pass, so they are the doors named as
+  // giving cell access. The next test derives both lists from the mint census.
+  it("names the cell access a run YOU start gets, the doors that give it, and its limits", () => {
+    const objectRoute = describeMacroProvenance("Acme Finance Pack", OBJECT_SCRIPT_DESCRIPTION)!;
+    expect(objectRoute).toContain(
+      "When you run it yourself from Developer ▸ Macros ▸ Run, by clicking a button that runs it, " +
+        "or from the command line, it may also read and change cells on any sheet",
+    );
+    expect(objectRoute).toContain("read and change cells on any sheet");
+    expect(objectRoute).toContain("the same cell access an approved module macro has");
+    // A granted fill copies the band's styles (module parity: fill_range clones
+    // value + style), so "no formatting" alone would be false; every OTHER
+    // formatting route -- api.setRangeFormat and the restricted sheet.* format
+    // rows -- is refused to such a run (explicitRunGrant.ts).
+    expect(objectRoute).toContain(
+      "where filling a range also copies the formatting of the cells it fills from",
+    );
+    expect(objectRoute).toContain("no other formatting, no sheet structure, no files, no other macros or commands");
+    expect(objectRoute).not.toContain("no formatting,");
+    // Not "no cell access": every restricted realm reaches the sheet on screen
+    // (the restricted sheet.* rows), and so does this one.
+    expect(objectRoute).toContain(
+      "Started any other way -- by another script, for example -- it has " +
+        "only what every restricted script has: the sheet on screen.",
+    );
+    expect(objectRoute).not.toMatch(/no cell access/);
+    // The module route never had a tier to lift.
+    expect(describeMacroProvenance("Acme Finance Pack", NOTEBOOK_DESCRIPTION)).not.toMatch(/cell access/);
+  });
+
+  // OWNER DECISION B, follow-up F10: the module runtime cannot run an
+  // application's macro with less than its full reach, so a run a script
+  // starts is REFUSED there (Rust: APPLICATION_MACRO_NOT_STARTED_BY_YOU). The
+  // note must say so, and must name every person's act that does run it --
+  // the three doors and the user's own view bookmark (Rust `RunDoor`).
+  // SABOTAGE: drop the "It also runs only when you start it yourself ..."
+  // sentence from describeMacroProvenance's module branch -> red.
+  it("the module route says a script cannot start it, and names every person's act that can", () => {
+    const moduleRoute = describeMacroProvenance("Acme Finance Pack", NOTEBOOK_DESCRIPTION)!;
+    expect(moduleRoute).toContain("It also runs only when you start it yourself");
+    expect(moduleRoute).toContain("a run another script starts is refused");
+    for (const door of ["Developer ▸ Macros ▸ Run", "a button that runs it", "the command line", "a view bookmark of your own"]) {
+      expect(moduleRoute, door).toContain(door);
+    }
+  });
+
+  // THE SENTENCE NAMES THE DOORS THAT MINT, AND NO OTHERS. Which doors give a
+  // run cell access is decided by WHERE a pass is minted (the census in
+  // src/api/__tests__/explicitMacroRun.test.ts), so the doors the sentence
+  // promises are read from the same production source: a door that mints must
+  // be named in "when you run it yourself", every other door in "started any
+  // other way". Wiring the command line (F2) turns this red until the
+  // sentence moves it.
+  // SABOTAGE: put "its button" back into the "Started any other way" clause
+  // (macroLibrary.ts) -> the button, which mints, is named as not giving it.
+  it("the doors it names are exactly the doors that mint a pass", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const appRoot = path.resolve(__dirname, "..", "..", "..");
+    const strip = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+    const minted = new Set<string>();
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "node_modules" || entry.name === "__tests__") continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(ts|tsx)$/.test(entry.name) && !/\.(test|spec)\.(ts|tsx)$/.test(entry.name)) {
+          for (const m of strip(fs.readFileSync(full, "utf8")).matchAll(/mintExplicitMacroRun\("(\w+)"/g)) {
+            minted.add(m[1]);
+          }
+        }
+      }
+    };
+    walk(path.join(appRoot, "src"));
+    walk(path.join(appRoot, "extensions"));
+    // Every door the pass module knows, and how the sentence names it.
+    const PHRASE: Record<string, string> = {
+      macrosDialog: "Developer ▸ Macros ▸ Run",
+      button: "clicking a button that runs it",
+      commandLine: "the command line",
+    };
+    const passModule = fs.readFileSync(path.join(appRoot, "src/api/explicitMacroRun.ts"), "utf8");
+    const union = passModule.match(/export type ExplicitMacroRunDoor = ([^;]+);/)?.[1] ?? "";
+    const doors = [...union.matchAll(/"(\w+)"/g)].map((m) => m[1]).sort();
+    expect(doors, "a door the sentence has no words for").toEqual(Object.keys(PHRASE).sort());
+    // Positive control: the census sees the two doors wired today.
+    expect([...minted].sort()).toEqual(expect.arrayContaining(["button", "macrosDialog"]));
+
+    const sentence = describeMacroProvenance("Acme Finance Pack", OBJECT_SCRIPT_DESCRIPTION)!;
+    const yours = sentence.slice(sentence.indexOf("When you run it yourself"), sentence.indexOf("it may also read"));
+    const other = sentence.slice(sentence.indexOf("Started any other way"));
+    expect(yours.length, "the 'you run it yourself' clause moved").toBeGreaterThan(0);
+    expect(other.length, "the 'started any other way' clause moved").toBeGreaterThan(0);
+    for (const door of doors) {
+      const phrase = PHRASE[door];
+      if (minted.has(door)) {
+        expect(yours, `"${door}" mints a pass, so the sentence must say it gives cell access`).toContain(phrase);
+        expect(other, `"${door}" mints a pass, yet the sentence says it does not`).not.toContain(phrase);
+      } else {
+        expect(other, `"${door}" mints no pass, so the sentence must say it does not give cell access`).toContain(phrase);
+        expect(yours, `"${door}" mints no pass, yet the sentence promises cell access`).not.toContain(phrase);
+      }
+    }
+  });
+
+  // THE SENTENCE IS BOUND TO THE BROKER. "no other formatting" and "the sheet on
+  // screen" are claims about what the broker admits, so they are read from it:
+  // a granted run (explicitRun present) reaches no formatting write -- neither
+  // an unlocked api.* row nor a restricted sheet.* row -- and an ungranted
+  // restricted realm is admitted the sheet on screen.
+  // SABOTAGE: delete "sheet.setRangeFormat" from EXPLICIT_RUN_REFUSED_FORMAT_METHODS
+  // (explicitRunGrant.ts) -> `reachable` names it and this goes red.
+  it("its limits are the broker's: no formatting write for a granted run, the sheet on screen without one", async () => {
+    const { ALLOWLIST } = await import("@api/scriptHost/allowlist");
+    const { decidePolicy } = await import("@api/scriptHost/brokerPolicy");
+    const { explicitRunAdmits, explicitRunRestrictedRefusal } = await import(
+      "@api/scriptHost/explicitRunGrant"
+    );
+    const none = new Set<never>();
+    const granted = { tier: "restricted" as const, explicitRun: { cells: true }, grants: none, declaredCapabilities: none };
+    const formattingWrites = Object.keys(ALLOWLIST).filter(
+      (m) => /Format|Style/.test(m) && ALLOWLIST[m].class === "mutate",
+    );
+    // Positive control: the filter sees both families.
+    expect(formattingWrites).toEqual(
+      expect.arrayContaining(["api.setRangeFormat", "api.applyNamedStyle", "sheet.setRangeFormat", "sheet.clearRangeFormat"]),
+    );
+    const reachable = formattingWrites.filter((m) =>
+      ALLOWLIST[m].tier === "unlocked" ? explicitRunAdmits(granted, m) : explicitRunRestrictedRefusal(m) === null,
+    );
+    expect(reachable, "a granted run can still format through these").toEqual([]);
+
+    const plain = { tier: "restricted" as const, grants: none, declaredCapabilities: none };
+    expect(decidePolicy(plain, "sheet.getCellValue", [0, 0]).admitted).toBe(true);
+    expect(decidePolicy(plain, "sheet.setCellValue", [0, 0, "x"]).admitted).toBe(true);
+  });
+
   // The route is chosen by the module's DESCRIPTION, which a `.calp` ships with
   // the module — publisher content. Only one of the two routes used to ask for
   // consent, so a publisher wrote `runtime=objectScript` in their own

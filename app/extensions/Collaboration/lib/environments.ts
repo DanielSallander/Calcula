@@ -11,6 +11,7 @@
 //          NO REACT, NO IPC. A component that wants to say something asks here.
 
 import type { EnvironmentPointer, EnvironmentSummary } from "@api/collaboration";
+import { describeCodeForConfirm, type PromotionCodeConfirm } from "./promotionCode";
 
 /** Names an environment may not take, mirroring `RESERVED_ENVIRONMENT_NAMES`. */
 export const RESERVED_ENVIRONMENT_NAMES: readonly string[] = [
@@ -174,6 +175,13 @@ export function describeRefreshCard(p: {
  * because the alternative reading — that a promotion pushes content at people —
  * is what makes users afraid to promote. And it says it can be rolled back,
  * because that is the fact that makes this a reversible decision.
+ *
+ * AND IT SAYS WHAT CODE CHANGES (plan_M8 S5), second, before anything else:
+ * the code summary names the changes and says whether everyone in the
+ * environment is asked to approve the application's code again. A rollback
+ * asks again too -- each Allow replaces the approval, so the older code is new
+ * to it. A comparison that failed is said as a failure, never as "no changes",
+ * and never blocks the promotion.
  */
 export function describePromotion(p: {
   packageName: string;
@@ -182,7 +190,12 @@ export function describePromotion(p: {
   toVersion: string;
   sourceLabel: string;
   mode: "promote" | "rollback";
+  /** What the promotion does to the application's CODE, from the impact read. */
+  code?: PromotionCodeConfirm;
 }): { title: string; message: string; okLabel: string; kind?: "warning" } {
+  const codeParagraph = p.code
+    ? `\n\n${describeCodeForConfirm(p.code, p.environment, p.toVersion, !p.fromVersion)}`
+    : "";
   if (p.mode === "rollback") {
     return {
       title: `Roll back ${p.environment}`,
@@ -190,7 +203,9 @@ export function describePromotion(p: {
       kind: "warning",
       message:
         `Roll "${p.packageName}" ${p.environment} back from v${p.fromVersion} to ` +
-        `v${p.toVersion}?\n\n` +
+        `v${p.toVersion}?` +
+        codeParagraph +
+        `\n\n` +
         `Everyone subscribed to ${p.environment} will be offered v${p.toVersion} — an ` +
         `OLDER version — at their next refresh, and their refresh preview will say so. ` +
         `Cells they have edited keep their overrides. This is recorded as a promotion ` +
@@ -206,7 +221,9 @@ export function describePromotion(p: {
     title: `Promote to ${p.environment}`,
     okLabel: "Promote",
     message:
-      `${opening}\n\n` +
+      `${opening}` +
+      codeParagraph +
+      `\n\n` +
       `Everyone subscribed to ${p.environment} will be offered v${p.toVersion} at their ` +
       `next refresh; nothing changes on their machines until they apply it. No files ` +
       `are copied — ${p.environment} is a pointer — and you can roll it back at any time ` +

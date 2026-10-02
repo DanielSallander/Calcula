@@ -18,6 +18,7 @@ import {
 } from "@api";
 import { AppEvents, onAppEvent, ENVIRONMENTS_CHANGED_EVENT } from "@api";
 import { promptAsync, confirmAsync } from "@api/dialogs";
+import { planCoPublisherChange, type CoPublisherEdit } from "../lib/coPublisherChange";
 import {
   ddStyle,
   dtStyle,
@@ -229,6 +230,41 @@ function CoPublishers({
     if (expanded) void load();
   }, [expanded, load]);
 
+  /**
+   * Write one change. The list is planned from what the listing calls CURRENT;
+   * when the workspace serves a ROLLED-BACK list, the creator is shown whom it
+   * re-adds and must say yes before the change -- and its acknowledgement of
+   * that exact served revision -- is sent. Fails closed: no yes, no write.
+   */
+  const applyChange = async (edit: CoPublisherEdit): Promise<void> => {
+    const plan = planCoPublisherChange(info, packageName, edit);
+    if (plan.rollbackConfirmation !== undefined) {
+      const ok = await confirmAsync(plan.rollbackConfirmation, {
+        title: "An older list of who may publish is back",
+      });
+      if (ok !== true) return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      setInfo(
+        await setCoPublishers({
+          registryPath,
+          packageName,
+          coPublishers: plan.next,
+          acknowledgedRolledBackRevision: plan.acknowledgedRolledBackRevision,
+        }),
+      );
+    } catch (e: unknown) {
+      setError(String(e));
+      // A refusal over a list that moved since it was listed: show the list
+      // as the workspace serves it NOW.
+      if (/CALP_PUBLISHER_LIST_ROLLED_BACK/.test(String(e))) void load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleAdd = async () => {
     const key = await promptAsync(
       "Paste the colleague's publisher key (they can copy it from the Working copy " +
@@ -240,19 +276,7 @@ function CoPublishers({
     const name =
       (await promptAsync("A name for them (display only):", { title: "Add a co-publisher" })) ??
       "";
-    setBusy(true);
-    setError(null);
-    try {
-      const next = [
-        ...(info?.coPublishers ?? []).map((c) => ({ key: c.key, name: c.name })),
-        { key: key.trim(), name: name.trim() },
-      ];
-      setInfo(await setCoPublishers({ registryPath, packageName, coPublishers: next }));
-    } catch (e: unknown) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
+    await applyChange({ add: { key: key.trim(), name: name.trim() } });
   };
 
   const handleRemove = async (key: string, name: string) => {
@@ -260,19 +284,8 @@ function CoPublishers({
       `Remove ${name || "this co-publisher"} from '${packageName}'? They will no longer ` +
         `be able to push new versions.`,
     );
-    if (!ok) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const next = (info?.coPublishers ?? [])
-        .filter((c) => c.key !== key)
-        .map((c) => ({ key: c.key, name: c.name }));
-      setInfo(await setCoPublishers({ registryPath, packageName, coPublishers: next }));
-    } catch (e: unknown) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
+    if (ok !== true) return;
+    await applyChange({ removeKey: key });
   };
 
   const handleCopyMyKey = async () => {
@@ -315,6 +328,28 @@ function CoPublishers({
           {info && (
             <>
               {info.problem && <div style={warnBoxStyle}>{info.problem}</div>}
+              {/* A ROLLED-BACK list is shown apart, never as the current one:
+                  whom it would re-add is the creator's to see before replacing it. */}
+              {info.rolledBack && (
+                <div style={warnBoxStyle} data-testid="co-publishers-rolled-back">
+                  The older list (revision {info.rolledBack.servedRevision}) names:{" "}
+                  {info.rolledBack.servedCoPublishers.length === 0
+                    ? "no co-publishers"
+                    : info.rolledBack.servedCoPublishers
+                        .map((c) => `${c.name || "(unnamed)"} (${c.key.slice(0, 12)}…)`)
+                        .join(", ")}
+                  . They are not treated as co-publishers here.
+                  {info.youAreTheRoot &&
+                    " Adding or removing anyone replaces it with the list below, after you confirm."}
+                </div>
+              )}
+              {/* A change of the list that replaced a ROLLED-BACK one says so:
+                  someone put an older list back, and this is the repair. */}
+              {info.notice && (
+                <div style={warnBoxStyle} data-testid="co-publishers-notice">
+                  {info.notice}
+                </div>
+              )}
               <div style={mutedStyle}>
                 Publisher key {info.rootKey.slice(0, 16)}…{" "}
                 {info.youAreTheRoot ? "(this computer)" : ""}

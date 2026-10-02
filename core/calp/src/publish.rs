@@ -805,30 +805,42 @@ fn a1_ref(col: u64, row: u64) -> String {
     format!("{}{}", letters, row + 1)
 }
 
-/// Publish-time reference guard for macro-LINKED buttons (loud-failure slice).
+/// One published button CONTROL whose `macroRef` names a macro the publish
+/// does not carry (see [`unshipped_macro_links`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnshippedMacroLink {
+    pub sheet_id: SheetId,
+    pub sheet_name: String,
+    /// 0-based anchor row and column of the control.
+    pub row: u32,
+    pub col: u32,
+    /// The anchor cell in A1 form with its sheet, e.g. `Dashboard!B4`.
+    pub cell: String,
+    /// The module-script id the button links.
+    pub macro_id: String,
+}
+
+/// Every published button control that links a macro (`macroRef`, the macro's
+/// MODULE-script id) this publish does not carry.
 ///
-/// A button that links a recorded macro carries a `macroRef` control property =
-/// the macro's MODULE-script id. That macro travels by default (all workbook
-/// module scripts publish unless the request narrows the set). But a publisher
-/// who NARROWED `module_scripts` could drop a macro a button still links —
-/// shipping a dead button whose click, on the subscriber, reports the macro
-/// missing. The subscriber is warned loudly at click; this warns the PUBLISHER
-/// loudly at publish, so the gap is caught before it ships: for every published
-/// control carrying a `macroRef` whose id is not in the published module set,
-/// emit a warning naming the button (sheet + A1) and the missing macro.
+/// Such a button ships dead -- or worse, its click on a subscriber's machine
+/// finds a macro of THEIRS under that id. The host turns this into a REFUSAL
+/// with a remedy per link (`held_button_code::refuse_push_on_unshipped_macros`)
+/// before core publish runs, because only the host knows which remedy works:
+/// the author's own macro can be included, another application's cannot. It
+/// used to be a warning printed here after the version was already written.
 ///
-/// `published_module_ids` is the id set the publish actually carries. Factored
-/// out (like `dropdown_reference_warnings`) so the app's publish PREVIEW derives
-/// the same warnings without writing an artifact. Controls on unpublished sheets
-/// are ignored; warnings are emitted in (sheet-selection, row, col) order for a
-/// stable read.
-pub fn macro_reference_warnings(
+/// Pure, so the push, its preview and the diffs classify the same carrier the
+/// same way. Only a LIVE `macroRef` is read: a checkout's held link never
+/// reaches a carrier (the host's release restores it live or withholds it
+/// first). Controls on unpublished sheets are ignored; links come out in
+/// (sheet-selection, row, col) order for a stable read.
+pub fn unshipped_macro_links(
     workbook: &Workbook,
     sheet_indices: &[usize],
-    published_module_ids: &std::collections::HashSet<String>,
-) -> Vec<String> {
-    // Published sheet id -> display name. Built in the selection's order so the
-    // warning stream reads predictably.
+    shipped_module_ids: &std::collections::HashSet<String>,
+) -> Vec<UnshippedMacroLink> {
+    // Published sheet id -> display name, in the selection's order.
     let mut published: Vec<(SheetId, &str)> = Vec::new();
     for &idx in sheet_indices {
         if let Some(s) = workbook.sheets.get(idx) {
@@ -836,7 +848,7 @@ pub fn macro_reference_warnings(
         }
     }
 
-    let mut warnings: Vec<String> = Vec::new();
+    let mut links: Vec<UnshippedMacroLink> = Vec::new();
     for (sheet_id, sheet_name) in &published {
         let Some(sheet_controls) = workbook
             .controls
@@ -858,7 +870,7 @@ pub fn macro_reference_warnings(
                 .and_then(|m| m.get("value"))
                 .and_then(|v| v.as_str());
             let Some(macro_id) = macro_id else { continue };
-            if macro_id.is_empty() || published_module_ids.contains(macro_id) {
+            if macro_id.is_empty() || shipped_module_ids.contains(macro_id) {
                 continue;
             }
             let row = entry.get("row").and_then(|r| r.as_u64()).unwrap_or(0);
@@ -867,15 +879,17 @@ pub fn macro_reference_warnings(
         }
         refs.sort();
         for (row, col, macro_id) in refs {
-            warnings.push(format!(
-                "Button at {}!{} links the recorded macro \"{}\", but that macro is not in the published module set — subscribers will get a dead button (clicking it reports the macro is missing). Include the macro's module script, or remove the button before publishing.",
-                sheet_name,
-                a1_ref(col, row),
-                macro_id
-            ));
+            links.push(UnshippedMacroLink {
+                sheet_id: *sheet_id,
+                sheet_name: sheet_name.to_string(),
+                row: row as u32,
+                col: col as u32,
+                cell: format!("{}!{}", sheet_name, a1_ref(col, row)),
+                macro_id,
+            });
         }
     }
-    warnings
+    links
 }
 
 /// Whether the request carries any Wave A/B artifact the publish would
@@ -1865,17 +1879,12 @@ pub fn publish(
     warnings.extend(chart_source_warnings(request.workbook, &request.sheet_indices));
     warnings.extend(object_source_warnings(request.workbook, &request.sheet_indices));
 
-    // Loud-failure guard for macro-linked buttons: warn the publisher when a
-    // button links a recorded macro that this publish's (possibly narrowed)
-    // module set does not carry. The published module ids are exactly the ones
-    // written above (override set, or all workbook modules by default).
-    let published_module_ids: std::collections::HashSet<String> =
-        modules_to_publish.iter().map(|s| s.id.clone()).collect();
-    warnings.extend(macro_reference_warnings(
-        request.workbook,
-        &request.sheet_indices,
-        &published_module_ids,
-    ));
+    // A button linking a macro this publish does not carry is NOT judged here
+    // any more. The host refuses such a push before core runs, with a remedy
+    // per link (`unshipped_macro_links` feeds it), and a warning printed after
+    // the version was written told the author too late to act. The preview
+    // publishes into memory through this same function and must never fail
+    // over it either.
 
     // Write object scripts
     if !scripts_to_publish.is_empty() {
@@ -2408,8 +2417,10 @@ mod tests {
         })
     }
 
+    /// SABOTAGE: `continue` for every entry in `unshipped_macro_links` (the
+    /// host's refusal then has nothing to refuse on).
     #[test]
-    fn macro_reference_warnings_flag_a_button_whose_macro_is_excluded() {
+    fn unshipped_macro_links_names_a_button_whose_macro_is_not_shipped() {
         let mut wb = make_test_workbook(); // sheets: "Dashboard"(0), "Data"(1)
         let dashboard_id = wb.sheets[0].id;
         wb.controls = vec![persistence::SavedSheetControls {
@@ -2420,35 +2431,85 @@ mod tests {
             ]),
         }];
 
-        // Only "macro-present" ships. The button linking "macro-missing" must
-        // be flagged — loudly, by anchor and macro id.
-        let mut published: std::collections::HashSet<String> = std::collections::HashSet::new();
-        published.insert("macro-present".to_string());
-
-        let warnings = macro_reference_warnings(&wb, &[0], &published);
-        assert_eq!(warnings.len(), 1, "warnings: {:?}", warnings);
-        assert!(warnings[0].contains("macro-missing"), "{}", warnings[0]);
-        assert!(warnings[0].contains("Dashboard!AB3"), "{}", warnings[0]);
-        // The present one is never warned about.
-        assert!(!warnings[0].contains("macro-present"), "{}", warnings[0]);
+        // Only "macro-present" ships. The button linking "macro-missing" is
+        // named by anchor and macro id.
+        let shipped: std::collections::HashSet<String> = ["macro-present".to_string()].into_iter().collect();
+        let links = unshipped_macro_links(&wb, &[0], &shipped);
+        assert_eq!(
+            links,
+            vec![UnshippedMacroLink {
+                sheet_id: dashboard_id,
+                sheet_name: "Dashboard".to_string(),
+                row: 2,
+                col: 27,
+                cell: "Dashboard!AB3".to_string(),
+                macro_id: "macro-missing".to_string(),
+            }]
+        );
     }
 
     #[test]
-    fn macro_reference_warnings_are_silent_when_all_linked_macros_ship() {
+    fn unshipped_macro_links_is_silent_when_every_linked_macro_ships() {
         let mut wb = make_test_workbook();
         let dashboard_id = wb.sheets[0].id;
         wb.controls = vec![persistence::SavedSheetControls {
             sheet_id: dashboard_id,
             controls: serde_json::json!([macro_button(0, 0, "macro-a")]),
         }];
-        let published: std::collections::HashSet<String> =
-            ["macro-a".to_string()].into_iter().collect();
-        assert!(macro_reference_warnings(&wb, &[0], &published).is_empty());
+        let shipped: std::collections::HashSet<String> = ["macro-a".to_string()].into_iter().collect();
+        assert!(unshipped_macro_links(&wb, &[0], &shipped).is_empty());
 
         // A control on a sheet OUTSIDE the published selection is ignored, even
         // when its macro is absent (that button isn't shipping either).
         let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
-        assert!(macro_reference_warnings(&wb, &[1], &empty).is_empty());
+        assert!(unshipped_macro_links(&wb, &[1], &empty).is_empty());
+    }
+
+    /// CORE PUBLISH IS NOT THE GATE ANY MORE: a publish carrying a button whose
+    /// macro it does not ship succeeds and says nothing about it. The host
+    /// refuses such a push BEFORE core runs (with a remedy), and the push
+    /// preview publishes into memory through this very function, which must
+    /// never fail -- nor print the old warning after the fact.
+    ///
+    /// SABOTAGE: restore the write-phase `unshipped_macro_links` warning.
+    #[test]
+    fn core_publish_no_longer_emits_macro_link_warnings() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let mut wb = make_test_workbook();
+        let dashboard_id = wb.sheets[0].id;
+        wb.controls = vec![persistence::SavedSheetControls {
+            sheet_id: dashboard_id,
+            controls: serde_json::json!([macro_button(1, 1, "macro-nowhere")]),
+        }];
+        let request = PublishRequest {
+            model_writebacks: None,
+            workbook: &wb,
+            package_name: "dead-link".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
+            sheet_indices: vec![0],
+            now: "2026-09-30T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        let result = publish(&reg, &request, prof.path()).expect("core publish is not the macro-link gate");
+        assert!(
+            result.warnings.iter().all(|w| !w.contains("macro-nowhere")),
+            "core publish still warns about the dead link: {:?}",
+            result.warnings
+        );
     }
 
     #[test]

@@ -15,28 +15,23 @@
 //          namespaced key ("custom-functions:", "lib:", "chart-marks:"), so none
 //          of them could ever satisfy the bare-name lookup this gate performs.
 //
-// THE STORE IS REAL HERE. `@api/distributedConsent` runs over an in-memory
-// virtual filesystem (the same technique as
-// src/api/__tests__/customFunctionConsent.test.ts), so the hashing, the
-// source-change re-prompt and the capability-expansion re-prompt are exercised
-// rather than stubbed — and the record this suite asserts on is the byte-level
-// JSON Rust reads.
+// THE STORE IS REAL HERE. `@api/distributedConsent` runs over the shared
+// double of its two Rust commands (src/api/__tests__/helpers/consentStoreDouble,
+// which hashes with node:crypto and refuses what Rust refuses), so the hashing,
+// the source-change re-prompt and the capability-expansion re-prompt are
+// exercised rather than stubbed — and the record this suite asserts on is the
+// one Rust recorded.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 
-// The consent store's only backend touch.
-const files = new Map<string, string>();
+import { createConsentStoreDouble } from "../../../src/api/__tests__/helpers/consentStoreDouble";
+
+// The consent store's only backend touch: the two Rust consent commands.
+const consentStore = createConsentStoreDouble();
 vi.mock("@api/backend", () => ({
-  readVirtualFile: async (p: string) => {
-    const v = files.get(p);
-    if (v === undefined) throw new Error("not found");
-    return v;
-  },
-  createVirtualFile: async (p: string, content: string) => {
-    files.set(p, content);
-  },
+  invokeBackend: (cmd: string, args?: Record<string, unknown>) => consentStore.invoke(cmd, args),
 }));
 
 /** The workbook's module-script store, as `listWorkbookScriptRecords` sees it. */
@@ -71,7 +66,6 @@ import {
   packageConsentPlan,
 } from "../lib/packageConsentSet";
 
-const CONSENT_FILE = ".calcula/script-consent.json";
 const PKG = "Quarterly Reports";
 
 /** An object script exactly as ObjectScriptManager hands it to the recorder. */
@@ -89,28 +83,19 @@ const macroRecord = (over: Partial<FakeRecord> = {}): FakeRecord => ({
 });
 
 /**
- * `consent_granted_in` (app/src-tauri/src/calp_commands.rs), reimplemented over
- * the SAME JSON Rust parses: a record under this package key that names this
- * artifact id with this exact source hash. The point of asserting through this
- * shape rather than through the TypeScript helpers is that the backend is the
- * thing that was refusing, and it reads the file, not our types.
+ * `consent_granted_in` (app/src-tauri/src/calp_commands.rs), over what Rust
+ * RECORDED: a record under this package key that names this artifact id with
+ * this exact source hash (hashed by the double with node:crypto). The point of
+ * asserting through the store rather than through the TypeScript helpers is
+ * that the backend is the thing that was refusing, and it reads its own record,
+ * not our types.
  */
 async function consentGrantedIn(
   packageKey: string,
   scriptId: string,
   source: string,
 ): Promise<boolean> {
-  const raw = files.get(CONSENT_FILE);
-  if (raw === undefined) return false;
-  const parsed = JSON.parse(raw) as {
-    consents?: Array<{ packageName?: string; scripts?: Array<{ id?: string; sourceHash?: string }> }>;
-  };
-  const hash = await sha256Hex(source);
-  return (parsed.consents ?? []).some(
-    (r) =>
-      r.packageName === packageKey &&
-      (r.scripts ?? []).some((s) => s.id === scriptId && s.sourceHash === hash),
-  );
+  return consentStore.grantedIn(packageKey, scriptId, source);
 }
 
 /** The grant, exactly as the ScriptableObjects consent-granted handler writes it. */
@@ -119,11 +104,11 @@ async function grantPackage(
   granted: CapabilityGrant[],
 ): Promise<void> {
   const macros = await listPackageMacros(PKG);
-  await recordConsent(PKG, packageConsentArtifacts(objectScripts, macros), granted);
+  await recordConsent(PKG, packageConsentArtifacts(objectScripts, macros, []), granted);
 }
 
 beforeEach(() => {
-  files.clear();
+  consentStore.reset();
   moduleRecords = [];
   listThrows = null;
 });
@@ -146,7 +131,7 @@ describe("one grant covers an application's object scripts AND its macros", () =
     // ...and the next open does not re-prompt for either.
     const consents = await loadConsents();
     expect(
-      await isPackageConsentCurrent(consents, PKG, [objectScript], await listPackageMacros(PKG)),
+      await isPackageConsentCurrent(consents, PKG, [objectScript], await listPackageMacros(PKG), []),
     ).toBe(true);
   });
 
@@ -169,7 +154,7 @@ describe("one grant covers an application's object scripts AND its macros", () =
 
     const consents = await loadConsents();
     expect(
-      await isPackageConsentCurrent(consents, PKG, [objectScript], await listPackageMacros(PKG)),
+      await isPackageConsentCurrent(consents, PKG, [objectScript], await listPackageMacros(PKG), []),
       "a changed macro must re-prompt exactly as a changed object script does",
     ).toBe(false);
     // And the backend refuses it in the same breath: the new source hashes to
@@ -186,7 +171,7 @@ describe("one grant covers an application's object scripts AND its macros", () =
     moduleRecords = [macroRecord(), macroRecord({ id: "macro-new", name: "New", source: "1;" })];
     const consents = await loadConsents();
     expect(
-      await isPackageConsentCurrent(consents, PKG, [objectScript], await listPackageMacros(PKG)),
+      await isPackageConsentCurrent(consents, PKG, [objectScript], await listPackageMacros(PKG), []),
     ).toBe(false);
   });
 });
@@ -216,7 +201,7 @@ describe("the grant is not widened past what the prompt showed", () => {
 
     const consents = await loadConsents();
     expect(
-      await isPackageConsentCurrent(consents, PKG, [objectScript], await listPackageMacros(PKG)),
+      await isPackageConsentCurrent(consents, PKG, [objectScript], await listPackageMacros(PKG), []),
     ).toBe(true);
   });
 });
@@ -273,7 +258,7 @@ describe("what a package grant must NOT reach", () => {
 
   it("an id that collides with an object script resolves to a refusal, not an approval", async () => {
     moduleRecords = [macroRecord({ id: objectScript.id, source: "different body;" })];
-    const artifacts = packageConsentArtifacts([objectScript], await listPackageMacros(PKG));
+    const artifacts = packageConsentArtifacts([objectScript], await listPackageMacros(PKG), []);
     expect(artifacts).toEqual([{ id: objectScript.id, source: objectScript.source }]);
   });
 
@@ -283,7 +268,7 @@ describe("what a package grant must NOT reach", () => {
     // carry — so the application re-prompted on every open and Allow could not
     // end the loop. The plan is the one place both sides read.
     moduleRecords = [macroRecord({ id: objectScript.id, source: "different body;" })];
-    const plan = packageConsentPlan([objectScript], await listPackageMacros(PKG));
+    const plan = packageConsentPlan([objectScript], await listPackageMacros(PKG), []);
     expect(plan.covered).toEqual([]);
     expect(plan.unapprovable.map((m) => m.id)).toEqual([objectScript.id]);
   });
@@ -299,7 +284,7 @@ describe("the listing's failure does not silently lose the object-script grant",
     } catch {
       macros = [];
     }
-    await recordConsent(PKG, packageConsentArtifacts([objectScript], macros), OBJECT_GRANTS);
+    await recordConsent(PKG, packageConsentArtifacts([objectScript], macros, []), OBJECT_GRANTS);
     expect(await consentGrantedIn(PKG, objectScript.id, objectScript.source)).toBe(true);
   });
 });
@@ -326,17 +311,27 @@ describe("the extension wires the macros into the grant it writes", () => {
     expect(EXT).toContain("await recordConsent(packageName, pending.artifacts, pending.granted);");
     // ...and the artifact list itself is still built by the one helper, from the
     // application's object scripts AND its macros.
-    expect(EXT).toContain("packageConsentPlan(pkgScripts, pkgMacros)");
+    // ...and, since M6, its button actions (`buttonAction:<sha256>`), which the
+    // Rust button door asks the same bare record for.
+    expect(EXT).toContain("packageConsentPlan(pkgScripts, pkgMacros, pkgButtonActions)");
   });
 
   it("the capability union is still computed over the OBJECT scripts alone", () => {
-    expect(EXT).toContain("computePackageCapabilities(pkgScripts)");
+    // Over the object scripts the record COVERS: an object script whose id sits
+    // in the button-action namespace cannot be recorded, so its pragmas are not
+    // a capability the grant may name.
+    expect(EXT).toContain("computePackageCapabilities(approvableScripts)");
+    expect(EXT).toContain("const approvableScripts = plan.objectScripts;");
     expect(EXT).not.toContain("computePackageCapabilities([...pkgScripts");
     expect(EXT).not.toContain("computePackageCapabilities(pkgMacros");
   });
 
   it("the freshness check covers the macros too", () => {
-    expect(EXT).toContain("isPackageConsentCurrent(persistedConsents, pkg, pkgScripts, pkgMacros)");
+    // (and its button actions, M6, and its command buttons, plan_M8 S3).
+    // Flattened, because the call spans lines.
+    expect(EXT.replace(/\s+/g, " ")).toContain(
+      "isPackageConsentCurrent( persistedConsents, pkg, pkgScripts, pkgMacros, pkgButtonActions, pkgCommands, )",
+    );
     // Grouped once for the whole load, not re-listed per package: the listing
     // fans out to one `get_script` per DISTRIBUTED module.
     expect(EXT).toContain("await listMacrosByPackage()");

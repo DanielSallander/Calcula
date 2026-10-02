@@ -289,12 +289,13 @@ fn the_hold_back_claims_its_undo_id_rather_than_observing_it() {
 /// makes — it is the hazard `apply_script_modified_grids_core`'s own "ALWAYS
 /// commit" comment names.
 ///
-/// SABOTAGE: move the `begin_owned_transaction` above `open_verified_content`, or
+/// SABOTAGE: move the `begin_owned_transaction` above `open_authorized_content`, or
 /// change `let applied = ...;` back to `...?;`.
 #[test]
 fn the_hold_backs_transaction_cannot_dangle() {
     let body = body_of(CALP_SRC, "pub fn calp_hold_back_cells(");
-    let verify = at(&body, "open_verified_content(", "the workspace verification");
+    // The authorised read (signature + BUG-0262 signer check) is a refusal too.
+    let verify = at(&body, "open_authorized_content(", "the workspace verification");
     let no_sheet = at(&body, "CALP_HOLDBACK_NO_SHEET", "the missing-sheet refusal");
     let begin = at(&body, "undo.begin_owned_transaction(", "the transaction");
     assert!(

@@ -84,6 +84,21 @@ export interface ScriptHandle {
    * empty — the flag can never travel with reach.
    */
   readonly preview?: true;
+  /**
+   * CELL ACCESS FOR A RUN A PERSON STARTED (owner decision B, 2026-09-30).
+   *
+   * Present only on the handle of a realm that an explicit run of an APPROVED
+   * application macro mounted -- decided by `admitMount` (host.ts) after every
+   * mount gate said yes, and set here by `buildHandleFromDefinition` alone. The
+   * tier stays "restricted" and the origin stays the application's; while
+   * `cells` is true the broker also admits the closed set of cell rows in
+   * `explicitRunGrant.ts`. The host switches `cells` off the moment the macro's
+   * setup settles, and the realm stays RUN-ONLY for the rest of its life (no
+   * hooks, no exposed methods, no event subscriptions, no calls into other
+   * scripts, no restricted formatting rows), so no other code can call in and
+   * borrow the access, nor be handed what the run read.
+   */
+  explicitRun?: { cells: boolean };
 }
 
 /** The recognized capability ids. Single source of truth: capabilityIds.ts
@@ -116,19 +131,28 @@ export class BrokerError extends Error {
  * definition — never from anything the script supplies. Single source of
  * truth for tier/origin/grant derivation (used by both the legacy
  * main-thread mount path and the worker host).
+ *
+ * `grant.explicitRunCells` is the mount admission's answer to "may this run
+ * change cells?" (owner decision B), and only the worker host's `mountWorker`
+ * passes it. It attaches `explicitRun` ONLY to a DISTRIBUTED handle below the
+ * unlocked tier: local code already has the whole unlocked surface, so a grant
+ * for it would mean nothing, and an unlocked distributed handle cannot exist.
  */
-export function buildHandleFromDefinition(definition: {
-  id: string;
-  name: string;
-  objectType: string;
-  instanceId: string | null;
-  accessLevel: string;
-  provenance?: string;
-  packageName?: string;
-  /** The authoritative declared-capability ceiling (R19). For distributed
-   *  scripts this is the manifest set; for local scripts the source pragmas. */
-  declaredCapabilities?: string[];
-}): ScriptHandle {
+export function buildHandleFromDefinition(
+  definition: {
+    id: string;
+    name: string;
+    objectType: string;
+    instanceId: string | null;
+    accessLevel: string;
+    provenance?: string;
+    packageName?: string;
+    /** The authoritative declared-capability ceiling (R19). For distributed
+     *  scripts this is the manifest set; for local scripts the source pragmas. */
+    declaredCapabilities?: string[];
+  },
+  grant?: { explicitRunCells?: boolean },
+): ScriptHandle {
   const isDistributed = definition.provenance === "distributed";
   // grants is the LIVE per-script set owned by capabilities.ts — so a JIT or
   // consent grant recorded after mount takes effect for checkPolicy without
@@ -172,6 +196,9 @@ export function buildHandleFromDefinition(definition: {
     origin: scriptOriginForMount(definition),
     grants,
     declaredCapabilities,
+    ...(grant?.explicitRunCells === true && isDistributed && definition.accessLevel !== "unlocked"
+      ? { explicitRun: { cells: true } }
+      : {}),
   };
 }
 

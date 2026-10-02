@@ -1081,3 +1081,239 @@ fn every_name_scoped_to_one_sheet_is_its_own_object() {
         assert!(rows[0].id.ends_with(edited), "the row names the edited name: {}", rows[0].id);
     }
 }
+
+// ---------------------------------------------------------------------------
+// An object script's capability ceiling (BUG-0274)
+// ---------------------------------------------------------------------------
+
+const FETCHER_SOURCE: &str = "export function onOpen(ctx) { return ctx.sheet; }";
+const FETCHER_WITH_FETCH: &str =
+    "// @capability net.fetch\nexport function onOpen(ctx) { return fetch(ctx.url); }";
+
+/// An object script the way the host saves one: its own ceiling derived from
+/// the source's `// @capability` pragmas.
+fn fetcher(source: &str) -> persistence::SavedObjectScript {
+    persistence::SavedObjectScript {
+        id: "obj-fetcher".to_string(),
+        name: "Fetcher".to_string(),
+        object_type: persistence::ScriptableObjectType::Workbook,
+        instance_id: None,
+        source: source.to_string(),
+        access_level: persistence::ScriptAccessLevel::default(),
+        description: None,
+        provenance: persistence::ScriptProvenance::default(),
+        package_name: None,
+        package_version: None,
+        declared_capabilities: persistence::parse_declared_capabilities(source),
+    }
+}
+
+/// `base` (same sheet identities) carrying exactly one object script.
+fn with_script(base: &Workbook, script: persistence::SavedObjectScript) -> Workbook {
+    let mut wb = base.clone();
+    wb.object_scripts = vec![script];
+    wb
+}
+
+/// The one object-script row of a diff.
+fn fetcher_row(diff: &calp::diff::VersionDiff) -> &calp::diff::ObjectChange {
+    let rows: Vec<_> = diff.objects.iter().filter(|o| o.domain == "objectScript").collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "exactly one object-script row: {:?}",
+        diff.objects.iter().map(|o| (&o.domain, &o.id, &o.change, &o.detail)).collect::<Vec<_>>()
+    );
+    assert_eq!(rows[0].id, "obj-fetcher");
+    rows[0]
+}
+
+/// THE VERSION DIFF SAYS WHEN A SCRIPT GAINS OR LOSES A CAPABILITY (BUG-0274).
+/// The diff read an object script's capabilities from an artifact key no
+/// artifact has (`capabilities`; an `ObjectScriptDef` writes
+/// `declaredCapabilities`, and only when non-empty), so the push preview, the
+/// Inspector's Compare and the refresh preview never said "gains net.fetch"
+/// for a real script. The ceiling a subscriber's pull applies is the SIGNED
+/// manifest's, and that is what the diff reads now -- on both arms a real
+/// caller uses: two published versions, and a working copy published into
+/// memory against its base.
+///
+/// Published through the real publish path, so the manifests carry exactly
+/// what `publish` derives from the pragmas.
+///
+/// SABOTAGE: read the ceilings back out of the artifacts (the old
+/// `capability_set`, `v.get("capabilities")`) -- every capability assertion
+/// below goes red.
+#[test]
+fn a_script_that_gains_or_loses_a_capability_says_so_in_every_diff() {
+    let f = Fixture::new();
+    let base = base_workbook();
+    f.publish(&with_script(&base, fetcher(FETCHER_SOURCE)), SemVer::new(1, 0, 0), PushMode::CreateNew);
+    f.publish(
+        &with_script(&base, fetcher(FETCHER_WITH_FETCH)),
+        SemVer::new(1, 1, 0),
+        PushMode::Update { expected_base: SemVer::new(1, 0, 0) },
+    );
+    f.publish(
+        &with_script(&base, fetcher(FETCHER_SOURCE)),
+        SemVer::new(1, 2, 0),
+        PushMode::Update { expected_base: SemVer::new(1, 1, 0) },
+    );
+
+    // Precondition: the SIGNED manifests carry the ceilings publish derived.
+    let ceiling = |version: &str| {
+        f.reg
+            .get_version_manifest(PKG, version)
+            .unwrap()
+            .object_scripts
+            .iter()
+            .find(|s| s.id == "obj-fetcher")
+            .expect("the script is listed")
+            .capabilities
+            .clone()
+    };
+    assert!(ceiling("1.0.0").is_empty());
+    assert_eq!(ceiling("1.1.0"), vec!["net.fetch".to_string()]);
+    assert!(ceiling("1.2.0").is_empty());
+
+    // GAINS: two published versions (the Inspector's Compare, the refresh preview).
+    let gained = f.diff("1.0.0", "1.1.0");
+    let row = fetcher_row(&gained);
+    assert_eq!(row.change, "modified");
+    assert_eq!(row.added_capabilities, vec!["net.fetch".to_string()]);
+    assert!(row.removed_capabilities.is_empty(), "{:?}", row.removed_capabilities);
+    assert!(row.detail.contains("gains net.fetch"), "the detail says so too: {}", row.detail);
+    // On the wire, the way VersionDiffView reads it (`addedCapabilities?`).
+    let wire = serde_json::to_value(row).unwrap();
+    assert_eq!(wire["addedCapabilities"], serde_json::json!(["net.fetch"]));
+    assert!(
+        wire.get("removedCapabilities").is_none(),
+        "an empty list is omitted, which the TS type allows (`removedCapabilities?`): {wire}"
+    );
+
+    // LOSES: the next version drops the pragma.
+    let lost = f.diff("1.1.0", "1.2.0");
+    let row = fetcher_row(&lost);
+    assert_eq!(row.change, "modified");
+    assert_eq!(row.removed_capabilities, vec!["net.fetch".to_string()]);
+    assert!(row.added_capabilities.is_empty(), "{:?}", row.added_capabilities);
+    assert!(row.detail.contains("loses net.fetch"), "the detail says so too: {}", row.detail);
+    let wire = serde_json::to_value(row).unwrap();
+    assert_eq!(wire["removedCapabilities"], serde_json::json!(["net.fetch"]));
+    assert!(wire.get("addedCapabilities").is_none(), "{wire}");
+
+    // THE PUSH PREVIEW: the working copy published into memory against its base.
+    let preview = yours_against(&f, "1.0.0", &with_script(&base, fetcher(FETCHER_WITH_FETCH)));
+    let row = fetcher_row(&preview);
+    assert_eq!(row.added_capabilities, vec!["net.fetch".to_string()]);
+    assert!(row.detail.contains("gains net.fetch"), "{}", row.detail);
+
+    // A script ADDED with a capability gains it; one REMOVED loses it.
+    f.publish(&base, SemVer::new(1, 3, 0), PushMode::Update { expected_base: SemVer::new(1, 2, 0) });
+    f.publish(
+        &with_script(&base, fetcher(FETCHER_WITH_FETCH)),
+        SemVer::new(1, 4, 0),
+        PushMode::Update { expected_base: SemVer::new(1, 3, 0) },
+    );
+    let added = f.diff("1.3.0", "1.4.0");
+    let row = fetcher_row(&added);
+    assert_eq!(row.change, "added");
+    assert_eq!(row.added_capabilities, vec!["net.fetch".to_string()]);
+    let removed = f.diff("1.4.0", "1.3.0");
+    let row = fetcher_row(&removed);
+    assert_eq!(row.change, "removed");
+    assert_eq!(row.removed_capabilities, vec!["net.fetch".to_string()]);
+}
+
+/// THE SIGNED CEILING DECIDES, NOT THE ARTIFACT'S OWN CLAIM. A subscriber's
+/// pull sets a distributed script's ceiling from the manifest entry (`pull.rs`,
+/// R19) and never from the `declaredCapabilities` its artifact carries, so the
+/// diff answers from the manifest too. Here the two disagree on purpose -- a
+/// saved script whose stored ceiling no longer matches its pragmas, which
+/// nothing at publish reconciles: v1's artifact claims net.fetch while its
+/// manifest grants nothing, and v2's artifact claims nothing while its manifest
+/// grants net.fetch. A subscriber moving from v1 to v2 GAINS net.fetch.
+///
+/// SABOTAGE: read `declaredCapabilities` from the artifacts -- the row says
+/// the script LOSES net.fetch, the opposite of what a subscriber receives.
+#[test]
+fn the_signed_ceiling_decides_what_a_script_gains_not_its_artifacts_claim() {
+    let f = Fixture::new();
+    let base = base_workbook();
+    let mut v1 = fetcher(FETCHER_SOURCE);
+    v1.declared_capabilities = vec!["net.fetch".to_string()];
+    let mut v2 = fetcher(FETCHER_WITH_FETCH);
+    v2.declared_capabilities = Vec::new();
+    f.publish(&with_script(&base, v1), SemVer::new(1, 0, 0), PushMode::CreateNew);
+    f.publish(
+        &with_script(&base, v2),
+        SemVer::new(1, 1, 0),
+        PushMode::Update { expected_base: SemVer::new(1, 0, 0) },
+    );
+
+    // Precondition: the artifacts really do claim the opposite.
+    let claim = |version: &str| -> serde_json::Value {
+        let bytes = f
+            .reg
+            .read_artifact(PKG, version, "object_scripts/obj-fetcher.json")
+            .unwrap()
+            .expect("the artifact is there");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        v.get("declaredCapabilities").cloned().unwrap_or(serde_json::Value::Null)
+    };
+    assert_eq!(claim("1.0.0"), serde_json::json!(["net.fetch"]));
+    assert_eq!(claim("1.1.0"), serde_json::Value::Null);
+
+    let diff = f.diff("1.0.0", "1.1.0");
+    let row = fetcher_row(&diff);
+    assert_eq!(row.added_capabilities, vec!["net.fetch".to_string()]);
+    assert!(row.removed_capabilities.is_empty(), "{:?}", row.removed_capabilities);
+}
+
+/// A CEILING THAT MOVES WITH NO ARTIFACT CHANGE IS STILL A ROW. Nothing at L1
+/// differs -- the script's file is byte-identical -- but the signed ceiling a
+/// subscriber's pull applies is wider, which is the one script change a
+/// consumer must be shown. Reachable by a hand-signed version, or by a pragma
+/// id this build has started to recognise (`KNOWN_CAPABILITY_IDS` grew before:
+/// `schedule` was once silently stripped).
+///
+/// SABOTAGE: drop the manifest pass (`diff_object_script_ceilings`) from
+/// `diff_sides` -- the diff reports nothing at all.
+#[test]
+fn a_ceiling_that_widens_with_no_artifact_change_is_still_reported() {
+    let f = Fixture::new();
+    let wb = with_script(&base_workbook(), fetcher(FETCHER_SOURCE));
+    let mem = MemoryWorkspace::new();
+    publish_version(&mem, f._prof.path(), &wb, SemVer::new(1, 0, 0), PushMode::CreateNew);
+    let manifest = mem.get_version_manifest(PKG, "1.0.0").unwrap();
+    let artifacts = mem.artifacts_of(PKG, "1.0.0");
+    let mut widened = manifest.clone();
+    widened
+        .object_scripts
+        .iter_mut()
+        .find(|s| s.id == "obj-fetcher")
+        .expect("the script is listed")
+        .capabilities = vec!["net.fetch".to_string()];
+
+    let diff = diff_sides(
+        &DiffSide::InMemory { manifest: &manifest, artifacts: &artifacts },
+        &DiffSide::InMemory { manifest: &widened, artifacts: &artifacts },
+        &DiffOptions::default(),
+    )
+    .unwrap();
+    assert!(diff.artifacts.changed.is_empty(), "no artifact differs: {:?}", diff.artifacts.changed);
+    let row = fetcher_row(&diff);
+    assert_eq!(row.change, "modified");
+    assert_eq!(row.added_capabilities, vec!["net.fetch".to_string()]);
+    assert!(row.detail.contains("gains net.fetch"), "{}", row.detail);
+    assert_eq!(diff.totals.objects_modified, 1, "and the totals count it");
+
+    // The positive control: the same manifest on both sides reports nothing.
+    let same = diff_sides(
+        &DiffSide::InMemory { manifest: &manifest, artifacts: &artifacts },
+        &DiffSide::InMemory { manifest: &manifest, artifacts: &artifacts },
+        &DiffOptions::default(),
+    )
+    .unwrap();
+    assert!(same.objects.is_empty(), "{:?}", same.objects);
+}

@@ -140,6 +140,19 @@ function fromDisplayValue(
   return { valueType: "static", value: displayValue };
 }
 
+/**
+ * Would committing `displayValue` change nothing? True when it is exactly what
+ * the row already shows for the stored value (or for its default, when nothing
+ * is stored). Exported for the unit tier.
+ */
+export function isUnchangedCommit(
+  displayValue: string,
+  stored: ControlPropertyValue | undefined,
+  defaultValue: string,
+): boolean {
+  return displayValue === toDisplayValue(stored, defaultValue);
+}
+
 // ============================================================================
 // Props
 // ============================================================================
@@ -173,15 +186,23 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
   }, [value, definition.defaultValue]);
 
   // Commit: determine valueType from the display value
+  //
+  // AN UNCHANGED VALUE IS NOT A WRITE (BUG-0257). The code field commits on
+  // blur, so tabbing THROUGH a row wrote it back -- and on a working copy's
+  // button whose code is held for publishing, the empty OnSelect field wrote
+  // "" over nothing, an author edit that replaced the application's code with
+  // none. The backend refuses that one too; this keeps every row's focus/blur
+  // from writing (and dirtying the document) when the author changed nothing.
   const handleCommit = useCallback(
     (newValue: string) => {
+      if (isUnchangedCommit(newValue, value, definition.defaultValue)) return;
       const { valueType, value: storedValue } = fromDisplayValue(
         newValue,
         definition.supportsFormula,
       );
       onChange(definition.key, valueType, storedValue);
     },
-    [onChange, definition.key, definition.supportsFormula],
+    [onChange, value, definition.key, definition.supportsFormula, definition.defaultValue],
   );
 
   // Plain input handlers (for non-formula inputs like boolean, script, plain text/number)

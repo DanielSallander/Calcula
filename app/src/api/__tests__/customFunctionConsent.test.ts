@@ -3,23 +3,19 @@
 //          arrived in a .calp — the hole this suite exists to keep closed is
 //          "a package shipped JavaScript and it ran with no prompt".
 // CONTEXT: Drives the REAL shared consent store (@api/distributedConsent) over
-//          an in-memory virtual filesystem, so the hashing, the source-change
-//          re-prompt and the capability-expansion re-prompt are exercised for
-//          real rather than stubbed.
+//          the shared double of its two Rust commands (helpers/consentStoreDouble,
+//          which hashes with node:crypto and refuses what Rust refuses), so the
+//          hashing, the source-change re-prompt and the capability-expansion
+//          re-prompt are exercised for real rather than stubbed.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
+import { createConsentStoreDouble } from "./helpers/consentStoreDouble";
+
 // The consent store is the only thing that touches the backend here.
-const files = new Map<string, string>();
+const consentStore = createConsentStoreDouble();
 vi.mock("../backend", () => ({
-  readVirtualFile: async (path: string) => {
-    const v = files.get(path);
-    if (v === undefined) throw new Error("not found");
-    return v;
-  },
-  createVirtualFile: async (path: string, content: string) => {
-    files.set(path, content);
-  },
+  invokeBackend: (cmd: string, args?: Record<string, unknown>) => consentStore.invoke(cmd, args),
 }));
 
 import {
@@ -58,7 +54,7 @@ async function approve(lib: CustomFunctionLibrary, pkg: string): Promise<void> {
 }
 
 beforeEach(() => {
-  files.clear();
+  consentStore.reset();
 });
 
 describe("custom-function distributed consent gate", () => {

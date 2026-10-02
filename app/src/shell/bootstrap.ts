@@ -485,6 +485,8 @@ export function bootstrapShell(): void {
     registerCommand: (command) => ExtensionRegistryImpl.registerCommand(command),
     unregisterCommand: (command) => ExtensionRegistryImpl.unregisterCommand(command),
     getCommand: (commandId) => ExtensionRegistryImpl.getCommand(commandId),
+    // plan_M8 S2: an application's button refuses a shadowed command id.
+    isCommandShadowed: (commandId) => ExtensionRegistryImpl.isShadowed(commandId),
     getAllCommands: () => ExtensionRegistryImpl.getAllCommands(),
     registerRibbonTab: (tab) => legacyRibbonRouting.registerRibbonTab(tab),
     unregisterRibbonTab: (tabId) => panelRegistry.unregisterPanel(tabId),

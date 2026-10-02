@@ -9,7 +9,6 @@ import type { DeclaredProperty } from "@api/scriptableObjects";
 import {
   ExtensionRegistry,
   AppEvents,
-  runWorkbookScript,
   IconControls,
   IconButton,
   IconShapes,
@@ -20,7 +19,6 @@ import {
 import { CommandRegistry } from "@api/commands";
 import { registerKeybinding, isGridFocused } from "@api/keybindings";
 import { registerControlsProvider } from "@api/controlsService";
-import type { ControlPropertyValue } from "./lib/types";
 import type {
   CreateShapeControlRequest,
   ShapeCatalogEntry,
@@ -35,10 +33,9 @@ import type {
   ButtonControlHandle,
   CreateButtonControlRequest,
 } from "@api/buttonControlService";
-import {
-  requireMacroRunProvider,
-  hasMacroRunProvider,
-} from "@api/macroRunService";
+import { clickButtonControl } from "./lib/controlClick";
+import { mintExplicitMacroRun } from "@api/explicitMacroRun";
+import type { ButtonGesturePass } from "../_shared/lib/buttonClickDoor";
 import { getActiveSheet } from "@api/lib";
 import { getGridStateSnapshot } from "@api/grid";
 import {
@@ -53,19 +50,15 @@ import {
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
   overlaySheetToCanvas,
+  topFloatingRegionAtClient,
 } from "@api/gridOverlays";
 import { runFloatingControlDelete } from "./lib/controlDelete";
-import { insertAnchorOrRefuse } from "./lib/insertAnchor";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { insertAnchorOrRefuse, refuseObjectInsertIfSelectionOwned } from "./lib/insertAnchor";
 import {
   coMovedControlPositions,
   snapshotControlDrag,
   type ControlDragSnapshot,
 } from "./lib/controlCoMove";
-import {
-  loadButtonScriptModules,
-  planInlineButtonRun,
-} from "../_shared/lib/buttonScriptRun";
 // The host -> frame envelope is the shared module's to spell, not this file's.
 // It used to be built by hand a few lines below, which made the protocol tag a
 // four-way copy the moment the pane host learned to share it.
@@ -78,7 +71,6 @@ import {
   setCurrentSelection,
   getCurrentSelection,
   refreshStyleCache,
-  reportUnavailableButtonModules,
   buttonStyleIndices,
 } from "./Button/interceptors";
 import {
@@ -175,11 +167,7 @@ import {
   toggleDesignMode,
   onDesignModeChange,
 } from "./lib/designMode";
-import {
-  diagnoseButtonClick,
-  orphanMacroDiagnosis,
-  macroRunnerUnavailableDiagnosis,
-} from "./lib/buttonClickDiagnosis";
+import { diagnoseButtonClick } from "./lib/buttonClickDiagnosis";
 import {
   setControlMetadata,
   getControlMetadata,
@@ -197,8 +185,11 @@ import { installControlClipboardKeys } from "./lib/controlKeys";
 import { controlsBackend } from "./lib/controlsBackend";
 import { PropertiesPane } from "./PropertiesPane/PropertiesPane";
 import { registerControlContextMenu } from "./lib/controlContextMenu";
+import { isEmbeddedControl, forgetInCellButtons, noteControlAt } from "./lib/heldEmbeddedButtons";
 import { installControlObjectMenu } from "./lib/controlObjectMenu";
 import { hitTestFloatingControl } from "./lib/controlHitTest";
+import { floatingControlZoneAt } from "./lib/controlZoneAt";
+import { beginFloatingButtonPress, cancelFloatingButtonPress } from "./lib/buttonPress";
 import {
   copyControls,
   pasteControl,
@@ -515,10 +506,13 @@ function activate(context: ExtensionContext): void {
   // 0d. Keyboard / programmatic SELECTION (@api/objectSelection). A canvas
   //     sheet cycles its objects with Tab, and `floatingObject:selected` cannot
   //     be the route: that event means "a left press landed here", and its
-  //     handler below RUNS a button's script in run mode, emits shape:clicked
-  //     and opens the Properties pane. The provider selects and does nothing
-  //     else -- and takes Controls' share of a canvas-wide Delete, and of every
-  //     Copy / Paste / Duplicate through the object clipboard (W25).
+  //     handler below emits shape:clicked and opens the Properties pane. (A
+  //     run-mode button's script does not run from it: it runs from Core's
+  //     content press, `floatingObject:bodyDragStart`, at a primary release
+  //     inside the button -- lib/buttonPress.ts, BUG-0258 phase 4c.) The
+  //     provider selects and does nothing else -- and takes Controls' share of
+  //     a canvas-wide Delete, and of every Copy / Paste / Duplicate through the
+  //     object clipboard (W25).
   cleanupFns.push(
     registerControlObjectSelection({
       deleteControls: deleteControlsWithGroups,
@@ -909,6 +903,10 @@ function activate(context: ExtensionContext): void {
     type: "floating-control",
     render: renderFloatingControl,
     hitTest: hitTestFloatingControl,
+    // The ONE zone answer (lib/controlZoneAt.ts): whole-body frame, except a
+    // run-mode button, which is CONTENT with a hand (it runs at the release
+    // inside it -- lib/buttonPress.ts -- and cannot move).
+    zoneAt: floatingControlZoneAt,
     priority: 12, // Above table (5), below charts (15)
   });
   cleanupFns.push(unregOverlay);
@@ -2182,8 +2180,10 @@ async function insertImage(): Promise<void> {
 
   // The selection owner is asked FIRST (wave-B B8): while another feature owns
   // the selection there is no anchor to place a picture at, and choosing a file
-  // only to be refused afterwards would waste the user's pick.
-  if (refuseIfSelectionOwned("Insert Image")) {
+  // only to be refused afterwards would waste the user's pick. Asked as an
+  // object insert, as the anchor below is: an object merely SELECTED does not
+  // refuse it (owner call 25).
+  if (refuseObjectInsertIfSelectionOwned("Insert Image")) {
     restoreFocusToGrid();
     return;
   }
@@ -2510,39 +2510,80 @@ function setupFloatingObjectEvents(): void {
         });
       });
       emitAppEvent(AppEvents.GRID_REFRESH);
-      // Emit shape click event for scriptable objects
-      if (ctrlType === "shape") {
+      // Emit shape click event for scriptable objects. A press on the object's
+      // GRIP (BUG-0258 phase 5) is a frame press that never acts: no click.
+      if (ctrlType === "shape" && detail.part !== "grip") {
         emitAppEvent("shape:clicked", { instanceId: controlId, x: 0, y: 0 });
       }
     } else {
-      // Run mode: only buttons execute scripts
-      if (ctrlType === "button") {
-        // Fire the scriptable button's onClick hook (the #1 VBA entry point)
-        // FIRST, synchronously, so a mounted object script starts without
-        // waiting on the metadata round trip the inline path needs.
-        emitAppEvent("button:clicked", { instanceId: controlId, x: 0, y: 0 });
-        // Not fire-and-forget: an unhandled rejection here used to be the whole
-        // story a user got for a button that did nothing.
-        void runFloatingButtonClick(
-          controlSheet,
-          controlRow,
-          controlCol,
-          controlId,
-        ).catch((err) => {
-          showToast(
-            `The button could not run: ${err instanceof Error ? err.message : String(err)}`,
-            { type: "error" },
-          );
-        });
-      }
-      // Emit shape click event for scriptable objects (run mode too)
-      if (ctrlType === "shape") {
+      // Run mode. A BUTTON does not run here: its press is CONTENT
+      // (lib/controlZoneAt.ts), so Core also hands it to
+      // `floatingObject:bodyDragStart`, where the listener below starts the
+      // press (lib/buttonPress.ts) -- and the button runs at the RELEASE
+      // inside it, and not at all when the pointer slides off first
+      // (BUG-0258 design phase 4c). It used to run right here, on the press.
+      // Emit shape click event for scriptable objects (run mode too), never
+      // for a grip press.
+      if (ctrlType === "shape" && detail.part !== "grip") {
         emitAppEvent("shape:clicked", { instanceId: controlId, x: 0, y: 0 });
       }
     }
   };
   window.addEventListener("floatingObject:selected", handleFloatingSelected);
   cleanupFns.push(() => window.removeEventListener("floatingObject:selected", handleFloatingSelected));
+
+  // A RUN-MODE button's press (BUG-0258 design phase 4c). Core hands a CONTENT
+  // press -- part 'button', a run-mode button's whole body -- to this event and
+  // never moves the button from it. The press only arms: the button shows
+  // pressed while the pointer is inside it, and RUNS AT THE RELEASE inside it,
+  // exactly once -- the `button:clicked` hook first, then the M4 click path
+  // (`runFloatingButtonClick`: macro link, application approval, audit),
+  // both unchanged, only later. Sliding off, Escape, a window blur or a lost
+  // release runs nothing. Moving a button still needs Design Mode (there it
+  // is frame, and never reaches this listener).
+  const handleButtonPress = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (detail?.regionType !== "floating-control" || detail.part !== "button") return;
+    const controlId = detail.regionId as string;
+    const controlRow = detail.data?.row as number;
+    const controlCol = detail.data?.col as number;
+    const controlSheet = detail.data?.sheetIndex as number;
+    beginFloatingButtonPress({
+      controlId,
+      regionId: controlId,
+      run: () => {
+        // Fire the scriptable button's onClick hook (the #1 VBA entry point)
+        // FIRST, synchronously, so a mounted object script starts without
+        // waiting on the metadata round trip the inline path needs.
+        emitAppEvent("button:clicked", { instanceId: controlId, x: 0, y: 0 });
+        // Not fire-and-forget: an unhandled rejection here used to be the whole
+        // story a user got for a button that did nothing.
+        //
+        // THE PERSON'S CLICK (owner decision B): a release inside the button
+        // the pointer pressed -- Core dispatches `floatingObject:bodyDragStart`
+        // only from its pointer handler -- so THIS is where the one-time
+        // explicit-run pass is minted, for whichever macro the door's answer
+        // turns out to run (@api/explicitMacroRun; census in
+        // src/api/__tests__/explicitMacroRun.test.ts). Nothing below mints one.
+        void runFloatingButtonClick(
+          controlSheet,
+          controlRow,
+          controlCol,
+          controlId,
+          (macroId) => mintExplicitMacroRun("button", macroId),
+        ).catch((err) => {
+          showToast(
+            `The button could not run: ${err instanceof Error ? err.message : String(err)}`,
+            { type: "error" },
+          );
+        });
+      },
+    });
+  };
+  window.addEventListener("floatingObject:bodyDragStart", handleButtonPress);
+  cleanupFns.push(() => window.removeEventListener("floatingObject:bodyDragStart", handleButtonPress));
+  // A press still held when the extension goes runs nothing.
+  cleanupFns.push(cancelFloatingButtonPress);
 
   // THE PRESS-TIME PICTURE of a control-led drag (lib/controlCoMove.ts): every
   // control the drag moves (the rest of the selection, the dragged control's
@@ -2856,131 +2897,50 @@ function announceDesignModeClick(): void {
 }
 
 /**
- * Execute a floating button's OnSelect action.
- * The onSelect value is inline code that runs directly in the script engine.
- * Custom script modules from the Script Editor are available as callable functions.
- *
- * Returns whether inline source actually RAN, so the caller can tell "this
- * button did something" apart from "this button has no inline action" — the
- * distinction the no-op diagnosis below is built on. Throws on failure rather
- * than logging: the caller turns it into a message the user can read.
- */
-/**
- * Read the `macroRef` link off a control, or null when it carries none.
- *
- * A non-empty value is the module id of the recorded macro this button LINKS —
- * the sole thing a macro-linked button stores. An empty string is treated as no
- * link (it is how an ordinary button's absent property would read if ever set).
- */
-async function readMacroRef(
-  sheetIndex: number,
-  row: number,
-  col: number,
-): Promise<string | null> {
-  const metadata = await getControlMetadata(sheetIndex, row, col);
-  const ref = metadata?.properties[MACRO_REF_PROPERTY]?.value;
-  return ref && ref.length > 0 ? ref : null;
-}
-
-async function executeFloatingButtonAction(
-  sheetIndex: number,
-  row: number,
-  col: number,
-): Promise<boolean> {
-  const metadata = await getControlMetadata(sheetIndex, row, col);
-  if (!metadata) return false;
-
-  const onSelect = metadata.properties["onSelect"];
-  if (!onSelect || !onSelect.value) return false;
-
-  // ONE RULE, shared with the in-cell button path and the button cell type:
-  // the user's OWN modules are prepended as callable functions; a module that
-  // arrived in an application is never spliced into anything, and an inline
-  // action that is exactly an invocation of one runs that module's stored source
-  // unchanged so the Rust consent gate can rule on it.
-  // See extensions/_shared/lib/buttonScriptRun.ts.
-  const plan = planInlineButtonRun(onSelect.value, await loadButtonScriptModules());
-  if (plan.kind === "refuse") {
-    throw new Error(plan.message);
-  }
-  reportUnavailableButtonModules(plan.unavailable);
-  const result = await runWorkbookScript(plan.source, plan.filename);
-  if (result.type === "error") {
-    throw new Error(result.message);
-  }
-  // Refresh unconditionally on success: `cellsModified > 0` is the backend's
-  // count of cells IT wrote, and a script can change the grid through paths it
-  // does not tally. A redundant refetch costs one round trip; a missed one
-  // leaves the user looking at stale numbers and calling the button broken.
-  window.dispatchEvent(new CustomEvent("grid:refresh"));
-  return true;
-}
-
-/**
  * A run-mode click on a floating button: run whatever is bound to it, and — if
  * NOTHING is — say so.
  *
+ * THE DOOR DECIDES (phase 4 of BUG-0257): the click names the button and the
+ * Rust door `run_control_action` reads what it runs from its own store -- a
+ * macro link (answered `link` and run through the phase-3 route,
+ * lib/applicationMacroLink.ts), the user's own inline code, or an application's
+ * HELD inline code, run as its exact bytes only after the approval of those
+ * bytes. Every answer is said once (lib/controlClick.ts ->
+ * _shared/lib/buttonClickDoor.ts); nothing is composed on this page.
+ *
  * "Nothing happened" has been the report on this feature twice. A click that
- * finds no inline action and no mounted object script is not a quiet no-op; it
- * is the single most informative moment available, because the user is looking
- * right at the control they expected to work. Each branch names the cause and
- * what to do about it.
+ * finds nothing on the button and no mounted object script is not a quiet
+ * no-op; it is the single most informative moment available, because the user
+ * is looking right at the control they expected to work. Each branch names the
+ * cause and what to do about it.
+ *
+ * `gesture` is the person's click from `handleButtonPress`, its only caller
+ * (owner decision B): handed on to a linked macro, never minted here.
  */
 async function runFloatingButtonClick(
   sheetIndex: number,
   row: number,
   col: number,
   instanceId: string,
+  gesture: ButtonGesturePass,
 ): Promise<void> {
-  // THE LINK MODEL, CHECKED FIRST. A button that carries `macroRef` runs the
-  // CURRENT recorded macro of that id through @api/macroRunService — there is no
-  // copied body on the button, and no object script to mount. This branch RETURNS
-  // (it never falls through to the inline/object-script paths below), so a
-  // macro-linked button runs exactly once, and every outcome — including "the
-  // macro is gone" — is voiced, never silent.
-  const macroRef = await readMacroRef(sheetIndex, row, col);
-  if (macroRef) {
-    if (!hasMacroRunProvider()) {
-      // The macro exists (or not) but nothing can run one: the Macro Recorder is
-      // not loaded. Say so with the specific remedy rather than a generic error.
-      const diag = macroRunnerUnavailableDiagnosis(
-        `This button links the recorded macro "${macroRef}", but the Macro Recorder ` +
-          "extension is not loaded, so nothing can run it. Enable it and try again.",
-      );
-      showToast(diag.message, { type: diag.variant });
-      return;
-    }
-    const outcome = await requireMacroRunProvider().runMacroByRef(macroRef);
-    if (outcome.status === "notFound") {
-      const diag = orphanMacroDiagnosis(outcome.macroId);
-      showToast(diag.message, { type: diag.variant });
-    } else if (outcome.status === "failed") {
-      showToast(`"${outcome.name}" failed: ${outcome.message}`, { type: "error" });
-    } else {
-      // The macro ran. It drives the grid through paths Controls does not tally,
-      // so refetch unconditionally — the same reason the inline path refreshes.
-      window.dispatchEvent(new CustomEvent("grid:refresh"));
-    }
-    return;
-  }
-
-  const ranInline = await executeFloatingButtonAction(sheetIndex, row, col);
-
-  // Dynamic, like the other ObjectScriptManager use in this file: the script
-  // host pulls in the worker bootstrap, and Controls activates long before any
-  // script does.
-  const { ObjectScriptManager, mountedScriptHasHook } = await import("@api");
-  const script = ObjectScriptManager.getScript("button", instanceId);
-  const mounted = script ? ObjectScriptManager.isScriptMounted(script.id) : false;
-
-  const diagnosis = diagnoseButtonClick({
-    ranInline,
-    script: script ? { id: script.id, name: script.name } : null,
-    mounted,
-    hasClickHandler:
-      script && mounted ? mountedScriptHasHook(script.id, "button.onClick") : false,
-  });
-  if (diagnosis) showToast(diagnosis.message, { type: diagnosis.variant });
+  await clickButtonControl(sheetIndex, row, col, async () => {
+    // Nothing on the button itself: its object script, if any, owns the click.
+    // Dynamic, like the other ObjectScriptManager use in this file: the script
+    // host pulls in the worker bootstrap, and Controls activates long before
+    // any script does.
+    const { ObjectScriptManager, mountedScriptHasHook } = await import("@api");
+    const script = ObjectScriptManager.getScript("button", instanceId);
+    const mounted = script ? ObjectScriptManager.isScriptMounted(script.id) : false;
+    const diagnosis = diagnoseButtonClick({
+      ranInline: false,
+      script: script ? { id: script.id, name: script.name } : null,
+      mounted,
+      hasClickHandler:
+        script && mounted ? mountedScriptHasHook(script.id, "button.onClick") : false,
+    });
+    if (diagnosis) showToast(diagnosis.message, { type: diagnosis.variant });
+  }, gesture);
 }
 
 // ============================================================================
@@ -3033,25 +2993,31 @@ async function handleEmbeddedToggle(
     const targetRow = targetCell?.row ?? row;
     const targetCol = targetCell?.col ?? col;
 
-    // Apply button formatting to the target cell
-    await applyFormatting([targetRow], [targetCol], { button: true });
-
     // Get the button text from metadata to set as cell value
     const meta = await getControlMetadata(sheetIndex, row, col);
     const buttonText = meta?.properties?.text?.value ?? "Button";
-    await updateCell(targetRow, targetCol, buttonText);
 
-    // If the target cell changed, move metadata
-    if (targetRow !== row || targetCol !== col) {
-      // Create metadata at new location
-      if (meta) {
-        meta.properties.embedded = { valueType: "static", value: "true" };
-        await setControlMetadata(sheetIndex, targetRow, targetCol, meta);
-        // Remove old metadata
-        const { removeControlMetadata } = await import("./lib/controlApi");
-        await removeControlMetadata(sheetIndex, row, col);
+    // If the target cell changed, MOVE the control there -- one backend step
+    // that carries every property, the application's HELD code included
+    // (BUG-0257), and re-keys its object scripts. It used to re-create the
+    // button at the new cell and delete the old one; the re-create door strips
+    // held code (it is the paste door), so every toggled button of a working
+    // copy lost its application's code and the next push published it empty.
+    // Done FIRST, so a refusal (another control already at the target) leaves
+    // nothing half-toggled. Pinned by embedToggleMove.test.ts.
+    if ((targetRow !== row || targetCol !== col) && meta) {
+      const { moveFloatingButtonIntoCell } = await import("./lib/embedToggleMove");
+      try {
+        await moveFloatingButtonIntoCell(sheetIndex, { row, col }, { row: targetRow, col: targetCol });
+      } catch (err) {
+        showToast(`Could not put the button in its cell: ${String(err)}`, { type: "error" });
+        return;
       }
     }
+
+    // Apply button formatting to the target cell
+    await applyFormatting([targetRow], [targetCol], { button: true });
+    await updateCell(targetRow, targetCol, buttonText);
     // An in-cell control's position IS its anchor: it must move with the grid.
     // Clear the floating-era pinToGrid=false or the backend would hold the
     // anchor still while the cell moves out from under it.
@@ -3175,25 +3141,9 @@ const reportedLegacyInlineImages = new Set<string>();
  */
 let loadedSheetIndex: number | null = null;
 
-/**
- * Is this control IN-CELL (part of its cell's formatting) rather than floating?
- *
- * The single definition of the rule, because two places ask it and a
- * disagreement between them is silent: `loadFloatingControls` uses it to decide
- * what enters the floating store, and `deleteControlByInstanceId` uses it to
- * tell "in-cell, cannot delete through this path" apart from "floating, but on
- * another sheet". If those two ever answered differently, a control would be
- * refused with a reason that does not describe it.
- *
- * Only BUTTONS can be embedded, and only legacy ones are by default — shapes
- * and pictures are always floating.
- */
-function isEmbeddedControl(
-  controlType: string,
-  properties: Record<string, ControlPropertyValue>,
-): boolean {
-  return controlType === "button" ? properties.embedded?.value !== "false" : false;
-}
+// `isEmbeddedControl` -- is this control IN-CELL rather than floating? -- is
+// defined ONCE in lib/heldEmbeddedButtons.ts, which asks it too (owner
+// question 8: the cell menu's "Make this my own…" on an in-cell button).
 
 /**
  * Load the floating controls of ONE sheet into the store: `sheetIndex` when the
@@ -3213,6 +3163,10 @@ async function loadFloatingControls(knownSheetIndex?: number): Promise<void> {
     const sheetIndex = knownSheetIndex ?? (await getActiveSheet());
     loadedSheetIndex = sheetIndex;
 
+    // The in-cell buttons are noted afresh from this read (the cell menu's
+    // "Make this my own…", lib/heldEmbeddedButtons.ts); a read that fails
+    // leaves none noted, so nothing stale is offered.
+    forgetInCellButtons();
     const controls = await getAllControls(sheetIndex);
     const unmigrated = collectUnmigratedInlineImages(
       controls,
@@ -3224,6 +3178,7 @@ async function loadFloatingControls(knownSheetIndex?: number): Promise<void> {
       // Buttons default to embedded for legacy; shapes are always floating.
       // One predicate, shared with the delete path — see isEmbeddedControl.
       const isEmbedded = isEmbeddedControl(entry.metadata.controlType, props);
+      noteControlAt(entry.sheetIndex, entry.row, entry.col, entry.metadata.controlType, props);
 
       if (!isEmbedded) {
         const x = parseFloat(props.x?.value ?? "0");
@@ -3417,6 +3372,16 @@ function setupButtonCursor(): () => void {
     if (getDesignMode()) {
       if (lastCanvas) {
         target.style.cursor = "";
+        lastCanvas = null;
+      }
+      return;
+    }
+
+    // A floating object lying on the cell answers the pointer itself (Core's
+    // zone answer); this inline cursor on the canvas would override it.
+    if (topFloatingRegionAtClient(event.clientX, event.clientY) !== null) {
+      if (lastCanvas) {
+        lastCanvas.style.cursor = "";
         lastCanvas = null;
       }
       return;

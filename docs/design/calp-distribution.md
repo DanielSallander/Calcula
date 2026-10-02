@@ -678,6 +678,17 @@ dropping the application's own scripts is the opposite failure and just as quiet
 Sheet-scoped names are never filtered: they ride with their sheet, and the sheet
 selection already decides that.
 
+**Superseded in part (2026-09-30, BUG-0264).** The filter keeps by KEY, so it
+could not tell the author's `RATE` from the application's: the checkout kept the
+author's definition, the link recorded the incoming key as the application's, and
+the push shipped the author's `RATE` anyway -- the same for a module script or a
+notebook whose id the author's workbook already used. That is closed at the door:
+a checkout now REFUSES when an application module, notebook or name shares an id
+with one the workbook already holds (`CALP_CHECKOUT_COLLISION`, audited), and the
+Open for Editing dialog offers to check out into a new workbook instead. The
+Custom Functions library is exempt; its id is shared by design. See
+calp-workspace-collaboration.md §3 invariant 10.
+
 #### Three facts the diff had collapsed into one (2026-09-02)
 
 Hiding derived values made `walk_cells` returning zero mean something new, and
@@ -1003,6 +1014,27 @@ A side pane with three views (filterable or tabbed - implementation choice):
   > the ring's overflow policy drops opt-in entries before always-recorded ones
   > (`audit.rs:185-207`) so high-volume traffic cannot push the egress trail out.
 
+  > **Added 2026-10-02 -- application code is on the always-on trail.** Every run
+  > and every refusal of an application's code is recorded whether or not the
+  > workbook opted in (`AuditEvent::is_always_recorded`): `ApplicationCodeRun`
+  > and `ApplicationCodeRefused` (surfaces `moduleRuntime`, `object-script`,
+  > `lib`, `button`, `buttonCommand`; refusal reasons such as `notConsented`,
+  > `privateSheets`, `triggerMismatch`, `notStartedByYou`, `outsideCellAccess`,
+  > `heldCodeOutsideButton`, `notAllowlisted` and `stateUnavailable`),
+  > `ButtonCodeRefused`, `ButtonCodeAdopted` ("Make this my own"),
+  > `SignerRefused`, `CheckoutRefused` and `DeveloperAnchorForgotten`. A run row
+  > names the application, the code (a macro id, or a command id for a button
+  > command) and, when storage backs the click, the button. The run rows of the
+  > module runtime, the mount gate and the button door also say who started the
+  > run (`startedBy`: "you" only for a door Rust vouches for, "script" otherwise)
+  > and from which `door`. A granted run of an application's object-script
+  > macro (owner decision B) adds `cellAccess` and `grantId`, and the cells it
+  > changed are `ScriptExecuted` rows (surface `object-script`, one per sheet,
+  > joined by `grantId`, with `completed`, `rolledBack` and `othersUndone`; a
+  > run that changed nothing and did not complete leaves one row with
+  > `cellsModified: 0`). Design: calp-workspace-collaboration.md §3 invariants
+  > 14-19 and wave3-scripting-security.md §11.
+
 ## Author Workflow
 
 This section described a `--dev` flag, a dev-channel URL and a "Publish to test
@@ -1104,11 +1136,46 @@ instances:
   the same fidelity, so the author preview matches subscriber reality.
 - **Controls and the consent model.** Cell-anchored controls
   (buttons/checkboxes) persist in `.cala` (`controls.json`, opaque per-sheet
-  payloads like CF/DV) and travel in applications — but their `onSelect` wiring
-  is INLINE SCRIPT SOURCE, so it is stripped at pull/refresh/dev
-  materialization (`sanitize_distributed_controls`). Distributed buttons arrive
-  visually intact but disarmed; publisher interactivity flows through
-  consent-gated object scripts only.
+  payloads like CF/DV) and travel in applications. A button's `onSelect` is
+  INLINE SCRIPT SOURCE. Since phase 4 of BUG-0257 (2026-10-01) a subscribe or
+  refresh HOLDS static inline code (`held_button_code::admit_wiring`, the
+  `LinkLanded` arm): it arrives in `heldOnSelect`, stamped by Rust with the
+  application and version, and runs only through the Rust button door
+  (`run_control_action`) after the person approved its exact bytes
+  (`buttonAction:<sha256>`, shown on the approval screen with every cell it
+  sits in); a formula-typed `onSelect` is removed and named, and a dev pull
+  still strips both slots (`sanitize_distributed_controls`) -- see
+  calp-workspace-collaboration.md §3 invariant 16. Its LINK to a macro (`macroRef`) is
+  different since 2026-09-30 (phase 3): a subscribe or refresh lands the
+  application's modules first, and a link naming a macro THAT pull applied is
+  kept -- held (`heldMacroRef`) and stamped with the application by Rust --
+  while any other link is removed and named in the Subscribe/Refresh dialog. A
+  click runs a held link only as that application's macro (`requirePackage`),
+  only after the application's approval, which now lists the buttons that run
+  each macro, and every run and refusal is an always-on audit row naming the
+  button (calp-workspace-collaboration.md §3 invariant 14). A dev pull brings
+  no modules and strips both. A CHECKOUT holds the code instead of stripping it
+  (BUG-0257, 2026-09-30): it moves into a held compartment -- inline code and
+  a link both runnable after approval, unless the developer's own sheets sit
+  beside the application (invariants 14-16) -- and a push restores it only
+  when the signed base carries those exact bytes -- see
+  calp-workspace-collaboration.md §3 invariant 8.
+  Button CELLS (`calcula.button` cell types, which travel as the `cellType`
+  custom object) are admitted too (BUG-0260, 2026-09-30): an action survives
+  only when it runs a macro the same pull applied for the application, or a
+  command on Calcula's list (`button_cells::DISTRIBUTABLE_BUTTON_COMMANDS`,
+  EMPTY by owner decision, M8 2026-10-01) -- and such a command runs only after
+  its own approval under `button-commands:<application>`; anything else is
+  removed with a notice on subscribe/refresh and held at checkout -- invariant 9.
+  Every approval counts only on the computer that sealed it (M6, invariant 17):
+  an approval inside a handed-over `.cala` asks again there.
+  Slicers' COMPUTED PROPERTIES used to be stripped on every door the same way
+  (`sanitize_distributed_slicers`), so an untouched push republished every
+  slicer without them. They travel now (BUG-0263, 2026-09-30, owner decision),
+  to subscribers too: each is a formula that sets one of its own slicer's
+  clamped presentation attributes, run by the cell evaluator with less reach
+  than a cell formula, and a collision rename reaches its sheet references on
+  the way in and back out -- invariant 11.
 - **Provenance ledger + Application Explorer.** `Subscription.objects` records
   every object a pull actually materialized (conflict-skipped items are
   never claimed). The Application Explorer panel resolves the ledger against

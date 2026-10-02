@@ -47,10 +47,12 @@ import {
 } from "../../lib/undoTransactionOwnership";
 import type { UndoResult } from "../../lib/tauri-api";
 import type { FormattingOptions } from "../../types";
-import { measureOptimalColumnWidth, measureOptimalRowHeight } from "../../lib/gridRenderer";
+import { measureOptimalColumnWidth, measureOptimalRowHeight, getCellFromPixel } from "../../lib/gridRenderer";
 import { effectiveGridConfig, paintedDisplayHeadings } from "../../lib/gridRenderer/layout/headerVisibility";
 import { getActiveGridTheme } from "../../theme/skinLoader";
 import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
+import { cancelCellPress, openCellPress, type CellPressDeps } from "../../lib/cellPressRelease";
+import { findPointerClaim } from "../../lib/pointerClaims";
 import { checkCellDoubleClickInterceptors } from "../../lib/cellDoubleClickInterceptors";
 import { checkEditGuards, checkRangeGuards } from "../../lib/editGuards";
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../../state/sheetGrouping";
@@ -1217,6 +1219,7 @@ export function useSpreadsheetSelection({
     handleMouseMove: baseHandleMouseMove,
     handleMouseUp: baseHandleMouseUp,
     handleDoubleClick: getDoubleClickCell,
+    handleMouseLeave,
     isOverFloatingOverlay,
   } = useMouseSelection({
     containerRef,
@@ -1277,25 +1280,99 @@ export function useSpreadsheetSelection({
     zoom: state.zoom,
   });
 
+  // THE GEOMETRY A HELD CELL PRESS MEASURES THE POINTER AGAINST, as of the last
+  // render: a press an interceptor answered with a RELEASE CLAIM is judged at
+  // its release (core/lib/cellPressRelease.ts), and the grid can scroll or
+  // re-lay out while it is held.
+  const cellPressGeometryRef = useRef({
+    config,
+    viewport,
+    dimensions,
+    zoom: state.zoom,
+    freezeConfig: effectiveFreezeConfig,
+    splitBarSize: effectiveSplitBarSize,
+    splitViewport: effectiveSplitViewport,
+    sheetIndex: sheetContext.activeSheetIndex,
+    isOverFloatingOverlay,
+  });
+  cellPressGeometryRef.current = {
+    config,
+    viewport,
+    dimensions,
+    zoom: state.zoom,
+    freezeConfig: effectiveFreezeConfig,
+    splitBarSize: effectiveSplitBarSize,
+    splitViewport: effectiveSplitViewport,
+    sheetIndex: sheetContext.activeSheetIndex,
+    isOverFloatingOverlay,
+  };
+
+  /**
+   * What Core's press session asks the grid while a claimed cell press is held
+   * (BUG-0258 design phase 4: act on RELEASE over the same target, sliding off
+   * cancels). A point is ON THE CELLS only when it is over the grid area itself
+   * -- not over DOM stacked above it (a menu, a dialog, a task pane), not over
+   * an element that claimed the pointer (an on-grid form), not over a floating
+   * object stacked on the cells, not over a header -- and the cell is Core's
+   * own pane-aware answer, the one the press itself was given.
+   */
+  const cellPressDeps = useMemo<CellPressDeps>(
+    () => ({
+      cellAt: (sample) => {
+        const area = containerRef.current;
+        if (!area) return null;
+        const target = sample.target;
+        if (typeof Node !== "undefined" && target instanceof Node && !area.contains(target)) return null;
+        if (findPointerClaim(target) !== null) return null;
+        const g = cellPressGeometryRef.current;
+        const box = area.getBoundingClientRect();
+        const x = (sample.clientX - box.left) / g.zoom;
+        const y = (sample.clientY - box.top) / g.zoom;
+        if (g.isOverFloatingOverlay(x, y)) return null;
+        return getCellFromPixel(x, y, g.config, g.viewport, g.dimensions, {
+          freezeConfig: g.freezeConfig,
+          splitBarSize: g.splitBarSize,
+          splitViewport: g.splitViewport,
+        });
+      },
+      sheetKey: () => String(cellPressGeometryRef.current.sheetIndex),
+      redraw: () => canvasRef.current?.redraw(),
+    }),
+    [containerRef, canvasRef],
+  );
+
   // Wrap mouse handlers to include fill handle logic and extension click interception
   const handleMouseDown = useCallback(
     async (event: React.MouseEvent<HTMLElement>) => {
+      // The next press ends a cell press still held (its release never came,
+      // or another button went down while it was held): nothing runs.
+      cancelCellPress();
       const rect = event.currentTarget.getBoundingClientRect();
       const z = state.zoom;
       const mouseX = (event.clientX - rect.left) / z;
       const mouseY = (event.clientY - rect.top) / z;
 
+      // A press on a FLOATING OBJECT -- a live resize handle of a selected
+      // object, or its body (e.g. a chart) -- skips the cell logic and goes
+      // straight to baseHandleMouseDown, which resizes, moves or hands it to
+      // the object's content. FIRST, before the fill handle and the cell click
+      // interceptors: the objects and their handles are painted over the
+      // cells, the selection and its fill handle (core.ts), and a handle is
+      // centred on the object's edge, so its outer half lies over the
+      // neighbouring cells. Asked after them, a press there ran the cell's own
+      // action -- a checkbox toggled, a button cell ran its macro, a validation
+      // or filter chevron opened -- or started a FILL drag, while the pointer
+      // promised a resize (BUG-0258 design phase 3: handles only where they
+      // work). The hover asks in the same order (useMouseSelection.ts).
+      if (isOverFloatingOverlay(mouseX, mouseY)) {
+        baseHandleMouseDown(event);
+        return;
+      }
+
       // Check if clicking on fill handle
       if (isOverFillHandle(mouseX, mouseY)) {
         event.preventDefault();
         startFillDrag(mouseX, mouseY);
-        return;
-      }
-
-      // Check if clicking on a floating overlay (e.g., chart) - skip cell interceptor logic
-      // and go directly to baseHandleMouseDown which handles overlay move/resize
-      if (isOverFloatingOverlay(mouseX, mouseY)) {
-        baseHandleMouseDown(event);
         return;
       }
 
@@ -1307,7 +1384,6 @@ export function useSpreadsheetSelection({
       // the hyperlink follow, a button cell — was handed a DIFFERENT cell from
       // the one the click actually selected, and acted on it. Every other
       // caller of this function already passes them; this one did not.
-      const { getCellFromPixel } = await import("../../lib/gridRenderer");
       const clickedCell = getCellFromPixel(mouseX, mouseY, config, state.viewport, state.dimensions, {
         freezeConfig: effectiveFreezeConfig,
         splitBarSize: effectiveSplitBarSize,
@@ -1323,6 +1399,25 @@ export function useSpreadsheetSelection({
       let mouseUpDuringAsyncCheck = false;
       const onEarlyMouseUp = () => { mouseUpDuringAsyncCheck = true; };
       window.addEventListener("mouseup", onEarlyMouseUp, { once: true });
+
+      // THE PRESS SESSION OPENS NOW, before the interceptors are asked (they are
+      // async: a fast click's mouseup arrives while they are still answering).
+      // An interceptor may answer with a RELEASE CLAIM -- an in-cell button, a
+      // pivot's +/- and filter buttons -- which acts only when the press is
+      // released over the same target, and sliding off cancels (BUG-0258
+      // design phase 4; core/lib/cellPressRelease.ts). Any other answer closes
+      // the session with nothing held.
+      const cellPress = openCellPress(
+        {
+          clientX: event.clientX,
+          clientY: event.clientY,
+          button: event.button,
+          target: event.target,
+          ctrlKey: event.ctrlKey,
+          metaKey: event.metaKey,
+        },
+        cellPressDeps,
+      );
 
       // A LIVE EXTERNAL SESSION counts as editing here. A floating grid's cell
       // edit hosted by the formula bar (or parked on another sheet) opens no
@@ -1344,9 +1439,14 @@ export function useSpreadsheetSelection({
           window.removeEventListener("mouseup", onEarlyMouseUp);
           event.preventDefault();
           event.stopPropagation();
+          // `true` acted at the press. A release claim acts at the release over
+          // the same target: the session holds the press, or judges the release
+          // it already heard. Either way the press selects nothing.
+          cellPress.settle(intercepted);
           return;
         }
       }
+      cellPress.settle(false);
 
       window.removeEventListener("mouseup", onEarlyMouseUp);
 
@@ -1363,7 +1463,7 @@ export function useSpreadsheetSelection({
         baseHandleMouseUp();
       }
     },
-    [baseHandleMouseDown, baseHandleMouseUp, isOverFillHandle, startFillDrag, isOverFloatingOverlay, isEditing, config, state.viewport, state.dimensions, state.zoom, effectiveFreezeConfig, effectiveSplitBarSize, effectiveSplitViewport]
+    [baseHandleMouseDown, baseHandleMouseUp, isOverFillHandle, startFillDrag, isOverFloatingOverlay, isEditing, config, state.viewport, state.dimensions, state.zoom, effectiveFreezeConfig, effectiveSplitBarSize, effectiveSplitViewport, cellPressDeps]
   );
 
   const handleMouseMove = useCallback(
@@ -1929,6 +2029,8 @@ export function useSpreadsheetSelection({
       handleMouseDown,
       handleMouseMove,
       handleMouseUp,
+      // The grid area's mouseleave: Core's floating-object hover ends there.
+      handleMouseLeave,
       cursorStyle: getCursorStyle(),
     },
     mouseState: {

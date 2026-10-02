@@ -18,6 +18,8 @@ import { OverlayContainer } from "./OverlayContainer";
 import { GridContextMenuHost } from "./Overlays/GridContextMenuHost";
 import { ToastContainer } from "./Toast/Toast";
 import { StatusBar } from "./StatusBar";
+// The app's ONE polite live region: the sink behind @api/announce (M8 S6).
+import { Announcer } from "./Announcer";
 // GridProvider is a special case - it's the root React context that must wrap everything
 import { GridProvider } from "../core/state/GridContext";
 // Actions and hooks are imported from the API layer
@@ -554,6 +556,10 @@ function LayoutInner(): React.ReactElement {
 
       {/* Toast Notifications */}
       <ToastContainer />
+
+      {/* Screen-reader announcements (@api/announce). Visually hidden, never
+          focusable, mounted exactly once: DOM focus stays on the grid. */}
+      <Announcer />
     </div>
   );
 }

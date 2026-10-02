@@ -9,13 +9,127 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 Re-audited against source. The **design is intact and shipped**; the counts had drifted and one
 resolved-asymmetry paragraph named two symbols that no longer exist.
 
-| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | 09-10 | Recounted (2026-09-25) | How counted |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | 806 | **809** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
-| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | 845 | **849** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
-| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | 108 | **107** | unique quoted names inside `PRIVILEGED_BACKEND_COMMANDS` (`app/src/api/backendCommands.ts`), comments stripped line-wise |
-| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | 698 | **702** | 809 − 107 |
-| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | 339 | **340** | exported functions/consts in `backend.ts` (lines starting `export async function` / `export function` / `export const`) |
+| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | 09-10 | 09-25 | 09-30 | 09-30 (anchor) | 09-30 (M6 seal) | 10-01 (M6 door) | 10-01 (owner B trail) | 10-01 (owner B all-or-nothing) | 10-01 (review of M6b) | Recounted (2026-10-01, M8 command allowlist) | How counted |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | 806 | 809 | 812 | 813 | 815 | 817 | 819 | 821 | 821 | **822** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
+| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | 845 | 849 | 853 | 854 | 856 | 858 | 860 | 862 | 862 | **863** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
+| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | 108 | 107 | 107 | 108 | 109 | 111 | 111 | 111 | 114 | **115** | unique quoted names inside `PRIVILEGED_BACKEND_COMMANDS` (`app/src/api/backendCommands.ts`), comments stripped line-wise |
+| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | 698 | 702 | 705 | 705 | 706 | 706 | 708 | 710 | 707 | **707** | 822 − 115 |
+| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | 339 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | **340** | exported functions/consts in `backend.ts` (lines starting `export async function` / `export function` / `export const`) |
+
+**Re-run 2026-10-02, at the end of M8 (its docs task): unchanged.** The rest of M8 -- the TypeScript half of the
+command allowlist, the promotion code summary (carried by the existing `calp_promotion_impact`), the keyboard into
+slicers and timelines, the cell interceptors acting on release, the touch measurement, and the review's fixes --
+added no command and moved none to or from the denylist. All five figures re-run together, line-wise
+(`count_cmds_m8rE.cjs`, the same method as the column): 822 / 863 / 115 / 707 / 340, every entry a valid unique path,
+so no new column. CLAUDE.md read **821** at this re-run and still needs the **822** sentence handed over with the
+column; it is the owner's file. A side note for whoever re-runs the comma-split cross-check CLAUDE.md describes: with
+fifteen comment lines inside the bracket now carrying commas, that parse no longer lands a fixed few entries off --
+it depends on exactly how each chunk is cut -- so only the line-wise figure means anything.
+
+The "Recounted (2026-10-01, M8 command allowlist)" column is plan_M8 S1 (Task A, BUG-0257 phase 5): a button
+cell that came with an application may run a Calcula command only when the command is on Rust's
+`button_cells::DISTRIBUTABLE_BUTTON_COMMANDS` (empty today, by owner decision), approved under
+`button-commands:<application>` and allowed by the working-copy private-sheet rule. ONE new command, DENYLISTED
+under `codeExecution` (privileged **115**, feature-open stays **707**):
+`scripting::control_action::authorize_button_command` -- the second question the page asks after the button door
+answered `command` with an application and the page checked the command's live registration: it compares the
+claim with the stored cell, asks the command gate again and writes the always-on run row. A grant door like
+`run_control_action` beside it, so a third party may never reach it. All five figures re-run together, line-wise,
+with `count_cmds_m8rA1.cjs` (the review-of-M6b parse with the new name checked): 822 / 863 / 115 / 707 / 340, every
+entry a valid unique path. CLAUDE.md read **821** at this recount and needs **822**; it is the owner's file, so the
+corrected sentence was handed over rather than edited by the agent.
+
+The "10-01 (review of M6b)" column adds NO command: a review of owner decision B's work found the
+doors that write its trail classified feature-open, so three existing commands moved to the DENYLIST under
+`codeExecution` (privileged **114**, feature-open **707**): `check_distributed_mount_consent` -- since F3 it
+opens a run's CELL GRANT and writes the always-on "you started it from ... so it could read and change cells on any
+sheet" run row from a page-supplied claim -- and `audit_explicit_run_writes` / `audit_explicit_run_refusal`,
+which write what a granted run changed and the refusal of one before it started. The script host and the one-off
+runner are their only callers; a third party that could reach them would forge those rows, or spend a live grant
+with an empty report so the run's real writes never reached the trail (grant ids are now random as well).
+`begin_undo_savepoint` / `roll_back_to_undo_savepoint` stay feature-open beside the undo family they belong to.
+All five figures re-run together, line-wise, with `count_cmds_m6bfix.cjs` (the all-or-nothing parse, the
+denylist read again): 821 / 862 / 114 / 707 / 340, every entry a valid unique path. CLAUDE.md's generate_handler!
+figure is unchanged by this (it counts commands, not the split).
+
+The "10-01 (owner B all-or-nothing)" column is owner decision B's follow-up F9: a run of an
+application's macro that a person started with cell access and that fails part-way is UNDONE whole, like the
+module runtime. Two commands, both FEATURE-OPEN beside `begin_undo_transaction` / `cancel_undo_transaction`
+(privileged stays **111**, feature-open **710**): `undo_commands::begin_undo_savepoint` -- opens the undo
+transaction or joins the one a caller holds (a command-line run of several lines), and names the point it is at
+(the open transaction's ticket and how many changes it holds) under one stack lock -- and
+`undo_commands::roll_back_to_undo_savepoint`, which takes back exactly the changes recorded after that point
+through the restore Ctrl+Z uses (`apply_changes`), leaving no undo and no redo step, and refuses (moving nothing)
+when the step is no longer open. The script host calls both through `invokeBackend`; no typed wrapper was added.
+All five figures re-run together, line-wise, with `count_cmds_m6bB2d.cjs` (the owner-B-trail parse with the two
+names added): 821 / 862 / 111 / 710 / 340, every entry a valid unique path. CLAUDE.md read **817** at this
+recount and needs **821**; it is the owner's file, so the corrected sentence was handed over rather than edited
+by the agent.
+
+The "10-01 (owner B trail)" column is owner decision B's persistent trail (M6b, follow-ups F3,
+F15 and F8). Two commands, both FEATURE-OPEN like `audit_button_refusal` (privileged stays **111**, feature-open
+**708**): `scripting::explicit_run_audit::audit_explicit_run_writes` -- the page's ONE report of which cells a
+run of an application's object-script macro wrote while it held cell access, per sheet with bounds, recorded as
+always-on `ScriptExecuted` rows in the module runtime's shape (surface `object-script`); it presents the grant
+id the mount gate opened (`check_distributed_mount_consent` gained an `explicitRun` PARAMETER, not a command, and
+answers `cellAccess` + `grantId`), and Rust names the application, the macro, the door and the button from that
+grant, never from the page; an unknown or already-reported grant records nothing -- and
+`scripting::explicit_run_audit::audit_explicit_run_refusal`, the always-on `ApplicationCodeRefused` row (reason
+`outsideCellAccess`) for a run the one-off runner refused before it started because the macro also calls methods
+outside cell access, reading the application from the module store. Both write only the audit trail and are
+main-window only. No typed wrapper was added (the host and the runner call them through `invokeBackend`). All five
+figures re-run together, line-wise, with `count_cmds_m6bB2c.cjs` (the M6 door parse with the two names added):
+819 / 860 / 111 / 708 / 340, every entry a valid unique path. CLAUDE.md read **817** at this recount and needs
+**819**; it is the owner's file, so the corrected sentence was handed over rather than edited by the agent.
+
+The "10-01 (M6 door)" column is BUG-0257 phase 4 in Rust (M6 Task B). Two commands, both
+DENYLISTED under `codeExecution` (privileged **111**; feature-open stays **706**):
+`scripting::control_action::run_control_action` -- THE BUTTON DOOR: a click names its button (kind and cell,
+`deny_unknown_fields`, never code); Rust reads the code from its own store, asks the approval of its exact bytes
+(`buttonAction:<sha256>`) or of the application module it runs, applies the working-copy private-sheet rule,
+asks Script Security, records every run and refusal of an application's code, and runs it -- and
+`controls::adopt_held_button_code` ("Make this my own"), which moves an application's held button code into the
+user's own slots after the Properties pane showed it, as one undo step, always audited. No typed wrapper was
+added (Task D wires the click). All five figures re-run together, line-wise, with `count_cmds_m6b3.cjs` (the M6
+seal parse with the two names added): 817 / 858 / 111 / 706 / 340, every entry a valid unique path. CLAUDE.md
+read **813** at this recount and needs **817**; it is the owner's file, so the corrected sentence was handed
+over rather than edited by the agent.
+
+The "09-30 (M6 seal)" column is BUG-0257 phase 4's prerequisite (M6 Task A): approvals of
+distributed code sealed to this computer (`app/src-tauri/src/consent_seal.rs`). Two commands:
+`consent_seal::record_script_consent` -- the approval screen's door, which computes every hash itself and
+seals the record with a key held in Windows Credential Manager -- is DENYLISTED under `codeExecution`, because
+an approval switches code on (privileged **109**); `consent_seal::list_script_consents` only reads the
+verified approvals and stays feature-open (**706**). No typed wrapper was added: `@api/distributedConsent`
+calls both through `invokeBackend`, and nothing else spells them (pinned by
+`distributedConsentSealedWire.test.ts`). All five figures re-run together, line-wise, with
+`count_cmds_m6a.cjs` (the M4 parse with the two names added): 815 / 856 / 109 / 706 / 340, every entry a valid
+unique path. CLAUDE.md read **813** at this recount and needs **815**; it is the owner's file, so the corrected
+sentence was handed over rather than edited by the agent. M6 planned two more commands (`run_control_action`,
+`adopt_held_button_code`, Task B); they landed the next day and the parse was re-run (the M6 door column).
+
+The "09-30 (anchor)" column is the developer anchor (BUG-0257 programme, M4 Task A):
+`calp_commands::calp_forget_developer_anchor` -- forget what this machine remembers about who created an
+application it develops -- made **813**. It lowers the one guard a share-writer cannot forge against a planted
+first version, so it is DENYLISTED under `collaborationTrust` (privileged **108**; feature-open stays **705**).
+All four figures re-run together, line-wise, the same afternoon -- and re-run again at the end of M4 (after the
+push's include and dead-link gates, phase 3's run gate, and `button_cells::audit_button_cell_refusal` RENAMED
+`audit_button_refusal`, net zero): 813 / 854 / 108 / 705 / 340, unchanged, every entry a valid unique path.
+CLAUDE.md read **812** at that recount (the 2026-09-30 column's figure) and needs 813. It is the owner's file,
+so the corrected sentence was handed over rather than edited by the agent; until it lands, the two
+"independent" counts disagree by one, in the stale direction.
+
+The 2026-09-30 column is the BUG-0257 programme. The tree already registered **810** before it (one
+command landed from other work after the 09-25 recount), then `controls::move_control` (the
+floating/in-cell toggle's MOVE, which keeps a working copy's held button code) made 811, and
+`button_cells::audit_button_cell_refusal` (the always-on audit row for a click's refusal of an
+application's button-cell action; renamed `audit_button_refusal` in M4, when button controls got the same
+row) made **812** -- feature-open, like `audit_record_capability`: it
+writes only an audit row, and it reads the application from the cell's own stamp, never from the
+caller. The "Remove the application's code" step is an optional `replaceHeld` flag on the existing
+`set_control_property`, not a new command. All four figures re-run together, line-wise, on
+2026-09-30; CLAUDE.md still quoted 809 at that date and needs the same figure.
 
 The 2026-09-25 column is the canvas-sheet programme: `sheets::set_canvas_layout` (the canvas page's
 layout, gated `editObjects`) and `controls::set_control_geometry` (one undo step for a batch of

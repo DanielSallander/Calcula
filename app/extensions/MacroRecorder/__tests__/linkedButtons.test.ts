@@ -42,6 +42,23 @@ describe("describeMacroDeletion", () => {
     expect(msg).toContain("Sheet2!AB3");
   });
 
+  // BUG-0257: a working copy's application buttons keep their macro links HELD
+  // and the next push publishes them. Deleting the macro there is exactly what
+  // the warning exists to name.
+  //
+  // SABOTAGE: drop `heldNote` from the returned message.
+  it("says when a linking button holds an application's link that a push publishes", () => {
+    const msg = describeMacroDeletion("Report", [
+      { ...at("Dashboard", 1, 1), heldBy: "Sales" },
+      at("Sheet1", 0, 0),
+    ])!;
+    expect(msg).toMatch(/2 buttons link/);
+    expect(msg).toContain('One of them holds the link that came with the application "Sales"');
+    expect(msg).toMatch(/push publishes/);
+    const own = describeMacroDeletion("Report", [at("Sheet1", 0, 0)])!;
+    expect(own).not.toMatch(/application/);
+  });
+
   it("caps the shown anchors but keeps the count exact", () => {
     const many: MacroLinkingControl[] = Array.from({ length: 10 }, (_, i) =>
       at("Sheet1", i, 0),

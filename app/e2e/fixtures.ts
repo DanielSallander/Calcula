@@ -424,13 +424,36 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       }
     } catch { /* no dialog open */ }
 
-    // Close any open task panes via store reset
-    await sharedPage.evaluate(() => {
+    // CLOSE EVERY TASK PANE, through the REAL store -- imported by URL from the
+    // dev server, which hands back the very module instance the app uses.
+    //
+    // This used to read a task-pane window global that nothing in the app
+    // defines, inside a try/catch: a silent no-op for as long as it
+    // existed. File > New closes no pane either, so a pane one spec opened
+    // (Collaboration's Audit Log, Format Chart) stayed docked on the right and
+    // narrowed the grid by ~500 px for EVERY later spec: objects placed at page
+    // x ~976 landed under it, and Ctrl+clicks, pixel samples and form clicks
+    // failed in specs that had nothing to do with the pane (E2E runs 9 and 10,
+    // 2026-09-30 / 2026-10-01). `windowGlobalsDefined.test.ts` now fails on any
+    // `__CALCULA_*__` global an e2e file reads that the app never defines.
+    const paneState = await sharedPage.evaluate(async () => {
       try {
-        const store = (window as any).__CALCULA_TASKPANE_STORE__;
-        if (store) store.getState().reset();
-      } catch { /* store not available */ }
+        const url = "/src/shell/TaskPane/useTaskPaneStore.ts";
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const m: any = await import(/* @vite-ignore */ url);
+        m.useTaskPaneStore.getState().reset();
+        const s = m.useTaskPaneStore.getState();
+        return { ok: true, isOpen: Boolean(s.isOpen), openPanes: Array.isArray(s.openPanes) ? s.openPanes.length : -1 };
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
     });
+    if (!paneState.ok || ("isOpen" in paneState && (paneState.isOpen || paneState.openPanes > 0))) {
+      throw new Error(
+        `[appPage] could not close the task panes a previous test left open (${JSON.stringify(paneState)}); ` +
+          "every later test would run against a grid narrowed by the docked pane",
+      );
+    }
 
     // DISMISS TOASTS LEFT BY THE PREVIOUS TEST. One app instance serves every
     // spec, and a toast lives 5s by default — long enough to outlive the test

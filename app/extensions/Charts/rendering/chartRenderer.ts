@@ -668,16 +668,11 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     chartHeight - 1,
   );
 
-  // 5. Draw selection border if chart is selected
+  // 5. The selected chart's OWN affordances. Its selection outline and its
+  //    resize handles are Core's (core/lib/gridRenderer/rendering/
+  //    floatingObjectChrome.ts), painted after every object from the one
+  //    geometry Core's resize hit test reads (BUG-0258 design phase 3).
   if (isChartSelected(chartId)) {
-    ctx.strokeStyle = "#0e639c";
-    ctx.lineWidth = 2;
-    ctx.setLineDash([]);
-    ctx.strokeRect(canvasX + 1, canvasY + 1, chartWidth - 2, chartHeight - 2);
-
-    // Resize handles at corners
-    drawResizeHandles(ctx, canvasX, canvasY, chartWidth, chartHeight);
-
     // Quick access buttons (to the right of chart)
     const qaButtons = computeQuickAccessButtons(canvasX, canvasY, chartWidth, chartHeight, chartId);
     drawQuickAccessButtons(ctx, qaButtons);
@@ -1488,31 +1483,6 @@ function drawFilterIndicator(
   }
 
   ctx.restore();
-}
-
-function drawResizeHandles(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-): void {
-  const handleSize = 6;
-  ctx.fillStyle = "#0e639c";
-
-  // Bottom-right handle
-  const brX = x + w - handleSize;
-  const brY = y + h - handleSize;
-  ctx.fillRect(brX, brY, handleSize, handleSize);
-
-  // Bottom-left handle
-  ctx.fillRect(x, brY, handleSize, handleSize);
-
-  // Top-right handle
-  ctx.fillRect(brX, y, handleSize, handleSize);
-
-  // Top-left handle
-  ctx.fillRect(x, y, handleSize, handleSize);
 }
 
 // ============================================================================

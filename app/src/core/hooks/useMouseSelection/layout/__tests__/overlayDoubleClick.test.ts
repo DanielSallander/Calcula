@@ -143,6 +143,6 @@ describe("the overlay double-click seam", () => {
     window.removeEventListener("floatingObject:bodyDragStart", onStart);
 
     expect(started).toBe(true);
-    expect(onStart).not.toHaveBeenCalled(); // no claimsBodyDrag => a move, as before
+    expect(onStart).not.toHaveBeenCalled(); // no zoneAt => all frame => a move, as before
   });
 });

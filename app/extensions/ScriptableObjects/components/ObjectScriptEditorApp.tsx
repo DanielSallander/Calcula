@@ -467,7 +467,7 @@ function macroDocFromRecord(
  * macro comes to look like yours on the one screen that exists to tell them
  * apart.
  */
-type MacroProvenanceKnowledge =
+export type MacroProvenanceKnowledge =
   | { kind: "package"; name: string }
   | { kind: "local" }
   | { kind: "unknown" };
@@ -532,16 +532,39 @@ export function macroWriteRefusal(doc: {
   return null;
 }
 
-/** The hover text on the tier chip — one sentence per state of knowledge. */
-function macroTierChipTitle(knowledge: MacroProvenanceKnowledge): string {
+/**
+ * The hover text on the tier chip — one sentence per state of knowledge.
+ *
+ * FOR A PUBLISHER'S MACRO IT SAYS WHERE THIS WINDOW'S RUN DIFFERS FROM YOURS
+ * (owner decision B, follow-up F5). Run and Debug here mount the stored bytes
+ * at the restricted tier with no pass (`hostStartModuleScriptDebugSession`),
+ * so `context.api` is null -- but a run YOU start from a door that carries a
+ * person's pass gets more: a macro written as an object script may change the
+ * cells of any sheet, and one for the workbook script runtime runs there with
+ * that runtime's reach. "What you step through is exactly what a button runs"
+ * is true of the BYTES and no longer of the reach, so the chip says both.
+ * Exported for objectScriptEditorMacros.test.tsx.
+ */
+export function macroTierChipTitle(
+  knowledge: MacroProvenanceKnowledge,
+  runtime: ModuleScriptRuntime | null = null,
+): string {
   switch (knowledge.kind) {
     case "package":
       return (
         `This macro arrived in the application "${knowledge.name}". Run and Debug in ` +
-        "this window mount it from the module store at the restricted tier — " +
-        "context.api is null — and it receives capabilities only through that " +
-        "application's consent record. You cannot raise it, and you cannot edit it " +
-        "here."
+        "this window mount its stored code at the restricted tier — context.api is " +
+        "null — and it receives capabilities only through that application's consent " +
+        "record. You cannot raise it, and you cannot edit it here. " +
+        (runtime === "objectScript"
+          ? "That is less than a run you start yourself: from Developer ▸ Macros ▸ Run, " +
+            "by clicking a button that runs it, or from the command line it may also read " +
+            "and change the cells of any sheet, and nothing more — and if it stops " +
+            "part-way, every change it made is undone."
+          : "That is not how a run you start yourself runs it: from Developer ▸ Macros ▸ " +
+            "Run, a button that runs it, the command line or a view bookmark of your own, " +
+            "it runs in the workbook script runtime, with that runtime's reach, once you " +
+            "have approved the application's code.")
       );
     case "local":
       return "A macro you wrote runs at the unlocked tier, where context.api is available.";
@@ -1587,9 +1610,10 @@ export function ObjectScriptEditorApp(): React.ReactElement {
    * READ-ONLY IS NOT UNRUNNABLE, and conflating them would be a fresh untruth.
    * A distributed MODULE is mounted BY ID from the module store
    * (`hostStartModuleScriptDebugSession`), at the restricted tier, from the
-   * publisher's own stored bytes — exactly what a button on the grid runs — so
-   * reading and stepping through it is both safe and the whole point of a
-   * transparency surface. A distributed OBJECT SCRIPT has no such path here and
+   * publisher's own stored bytes — the very bytes a button on the grid runs, though
+   * without the cell access a run YOU start gets (owner decision B; the tier chip
+   * says so) — so reading and stepping through it is both safe and the whole
+   * point of a transparency surface. A distributed OBJECT SCRIPT has no such path here and
    * keeps its refusal.
    */
   const runBlockedReason =
@@ -2909,7 +2933,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
             // to say whose code this is.
             data-macro-provenance={macroProvenanceKnowledge(macroDoc).kind}
             style={{ cursor: "default", opacity: 0.85 }}
-            title={macroTierChipTitle(macroProvenanceKnowledge(macroDoc))}
+            title={macroTierChipTitle(macroProvenanceKnowledge(macroDoc), macroDoc.runtime)}
           >
             {activeScript.accessLevel === "restricted" ? <IconLock /> : <IconUnlock />}
             {macroTierChipLabel(macroProvenanceKnowledge(macroDoc), activeScript.accessLevel)}
@@ -3063,8 +3087,9 @@ export function ObjectScriptEditorApp(): React.ReactElement {
             // the whole point of the change: in the VBE you never press Save
             // before you press F5. The only thing that still disables Run is a
             // distributed OBJECT SCRIPT — a distributed module is mounted from
-            // the store at the restricted tier and reads/steps exactly as a
-            // button click runs it, so read-only does not mean unrunnable.
+            // the store at the restricted tier -- the bytes a button click runs,
+            // without the cell access a run YOU start gets (owner decision B; the
+            // tier chip says so) -- so read-only does not mean unrunnable.
             runDisabled={runBlockedReason !== null}
             runDisabledTitle={runBlockedReason ?? undefined}
           />

@@ -104,25 +104,92 @@ pub struct WorkspaceLock {
     heartbeat: Option<std::thread::JoinHandle<()>>,
 }
 
+/// The lockfile's name in the workspace root.
+const LOCK_FILE: &str = ".calp-lock";
+
+/// Exclusively create the lockfile: the real `create` of [`WorkspaceLock::acquire`].
+fn create_lock_file(path: &Path) -> std::io::Result<()> {
+    fs::OpenOptions::new().write(true).create_new(true).open(path).map(|_| ())
+}
+
+/// Can this computer create a file in `root`? The real `probe` of
+/// [`WorkspaceLock::acquire`]: a uniquely named file, created and removed again.
+fn probe_folder_writable(root: &Path) -> std::io::Result<()> {
+    static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = PROBE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let probe = root.join(format!(".calp-write-probe-{}-{seq}", std::process::id()));
+    match fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+        Ok(file) => {
+            drop(file);
+            let _ = fs::remove_file(&probe);
+            Ok(())
+        }
+        // Somebody else's file under our name proves nothing either way; the
+        // caller's wait stays bounded regardless.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 impl WorkspaceLock {
     const STALE: Duration = Duration::from_secs(30);
     /// Comfortably inside STALE so a missed beat (a stalled share, a suspended
     /// thread) still leaves margin before another process reads us as crashed.
     const HEARTBEAT: Duration = Duration::from_secs(10);
+    /// How long a waiter waits before answering `WorkspaceBusy`: STALE plus a
+    /// margin. Within this window a LIVE holder either releases (we then create
+    /// the lock) or its lockfile ages past STALE and we steal it. Bounding the
+    /// wait by STALE — not a fixed iteration count — means we never fail
+    /// spuriously while another process legitimately holds the lock (the bug was
+    /// a 5s iteration budget vs a 30s stale threshold).
+    const MAX_WAIT: Duration = Duration::from_secs(Self::STALE.as_secs() + 5);
 
     pub fn acquire(root: &Path) -> Result<Self, CalpError> {
-        let path = root.join(".calp-lock");
+        Self::acquire_with(root, Self::MAX_WAIT, create_lock_file, probe_folder_writable)
+    }
+
+    /// [`Self::acquire`] with its two filesystem questions injectable -- "create
+    /// the lockfile" and "can this computer write to the folder at all" -- so a
+    /// test can hand it the answers Windows gives only inside a race.
+    fn acquire_with(
+        root: &Path,
+        max_wait: Duration,
+        mut create: impl FnMut(&Path) -> std::io::Result<()>,
+        mut probe: impl FnMut(&Path) -> std::io::Result<()>,
+    ) -> Result<Self, CalpError> {
+        let path = root.join(LOCK_FILE);
         let start = std::time::Instant::now();
-        // Wait up to STALE + a margin: within this window a LIVE holder either
-        // releases (we then create the lock) or its lockfile ages past STALE and
-        // we steal it. Bounding the wait by STALE — not a fixed iteration count —
-        // means we never fail spuriously while another process legitimately holds
-        // the lock (the bug was a 5s iteration budget vs a 30s stale threshold).
-        let max_wait = Self::STALE + Duration::from_secs(5);
+        let mut folder_checked = false;
         loop {
-            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(_) => return Ok(Self::with_heartbeat(path)),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            match create(&path) {
+                Ok(()) => return Ok(Self::with_heartbeat(path)),
+                // A LOCK STILL BEING RELEASED IS DENIED, NOT "EXISTING" (BUG-0275).
+                // On Windows a create over a lockfile whose holder's delete is
+                // still pending answers ERROR_ACCESS_DENIED (os error 5) until the
+                // last handle on the old file closes -- a waiter's own staleness
+                // check below holds one, and so may a scanner; a network share
+                // deletes that way as a rule. Retrying on AlreadyExists alone
+                // handed the loser of two simultaneous pushes a raw "Access is
+                // denied" instead of its turn. So a denial is waited for exactly
+                // like a held lock -- same staleness re-check, same bound, same
+                // WorkspaceBusy -- UNLESS this computer cannot create any file in
+                // the folder at all: that is a real permission problem, reported
+                // as such at once rather than as "busy, try again".
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    if e.kind() == std::io::ErrorKind::PermissionDenied && !folder_checked {
+                        folder_checked = true;
+                        if let Err(why) = probe(root) {
+                            return Err(CalpError::WorkspaceNotWritable {
+                                workspace: root.display().to_string(),
+                                reason: why.to_string(),
+                            });
+                        }
+                    }
                     // Steal an abandoned lock (holder crashed) rather than wait forever.
                     if let Ok(meta) = fs::metadata(&path) {
                         if let Ok(modified) = meta.modified() {
@@ -1730,6 +1797,177 @@ mod tests {
         assert!(!lockfile.exists(), "lockfile removed on drop");
         // Re-acquire after release works.
         let _g2 = WorkspaceLock::acquire(dir.path()).unwrap();
+    }
+
+    // --- BUG-0275: a lockfile still being released answers ACCESS_DENIED ---
+
+    fn denied() -> std::io::Error {
+        std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+    }
+
+    /// BUG-0275. On Windows, creating a file whose previous holder is still
+    /// being deleted answers ERROR_ACCESS_DENIED (os error 5) -- PermissionDenied,
+    /// not AlreadyExists -- and the lock retried only on AlreadyExists, so the
+    /// loser of two simultaneous pushes got a raw "Access is denied" instead of
+    /// waiting its turn. A denial in a folder this computer CAN write to is the
+    /// lock still being released: wait, and take it.
+    ///
+    /// SABOTAGE: retry on AlreadyExists only again -- `Io(PermissionDenied)` at
+    /// the first denial.
+    #[test]
+    fn a_lock_denied_while_it_is_being_released_is_waited_for_and_taken() {
+        let dir = TempDir::new().unwrap();
+        let calls = std::cell::Cell::new(0usize);
+        let create = |path: &Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() <= 3 {
+                Err(denied())
+            } else {
+                create_lock_file(path)
+            }
+        };
+        let lock = WorkspaceLock::acquire_with(dir.path(), Duration::from_secs(10), create, |_: &Path| Ok(()))
+            .expect("a denial that clears is a wait, not an error");
+        assert_eq!(calls.get(), 4, "three denials, then the create that took the lock");
+        assert!(dir.path().join(LOCK_FILE).exists(), "the lockfile is held");
+        drop(lock);
+        assert!(!dir.path().join(LOCK_FILE).exists(), "and released on drop");
+    }
+
+    /// ...and that wait is BOUNDED exactly like a held lock's: a denial that
+    /// never clears gives up with `WorkspaceBusy` (an honest, retryable answer)
+    /// after the bound -- never an endless wait, never the raw error.
+    ///
+    /// SABOTAGE: retry on AlreadyExists only again -- `Io(PermissionDenied)` at
+    /// the first denial, no wait and no WorkspaceBusy.
+    #[test]
+    fn a_denial_that_never_clears_gives_up_busy_after_the_same_bound() {
+        let dir = TempDir::new().unwrap();
+        let calls = std::cell::Cell::new(0usize);
+        let bound = Duration::from_millis(300);
+        let start = std::time::Instant::now();
+        let result = WorkspaceLock::acquire_with(
+            dir.path(),
+            bound,
+            |_: &Path| {
+                calls.set(calls.get() + 1);
+                Err(denied())
+            },
+            |_: &Path| Ok(()),
+        );
+        let waited = start.elapsed();
+        assert!(
+            matches!(result, Err(CalpError::WorkspaceBusy { .. })),
+            "expected WorkspaceBusy, got {:?}",
+            result.err()
+        );
+        assert!(waited >= bound, "it waited the bound out first: {waited:?}");
+        assert!(waited < Duration::from_secs(10), "and no longer: {waited:?}");
+        assert!(calls.get() > 1, "it retried: {} create(s)", calls.get());
+    }
+
+    /// A GENUINE permission problem is not turned into a wait. When this
+    /// computer cannot create ANY file in the workspace folder, the denial is
+    /// reported as exactly that, at once -- not as "busy, try again in a
+    /// minute", which the developer would obey and fail again. Any other answer
+    /// to the create is still an error at once, as before.
+    ///
+    /// SABOTAGE: ignore the probe's answer -- WorkspaceBusy after the full wait,
+    /// and this test's 5 s ceiling fails first.
+    #[test]
+    fn a_folder_this_computer_cannot_write_to_is_reported_not_waited_on() {
+        let dir = TempDir::new().unwrap();
+        let calls = std::cell::Cell::new(0usize);
+        let start = std::time::Instant::now();
+        let result = WorkspaceLock::acquire_with(
+            dir.path(),
+            Duration::from_secs(30),
+            |_: &Path| {
+                calls.set(calls.get() + 1);
+                Err(denied())
+            },
+            |_: &Path| Err(denied()),
+        );
+        match result {
+            Err(CalpError::WorkspaceNotWritable { workspace, reason }) => {
+                assert_eq!(workspace, dir.path().display().to_string());
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected WorkspaceNotWritable, got {:?}", other.err()),
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "reported, not waited on: {:?}", start.elapsed());
+        assert_eq!(calls.get(), 1, "one create, one probe, one answer");
+
+        let other = WorkspaceLock::acquire_with(
+            dir.path(),
+            Duration::from_secs(30),
+            |_: &Path| Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            |_: &Path| Ok(()),
+        );
+        assert!(
+            matches!(other, Err(CalpError::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound),
+            "any other answer is an error at once, as before: {:?}",
+            other.err()
+        );
+    }
+
+    /// The real probe: yes in a writable folder, leaving nothing behind; no
+    /// where there is no folder at all.
+    #[test]
+    fn the_write_probe_answers_and_leaves_nothing_behind() {
+        let dir = TempDir::new().unwrap();
+        probe_folder_writable(dir.path()).expect("a temp folder is writable");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0, "the probe file is removed");
+        assert!(probe_folder_writable(&dir.path().join("no-such-folder")).is_err());
+    }
+
+    /// BUG-0275 ON THE REAL FILE SYSTEM, made on demand. A holder's delete that
+    /// leaves the name PENDING (a delete-on-close, the classic semantics a
+    /// network share uses) while another handle is still open on the old
+    /// lockfile -- a waiter's staleness check, a virus scanner -- makes a fresh
+    /// `create_new` answer ERROR_ACCESS_DENIED until that handle closes. (A
+    /// plain DeleteFile on a local NTFS volume uses POSIX semantics and unlinks
+    /// the name at once, which is why the race was so rare here.)
+    ///
+    /// SABOTAGE: retry on AlreadyExists only again -- `Io(PermissionDenied)`.
+    #[cfg(windows)]
+    #[test]
+    fn a_lockfile_still_pending_deletion_is_waited_for_on_the_real_file_system() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const DELETE: u32 = 0x0001_0000;
+        const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x1 | 0x2 | 0x4;
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(LOCK_FILE);
+        fs::write(&path, b"1").unwrap();
+        let lingering = fs::File::open(&path).unwrap();
+        let deleter = fs::OpenOptions::new()
+            .access_mode(DELETE)
+            .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .open(&path)
+            .unwrap();
+        drop(deleter);
+
+        // Precondition: the answer the bug is about, on this machine, now.
+        let raw = fs::OpenOptions::new().write(true).create_new(true).open(&path);
+        assert_eq!(
+            raw.as_ref().err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::PermissionDenied),
+            "precondition: a create over a delete-pending lockfile is denied: {raw:?}"
+        );
+
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(lingering);
+        });
+        let lock = WorkspaceLock::acquire(dir.path());
+        release.join().unwrap();
+        let lock = lock.expect("the lock is taken once the old one is gone");
+        assert!(path.exists());
+        drop(lock);
+        assert!(!path.exists());
     }
 
     // --- D8: WorkspaceTransport seam ---

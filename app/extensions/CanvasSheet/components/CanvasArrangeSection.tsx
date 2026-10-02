@@ -1,7 +1,9 @@
 //! FILENAME: app/extensions/CanvasSheet/components/CanvasArrangeSection.tsx
 // PURPOSE: The Canvas tab's ARRANGE section: stacking order (Bring Forward /
-//          to Front, Send Backward / to Back), Align and Distribute, and Lock
-//          -- acting on the canvas-wide selection, across families.
+//          to Front, Send Backward / to Back), Align and Distribute, Lock --
+//          acting on the canvas-wide selection, across families -- and Size &
+//          Position, the no-drag dialog for the selection's PRIMARY object
+//          (@api/objectPosition; BUG-0258 design phase 5b).
 // CONTEXT: One tall row of heroes (the ribbon grammar's first sanctioned way
 //          to fill the 61px box). Three are menus -- the most-used command is
 //          the menu's FIRST item, so it is one click and Enter away -- and Lock
@@ -13,7 +15,10 @@
 //              same note every other Canvas section shows;
 //            - with nothing selected;
 //            - Distribute, below three objects (two objects have no gap to
-//              even out).
+//              even out);
+//            - Size & Position, when no Size and Position dialog can open for
+//              the primary object. A primary Core would refuse to move (locked,
+//              a run-mode button) still opens it, read-only, with the reason.
 //
 //          The section follows the selection (@api/objectSelection) and the
 //          canvas store (the lock state lives in the layout), so a selection
@@ -32,7 +37,8 @@ import {
   MenuSeparator,
 } from "@api/layout";
 import { RibbonIcon } from "@api/ribbonIcons";
-import { getSelectedObjectRegions, onObjectSelectionChanged } from "@api/objectSelection";
+import { getPrimaryObjectRegion, getSelectedObjectRegions, onObjectSelectionChanged } from "@api/objectSelection";
+import { openSizeAndPosition, sizeAndPositionMenuEntry } from "@api/objectPosition";
 import { getCanvasSheetSnapshot, subscribeCanvasSheets } from "../lib/canvasSheetStore";
 import {
   ALIGN_LABELS,
@@ -83,6 +89,16 @@ export function CanvasArrangeSection(_props: PanelSectionProps): React.ReactElem
   const why = activeSubscribed ? SUBSCRIBED_NOTE : none ? NOTHING_SELECTED_NOTE : null;
   const locked = !none && allLocked(selected);
   const canDistribute = count >= DISTRIBUTE_MIN_OBJECTS;
+  // Size & Position acts on ONE object: the primary member, the one Core's
+  // grip and the Name Box name.
+  const primary = none ? null : getPrimaryObjectRegion();
+  const sizeEntry = primary ? sizeAndPositionMenuEntry(primary) : null;
+  const sizeDisabled = disabled || !sizeEntry || sizeEntry.disabled;
+  const sizeWhy =
+    why ??
+    (!sizeEntry
+      ? NOTHING_SELECTED_NOTE
+      : (sizeEntry.reason ?? "Set the selected object's position and size in pixels, without dragging it"));
 
   return (
     <ActionRow gap={GAP_XS}>
@@ -203,6 +219,19 @@ export function CanvasArrangeSection(_props: PanelSectionProps): React.ReactElem
         }
         data-testid="canvas-arrange-lock"
         onClick={() => void setObjectsLocked(!locked)}
+      />
+
+      <CommandButton
+        icon={<RibbonIcon.Resize size={HERO_ICON_SIZE} />}
+        label="Size & Position"
+        disabled={sizeDisabled}
+        tooltip={sizeWhy}
+        data-testid="canvas-arrange-size-position"
+        onClick={() => {
+          // Read again at the click: the selection may have changed since render.
+          const target = getPrimaryObjectRegion();
+          if (target) openSizeAndPosition(target);
+        }}
       />
     </ActionRow>
   );

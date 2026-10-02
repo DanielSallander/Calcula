@@ -2,11 +2,15 @@
 // PURPOSE: What a press on a pivot's in-cell chrome DOES -- the +/- toggle,
 //          a report-filter combo, a Row/Column Labels filter button and the
 //          loading indicator's Cancel -- independent of HOW the press arrived.
-// CONTEXT: A worksheet pivot hears the press through the cellClicks
-//          interceptors; a canvas pivot box through Core's body-drag claim
-//          (`floatingObject:bodyDragStart`), because over a floating object the
-//          interceptors are never asked. Both routes call these, so the two
-//          cannot drift apart.
+// CONTEXT: A worksheet pivot hears the press through its ONE cell click
+//          interceptor, which claims it for the release (pivotCellChrome.ts,
+//          Core's release seam); a canvas pivot box through Core's content
+//          press (its chrome is CONTENT in the box's `zoneAt`, and Core
+//          dispatches `floatingObject:bodyDragStart`), because over a floating
+//          object the interceptors are never asked (pivotChromePress.ts). On
+//          both, the action runs at the press's RELEASE over the same chrome
+//          (BUG-0258 phase 4). Both routes call these, so the two cannot drift
+//          apart.
 
 import { emitAppEvent } from "@api/events";
 import { requestOverlayRedraw } from "@api/gridOverlays";
@@ -80,6 +84,52 @@ export async function togglePivotHeaderAt(
   return true;
 }
 
+/** A report-filter zone as the backend knows it: what its menu opens on. */
+export interface PivotReportFilterZone {
+  fieldIndex: number;
+  fieldName: string;
+  row: number;
+  col: number;
+}
+
+/**
+ * The report-filter zone of the combo at hidden-grid cell (gridRow, gridCol)
+ * for `fieldIndex`, or null when the backend knows no such zone. A worksheet
+ * press asks this at the PRESS (a combo it cannot serve is not claimed, and
+ * the cell is selected as before) and opens the menu at the release
+ * (pivotCellChrome.ts).
+ */
+export async function findPivotReportFilterZone(
+  gridRow: number,
+  gridCol: number,
+  fieldIndex: number,
+): Promise<PivotReportFilterZone | null> {
+  try {
+    const pivotInfo = await getPivotAtCell(gridRow, gridCol);
+    if (!pivotInfo?.filterZones) return null;
+    for (const zone of pivotInfo.filterZones) {
+      if (zone.fieldIndex === fieldIndex) {
+        return { fieldIndex: zone.fieldIndex, fieldName: zone.fieldName, row: zone.row, col: zone.col };
+      }
+    }
+  } catch (error) {
+    console.error("[Pivot Extension] Failed to check pivot filter:", error);
+  }
+  return null;
+}
+
+/** Open a report filter's menu, anchored at a CLIENT point. */
+export function openPivotReportFilterZone(zone: PivotReportFilterZone, anchorX: number, anchorY: number): void {
+  emitAppEvent(PivotEvents.PIVOT_OPEN_FILTER_MENU, {
+    fieldIndex: zone.fieldIndex,
+    fieldName: zone.fieldName,
+    row: zone.row,
+    col: zone.col,
+    anchorX,
+    anchorY,
+  });
+}
+
 /**
  * Open the report-filter menu of the combo at hidden-grid cell (gridRow,
  * gridCol), anchored at a CLIENT point. Returns false when the backend knows
@@ -92,27 +142,10 @@ export async function openPivotReportFilterAt(
   anchorX: number,
   anchorY: number,
 ): Promise<boolean> {
-  try {
-    const pivotInfo = await getPivotAtCell(gridRow, gridCol);
-    if (!pivotInfo?.filterZones) return false;
-
-    for (const zone of pivotInfo.filterZones) {
-      if (zone.fieldIndex === fieldIndex) {
-        emitAppEvent(PivotEvents.PIVOT_OPEN_FILTER_MENU, {
-          fieldIndex: zone.fieldIndex,
-          fieldName: zone.fieldName,
-          row: zone.row,
-          col: zone.col,
-          anchorX,
-          anchorY,
-        });
-        return true;
-      }
-    }
-  } catch (error) {
-    console.error("[Pivot Extension] Failed to check pivot filter:", error);
-  }
-  return false;
+  const zone = await findPivotReportFilterZone(gridRow, gridCol, fieldIndex);
+  if (!zone) return false;
+  openPivotReportFilterZone(zone, anchorX, anchorY);
+  return true;
 }
 
 /** Open the Row Labels / Column Labels filter menu, anchored at a CLIENT point. */

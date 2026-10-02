@@ -13,7 +13,7 @@
 import { registerOverlay, unregisterOverlay, showOverlay, AppEvents } from "@api";
 import { emitAppEvent } from "@api/events";
 import { ControlContextMenu } from "../components/ControlContextMenu";
-import { buildControlObjectMenu } from "./controlContextMenu";
+import { buildControlObjectMenu, refineControlObjectMenu } from "./controlContextMenu";
 import { floatingControlRegionAtClientPoint } from "./controlHitTest";
 import { getFloatingControl } from "./floatingStore";
 import { isFloatingControlSelected } from "../Button/floatingSelection";
@@ -107,6 +107,10 @@ export function installControlObjectMenu(): () => void {
         // whether anything is on the control clipboard, and on how many controls
         // are selected — all of which change between one right-click and the next.
         items: buildControlObjectMenu(control.id),
+        // The same list once a backend READ says what the store cannot: a
+        // button holding an application's code adds "Make this my own…"
+        // (owner question 8). The menu paints it when it answers.
+        refinedItems: refineControlObjectMenu(control.id),
       },
     });
   };

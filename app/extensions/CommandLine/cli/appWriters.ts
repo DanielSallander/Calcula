@@ -19,6 +19,7 @@ import type { CliOptionSpec, CliOptionTable } from "../../_shared/cli/optionSche
 import type { CliIo, WritePreview } from "../../_shared/cli/registry";
 import type { ClearApplyTo } from "@api/backend";
 import type { SheetInfo, SheetKindName } from "@api/lib";
+import { mintExplicitMacroRun } from "@api/explicitMacroRun";
 import {
   colLetterToIndex,
   formatQualified,
@@ -667,7 +668,15 @@ async function runMacro(cmd: GenericCommand, s: AppCliSession, io: CliIo): Promi
   if (notice) io.print(notice, "info");
 
   const origin = macroOriginPhrase(match);
-  const outcome = await s.gateway.runMacroByRef(match.id);
+  // THE PERSON'S PASS (owner decision B, follow-up F2): this line was typed and
+  // run by the user now -- Enter, Ctrl+Enter, Run or Confirm in the panel; no
+  // path replays a `run` line on its own (CliPanel recalls history only into
+  // the prompt). Minted here, after the resolution gates and the provenance
+  // notice, immediately before the run, for exactly the macro it resolved --
+  // never in the gateway, which other callers can reach. The census
+  // (src/api/__tests__/explicitMacroRun.test.ts) pins it.
+  const explicitRun = mintExplicitMacroRun("commandLine", match.id);
+  const outcome = await s.gateway.runMacroByRef(match.id, explicitRun);
   switch (outcome.status) {
     case "ran":
       io.print(`Macro '${outcome.name}' ran (${origin}).`, "info");
@@ -679,6 +688,12 @@ async function runMacro(cmd: GenericCommand, s: AppCliSession, io: CliIo): Promi
       // The origin travels on the FAILURE too: "somebody else's code just threw
       // in my workbook" is a different fact from "my macro has a bug".
       fail(`Macro '${outcome.name}' (${origin}) failed: ${outcome.message}`, cmd.line);
+      break;
+    case "refused":
+      // The command line asks for no particular application, so the seam has no
+      // reason to refuse here -- but if it ever does, the macro did NOT run, and
+      // saying "ran" or nothing would be the silent failure this seam forbids.
+      fail(`Macro '${outcome.name}' (${origin}) did not run: ${outcome.message}`, cmd.line);
       break;
   }
 }

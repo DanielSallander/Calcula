@@ -55,8 +55,15 @@ import {
 import {
   selectFloatingRange,
   deselectAllFloatingRanges,
+  isFloatingRangeSelected,
   resetFrSelection,
 } from "../frSelection";
+import {
+  registerObjectSelectionProvider,
+  resetObjectSelectionProviders,
+  setObjectSelectionSet,
+  deselectAllObjects,
+} from "@api/objectSelection";
 import { setFrEditingRange } from "../frEditingRange";
 import {
   FR_ROW_HDR_W,
@@ -324,6 +331,36 @@ describe("syncFloatingRangeRegions", () => {
     }
   });
 
+  it("asks Core for its four CORNER handles only (the edge midpoints are the yellow balls)", () => {
+    // Core's selection handles are eight by default and its resize scan runs
+    // BEFORE the range's own zone answer, so a Core midpoint would take every
+    // press meant for a ball (which scales the CELLS, not the counts).
+    // `handles: "corners"` is how a region asks for the corners only
+    // (core/lib/floatingHandles.ts `floatingHandleMode`).
+    upsertFromInfo(makeInfo({ id: "d", name: "Float1", hostSheetIndex: 0, rowCount: 3, colCount: 3 }));
+    setFrActiveSheetIndex(0);
+    syncFloatingRangeRegions();
+    expect(regionData("d").handles).toBe("corners");
+    selectFloatingRange("d");
+    syncFloatingRangeRegions();
+    expect(regionData("d")).toMatchObject({ resizable: true, handles: "corners" });
+  });
+
+  it("asks Core for a HOVER GRIP exactly when its title is hidden (BUG-0258 design phase 5)", () => {
+    // A title-less grid has only its 4px border band to be moved by: Core
+    // shows the six-dot grip (core/lib/floatingGrip.ts) on a region that
+    // publishes `grip: "hover"` while it is hovered or selected. A titled
+    // grid moves by its title and publishes no grip flag at all.
+    upsertFromInfo(makeInfo({ id: "t", hostSheetIndex: 0, showTitle: true }));
+    upsertFromInfo(makeInfo({ id: "n", hostSheetIndex: 0, showTitle: false, name: "Float2" }));
+    setFrActiveSheetIndex(0);
+    syncFloatingRangeRegions();
+    expect(regionData("t"), "a TITLED grid asks for a grip").not.toHaveProperty("grip");
+    expect(regionData("n").grip).toBe("hover");
+    // ...and the border band stays: the title-less grid is still frame at its edge.
+    expect(regionData("n")).toMatchObject({ movable: true, handles: "corners" });
+  });
+
   it("honors per-column width overrides in the derived width", () => {
     upsertFromInfo(
       makeInfo({
@@ -471,6 +508,40 @@ describe("geometry flags on a layout surface", () => {
       expect(regionData("a").resizable).toBe(true);
     } finally {
       setFrEditingRange(null);
+      uninstall();
+    }
+  });
+
+  it("a range the canvas selection SET holds -- the second grid of a multi-selection -- is resizable too, like every family's set-held member", () => {
+    // The family holds ONE range (no addToSelection), so a second selected
+    // grid is held by the set (@api/objectSelection). Core outlines it; its
+    // four corners are live only if the store says `resizable`.
+    const uninstall = installFrRegionResyncs();
+    const offProvider = registerObjectSelectionProvider({
+      types: [FLOATING_RANGE_REGION_TYPE],
+      isSelected: (r) => isFloatingRangeSelected(r.data?.frId as string),
+      select: (r) => selectFloatingRange(r.data?.frId as string),
+      deselectAll: () => deselectAllFloatingRanges(),
+    });
+    try {
+      upsertFromInfo(makeInfo({ id: "a", hostSheetIndex: 0 }));
+      upsertFromInfo(makeInfo({ id: "b", hostSheetIndex: 0, name: "Float2" }));
+      setFrActiveSheetIndex(0);
+      syncFloatingRangeRegions();
+      const ra = getGridRegions().find((r) => r.id === "fr-a")!;
+      const rb = getGridRegions().find((r) => r.id === "fr-b")!;
+      setObjectSelectionSet([ra, rb], rb);
+      expect(isFloatingRangeSelected("a"), "precondition: the SET holds a, not the family").toBe(false);
+      expect(isFloatingRangeSelected("b")).toBe(true);
+      expect(regionData("b").resizable).toBe(true);
+      expect(regionData("a").resizable, "a set-held grid gets the outline but no handles").toBe(true);
+
+      deselectAllObjects();
+      expect(regionData("a").resizable).toBe(false);
+      expect(regionData("b").resizable).toBe(false);
+    } finally {
+      offProvider();
+      resetObjectSelectionProviders();
       uninstall();
     }
   });

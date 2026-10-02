@@ -1,0 +1,67 @@
+{
+  "comment": "The consent-seal wire, read by BOTH sides: app/src-tauri/src/consent_seal_tests.rs deserializes 'request' into RecordScriptConsentRequest (deny_unknown_fields, so 'inputs' with its caller-side extras is REFUSED) and serializes a ScriptConsentList that must equal 'response'; app/src/api/__tests__/distributedConsentSealedWire.test.ts asserts recordConsent sends exactly 'request' for 'inputs' (the extras, a planted sourceHash among them, never leave the page), and that 'response' is what a typed ConsentReport literal spells. A field renamed on either side turns one of them red.",
+  "inputs": {
+    "packageName": "Quarterly Reports",
+    "scripts": [
+      { "id": "obj-refresh", "source": "// @capability net.fetch\nreturn 1;", "name": "Refresh", "sourceHash": "planted-by-the-caller" },
+      { "id": "macro-month-end", "source": "Calcula.setCellValue('A1', 1);" }
+    ],
+    "grantedCapabilities": [
+      { "capability": "net.fetch", "origins": ["https://example.com"] },
+      { "capability": "storage" }
+    ]
+  },
+  "request": {
+    "packageName": "Quarterly Reports",
+    "scripts": [
+      { "id": "obj-refresh", "source": "// @capability net.fetch\nreturn 1;" },
+      { "id": "macro-month-end", "source": "Calcula.setCellValue('A1', 1);" }
+    ],
+    "grantedCapabilities": [
+      { "capability": "net.fetch", "origins": ["https://example.com"] },
+      { "capability": "storage" }
+    ]
+  },
+  "response": {
+    "consents": [
+      {
+        "packageName": "Quarterly Reports",
+        "scripts": [
+          {
+            "id": "macro-month-end",
+            "sourceHash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "source": "Calcula.setCellValue('A1', 1);"
+          }
+        ],
+        "grantedCapabilities": [
+          { "capability": "net.fetch", "origins": ["https://example.com"] },
+          { "capability": "storage" }
+        ],
+        "grantedAt": "2026-09-30T12:00:00.000Z"
+      }
+    ],
+    "ignored": [
+      { "packageName": "Sealed Elsewhere", "reason": "otherComputer" },
+      { "packageName": "Old File", "reason": "unsealed" },
+      { "packageName": "Edited", "reason": "altered" },
+      { "packageName": "Broken Key", "reason": "keyUnavailable" }
+    ]
+  },
+  "buttonAction": {
+    "comment": "An approval of BUTTON code: its id is 'buttonAction:' + sha256 of its exact bytes, so an id must name the source beside it. Rust (consent_seal_tests.rs, a_button_action_approval_must_name_the_bytes_it_shows) accepts 'matched' and refuses 'mismatched' (the id names the bytes of 'Report();' while the source is 'Exfiltrate();'); the TypeScript double (helpers/consentStoreDouble.ts) mirrors that refusal, and distributedConsentSealedWire.test.ts asserts both through recordConsent.",
+    "matched": {
+      "packageName": "Quarterly Reports",
+      "scripts": [
+        { "id": "buttonAction:12ee7956d35291e173512db1ff55a88cc878327b647ef5a176ce2533a9154025", "source": "Report();" }
+      ],
+      "grantedCapabilities": []
+    },
+    "mismatched": {
+      "packageName": "Quarterly Reports",
+      "scripts": [
+        { "id": "buttonAction:12ee7956d35291e173512db1ff55a88cc878327b647ef5a176ce2533a9154025", "source": "Exfiltrate();" }
+      ],
+      "grantedCapabilities": []
+    }
+  }
+}

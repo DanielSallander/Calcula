@@ -55,6 +55,22 @@ export interface PublishParams {
   expectedBaseVersion?: string;
   /** What changed, in the author's words. Required for `"update"`. */
   changeSummary?: string;
+  /**
+   * The button code this push may publish although the application's signed
+   * version does not carry it (BUG-0257): the `hash` of each
+   * {@link ButtonCodeItem} in `report.buttonCode.unreviewed` the author has
+   * READ in the push dialog and ticked. Anything unlisted refuses the push by
+   * name (`CALP_PUSH_BUTTON_CODE_UNREVIEWED`).
+   */
+  acknowledgedButtonCode?: string[];
+  /**
+   * The author's own new macros, notebooks and names this push ADDS to the
+   * application ("Include in application", M4). Each names the `contentHash`
+   * Rust supplied for the {@link WithheldContent} whose `code` the push dialog
+   * SHOWED -- never a hash computed here. An item whose content no longer has
+   * that hash refuses the push by name (`CALP_PUSH_INCLUDED_CHANGED`).
+   */
+  includeInApplication?: IncludedItem[];
 }
 
 export interface PublishResponse {
@@ -87,6 +103,172 @@ export interface PublishReportItem {
 export interface PublishReport {
   included: PublishReportItem[];
   excluded: PublishReportItem[];
+  /**
+   * Every item THIS push left in the workbook because it is not the
+   * application's, by name (BUG-0261): your own scripts, notebooks, names,
+   * custom functions and pane controls the application never had, and other
+   * applications' code that arrived through a subscription. `excluded` says
+   * what applications cannot carry at all; this says what the push chose not
+   * to. Mirrors `PublishReport::withheld` (calp_commands.rs).
+   */
+  withheld: WithheldContent[];
+  /**
+   * The buttons' code this push carries, WITH the code (BUG-0257). Mirrors
+   * `PublishReport::button_code` (calp_commands.rs). Optional only so a
+   * report from an older backend still renders.
+   */
+  buttonCode?: ButtonCodeRelease;
+  /**
+   * Your own macros, notebooks and names this push ADDS to the application
+   * ("Include in application"), by name. They go out under your key, and the
+   * next push keeps them without a tick. Mirrors
+   * `PublishReport::added_to_application` (calp_commands.rs). Optional only so
+   * a report from an older backend still renders.
+   */
+  addedToApplication?: WithheldContent[];
+  /**
+   * Every button on a published sheet -- control or button cell -- that runs a
+   * macro this push does not publish, with the remedy that works. A push is
+   * REFUSED while any remain (`CALP_PUSH_BUTTON_MACRO_NOT_SHIPPED`); the preview
+   * only reports them. Mirrors `PublishReport::unshipped_macro_links`.
+   */
+  unshippedMacroLinks?: UnshippedMacroLinkItem[];
+}
+
+/**
+ * One piece of button code a push restores, refuses or needs acknowledged.
+ * Mirrors Rust `ButtonCodeItem` (app/src-tauri/src/held_button_code.rs).
+ */
+export interface ButtonCodeItem {
+  /** The APPLICATION sheet id. */
+  sheetId: string;
+  sheetName: string;
+  row: number;
+  col: number;
+  /** "Dashboard!B4" */
+  cell: string;
+  /** "onSelect" (inline code) or "macroRef" (a macro link). */
+  slot: string;
+  valueType: string;
+  /** The code, or the macro id, exactly as it would ship. */
+  code: string;
+  /** What an acknowledgement names (sha256 over the value type and the code). */
+  hash: string;
+  /** The application held code came with; empty for live code. */
+  application: string;
+  /** Why it is refused, or why it needs review. Empty for restored code. */
+  reason: string;
+}
+
+/**
+ * What a push does with the buttons' code (BUG-0257). Mirrors Rust
+ * `ButtonCodeRelease`.
+ *
+ * - `restored`: the application's code a working copy HELD, put back on the
+ *   published copy because the signed base carries those exact bytes;
+ * - `refused`: held code that cannot be proved to be the application's -- any
+ *   entry refuses the push (`CALP_PUSH_HELD_CODE_UNVERIFIED`);
+ * - `unreviewed`: code the signed base does not have (yours, or bytes a file
+ *   brought in) -- each needs an acknowledgement by hash;
+ * - `withheld`: held code a push that is NOT of the working copy's
+ *   application (a publish as a new application, a scripted publish) leaves
+ *   out, by name -- the button goes out without it. Never a refusal.
+ */
+export interface ButtonCodeRelease {
+  restored: ButtonCodeItem[];
+  refused: ButtonCodeItem[];
+  unreviewed: ButtonCodeItem[];
+  withheld?: ButtonCodeItem[];
+}
+
+/** What kind of thing a push withheld. Mirrors Rust `WithheldKind`. */
+export type WithheldKind =
+  | "objectScript"
+  | "moduleScript"
+  | "customFunction"
+  | "notebook"
+  | "paneControl"
+  | "namedRange";
+
+/**
+ * Why a push withheld it. Mirrors Rust `WithheldReason`:
+ * - `notInApplication`: yours, and the application never had it — it stays in
+ *   this workbook;
+ * - `otherApplication`: another application's code (it arrived through a
+ *   subscription) — publishing it would sign that application's code under
+ *   your key.
+ */
+export type WithheldReason = "notInApplication" | "otherApplication";
+
+/** One item a push (or its preview) withheld. Mirrors Rust `WithheldContent`
+ * (app/src-tauri/src/calp_push_scope.rs). */
+export interface WithheldContent {
+  kind: WithheldKind;
+  id: string;
+  name: string;
+  reason: WithheldReason;
+  /** The application it belongs to, for `otherApplication`; empty for yours. */
+  owner: string;
+  /**
+   * The push dialog may ADD it to the application ("Include in application"):
+   * your own module script, notebook or workbook name -- never another
+   * application's code, the Custom Functions record or a reserved record.
+   * Optional (like the three below) only so a report from an older backend
+   * still renders.
+   */
+  includable?: boolean;
+  /** sha256 of `code`, computed by Rust: what an {@link IncludedItem} names. */
+  contentHash?: string;
+  /**
+   * The exact text `contentHash` covers, for an includable item: a module's
+   * source, a notebook's cell sources as a JSON array in order, a name's
+   * refers-to formula. The dialog shows THIS before it lets the author tick
+   * it -- nothing ships under their key that was not on screen.
+   */
+  code?: string;
+  /** A caveat to read before including it (a name pointing at a sheet the push
+   * does not publish); empty otherwise. */
+  detail?: string;
+}
+
+/**
+ * One item the author asks a push to ADD to the application ("Include in
+ * application"). `hash` is the Rust-supplied {@link WithheldContent.contentHash}
+ * of the code the dialog showed. Mirrors Rust `IncludedItem`
+ * (app/src-tauri/src/calp_push_scope.rs).
+ */
+export interface IncludedItem {
+  kind: WithheldKind;
+  id: string;
+  hash: string;
+}
+
+/** Which kind of button runs the macro. Mirrors Rust `MacroLinkKind`. */
+export type MacroLinkKind = "control" | "cell";
+
+/**
+ * The remedy that works for a button whose macro the push does not publish.
+ * Mirrors Rust `MacroLinkRemedy` (app/src-tauri/src/held_button_code.rs):
+ * - `include`: your own macro -- tick Include in application next to it;
+ * - `otherApplication`: another application's macro -- unlink the button, or
+ *   copy the macro into one of your own and include the copy;
+ * - `missing`: no macro with this id can be published -- unlink or restore.
+ */
+export type MacroLinkRemedy = "include" | "otherApplication" | "missing";
+
+/** One button that runs a macro the push does not publish. Mirrors Rust
+ * `UnshippedMacroLinkItem`. */
+export interface UnshippedMacroLinkItem {
+  /** The button's anchor, e.g. "Dashboard!B4". */
+  cell: string;
+  kind: MacroLinkKind;
+  /** The module-script id the button runs. */
+  macroId: string;
+  /** The macro's name when this workbook holds it; empty otherwise. */
+  macroName: string;
+  remedy: MacroLinkRemedy;
+  /** The application the macro belongs to, for `otherApplication`. */
+  owner: string;
 }
 
 export interface PublishPreviewResponse {
@@ -372,6 +554,25 @@ export interface WorkingCopyDiff {
   packageName: string;
   baseVersion: string;
   diff: VersionDiff;
+  /** The code this push changes, when asked (`codeSummary: true`); `null` otherwise. */
+  code: WorkingCopyCode | null;
+}
+
+/**
+ * The CODE a push changes against its signed base (owner question 14): the
+ * Promote dialog's code summary (`calp::code_summary`), base version -> what
+ * this push would publish. Mirrors `WorkingCopyCode`
+ * (app/src-tauri/src/calp_diff.rs), with the same three fields as
+ * `PromotionImpact`'s code, so one reader (`promotionCodeFromImpact`) reads
+ * both answers.
+ */
+export interface WorkingCopyCode {
+  /** Every piece of code that changes. Empty when `codeError` is set: then NOT KNOWN, never "no changes". */
+  codeChanges: PromotionCodeChange[];
+  /** Whether anyone who approved the application's code will be asked again. */
+  asksApprovalAgain: boolean;
+  /** Why the code could not be compared (a base artifact that fails its signed checksum). `null` when it was. */
+  codeError: string | null;
 }
 
 // ============================================================================
@@ -425,7 +626,14 @@ export interface MergeAnalysisResponse {
   packageName: string;
   baseVersion: string;
   headVersion: string;
-  headPublishedBy: string;
+  /**
+   * Who SIGNED the head, on what authority -- from its VERIFIED manifest, after
+   * the authorised-publisher check. Never the version listing's
+   * `publishedBy`, which is unsigned: a share-writer could make the banner
+   * name a colleague for a version they planted.
+   */
+  headSigner: CheckoutSigner;
+  /** What the head's signer wrote, from the same verified manifest. */
   headChangeSummary: string;
   analysis: MergeAnalysis;
 }
@@ -462,6 +670,30 @@ export interface CoPublishersResponse {
   /** Set when a list exists but could not be trusted. Reported rather than
    *  treated as "no delegates" — those two must not look alike. */
   problem: string;
+  /** Set by a change of the list when the workspace was serving an OLDER list
+   *  than one this computer had already seen (a rollback): which revision was
+   *  served, which was seen, and which the new list became. Empty otherwise. */
+  notice: string;
+  /**
+   * Set when the workspace SERVES a list older than one this computer has seen
+   * -- someone put back a list that still carries the creator's valid
+   * signature. Its entries are NOT `coPublishers` (a rolled-back list is not the
+   * current one, and an editor starting from it would sign whoever it re-adds
+   * back in); they are here, apart, so the creator can see whom it re-adds. A
+   * change on top of it must acknowledge `servedRevision`
+   * (`setCoPublishers`' `acknowledgedRolledBackRevision`), or it is refused.
+   */
+  rolledBack?: RolledBackCoPublisherList | null;
+}
+
+/** A co-publisher list the workspace serves that is older than one this computer has seen. */
+export interface RolledBackCoPublisherList {
+  /** The revision the workspace serves now. */
+  servedRevision: number;
+  /** The highest revision this computer has seen. */
+  seenRevision: number;
+  /** Who the served (older) list names. Not the current list. */
+  servedCoPublishers: CoPublisherInfo[];
 }
 
 export interface CheckoutParams {
@@ -496,7 +728,109 @@ export interface CheckoutResponse {
    * sheet whenever a floating range is present.
    */
   firstSheetIndex?: number | null;
+  /**
+   * WHO SIGNED the version just opened, and on what authority (BUG-0262).
+   * The backend has already REFUSED any signer the application does not
+   * authorise (anchored at its first version), so this is what the developer
+   * is entitled to see about the code they are about to edit and re-sign —
+   * not a warning they are expected to act on.
+   */
+  signer: CheckoutSigner;
+  /**
+   * The application's button code slots this checkout HELD (BUG-0257): inert
+   * in the working copy -- no click runs them -- and published unchanged by
+   * the next push, after it matches them against the signed version.
+   * Optional only so an older backend's response still reads.
+   */
+  buttonCodeHeld?: number;
+  /**
+   * Control property values the checkout cleared because they were over the
+   * 64 KiB per-value bound (every door runs the same file checks). Reported,
+   * never dropped silently.
+   */
+  oversizedValuesCleared?: number;
+  /**
+   * The application's button-CELL actions this checkout HELD (BUG-0260), one
+   * sentence each ("Dashboard!C3: runs the macro ..."): an action that runs a
+   * macro the application did not bring into this workbook, or a command that
+   * is not on Calcula's list of commands a button from an application may run
+   * (`DISTRIBUTABLE_BUTTON_COMMANDS`, empty today). Inert in the working copy;
+   * the next push publishes it unchanged after matching it against the signed
+   * version. Optional only so an older backend still reads.
+   */
+  buttonActionsHeld?: string[];
+  /**
+   * The names of the sheets this working copy holds BESIDE the application (not
+   * among the new link's base sheets, and not blank), computed by the run gate's
+   * own rule after the link is written (phase 3 of BUG-0257). While any is
+   * there, the application's macros and object scripts do not run in this
+   * workbook -- what they write into the application's sheets would go out with
+   * the next push -- and the remedy is opening the application in a new
+   * workbook. Mirrors `CheckoutResponse::private_sheets`; optional only so an
+   * older backend's response still reads.
+   */
+  privateSheets?: string[];
 }
+
+/** The signer of a checked-out version, mirrored from Rust `CheckoutSignerInfo`. */
+export interface CheckoutSigner {
+  /** The name the version's own signed manifest gives. Display only. */
+  name: string;
+  /** Lowercase hex of the key that signed it. */
+  key: string;
+  /** The short form of `key` a refusal names, so the two can be compared. */
+  fingerprint: string;
+  /** "root": signed the application's first version. "coPublisher": listed in
+   *  the root-signed co-publisher list. */
+  role: CheckoutSignerRole;
+  /** For a co-publisher, the name the ROOT gave them. Empty for the root. */
+  listedAs: string;
+  rootName: string;
+  rootFingerprint: string;
+  /** This computer holds the signing key. DISPLAY ONLY — never an exemption:
+   *  a version signed with your key can hold a colleague's code after a merge
+   *  or a co-publisher's push. */
+  isYourKey: boolean;
+  /** What THIS COMPUTER remembers about the application's creator (the
+   *  developer anchor), mirrored from Rust `CheckoutAnchorInfo`. */
+  anchor: CheckoutAnchorInfo;
+}
+
+export type CheckoutSignerRole = "root" | "coPublisher";
+
+/**
+ * The developer anchor at a door, mirrored from Rust `CheckoutAnchorInfo`.
+ *
+ * The workspace PROVES an application's creator (its first version verifies
+ * under its own key) but FINDS it through an unsigned listing, so anyone who
+ * can write to the workspace folder can plant a first version of their own.
+ * This computer therefore remembers the creator it first saw, per workspace
+ * and application, and refuses a later answer naming anyone else -- and
+ * remembers the highest co-publisher list revision it has seen, refusing an
+ * older one.
+ */
+export interface CheckoutAnchorInfo {
+  status: CheckoutAnchorStatus;
+  /** RFC3339 when the creator was remembered; "" when not anchored. */
+  anchoredAt: string;
+  /** How it was remembered; "" when not anchored. */
+  anchoredBy: DeveloperAnchoredBy | "";
+  /** The highest co-publisher list revision this computer has seen. */
+  publishersRevision: number;
+}
+
+/**
+ * - `"firstContact"` -- nothing was remembered; THIS checkout recorded the
+ *   creator. A later checkout naming a different creator is refused.
+ * - `"matches"` -- the creator is the one this computer remembers.
+ * - `"notAnchored"` -- a passive read (the push merge's head) on a computer
+ *   that remembers nothing; nothing was recorded.
+ */
+export type CheckoutAnchorStatus = "firstContact" | "matches" | "notAnchored";
+
+/** What recorded an anchor: opening for editing, publishing or pushing, or
+ *  changing who may publish. */
+export type DeveloperAnchoredBy = "checkout" | "publish" | "publisherList";
 
 /**
  * TOFU trust outcome for a `.calp` application, mirrored EXACTLY from the Rust
@@ -632,6 +966,31 @@ export interface TrustedPublisherReport {
   /** Non-empty when the pin store exists but could not be read. NOT the same as
    *  "nothing is trusted" — render it as a failure, never as an empty list. */
   error: string;
+  /** The applications this computer DEVELOPS and the creator it remembers for
+   *  each (the developer anchor) -- a separate store from the pins, answering
+   *  "who created the applications I open for editing and push to?". */
+  developerAnchors: DeveloperAnchorInfo[];
+  /** Non-empty when the anchor store exists but could not be read -- which also
+   *  blocks every checkout, merge and push until it is repaired. Never an empty
+   *  list in disguise. */
+  developerAnchorsError: string;
+}
+
+/**
+ * One application this computer develops, as the machine remembers it. The
+ * workspace is named in the user's own spelling (`scopeLabel`); the normalized
+ * scope id is key material and is never sent.
+ */
+export interface DeveloperAnchorInfo {
+  scopeLabel: string;
+  application: string;
+  rootName: string;
+  rootFingerprint: string;
+  rootVersion: string;
+  publishersRevision: number;
+  /** RFC3339. */
+  anchoredAt: string;
+  anchoredBy: DeveloperAnchoredBy;
 }
 
 /**
@@ -642,6 +1001,84 @@ export interface TrustedPublisherReport {
  */
 export async function listTrustedPublishers(): Promise<TrustedPublisherReport> {
   return invokeBackend<TrustedPublisherReport>("calp_list_trusted_publishers");
+}
+
+/**
+ * Forget who created `packageName` in the workspace at `registryPath`, as this
+ * computer remembers it (the developer anchor). Resolves to how many records
+ * were forgotten.
+ *
+ * A DELIBERATE HOLE: the next checkout or push records whatever creator the
+ * workspace then names, which is exactly what a planted first version needs.
+ * Callers must ask first -- `await confirmAsync(...)`, naming both keys and
+ * telling the user to confirm with the creator -- and do nothing on a refusal
+ * or a dialog that cannot be shown. The backend audits every forget.
+ */
+export async function forgetDeveloperAnchor(
+  registryPath: string,
+  packageName: string,
+): Promise<{ forgotten: number }> {
+  return invokeBackend<{ forgotten: number }>("calp_forget_developer_anchor", {
+    params: { registryPath, packageName },
+  });
+}
+
+/** Prefix of a refusal because the workspace names a different creator than
+ *  this computer remembers (Rust `ANCHOR_CONTRADICTED_CODE`). */
+export const ANCHOR_CONTRADICTED_CODE = "CALP_ANCHOR_CONTRADICTED";
+/** Prefix of a refusal because the co-publisher list is older than one this
+ *  computer has seen (Rust `PUBLISHER_LIST_ROLLED_BACK_CODE`). */
+export const PUBLISHER_LIST_ROLLED_BACK_CODE = "CALP_PUBLISHER_LIST_ROLLED_BACK";
+
+/** A developer-anchor refusal, taken apart. */
+export interface AnchorRefusal {
+  /** "contradicted": another creator than the one this computer remembers --
+   *  forgetting the remembered one is a remedy, after checking with the
+   *  creator. "rolledBack": an older co-publisher list -- the remedy is the
+   *  creator's (save the list again), and nothing is offered here. */
+  kind: "contradicted" | "rolledBack";
+  /** The remembered creator's key fingerprint ("" for a rollback). */
+  rememberedFingerprint: string;
+  /** The key fingerprint the workspace names now ("" for a rollback). */
+  claimedFingerprint: string;
+  /** The refusal's own sentence, without the machine-readable prefix. */
+  text: string;
+}
+
+/**
+ * Take apart a developer-anchor refusal, or return `null` for any other error.
+ *
+ * The code must START the message: a refusal's sentence carries names the
+ * workspace chose (the application, the publishers), so a prefix found in the
+ * middle of some other refusal is somebody's text, not Calcula's -- and taking
+ * fingerprints from it would put a planter's words in a Forget question.
+ */
+export function parseAnchorRefusal(message: string | null | undefined): AnchorRefusal | null {
+  if (typeof message !== "string") return null;
+  const m = message.replace(/^\s*(Error:\s*)?/, "");
+  const contradicted = /^CALP_ANCHOR_CONTRADICTED remembered=(\S+) claimed=(\S+): /.exec(m);
+  if (contradicted) {
+    return {
+      kind: "contradicted",
+      rememberedFingerprint: contradicted[1],
+      claimedFingerprint: contradicted[2],
+      text: m.slice(contradicted[0].length),
+    };
+  }
+  if (m.startsWith(`${PUBLISHER_LIST_ROLLED_BACK_CODE}: `)) {
+    return {
+      kind: "rolledBack",
+      rememberedFingerprint: "",
+      claimedFingerprint: "",
+      text: m.slice(PUBLISHER_LIST_ROLLED_BACK_CODE.length + 2),
+    };
+  }
+  return null;
+}
+
+/** Is this error one of the two developer-anchor refusals? */
+export function isAnchorRefusal(message: string | null | undefined): boolean {
+  return parseAnchorRefusal(message) !== null;
 }
 
 export interface PullParams {
@@ -702,6 +1139,50 @@ export interface PullResponse {
    * mirror, where the next recalculation overwrites it.
    */
   firstPulledSheetIndex?: number | null;
+  /** Button code slots held (checkout only; a subscribe strips them). BUG-0257. */
+  buttonCodeHeld?: number;
+  /** Control property values cleared as over the 64 KiB per-value bound. */
+  oversizedValuesCleared?: number;
+  /** Button-cell actions a checkout held, one sentence each (BUG-0260). */
+  buttonActionsHeld?: string[];
+  /**
+   * Button-cell actions a SUBSCRIBE removed, one sentence each (BUG-0260): a
+   * button cell from an application runs only a macro that application brought
+   * into this workbook, and a command only when it is on Calcula's list of
+   * commands a button from an application may run (empty today) and approved.
+   */
+  buttonActionsRemoved?: string[];
+  /**
+   * Button CONTROLS whose link to one of this application's macros a SUBSCRIBE
+   * kept, held and stamped (phase 3 of BUG-0257): each runs that macro when
+   * clicked, only after the application's code is approved. Mirrors
+   * `PullResponse::button_links_held`.
+   */
+  buttonLinksHeld?: number;
+  /**
+   * Button-control macro links a SUBSCRIBE removed, one sentence each: the link
+   * named a macro this pull did not bring into the workbook (an id the
+   * workbook's own macro already holds, or one the application does not ship),
+   * and a button from an application runs only that application's own macros.
+   * Mirrors `PullResponse::button_links_removed`.
+   */
+  buttonLinksRemoved?: string[];
+  /**
+   * Button CONTROLS' inline code a SUBSCRIBE kept HELD, stamped with the
+   * application (phase 4 of BUG-0257): nothing arrives live, and the Rust
+   * button door runs it only after the approval screen has shown those exact
+   * bytes. Not `buttonActionsHeld`, which means button CELLS. Always 0 on a
+   * checkout (its held code is `buttonCodeHeld`). Mirrors
+   * `PullResponse::inline_button_code_held`.
+   */
+  inlineButtonCodeHeld?: number;
+  /**
+   * Button CONTROLS' inline code a SUBSCRIBE removed, one sentence each: an
+   * action written as a formula, which Calcula does not run as button code
+   * (only static bytes can be approved). Always empty on a checkout. Mirrors
+   * `PullResponse::inline_button_code_removed`.
+   */
+  inlineButtonCodeRemoved?: string[];
 }
 
 /** Contents of an application version, for pre-pull review. */
@@ -1110,6 +1591,29 @@ export interface RefreshResult {
   conflictsCreated: number;
   overridesAutoCleared: number;
   structuralConflicts: StructuralConflict[];
+  /**
+   * Button-cell actions this refresh REMOVED, one sentence each (BUG-0260): a
+   * button cell from an application runs only a macro that application brought
+   * into this workbook, and a command only when it is on Calcula's list of
+   * commands a button from an application may run (empty today) and approved.
+   * Optional for an older backend.
+   */
+  buttonActionsRemoved?: string[];
+  /**
+   * Button-control macro links this refresh REMOVED, one sentence each (phase 3
+   * of BUG-0257): the link named a macro the refreshed version did not bring
+   * into this workbook. Mirrors core `RefreshResult::button_links_removed`;
+   * optional for an older backend.
+   */
+  buttonLinksRemoved?: string[];
+  /**
+   * Button-control INLINE code this refresh REMOVED, one sentence each (phase
+   * 4 of BUG-0257): static inline code is held again, stamped with the new
+   * version, and runs only after the approval of its exact bytes; an action
+   * written as a formula cannot be approved and is removed. Mirrors core
+   * `RefreshResult::inline_button_code_removed`; optional for an older backend.
+   */
+  inlineButtonCodeRemoved?: string[];
 }
 
 export interface StructuralConflict {
@@ -1195,6 +1699,12 @@ export function publishPreview(
    * ships none.
    */
   kind?: string,
+  /**
+   * What the push would ADD to the application ("Include in application"),
+   * so the dry run shows what it adds -- and which buttons still run a macro
+   * it does not publish -- exactly as the push would. Omit for none.
+   */
+  includeInApplication?: IncludedItem[],
 ): Promise<PublishPreviewResponse> {
   return invokeBackend("calp_publish_preview", {
     params: {
@@ -1203,6 +1713,7 @@ export function publishPreview(
       kind: kind ?? "",
       registryPath: target?.registryPath ?? null,
       packageName: target?.packageName ?? null,
+      includeInApplication: includeInApplication ?? [],
     },
   });
 }
@@ -1437,12 +1948,96 @@ export function promoteEnvironment(params: {
 }
 
 /**
- * What a promotion WOULD do to data already collected in the target
- * environment.
+ * What kind of code a promotion's code-summary row is about. Mirrors
+ * `calp::code_summary::CodeKind` (core/calp/src/code_summary.rs), whose
+ * camelCase variant names are the wire values; a drift test reads that enum.
+ */
+export type PromotionCodeKind =
+  | "macro"
+  | "objectScript"
+  | "customFunction"
+  | "notebook"
+  | "buttonCode"
+  | "buttonCellAction"
+  | "writebackValidator"
+  | "reservedScript";
+
+/**
+ * What happened to the code between the two versions. Mirrors
+ * `calp::code_summary::CodeChangeKind`; `unchanged` only for a reserved
+ * script, which blocks the target whether or not it changed.
+ */
+export type PromotionCodeChangeKind = "added" | "removed" | "modified" | "unchanged";
+
+/**
+ * What a change means for the environment's subscribers. Mirrors
+ * `calp::code_summary::SubscriberConsequence`. A PREDICTION from the two
+ * versions: approvals are keyed by the hash of the code, so new or changed code
+ * asks again; nothing here can see a subscriber's own collisions or an earlier
+ * Deny.
+ */
+export type PromotionCodeConsequence =
+  | "asksApprovalAgain"
+  | "runsAfterApproval"
+  | "stopsRunning"
+  | "removedOnArrival"
+  | "neverRuns"
+  | "refusesVersion"
+  | "blocksSubmit";
+
+/**
+ * One piece of code that changes in a promotion. Mirrors
+ * `calp::code_summary::CodeChange` field for field (every field always present;
+ * the absent ones are `null`).
+ */
+export interface PromotionCodeChange {
+  kind: PromotionCodeKind;
+  /** Stable within its kind: a script id, a function name, `sheetId!A1:slot`, a region id. */
+  id: string;
+  name: string;
+  sheetName: string | null;
+  change: PromotionCodeChangeKind;
+  /** One line on this item: what it links, why it will not run, which approval it reuses. */
+  detail: string;
+  consequence: PromotionCodeConsequence;
+  /** The code before and after, capped; the `*Truncated` flags say when it was cut. */
+  before: string | null;
+  after: string | null;
+  beforeTruncated: boolean;
+  afterTruncated: boolean;
+  /** Capabilities an object script gains, from the signed manifest's declaration. */
+  addedCapabilities: string[];
+}
+
+/**
+ * What a promotion would cost. Mirrors `PromotionImpactResponse`
+ * (app/src-tauri/src/calp_environments.rs).
+ */
+export interface PromotionImpact {
+  /** What the promotion does to data already collected there. Empty when nothing is affected. */
+  writebackReport: string;
+  /** The code that changes between the environment's version and the target (all of it, on a first promotion). */
+  codeChanges: PromotionCodeChange[];
+  /** Whether anyone in the environment will be asked to approve the application's code again. */
+  asksApprovalAgain: boolean;
+  /**
+   * Why the code could not be compared (a target signed by a key the
+   * application does not authorise, an artifact that fails its checksum).
+   * `null` when it was compared. When set, `codeChanges` is empty because it
+   * is NOT KNOWN, never because nothing changes.
+   */
+  codeError: string | null;
+}
+
+/**
+ * What a promotion WOULD do: to data already collected in the target
+ * environment, and to the CODE its subscribers run.
  *
  * A SEPARATE READ so the window can show it before the confirm. The same
- * report comes back from the promotion itself, but a report that arrives after
- * the decision is a receipt, not a warning.
+ * writeback report comes back from the promotion itself, but a report that
+ * arrives after the decision is a receipt, not a warning. The code summary is
+ * computed for a FIRST promotion too (every piece of the target's code is new
+ * there), and a failure to compare the code comes back NAMED in `codeError`.
  */
 export function promotionImpact(params: {
   registryPath: string;
@@ -1450,7 +2045,7 @@ export function promotionImpact(params: {
   environment: string;
   /** The version being offered. Always send it — an unnamed one answers nothing. */
   version: string;
-}): Promise<{ writebackReport: string }> {
+}): Promise<PromotionImpact> {
   return invokeBackend("calp_promotion_impact", { params });
 }
 
@@ -1507,6 +2102,13 @@ export function setCoPublishers(params: {
   registryPath: string;
   packageName: string;
   coPublishers: Array<{ key: string; name?: string }>;
+  /**
+   * The served revision of a ROLLED-BACK list the creator knowingly replaces
+   * (`CoPublishersResponse.rolledBack.servedRevision`). Set only after a
+   * confirmation naming whom that list re-adds; without it a change on top of a
+   * rolled-back list is refused (`CALP_PUBLISHER_LIST_ROLLED_BACK`).
+   */
+  acknowledgedRolledBackRevision?: number;
 }): Promise<CoPublishersResponse> {
   return invokeBackend("calp_set_co_publishers", { params });
 }
@@ -1585,6 +2187,18 @@ export async function diffWorkingCopy(params?: {
    * range's backing sheet as added — neither of which a reset touches.
    */
   scopeSheetIds?: string[];
+  /**
+   * What the push dialog ADDS to the application ("Include in application"),
+   * so the working side is the push it would make. Omit for none.
+   */
+  includeInApplication?: IncludedItem[];
+  /**
+   * Also compare the CODE this push changes (the answer's `code`): which
+   * macros, scripts, functions, notebooks, buttons and validators, and what
+   * each change means for everyone on the development line. The push dialog
+   * asks; omitted, the answer carries `code: null`.
+   */
+  codeSummary?: boolean;
   /**
    * The providers' distributable objects the working side carries. Omitted =
    * collected here, exactly as `publishApplication` collects them: the working

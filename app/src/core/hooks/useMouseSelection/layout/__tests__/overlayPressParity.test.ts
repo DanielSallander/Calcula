@@ -1,9 +1,11 @@
 //! FILENAME: app/src/core/hooks/useMouseSelection/layout/__tests__/overlayPressParity.test.ts
 // PURPOSE: PRESS PARITY through Core's REAL press handler: on a CANVAS a plain
 //          press on one family's object deselects every other family before the
-//          family hears the press; Ctrl/Shift keeps the rest; a WORKSHEET keeps
-//          its historical behaviour (the press touches no other family). And
-//          the one click signal every family reads now carries Shift.
+//          family hears the press; Ctrl/Shift keeps the rest. A WORKSHEET gets
+//          the same plain rule since BUG-0270's review (it used to touch no
+//          other family, so a chart and a slicer clicked in turn were BOTH
+//          selected and Delete removed the chart clicked earlier). And the one
+//          click signal every family reads now carries Shift.
 // CONTEXT: The surface comes from the grid state snapshot, mocked here; the
 //          families are doubles registered through the real object-selection
 //          seam, and their "click handler" is a real listener on the real
@@ -22,7 +24,12 @@ vi.mock("../../../../state/GridContext", async (importOriginal) => ({
 }));
 
 import { createOverlayMoveHandlers, type OverlayMoveState } from "../overlayMoveHandlers";
-import { setGridRegions, type GridRegion } from "../../../../../api/gridOverlays";
+import {
+  setGridRegions,
+  registerGridOverlay,
+  unregisterGridOverlay,
+  type GridRegion,
+} from "../../../../../api/gridOverlays";
 import {
   getSelectedObjectRegions,
   notifyObjectSelectionChanged,
@@ -167,14 +174,104 @@ describe("press parity on a CANVAS", () => {
   });
 });
 
-describe("a WORKSHEET keeps its historical behaviour", () => {
-  it("a press on one family's object leaves the other family's selection alone", () => {
+describe("press parity on a WORKSHEET (BUG-0270 review): the plain rule", () => {
+  it("a plain press on another family's object deselects the first -- Delete then deletes what was just clicked", () => {
     snapshot.surface = "grid";
     click(0);
     click(200);
-    // Two families "selected" at once -- exactly what a worksheet always did.
+    expect(slicers.selected).toBe("slicer-1");
+    expect(charts.selected, "the chart clicked EARLIER stayed selected beside the slicer").toBeNull();
+    expect(getSelectedObjectRegions().map((r) => r.id)).toEqual(["slicer-1"]);
+  });
+
+  it("Ctrl keeps both families selected (a deliberate multi-selection, deleted whole)", () => {
+    snapshot.surface = "grid";
+    click(0);
+    click(200, { ctrlKey: true });
     expect(charts.selected).toBe("chart-1");
     expect(slicers.selected).toBe("slicer-1");
+  });
+});
+
+describe("the modifiers belong to the ZONE (a zoneAt family, M5 T2)", () => {
+  // The chart's LEFT half is content (think: a brush, a timeline's months),
+  // its right half frame.
+  beforeEach(() => {
+    registerGridOverlay({
+      type: "chart",
+      render: () => {},
+      zoneAt: (ctx) =>
+        ctx.canvasX < (ctx.floatingCanvasBounds?.x ?? 0) + 50
+          ? { kind: "content", cursor: "crosshair", part: "plot" }
+          : null,
+    });
+  });
+  afterEach(() => unregisterGridOverlay("chart"));
+
+  const CHART_CONTENT = RHW + 10;
+  const CHART_FRAME = RHW + 80;
+
+  /** Press at canvas x on the object row; `release` finishes the click. */
+  function pressAt(canvasX: number, mods: { ctrlKey?: boolean; shiftKey?: boolean } = {}) {
+    const ref: { current: OverlayMoveState | null } = { current: null };
+    const h = createOverlayMoveHandlers({
+      config: DEFAULT_GRID_CONFIG,
+      viewport: VIEWPORT,
+      containerRef: { current: null },
+      setIsOverlayMoving: vi.fn(),
+      setCursorStyle: vi.fn(),
+      overlayMoveStateRef: ref as React.MutableRefObject<OverlayMoveState | null>,
+    });
+    expect(h.handleOverlayMoveMouseDown(canvasX, CHH + 10, mouse(mods))).toBe(true);
+    return {
+      release(): void {
+        h.handleOverlayMoveMouseUp();
+        window.dispatchEvent(new MouseEvent("mouseup"));
+        vi.runOnlyPendingTimers();
+      },
+    };
+  }
+
+  /** The selected objects' ids, sorted (paint order is not the point here). */
+  const selectedIds = () => getSelectedObjectRegions().map((r) => r.id).sort();
+
+  /** Chart and slicer both selected (a canvas multi-selection). */
+  function selectBoth(): void {
+    pressAt(CHART_FRAME).release();
+    click(200, { ctrlKey: true });
+    expect(selectedIds()).toEqual(["chart-1", "slicer-1"]);
+  }
+
+  it("Shift+press on a member's CONTENT never toggles it out: it is a plain press there", () => {
+    selectBoth();
+    const p = pressAt(CHART_CONTENT, { shiftKey: true });
+    // During the press the set is kept (a plain press on a member)...
+    expect(selectedIds()).toEqual(["chart-1", "slicer-1"]);
+    p.release();
+    // ...and at the release the pressed member is still selected: Shift was
+    // the content's (it would have toggled the chart OUT on the frame). A
+    // plain click on content that moved nothing narrows to its object.
+    expect(charts.selected).toBe("chart-1");
+    expect(getSelectedObjectRegions().map((r) => r.id)).toEqual(["chart-1"]);
+    // And the family's click signal carries no object-selection Shift.
+    expect(details[details.length - 1]).toMatchObject({ regionId: "chart-1", zone: "content", shiftKey: false });
+  });
+
+  it("Shift+press on the same member's FRAME toggles it out, keeping the other", () => {
+    selectBoth();
+    pressAt(CHART_FRAME, { shiftKey: true }).release();
+    expect(charts.selected).toBeNull();
+    expect(slicers.selected).toBe("slicer-1");
+    expect(getSelectedObjectRegions().map((r) => r.id)).toEqual(["slicer-1"]);
+    expect(details[details.length - 1]).toMatchObject({ regionId: "chart-1", zone: "frame", shiftKey: true });
+  });
+
+  it("Ctrl+press on a non-member's CONTENT selects it alone (no add)", () => {
+    click(200);
+    expect(slicers.selected).toBe("slicer-1");
+    pressAt(CHART_CONTENT, { ctrlKey: true }).release();
+    expect(charts.selected).toBe("chart-1");
+    expect(slicers.selected).toBeNull();
   });
 });
 

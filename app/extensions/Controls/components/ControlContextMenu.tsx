@@ -104,7 +104,34 @@ export function ControlContextMenu({
   const controlId = typeof data?.controlId === "string" ? data.controlId : null;
   const screenX = typeof data?.screenX === "number" ? data.screenX : null;
   const screenY = typeof data?.screenY === "number" ? data.screenY : null;
-  const items = Array.isArray(data?.items) ? (data.items as ControlMenuItem[]) : [];
+  const openedItems = Array.isArray(data?.items) ? (data.items as ControlMenuItem[]) : [];
+  // The whole list again once a backend READ has answered what the store could
+  // not (lib/controlContextMenu.ts `refineControlObjectMenu`: "Make this my
+  // own…" on a button holding an application's code). Painted when it arrives,
+  // and only for the opening it belongs to: a re-open hands a new promise, and
+  // an answer to the old one is never painted over the new menu.
+  const refinedItems =
+    data?.refinedItems instanceof Promise ? (data.refinedItems as Promise<ControlMenuItem[] | null>) : null;
+  const [refined, setRefined] = useState<{
+    from: Promise<ControlMenuItem[] | null>;
+    items: ControlMenuItem[];
+  } | null>(null);
+  useEffect(() => {
+    if (!refinedItems) return;
+    let current = true;
+    refinedItems.then(
+      (list) => {
+        if (current && Array.isArray(list)) setRefined({ from: refinedItems, items: list });
+      },
+      () => {
+        // A failed read offers nothing more: the list the menu opened with stands.
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [refinedItems]);
+  const items = refined !== null && refined.from === refinedItems ? refined.items : openedItems;
 
   const menuRef = useRef<HTMLDivElement>(null);
   const [openSubmenuId, setOpenSubmenuId] = useState<string | null>(null);

@@ -273,6 +273,8 @@ pub struct RenameCounts {
     pub controls: usize,
     /// Cell-range sources of pane-control dropdowns.
     pub pane_controls: usize,
+    /// Formulas of slicers' computed properties (BUG-0263: they travel now).
+    pub slicer_formulas: usize,
 }
 
 /// The per-sheet and workbook-scoped RULE payloads a pull carries next to its
@@ -450,8 +452,9 @@ impl SheetRenames {
 
     /// Rename every sheet-name-bound reference a pull carries: the formulas on
     /// every pulled sheet (object-backed sheets included -- they are sheets of
-    /// the pull like any other), every defined name's `refers_to`, and every
-    /// chart's string sources. Run BEFORE the sheets become grids, so the edges
+    /// the pull like any other), every defined name's `refers_to`, every
+    /// chart's string sources, the rule payloads, and every slicer's computed
+    /// property formulas. Run BEFORE the sheets become grids, so the edges
     /// built from them, the override baselines captured from them and the
     /// upstream values a refresh compares against are all in ONE spelling.
     pub fn rename_pull(&self, result: &mut crate::pull::PullResult) -> RenameCounts {
@@ -463,6 +466,7 @@ impl SheetRenames {
             controls: &mut result.controls,
             pane_controls: &mut result.pane_controls,
         });
+        let slicer_formulas = self.rename_slicer_formulas(&mut result.slicers);
         RenameCounts {
             cell_formulas: content.cell_formulas,
             named_ranges: content.named_ranges,
@@ -471,7 +475,29 @@ impl SheetRenames {
             data_validations: rules.data_validations,
             controls: rules.controls,
             pane_controls: rules.pane_controls,
+            slicer_formulas,
         }
+    }
+
+    /// Rename the sheet references in every slicer's COMPUTED PROPERTY
+    /// formulas (BUG-0263). A computed property is a formula the cell
+    /// evaluator runs (`slicer/computed.rs`) and it names sheets by NAME, so
+    /// once these travel -- on checkout, so an untouched push republishes them,
+    /// and to subscribers, who evaluate them like the cell formulas that
+    /// already travel -- a collision rename has to reach them exactly as it
+    /// reaches a cell. The push half is the host's
+    /// `restore_published_sheet_references`. Returns how many changed.
+    pub fn rename_slicer_formulas(&self, slicers: &mut [persistence::SavedSlicer]) -> usize {
+        if self.is_empty() {
+            return 0;
+        }
+        let mut changed = 0;
+        for slicer in slicers.iter_mut() {
+            for prop in slicer.computed_properties.iter_mut() {
+                changed += usize::from(self.rename_slot(&mut prop.formula));
+            }
+        }
+        changed
     }
 
     /// Rename the sheet references inside the RULE payloads a pull carries:
@@ -698,6 +724,18 @@ pub fn visit_pane_control_reference(config: &mut serde_json::Value, f: &mut dyn 
     usize::from(visit_string(source.get_mut("reference"), f))
 }
 
+/// Every formula a slicer's `computed_properties` list carries (one saved
+/// slicer's JSON field -- `SavedSlicer` serializes snake_case): each entry's
+/// `formula`, which the slicer evaluator parses with or without a leading `=`,
+/// so it is always visited (BUG-0263).
+pub fn visit_slicer_computed_formulas(props: &mut serde_json::Value, f: &mut dyn FnMut(&mut String) -> bool) -> usize {
+    let Some(props) = props.as_array_mut() else { return 0 };
+    props
+        .iter_mut()
+        .map(|prop| usize::from(visit_string(prop.get_mut("formula"), f)))
+        .sum()
+}
+
 /// A rule payload OBJECT (one version-diff item of `domain`) with every
 /// formula slot in the form two spellings of it share, so a checkout's
 /// collision rename and the push's undo of it -- which re-render the
@@ -708,13 +746,15 @@ pub fn visit_pane_control_reference(config: &mut serde_json::Value, f: &mut dyn 
 /// so a slot the rename can re-spell is always compared spelling-blind, and a
 /// literal the visitor skips (a cell-value bound without `=`) stays
 /// byte-compared: `abc` becoming `ABC` is still a change. `None` for a domain
-/// with no such slots.
+/// with no such slots (and for a slicer that carries no computed properties,
+/// which is then compared byte for byte like any other object).
 pub fn comparable_rule_payload(domain: &str, item: &serde_json::Value) -> Option<serde_json::Value> {
     let (field, visit): (&str, fn(&mut serde_json::Value, &mut dyn FnMut(&mut String) -> bool) -> usize) = match domain {
         "conditionalFormat" => ("rules", visit_cf_rule_formulas),
         "dataValidation" => ("ranges", visit_validation_formulas),
         "control" => ("controls", visit_control_formulas),
         "paneControl" => ("config", visit_pane_control_reference),
+        "slicer" => ("computed_properties", visit_slicer_computed_formulas),
         _ => return None,
     };
     let mut out = item.clone();
@@ -1067,5 +1107,58 @@ mod tests {
         });
         assert_eq!(cfs[0].rules[0]["rule"]["formula"], "=A1>#REF!");
         assert_eq!(panes[0].config["source"]["reference"], "#REF!");
+    }
+
+    /// BUG-0263. Slicer computed properties now make the checkout -> push round
+    /// trip, and a collision rename re-renders every formula it touches: the
+    /// author typed `=data!a1 * 2`, the push brings it home as `=Data!A1*2`.
+    /// That is the same formula and must not show in the push preview as a
+    /// changed slicer (nor collide with a teammate's edit in the merge
+    /// analysis) -- while a real edit, or a formula gained or lost, still does.
+    ///
+    /// SABOTAGE: drop the `"slicer"` arm from `comparable_rule_payload`.
+    #[test]
+    fn a_slicer_formula_re_spelled_by_a_rename_round_trip_is_the_same_slicer() {
+        use serde_json::json;
+        let slicer = |formula: &str| {
+            json!({ "id": "s1", "name": "ByRegion", "width": 180.0,
+                    "computed_properties": [{ "id": "p1", "attribute": "width", "formula": formula }] })
+        };
+        let typed = slicer("=data!a1 * 2");
+        let checkout = renames(&[("Data", "Data (2)")]);
+        let push = renames(&[("data (2)", "Data")]);
+        let mut wrapped: Vec<persistence::SavedSlicer> = vec![serde_json::from_value(json!({
+            "id": identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            "name": "ByRegion",
+            "sheet_id": identity::SheetId::from_bytes(identity::generate_uuid_v7()),
+            "x": 0.0, "y": 0.0, "width": 180.0, "height": 220.0,
+            "source_type": "table",
+            "cache_source_id": identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            "field_name": "Region", "selected_items": null, "show_header": true,
+            "columns": 1, "style_preset": "SlicerStyleLight1",
+            "computed_properties": [{
+                "id": identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+                "attribute": "width",
+                "formula": "=data!a1 * 2"
+            }]
+        }))
+        .expect("a minimal saved slicer")];
+        assert_eq!(checkout.rename_slicer_formulas(&mut wrapped), 1);
+        assert_eq!(push.rename_slicer_formulas(&mut wrapped), 1);
+        let home = wrapped[0].computed_properties[0].formula.clone();
+        assert_ne!(home, "=data!a1 * 2", "precondition: the round trip re-spells the text");
+
+        let same = |a: &serde_json::Value, b: &serde_json::Value| {
+            match (comparable_rule_payload("slicer", a), comparable_rule_payload("slicer", b)) {
+                (Some(x), Some(y)) => x == y,
+                _ => false,
+            }
+        };
+        assert!(same(&typed, &slicer(&home)), "{home} vs =data!a1 * 2 is only spelling");
+        assert!(!same(&typed, &slicer("=Data!A1*3")), "a real edit is still a change");
+        assert!(!same(&typed, &slicer("=Other!A1*2")), "another sheet is still a change");
+        let mut no_props = typed.clone();
+        no_props.as_object_mut().unwrap().remove("computed_properties");
+        assert!(!same(&typed, &no_props), "losing the computed properties is a change");
     }
 }

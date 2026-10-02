@@ -299,6 +299,9 @@ pub fn materialize_saved_cell_types(
 // ============================================================================
 
 /// Assign a cell type to a single cell on the active sheet (undoable).
+///
+/// Refuses a `heldAction` in `params` by name (BUG-0260): only a checkout may
+/// put an application's button action there, because the next push publishes it.
 #[tauri::command]
 pub fn set_cell_type(
     state: State<AppState>,
@@ -307,7 +310,9 @@ pub fn set_cell_type(
     col: u32,
     type_id: String,
     params: Option<serde_json::Value>,
-) -> CellTypeEntry {
+) -> Result<CellTypeEntry, String> {
+    // Before the effect: a refused write leaves a clean document clean.
+    crate::button_cells::refuse_held_action_write(params.as_ref())?;
     let sheet_index = *state.active_sheet.read().unwrap();
     // Cell-type assignments are persisted (`workbook.cell_types`) and written
     // only by the save path. These commands already record undo -- recording
@@ -324,13 +329,13 @@ pub fn set_cell_type(
 
     crate::undo_commands::record_cell_types_undo(&state, sheet_index, previous, "Set cell type");
 
-    CellTypeEntry {
+    Ok(CellTypeEntry {
         sheet_index,
         row,
         col,
         type_id: assignment.type_id,
         params: assignment.params,
-    }
+    })
 }
 
 /// Assign a cell type to every cell in a range on the active sheet (one undo
@@ -358,6 +363,8 @@ pub fn set_cell_type_range(
             cell_count, MAX_RANGE_CELLS
         ));
     }
+    // BUG-0260: the held action is the checkout's to write, never a caller's.
+    crate::button_cells::refuse_held_action_write(params.as_ref())?;
 
     let sheet_index = *state.active_sheet.read().unwrap();
     let params = params.unwrap_or_else(|| serde_json::json!({}));

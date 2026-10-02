@@ -371,8 +371,9 @@ export async function selectedObjects(page: Page): Promise<Obj[]> {
 
 /**
  * Click an object. `at` is the point inside it, in the object's own px
- * (default: 24,24 -- inside the body, clear of the 10 px corner handles that a
- * press on ANY resizable floating object grabs, selected or not).
+ * (default: 24,24 -- inside the body, clear of Core's resize handles: they are
+ * live only on a SELECTED object, centred on its corners and edge midpoints,
+ * each hit at its centre +/- 6 px -- core/lib/floatingHandles.ts).
  */
 export async function clickObject(
   page: Page,

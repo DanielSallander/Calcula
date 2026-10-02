@@ -3,9 +3,15 @@
 // CONTEXT: Handles checkbox toggling via mouse clicks and Spacebar,
 //          suppresses TRUE/FALSE text display for checkbox cells,
 //          and handles non-boolean input and deletion.
+//          A click toggles on the RELEASE on the checkbox's own cell, and a
+//          press that slides off toggles nothing -- the Windows checkbox rule,
+//          through the release seam the in-cell buttons use
+//          (@api/cellClickInterceptors `actOnCellRelease`, held by Core's press
+//          session; owner question 26, 2026-10-02).
 
 import type { Selection, StyleData } from "@api";
 import type { IStyleOverride, BaseStyleInfo, CellCoords } from "@api/styleInterceptors";
+import { actOnCellRelease, type CellClickAnswer } from "@api/cellClickInterceptors";
 import { showToast } from "@api/notifications";
 
 // ============================================================================
@@ -96,15 +102,19 @@ async function isCellCheckboxAsync(styleIndex: number): Promise<boolean> {
 }
 
 /**
- * Cell click interceptor for checkbox toggling.
- * Returns true if the click was handled (checkbox cell was toggled).
+ * Cell click interceptor for checkbox toggling. A press on a checkbox cell is
+ * CLAIMED for its release on that same cell (a release claim): the cell is
+ * selected at the press -- the keyboard follows the press, as a Windows
+ * checkbox takes the focus -- and the value flips only when the press is
+ * released on the cell; a press that slides off flips nothing. Returns false
+ * for a cell that is not a checkbox (Core selects it as before).
  */
 export async function checkboxClickInterceptor(
   row: number,
   col: number,
   _event: { clientX: number; clientY: number },
-): Promise<boolean> {
-  const { getCell, updateCell } = await import("../../src/api/lib");
+): Promise<CellClickAnswer> {
+  const { getCell } = await import("../../src/api/lib");
   const { dispatchGridAction } = await import("../../src/api/gridDispatch");
   const { setSelection } = await import("../../src/api/grid");
 
@@ -118,6 +128,35 @@ export async function checkboxClickInterceptor(
   const isCheckbox = await isCellCheckboxAsync(cellData.styleIndex);
   if (!isCheckbox) {
     return false;
+  }
+
+  // Set selection to this cell at the press (so the user sees it selected)
+  dispatchGridAction(setSelection({
+    startRow: row,
+    startCol: col,
+    endRow: row,
+    endCol: col,
+    type: "cells",
+  }));
+
+  // Toggle at the RELEASE on this cell (Core holds the press; sliding off cancels).
+  return actOnCellRelease(row, col, () => toggleCheckboxAt(row, col));
+}
+
+/**
+ * The release of a press on a checkbox: flip the value the cell holds NOW
+ * (TRUE -> FALSE; FALSE, empty or anything else -> TRUE), through the normal
+ * (undoable) cell write. A cell that is no longer a checkbox is left alone.
+ */
+async function toggleCheckboxAt(row: number, col: number): Promise<void> {
+  const { getCell, updateCell } = await import("../../src/api/lib");
+
+  const cellData = await getCell(row, col);
+  if (!cellData) {
+    return;
+  }
+  if (!(await isCellCheckboxAsync(cellData.styleIndex))) {
+    return;
   }
 
   // Toggle the value
@@ -134,19 +173,8 @@ export async function checkboxClickInterceptor(
   // Update the cell value
   await updateCell(row, col, newValue);
 
-  // Set selection to this cell (so the user sees it selected)
-  dispatchGridAction(setSelection({
-    startRow: row,
-    startCol: col,
-    endRow: row,
-    endCol: col,
-    type: "cells",
-  }));
-
   // Trigger renderer refresh so the checkbox graphic updates
   window.dispatchEvent(new CustomEvent("styles:refresh"));
-
-  return true; // Click handled - prevent default behavior
 }
 
 // ============================================================================

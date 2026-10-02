@@ -501,8 +501,9 @@ export interface GrantRestoreTarget {
  * Step 2 subsumes the old standalone `syncNetOriginsToBackend`/`syncBackendGrants`
  * pair for a remount, so a remount within the session still keeps its session
  * grants. Distributed scripts skip step 1 entirely: their capabilities come from
- * package consent, which is persisted INSIDE the workbook (it must survive a
- * copy) and applied before mount by `applyConsentedCapabilities`.
+ * package consent, which is kept inside the workbook but sealed to the computer
+ * that approved it (it counts only there; a copy opened elsewhere asks again),
+ * and applied before mount by `applyConsentedCapabilities`.
  */
 export async function restoreAndSyncGrants(target: GrantRestoreTarget): Promise<void> {
   if (isLocalOrigin(target.origin)) {

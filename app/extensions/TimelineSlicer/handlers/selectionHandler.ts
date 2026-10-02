@@ -15,12 +15,15 @@ import {
 } from "../manifest";
 import { TimelineSlicerEvents } from "../lib/timelineSlicerEvents";
 import type { TimelineSlicer } from "../lib/timelineSlicerTypes";
+import { timelineSelectedIdSet } from "../lib/timelineSelectedIds";
 
 // ============================================================================
 // State
 // ============================================================================
 
-const selectedTimelineIds = new Set<string>();
+// The set lives in lib/timelineSelectedIds.ts so the store can read it (the
+// region's `resizable` follows the selection); this module is its only writer.
+const selectedTimelineIds = timelineSelectedIdSet();
 let optionsTabRegistered = false;
 
 // ============================================================================

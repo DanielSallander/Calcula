@@ -61,6 +61,21 @@ export function timelineCanvasBounds(
 }
 
 /**
+ * A window mouse event's CLIENT point in logical canvas px -- the basis Core
+ * measures a press in: relative to the grid area, divided by the zoom. Null
+ * before the grid mounts. The range drag (timelineRangeDrag.ts) tracks the
+ * pointer with it, so its moves share one space with Core's press.
+ */
+export function clientToTimelineCanvas(clientX: number, clientY: number): { x: number; y: number } | null {
+  if (typeof document === "undefined") return null;
+  const area = document.querySelector("[data-grid-area]");
+  if (!area) return null;
+  const rect = area.getBoundingClientRect();
+  const zoom = getGridStateSnapshot()?.zoom || 1;
+  return { x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom };
+}
+
+/**
  * The timeline a logical canvas point is on, or null.
  *
  * Core's topmost floating region decides first: a timeline region on top is

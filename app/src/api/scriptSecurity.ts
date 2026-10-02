@@ -57,8 +57,11 @@
 //   (%LOCALAPPDATA%\com.calcula.app\...) — it is host state, not document state.
 //   Nothing in this module ever calls createVirtualFile/readVirtualFile, so no
 //   byte of it is written into the .cala archive, into a .calp package, or into
-//   any exported artifact. (Contrast `./distributedConsent`, which DELIBERATELY
-//   persists inside the workbook because package consent must survive a copy.)
+//   any exported artifact. (Contrast `./distributedConsent`, whose package
+//   approvals ARE kept inside the workbook -- but each one is sealed by Rust to
+//   the computer that made it (app/src-tauri/src/consent_seal.rs), so they
+//   count only there: a copy opened on another computer asks again, exactly
+//   like trust does.)
 //   Consequence: a workbook emailed, copied, or synced from another machine
 //   arrives with ZERO trust and prompts on first run, no matter what it contains
 //   — a malicious author cannot pre-trust their own file. Belt and braces: the
@@ -540,13 +543,33 @@ export async function evaluateWorkbookTrust(
  * point of this gate is to notice change, so it must fail in the direction that
  * ASKS. Callers turn the throw into a lapse (evaluateCurrentWorkbookTrust) or a
  * refusal to record trust (trustCurrentWorkbook).
+ *
+ * THE USER'S OWN BUTTON CODE COUNTS (M6), BY CONTENT. A button's inline
+ * `onSelect` is code this workbook runs on a click, so it is in the inventory
+ * as a button-action unit whose id is `buttonAction:<sha256 of its bytes>`:
+ * adding one lapses trust, changing one lapses trust, and MOVING one does not
+ * (a positional id would read every move as an added script). Its trust id is
+ * that BARE id -- every other unit is `<surfaceId>:<id>`, and no surface id is
+ * `buttonAction`, so a module the user happens to name `buttonAction:...`
+ * cannot collide with it. The button listing is asked STRICTLY: a failure to
+ * read the buttons throws here like any other inventory failure, instead of
+ * reading as "this workbook has no button code".
  */
 export async function collectLocalWorkbookScripts(): Promise<TrustableScript[]> {
   const { getWorkbookCodeUnits } = await import("./codeInventory");
-  const units = await getWorkbookCodeUnits();
+  const units = await getWorkbookCodeUnits({ strictButtonActions: true });
   return units
     .filter((u) => u.provenance === "local")
-    .map((u) => ({ id: `${u.surfaceId}:${u.id}`, name: u.name, source: u.source }))
+    .map((u) => ({
+      // A MODULE is keyed by the module store, whatever surface it runs on: a
+      // macro written as an object script is listed on the object-script surface
+      // (owner decision B, F7), and `object-script:<id>` could then collide with
+      // an object script of the same id. `one-off-script:<id>` is the spelling
+      // every module's trust has always had -- an identity, not a reach claim.
+      id: u.buttonAction ? u.id : u.module ? `one-off-script:${u.id}` : `${u.surfaceId}:${u.id}`,
+      name: u.name,
+      source: u.source,
+    }))
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
@@ -864,7 +887,8 @@ export async function rehydrateNotebookCapabilityGrants(): Promise<number> {
 //                      stop", not "stop next launch").
 //   LOCAL SCRIPTS ONLY. Distributed (.calp) scripts never JIT-prompt and never
 //                      reach here — they keep per-package consent, which lives
-//                      INSIDE the workbook because it must survive a copy.
+//                      inside the workbook but is sealed to the computer that
+//                      approved it (app/src-tauri/src/consent_seal.rs).
 //                      Callers enforce this; `persistScriptCapabilityGrant` is
 //                      only reached from the local-only JIT path.
 

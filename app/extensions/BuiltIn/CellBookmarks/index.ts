@@ -75,6 +75,7 @@ import {
   onViewBookmarkChange,
   serializeViewBookmarks,
   setScriptRunner,
+  type ViewBookmarkActivator,
 } from "./lib/viewBookmarkStore";
 
 // Internal modules — Persistence
@@ -304,7 +305,9 @@ function activate(context: ExtensionContext): void {
   commands.register("bookmarks.activateView", async (args?: unknown) => {
     const a = args as { id?: string } | undefined;
     if (!a?.id) return;
-    const success = await activateViewBookmark(a.id);
+    // A command a person runs (the palette, a menu, a key, the command line's
+    // `command` verb): it is not scriptSafe, so no script reaches it.
+    const success = await activateViewBookmark(a.id, "person");
     if (success) {
       showToast("View activated", { variant: "success" });
     } else {
@@ -418,17 +421,33 @@ function activate(context: ExtensionContext): void {
   //      Runs through the @api script runtime so the security gate, the
   //      bookmark collections the script can read, and the mutations it queues
   //      all go through one path.
-  setScriptRunner(async (scriptId: string) => {
+  //      WHO activated the bookmark travels with the run (owner decision B,
+  //      follow-up F10): an application's macro runs only when a PERSON
+  //      started it, so one a script's activation set off is refused by the
+  //      module-runtime gate (and recorded there). The user's own scripts run
+  //      either way.
+  setScriptRunner(async (scriptId: string, activatedBy: ViewBookmarkActivator) => {
     const script = await getWorkbookScript(scriptId);
     if (!script) return;
-    const result = await runWorkbookScript(
-      script.source,
-      script.name || "bookmark-script.js",
-      {
-        cellBookmarksJson: JSON.stringify(getAllBookmarks()),
-        viewBookmarksJson: JSON.stringify(serializeViewBookmarks()),
-      }
-    );
+    let result: Awaited<ReturnType<typeof runWorkbookScript>>;
+    try {
+      result = await runWorkbookScript(
+        script.source,
+        script.name || "bookmark-script.js",
+        {
+          cellBookmarksJson: JSON.stringify(getAllBookmarks()),
+          viewBookmarksJson: JSON.stringify(serializeViewBookmarks()),
+          startedBy: { kind: "viewBookmark", activatedBy },
+        }
+      );
+    } catch (error) {
+      // A REFUSAL rejects (the gate said no: an application's macro a script
+      // set off, code not approved, Script Security). The activation used to
+      // swallow it into a console line; the user is told instead.
+      const message = error instanceof Error ? error.message : String(error);
+      showToast(`The view bookmark's script did not run: ${message}`, { variant: "error" });
+      return;
+    }
     if (result.type === "error") {
       showToast(`Script error: ${result.message}`, { variant: "error" });
     }

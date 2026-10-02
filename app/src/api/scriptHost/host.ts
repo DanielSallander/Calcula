@@ -5,7 +5,8 @@
 //          pushes mirror snapshots for sync getters, and plumbs the
 //          data-only render protocols (cell style batches, shape/slicer
 //          bitmaps). Faults: one free respawn on worker crash; a second
-//          crash within 30s faults the script.
+//          crash within 30s faults the script. A RUN (`consentRun`) is never
+//          respawned: its crash is reported to whoever started it.
 
 import {
   brokerCall,
@@ -155,6 +156,12 @@ import {
   scriptOriginForStoredRecord,
 } from "./scriptOrigin";
 import type { MountConsentArtifact, MountConsentSurface } from "./mountConsentSurface";
+import type { ScriptRunTrigger } from "../workbookScripts";
+import {
+  claimExplicitMacroRun,
+  type ClaimedExplicitMacroRun,
+  type ExplicitMacroRun,
+} from "../explicitMacroRun";
 import {
   cellWriteFor,
   collectFormBindings,
@@ -174,7 +181,14 @@ import type {
   ScriptDialogPromptOptions,
   ScriptDialogTextOptions,
 } from "./scriptDialogSpec";
-import { AppEvents, emitAppEvent, onAppEvent, type ApplicationUpdatedPayload, type CellValueChange } from "../events";
+import {
+  AppEvents,
+  emitAppEvent,
+  onAppEvent,
+  type ApplicationUpdatedPayload,
+  type CellValueChange,
+  type MutationDomain,
+} from "../events";
 import type { PullResponse } from "../collaboration";
 import {
   registerLifecycleGuard,
@@ -190,6 +204,7 @@ import { registerCellDoubleClickInterceptor } from "../../core/lib/cellDoubleCli
 import {
   readUndoBeginAnswer,
   type UndoBeginAnswer,
+  type UndoResult,
   type UndoTransactionTicket,
 } from "../../core/lib/tauri-api";
 import { registerCellContextMenuInterceptor } from "../../core/lib/cellContextMenuInterceptors";
@@ -274,6 +289,9 @@ function scriptWriteKey(scriptId: string, sheetIndex: number, row: number, col: 
 }
 
 function recordScriptWrite(scriptId: string, sheetIndex: number, row: number, col: number): void {
+  // Every broker write passes here, with the sheet it really writes: the one
+  // place a granted run's writes can be counted for the trail (F15, below).
+  noteGrantedRunWrite(scriptId, sheetIndex, row, col);
   if (recentScriptWrites.size > 8192) {
     const now = performance.now();
     for (const [k, expiry] of recentScriptWrites) {
@@ -284,6 +302,584 @@ function recordScriptWrite(scriptId: string, sheetIndex: number, row: number, co
     scriptWriteKey(scriptId, sheetIndex, row, col),
     performance.now() + SCRIPT_WRITE_TTL_MS,
   );
+}
+
+// ============================================================================
+// What a granted run wrote, on the persistent trail (owner decision B, F15)
+// ============================================================================
+// A module-runtime run of an approved application macro leaves structured,
+// always-on grid-mutation rows, because Rust applies its writes. A run of an
+// application's object-script macro that a PERSON started gets the same cell
+// access on any sheet -- but writes through this broker, one ordinary cell
+// command at a time, so Rust never sees "the run". The in-memory ring loses it
+// on reload, and `persistCapabilityAudit` persists capability calls only. So
+// the host counts what such a realm writes -- per sheet: distinct cells and
+// their bounds -- at the one hook every broker write passes
+// (`recordScriptWrite`), and reports it ONCE to the Rust trail
+// (`audit_explicit_run_writes`) against the grant the mount gate opened. Rust
+// names the application, the macro, the door and the button from that grant,
+// never from this report.
+//
+// WHEN: as the grant expires -- "mounted", after the calls held at the standing
+// gate were handed on (BUG-0267's order) -- once every call the run made has
+// finished, so a write still in flight is counted. A realm that ends first (a
+// crash, the deadline, a teardown) reports what it wrote, as not completed.
+//
+// FAIL-SOFT, BUT LOUD: the run has already happened; a report that cannot be
+// recorded never fails it, but says so on the console and to the user.
+//
+// ALL OR NOTHING (owner decision B, follow-up F9). The module runtime runs a
+// macro on a clone and applies nothing when it throws; this realm writes LIVE.
+// So the granted run marks an undo SAVEPOINT before its realm starts
+// (`begin_undo_savepoint`: it opens the run's own step, or joins the one a
+// caller holds -- a command-line run of several lines), and when it ends --
+// once every call it made has finished, so no write lands afterwards -- a run
+// that completed is committed as ONE step, and one that did not is TAKEN BACK
+// to the savepoint (`roll_back_to_undo_savepoint`), every change, through the
+// restore Ctrl+Z uses. The one-off runner waits for that ending
+// (`hostSettleExplicitRun`) and tells the person: "stopped ... nothing was
+// changed", or why its changes could not be undone. The report says which.
+//
+// GRANTED RUNS TAKE TURNS (review of M6b). The backend keeps ONE open undo
+// slot, so a second granted run that marked its savepoint while the first one
+// held its step would JOIN that step: the first run's rollback would take the
+// second's writes back too, and its commit would close the step halfway through
+// the second -- which would then report success with part of its work undone.
+// (A click is a release, and every release runs: two quick clicks are two runs.)
+// So each granted run waits, before it marks its savepoint, until every granted
+// run started before it has ENDED -- its step committed or taken back -- in the
+// order they were started (`waitForGrantedRunTurn`). Rust refuses the join too
+// (`begin_undo_savepoint` never joins a step a savepoint opened); this covers
+// the case it cannot see, two runs inside a caller's step. A turn that does not
+// come within `GRANTED_RUN_TURN_WAIT_MS` -- the run ahead never ended -- is a
+// run that did not start: nothing was changed.
+//
+// WHAT ELSE A ROLLBACK TOOK BACK (review of M6b). The rollback takes back
+// everything recorded after the savepoint, which includes a cell somebody else
+// wrote while the run lasted (the user typing meanwhile, another script). The
+// backend names every cell it took back (`takenBackCells`); the ones that are
+// not this run's own writes are counted (`othersUndone`), and the person and
+// the trail are told -- never only "nothing was changed".
+
+/** Distinct cells counted per sheet; beyond this the count is a lower bound. */
+const GRANTED_RUN_DISTINCT_CELL_CAP = 100_000;
+
+/**
+ * How long a granted run waits for the granted runs started before it to end.
+ * A run lasts at most the 10-second mount deadline, and then its calls settle
+ * and its step closes; a run ahead that has not ended by this time never will.
+ */
+const GRANTED_RUN_TURN_WAIT_MS = 30_000;
+
+/** Why a granted run did not start when its turn never came. */
+const GRANTED_RUN_TURN_NEVER_CAME =
+  "another macro you started with cell access had not finished after 30 seconds, and two such runs cannot share one undo step";
+
+/**
+ * THE ONE IMPORT of the backend door on the granted-run path (review of M6b):
+ * the mount gate, the savepoint, the rollback and the report. Granted runs
+ * overlap there by design -- the second waits for its turn while the first
+ * closes its step and reports -- and one shared import promise means those
+ * reaches never import the door twice at once. (The browser caches a module
+ * either way; vitest 4.1 does not: two concurrent dynamic imports of a mocked
+ * module hand one of them the REAL module.) A failed import is retried.
+ */
+let grantedRunBackendDoor: Promise<typeof import("../backend")> | null = null;
+function grantedRunBackend(): Promise<typeof import("../backend")> {
+  if (grantedRunBackendDoor === null) {
+    grantedRunBackendDoor = import("../backend").catch((err: unknown) => {
+      grantedRunBackendDoor = null;
+      throw err;
+    });
+  }
+  return grantedRunBackendDoor;
+}
+
+/**
+ * Settles once every granted run started so far has ENDED: the turn of the
+ * next run to start. Reset with the workbook (`dropGrantedRunWrites`).
+ */
+let grantedRunTail: Promise<void> = Promise.resolve();
+
+/** How long a granted run waits for its turn, in ms (a test may shorten it). */
+let grantedRunTurnWaitMs = GRANTED_RUN_TURN_WAIT_MS;
+
+/** Test seam: shorten the wait for a granted run's turn; null restores it. */
+export function setGrantedRunTurnWaitForTest(ms: number | null): void {
+  grantedRunTurnWaitMs = ms ?? GRANTED_RUN_TURN_WAIT_MS;
+}
+
+/**
+ * How a granted run ENDED (owner decision B, follow-up F9), for the one-off
+ * runner that started it -- which tells the person.
+ */
+export interface ExplicitRunEnd {
+  /** Its `setup` settled without throwing. */
+  readonly completed: boolean;
+  /** It had its ONE undo step: a savepoint was marked before it ran. */
+  readonly undoable: boolean;
+  /** It did not complete, and every change it made was taken back. */
+  readonly rolledBack: boolean;
+  /** Why a run that did not complete could not be taken back; null otherwise. */
+  readonly notUndoneBecause: string | null;
+  /**
+   * Cells the rollback took back that were NOT this run's own writes -- written
+   * by somebody else while it ran (the user typing meanwhile, another script).
+   * 0 when it was not taken back, or took back only its own.
+   */
+  readonly othersUndone: number;
+}
+
+/** A point in the open undo transaction (Rust `UndoSavepoint`), presented back verbatim. */
+interface UndoSavepointWire {
+  readonly transaction: number;
+  readonly changes: number;
+}
+
+/** What `begin_undo_savepoint` answers (Rust `UndoSavepointBegin`). */
+interface UndoSavepointBeginWire {
+  readonly ticket?: number | null;
+  readonly savepoint?: UndoSavepointWire | null;
+  /** Why there is no point, when Rust knows (another granted run holds the step). */
+  readonly refused?: string | null;
+}
+
+/** One cell a rollback took back (Rust `UndoCellRef`), by its TRUE sheet index. */
+interface UndoCellRefWire {
+  readonly sheet: number;
+  readonly row: number;
+  readonly col: number;
+}
+
+/** What `roll_back_to_undo_savepoint` answers (Rust `UndoRollback`): the restore, and the cells it took back. */
+type UndoRollbackWire = UndoResult & { readonly takenBackCells?: readonly UndoCellRefWire[] };
+
+/** The granted run's own undo step. */
+interface GrantedRunStep {
+  /** The ticket when the run's begin OPENED the step (it commits it); null when it joined a caller's. */
+  readonly ticket: UndoTransactionTicket | null;
+  /** Where the run started, to take it back to. */
+  readonly savepoint: UndoSavepointWire;
+}
+
+/** Why a run that did not complete was not taken back, when its workbook was replaced meanwhile. */
+const RUN_WORKBOOK_REPLACED = "the workbook was replaced while it ran";
+
+/** Why a run that did not complete was not taken back, when it never had its step. */
+const RUN_HAD_NO_UNDO_STEP = "it stopped before its changes could be made undoable as one step";
+
+/**
+ * Each granted run's ending, by realm script id, until the one-off runner that
+ * started it takes it (`hostSettleExplicitRun`).
+ */
+const grantedRunEnds = new Map<string, Promise<ExplicitRunEnd>>();
+
+/**
+ * Wait for how the granted run in realm `scriptId` ended -- its step committed
+ * or taken back -- and forget it. Null when that realm had no cell grant. The
+ * one-off runner calls it after the realm is gone, so the ending is already on
+ * its way (the teardown ends a run its "mounted" did not). Never rejects.
+ */
+export function hostSettleExplicitRun(scriptId: string): Promise<ExplicitRunEnd | null> {
+  const end = grantedRunEnds.get(scriptId);
+  grantedRunEnds.delete(scriptId);
+  return end ?? Promise.resolve(null);
+}
+
+/** The sentence for a granted run that could not be given its one undo step. */
+export function describeGrantedRunNotStarted(name: string, why: string): string {
+  return (
+    `"${name}" did not start: a macro you run with cell access is undone as a whole if it ` +
+    `stops part-way, and that could not be arranged here (${why}). Nothing was changed.`
+  );
+}
+
+/** Read the savepoint Rust handed out; anything malformed is no savepoint. */
+function readUndoSavepoint(value: unknown): UndoSavepointWire | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { transaction, changes } = value as { transaction?: unknown; changes?: unknown };
+  return Number.isSafeInteger(transaction) && Number.isSafeInteger(changes)
+    ? { transaction: transaction as number, changes: changes as number }
+    : null;
+}
+
+interface GrantedSheetWrites {
+  readonly cells: Set<string>;
+  firstRow: number;
+  lastRow: number;
+  firstCol: number;
+  lastCol: number;
+}
+
+interface GrantedRunWrites {
+  readonly grantId: number;
+  readonly scriptName: string;
+  readonly sheets: Map<number, GrantedSheetWrites>;
+  countsCapped: boolean;
+  /** Calls of the run that failed: a cell counted for one may not have changed. */
+  failedCalls: number;
+  /** The run's calls still being handled; the report waits for them. */
+  readonly inFlight: Set<Promise<void>>;
+  /** The run is over: no new call is the run's, and its report is on its way. */
+  ended: boolean;
+  /**
+   * The workbook it ran in is gone (`hostResetAll`, which a document swap
+   * runs AFTER the new document is in place): its report would land on the
+   * NEW workbook's trail, so it is dropped instead.
+   */
+  dropped: boolean;
+  /** The run's own undo step (F9), once its savepoint is marked. */
+  step: GrantedRunStep | null;
+  /** Settles when every granted run started before this one has ended: its turn. */
+  readonly turn: Promise<void>;
+  /** Settle the run's ending for the runner -- the first answer wins. */
+  readonly settle: (end: ExplicitRunEnd) => void;
+}
+
+/** Open per realm script id -- `recordScriptWrite` knows only that. */
+const grantedRunWrites = new Map<string, GrantedRunWrites>();
+
+/** Start counting a granted realm's writes (`mountWorker`, first realm only). */
+function openGrantedRunWrites(scriptId: string, grantId: number, scriptName: string): void {
+  let resolveEnd!: (end: ExplicitRunEnd) => void;
+  const ending = new Promise<ExplicitRunEnd>((resolve) => {
+    resolveEnd = resolve;
+  });
+  let settled = false;
+  grantedRunEnds.set(scriptId, ending);
+  // TAKE A TURN: this run's turn comes when every granted run started before
+  // it has ended; the next one's, when this one has ended too.
+  const turn = grantedRunTail;
+  grantedRunTail = turn.then(() => ending).then(() => undefined);
+  grantedRunWrites.set(scriptId, {
+    grantId,
+    scriptName,
+    sheets: new Map(),
+    countsCapped: false,
+    failedCalls: 0,
+    inFlight: new Set(),
+    ended: false,
+    dropped: false,
+    step: null,
+    turn,
+    settle: (end) => {
+      if (settled) return;
+      settled = true;
+      resolveEnd(end);
+    },
+  });
+}
+
+/**
+ * Wait for a granted run's turn (GRANTED RUNS TAKE TURNS, above): true once
+ * every granted run started before it has ended, false when that did not
+ * happen within `GRANTED_RUN_TURN_WAIT_MS`.
+ */
+async function waitForGrantedRunTurn(turn: Promise<void>): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const tooLong = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), grantedRunTurnWaitMs);
+  });
+  try {
+    return await Promise.race([turn.then(() => true as const), tooLong]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+/**
+ * Mark the granted run's undo savepoint (F9) BEFORE its realm runs -- once
+ * every granted run started before it has ended (its turn) -- opening the
+ * run's own step, or joining the one a caller holds. A run whose step cannot
+ * be named, or whose turn never came, is refused here -- nothing has run yet,
+ * so nothing was changed -- and one whose realm ended while the begin was in
+ * flight closes what it opened.
+ */
+async function openGrantedRunStep(scriptId: string, scriptName: string): Promise<void> {
+  const writes = grantedRunWrites.get(scriptId);
+  if (!writes) return;
+  if (!(await waitForGrantedRunTurn(writes.turn))) {
+    throw new Error(describeGrantedRunNotStarted(scriptName, GRANTED_RUN_TURN_NEVER_CAME));
+  }
+  // The realm ended while it waited for its turn: nothing to mark a point for.
+  if (writes.ended || writes.dropped || grantedRunWrites.get(scriptId) !== writes) {
+    throw new Error("Script mount superseded by a newer mount of the same script");
+  }
+  let answer: UndoSavepointBeginWire | null;
+  try {
+    const { invokeBackend } = await grantedRunBackend();
+    answer = await invokeBackend<UndoSavepointBeginWire | null>("begin_undo_savepoint", {
+      description: `Run "${scriptName}"`,
+    });
+  } catch (err) {
+    throw new Error(describeGrantedRunNotStarted(scriptName, err instanceof Error ? err.message : String(err)));
+  }
+  const ticket = typeof answer?.ticket === "number" && Number.isSafeInteger(answer.ticket) ? answer.ticket : null;
+  const savepoint = readUndoSavepoint(answer?.savepoint);
+  const gone = writes.ended || writes.dropped || grantedRunWrites.get(scriptId) !== writes;
+  if (savepoint !== null && !gone) {
+    writes.step = { ticket, savepoint };
+    return;
+  }
+  // What this begin opened is nobody else's to close: close it, empty.
+  if (ticket !== null) {
+    try {
+      await cancelOwnTransaction(await getLib(), ticket);
+    } catch (err) {
+      console.error(`[ScriptHost] could not close the undo step "${scriptName}" opened:`, err);
+    }
+  }
+  if (gone) throw new Error("Script mount superseded by a newer mount of the same script");
+  throw new Error(
+    describeGrantedRunNotStarted(
+      scriptName,
+      typeof answer?.refused === "string" && answer.refused.trim() !== ""
+        ? answer.refused.trim()
+        : "the change being recorded right now could not be named as a point to return to",
+    ),
+  );
+}
+
+/**
+ * Close the granted run's step (F9), once every call it made has finished:
+ * commit a run that completed as ONE step; take back one that did not, every
+ * change, and show what came back. Never throws.
+ */
+async function closeGrantedRunStep(writes: GrantedRunWrites, completed: boolean): Promise<ExplicitRunEnd> {
+  const step = writes.step;
+  if (step === null) {
+    return {
+      completed,
+      undoable: false,
+      rolledBack: false,
+      notUndoneBecause: completed ? null : RUN_HAD_NO_UNDO_STEP,
+      othersUndone: 0,
+    };
+  }
+  const commitStep = async (): Promise<void> => {
+    if (step.ticket === null) return; // joined: the caller who opened it closes it
+    try {
+      await commitOwnTransaction(await getLib(), step.ticket);
+    } catch (err) {
+      console.error(`[ScriptHost] could not close the undo step of "${writes.scriptName}":`, err);
+    }
+  };
+  if (completed) {
+    await commitStep();
+    return { completed: true, undoable: true, rolledBack: false, notUndoneBecause: null, othersUndone: 0 };
+  }
+  let result: UndoRollbackWire | null = null;
+  let why: string | null = null;
+  try {
+    const { invokeBackend } = await grantedRunBackend();
+    result = await invokeBackend<UndoRollbackWire>("roll_back_to_undo_savepoint", { savepoint: step.savepoint });
+    if (result?.success !== true) why = result?.refusal ?? "the undo history did not take it back";
+  } catch (err) {
+    why = err instanceof Error ? err.message : String(err);
+  }
+  // Close what the run opened. Taken back, its step holds nothing of the
+  // run's and the commit pushes nothing; refused, it holds the run's writes,
+  // which then stay ONE step that Ctrl+Z takes back.
+  await commitStep();
+  if (why === null && result !== null) await showRolledBackRun(result);
+  return {
+    completed: false,
+    undoable: true,
+    rolledBack: why === null,
+    notUndoneBecause: why,
+    othersUndone: why === null && result !== null ? countOthersUndone(writes, result.takenBackCells) : 0,
+  };
+}
+
+/**
+ * How many of the cells a rollback took back were NOT the run's own writes:
+ * written by somebody else while it ran. A cell is the run's when it is in the
+ * run's counted set for its sheet -- or, once that set hit its cap, anywhere
+ * inside the run's exact bounds on that sheet (the count is then a lower bound).
+ * A malformed or missing list counts nothing (it cannot be told apart).
+ */
+function countOthersUndone(writes: GrantedRunWrites, taken: unknown): number {
+  if (!Array.isArray(taken)) return 0;
+  let others = 0;
+  for (const cell of taken as unknown[]) {
+    if (typeof cell !== "object" || cell === null) continue;
+    const { sheet, row, col } = cell as Partial<UndoCellRefWire>;
+    if (!Number.isSafeInteger(sheet) || !Number.isSafeInteger(row) || !Number.isSafeInteger(col)) continue;
+    const mine = writes.sheets.get(sheet as number);
+    const isMine =
+      mine !== undefined &&
+      (mine.cells.has(`${row}:${col}`) ||
+        (writes.countsCapped &&
+          (row as number) >= mine.firstRow &&
+          (row as number) <= mine.lastRow &&
+          (col as number) >= mine.firstCol &&
+          (col as number) <= mine.lastCol));
+    if (!isMine) others += 1;
+  }
+  return others;
+}
+
+/** Show what a taken-back run restored: the cells, their styles, the sheet. */
+async function showRolledBackRun(result: UndoResult): Promise<void> {
+  try {
+    await afterCellDataChange(result.updatedCells ?? []);
+    const domains: MutationDomain[] = ["styles", ...((result.refreshDomains ?? []) as MutationDomain[])];
+    emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "undo" });
+    // The restore follows the sheet the run's first write was on (Excel's
+    // undo does): follow it, so the tab strip shows where the cells came back.
+    if (typeof result.activeSheetIndex === "number" && result.activeSheetIndex !== activeSheetIndexForEvents) {
+      await announceSheetsChanged(await (await getLib()).getSheets());
+    }
+  } catch (err) {
+    console.error("[ScriptHost] the cells a taken-back run restored could not be repainted:", err);
+  }
+}
+
+function noteGrantedRunWrite(scriptId: string, sheetIndex: number, row: number, col: number): void {
+  const writes = grantedRunWrites.get(scriptId);
+  if (!writes) return;
+  const key = `${row}:${col}`;
+  const sheet = writes.sheets.get(sheetIndex);
+  if (!sheet) {
+    writes.sheets.set(sheetIndex, { cells: new Set([key]), firstRow: row, lastRow: row, firstCol: col, lastCol: col });
+    return;
+  }
+  sheet.firstRow = Math.min(sheet.firstRow, row);
+  sheet.lastRow = Math.max(sheet.lastRow, row);
+  sheet.firstCol = Math.min(sheet.firstCol, col);
+  sheet.lastCol = Math.max(sheet.lastCol, col);
+  if (sheet.cells.size < GRANTED_RUN_DISTINCT_CELL_CAP) sheet.cells.add(key);
+  else if (!sheet.cells.has(key)) writes.countsCapped = true;
+}
+
+/** A call the granted realm made while its run lasted: the report waits for it. */
+function noteGrantedRunCall(scriptId: string, handled: Promise<void>): void {
+  const writes = grantedRunWrites.get(scriptId);
+  if (!writes || writes.ended) return;
+  writes.inFlight.add(handled);
+  void handled.finally(() => writes.inFlight.delete(handled));
+}
+
+/** A call of the run that failed. */
+function noteGrantedRunCallFailed(scriptId: string): void {
+  const writes = grantedRunWrites.get(scriptId);
+  if (writes && !writes.ended) writes.failedCalls += 1;
+}
+
+/**
+ * The run is over (`completed`: its setup settled without throwing). Once its
+ * calls have finished -- so no write of the run lands afterwards -- close its
+ * one undo step (commit, or take it all back: F9), tell the runner how it
+ * ended, and report what it wrote -- once; a second end is a no-op.
+ */
+function endGrantedRun(scriptId: string, completed: boolean): void {
+  const writes = grantedRunWrites.get(scriptId);
+  if (!writes || writes.ended) return;
+  writes.ended = true;
+  void Promise.allSettled([...writes.inFlight]).then(async () => {
+    if (grantedRunWrites.get(scriptId) === writes) grantedRunWrites.delete(scriptId);
+    if (writes.dropped) {
+      console.warn(
+        `[ScriptHost] "${writes.scriptName}" was still running when its workbook was replaced; ` +
+          "what it wrote was not recorded on the new workbook's audit trail.",
+      );
+      // The swap ended the undo history, the run's step with it.
+      writes.settle({
+        completed,
+        undoable: writes.step !== null,
+        rolledBack: false,
+        notUndoneBecause: completed ? null : RUN_WORKBOOK_REPLACED,
+        othersUndone: 0,
+      });
+      return;
+    }
+    // The runner waits on this ending, so it is settled whatever happens here.
+    let end: ExplicitRunEnd = {
+      completed,
+      undoable: writes.step !== null,
+      rolledBack: false,
+      notUndoneBecause: completed ? null : "how it ended could not be established",
+      othersUndone: 0,
+    };
+    try {
+      end = await closeGrantedRunStep(writes, completed);
+    } finally {
+      writes.settle(end);
+    }
+    return reportGrantedRunWrites(writes, completed, end.rolledBack, end.othersUndone);
+  });
+}
+
+/** `hostResetAll`: the workbook is gone -- no pending report may reach the next one. */
+function dropGrantedRunWrites(): void {
+  for (const writes of grantedRunWrites.values()) {
+    writes.dropped = true;
+    // A run still going will find no record when its realm is torn down:
+    // its runner hears now. (One that already ended settles when its calls do.)
+    if (!writes.ended) {
+      writes.settle({
+        completed: false,
+        undoable: writes.step !== null,
+        rolledBack: false,
+        notUndoneBecause: RUN_WORKBOOK_REPLACED,
+        othersUndone: 0,
+      });
+    }
+  }
+  grantedRunWrites.clear();
+  // A new workbook has no granted run ahead of its first one.
+  grantedRunTail = Promise.resolve();
+}
+
+/** The one report (`audit_explicit_run_writes`). Never throws. */
+async function reportGrantedRunWrites(
+  writes: GrantedRunWrites,
+  completed: boolean,
+  rolledBack: boolean,
+  othersUndone: number,
+): Promise<void> {
+  const sheets = [...writes.sheets.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([sheet, s]) => ({
+      sheet,
+      cellsModified: s.cells.size,
+      firstRow: s.firstRow,
+      lastRow: s.lastRow,
+      firstCol: s.firstCol,
+      lastCol: s.lastCol,
+    }));
+  const report = {
+    grantId: writes.grantId,
+    completed,
+    // Every change taken back (F9): the rows say so, so nobody goes looking
+    // for cells that hold what they held before the run.
+    rolledBack,
+    failedCalls: writes.failedCalls,
+    countsCapped: writes.countsCapped,
+    sheets,
+    // ...and what ELSE the rollback took back: cells somebody else wrote while
+    // the run lasted (review of M6b). Sent only when there were any.
+    ...(othersUndone > 0 ? { othersUndone } : {}),
+  };
+  try {
+    const { invokeBackend } = await grantedRunBackend();
+    await invokeBackend<number>("audit_explicit_run_writes", { report });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[ScriptHost] the audit trail did not record which cells "${writes.scriptName}" changed ` +
+        `(grant ${writes.grantId}):`,
+      err,
+    );
+    showToast(
+      `The audit trail could not record which cells "${writes.scriptName}" changed. ` +
+        (rolledBack
+          ? "The macro stopped part-way, and every change it made was undone. "
+          : "The macro ran; check the cells it may have changed. ") +
+        message,
+      { type: "warning" },
+    );
+  }
 }
 
 function isOwnScriptWrite(scriptId: string, sheetIndex: number, row: number, col: number): boolean {
@@ -623,6 +1219,34 @@ export interface HostMountDefinition {
    * codebase currently needs (pinned by `mountConsentKeyDrift.test.ts`).
    */
   consentArtifacts?: readonly MountConsentArtifact[];
+  /**
+   * The BUTTON a click mounted this for (phase 3 of BUG-0257): the one-off
+   * runner passes it when a macro-linked button starts an application's macro.
+   * Handed verbatim to `check_distributed_mount_consent`, which verifies it
+   * against the backend's own store (`application_code_gate::verify_trigger`)
+   * and names the button on the always-on audit row. A claim that can only
+   * narrow what mounts. Not consulted for local mounts, which are never asked.
+   */
+  consentTrigger?: ScriptRunTrigger;
+  /**
+   * This mount IS a run the user asked for -- the one-off runner (Developer >
+   * Macros > Run, the CLI, a button, a script's `runMacro`) -- rather than a
+   * standing mount of the workbook's own code. For a distributed mount the Rust
+   * gate is then asked TWICE: `runCheck` before Script Security (every refusal
+   * on the audit trail, no run row) and `runAdmitted` after it (the always-on
+   * run row, button or not). Asking once, before Script Security, wrote "ran"
+   * for runs Script Security then refused, and no row at all for a run nobody
+   * clicked a button for.
+   */
+  consentRun?: boolean;
+  /**
+   * The pass a PERSON's door minted for this run (owner decision B; see
+   * explicitMacroRun.ts). `admitMount` claims -- spends -- it before anything
+   * else, and only a one-off run of an approved application macro can turn it
+   * into cell access (`explicitRunCellsFor`). Read nowhere else. A script's
+   * `api.runMacro` never carries one.
+   */
+  explicitRun?: ExplicitMacroRun;
   apiVersion: string;
   /**
    * Why this mount is happening. `"open"` marks the workbook-open mount path
@@ -657,6 +1281,30 @@ interface MountedWorker {
    * never be re-presented for anything else (see `assertAdmissionCovers`).
    */
   admission: MountAdmission;
+  /**
+   * THE RULE WHILE IT RUNS. True while this DISTRIBUTED realm must ask the
+   * Rust gate again (`standing`) before it acts (a broker call) or is told
+   * anything (an event): it is running in a working copy, where the
+   * private-sheet rule can start refusing after the mount. Set from the gate's
+   * own answer (`recheckWhileRunning`), re-armed on AFTER_OPEN (a checkout into
+   * this workbook makes it a working copy under a running realm).
+   */
+  standingRecheck: boolean;
+  /** The standing check running now (the next batch waits for it). */
+  standingInFlight: Promise<boolean>;
+  /** The standing check calls and events arriving now will share. */
+  standingNext: Promise<boolean> | null;
+  /** Calls and events waiting on a standing check, not yet let through. */
+  standingQueued: number;
+  /**
+   * Calls that had to WAIT at the standing gate and have not yet been handed to
+   * the broker (or refused). "mounted" is held behind them (BUG-0267): the
+   * one-off runner unmounts the moment the mount resolves, and a call the realm
+   * made BEFORE "mounted" -- `context.notify` in `setup` -- was discarded when
+   * its standing answer arrived for a terminated realm. Empty on the fast path,
+   * so local and unrechecked realms keep today's synchronous "mounted".
+   */
+  callsAtGate: Set<Promise<void>>;
   cleanupFns: CleanupFn[];
   /** Wired app-event forwarders, keyed by hook. */
   forwarders: Map<string, CleanupFn>;
@@ -883,14 +1531,48 @@ interface MountAdmission {
    * reason it carries the source and the origin.
    */
   readonly artifactKey: string;
+  /**
+   * The gate said this realm runs in a working copy on a surface the
+   * private-sheet rule gates: it must keep asking while it runs.
+   */
+  readonly recheckWhileRunning: boolean;
+  /**
+   * A person ran this approved application macro through one of their doors,
+   * and every gate admitted the run: its realm may read and change cells on
+   * any sheet while the run lasts (owner decision B; `explicitRunCellsFor`,
+   * and Rust's own yes on `runAdmitted`, follow-up F3). Honoured for the FIRST
+   * realm built from this admission only (`spentCellGrants`).
+   */
+  readonly explicitRunCells: boolean;
+  /**
+   * The id of the grant the Rust gate opened for that cell access, which the
+   * run's one write report presents (`reportGrantedRunWrites`, F15). Null
+   * exactly when `explicitRunCells` is false.
+   */
+  readonly explicitRunGrantId: number | null;
 }
 
-/** The surface + artifact identity a definition presents to the consent gate, flattened. */
+/**
+ * Admissions whose cell access a realm has already used. A remount re-presents
+ * the admission it holds -- a crash respawn, a debug session opening or
+ * closing -- and none of those is a person running the macro again, so the
+ * first realm built from an admission is the only one that gets the grant.
+ */
+const spentCellGrants = new WeakSet<MountAdmission>();
+
+/**
+ * The surface + artifact identity a definition presents to the consent gate,
+ * flattened -- and the button a click claimed, when one did, since the gate
+ * judged that too.
+ */
 function mountArtifactKey(definition: HostMountDefinition): string {
   const artifacts = definition.consentArtifacts;
   const surface = definition.consentSurface;
   if (!artifacts && !surface) return "";
-  return JSON.stringify([surface ?? null, (artifacts ?? []).map((a) => [a.id, a.source])]);
+  const judged: unknown[] = [surface ?? null, (artifacts ?? []).map((a) => [a.id, a.source])];
+  const trigger = definition.consentTrigger;
+  if (trigger) judged.push([trigger.kind, trigger.sheetIndex, trigger.row, trigger.col]);
+  return JSON.stringify(judged);
 }
 
 /**
@@ -912,6 +1594,20 @@ function mountOriginKey(definition: HostMountDefinition): string {
  * which are two different sentences for the user.
  */
 const DISTRIBUTED_SCRIPT_NOT_CONSENTED = "DISTRIBUTED_SCRIPT_NOT_CONSENTED";
+
+/**
+ * Every OTHER sentence the mount gate speaks in its own words (phase 3 of
+ * BUG-0257, app/src-tauri/src/scripting/application_code_gate.rs): the
+ * working-copy private-sheet rule, and a button claim the backend's store does
+ * not back. Both are "the gate said no", so they pass through verbatim like the
+ * consent refusal -- wrapping them in "whether you have approved ... could not
+ * be established" would tell the user the wrong thing.
+ */
+const MOUNT_GATE_REFUSAL_SENTINELS: readonly string[] = [
+  DISTRIBUTED_SCRIPT_NOT_CONSENTED,
+  "APPLICATION_CODE_BESIDE_PRIVATE_SHEETS",
+  "APPLICATION_CODE_TRIGGER_MISMATCH",
+];
 
 /**
  * Put a DISTRIBUTED mount past the workbook's consent record, through the
@@ -961,9 +1657,65 @@ const DISTRIBUTED_SCRIPT_NOT_CONSENTED = "DISTRIBUTED_SCRIPT_NOT_CONSENTED";
  * never from the package name — so asking would spend an IPC round trip on every
  * mount of the user's own code to be told what the origin already said.
  */
-async function requireDistributedMountConsent(definition: HostMountDefinition): Promise<void> {
+/**
+ * Which question the mount gate is asked (Rust `MountGatePhase`): a standing
+ * `mount`; an explicit run `runCheck` (before Script Security) and
+ * `runAdmitted` (after it -- the run row); and `standing`, a mounted realm about
+ * to act, which `standingGate` asks.
+ */
+type MountGatePhase = "mount" | "runCheck" | "runAdmitted" | "standing";
+
+/** What the mount gate answers when it admits (Rust `MountGateAnswer`). */
+interface MountGateAnswer {
+  recheckWhileRunning?: boolean;
+  /**
+   * Rust's half of owner decision B (follow-up F3): this admitted run of an
+   * application's macro may read and change cells on any sheet. Only ever true
+   * on `runAdmitted`, and only for the claim it was shown. Absent = no grant.
+   */
+  cellAccess?: boolean;
+  /** The grant's id, which the run's one write report presents (F15). */
+  grantId?: number | null;
+}
+
+/** The gate's answer, read the way the host acts on it -- fail closed. */
+interface MountGateVerdict {
+  /** The realm must keep asking the gate while it runs. */
+  readonly recheckWhileRunning: boolean;
+  /**
+   * Rust granted cell access, with the id its write report presents; `null`
+   * for every other answer, including a `cellAccess` with no usable id (a
+   * grant whose writes could not be put on the trail is no grant).
+   */
+  readonly cellGrant: { readonly grantId: number } | null;
+}
+
+/**
+ * What the page tells the gate about a run a PERSON started (Rust
+ * `ExplicitRunClaim`, owner decision B follow-up F3): the door and the macro of
+ * the pass `admitMount` claimed. Sent only when the page would honour a grant
+ * for it (`explicitRunClaimFor`), so Rust is never asked to grant what the
+ * host would then withhold, and its run row never says a run had cell access
+ * that it did not.
+ */
+interface ExplicitRunClaimWire {
+  readonly door: ClaimedExplicitMacroRun["door"];
+  readonly macroId: string;
+}
+
+/**
+ * Asks the Rust mount gate (refusing exactly as before) and reads its answer:
+ * whether the realm must keep asking while it runs, and -- on `runAdmitted`,
+ * for a run whose `claim` Rust honoured -- the cell grant. Always "nothing to
+ * keep asking, no grant" for a local mount, which is never asked.
+ */
+async function requireDistributedMountConsent(
+  definition: HostMountDefinition,
+  phase: Exclude<MountGatePhase, "standing"> = "mount",
+  claim: ExplicitRunClaimWire | null = null,
+): Promise<MountGateVerdict> {
   const origin = scriptOriginForMount(definition);
-  if (origin.kind !== "package") return;
+  if (origin.kind !== "package") return { recheckWhileRunning: false, cellGrant: null };
   const describeFailure = (message: string): Error =>
     new Error(
       `"${definition.name}" was not mounted: it arrived inside the application ` +
@@ -974,12 +1726,12 @@ async function requireDistributedMountConsent(definition: HostMountDefinition): 
   try {
     // Dynamically imported like every other backend reach in this file: a static
     // value import would drag the Tauri door into every consumer of the host.
-    ({ invokeBackend: invoke } = await import("../backend"));
+    ({ invokeBackend: invoke } = await grantedRunBackend());
   } catch (err) {
     throw describeFailure(err instanceof Error ? err.message : String(err));
   }
   try {
-    await invoke<void>("check_distributed_mount_consent", {
+    const answer = await invoke<MountGateAnswer | null>("check_distributed_mount_consent", {
       // `origin.name`, never `definition.packageName`: a definition that names a
       // package without carrying distributed provenance never reaches this line,
       // and one that carries the provenance with no name asks about the
@@ -988,14 +1740,78 @@ async function requireDistributedMountConsent(definition: HostMountDefinition): 
       source: definition.source,
       surface: definition.consentSurface ?? null,
       artifacts: definition.consentArtifacts ?? null,
+      // The button a click claims (phase 3 of BUG-0257); Rust verifies it.
+      trigger: definition.consentTrigger ?? null,
+      phase,
+      // A person's run (owner decision B, F3): Rust co-decides cell access on
+      // `runAdmitted` and names it on the run row. Null for every other mount.
+      explicitRun: claim,
     });
+    const grantId = answer?.grantId;
+    return {
+      recheckWhileRunning: answer?.recheckWhileRunning === true,
+      cellGrant:
+        phase === "runAdmitted" &&
+        claim !== null &&
+        answer?.cellAccess === true &&
+        typeof grantId === "number" &&
+        Number.isSafeInteger(grantId)
+          ? { grantId }
+          : null,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // The gate spoke: pass its own words through, so the user reads the same
     // refusal here as on the module-runtime route.
-    if (message.includes(DISTRIBUTED_SCRIPT_NOT_CONSENTED)) throw new Error(message);
+    if (MOUNT_GATE_REFUSAL_SENTINELS.some((s) => message.includes(s))) throw new Error(message);
     throw describeFailure(message);
   }
+}
+
+/**
+ * CELL ACCESS FOR A RUN A PERSON STARTED (owner decision B, 2026-09-30):
+ * "An APPROVED application macro that the user runs EXPLICITLY -- a button
+ * click, Developer > Macros > Run, the command line -- gets the same CELL
+ * access in either runtime ... Standing object scripts, and any run a script
+ * starts on its own, stay restricted."
+ *
+ * Decided from what the mount gates have ALREADY judged, and true only when
+ * every one of these holds -- anything else is no grant:
+ *   1. a live pass was claimed: a person's door minted it (a copy, a replay or
+ *      a spent pass claims as null);
+ *   2. the mount is an explicit RUN (`consentRun`), which the Rust gate was
+ *      asked about before Script Security and again after it;
+ *   3. the code came in an APPLICATION (local code is unlocked already);
+ *   4. it runs RESTRICTED -- the grant is a narrow flag beside that tier, never
+ *      a way above it;
+ *   5. it is the one-off runner's shape: the object-script surface, a
+ *      `workbook` context, no instance -- never a standing object's realm;
+ *   6. exactly ONE consented artifact, it is the macro the pass names, and it
+ *      is the very source this realm runs: the Rust gate hashed THOSE bytes
+ *      against the approval;
+ *   7. the door agrees with the trigger: the button door needs a button
+ *      trigger -- a button control's (`buttonControl`, its link) or a button
+ *      cell's (`buttonCell`, its object-script macro; ownerB follow-up F6) --
+ *      which the Rust gate verified against its own store on BOTH questions
+ *      (`verify_trigger`: the button there runs exactly this macro, under its
+ *      stamp); every other door needs none. A contradiction is not a grant.
+ */
+function explicitRunCellsFor(
+  definition: HostMountDefinition,
+  claimed: ClaimedExplicitMacroRun | null,
+): boolean {
+  if (claimed === null) return false;
+  if (definition.consentRun !== true) return false;
+  if (scriptOriginForMount(definition).kind !== "package") return false;
+  if (definition.accessLevel !== "restricted") return false;
+  if (definition.consentSurface !== "object-script") return false;
+  if (definition.objectType !== "workbook" || definition.instanceId !== null) return false;
+  const artifacts = definition.consentArtifacts;
+  if (!artifacts || artifacts.length !== 1) return false;
+  if (artifacts[0].id !== claimed.macroId || artifacts[0].source !== definition.source) return false;
+  const trigger = definition.consentTrigger;
+  if (claimed.door === "button") return trigger?.kind === "buttonControl" || trigger?.kind === "buttonCell";
+  return trigger === undefined || trigger === null;
 }
 
 /**
@@ -1007,17 +1823,176 @@ async function requireDistributedMountConsent(definition: HostMountDefinition): 
  * for that on behalf of code we are about to refuse would mint a session-wide
  * approval for a run that never happens, and make the user answer twice to be
  * told no. A refusal that no prompt can fix comes first.
+ *
+ * AN EXPLICIT RUN (`consentRun`) IS ASKED AGAIN AFTERWARDS. The first question
+ * (`runCheck`) records every refusal but no run -- Script Security may still
+ * say no, and a trail that said the code ran would then be false; the second
+ * (`runAdmitted`), asked only once Script Security has admitted it, writes the
+ * always-on run row. A standing mount is asked once (`mount`).
+ *
+ * CELL ACCESS IS DECIDED LAST (owner decision B). The person's pass is SPENT
+ * on the first line, before any gate, so a run refused below cannot be retried
+ * with it. Whether that pass becomes cell access is decided only once runCheck,
+ * Script Security and runAdmitted have ALL admitted the run -- a refusal
+ * anywhere means no admission and no realm, so the grant can never attach to
+ * bytes the user did not approve.
+ *
+ * AND RUST DECIDES IT TOO (follow-up F3). The page's half is
+ * `explicitRunCellsFor` -- the realm's tier and context shape are things only
+ * the page can see -- and when it holds, the gate is SHOWN the claim (door and
+ * macro). Rust grants on `runAdmitted` only if everything it can see agrees
+ * (`explicit_run_cell_access`: one approved artifact, the very bytes this realm
+ * runs, the door agreeing with the verified button), opens a grant, and names
+ * it on the always-on run row. The realm gets cell access only when BOTH said
+ * yes; the grant's id travels with the admission so the run's writes can be
+ * reported against it (F15).
  */
 async function admitMount(definition: HostMountDefinition): Promise<MountAdmission> {
-  await requireDistributedMountConsent(definition);
+  const claimed = claimExplicitMacroRun(definition.explicitRun);
+  const run = definition.consentRun === true;
+  const claim = explicitRunClaimFor(definition, claimed);
+  const { recheckWhileRunning } = await requireDistributedMountConsent(definition, run ? "runCheck" : "mount", claim);
   await assertMountAllowed(definition.name);
+  const admitted = run ? await requireDistributedMountConsent(definition, "runAdmitted", claim) : null;
+  const cellGrant = admitted?.cellGrant ?? null;
   return Object.freeze({
     [MOUNT_ADMISSION_BRAND]: true as const,
     scriptId: definition.id,
     source: definition.source,
     originKey: mountOriginKey(definition),
     artifactKey: mountArtifactKey(definition),
+    recheckWhileRunning,
+    explicitRunCells: cellGrant !== null,
+    explicitRunGrantId: cellGrant?.grantId ?? null,
   });
+}
+
+/**
+ * The claim the Rust gate is shown for this mount (owner decision B, F3): the
+ * door and macro of the pass `admitMount` claimed -- but only when the page's
+ * own half of the decision holds (`explicitRunCellsFor`), so the gate is never
+ * asked for a grant the host would not give. Null otherwise.
+ */
+function explicitRunClaimFor(
+  definition: HostMountDefinition,
+  claimed: ClaimedExplicitMacroRun | null,
+): ExplicitRunClaimWire | null {
+  if (claimed === null || !explicitRunCellsFor(definition, claimed)) return null;
+  return { door: claimed.door, macroId: claimed.macroId };
+}
+
+// ============================================================================
+// THE PRIVATE-SHEET RULE WHILE A REALM RUNS (phase 3 of BUG-0257)
+// ============================================================================
+//
+// The working-copy private-sheet rule used to be judged only when a mount was
+// admitted. A distributed object script or library that mounted in a CLEAN
+// working copy kept running after a private sheet appeared -- the rule's own
+// remedy (open the application in a new workbook) followed by the developer
+// adding, pasting or typing into a sheet -- and its timers and event handlers
+// could read that sheet and write it into an application sheet the next push
+// ships. So a realm the gate marked `recheckWhileRunning` asks again
+// (`standing`) before every broker call it makes and every event it is told,
+// and a refusal ENDS it: a realm that has seen nothing can simply stop, but one
+// that was told something must not keep it in memory for later. Only a new,
+// fully gated mount brings it back. Calls and events arriving while a check is
+// in flight share the NEXT check, in arrival order, so the rule costs one round
+// trip per batch and never reorders what the realm does.
+
+/** Re-arm every running distributed realm's standing check. */
+function rearmStandingChecks(): void {
+  for (const mw of mounted.values()) {
+    if (scriptOriginForMount(mw.definition).kind === "package") mw.standingRecheck = true;
+  }
+}
+
+let standingRearmWired = false;
+function wireStandingRearm(): void {
+  if (standingRearmWired) return;
+  standingRearmWired = true;
+  // A checkout ADDS an application to the open workbook and announces it as
+  // AFTER_OPEN: realms mounted before it may now be running in a working copy.
+  // Re-armed realms ask once; the gate's answer turns the check back off where
+  // the rule does not apply.
+  onAppEvent(AppEvents.AFTER_OPEN, () => rearmStandingChecks());
+}
+
+/** End a realm the standing check refused, saying why. */
+function stopStandingRealm(mw: MountedWorker, message: string): void {
+  if (mw.terminated) return;
+  console.warn(`[ScriptHost] "${mw.definition.name}" was stopped while running:`, message);
+  showToast(
+    `"${mw.definition.name}" was stopped. ${message} It mounts again, through every gate, the next ` +
+      "time this workbook's scripts are loaded.",
+    { variant: "error" },
+  );
+  hostUnmountScript(mw.definition.id);
+}
+
+/** Ask the gate `standing` for one realm. Resolves whether it may go on. */
+async function runStandingCheck(mw: MountedWorker): Promise<boolean> {
+  if (mw.terminated) return false;
+  if (!mw.standingRecheck) return true;
+  const origin = scriptOriginForMount(mw.definition);
+  if (origin.kind !== "package") {
+    mw.standingRecheck = false;
+    return true;
+  }
+  try {
+    const { invokeBackend } = await grantedRunBackend();
+    const answer = await invokeBackend<MountGateAnswer | null>("check_distributed_mount_consent", {
+      packageName: origin.name,
+      // The rule needs no source: nothing is re-hashed per call. The artifact
+      // ids name the code on the audit row.
+      source: "",
+      surface: mw.definition.consentSurface ?? null,
+      artifacts: (mw.definition.consentArtifacts ?? []).map((a) => ({ id: a.id, source: "" })),
+      trigger: null,
+      phase: "standing" satisfies MountGatePhase,
+    });
+    if (mw.terminated) return false;
+    mw.standingRecheck = answer?.recheckWhileRunning === true;
+    return true;
+  } catch (err) {
+    // FAILS CLOSED: a refusal, or a gate that cannot be reached, ends the realm.
+    stopStandingRealm(mw, err instanceof Error ? err.message : String(err));
+    return false;
+  }
+}
+
+/**
+ * Run `then` once the standing check allows it -- synchronously when this realm
+ * need not ask and nothing is queued ahead of it (so ordinary realms keep
+ * today's timing exactly), otherwise after the NEXT check, in arrival order.
+ */
+function standingGateThen(mw: MountedWorker, then: (allowed: boolean) => void): void {
+  // The fast path only when NOTHING is queued: an earlier call or event still
+  // waiting on a check must go first, even after the check stopped applying.
+  if (!mw.standingRecheck && mw.standingQueued === 0) {
+    then(!mw.terminated);
+    return;
+  }
+  if (mw.standingNext === null) {
+    const next = mw.standingInFlight.then(() => runStandingCheck(mw));
+    mw.standingNext = next;
+    // When it STARTS it is in flight: what arrives from then on waits for it.
+    void mw.standingInFlight.then(() => {
+      if (mw.standingNext === next) {
+        mw.standingNext = null;
+        mw.standingInFlight = next;
+      }
+    });
+  }
+  mw.standingQueued += 1;
+  void mw.standingNext.then((allowed) => {
+    mw.standingQueued -= 1;
+    then(allowed);
+  });
+}
+
+/** {@link standingGateThen} as a promise, for the broker-call path. */
+function standingGate(mw: MountedWorker): Promise<boolean> {
+  return new Promise((resolve) => standingGateThen(mw, resolve));
 }
 
 /**
@@ -1082,6 +2057,7 @@ async function mountWorker(
 ): Promise<void> {
   assertAdmissionCovers(definition, admission);
   wireActiveSheet();
+  wireStandingRearm();
   if (mounted.has(definition.id)) {
     // OWNERSHIP SURVIVES A REMOUNT. `hostUnmountScript` clears the transient
     // marker (an unmount really is the end of a debugger-owned mount), but a
@@ -1138,13 +2114,23 @@ async function mountWorker(
     emitDebugState(debugSession, definition.id);
   }
 
-  const handle = buildHandleFromDefinition(definition);
+  // CELL ACCESS BELONGS TO THE FIRST REALM ONLY (owner decision B). The crash
+  // respawn and the debug remounts re-present this admission; none of them is a
+  // person running the macro again, so they mount without it.
+  const grantCells = admission.explicitRunCells && !spentCellGrants.has(admission);
+  if (admission.explicitRunCells) spentCellGrants.add(admission);
+  const handle = buildHandleFromDefinition(definition, { explicitRunCells: grantCells });
   const worker = spawnWorker();
   const mw: MountedWorker = {
     worker,
     handle,
     definition,
     admission,
+    standingRecheck: admission.recheckWhileRunning,
+    standingInFlight: Promise.resolve(true),
+    standingNext: null,
+    standingQueued: 0,
+    callsAtGate: new Set(),
     cleanupFns: [],
     forwarders: new Map(),
     pendingRenderCells: new Map(),
@@ -1174,6 +2160,16 @@ async function mountWorker(
   // open — the replay belongs to the one mount the opener started.
   definition.mountCause = undefined;
   mw.cleanupFns.push(registerMountedHandle(handle));
+  // WHAT THE GRANTED RUN WRITES goes on the trail (owner decision B, F15):
+  // counted from here, reported as the grant expires ("mounted") -- or, if the
+  // realm ends first, as a run that did not complete.
+  if (grantCells && admission.explicitRunGrantId !== null) {
+    openGrantedRunWrites(definition.id, admission.explicitRunGrantId, definition.name);
+    mw.cleanupFns.push(() => endGrantedRun(definition.id, false));
+    // ...and it is ALL OR NOTHING (F9): its undo savepoint is marked before
+    // the realm is told to run, or the run does not start.
+    await openGrantedRunStep(definition.id, definition.name);
+  }
   // Re-establish this script's grants BEFORE the mount spec is built, so the
   // capability list the worker realm receives is the one it actually has:
   //   1. persisted "Allow always" decisions for THIS EXACT SOURCE (local
@@ -1235,6 +2231,9 @@ async function mountWorker(
         }
       : undefined,
     snapshot,
+    // Shapes the shim only (context.api exists; hooks and expose throw). The
+    // broker enforces the grant against the host-side handle, never this.
+    ...(handle.explicitRun?.cells === true ? { explicitRunCells: true as const } : {}),
   };
   pauseOnEntryOnce.set(definition.id, false);
 
@@ -1516,6 +2515,9 @@ export function hostResetAll(): void {
   // before it calls this, and those sweeps present the previous document's
   // tickets, which the swap's clear has spent -- the backend closes nothing.)
   resetScriptBatchTracking();
+  // Before the unmounts, whose teardown would report a granted run's writes:
+  // the document is already the next one, and the writes were not made there.
+  dropGrantedRunWrites();
   for (const scriptId of [...mounted.keys()]) {
     hostUnmountScript(scriptId);
   }
@@ -2983,6 +3985,9 @@ export async function hostStartModuleScriptDebugSession(
     // this session is about to mount, un-composed.
     consentSurface: "object-script",
     consentArtifacts: [{ id: scriptId, source: record.source }],
+    // The user asked to RUN it (Run / Debug in the editor): an explicit run,
+    // recorded once Script Security has admitted it too.
+    consentRun: true,
     apiVersion: SCRIPT_API_VERSION,
   };
 
@@ -3268,14 +4273,44 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
   mw.worker.onmessage = (e: MessageEvent<W2H>) => {
     const msg = e.data;
     switch (msg.t) {
-      case "mounted":
-        noteDebugMountSettled(mw, msg.ok, msg.error);
-        onMounted(msg.ok, msg.error);
+      case "mounted": {
+        const deliver = () => {
+          // CELL ACCESS LASTS EXACTLY AS LONG AS THE RUN (owner decision B): it
+          // ends when setup settles. A call held at the standing gate above has
+          // already passed the broker's check by the time this runs.
+          if (mw.handle.explicitRun) mw.handle.explicitRun.cells = false;
+          // ...and what the run wrote goes on the trail (F15), once its calls
+          // have finished. After the held calls were handed on, so none is lost.
+          endGrantedRun(mw.definition.id, msg.ok);
+          noteDebugMountSettled(mw, msg.ok, msg.error);
+          onMounted(msg.ok, msg.error);
+        };
+        // IN ARRIVAL ORDER (BUG-0267). A call the realm made before "mounted"
+        // may still be waiting at the standing gate; resolving the mount first
+        // let the one-off runner unmount before it was delivered, and it was
+        // lost without a word. Nothing waiting: deliver now, exactly as before.
+        // Something waiting: deliver once each has been handed to the broker
+        // or refused -- at most one standing round trip (a gated realm is
+        // package origin and never JIT-prompts), bounded by the mount deadline.
+        // A refusal meanwhile ends the realm and has already rejected the
+        // mount, so the late delivery is then a no-op.
+        if (mw.callsAtGate.size === 0) deliver();
+        else void Promise.allSettled([...mw.callsAtGate]).then(deliver);
         break;
+      }
       case "call":
-        void handleCall(mw, msg.callId, msg.method, msg.args);
+        // A granted run's report waits for every call it made (F15).
+        noteGrantedRunCall(mw.definition.id, handleCall(mw, msg.callId, msg.method, msg.args));
         break;
       case "hookRegistered":
+        // A RUN-ONLY realm (an explicit run of an application's macro, owner
+        // decision B) wires no hook: nothing may call into it after the run.
+        if (mw.handle.explicitRun) {
+          console.warn(
+            `[ScriptHost] "${mw.definition.name}" is a run-only realm (cell access for a run you started); hook "${msg.hook}" was not wired.`,
+          );
+          break;
+        }
         if (!mw.declaredHooks.includes(msg.hook)) mw.declaredHooks.push(msg.hook);
         wireHookForwarder(mw, msg.hook);
         // A hook registered after `setup` returned (from inside another handler)
@@ -3366,11 +4401,47 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
 }
 
 /**
+ * The sentence a one-off RUN's caller gets when its realm crashed (ownerB
+ * follow-up F11). Exported for the tests that pin it.
+ */
+export function describeRunRealmCrash(name: string, message: string, takenBackWhole = false): string {
+  return (
+    `"${name}" stopped: the script crashed while it was running (${message}). It was not ` +
+    "started again -- a run happens once, when you start it -- so " +
+    // A run with cell access is taken back whole (F9): the runner says whether
+    // that worked, so this does not send the user looking at its cells.
+    (takenBackWhole ? "" : "check the cells it may already have changed, and ") +
+    "run it again if you want to."
+  );
+}
+
+/**
  * A realm has died (or, equivalently, stopped acknowledging its dispatches —
  * see the stall watchdog in `forwardEvent`): respawn already-admitted code
  * once, fault it on a second crash within 30 s.
+ *
+ * A RUN IS NEVER RESPAWNED (ownerB follow-up F11). A `consentRun` realm is one
+ * run someone started -- the one-off runner (Developer > Macros > Run, a
+ * button, the command line, a script's runMacro) or a macro's debug session --
+ * and its `setup` IS the run. Respawning it re-ran that run with no one
+ * starting it and no new run row, and the respawned realm could outlive the
+ * runner's `finally` that was meant to tear it down. So it is faulted instead:
+ * the run's own mount is rejected with the crash (the runner reports it to
+ * whoever started the run, so nothing is emitted here as well) and the realm
+ * is torn down. Standing realms keep their one free respawn.
  */
 function crashWorker(mw: MountedWorker, message: string): void {
+  if (mw.definition.consentRun === true) {
+    if (mw.terminated) return;
+    console.warn(`[ScriptHost] "${mw.definition.name}" crashed while running; not respawned:`, message);
+    // FIRST: the waiting runner hears the crash itself, not the generic
+    // "superseded" the teardown below would otherwise answer it with.
+    mw.rejectMount?.(
+      new Error(describeRunRealmCrash(mw.definition.name, message, grantedRunWrites.has(mw.definition.id))),
+    );
+    hostUnmountScript(mw.definition.id);
+    return;
+  }
   {
     const now = Date.now();
     if (mw.respawned && now - mw.lastCrashAt < 30_000) {
@@ -3727,6 +4798,37 @@ async function requestLibraryCapability(
 // ============================================================================
 
 async function handleCall(mw: MountedWorker, callId: number, method: string, args: unknown[]): Promise<void> {
+  // A call that must WAIT at the standing gate holds "mounted" back until it
+  // has been handed to the broker or refused (BUG-0267; see `callsAtGate`).
+  // The same condition as `standingGateThen`'s slow path, read before it runs.
+  // Asserted, not annotated: it is assigned inside the executor below, which
+  // control-flow analysis does not follow, so an annotation narrows it to null.
+  let releaseGate = null as (() => void) | null;
+  if (mw.standingRecheck || mw.standingQueued > 0) {
+    const held = new Promise<void>((resolve) => {
+      releaseGate = () => {
+        releaseGate = null;
+        mw.callsAtGate.delete(held);
+        resolve();
+      };
+    });
+    mw.callsAtGate.add(held);
+  }
+  const letMountedThrough = () => releaseGate?.();
+  // THE PRIVATE-SHEET RULE WHILE IT RUNS: a realm in a working copy asks
+  // before it acts, and a refusal has already ended it (see `standingGate`).
+  if (!(await standingGate(mw))) {
+    letMountedThrough();
+    // A standing REFUSAL has already said so (stopStandingRealm). A realm that
+    // ended for another reason while this call waited -- unmounted, remounted
+    // -- drops it; say so instead of losing it without a word (BUG-0267).
+    if (mw.terminated) {
+      console.warn(
+        `[ScriptHost] "${mw.definition.name}" ended while its call "${method}" waited at the standing check; it was not run.`,
+      );
+    }
+    return;
+  }
   try {
     // JIT capability grant (R10): for a LOCAL script's first ungranted use of a
     // capability, prompt the user before the broker denies it. On grant the live
@@ -3734,9 +4836,16 @@ async function handleCall(mw: MountedWorker, callId: number, method: string, arg
     // same call below. Distributed scripts are not JIT-prompted — they acquire
     // capabilities only through package consent (Phase 4.2).
     await maybeRequestCapabilityGrant(mw, method, args);
-    const value = await brokerCall(mw.handle, method, args, () => executeImpl(mw, method, args));
+    const pending = brokerCall(mw.handle, method, args, () => executeImpl(mw, method, args));
+    // Handed to the broker: its synchronous part (a toast, a log line) has run.
+    letMountedThrough();
+    const value = await pending;
     post(mw, { t: "callResult", callId, ok: true, value });
   } catch (err) {
+    letMountedThrough();
+    // A granted run's report says some of its calls failed (F15): a cell
+    // counted for one of them may not have changed.
+    noteGrantedRunCallFailed(mw.definition.id);
     const error =
       err instanceof BrokerError
         ? { code: err.code, message: err.message, detail: err.capability ? { capability: err.capability } : undefined }
@@ -4009,7 +5118,9 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         sheetIndex = resolveSheetRefIn(sheets, sheetRef, "setCellValue");
         if (sheetIndex !== activeIndex) {
           // Another sheet, by name or index: the same off-sheet path
-          // sheet.setCellValue takes (api.* is unlocked-only, so no tier clamp).
+          // sheet.setCellValue takes (api.* rows are unlocked-only or granted to
+          // an explicit run by explicitRunGrant.ts; both reach any sheet by
+          // design, so no tier clamp).
           recordScriptWrite(definition.id, sheetIndex, row, col);
           // Canonical US form + invariant flag — parse_cell_input_invariant,
           // never delocalized (sv-SE would read "42.5" as 425). The backend
@@ -4702,8 +5813,11 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         number, number, number, number, ScriptFillOptions | undefined, (number | string)?,
       ];
       const lib = await getLib();
+      // A realm holding the explicit-run grant (owner decision B) fills the way
+      // the module runtime's fillDown/fillRight do, and no further.
       return fillRangeFromScript(
         lib, definition.id, startRow, startCol, endRow, endCol, options ?? {}, sheetRef,
+        { moduleParity: handle.explicitRun !== undefined },
       );
     }
     case "api.findAll": {
@@ -7944,6 +9058,14 @@ function scriptSeriesPattern(values: string[]): PatternResult {
  * active-sheet-only bulk path copyRange documents — and writes through
  * `update_cells_batch`, which carries style indexes only on the active sheet.
  * Same rule, same message, as copyRange / sortRange.
+ *
+ * `moduleParity` (owner decision B): set for a realm holding the explicit-run
+ * grant, an application's macro a person ran. Its fill then does exactly what
+ * the module runtime's `Calcula.fillDown` / `fillRight` do (the backend
+ * `fill_range`: values, shifted formulas and the band's styles) and nothing the
+ * drag adds on top: it does not repeat the band's merges (structure) and does
+ * not emit FILL_COMPLETED, whose sparkline listener creates sparkline groups
+ * (objects) for the filled cells. "The same CELL access" is the ceiling.
  */
 export async function fillRangeFromScript(
   lib: Awaited<ReturnType<typeof getLib>>,
@@ -7954,7 +9076,9 @@ export async function fillRangeFromScript(
   endCol: number,
   options: ScriptFillOptions,
   sheetRef: number | string | undefined,
+  scope: { moduleParity?: boolean } = {},
 ): Promise<{ count: number }> {
+  const moduleParity = scope.moduleParity === true;
   assertRangeSize(startRow, startCol, endRow, endCol);
   const active = await assertActiveSheet(lib, sheetRef, "fillRange");
   const direction = options.direction ?? "down";
@@ -8110,17 +9234,21 @@ export async function fillRangeFromScript(
       await lib.updateCell(w.row, w.col, w.value);
     }
     // Merge patterns replicate from the band into the filled area, exactly as
-    // the drag does (same shared function, same clipping rules).
-    await replicateMergeRegions(srcBox, targetBox, direction);
+    // the drag does (same shared function, same clipping rules) -- except for a
+    // granted application macro, whose module twin merges nothing.
+    if (!moduleParity) await replicateMergeRegions(srcBox, targetBox, direction);
   });
 
   // The same completion event the drag emits, so extensions that follow fills
-  // (e.g. sparklines) see a script fill too.
-  emitAppEvent(AppEvents.FILL_COMPLETED, {
-    sourceRange: srcBox,
-    targetRange: targetBox,
-    direction,
-  });
+  // (e.g. sparklines) see a script fill too -- except a granted application
+  // macro's: the sparkline listener CREATES objects, which cell access is not.
+  if (!moduleParity) {
+    emitAppEvent(AppEvents.FILL_COMPLETED, {
+      sourceRange: srcBox,
+      targetRange: targetBox,
+      direction,
+    });
+  }
 
   return { count: batchUpdates.length };
 }
@@ -11486,7 +12614,18 @@ export async function executeRunMacro(ref: string): Promise<{ name: string }> {
         `no macro with id "${outcome.macroId}" exists in this workbook (it may have just been deleted)`,
       );
     case "failed":
+      // A SCRIPT started this run, so an application's MODULE macro is refused
+      // by the Rust run gate (owner decision B, follow-up F10: that runtime
+      // cannot run it with less than its full reach) -- which the gate already
+      // recorded. It did not run; the script is told so, as a refusal.
+      if (outcome.message.includes(scripts.APPLICATION_MACRO_NOT_STARTED_BY_YOU)) {
+        throw new BrokerError("PermissionDenied", `macro "${outcome.name}" did not run: ${outcome.message}`);
+      }
       throw new BrokerError("HostError", `macro "${outcome.name}" failed: ${outcome.message}`);
+    case "refused":
+      // Not asked for here (no `requirePackage`), so not expected -- but a
+      // refusal is still a refusal, and the macro did not run.
+      throw new BrokerError("HostError", `macro "${outcome.name}" did not run: ${outcome.message}`);
   }
 }
 
@@ -15229,7 +16368,17 @@ const HELD_EVENTS_HARD_CAP = EVENT_QUEUE_HIGH_WATER * 4;
 /** Post one dispatch and count it as outstanding until the realm acknowledges. */
 function postEvent(mw: MountedWorker, hook: string, payload: unknown): void {
   mw.outstandingEvents += 1;
-  post(mw, { t: "event", hook, payload });
+  // A realm in a working copy is told nothing the private-sheet rule would
+  // refuse it: the event waits for the standing check, and a refusal ends the
+  // realm before the payload reaches it (see `standingGateThen`). Synchronous,
+  // exactly as before, for every realm that need not ask.
+  standingGateThen(mw, (allowed) => {
+    if (!allowed || mw.terminated) {
+      if (mw.outstandingEvents > 0) mw.outstandingEvents -= 1;
+      return;
+    }
+    post(mw, { t: "event", hook, payload });
+  });
   if (!mw.eventsHeld && mw.outstandingEvents >= EVENT_QUEUE_HIGH_WATER) {
     mw.eventsHeld = true;
     armStallWatchdog(mw);

@@ -4,6 +4,9 @@
 
 pub mod types;
 pub mod commands;
+pub mod application_code_gate;
+pub mod explicit_run_audit;
+pub mod control_action;
 pub mod notebook_commands;
 pub mod notebook_executor;
 pub mod object_script_commands;

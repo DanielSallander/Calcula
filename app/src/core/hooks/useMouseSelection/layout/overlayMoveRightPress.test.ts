@@ -2,18 +2,21 @@
 // PURPOSE: A SECONDARY press on a floating overlay dispatches nothing and drags
 //          nothing — while still consuming the press, so the cell cursor does
 //          not jump to the cell under the object.
-// CONTEXT: `handleOverlayMoveMouseDown` is the ONLY place in the codebase where
-//          a native mousedown becomes `floatingObject:selected`, and Controls'
-//          listener turns that event into `button:clicked` for a run-mode
-//          button — so with no `event.button` filter anywhere upstream, a
-//          RIGHT-CLICK RAN THE USER'S MACRO. The filter belongs at this
-//          dispatch rather than in Controls' listener because six listeners
-//          share the event and any one added later inherits its meaning.
+// CONTEXT: `handleOverlayMoveMouseDown` is where a native mousedown on an
+//          object's body becomes `floatingObject:selected` and, on CONTENT,
+//          `floatingObject:bodyDragStart`. A run-mode button RUNS from the
+//          second: Controls starts its press at bodyDragStart and runs it at a
+//          PRIMARY release inside it (BUG-0258 phase 4c). It used to run from
+//          `selected` -- and with no `event.button` filter anywhere upstream,
+//          a RIGHT-CLICK RAN THE USER'S MACRO. The filter belongs at this
+//          dispatch rather than in a family's listener because many listeners
+//          share these events and any one added later inherits their meaning:
+//          a secondary press dispatches NEITHER.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type React from "react";
 import { createOverlayMoveHandlers, type OverlayMoveState } from "./overlayMoveHandlers";
-import { setGridRegions } from "../../../../api/gridOverlays";
+import { registerGridOverlay, setGridRegions, unregisterGridOverlay } from "../../../../api/gridOverlays";
 import { DEFAULT_GRID_CONFIG, type Viewport } from "../../../types";
 
 const VIEWPORT: Viewport = { scrollX: 0, scrollY: 0, startRow: 0, startCol: 0, rowCount: 30, colCount: 10 };
@@ -49,7 +52,7 @@ function pressEvent(button: number): React.MouseEvent<HTMLElement> {
 describe("a right press on a floating overlay", () => {
   let selected: CustomEvent[];
   let listener: (e: Event) => void;
-  let setIsOverlayMoving: ReturnType<typeof vi.fn>;
+  let setIsOverlayMoving: ReturnType<typeof vi.fn<(value: boolean) => void>>;
   let overlayMoveStateRef: { current: OverlayMoveState | null };
 
   const makeHandlers = () =>
@@ -76,7 +79,7 @@ describe("a right press on a floating overlay", () => {
     setGridRegions([]);
   });
 
-  it("dispatches no floatingObject:selected — the event Controls turns into button:clicked", () => {
+  it("dispatches no floatingObject:selected (the event a run-mode button used to run from, and every family's press)", () => {
     makeHandlers().handleOverlayMoveMouseDown(CENTRE.x, CENTRE.y, pressEvent(2));
     expect(selected).toHaveLength(0);
   });
@@ -107,5 +110,46 @@ describe("a right press on a floating overlay", () => {
   it("a press on a pixel outside every region is not the overlay path's at all", () => {
     expect(makeHandlers().handleOverlayMoveMouseDown(5000, 5000, pressEvent(2))).toBe(false);
     expect(selected).toHaveLength(0);
+  });
+});
+
+describe("a right press on a RUN-MODE button (content: the press its run starts from)", () => {
+  let events: Array<{ type: string; detail: Record<string, unknown> }>;
+  const record = (e: Event) => events.push({ type: e.type, detail: (e as CustomEvent).detail });
+  const NAMES = ["floatingObject:selected", "floatingObject:bodyDragStart"];
+
+  const makeHandlers = () =>
+    createOverlayMoveHandlers({
+      config: DEFAULT_GRID_CONFIG,
+      viewport: VIEWPORT,
+      containerRef: { current: null },
+      setIsOverlayMoving: vi.fn(),
+      setCursorStyle: vi.fn(),
+      overlayMoveStateRef: { current: null } as React.MutableRefObject<OverlayMoveState | null>,
+    });
+
+  beforeEach(() => {
+    // The run-mode button's zone answer (Controls/lib/controlZoneAt.ts): CONTENT, part 'button'.
+    registerGridOverlay({ type: "control", render: () => {}, zoneAt: () => ({ kind: "content", cursor: "pointer", part: "button" }) });
+    setGridRegions([{ ...BUTTON_REGION, data: { controlType: "button", movable: false } }]);
+    events = [];
+    for (const n of NAMES) window.addEventListener(n, record);
+  });
+
+  afterEach(() => {
+    for (const n of NAMES) window.removeEventListener(n, record);
+    unregisterGridOverlay("control");
+    setGridRegions([]);
+  });
+
+  it("dispatches no floatingObject:bodyDragStart either -- the event a run-mode button's press starts from", () => {
+    expect(makeHandlers().handleOverlayMoveMouseDown(CENTRE.x, CENTRE.y, pressEvent(2))).toBe(true);
+    expect(events, "a right press reached a family's press listener").toEqual([]);
+  });
+
+  it("POSITIVE CONTROL: a LEFT press on it dispatches selected AND bodyDragStart (part 'button')", () => {
+    makeHandlers().handleOverlayMoveMouseDown(CENTRE.x, CENTRE.y, pressEvent(0));
+    expect(events.map((e) => e.type)).toEqual(NAMES);
+    expect(events[1].detail).toMatchObject({ regionId: "control-1", part: "button" });
   });
 });

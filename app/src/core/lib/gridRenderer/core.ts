@@ -57,6 +57,7 @@ import { hasCellTypes, getCellTypeAt, renderCellTypeCell } from "../../../api/ce
 import { hasGridLayers, paintGridLayers, type GridLayerAnchor, type GridLayerContext } from "../../../api/gridLayers";
 import type { CellDecorationContext } from "../../../api/cellDecorations";
 import { effectiveZ, hasStackingOrder } from "../../../api/gridOverlays";
+import { paintFloatingGrips, paintFloatingSelectionChrome } from "./rendering/floatingObjectChrome";
 
 // ============================================================================
 // Post-Header Overlay Types
@@ -1149,6 +1150,20 @@ export function renderGrid(
       }
     }
   }
+
+  // The SELECTION CHROME of every selected floating object -- one outline
+  // colour, and the resize handles from the one geometry the resize hit test
+  // reads (core/lib/floatingHandles.ts; BUG-0258 design phase 3). After every
+  // floating object, so a selected object's handles show above an object
+  // stacked over it (and are grabbable there); before the over-selection
+  // layers, so a canvas's padlock paints over the outline. No family paints
+  // selection chrome of its own.
+  //
+  // The six-dot GRIPS first (core/lib/floatingGrip.ts; BUG-0258 design phase
+  // 5): above every object, so a grip over a neighbour shows where it takes
+  // the press, and below the handles, which the press scans before the grip.
+  paintFloatingGrips(ctx, surfaceRegions, effectiveConfig, viewport);
+  paintFloatingSelectionChrome(ctx, surfaceRegions, effectiveConfig, viewport);
 
   paintLayers("over-selection");
 

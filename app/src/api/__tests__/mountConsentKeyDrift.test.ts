@@ -15,6 +15,18 @@
 //      custom-functions       custom-functions:<application>     JS UDFs merged from a .calp
 //      lib                    lib:<application>                  shared script libraries
 //      writeback-validators   <application>::writeback-validators
+//      (not a mount surface)  button-commands:<application>      an application's button-cell
+//                                                                commands (plan_M8 S3)
+//
+// ScriptableObjects/index.ts ALSO writes `button-commands:<application>`: the
+// Calcula commands an application's button cells may run, approved on the same
+// screen as its object scripts but recorded under their own key, because
+// `recordConsent` replaces a key's whole record and the bare key is the mount
+// floor's. That key is NOT a mount surface -- nothing mounts a command, and
+// Rust's CONSENT_SURFACES has no row for it (pinned on the Rust side by
+// `no_mount_surface_is_judged_under_the_button_command_key`); only Rust's
+// command gate (`application_code_gate::button_command_gate`) asks it. So the
+// writer census below keeps the same file set.
 //
 // A MOUNT names its surface (`consentSurface` on the definition) and the Rust
 // gate (`CONSENT_SURFACES`, app/src-tauri/src/scripting/commands.rs) narrows to

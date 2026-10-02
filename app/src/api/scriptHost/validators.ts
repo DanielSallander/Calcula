@@ -206,6 +206,15 @@ export const vSetState: Validator = ([aspect, aspectArgs]) => {
   if (aspect === "shape.setProperty") {
     return checkShapeSetProperty(aspectArgs);
   }
+  // Cell-type ASSIGNMENT (the two-tier handshake: a script puts an extension's
+  // cell type on its own target). Until this row existed the aspect fell through
+  // to `return true`, and a button cell's params ARE an action: a script could
+  // hand the user a one-click button that runs the user's own macro, unlocked,
+  // with a call of its choosing appended (BUG-0260's confused deputy through the
+  // script door). Refused here like `onSelect` / `macroRef` above.
+  if (aspect === "range.setCellType") {
+    return checkRangeSetCellType(aspectArgs);
+  }
   // Floating ranges are an enumerable kind (`api.listObjects`), so BOTH
   // setState doors can name them — and the tail of this ladder is `return
   // true` (the shape.setProperty lesson, one paragraph up). Every
@@ -5286,8 +5295,74 @@ const SCRIPT_SHAPE_PROPERTY_KEY_SET: ReadonlySet<string> = new Set(SCRIPT_SHAPE_
  * IMAGE_PROPERTIES, and the door this aspect goes through hardcodes the control
  * type "shape". Buttons get their action from the Properties pane or from the
  * @api/buttonControlService seam, both of which are trusted UI.
+ *
+ * The HELD compartment is refused too (BUG-0257): `heldOnSelect`,
+ * `heldMacroRef` and their stamp `heldFrom` keep an application's button code
+ * in a working copy, inert, and the next push PUBLISHES it -- under the
+ * pusher's key -- once it matches the signed base. A script writing one would
+ * be staging code for that publish: the same escalation, one push later. The
+ * spellings are @api/heldButtonCode's; the backend refuses them at its own door
+ * as well, and `controls.rs` pins this list against EXECUTABLE + HELD.
  */
-export const SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS: readonly string[] = ["onSelect", "macroRef"];
+export const SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS: readonly string[] = ["onSelect", "macroRef", "heldOnSelect", "heldMacroRef", "heldFrom"];
+
+/**
+ * Cell-type params a SCRIPT may not write, on any cell type (BUG-0260).
+ *
+ * Both are written by the application admission in Rust and nothing else
+ * (app/src-tauri/src/button_cells.rs): `heldAction` is an application's button
+ * action a working copy keeps for publishing -- whatever sits there is
+ * published at the next push, under the pusher's key -- and `fromApplication`
+ * is the stamp a click trusts to decide which macros a button may run. Pinned
+ * against the Rust constants by `the_frontend_spells_the_params_as_rust_does`.
+ */
+export const SCRIPT_REFUSED_CELL_TYPE_PARAMS: readonly string[] = ["heldAction", "fromApplication"];
+
+/** The cell type whose params carry an executable action. */
+const BUTTON_CELL_TYPE_ID = "calcula.button";
+
+/**
+ * `range.setCellType`: `[typeId, params?]`.
+ *
+ * A script may put any registered cell type on its own target -- that is the
+ * two-tier handshake -- but it may not ARM a button: a `calcula.button` whose
+ * params carry an `action` runs a stored macro or a registered command on the
+ * user's next click, with the USER's reach rather than the script's. The same
+ * reasoning as `SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS`: authoring code that later
+ * runs with more reach than the author has is privilege escalation with extra
+ * steps. A button without an action (a label) is fine; the user gives it an
+ * action through the Insert Button dialog, which is trusted UI.
+ */
+export function checkRangeSetCellType(aspectArgs: unknown): true | string {
+  const args = Array.isArray(aspectArgs) ? aspectArgs : [];
+  const [typeId, params] = args;
+  if (typeof typeId !== "string" || typeId.length === 0) {
+    return "expected [typeId, params?] with a non-empty typeId";
+  }
+  if (params === undefined || params === null) return true;
+  if (typeof params !== "object" || Array.isArray(params)) {
+    return "cell-type params must be an object";
+  }
+  const record = params as Record<string, unknown>;
+  for (const key of SCRIPT_REFUSED_CELL_TYPE_PARAMS) {
+    if (Object.prototype.hasOwnProperty.call(record, key)) {
+      return (
+        `"${key}" is written only when an application is opened for editing or subscribed ` +
+        "to, and a script may not write it: it decides what a button from an application " +
+        "may run, and what the next push publishes."
+      );
+    }
+  }
+  if (typeId === BUTTON_CELL_TYPE_ID && Object.prototype.hasOwnProperty.call(record, "action")) {
+    return (
+      'a script may not give a button cell an "action": the button would run a macro or a ' +
+      "command on the user's next click, with the user's reach rather than the script's. " +
+      "Put the button in place without one (a label is fine) and let the user choose its " +
+      "action (Insert > Cell Type > Button)."
+    );
+  }
+  return true;
+}
 const SCRIPT_REFUSED_SHAPE_PROPERTY_KEY_SET: ReadonlySet<string> =
   new Set(SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS);
 
@@ -5353,6 +5428,12 @@ export function checkShapeSetProperty(aspectArgs: unknown): true | string {
   }
   const name = key as string;
   if (SCRIPT_REFUSED_SHAPE_PROPERTY_KEY_SET.has(name)) {
+    if (name.startsWith("held")) {
+      return (
+        `"${name}" holds an application's button ACTION, kept for publishing, and a ` +
+        `script may not write it: whatever sits there is published at the next push.`
+      );
+    }
     return (
       `"${name}" holds an ACTION, not an appearance, and a script may not write it. ` +
       `Set a button's click action in the Properties pane, or link a recorded macro ` +

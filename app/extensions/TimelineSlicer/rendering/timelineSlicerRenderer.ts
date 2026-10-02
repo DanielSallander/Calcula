@@ -8,26 +8,53 @@ import {
   overlaySheetToCanvas,
   type OverlayRenderContext,
   type OverlayHitTestContext,
-  type OverlayCursorFn,
 } from "@api/gridOverlays";
 import { getTimelineById, getCachedTimelineData } from "../lib/timelineSlicerStore";
-import { isTimelineSelected } from "../handlers/selectionHandler";
 import { TIMELINE_STYLES_BY_ID } from "../components/TimelineSlicerStylesGallery";
-import type { TimelineSlicer, TimelinePeriod, TimelineLevel } from "../lib/timelineSlicerTypes";
+import type { TimelineLevel } from "../lib/timelineSlicerTypes";
+import {
+  TIMELINE_CLEAR_BUTTON_MARGIN,
+  TIMELINE_CLEAR_BUTTON_SIZE,
+  TIMELINE_HEADER_HEIGHT,
+  TIMELINE_LEVELS,
+  TIMELINE_LEVEL_SELECTOR_HEIGHT,
+  TIMELINE_LEVEL_BUTTON_WIDTH,
+  TIMELINE_SCROLLBAR_HEIGHT,
+  clampScroll,
+  computeTimelineLayout,
+  isTimelineFiltered,
+  levelButtonLeft,
+  scrollbarThumbOf,
+  selectedSpanOf,
+  type TimelineLayout,
+} from "../lib/timelineZones";
+import { getScrollOffset, timelineZoneAtCanvas } from "../lib/timelineView";
+import { getTimelineRangePreview } from "../lib/timelineGestureView";
+import { getTimelineKeyFocus, resolveTimelineFocus } from "../lib/timelineKeyFocus";
 
 // ============================================================================
 // Style Constants
 // ============================================================================
 
-const HEADER_HEIGHT = 28;
-const GROUP_LABEL_HEIGHT = 18;
-const PERIOD_HEIGHT = 28;
-const LEVEL_SELECTOR_HEIGHT = 24;
-const SCROLLBAR_HEIGHT = 8;
-const PERIOD_MIN_WIDTH = 40;
+// The geometry (header, year strip, tiles, level row, scrollbar) is the zone
+// table's (lib/timelineZones.ts): what is painted is what a press hits.
+const HEADER_HEIGHT = TIMELINE_HEADER_HEIGHT;
+const LEVEL_SELECTOR_HEIGHT = TIMELINE_LEVEL_SELECTOR_HEIGHT;
+const SCROLLBAR_HEIGHT = TIMELINE_SCROLLBAR_HEIGHT;
 const BORDER_RADIUS = 3;
 const FONT_FAMILY = "Calibri, Segoe UI, sans-serif";
-const CLEAR_BUTTON_SIZE = 18;
+const CLEAR_BUTTON_SIZE = TIMELINE_CLEAR_BUTTON_SIZE;
+
+/**
+ * The keyboard focus ring (M8 S8, plan decision KD4; the Slicer's ring): a
+ * 2px DARK outline with a 1px LIGHT line inside it, drawn inside the focused
+ * period's tile. Two tones, so that whatever the fill under it -- a preset's
+ * background, its translucent selection highlight, a dark preset's
+ * near-black -- one of them reaches 3:1 against it (WCAG 2.2 SC 1.4.11).
+ * timelineFocusRing.test.ts measures every preset.
+ */
+export const TIMELINE_FOCUS_RING_DARK = "#000000";
+export const TIMELINE_FOCUS_RING_LIGHT = "#ffffff";
 
 interface TimelineStyleColors {
   bg: string;
@@ -111,106 +138,12 @@ function getStyleColors(preset: string): TimelineStyleColors {
 }
 
 // ============================================================================
-// Layout Computation
-// ============================================================================
-
-interface TimelineLayout {
-  headerH: number;
-  groupLabelH: number;
-  periodH: number;
-  levelSelectorH: number;
-  scrollbarH: number;
-  periodWidth: number;
-  contentWidth: number;
-  viewportWidth: number;
-  viewportTop: number;
-  needsScroll: boolean;
-  totalPeriods: number;
-}
-
-function computeLayout(
-  tl: TimelineSlicer,
-  periodCount: number,
-): TimelineLayout {
-  const headerH = tl.showHeader ? HEADER_HEIGHT : 0;
-  const groupLabelH = GROUP_LABEL_HEIGHT;
-  const periodH = PERIOD_HEIGHT;
-  const levelSelectorH = tl.showLevelSelector ? LEVEL_SELECTOR_HEIGHT : 0;
-  const scrollbarH = tl.showScrollbar ? SCROLLBAR_HEIGHT : 0;
-
-  const viewportWidth = tl.width;
-  const viewportTop = headerH;
-
-  // Calculate period width based on level and available space
-  let periodWidth: number;
-  switch (tl.level) {
-    case "years":
-      periodWidth = Math.max(PERIOD_MIN_WIDTH, 80);
-      break;
-    case "quarters":
-      periodWidth = Math.max(PERIOD_MIN_WIDTH, 60);
-      break;
-    case "months":
-      periodWidth = Math.max(PERIOD_MIN_WIDTH, 50);
-      break;
-    case "days":
-      periodWidth = Math.max(PERIOD_MIN_WIDTH - 10, 30);
-      break;
-    default:
-      periodWidth = PERIOD_MIN_WIDTH;
-  }
-
-  const contentWidth = periodCount * periodWidth;
-  const needsScroll = contentWidth > viewportWidth;
-
-  return {
-    headerH,
-    groupLabelH,
-    periodH,
-    levelSelectorH,
-    scrollbarH,
-    periodWidth,
-    contentWidth,
-    viewportWidth,
-    viewportTop,
-    needsScroll,
-    totalPeriods: periodCount,
-  };
-}
-
-// ============================================================================
-// Scroll State
-// ============================================================================
-
-const scrollOffsets = new Map<string, number>();
-
-export function getScrollOffset(timelineId: string): number {
-  return scrollOffsets.get(timelineId) ?? 0;
-}
-
-export function setScrollOffset(timelineId: string, offset: number): void {
-  const max = getMaxScrollOffset(timelineId);
-  scrollOffsets.set(timelineId, Math.max(0, Math.min(offset, max)));
-}
-
-export function getMaxScrollOffset(timelineId: string): number {
-  const tl = getTimelineById(timelineId);
-  if (!tl) return 0;
-
-  const data = getCachedTimelineData(timelineId);
-  if (!data) return 0;
-
-  const layout = computeLayout(tl, data.periods.length);
-  return Math.max(0, layout.contentWidth - layout.viewportWidth);
-}
-
-export function resetScrollOffsets(): void {
-  scrollOffsets.clear();
-}
-
-// ============================================================================
 // Renderer
 // ============================================================================
+//
+// The layout is `computeTimelineLayout` (lib/timelineZones.ts), and the
+// periods' scroll is lib/timelineView.ts's -- the zone table measures presses
+// on the same numbers.
 
 export function renderTimelineSlicer(ctx: OverlayRenderContext): void {
   const timelineId = ctx.region.data?.timelineId as string | undefined;
@@ -227,8 +160,16 @@ export function renderTimelineSlicer(ctx: OverlayRenderContext): void {
   const { canvasX, canvasY } = overlaySheetToCanvas(ctx, tl.x, tl.y);
   const w = tl.width;
   const h = tl.height;
-  const layout = computeLayout(tl, periods.length);
-  const scrollVal = Math.min(getScrollOffset(timelineId), Math.max(0, layout.contentWidth - layout.viewportWidth));
+  const layout: TimelineLayout = computeTimelineLayout(tl, periods.length);
+  const scrollVal = clampScroll(layout, getScrollOffset(timelineId));
+
+  // The range to paint: a live range drag's TRANSIENT preview (or a released
+  // one's until its commit lands), else the committed range the backend
+  // flagged. Nothing here is written anywhere. The zone input places the
+  // range-end markers on this same range (lib/timelineView.ts).
+  const preview = getTimelineRangePreview(timelineId);
+  const isShownSelected = (i: number): boolean =>
+    preview ? i >= preview.first && i <= preview.last : periods[i].isSelected;
 
   // Clip to bounds
   c.save();
@@ -256,9 +197,10 @@ export function renderTimelineSlicer(ctx: OverlayRenderContext): void {
       w - CLEAR_BUTTON_SIZE - 20,
     );
 
-    // Clear filter button
-    const isFiltered = tl.selectionStart !== null;
-    const btnX = canvasX + w - CLEAR_BUTTON_SIZE - 4;
+    // Clear filter button: lit (and a press target, lib/timelineZones.ts)
+    // only while there is a filter to clear.
+    const isFiltered = isTimelineFiltered(tl);
+    const btnX = canvasX + w - CLEAR_BUTTON_SIZE - TIMELINE_CLEAR_BUTTON_MARGIN;
     const btnY = canvasY + (HEADER_HEIGHT - CLEAR_BUTTON_SIZE) / 2;
     drawClearFilterButton(c, btnX, btnY, CLEAR_BUTTON_SIZE, isFiltered, colors.headerFg);
   }
@@ -317,14 +259,15 @@ export function renderTimelineSlicer(ctx: OverlayRenderContext): void {
     const cellH = layout.periodH;
 
     // Selection highlight
-    if (period.isSelected) {
+    const shownSelected = isShownSelected(i);
+    if (shownSelected) {
       c.fillStyle = colors.selectionBarBg;
       c.fillRect(px, cellTop, layout.periodWidth, cellH);
     }
 
     // Period label
     if (period.hasData) {
-      c.fillStyle = period.isSelected ? colors.selectedFg : colors.periodFg;
+      c.fillStyle = shownSelected ? colors.selectedFg : colors.periodFg;
     } else {
       c.fillStyle = colors.noDataFg;
     }
@@ -350,11 +293,10 @@ export function renderTimelineSlicer(ctx: OverlayRenderContext): void {
   }
 
   // Selection bar (thick bar across selected range)
-  const firstSelected = periods.findIndex((p) => p.isSelected);
-  const lastSelected = periods.length - 1 - [...periods].reverse().findIndex((p) => p.isSelected);
-  if (firstSelected >= 0 && lastSelected >= firstSelected) {
-    const selX = canvasX + firstSelected * layout.periodWidth - scrollVal;
-    const selW = (lastSelected - firstSelected + 1) * layout.periodWidth;
+  const span = preview ?? selectedSpanOf(periods);
+  if (span && span.last < periods.length) {
+    const selX = canvasX + span.first * layout.periodWidth - scrollVal;
+    const selW = (span.last - span.first + 1) * layout.periodWidth;
     const barTop = periodAreaTop + layout.groupLabelH + layout.periodH - 4;
 
     c.fillStyle = colors.selectedBg;
@@ -369,20 +311,35 @@ export function renderTimelineSlicer(ctx: OverlayRenderContext): void {
     c.fill();
   }
 
+  // The keyboard's focus ring (M8 S8), on the period the next key acts on
+  // (`resolveTimelineFocus`, which the key handler asks too), at the tile the
+  // period loop above painted -- after the selection bar, so the bar does not
+  // cover the ring's lower edge, and inside the period clip, so a focused
+  // period scrolled out of view shows no ring.
+  const keyFocus = getTimelineKeyFocus();
+  if (keyFocus !== null && keyFocus.timelineId === timelineId) {
+    const at = resolveTimelineFocus(
+      keyFocus,
+      tl.level,
+      periods.map((p) => p.startDate),
+    );
+    if (at !== null) {
+      const tileX = canvasX + at.index * layout.periodWidth - scrollVal;
+      drawFocusRing(c, tileX, periodAreaTop + layout.groupLabelH, layout.periodWidth, layout.periodH);
+    }
+  }
+
   c.restore(); // restore period clip
 
   // Level selector
   if (tl.showLevelSelector) {
-    const levelTop = canvasY + h - layout.levelSelectorH - layout.scrollbarH;
-    const levels: TimelineLevel[] = ["years", "quarters", "months", "days"];
+    const levelTop = canvasY + layout.levelTop;
+    const levels: readonly TimelineLevel[] = TIMELINE_LEVELS;
     const levelLabels = ["YEARS", "QUARTERS", "MONTHS", "DAYS"];
-    const levelBtnWidth = 68;
-    const levelGap = 4;
-    const totalLevelWidth = levels.length * levelBtnWidth + (levels.length - 1) * levelGap;
-    const levelStartX = canvasX + (w - totalLevelWidth) / 2;
+    const levelBtnWidth = TIMELINE_LEVEL_BUTTON_WIDTH;
 
     for (let i = 0; i < levels.length; i++) {
-      const lx = levelStartX + i * (levelBtnWidth + levelGap);
+      const lx = canvasX + levelButtonLeft(w, i);
       const isActive = levels[i] === tl.level;
 
       c.fillStyle = isActive ? colors.levelActiveBg : colors.levelBg;
@@ -400,8 +357,8 @@ export function renderTimelineSlicer(ctx: OverlayRenderContext): void {
 
   // Scrollbar
   if (layout.needsScroll && tl.showScrollbar) {
-    const sbTop = canvasY + h - layout.scrollbarH;
-    drawHScrollbar(c, canvasX, sbTop, w, SCROLLBAR_HEIGHT, scrollVal, layout.contentWidth);
+    const sbTop = canvasY + layout.scrollbarTop;
+    drawHScrollbar(c, canvasX, sbTop, w, SCROLLBAR_HEIGHT, scrollbarThumbOf(layout, scrollVal));
   }
 
   // Border
@@ -411,43 +368,65 @@ export function renderTimelineSlicer(ctx: OverlayRenderContext): void {
   c.roundRect(canvasX, canvasY, w, h, BORDER_RADIUS);
   c.stroke();
 
-  // Selection highlight border
-  if (isTimelineSelected(timelineId)) {
-    c.strokeStyle = "#0078D4";
-    c.lineWidth = 2;
-    c.beginPath();
-    c.roundRect(canvasX - 0.5, canvasY - 0.5, w + 1, h + 1, BORDER_RADIUS + 1);
-    c.stroke();
-  }
+  // A selected timeline's outline and resize handles are Core's (core/lib/
+  // gridRenderer/rendering/floatingObjectChrome.ts, BUG-0258 design phase 3):
+  // the half-clipped border this drew is gone, and the handles are painted
+  // exactly where Core's selection-gated resize answers.
 
   c.restore(); // restore outer clip
+}
+
+/** The focus ring inside a period's tile (x, y, w, h: the tile, in canvas px). */
+function drawFocusRing(c: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): void {
+  if (w < 6 || h < 6) return;
+  c.save();
+  c.strokeStyle = TIMELINE_FOCUS_RING_DARK;
+  c.lineWidth = 2;
+  c.beginPath();
+  c.rect(x + 1, y + 1, w - 2, h - 2);
+  c.stroke();
+  c.strokeStyle = TIMELINE_FOCUS_RING_LIGHT;
+  c.lineWidth = 1;
+  c.beginPath();
+  c.rect(x + 2.5, y + 2.5, w - 5, h - 5);
+  c.stroke();
+  c.restore();
+}
+
+/**
+ * Every colour set the renderer can paint (`getStyleColors`): the gallery's
+ * presets by id, the legacy ids the gallery does not shadow, and the fallback
+ * for an unknown id -- for the focus ring's contrast test.
+ */
+export function timelinePresetColorSets(): Array<{ id: string; colors: TimelineStyleColors }> {
+  const sets: Array<{ id: string; colors: TimelineStyleColors }> = [];
+  for (const [id, style] of TIMELINE_STYLES_BY_ID) sets.push({ id, colors: style.colors });
+  for (const [id, colors] of Object.entries(LEGACY_STYLES)) {
+    if (!TIMELINE_STYLES_BY_ID.has(id)) sets.push({ id, colors });
+  }
+  sets.push({ id: "<unknown preset>", colors: DEFAULT_COLORS });
+  return sets;
 }
 
 // ============================================================================
 // Scrollbar
 // ============================================================================
 
+/** The track and thumb; the thumb is the zone table's (the drag grabs it there). */
 function drawHScrollbar(
   c: CanvasRenderingContext2D,
   x: number,
   y: number,
   trackWidth: number,
   height: number,
-  scrollOffset: number,
-  contentWidth: number,
+  thumb: { x: number; width: number },
 ): void {
   c.fillStyle = "rgba(0, 0, 0, 0.05)";
   c.fillRect(x, y, trackWidth, height);
 
-  const thumbRatio = trackWidth / contentWidth;
-  const thumbWidth = Math.max(20, trackWidth * thumbRatio);
-  const scrollRange = contentWidth - trackWidth;
-  const thumbRange = trackWidth - thumbWidth;
-  const thumbX = scrollRange > 0 ? x + (scrollOffset / scrollRange) * thumbRange : x;
-
   c.fillStyle = "rgba(0, 0, 0, 0.25)";
   c.beginPath();
-  c.roundRect(thumbX, y + 1, thumbWidth, height - 2, (height - 2) / 2);
+  c.roundRect(x + thumb.x, y + 1, thumb.width, height - 2, (height - 2) / 2);
   c.fill();
 }
 
@@ -534,111 +513,39 @@ export function hitTestTimeline(ctx: OverlayHitTestContext): boolean {
   );
 }
 
+/**
+ * What a point on a timeline IS, in the words the rest of the app (and the
+ * live journeys) already use. An adapter over the zone table
+ * (lib/timelineZones.ts) -- never a second geometry: the year-label strip, the
+ * empty space and the level-row gaps, which are FRAME, answer "body"; only
+ * the month-tile row answers "period".
+ */
 export function getTimelineHitDetail(
   canvasX: number,
   canvasY: number,
   bounds: { x: number; y: number; width: number; height: number },
   timelineId: string,
 ): TimelineHitResult | null {
-  const tl = getTimelineById(timelineId);
-  if (!tl) return null;
-
-  const data = getCachedTimelineData(timelineId);
-  const periods = data?.periods ?? [];
-  const layout = computeLayout(tl, periods.length);
-
-  const relX = canvasX - bounds.x;
-  const relY = canvasY - bounds.y;
-
-  // Header area
-  if (tl.showHeader && relY < HEADER_HEIGHT) {
-    if (relX > bounds.width - CLEAR_BUTTON_SIZE - 4) {
-      return { type: "clearButton" };
-    }
-    return { type: "header" };
-  }
-
-  // Level selector area
-  if (tl.showLevelSelector) {
-    const levelTop = bounds.height - layout.levelSelectorH - layout.scrollbarH;
-    if (relY >= levelTop && relY < levelTop + LEVEL_SELECTOR_HEIGHT) {
-      const levels: TimelineLevel[] = ["years", "quarters", "months", "days"];
-      const levelBtnWidth = 68;
-      const levelGap = 4;
-      const totalLevelWidth = levels.length * levelBtnWidth + (levels.length - 1) * levelGap;
-      const levelStartX = (bounds.width - totalLevelWidth) / 2;
-
-      for (let i = 0; i < levels.length; i++) {
-        const lx = levelStartX + i * (levelBtnWidth + levelGap);
-        if (relX >= lx && relX <= lx + levelBtnWidth) {
-          return { type: "levelButton", level: levels[i] };
-        }
-      }
-      return { type: "body" };
-    }
-  }
-
-  // Scrollbar area
-  if (layout.needsScroll && tl.showScrollbar) {
-    const sbTop = bounds.height - layout.scrollbarH;
-    if (relY >= sbTop) {
-      return { type: "scrollbar" };
-    }
-  }
-
-  // Period area
-  const periodAreaTop = layout.headerH;
-  if (relY >= periodAreaTop) {
-    const scrollVal = getScrollOffset(timelineId);
-    const periodIndex = Math.floor((relX + scrollVal) / layout.periodWidth);
-
-    if (periodIndex >= 0 && periodIndex < periods.length) {
-      // Check for selection handle hits
-      const firstSelected = periods.findIndex((p) => p.isSelected);
-      const lastSelected = periods.length - 1 - [...periods].reverse().findIndex((p) => p.isSelected);
-
-      if (firstSelected >= 0) {
-        const handleStartX = firstSelected * layout.periodWidth - scrollVal;
-        const handleEndX = (lastSelected + 1) * layout.periodWidth - scrollVal;
-
-        if (Math.abs(relX - handleStartX) < 6) {
-          return { type: "selectionHandleStart" };
-        }
-        if (Math.abs(relX - handleEndX) < 6) {
-          return { type: "selectionHandleEnd" };
-        }
-      }
-
-      return { type: "period", periodIndex };
-    }
-  }
-
-  return { type: "body" };
-}
-
-export const getTimelineCursor: OverlayCursorFn = (ctx) => {
-  if (!ctx.floatingCanvasBounds) return null;
-
-  const timelineId = ctx.region.data?.timelineId as string | undefined;
-  if (timelineId == null) return null;
-
-  const hit = getTimelineHitDetail(
-    ctx.canvasX,
-    ctx.canvasY,
-    ctx.floatingCanvasBounds,
-    timelineId,
-  );
-  if (!hit) return null;
-
-  switch (hit.type) {
-    case "period":
+  const zone = timelineZoneAtCanvas(timelineId, canvasX, canvasY, bounds);
+  if (!zone) return getTimelineById(timelineId) ? { type: "body" } : null;
+  switch (zone.part) {
+    case "header":
+      return { type: "header" };
     case "clearButton":
+      return { type: "clearButton" };
+    case "period":
+      return { type: "period", periodIndex: zone.periodIndex };
+    case "rangeStart":
+      return { type: "selectionHandleStart" };
+    case "rangeEnd":
+      return { type: "selectionHandleEnd" };
     case "levelButton":
-      return "pointer";
-    case "selectionHandleStart":
-    case "selectionHandleEnd":
-      return "ew-resize";
-    default:
-      return null;
+      return { type: "levelButton", level: zone.level };
+    case "scrollbar":
+      return { type: "scrollbar" };
+    case "yearStrip":
+    case "empty":
+    case "levelGap":
+      return { type: "body" };
   }
-};
+}

@@ -1,7 +1,14 @@
 //! FILENAME: app/extensions/ScriptableObjects/components/ScriptConsentDialog.tsx
 // PURPOSE: Security consent prompt for distributed object scripts.
 // CONTEXT: When a workbook contains scripts from a .calp package, the user
-//          is asked to review and approve them before they can run.
+//          is asked to review and approve them before they can run. One screen
+//          per application covers its object scripts, its macros and -- since
+//          M6 (phase 4 of BUG-0257) -- its BUTTON ACTIONS: the inline code its
+//          buttons carry, shown verbatim with every place it sits, approved by
+//          the hash of its exact bytes. Since plan_M8 S3 it also covers the
+//          Calcula COMMANDS the application's button cells run -- recorded
+//          under their own key, `button-commands:<application>`, never in the
+//          application's bare record -- and names any command no click can run.
 
 import React, { useState, useCallback, useEffect, useMemo } from "react";
 import { emitAppEvent } from "@api/events";
@@ -9,6 +16,20 @@ import { requireScriptEditorProvider } from "@api/scriptEditorService";
 import { DialogBody, DialogPane, DialogPaneTitle, dialogWidth } from "@api/dialogLayout";
 import type { CapabilityId } from "@api";
 import { lineDiff, changedLineCount, type DiffRowType } from "../lib/lineDiff";
+import { describeConsentMacroButton, type ConsentMacroButton } from "../lib/consentMacroButtons";
+import { describeButtonActionLocation, type ConsentButtonAction } from "../lib/consentButtonActions";
+
+/** One Calcula command the application's button cells run (plan_M8 S3). */
+interface ConsentCommand {
+  commandId: string;
+  commandName: string;
+  buttons: ConsentMacroButton[];
+}
+
+/** ...and one no click can run, with why. */
+interface ConsentCommandWontRun extends ConsentCommand {
+  why: string;
+}
 
 /** One entry in the consent prompt's requested-capabilities list. */
 interface RequestedCapability {
@@ -227,6 +248,96 @@ const triggerListStyle: React.CSSProperties = {
   paddingLeft: 18,
 };
 
+/** "Buttons that run this macro", under one macro in the list. */
+const macroButtonsStyle: React.CSSProperties = {
+  margin: "0 0 4px 12px",
+  fontSize: 11,
+  color: "#555",
+};
+
+const macroButtonListStyle: React.CSSProperties = {
+  margin: "2px 0 0",
+  paddingLeft: 16,
+  fontFamily: "'Cascadia Code', Consolas, monospace",
+};
+
+/** One button action: its code, verbatim, then where it sits. */
+const buttonActionStyle: React.CSSProperties = {
+  padding: "6px 0",
+  borderTop: "1px solid #E8E8E8",
+};
+
+const buttonActionCodeStyle: React.CSSProperties = {
+  margin: "0 0 4px",
+  padding: "4px 6px",
+  maxHeight: 160,
+  overflow: "auto",
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
+  fontFamily: "'Cascadia Code', Consolas, monospace",
+  fontSize: 11,
+  background: "#FFF",
+  border: "1px solid #E2E2E2",
+  borderRadius: 3,
+};
+
+const buttonActionNoteStyle: React.CSSProperties = {
+  fontSize: 11,
+  color: "#555",
+};
+
+/**
+ * What a button action's code may touch, as the first sentence of the reach
+ * paragraph: a button action runs where a macro runs -- the Rust button door
+ * hands its bytes to the same isolated interpreter `run_script` uses.
+ */
+function interpreterReachSubject(macros: boolean, buttons: boolean, objectScriptMacrosToo: boolean): string {
+  // When some of the macros ARE written as object scripts, "a macro is not an
+  // object script" would be false of them: name the runtime this paragraph is
+  // about, and let the object-script paragraph speak for the rest.
+  const macro = objectScriptMacrosToo ? "A macro written for the workbook script runtime" : "A macro";
+  if (macros && buttons) {
+    return `${macro} is not an object script, and neither is a button action: neither runs in that realm. Each runs`;
+  }
+  if (macros) return `${macro} is not an object script and does not run in that realm. It runs`;
+  return "A button action is not an object script and does not run in that realm. It runs";
+}
+
+/**
+ * What an application's macro WRITTEN AS AN OBJECT SCRIPT (the Macro
+ * Recorder's default) may do once approved -- owner decision B: when YOU run
+ * it, from one of the doors that carry a person's pass, it may also read and
+ * change the cells of any sheet, and nothing more; a run that stops part-way
+ * is undone whole (follow-up F9); started by another script it keeps only what
+ * every restricted script has. Every clause is a statement about the code
+ * (scriptHost/explicitRunGrant.ts, host.ts), and the doors named are the ones
+ * that mint a pass -- macroSurfaceReachHonesty.test.tsx reads them from the
+ * mint census, so wiring or unwiring a door turns it red until this follows.
+ * Exported for that test.
+ */
+export function describeObjectScriptMacroReach(objectScriptMacros: number, macros: number): string {
+  const subject =
+    objectScriptMacros === macros
+      ? macros === 1
+        ? "This macro is written as an object script"
+        : "These macros are written as object scripts"
+      : objectScriptMacros === 1
+        ? "One of these macros is written as an object script"
+        : `${objectScriptMacros} of these macros are written as object scripts`;
+  const runs = objectScriptMacros === 1 ? "it runs" : "each runs";
+  const one = objectScriptMacros === 1 ? "it" : "one";
+  return (
+    `${subject}: ${runs} once, in a restricted space of its own, not in Calcula's interpreter. ` +
+    `When you run ${one} yourself -- from Developer ▸ Macros ▸ Run, by clicking a button that ` +
+    "runs it, or from the command line -- it may also read and change the cells of any sheet " +
+    "in this workbook (filling a range also copies the formatting of the cells it fills from, " +
+    "as a module macro's fill does), and nothing more: no other formatting, no sheet " +
+    "structure, no files, no other macros. If it stops part-way, every change it made is " +
+    "undone. Started by another script, it has only what every restricted script has: the " +
+    "sheet on screen."
+  );
+}
+
 const capListStyle: React.CSSProperties = {
   margin: "10px 0",
   padding: "4px 0",
@@ -348,6 +459,19 @@ export default function ScriptConsentDialog({
   // (`core/calp/src/pull.rs` materializes modules independently of object
   // scripts), and this is the screen that approves them.
   const moduleScriptIds = (data?.moduleScriptIds as string[]) ?? [];
+  // Which of those macros are WRITTEN AS OBJECT SCRIPTS (the Macro Recorder's
+  // default, `runtime=objectScript`): they do not run in the interpreter the
+  // macro paragraph describes, and since owner decision B a run YOU start may
+  // change the cells of any sheet -- so they get a paragraph of their own.
+  const objectScriptMacroIdSet = new Set((data?.objectScriptMacroIds as string[] | undefined) ?? []);
+  const objectScriptMacroCount = moduleScriptIds.filter((id) => objectScriptMacroIdSet.has(id)).length;
+  const runtimeMacroCount = moduleScriptNames.length - objectScriptMacroCount;
+  // WHICH BUTTONS ALLOWING ARMS (phase 3 of BUG-0257): macro id -> the buttons
+  // THIS application put in the workbook to run it (Sheet!A1 + caption). Built
+  // by the one emitter (lib/consentMacroButtons.ts), filtered to the
+  // application, so another application's buttons and the user's own are never
+  // shown as armed by this grant.
+  const macroButtons = (data?.macroButtons as Record<string, ConsentMacroButton[]> | undefined) ?? {};
   // Macros this grant CANNOT cover: their id is already claimed by one of the
   // application's object scripts, and one consent record is a flat id-keyed
   // list. Allow will not approve them and Rust will keep refusing them at Run,
@@ -355,6 +479,25 @@ export default function ScriptConsentDialog({
   // demanded their hash — the record could never satisfy it, the application
   // re-prompted on every open, and pressing Allow could not end the loop.
   const unapprovableMacroNames = (data?.unapprovableMacroNames as string[]) ?? [];
+  // Object scripts and macros whose id sits in the `buttonAction:` namespace,
+  // which belongs to button actions alone. Allow cannot approve them.
+  const reservedIdNames = (data?.reservedIdNames as string[] | undefined) ?? [];
+  // THE APPLICATION'S BUTTON ACTIONS (M6, phase 4 of BUG-0257): every piece of
+  // inline code its buttons carry, by the hash of its exact bytes, with every
+  // place it sits. Allowing records each one, and the Rust button door runs a
+  // held button's code only when its exact bytes are in that record.
+  const buttonActions = (data?.buttonActions as ConsentButtonAction[] | undefined) ?? [];
+  // THE CALCULA COMMANDS ITS BUTTON CELLS RUN (plan_M8 S3): each command with
+  // the buttons that run it. Allowing records them under the application's
+  // command key, and a click then runs the command -- Calcula's own code, at a
+  // moment the application's button decides. The ones no click can run are
+  // named, never recorded.
+  const commandButtons = (data?.commandButtons as ConsentCommand[] | undefined) ?? [];
+  const commandsWontRun = (data?.commandsWontRun as ConsentCommandWontRun[] | undefined) ?? [];
+  const commandButtonCount = commandButtons.reduce((n, c) => n + c.buttons.length, 0);
+  // The workbook carries an approval for this application that does not count
+  // here: it was made on another computer, or before approvals were tied to one.
+  const approvalMadeElsewhere = data?.approvalMadeElsewhere === true;
   const requestedCapabilities =
     (data?.requestedCapabilities as RequestedCapability[]) ?? [];
   const changedScripts = (data?.changedScripts as ChangedScriptData[]) ?? [];
@@ -414,9 +557,13 @@ export default function ScriptConsentDialog({
   // the disclosure below the fold while "Allow Scripts" is already visible in
   // the fixed footer, so both the width and the split are a function of what
   // this application actually ships rather than a constant. A re-consent counts
-  // as heavy by itself: that is the prompt with the most at stake on it.
+  // as heavy by itself: that is the prompt with the most at stake on it. So is a
+  // single button action: it is CODE, shown in full, and the screen exists to
+  // put it in front of the user.
   const twoColumn =
     moduleScriptNames.length > 0 ||
+    buttonActions.length > 0 ||
+    commandButtons.length > 0 ||
     changedScripts.length > 0 ||
     requestedCapabilities.length >= 2 ||
     scriptNames.length >= 3;
@@ -501,24 +648,50 @@ export default function ScriptConsentDialog({
                     you run them yourself, from the macro library". The macro
                     library stopped being the only surface the moment macros were
                     folded into this one grant, and the surface that was missing
-                    belongs to the PUBLISHER: a `calcula.button` cell carries
-                    `action: { kind: "script", scriptId }` in its cell-type params,
-                    those params publish as a `cellType` custom object and are
-                    materialized on pull byte-for-byte with no sanitizing
-                    (collect_cell_type_custom_objects / materialize_saved_cell_types,
-                    app/src-tauri/src/calp_commands.rs), and one click resolves the
-                    module by id and hands its stored source verbatim to run_script
-                    (extensions/CellTypes/types/button.ts -> planStoredModuleRun,
-                    extensions/_shared/lib/buttonScriptRun.ts). So a .calp ships the
-                    button AND the macro, and this grant is what arms it.
+                    belongs to the PUBLISHER.
 
-                    The bullets are deliberately generous about "a button": an
-                    on-grid button CONTROL does arrive disarmed (a pull strips
-                    onSelect and macroRef — EXECUTABLE_CONTROL_PROPERTIES,
-                    app/src-tauri/src/controls.rs), but a consent screen is the wrong
-                    place to teach the cell/control distinction, and the safe error
-                    is to warn about a click that cannot happen rather than to miss
-                    one that can.
+                    A BUTTON CELL. A `calcula.button` cell carries `action: { kind:
+                    "script", scriptId }` in its cell-type params, those params
+                    publish as a `cellType` custom object, and on pull the action is
+                    KEPT, stamped `fromApplication`, when it names a macro this
+                    application brought into the workbook (admit_button_cells,
+                    app/src-tauri/src/button_cells.rs -- BUG-0260: an action naming
+                    anything else, or a command not on Calcula's list of commands
+                    such buttons may run, is removed on the way in; a command on
+                    that list is the command section below). One click
+                    resolves the module by id and runs its stored source verbatim,
+                    and only a module of THAT application: the rule is Rust's
+                    (`plan_cell_action`, app/src-tauri/src/scripting/
+                    control_action.rs, behind the button door `run_control_action`),
+                    and the module's own approval -- this grant -- is asked of
+                    exactly those bytes. So a .calp ships the button AND the macro,
+                    and this grant is what arms it.
+
+                    A BUTTON CONTROL'S LINK (phase 3 of BUG-0257). A macroRef naming
+                    a macro THIS pull landed for the application is kept HELD and
+                    stamped (DistributedWiring::LinkLanded,
+                    app/src-tauri/src/held_button_code.rs), and one click runs it
+                    through Controls' one click rule
+                    (extensions/Controls/lib/applicationMacroLink.ts), which asks the
+                    macro-run seam for exactly that application's macro
+                    (requirePackage) -- and this grant is what lets it run. Each
+                    macro below lists the buttons of this application that run it,
+                    so the screen names what Allow arms rather than only saying "a
+                    button". A link to anything else is removed on the way in and
+                    named in the subscribe or refresh notice.
+
+                    A BUTTON CONTROL'S INLINE CODE (phase 4, M6). It no longer
+                    arrives removed: a subscribe or refresh moves a STATIC onSelect
+                    into the held compartment, stamped (the same LinkLanded arm), and
+                    the Rust button door runs it only after THIS grant approves its
+                    exact bytes (`buttonAction:<sha256>` in the application's bare
+                    record, application_code_gate::button_run_gate). It runs as its
+                    own code, never composed with the user's modules, and a held
+                    `Name()` reaches only the application's own modules
+                    (control_action::plan_held_inline) -- so code that calls one of
+                    these macros by name is one more way a click starts it, and the
+                    button-action list says which. A formula-typed onSelect is
+                    removed on the way in and named.
 
                     The two negatives are load-bearing and both hold: cap.schedule*
                     runs one of the SCRIPT'S OWN methods, never a stored macro
@@ -532,13 +705,24 @@ export default function ScriptConsentDialog({
                     Developer &#9656; Macros, where you pick one and press Run.
                   </li>
                   <li>
-                    A button the publisher put on a sheet &mdash; a button's action
-                    travels inside the application, so one click runs the macro it
-                    names.
+                    A button the publisher put on a sheet &mdash; its link to one of
+                    these macros travels inside the application, so one click runs
+                    the macro it names. Each macro below lists the buttons that run
+                    it.
+                    {buttonActions.length > 0 && (
+                      <>
+                        {" "}
+                        A button whose code calls one of them by name runs it too;
+                        the button actions below say which.
+                      </>
+                    )}
                   </li>
                   <li>
                     Anything of your own you point at one later: a button, a view
-                    bookmark, the command line, or one of your own scripts.
+                    bookmark, or the command line. One of your own scripts can start
+                    one too, but never with its reach: a macro for the workbook
+                    script runtime is then refused, and one written as an object
+                    script runs restricted.
                   </li>
                 </ul>
                 <p>
@@ -546,7 +730,179 @@ export default function ScriptConsentDialog({
                   approved, and allowing approves them:
                 </p>
                 <div style={scriptListStyle}>
-                  {moduleScriptNames.map((name, i) => (
+                  {moduleScriptNames.map((name, i) => {
+                    const id = moduleScriptIds[i];
+                    const buttons = (id !== undefined ? macroButtons[id] : undefined) ?? [];
+                    return (
+                      <div key={i} data-consent-macro={id ?? name}>
+                        <div style={scriptItemStyle}>{name}</div>
+                        {buttons.length > 0 && (
+                          <div style={macroButtonsStyle} data-consent-macro-buttons={id}>
+                            <div>Buttons that run this macro:</div>
+                            <ul style={macroButtonListStyle}>
+                              {buttons.map((button) => (
+                                <li key={`${button.kind}:${button.cell}`}>
+                                  {describeConsentMacroButton(button)}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            {buttonActions.length > 0 && (
+              <div data-consent-button-actions>
+                {/* THE APPLICATION'S BUTTON ACTIONS, AS CODE. A subscribe or
+                    refresh HOLDS a button's static inline code, and the Rust
+                    button door runs it only after this grant approves its exact
+                    bytes -- so the screen shows the bytes, never a summary, and
+                    every place they sit. Two buttons carrying the same code are
+                    one item with two places: the hash is the identity. A changed
+                    button's code is a NEW item (its hash changed), shown in full
+                    rather than as a diff. */}
+                <p>
+                  {scriptCount > 0 || moduleScriptNames.length > 0 ? (
+                    <>Its buttons also carry code of their own: </>
+                  ) : (
+                    <>
+                      The package <strong>"{packageName}"</strong> put buttons in this
+                      workbook that carry code of their own:{" "}
+                    </>
+                  )}
+                  {buttonActions.length} button action
+                  {buttonActions.length !== 1 ? "s" : ""}. Each arrived held &mdash;
+                  it runs only after this approval, only when its button is clicked,
+                  and as its own code, never mixed with yours. This is exactly the
+                  code each one carries, and every place it sits:
+                </p>
+                <div style={{ ...scriptListStyle, fontSize: 11 }}>
+                  <div style={{ fontWeight: 600, color: "#333", marginBottom: 2 }}>
+                    Button actions ({buttonActions.length})
+                  </div>
+                  {buttonActions.map((action) => (
+                    <div key={action.id} style={buttonActionStyle} data-consent-button-action-item={action.hash}>
+                      <pre style={buttonActionCodeStyle} data-consent-button-action={action.hash}>
+                        {action.source}
+                      </pre>
+                      <div style={buttonActionNoteStyle} data-consent-button-action-locations={action.hash}>
+                        <div>
+                          {action.locations.length === 1 ? "On the button:" : `On ${action.locations.length} buttons:`}
+                        </div>
+                        <ul style={macroButtonListStyle}>
+                          {action.locations.map((location) => (
+                            <li key={location.cell}>{describeButtonActionLocation(location)}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      {action.runsMacro !== null && (
+                        <div style={buttonActionNoteStyle} data-consent-button-action-runs={action.hash}>
+                          Runs the application&apos;s macro {action.runsMacro}.
+                        </div>
+                      )}
+                      {action.refusedBecause !== null && (
+                        <div
+                          style={{ ...buttonActionNoteStyle, color: "#9a5b00", fontWeight: 600 }}
+                          data-consent-button-action-refused={action.hash}
+                        >
+                          Will not run even if you allow it: {action.refusedBecause}.
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {commandButtons.length > 0 && (
+              <div data-consent-commands>
+                {/* THE CALCULA COMMANDS THE APPLICATION'S BUTTONS RUN (plan_M8
+                    S3). A command is Calcula's own code, not the application's,
+                    so there is no source to show -- what Allow approves is that
+                    THIS application's buttons may decide when it runs. Rust's
+                    command gate asks this approval at every click, under the
+                    application's command key, and the page runs the command only
+                    when its live registration opts in and Rust says yes again.
+                    Listed by command, each with every button that runs it. */}
+                <p>
+                  {scriptCount > 0 || moduleScriptNames.length > 0 || buttonActions.length > 0 ? (
+                    <>Its button cells also run Calcula commands:</>
+                  ) : (
+                    <>
+                      The package <strong>"{packageName}"</strong> put buttons in this
+                      workbook that run a Calcula command:
+                    </>
+                  )}
+                </p>
+                <div style={{ ...scriptListStyle, fontSize: 11 }}>
+                  <div style={{ fontWeight: 600, color: "#333", marginBottom: 2 }}>
+                    Buttons that run a Calcula command ({commandButtonCount})
+                  </div>
+                  {commandButtons.map((command) => (
+                    <div key={command.commandId} style={buttonActionStyle} data-consent-command={command.commandId}>
+                      <div style={scriptItemStyle}>
+                        &quot;{command.commandName}&quot; ({command.commandId})
+                      </div>
+                      <div style={macroButtonsStyle} data-consent-command-buttons={command.commandId}>
+                        <div>
+                          {command.buttons.length === 1 ? "On the button:" : `On ${command.buttons.length} buttons:`}
+                        </div>
+                        <ul style={macroButtonListStyle}>
+                          {command.buttons.map((button) => (
+                            <li key={`${button.kind}:${button.cell}`}>{describeConsentMacroButton(button)}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  ))}
+                  <p style={{ ...buttonActionNoteStyle, margin: "6px 0 0" }}>
+                    Each command is part of Calcula, not code from this application: allowing
+                    lets this application&apos;s buttons decide when it runs, and it runs only
+                    when you click one of them.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {commandsWontRun.length > 0 && (
+              <div data-consent-command-wont-run>
+                {/* A stamped command no click can run -- its live registration
+                    does not opt in, another registration has replaced it, or it
+                    is not registered. Approving it would be a false yes, so it
+                    is named, never recorded. */}
+                <p style={{ color: "#9a5b00", fontWeight: 600, margin: "8px 0 4px" }}>
+                  {commandsWontRun.length} command{commandsWontRun.length !== 1 ? "s" : ""} its
+                  buttons name will not run even if you allow it:
+                </p>
+                <div style={scriptListStyle}>
+                  {commandsWontRun.map((command) => (
+                    <div key={command.commandId} style={scriptItemStyle}>
+                      &quot;{command.commandName}&quot; ({command.commandId}): {command.why}.
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {reservedIdNames.length > 0 && (
+              <>
+                {/* A crafted workbook can name an object script or a macro with
+                    an id from the button-action namespace. Rust refuses those at
+                    pull, at mount and at record, so Allow cannot cover them --
+                    and the screen says so rather than leaving the user to find
+                    out at Run. */}
+                <p style={{ color: "#9a5b00", fontWeight: 600, margin: "8px 0 4px" }}>
+                  {reservedIdNames.length} item{reservedIdNames.length !== 1 ? "s" : ""} in this
+                  application use an id Calcula reserves for button code, so{" "}
+                  {reservedIdNames.length !== 1 ? "they" : "it"} cannot be approved and will not
+                  run:
+                </p>
+                <div style={scriptListStyle}>
+                  {reservedIdNames.map((name, i) => (
                     <div key={i} style={scriptItemStyle}>{name}</div>
                   ))}
                 </div>
@@ -668,9 +1024,14 @@ export default function ScriptConsentDialog({
                 </p>
               ))}
 
-            {moduleScriptNames.length > 0 && (
+            {(moduleScriptNames.length > 0 || buttonActions.length > 0) && (
               <>
                 {/* THE MACRO SURFACE'S OWN REACH, DERIVED — NOT BORROWED.
+                    (A BUTTON ACTION runs on the same surface: the Rust button
+                    door hands its bytes to `run_in_interpreter`, the very core
+                    `run_script` uses -- so the same six classes describe it, and
+                    the paragraph names whichever of the two this application
+                    ships.)
                     A macro is a MODULE script: the run routes hand its source to
                     `run_script`, which is the `one-off-script` surface of the Rust
                     QuickJS interpreter. `SURFACE_PROFILES` in
@@ -687,26 +1048,63 @@ export default function ScriptConsentDialog({
                     It is deliberately WIDER than the object-script sentence in
                     two ways the user has to be told: a macro is not clamped to the
                     sheet currently shown, and there is no capability to withhold
-                    because none is consulted. */}
-                <p>
-                  A macro is not an object script and does not run in that realm.
-                  It runs in Calcula&apos;s isolated interpreter, on a copy of this
-                  workbook, and what it may touch there is fixed &mdash; there is
-                  no permission to grant and none to withhold: the cells of any
-                  sheet in this workbook; its sheets, document properties and
-                  calculation settings; how it is displayed; its bookmarks;
-                  Calcula&apos;s own version and locale settings, which it can
-                  read; and the results it prints back to you. It reaches nothing
-                  else: no network, no files, no BI data.
-                </p>
+                    because none is consulted.
+
+                    A macro WRITTEN AS AN OBJECT SCRIPT is not on that surface: it
+                    runs in a restricted worker realm, and owner decision B gives a
+                    run YOU start cell access on any sheet and nothing more. It gets
+                    its own paragraph below; this one then names the runtime it
+                    describes, and is left out when no macro runs there. */}
+                {(runtimeMacroCount > 0 || buttonActions.length > 0) && (
+                  <p>
+                    {interpreterReachSubject(runtimeMacroCount > 0, buttonActions.length > 0, objectScriptMacroCount > 0)}{" "}
+                    in Calcula&apos;s isolated interpreter, on a copy of this
+                    workbook, and what it may touch there is fixed &mdash; there is
+                    no permission to grant and none to withhold: the cells of any
+                    sheet in this workbook; its sheets, document properties and
+                    calculation settings; how it is displayed; its bookmarks;
+                    Calcula&apos;s own version and locale settings, which it can
+                    read; and the results it prints back to you. It reaches nothing
+                    else: no network, no files, no BI data.
+                  </p>
+                )}
+                {objectScriptMacroCount > 0 && (
+                  <p data-consent-object-script-macros={objectScriptMacroCount}>
+                    {describeObjectScriptMacroReach(objectScriptMacroCount, moduleScriptNames.length)}
+                  </p>
+                )}
               </>
             )}
 
+            {commandButtons.length > 0 && (
+              /* A COMMAND'S REACH (plan_M8 S3) is the command's own: the page
+                 runs the very registration a ribbon or menu would, with the same
+                 context (buttonCommandRun.ts, buildCommandContext) -- the
+                 approval decides who may start it, never what it may touch. */
+              <p data-consent-command-reach>
+                A command runs as the Calcula feature it is, with the same reach it has when
+                you run it yourself; allowing changes only who may start it &mdash; this
+                application&apos;s buttons, when you click them.
+              </p>
+            )}
+
+            {/* SEALED TO THIS COMPUTER (M6). An approval is kept in the workbook
+                but counts only on the computer that made it
+                (app/src-tauri/src/consent_seal.rs), so the sentence says where
+                it is remembered -- and when this workbook carries an approval
+                that does not count here, the screen says why it is asking. */}
+            {approvalMadeElsewhere && (
+              <p style={{ fontSize: 11, color: "#7a4a00" }} data-consent-approval-elsewhere>
+                This workbook carries an approval of this application that was made on
+                another computer, or before approvals were tied to a computer, and it does
+                not count here &mdash; so you are asked again on this one.
+              </p>
+            )}
             <p style={{ fontSize: 11, color: "#888" }}>
               You can inspect the source before allowing. Allowing is remembered
-              with this workbook; if the application changes any script&apos;s or
-              macro&apos;s code, or requests new capabilities, you will be asked
-              again.
+              with this workbook on this computer only; if the application changes
+              any script&apos;s, macro&apos;s or button&apos;s code, or requests new
+              capabilities, you will be asked again.
             </p>
           </DialogPane>
         </DialogBody>

@@ -631,8 +631,9 @@ function insertTextAtCursor(text: string): void {
   notifyExternalEditChanged();
 }
 
-/** Insert reference text into THIS editor (used by the FR claimsBodyDrag
- *  float->float branch when this editor is the active formula target). */
+/** Insert reference text into THIS editor. No caller today: a reference pick
+ *  on a range reaches this editor through the external formula target
+ *  (`insertReferenceTo`, index.ts). */
 export function insertReferenceIntoFrEditor(text: string): boolean {
   if (!editorState || !textarea) return false;
   insertTextAtCursor(text);

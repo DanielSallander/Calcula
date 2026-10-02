@@ -23,6 +23,8 @@ import type { CellDecorationContext } from "./cellDecorations";
 import {
   registerCellClickInterceptor,
   registerCellCursorInterceptor,
+  isCellReleaseClaim,
+  type CellClickAnswer,
   type CellClickEvent,
 } from "../core/lib/cellClickInterceptors";
 import { registerEditGuard } from "../core/lib/editGuards";
@@ -84,11 +86,14 @@ export interface CellTypeDefinition {
    */
   editor?: "none" | "default";
   /**
-   * Single-click handler (fires only for cells tagged with this type, before
-   * default selection). Return `true` to claim the click. All value changes
-   * must go through normal @api writes so they stay undoable.
+   * Single-click handler (fires only for cells tagged with this type, at the
+   * PRESS, before default selection). Return `true` to claim the click and act
+   * at once, or a RELEASE CLAIM (`actOnCellRelease`, @api/cellClickInterceptors)
+   * to act only when the press is released on the same cell -- sliding off
+   * cancels, the standard button rule (BUG-0258 design phase 4). All value
+   * changes must go through normal @api writes so they stay undoable.
    */
-  onClick?: (ctx: CellTypeClickContext) => boolean | Promise<boolean>;
+  onClick?: (ctx: CellTypeClickContext) => CellClickAnswer | Promise<CellClickAnswer>;
   /**
    * Keyboard handler for the selected (non-editing) cell. v1: invoked for
    * Space only. Return `true` when handled.
@@ -288,14 +293,16 @@ function ensureInit(): void {
   if (initialized) return;
   initialized = true;
 
-  // Click: claim only when the cell has a typed onClick that handles it.
+  // Click: claim only when the cell has a typed onClick that handles it -- at
+  // once (`true`), or at the press's release (a release claim, passed through
+  // to Core's press session as it is).
   registerCellClickInterceptor(async (row, col, event) => {
     const a = assignmentIndex.get(indexKey(row, col));
     if (!a?.def?.onClick) return false;
     try {
-      return (
-        (await a.def.onClick({ row, col, typeId: a.typeId, params: a.params, event })) === true
-      );
+      const answer: unknown = await a.def.onClick({ row, col, typeId: a.typeId, params: a.params, event });
+      if (isCellReleaseClaim(answer)) return answer;
+      return answer === true;
     } catch (error) {
       console.error(`[CellTypes] Error in onClick of type "${a.typeId}":`, error);
       return false;

@@ -7,7 +7,9 @@
 pub mod audit;
 pub mod chart_refs;
 pub mod checkout;
+pub mod code_summary;
 pub mod compat;
+pub mod developer_anchor;
 pub mod diff;
 pub mod dev_mode;
 pub mod environments;
@@ -46,13 +48,15 @@ pub use manifest::{
     ApplicationDataSource, TableBinding, SubscriberDataSourceConfig,
 };
 pub use publish::{head_version, resolve_authorized_keys, PushMode};
-pub use checkout::checkout;
+pub use checkout::{checkout, CheckedOut};
+pub use code_summary::{code_summary, CodeChange, CodeChangeKind, CodeKind, CodeSummary, SubscriberConsequence};
+pub use developer_anchor::{AnchorGate, AnchorPolicy, AnchorRecord, AnchorStatus, AnchoredBy};
 pub use diff::{diff_sheet_cells, diff_sides, DiffOptions, DiffSide, VersionDiff};
 pub use memory_workspace::MemoryWorkspace;
 pub use merge::{analyze as analyze_merge, Collision, MergeAnalysis, MergeVerdict, PieceKey};
-pub use publishers::{AuthorizedKey, PublisherList};
+pub use publishers::{AuthorizedKey, AuthorizedSigner, PublisherList, SignerRole};
 pub use pull::SheetIdMode;
-pub use working_copy::{WorkingCopyLink, WorkingCopySheetRef};
+pub use working_copy::{WorkingCopyContent, WorkingCopyLink, WorkingCopySheetRef};
 pub use overrides::{OverrideLayer, CellOverride, OverrideValue, OverridePatch};
 pub use workspace::LocalWorkspace;
 pub use workspace_id::{same_workspace, workspace_scope, WorkspaceScope};

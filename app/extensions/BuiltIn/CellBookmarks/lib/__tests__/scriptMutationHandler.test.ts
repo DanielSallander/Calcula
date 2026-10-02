@@ -134,7 +134,8 @@ describe("processBookmarkMutations", () => {
     ]);
 
     expect(mockRemoveViewBookmark).toHaveBeenCalledWith("vb-1");
-    expect(mockActivateViewBookmark).toHaveBeenCalledWith("vb-2");
+    // A SCRIPT queued it: the activation says so (owner decision B, F10).
+    expect(mockActivateViewBookmark).toHaveBeenCalledWith("vb-2", "script");
   });
 
   it("breaks the cycle when an onActivate script re-activates its own bookmark", async () => {

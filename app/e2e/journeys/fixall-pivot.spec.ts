@@ -83,6 +83,7 @@ import {
   type AppWindow,
   type PivotView,
 } from "../helpers/pivot-live";
+import { clickPeriod, periodPoint, timelineLanded, timelineRange, timelineRow, type TimelineRow } from "../helpers/timelines";
 
 const TMP = os.tmpdir();
 
@@ -1741,16 +1742,6 @@ test.describe("E. slicers on range pivots", () => {
 //    we-pivot Y1, wf-pivot Z3 and its fix-up checks)
 // ===========================================================================
 
-interface TimelineRow {
-  id: string;
-  selectionStart: string | null;
-  selectionEnd: string | null;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
 /** Date / Product / Sales: Jan = Apples; Feb = Apples, Pears, Plums; Mar = Kiwis. */
 const TL_DATA: Array<Array<string | number | null>> = [
   ["Date", "Product", "Sales"],
@@ -1760,15 +1751,6 @@ const TL_DATA: Array<Array<string | number | null>> = [
   ["'2026-02-20", "Plums", 8],
   ["'2026-03-03", "Kiwis", 16],
 ];
-
-async function timelineRow(page: Page, id: string): Promise<TimelineRow | null> {
-  return (await callModule<TimelineRow | undefined>(page, MOD.TIMELINE_STORE, "getTimelineById", [id])) ?? null;
-}
-
-async function timelineRange(page: Page, id: string): Promise<string> {
-  const t = await timelineRow(page, id);
-  return t?.selectionStart ? `${t.selectionStart.slice(0, 7)}..${(t.selectionEnd ?? "").slice(0, 7)}` : "all";
-}
 
 /** Pivot at E1 (Product rows) over TL_DATA and a months timeline on its Date field, at sheet (x, y). */
 async function setupTimeline(page: Page, x = 470, y = 180): Promise<{ pid: string; tid: string }> {
@@ -1783,65 +1765,6 @@ async function setupTimeline(page: Page, x = 470, y = 180): Promise<{ pid: strin
   expect(tl, "precondition: a timeline was created on the pivot's Date field").toBeTruthy();
   await page.waitForTimeout(600);
   return { pid, tid: tl!.id };
-}
-
-/**
- * The CLIENT point of the centre of the timeline period starting `yyyymm`
- * ("2026-02"), found by the extension's own hit test.
- */
-async function periodPoint(page: Page, tid: string, yyyymm: string): Promise<{ x: number; y: number }> {
-  const r = await page.evaluate(
-    async ({ tid, yyyymm, mods }) => {
-      const w = window as unknown as { __appImport: (m: string) => Promise<Record<string, (...a: unknown[]) => unknown>> };
-      const renderer = await w.__appImport(mods.renderer);
-      const geo = await w.__appImport(mods.geo);
-      const store = await w.__appImport(mods.store);
-      const grid = await w.__appImport(mods.grid);
-      const tl = store.getTimelineById(tid) as { x: number } | undefined;
-      const data = store.getCachedTimelineData(tid) as { periods: Array<{ startDate: string }> } | undefined;
-      if (!tl || !data) return { error: "no timeline or no data" };
-      const k = data.periods.findIndex((p) => p.startDate.startsWith(yyyymm));
-      if (k < 0) return { error: `no period ${yyyymm}: ${data.periods.map((p) => p.startDate).join(",")}` };
-      const b = geo.timelineCanvasBounds(tl) as { x: number; y: number; width: number; height: number } | null;
-      if (!b) return { error: "no bounds" };
-      const xs: number[] = [];
-      const ys: number[] = [];
-      for (let y = b.y; y < b.y + b.height; y += 2) {
-        for (let x = b.x; x < b.x + b.width; x += 2) {
-          const h = renderer.getTimelineHitDetail(x, y, b, tid) as { type: string; periodIndex?: number } | null;
-          if (h && h.type === "period" && h.periodIndex === k) {
-            xs.push(x);
-            ys.push(y);
-          }
-        }
-      }
-      if (xs.length === 0) return { error: `period ${k} has no hit area` };
-      xs.sort((a, b) => a - b);
-      ys.sort((a, b) => a - b);
-      const cx = xs[Math.floor(xs.length / 2)];
-      const cy = ys[Math.floor(ys.length / 2)];
-      const area = (document.querySelector("[data-grid-area]") as HTMLElement).getBoundingClientRect();
-      const zoom = ((grid.getGridStateSnapshot() as { zoom?: number } | null)?.zoom ?? 1) as number;
-      return { x: area.left + cx * zoom, y: area.top + cy * zoom };
-    },
-    { tid, yyyymm, mods: { renderer: MOD.TIMELINE_RENDERER, geo: MOD.TIMELINE_CANVAS_GEO, store: MOD.TIMELINE_STORE, grid: "/src/api/grid.ts" } },
-  );
-  if ("error" in r) throw new Error(`periodPoint: ${r.error}`);
-  return r as { x: number; y: number };
-}
-
-/** A real mouse click on a timeline period. */
-async function clickPeriod(page: Page, tid: string, yyyymm: string): Promise<void> {
-  const p = await periodPoint(page, tid, yyyymm);
-  await page.mouse.move(p.x, p.y);
-  await page.mouse.down();
-  await page.mouse.up();
-  await page.waitForTimeout(150);
-}
-
-async function timelineLanded(page: Page): Promise<void> {
-  await eventually(() => callModule<boolean>(page, MOD.TIMELINE_STORE, "isTimelineGestureLanding", []), (v) => v === false, "the timeline selection never landed", 15_000);
-  await page.waitForTimeout(300);
 }
 
 /** A script's timeline selection (no question): the store's own non-asking door. */

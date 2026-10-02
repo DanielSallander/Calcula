@@ -81,6 +81,7 @@ import {
   removeGridRegionsByType,
   requestOverlayRedraw,
   isOccludedAtClientPoint,
+  isFloatingRegionCoveredAtClient,
   type OverlayRenderContext,
 } from "@api/gridOverlays";
 import { emitAppEvent } from "@api/events";
@@ -203,10 +204,6 @@ import {
   getChartLocalCoords,
   findChartAtCanvasPos,
   getCachedChartData,
-  isHoveringFilterButton,
-  isHoveringDataElement,
-  isHoveringQuickAccessButton,
-  isHoveringAxis,
   getHoverState,
   removeChartFromCache,
   setBrushMarquee,
@@ -217,7 +214,6 @@ import {
   chartsIdle,
 } from "./rendering/chartRenderer";
 import {
-  hitTestQuickAccessButtons,
   togglePopup,
   closePopup,
   getActivePopup,
@@ -241,7 +237,19 @@ import {
   setChartDragActive,
   type ChartFormatElementDetail,
 } from "./handlers/chartTextEditing";
-import { isComposed } from "./rendering/chartDispatch";
+import { chartZoneAt } from "./lib/chartZoneAt";
+import {
+  chartButtonOfPart,
+  isChartButtonPart,
+  type ChartWidgetHit,
+} from "./lib/chartButtonPress";
+import {
+  beginChartButtonPress,
+  cancelChartButtonPress,
+  isChartButtonPressActive,
+  takeChartButtonPress,
+  type ChartButtonPressState,
+} from "./lib/chartButtonSession";
 import {
   setPointSelection,
   clearPointSelection,
@@ -279,7 +287,6 @@ import {
   insideChartCanvas,
 } from "./lib/chartPointer";
 import { clearAllWidgetValues, getWidgetValue, setWidgetValue, nextWidgetValue } from "./handlers/chartWidgetValues";
-import { hitTestWidgetControls, isInWidgetArea } from "./rendering/paramWidgets";
 import { onAppEvent } from "@api/events";
 import { ChartEvents } from "./lib/chartEvents";
 import {
@@ -1113,27 +1120,11 @@ function activate(context: ExtensionContext): void {
         context.events.emit(AppEvents.GRID_REFRESH);
         return true;
       },
-      // S6: claim an in-plot drag as a brush (interval select) instead of a move.
-      // Only for a selected, brushable chart, inside the plot area, off any widget.
-      claimsBodyDrag: (ctx) => {
-        const cid = ctx.region.data?.chartId as string | undefined;
-        if (!cid) return false;
-        const ch = getChartById(cid);
-        if (!ch || !isChartSelected(cid) || !SELECTION_SUPPORTED_MARKS.has(ch.spec.mark)) return false;
-        if (!ch.spec.params?.some((p) => p.select === "point" && p.brush)) return false;
-        const cached = getCachedChartData(cid);
-        const pa = cached?.layout?.plotArea;
-        if (!pa) return false;
-        // Composed charts (repeat/facet/concat) tile independent sub-scales; a
-        // single brush rectangle across panels has no well-defined interval, so
-        // the interval brush is OFF for them in v1. A plain click still selects a
-        // panel datum (handled in the mouseup hit-test path, not the body-drag).
-        if (cached.data && isComposed(ch.spec, cached.data)) return false;
-        if (cached?.widgetControls && isInWidgetArea(ctx.canvasX, ctx.canvasY, cached.widgetControls)) return false;
-        const loc = getChartLocalCoords(cid, ctx.canvasX, ctx.canvasY);
-        if (!loc) return false;
-        return loc.localX >= pa.x && loc.localX <= pa.x + pa.width && loc.localY >= pa.y && loc.localY <= pa.y + pa.height;
-      },
+      // ONE zone answer (BUG-0258 design phase 2, lib/chartZoneAt.ts): the plot
+      // of a brushable chart is CONTENT -- Core hands the press to the S6
+      // interval brush (floatingObject:bodyDragStart, below) and shows a
+      // crosshair there -- and the rest of the chart is FRAME, which moves it.
+      zoneAt: chartZoneAt,
       priority: 15, // Above table (5) and pivot (10)
     }),
   );
@@ -1253,12 +1244,27 @@ function activate(context: ExtensionContext): void {
   // Floating Object Events (move/resize from Core mouse handlers)
   // -----------------------------------------------------------------------
 
+  // A press on one of the chart's own BUTTONS -- CONTENT in the chart's zone
+  // answer (lib/chartZoneAt.ts), so Core hands it to bodyDragStart and never
+  // moves the chart from it. Armed at bodyDragStart (lib/chartButtonSession.ts);
+  // it acts at its release over the SAME button (handleMouseUp), never at the
+  // press. Ended by that release, by the next press, by a move whose primary
+  // button is up, by Escape, by a window blur and by deactivation.
+
   // Handle floating object selection (mousedown on chart body)
   const handleFloatingSelected = (e: Event) => {
     const detail = (e as CustomEvent).detail;
+    // Every press ends a button press whose release was never heard: it acts
+    // on nothing now. (A press ON a button arms a fresh one at bodyDragStart,
+    // which Core dispatches after this.)
+    cancelChartButtonPress();
     if (detail.regionType !== "chart") return;
     const chartId = detail.data?.chartId as string;
     if (chartId == null) return;
+
+    // For THIS press only: its release completes a pending click (armed
+    // below) and unbinds. (Binding the same listener twice is a no-op.)
+    window.addEventListener("mouseup", handleMouseUp);
 
     // Where the object sits NOW, so a live move preview can be measured
     // against the press instead of against the object's own already-moved
@@ -1272,28 +1278,20 @@ function activate(context: ExtensionContext): void {
       // EXCEPT on a canvas when the chart is one of several selected objects
       // (or the press is Ctrl/Shift): that press narrows (or toggles) the
       // multi-selection, and must not ALSO step the ladder to series level.
-      if (pressArmsPendingChartClick(detail)) {
+      // Nor on the selection GRIP (BUG-0258 phase 5): a grip press selects
+      // and moves the chart and is never a click on it.
+      if (detail.part !== "grip" && pressArmsPendingChartClick(detail)) {
         setPendingClick(chartId, lastCanvasX, lastCanvasY);
       } else {
         clearPendingClick();
       }
     } else {
-      // First click: select the chart (Level 1)
+      // First click: select the chart (Level 1). A press on a pivot field
+      // button is CONTENT (lib/chartZoneAt.ts): bodyDragStart takes it and the
+      // button acts at its release, on this first press too -- nothing is
+      // armed for it here.
       selectChart(chartId);
       emitChartSelectionEvent();
-
-      // Also check if the click landed on a pivot field button -
-      // these should be clickable even on the first click (chart select + button click)
-      const cachedData = getCachedChartData(chartId);
-      if (cachedData?.pivotFieldButtons && cachedData.pivotFieldButtons.length > 0) {
-        const local = getChartLocalCoords(chartId, lastCanvasX, lastCanvasY);
-        if (local) {
-          const btnHit = findClickedFieldButton(local.localX, local.localY, cachedData.pivotFieldButtons);
-          if (btnHit) {
-            setPendingClick(chartId, lastCanvasX, lastCanvasY);
-          }
-        }
-      }
     }
     context.events.emit(AppEvents.GRID_REFRESH);
   };
@@ -1398,7 +1396,8 @@ function activate(context: ExtensionContext): void {
   );
 
   // -----------------------------------------------------------------------
-  // Interval brush (S6): the Core body-drag hook hands us the in-plot drag via
+  // Interval brush (S6): the plot is CONTENT in the chart's zone answer
+  // (lib/chartZoneAt.ts), so Core hands us the in-plot press via
   // floatingObject:bodyDragStart; we track move/up on our existing window
   // listeners and finalize via hitTestRect. A plain click (zero-size rect)
   // selects the one datum under it; a drag selects the covered set.
@@ -1443,26 +1442,63 @@ function activate(context: ExtensionContext): void {
   };
 
   const handleBodyDragStart = (e: Event) => {
-    const detail = (e as CustomEvent).detail as { regionType: string; data?: { chartId?: string } };
+    const detail = (e as CustomEvent).detail as {
+      regionId?: string;
+      regionType: string;
+      data?: { chartId?: string };
+      part?: string | null;
+      canvasX?: number;
+      canvasY?: number;
+    };
     if (detail.regionType !== "chart") return;
     const cid = detail.data?.chartId;
     if (!cid) return;
-    // Use the extension's own canvas basis (lastCanvasX/Y from the prior
-    // mousemove ~ the mousedown position) so start/move/end share one space.
-    const loc = getChartLocalCoords(cid, lastCanvasX, lastCanvasY);
-    if (!loc) return;
-    clearPendingClick(); // the brush mouseup must not also be read as a click
-    brushDrag = { chartId: cid, startX: loc.localX, startY: loc.localY, endX: loc.localX, endY: loc.localY };
-    setBrushMarquee({ chartId: cid, x: loc.localX, y: loc.localY, width: 0, height: 0 });
+    const part = detail.part;
+    if (isChartButtonPart(part)) {
+      // One of the chart's own buttons (BUG-0258 phase 4b): NOTHING acts here.
+      // Its release acts, over the same button only (handleMouseUp). The press
+      // point is Core's own, the basis its zone answer was asked in.
+      clearPendingClick(); // the button's release must not also be read as a click
+      const pressX = typeof detail.canvasX === "number" ? detail.canvasX : lastCanvasX;
+      const pressY = typeof detail.canvasY === "number" ? detail.canvasY : lastCanvasY;
+      const pressed = chartButtonOfPart(cid, part, pressX, pressY);
+      if (!pressed) return;
+      beginChartButtonPress({
+        chartId: cid,
+        regionId: typeof detail.regionId === "string" ? detail.regionId : null,
+        part,
+        key: pressed.key,
+        pressX,
+        pressY,
+      });
+    } else {
+      // The interval brush ('brush'). Use the extension's own canvas basis
+      // (lastCanvasX/Y from the prior mousemove ~ the mousedown position) so
+      // start/move/end share one space.
+      const loc = getChartLocalCoords(cid, lastCanvasX, lastCanvasY);
+      if (!loc) return;
+      clearPendingClick(); // the brush mouseup must not also be read as a click
+      brushDrag = { chartId: cid, startX: loc.localX, startY: loc.localY, endX: loc.localX, endY: loc.localY };
+      setBrushMarquee({ chartId: cid, x: loc.localX, y: loc.localY, width: 0, height: 0 });
+    }
+    // The release finalizes the brush or acts on the button (and unbinds):
+    // bound for THIS press.
+    window.addEventListener("mouseup", handleMouseUp);
   };
   window.addEventListener("floatingObject:bodyDragStart", handleBodyDragStart);
   cleanupFunctions.push(() => window.removeEventListener("floatingObject:bodyDragStart", handleBodyDragStart));
+  // A button press still held when the extension goes acts on nothing.
+  cleanupFunctions.push(cancelChartButtonPress);
 
   // -----------------------------------------------------------------------
   // Mousemove for Tooltips
   // -----------------------------------------------------------------------
 
   const handleMouseMove = (e: MouseEvent) => {
+    // A button press whose release was never heard (the primary button is
+    // UP): it acts on nothing now -- never on a later, unrelated release.
+    if ((e.buttons & 1) === 0 && isChartButtonPressActive()) cancelChartButtonPress();
+
     // Find the grid container if not cached yet
     if (!gridContainer) {
       gridContainer = document.querySelector("canvas")?.parentElement ?? null;
@@ -1509,17 +1545,14 @@ function activate(context: ExtensionContext): void {
       rafPending = true;
       requestAnimationFrame(() => {
         rafPending = false;
+        // The hover STATE only (tooltips, the highlighted datum, the lit
+        // quick-access button). The POINTER is Core's, from the chart's one
+        // zone answer (lib/chartZoneAt.ts): this used to write
+        // `canvas.style.cursor = "pointer"` over any chart's bars, axes and
+        // buttons, an inline cursor on the grid <canvas> that overrode Core's
+        // -- a hand over a brushable plot's crosshair, over a movable chart's
+        // 'move' and over a locked chart's 'default' (BUG-0258: one answer).
         handleChartMouseMove(lastCanvasX, lastCanvasY);
-
-        // Set pointer cursor when hovering over interactive chart elements
-        const canvas = gridContainer?.querySelector("canvas");
-        if (canvas) {
-          if (isHoveringFilterButton() || isHoveringDataElement() || isHoveringQuickAccessButton() || isHoveringAxis()) {
-            canvas.style.cursor = "pointer";
-          } else {
-            canvas.style.cursor = "";
-          }
-        }
       });
     }
   };
@@ -1532,13 +1565,89 @@ function activate(context: ExtensionContext): void {
   // Mouseup for Deferred Click Detection (hierarchical selection)
   // -----------------------------------------------------------------------
 
-  const handleMouseUp = () => {
+  /** A widget control's step or option (C5 S5): the live widget value it names. */
+  const applyWidgetControl = (chartId: string, wHit: ChartWidgetHit) => {
+    const cachedData = getCachedChartData(chartId);
+    // Seed the step base from what the widget displays (widget > resolved
+    // cell > literal default) so the first +/- continues from that value.
+    const current = getWidgetValue(chartId, wHit.paramName)
+      ?? cachedData?.resolvedParams?.get(wHit.paramName)
+      ?? getChartById(chartId)?.spec.params?.find((p) => p.name === wHit.paramName)?.value;
+    const next = "option" in wHit.action ? wHit.action.option : nextWidgetValue(wHit.bind, current, wHit.action.dir);
+    setWidgetValue(chartId, wHit.paramName, next);
+    invalidateChartCache(chartId);
+    context.events.emit(AppEvents.GRID_REFRESH);
+  };
+
+  /**
+   * The RELEASE of a press on one of the chart's own buttons: it acts only
+   * when the release point names the SAME button the press did -- the same
+   * quick-access button, the same pivot field, the same widget param and step
+   * (lib/chartButtonPress.ts), and no other object covers it there. Sliding
+   * off before the release cancels, as a Windows button does, so a drag from a
+   * button neither moves the chart nor opens anything.
+   */
+  const releaseChartButton = (p: ChartButtonPressState, e: MouseEvent) => {
+    if (e.button !== 0) return;
+    if (!gridContainer) {
+      gridContainer = document.querySelector("canvas")?.parentElement ?? null;
+    }
+    if (!gridContainer) return;
+    const rect = gridContainer.getBoundingClientRect();
+    const at = clientToChartCanvas(e.clientX, e.clientY, rect, currentGridZoom());
+    const released = chartButtonOfPart(p.chartId, p.part, at.x, at.y);
+    if (!released || released.key !== p.key) return;
+    // ...and where no other object covers the button: Core's press there would
+    // have gone to the cover (the rule every content press keeps; the
+    // quick-access buttons sit OUTSIDE the chart's rectangle, so the question
+    // is "nothing above it here", not "the chart is topmost here").
+    if (p.regionId !== null && isFloatingRegionCoveredAtClient(p.regionId, e.clientX, e.clientY)) return;
+    switch (released.part) {
+      case "quickAccess":
+        handleQuickAccessButtonClick(p.chartId, released.button, p.pressX, p.pressY);
+        return;
+      case "fieldButton":
+        handlePivotFieldButtonClick(p.chartId, released.button, p.pressX, p.pressY);
+        return;
+      case "widget":
+        applyWidgetControl(p.chartId, released.control);
+        return;
+    }
+  };
+
+  // Bound by the chart press that may arm a pending click
+  // (handleFloatingSelected), start a brush or press one of the chart's own
+  // buttons (handleBodyDragStart) and
+  // unbound by the first mouseup after it -- that press's own release -- so
+  // it lives exactly as long as the press it completes: the census
+  // (core/lib/globalInputListeners.ts) calls it session-scoped, and that is a
+  // claim about its lifetime. It used to be bound for the extension's whole
+  // life. Core ends a frame move (moveComplete clears the pending click)
+  // before this hears the release, wherever the release lands.
+  const handleMouseUp = (e: MouseEvent) => {
+    window.removeEventListener("mouseup", handleMouseUp);
     // Finish an interval brush (S6) before the normal click handling.
     if (brushDrag) {
       const d = brushDrag;
       brushDrag = null;
       setBrushMarquee(null);
+      // A brush is the PRIMARY button's gesture. Core hands a MIDDLE press
+      // over too (it filters only the secondary), and its release must select
+      // nothing -- a brush with a `writeTo` param would write a cell from a
+      // middle click (M7 review). It ends here, the marquee gone.
+      if (e.button !== 0) {
+        requestOverlayRedraw();
+        return;
+      }
       finalizeBrush(d);
+      return;
+    }
+
+    // A press on one of the chart's own buttons: it acts only when released
+    // over the SAME button (BUG-0258 phase 4b); anywhere else it does nothing.
+    const buttonPress = takeChartButtonPress();
+    if (buttonPress) {
+      releaseChartButton(buttonPress, e);
       return;
     }
 
@@ -1576,49 +1685,12 @@ function activate(context: ExtensionContext): void {
       return;
     }
 
-    // Check quick access buttons first (they are outside chart bounds)
-    if (cachedData.quickAccessButtons && cachedData.quickAccessButtons.length > 0) {
-      const qaBtnHit = hitTestQuickAccessButtons(
-        click.canvasX,
-        click.canvasY,
-        cachedData.quickAccessButtons,
-      );
-      if (qaBtnHit) {
-        handleQuickAccessButtonClick(click.chartId, qaBtnHit, click.canvasX, click.canvasY);
-        return;
-      }
-    }
-
+    // The quick-access buttons, the pivot field buttons and the widget
+    // controls are never reached from here: they are CONTENT
+    // (lib/chartZoneAt.ts), so a press on one never arms this click -- it acts
+    // at its own release above (releaseChartButton).
     const local = getChartLocalCoords(click.chartId, click.canvasX, click.canvasY);
     if (!local) return;
-
-    // Check pivot field buttons (they take priority over data elements)
-    if (cachedData.pivotFieldButtons && cachedData.pivotFieldButtons.length > 0) {
-      const btnHit = findClickedFieldButton(local.localX, local.localY, cachedData.pivotFieldButtons);
-      if (btnHit) {
-        handlePivotFieldButtonClick(click.chartId, btnHit, click.canvasX, click.canvasY);
-        return;
-      }
-    }
-
-    // On-canvas bound-param widget controls (C5 S5). Drawn (and cached) only when
-    // the chart is selected, so a hit here only happens on a follow-up click —
-    // route it to the widget value change. Absolute canvas coords (main-canvas).
-    if (cachedData.widgetControls && cachedData.widgetControls.length > 0) {
-      const wHit = hitTestWidgetControls(click.canvasX, click.canvasY, cachedData.widgetControls);
-      if (wHit) {
-        // Seed the step base from what the widget displays (widget > resolved
-        // cell > literal default) so the first +/- continues from that value.
-        const current = getWidgetValue(click.chartId, wHit.paramName)
-          ?? cachedData.resolvedParams?.get(wHit.paramName)
-          ?? getChartById(click.chartId)?.spec.params?.find((p) => p.name === wHit.paramName)?.value;
-        const next = "option" in wHit.action ? wHit.action.option : nextWidgetValue(wHit.bind, current, wHit.action.dir);
-        setWidgetValue(click.chartId, wHit.paramName, next);
-        invalidateChartCache(click.chartId);
-        context.events.emit(AppEvents.GRID_REFRESH);
-        return;
-      }
-    }
 
     // THE LADDER OWNS THE CLICK. A ring is a PROPERTY of the datum it marks,
     // not a thing the reader selects INSTEAD of it, so this branch records
@@ -1713,7 +1785,6 @@ function activate(context: ExtensionContext): void {
     emitChartSelectionEvent();
     context.events.emit(AppEvents.GRID_REFRESH);
   };
-  window.addEventListener("mouseup", handleMouseUp);
   cleanupFunctions.push(() => {
     window.removeEventListener("mouseup", handleMouseUp);
   });
@@ -2543,15 +2614,17 @@ function activate(context: ExtensionContext): void {
     const chartId = getCurrentChartId();
     if (chartId == null) return;
 
-    // A canvas MULTI-selection -- this chart with a second chart the selection
-    // set holds, or with objects of other families -- is deleted WHOLE, as one
+    // A MULTI-selection -- this chart with a second chart the selection set
+    // holds, or with objects of other families -- is deleted WHOLE, as one
     // undo step (@api/objectSelection `deleteSelectedObjects`). Deleting only
     // the chart Charts holds left the rest selected and standing (open-items
     // 2.af row 1); the dispatcher runs one winner per key, so this door must
-    // speak for the whole selection. CANVAS ONLY (the seam's one rule): on a
-    // worksheet a slicer clicked before this chart stays selected too, and a
-    // Delete on the chart's TITLE there must delete the title, not the chart
-    // and the slicer with it.
+    // speak for the whole selection. On a canvas AND a worksheet (the seam's
+    // one rule, BUG-0270 review): a plain press on another family's object
+    // deselects this chart on either surface now, so a chart + slicer
+    // selection is a deliberate Ctrl/Shift one. The chart ALONE -- walked to
+    // its TITLE included -- is not a multi-selection, and keeps the rungs
+    // below (Delete deletes the smallest thing selected).
     if (shouldActOnWholeObjectSelection()) {
       void deleteSelectedObjects();
       return;
@@ -3047,27 +3120,6 @@ function deactivate(): void {
 // ============================================================================
 // PivotChart Field Button Click Handling
 // ============================================================================
-
-/**
- * Find which pivot field button was clicked at the given chart-local coordinates.
- */
-function findClickedFieldButton(
-  localX: number,
-  localY: number,
-  buttons: PivotChartFieldButton[],
-): PivotChartFieldButton | null {
-  for (const btn of buttons) {
-    if (
-      localX >= btn.x &&
-      localX <= btn.x + btn.width &&
-      localY >= btn.y &&
-      localY <= btn.y + btn.height
-    ) {
-      return btn;
-    }
-  }
-  return null;
-}
 
 /**
  * Handle a click on a pivot chart field button.

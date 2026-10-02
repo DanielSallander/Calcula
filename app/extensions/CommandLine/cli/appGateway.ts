@@ -55,6 +55,7 @@ import { macroEntriesFrom } from "./macroProvenance";
 import type { MacroEntry } from "./macroProvenance";
 import { hasMacroRunProvider, requireMacroRunProvider } from "@api/macroRunService";
 import type { MacroRunOutcome } from "@api/macroRunService";
+import type { ExplicitMacroRun } from "@api/explicitMacroRun";
 import type { PivotTableInfo } from "@api/pivotTypes";
 import type { UndoTransactionTicket } from "@api/undoTicket";
 
@@ -149,7 +150,13 @@ export interface AppCliGateway {
    */
   listMacros(): Promise<MacroEntry[]>;
   hasMacroRunProvider(): boolean;
-  runMacroByRef(macroId: string): Promise<MacroRunOutcome>;
+  /**
+   * Run a macro through the macro-run seam. `explicitRun` is the one-time pass
+   * the interactive `run` line minted for it (owner decision B, follow-up F2)
+   * -- FORWARDED, never made here: the gateway is a seam other callers can
+   * reach, so a pass minted inside it would make every caller "a person".
+   */
+  runMacroByRef(macroId: string, explicitRun?: ExplicitMacroRun): Promise<MacroRunOutcome>;
 }
 
 /**
@@ -281,6 +288,8 @@ export function createLiveAppGateway(): AppCliGateway {
     // (macroEntriesFrom -> scriptOriginForStoredRecord).
     listMacros: async () => macroEntriesFrom(await listWorkbookScripts()),
     hasMacroRunProvider: () => hasMacroRunProvider(),
-    runMacroByRef: (macroId: string) => requireMacroRunProvider().runMacroByRef(macroId),
+    // The pass the typed line handed down, forwarded as is (or nothing).
+    runMacroByRef: (macroId: string, explicitRun?: ExplicitMacroRun) =>
+      requireMacroRunProvider().runMacroByRef(macroId, { explicitRun }),
   };
 }

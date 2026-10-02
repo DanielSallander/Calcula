@@ -62,8 +62,9 @@ function activate(context: ExtensionContext): void {
   }
   console.log("[MacroRecorder] Activating...");
 
-  // 0. Bind the capability-scoped backend door for lib helpers (the delete
-  //    warning's `list_controls_referencing_macro` query goes through it).
+  // 0. Bind the capability-scoped backend door for lib helpers (the action
+  //    recorder's queries go through it; the delete warning's button listing
+  //    is read through @api/heldButtonCode's one wrapper).
   macroRecorderBackend.set(context.invokeBackend);
 
   // 1. Dialogs.

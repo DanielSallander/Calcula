@@ -91,6 +91,9 @@ import {
   quoteSheetNameForFormula,
 } from "../../api/externalEdit";
 import type { NamedRange } from "../../api";
+// The selection-owner seam (BUG-0270 review): a selected OBJECT holds the
+// selection, and a new name must not be defined over the cell behind it.
+import { selectionRefusalFor } from "../../api/selectionOwner";
 import { resolveNamedRangeCoords } from "../../api/lib";
 import type { NamedRangeCoords } from "../../api/lib";
 import {
@@ -954,6 +957,19 @@ export function NameBox(): React.ReactElement {
               "from the Name Box (it would have been defined over a worksheet cell you are not looking at).",
           );
           return;
+        }
+        //    NOR while an OBJECT holds the selection (a slicer, a chart, a
+        //    shape, a floating grid selected whole -- @api/selectionOwner):
+        //    "the current selection" is then the active cell hidden behind the
+        //    object (BUG-0270 review). The owner's own sentence; navigating to
+        //    an address or a name above stays allowed -- it is the way back to
+        //    the cells, not a write.
+        if (isValidName(value)) {
+          const refusal = selectionRefusalFor("Define Name");
+          if (refusal !== null) {
+            reportProblem(refusal);
+            return;
+          }
         }
         if (isValidName(value) && state.selection) {
           const sel = state.selection;

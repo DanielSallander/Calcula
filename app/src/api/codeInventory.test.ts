@@ -639,3 +639,92 @@ describe("getWorkbookCodeUnits — writeback validators", () => {
     expect(units.filter((u) => u.surfaceId === "writeback-validator")).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// OWNER DECISION B, follow-up F7: a macro WRITTEN AS AN OBJECT SCRIPT is a
+// module record, but it runs in a worker realm -- restricted when it came in an
+// application, and a run YOU start may also change the cells of any sheet. The
+// inventory lists it on that surface with that reach, never with the
+// interpreter's.
+// ---------------------------------------------------------------------------
+
+describe("getWorkbookCodeUnits — a macro written as an object script (F7)", () => {
+  function storeModules(
+    ...records: Array<{ id: string; name: string; description: string | null; source: string; sourcePackage: string | null }>
+  ): void {
+    (listModuleScripts as any).mockResolvedValue(records.map((r) => ({ id: r.id, name: r.name, scope: { type: "workbook" } })));
+    (getModuleScript as any).mockImplementation(async (id: string) => {
+      const r = records.find((x) => x.id === id)!;
+      return { ...r, scope: { type: "workbook" } };
+    });
+  }
+
+  // SABOTAGE: drop the `parseModuleScriptRuntime(...) === "objectScript"` branch
+  // in getWorkbookCodeUnits -> the application's recorded macro is listed with
+  // the interpreter's reach and no tier.
+  it("an application's recorded macro: the object-script surface, restricted, with the cell access a run you start gets", async () => {
+    storeModules({
+      id: "macro-close",
+      name: "Close the month",
+      description: "Recorded macro · runtime=objectScript · 2 actions",
+      source: "function setup(context) { return context.api.setCellValue(0, 0, 1); }",
+      sourcePackage: "Sales",
+    });
+    const [u] = await getWorkbookCodeUnits();
+    expect(u.surfaceId).toBe("object-script");
+    expect(u.tier).toBe("restricted");
+    expect(u.provenance).toBe("distributed");
+    expect(u.sourcePackage).toBe("Sales");
+    expect(u.interpreterReach, "it does not run in the interpreter").toBeNull();
+    expect(u.interpreterCapabilities).toBeNull();
+    expect(u.module).toEqual({ runtime: "objectScript", cellAccessWhenYouRunIt: true });
+    expect(u.residence).toContain("Macro written as an object script");
+    expect(u.residence).toContain("when you run it yourself it may also read and change cells on any sheet");
+    expect(u.mounted).toBe(false);
+    expect(codeUnitReachesBeyondGrid(u)).toBe(false);
+  });
+
+  it("the user's own recorded macro: the object-script surface at the unlocked tier, no grant to speak of", async () => {
+    storeModules({
+      id: "macro-mine",
+      name: "Mine",
+      description: "Recorded macro · runtime=objectScript · 1 action",
+      source: "// @capability net.fetch\nfunction setup(context) {}",
+      sourcePackage: null,
+    });
+    const [u] = await getWorkbookCodeUnits();
+    expect(u.surfaceId).toBe("object-script");
+    expect(u.tier).toBe("unlocked");
+    expect(u.provenance).toBe("local");
+    expect(u.module).toEqual({ runtime: "objectScript", cellAccessWhenYouRunIt: false });
+    // Its ceiling is its own pragmas -- exactly what the one-off runner mounts it with.
+    expect(u.declaredCapabilities).toEqual(["net.fetch"]);
+  });
+
+  it("CONTROL: a macro for the workbook script runtime keeps the interpreter's reach, and is marked a module", async () => {
+    storeModules({
+      id: "macro-report",
+      name: "Report",
+      description: "Recorded macro · runtime=notebook · 1 action",
+      source: "Calcula.setCellValue('A1', 1);",
+      sourcePackage: "Sales",
+    });
+    const [u] = await getWorkbookCodeUnits();
+    expect(u.surfaceId).toBe("one-off-script");
+    expect(u.tier).toBeNull();
+    expect(u.interpreterReach).toEqual(QUICKJS_SURFACE_REACH["one-off-script"]);
+    expect(u.module).toEqual({ runtime: "workbookScript", cellAccessWhenYouRunIt: false });
+  });
+
+  it("the panel's roll-up counts it with the object scripts", async () => {
+    storeModules({
+      id: "macro-close",
+      name: "Close the month",
+      description: "runtime=objectScript",
+      source: "function setup() {}",
+      sourcePackage: "Sales",
+    });
+    const summary = summarizeCodeInventory(await getWorkbookCodeUnits());
+    expect(summary.bySurface.map((g) => g.surfaceId)).toEqual(["object-script"]);
+  });
+});

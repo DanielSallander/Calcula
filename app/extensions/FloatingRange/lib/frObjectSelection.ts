@@ -24,6 +24,7 @@ import { requestOverlayRedraw } from "@api/gridOverlays";
 import { canvasObjectRef } from "@api/canvasSheet";
 import { FLOATING_RANGE_REGION_TYPE, getFloatingRangeById } from "./floatingRangeStore";
 import { isFrContextMenuOpen } from "./frContextMenu";
+import { frSelectionOnScreen } from "./frKeyRouting";
 import {
   clearLocalSelection,
   deselectAllFloatingRanges,
@@ -106,6 +107,13 @@ export function createFloatingRangeSelectionProvider(
       // key -- so unless the range claims it here, Escape cleared the
       // selection behind the menu and left the menu open (fix round 4, F5).
       if (key === "Escape" && isFrContextMenuOpen()) return true;
+      // Delete / Backspace are the range's own door's while the range -- a
+      // cell of it, or the range itself -- is selected on the sheet shown
+      // (frKeyRouting.ts: it clears the cell, or deletes the range). The
+      // generic object Delete (BUG-0270) asks this and stands down, so it can
+      // never delete the whole range where its door would clear a cell,
+      // whichever extension happens to activate first.
+      if (key === "Delete") return frSelectionOnScreen();
       // Tab moves the inner cell, the arrows move (or Shift-extend) it, and
       // Escape drops the inner selection — all only while an inner selection
       // exists (handleFrKeyDown). Without one, the range has no use for them.

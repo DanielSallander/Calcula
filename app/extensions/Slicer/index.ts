@@ -55,8 +55,6 @@ import {
   deleteSlicerAsync,
   commitSlicerGeometryAsync,
   updateSlicerSelectionAsync,
-  clickSlicerItem,
-  clickSlicerClearFilter,
   getCachedItems,
   updateCachedSlicerPosition,
   updateCachedSlicerBounds,
@@ -74,8 +72,7 @@ import { createSlicerGeometryProvider } from "./lib/slicerGeometry";
 import {
   renderSlicer,
   hitTestSlicer,
-  getSlicerHitDetail,
-  getSlicerCursor,
+  slicerZoneAt,
   getScrollOffset,
   setScrollOffset,
   getMaxScrollOffset,
@@ -89,7 +86,14 @@ import {
   takePendingSlicerClick,
 } from "./lib/slicerPendingClick";
 import { registerSlicerObjectSelection } from "./lib/slicerObjectSelection";
-import { slicerAtCanvasPoint, slicerCanvasBounds } from "./lib/slicerCanvasGeometry";
+import {
+  clientToSlicerCanvas,
+  slicerAtCanvasPoint,
+  slicerCanvasBounds,
+} from "./lib/slicerCanvasGeometry";
+import { beginSlicerContentPress, resetSlicerContentPress } from "./lib/slicerItemDrag";
+import { installSlicerKeys } from "./lib/slicerKeys";
+import { leaveSlicerKeyFocus } from "./lib/slicerKeyFocus";
 
 // ============================================================================
 // Module State
@@ -103,9 +107,6 @@ let gridContainer: HTMLElement | null = null;
 // The pending click (armed on floatingObject:selected, consumed on mouseup)
 // lives in lib/slicerPendingClick.ts, so the rule that only a real mouse press
 // may arm it is testable.
-
-/** Track last mousedown modifier state (since floatingObject:selected doesn't carry it). */
-let lastMousedownCtrl = false;
 
 /**
  * Snapshot of all selected slicers' positions at drag start.
@@ -176,7 +177,13 @@ function activate(context: ExtensionContext): void {
   context.ui.dialogs.register(SlicerComputedPropsDialogDefinition);
   context.ui.dialogs.register(SlicerConnectionsDialogDefinition);
 
-  // Register grid overlay renderer for slicer panels
+  // Register grid overlay renderer for slicer panels. `zoneAt` is the ONE
+  // answer Core derives the press, the pointer and Ctrl/Shift from (BUG-0258
+  // design phase 4): the items, "Select all", the LIT clear button and the
+  // scrollbar are CONTENT -- Core hands their press to the content gesture
+  // below (floatingObject:bodyDragStart) and never moves the slicer from
+  // them -- while the header, the gaps, the padding and a header-less
+  // slicer's 4px band are frame, which moves it.
   cleanupFunctions.push(
     context.grid.overlays.register({
       type: "slicer",
@@ -184,7 +191,7 @@ function activate(context: ExtensionContext): void {
         renderSlicer(ctx);
       },
       hitTest: hitTestSlicer,
-      getCursor: getSlicerCursor,
+      zoneAt: slicerZoneAt,
       priority: 15, // Above selection and table borders
     }),
   );
@@ -193,6 +200,12 @@ function activate(context: ExtensionContext): void {
   // Tab cycling selects slicers through this, never through the mouse route
   // below, which arms a pending click the next mouseup anywhere would complete.
   cleanupFunctions.push(registerSlicerObjectSelection());
+
+  // The keyboard INSIDE a selected slicer (M8 S7): Enter goes in, the arrows
+  // move a focus ring between the items, Space applies, Escape leaves, Alt+C
+  // clears. One window-capture keydown, gated like the floating grid's
+  // (lib/slicerKeys.ts); it claims nothing until Enter went in.
+  cleanupFunctions.push(installSlicerKeys());
 
   // A keyboard Ctrl+Z / Ctrl+Y while a click lands is refused with a sentence
   // (the backend refuses it silently): @api/objectGeometry.
@@ -208,18 +221,16 @@ function activate(context: ExtensionContext): void {
   // Floating object events (selection, move, resize)
   // -----------------------------------------------------------------------
 
-  // Capture modifier key state on mousedown (before floatingObject:selected fires).
-  // We use a window-level capture listener so it fires before the Core's handler.
-  const handleMousedownModifiers = (e: MouseEvent) => {
-    lastMousedownCtrl = e.ctrlKey || e.metaKey;
-  };
-  window.addEventListener("mousedown", handleMousedownModifiers, true);
-  cleanupFunctions.push(() => {
-    window.removeEventListener("mousedown", handleMousedownModifiers, true);
-  });
-
-  // Handle floating object selection (mousedown on slicer body)
+  // Handle floating object selection (Core's filtered press on a slicer).
   // Sets a pending click that will be processed on mouseup.
+  //
+  // The OBJECT-selection Ctrl is Core's (`detail.ctrlKey`): Core resolves the
+  // zone before it selects anything and zeroes Ctrl/Shift on CONTENT, so a
+  // Ctrl+click on an item toggles the ITEM (the content gesture below gets the
+  // raw Ctrl) and never toggles the slicer out of its selection. The Slicer
+  // used to record Ctrl from its own capture-phase mousedown, which saw the
+  // raw key before Core decided whose it was -- a Ctrl+click on an item of a
+  // selected slicer DESELECTED the slicer (BUG-0258 design phase 4).
   const handleFloatingSelected = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "slicer") return;
@@ -229,16 +240,17 @@ function activate(context: ExtensionContext): void {
 
     const alreadySelected = isSlicerSelected(slicerId);
     const wasMultiSelected = getSelectedSlicerIds().size > 1;
+    const ctrl = detail.ctrlKey === true;
 
     // If this slicer is already part of a multi-selection and it's a plain
     // click (no Ctrl), DON'T narrow the selection yet — the user may be
     // about to drag the group.  We'll narrow to single on mouseup instead.
-    if (alreadySelected && wasMultiSelected && !lastMousedownCtrl) {
+    if (alreadySelected && wasMultiSelected && !ctrl) {
       // Keep multi-selection intact for potential multi-drag.
       // Ensure the ribbon tab is still showing.
       broadcastSelectedSlicers();
     } else {
-      selectSlicer(slicerId, lastMousedownCtrl);
+      selectSlicer(slicerId, ctrl);
     }
 
     // Snapshot positions of ALL selected slicers for potential multi-move
@@ -248,12 +260,20 @@ function activate(context: ExtensionContext): void {
       if (s) dragStartPositions.set(id, { x: s.x, y: s.y });
     }
 
+    // A press on the object's GRIP (Core's chrome, design phase 5) is a frame
+    // press that never acts: it selects and may move the slicer, and its
+    // click opens the grip's menu -- no pending click, nothing narrowed here.
+    if (detail.part === "grip") return;
+
     // Set pending click — processed on mouseup if not a drag.
     // deferNarrow = true when we deferred narrowing the multi-selection.
     armPendingSlicerClick({
       slicerId,
-      deferNarrow: alreadySelected && wasMultiSelected && !lastMousedownCtrl,
+      deferNarrow: alreadySelected && wasMultiSelected && !ctrl,
     });
+    // For THIS press only: its release completes the click and unbinds.
+    // (Binding the same listener twice is a no-op.)
+    window.addEventListener("mouseup", handleMouseUp);
   };
   window.addEventListener("floatingObject:selected", handleFloatingSelected);
   cleanupFunctions.push(() => {
@@ -404,41 +424,91 @@ function activate(context: ExtensionContext): void {
   });
 
   // -----------------------------------------------------------------------
-  // Mouseup handler: process deferred slicer clicks
+  // Mouseup handler: the FRAME click
   // -----------------------------------------------------------------------
 
-  const handleMouseUp = (e: MouseEvent) => {
+  // Bound by the press that arms the pending click (handleFloatingSelected,
+  // above) and unbound by the first mouseup after it -- that press's own
+  // release -- so it lives exactly as long as the press it completes: the
+  // census (core/lib/globalInputListeners.ts) calls it session-scoped, and
+  // that is a claim about its lifetime. It used to be bound for the
+  // extension's whole life. Core ends a frame move (moveComplete) before this
+  // hears the release, wherever the release lands (overlayMoveHandlers.ts).
+  //
+  // The frame does nothing on a click but select the slicer -- which the
+  // press already did -- so all that is left is narrowing a kept
+  // multi-selection to the slicer pressed. Every item, "Select all", clear
+  // button and scrollbar press is the content gesture's (bodyDragStart below,
+  // which TAKES the pending click); it reads no point and commits nothing.
+  const handleMouseUp = () => {
+    window.removeEventListener("mouseup", handleMouseUp);
     const pendingClick = takePendingSlicerClick();
     if (!pendingClick) return;
-
-    const { slicerId, deferNarrow } = pendingClick;
     dragStartPositions = null;
 
     // If we deferred narrowing a multi-selection to this single slicer
     // (because the user might have been about to drag the group), do it now.
-    if (deferNarrow) {
-      selectSlicer(slicerId, false);
+    if (pendingClick.deferNarrow) {
+      selectSlicer(pendingClick.slicerId, false);
     }
-
-    // Compute canvas coordinates directly from this mouseup event
-    if (!gridContainer) {
-      gridContainer = document.querySelector("[data-grid-area]") as HTMLElement | null;
-    }
-    if (!gridContainer) return;
-
-    const rect = gridContainer.getBoundingClientRect();
-    // Divide by zoom to convert CSS pixels to logical canvas coordinates
-    // (the core's mouse handling does the same division)
-    const gridState = getGridStateSnapshot();
-    const zoom = gridState?.zoom ?? 1.0;
-    const canvasX = (e.clientX - rect.left) / zoom;
-    const canvasY = (e.clientY - rect.top) / zoom;
-
-    handleSlicerClickAt(slicerId, canvasX, canvasY, e.ctrlKey || e.metaKey);
   };
-  window.addEventListener("mouseup", handleMouseUp);
   cleanupFunctions.push(() => {
     window.removeEventListener("mouseup", handleMouseUp);
+  });
+
+  // -----------------------------------------------------------------------
+  // Content press: an item click or run, a button, the scrollbar (BUG-0258)
+  // -----------------------------------------------------------------------
+
+  // Core dispatches this for a press the registration's `zoneAt` answered
+  // CONTENT -- after the press selected the slicer (a plain press: the
+  // modifiers are the content's) and whatever the lock or the subscription,
+  // so a locked slicer and a subscribed canvas page still filter (owner
+  // decision 2026-09-29). The timeline's shape (TimelineSlicer/index.ts): the
+  // press is the content's, so the pending click it armed is TAKEN here -- its
+  // mouseup must not also be read as a frame click -- and a kept
+  // multi-selection it deferred still narrows, at the release. The RAW Ctrl
+  // arrives here, and only here: a click toggles the item, a drag adds the
+  // run. lib/slicerItemDrag.ts owns the rest: its window listeners live only
+  // while the gesture does, and it commits ONCE, at release.
+  const handleBodyDragStart = (e: Event) => {
+    const detail = (e as CustomEvent).detail as {
+      regionId?: unknown;
+      regionType?: string;
+      data?: { slicerId?: unknown };
+      canvasX?: number;
+      canvasY?: number;
+      part?: unknown;
+      ctrlKey?: unknown;
+    };
+    if (detail?.regionType !== "slicer") return;
+    const slicerId = detail.data?.slicerId;
+    if (typeof slicerId !== "string" || slicerId.length === 0) return;
+    if (typeof detail.regionId !== "string" || detail.regionId.length === 0) return;
+    if (typeof detail.canvasX !== "number" || typeof detail.canvasY !== "number") return;
+
+    const pending = takePendingSlicerClick();
+    dragStartPositions = null;
+    const narrow = pending?.slicerId === slicerId && pending.deferNarrow === true;
+
+    beginSlicerContentPress({
+      slicerId,
+      regionId: detail.regionId,
+      canvasX: detail.canvasX,
+      canvasY: detail.canvasY,
+      part: typeof detail.part === "string" ? detail.part : undefined,
+      additive: detail.ctrlKey === true,
+      boundsOf: () => {
+        const s = getSlicerById(slicerId);
+        return s ? slicerCanvasBounds(s) : null;
+      },
+      clientToCanvas: clientToSlicerCanvas,
+      onRelease: narrow ? () => selectSlicer(slicerId, false) : undefined,
+    });
+  };
+  window.addEventListener("floatingObject:bodyDragStart", handleBodyDragStart);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("floatingObject:bodyDragStart", handleBodyDragStart);
   });
 
   // -----------------------------------------------------------------------
@@ -516,6 +586,8 @@ function activate(context: ExtensionContext): void {
 
   cleanupFunctions.push(
     context.events.on(AppEvents.SHEET_CHANGED, () => {
+      // The keyboard was inside a slicer of the sheet just left (M8 S7).
+      leaveSlicerKeyFocus();
       refreshCache().catch(console.error);
     }),
   );
@@ -648,6 +720,9 @@ function deactivate(): void {
   }
   cleanupFunctions = [];
 
+  // A live item drag ends with no commit, and its preview goes with it (the
+  // cleanups above already unbound Core's press events).
+  resetSlicerContentPress();
   resetSelectionHandlerState();
   closeSlicerContextMenu();
   resetStore();
@@ -660,53 +735,6 @@ function deactivate(): void {
   ExtensionRegistry.unregisterAddIn(SlicerManifest.id);
 
   console.log("[Slicer Extension] Unregistered");
-}
-
-// ============================================================================
-// Internal: Slicer Click Handling
-// ============================================================================
-
-/**
- * Handle a click on a slicer at specific canvas coordinates.
- * Called from the mouseup handler with coordinates from the mouse event.
- */
-function handleSlicerClickAt(
-  slicerId: string,
-  canvasX: number,
-  canvasY: number,
-  ctrlHeld: boolean,
-): void {
-  const slicer = getSlicerById(slicerId);
-  if (!slicer) return;
-
-  // Slicer sheet-space position -> canvas space, with the gutters Core
-  // PAINTED (a canvas shows none; the stored config still says 22 x 20).
-  const bounds = slicerCanvasBounds(slicer);
-  if (!bounds) return;
-
-  const hit = getSlicerHitDetail(canvasX, canvasY, bounds, slicerId);
-  if (!hit) return;
-
-  // Every user click is QUEUED (lib/slicerStore.queueSlicerClick): it runs
-  // after the previous click committed its undo step, and computes the new
-  // selection from the COMMITTED selection -- never two clicks in one Ctrl+Z,
-  // never a Ctrl+click toggle that drops the item the previous click added.
-  switch (hit.type) {
-    case "clearButton":
-    case "selectAll":
-      // Clear the filter (all selected) -- a no-op when nothing is filtered.
-      clickSlicerClearFilter(slicerId).catch(console.error);
-      break;
-
-    case "item":
-      clickSlicerItem(slicerId, hit.itemValue!, ctrlHeld).catch(console.error);
-      break;
-
-    case "header":
-    case "body":
-      // Just selection (already handled above via selectSlicer)
-      break;
-  }
 }
 
 // ============================================================================

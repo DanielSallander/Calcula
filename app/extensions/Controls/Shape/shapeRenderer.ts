@@ -46,7 +46,8 @@ import {
   type ScriptFrameSlotRefusal,
 } from "../../_shared/scriptFrame";
 import { resolveControlProperties } from "../lib/controlApi";
-import { isFloatingControlSelected, getSelectedFloatingControls } from "../Button/floatingSelection";
+import { beginControlGeometryRead, controlGeometryWritesInFlight } from "../lib/geometryWriteOrder";
+import { getSelectedFloatingControls } from "../Button/floatingSelection";
 import { getShapeDefinition, isConnectorShape, type ShapePathCommand } from "./shapeCatalog";
 
 // ============================================================================
@@ -823,32 +824,16 @@ export function invalidateAllShapeCaches(): void {
 }
 
 // ============================================================================
-// Selection Indicator Helper
+// Selection chrome: Core's
 // ============================================================================
-
-/**
- * Draw selection border and resize handles for a shape control.
- * Used by both default and custom renderers.
- */
-function drawSelectionIndicators(
-  ctx: CanvasRenderingContext2D,
-  controlId: string,
-  canvasX: number,
-  canvasY: number,
-  shapeWidth: number,
-  shapeHeight: number,
-  _overlayCtx: OverlayRenderContext,
-): void {
-  if (!getDesignMode()) return;
-  const selected = isFloatingControlSelected(controlId);
-  if (!selected) return;
-
-  ctx.strokeStyle = "#0e639c";
-  ctx.lineWidth = 2;
-  ctx.setLineDash([]);
-  ctx.strokeRect(canvasX + 1, canvasY + 1, shapeWidth - 2, shapeHeight - 2);
-  drawResizeHandles(ctx, canvasX, canvasY, shapeWidth, shapeHeight);
-}
+//
+// A selected shape's outline and its EIGHT resize handles are painted by Core
+// (core/lib/gridRenderer/rendering/floatingObjectChrome.ts) after every object,
+// from the one geometry Core's resize hit test reads (BUG-0258 design phase
+// 3) -- on every path below (default, bitmap, custom, html), and all eight now
+// resize: the edge midpoints this renderer used to paint were never live, so a
+// press there MOVED the shape. KNOWN GAP (unchanged): on the html path Core's
+// chrome still paints UNDER the opaque DOM frame (see framePaintsTheShape).
 
 // ============================================================================
 // Path Rendering
@@ -996,7 +981,6 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     if (bmp) {
       ctx.drawImage(bmp, canvasX, canvasY, shapeWidth, shapeHeight);
     }
-    drawSelectionIndicators(ctx, controlId, canvasX, canvasY, shapeWidth, shapeHeight, overlayCtx);
     ctx.restore();
     return;
   }
@@ -1009,8 +993,6 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     } catch (err) {
       console.error("[ShapeRenderer] Custom renderer error:", err);
     }
-    // Still draw selection indicators if in design mode
-    drawSelectionIndicators(ctx, controlId, canvasX, canvasY, shapeWidth, shapeHeight, overlayCtx);
     ctx.restore();
     return;
   }
@@ -1050,15 +1032,14 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     );
 
   if (framePaintsTheShape) {
-    // Selection border and resize handles. NOT "on top of the iframe", as this
-    // said until the outline defect was traced: these are canvas strokes at the
-    // shape's bounds, which is exactly the box the opaque frame covers, so on
-    // this path they are painted UNDER it and only the sub-pixel slivers outside
-    // its border-radius show. The shape is still selectable (hit-testing is
-    // canvas-side) and still movable; what is missing is the picture of it. The
-    // fix is the same one the hit-region outline just took — a sibling element
-    // above the frame — and it is filed rather than smuggled in here.
-    drawSelectionIndicators(ctx, controlId, canvasX, canvasY, shapeWidth, shapeHeight, overlayCtx);
+    // Selection chrome is Core's (floatingObjectChrome.ts), and it is NOT "on
+    // top of the iframe": it is canvas strokes at the shape's bounds, which is
+    // exactly the box the opaque frame covers, so on this path it is painted
+    // UNDER it and only the parts of the handles that reach past the frame's
+    // edge show. The shape is still selectable (hit-testing is canvas-side)
+    // and still movable; what is missing is the picture of it. The fix is the
+    // same one the hit-region outline just took — a sibling element above the
+    // frame — and it is filed rather than smuggled in here.
     ctx.restore();
     return;
   }
@@ -1151,18 +1132,7 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
   // Restore opacity
   ctx.globalAlpha = prevAlpha;
 
-  // 4. Selection indicators (shapes are always selectable)
-  const selected = isFloatingControlSelected(controlId);
-  if (selected) {
-    // Selection border
-    ctx.strokeStyle = "#0e639c";
-    ctx.lineWidth = 2;
-    ctx.setLineDash([]);
-    ctx.strokeRect(canvasX + 1, canvasY + 1, shapeWidth - 2, shapeHeight - 2);
-
-    // Resize handles at corners and midpoints
-    drawResizeHandles(ctx, canvasX, canvasY, shapeWidth, shapeHeight);
-  }
+  // 4. Selection indicators: Core's (see "Selection chrome: Core's" above).
 
   // 5. Connection point indicators
   // Show connection points (small circles at edge midpoints) on non-connector
@@ -1218,6 +1188,12 @@ async function fetchShapeData(
 ): Promise<void> {
   pendingFetches.add(controlId);
   try {
+    // Never read under a geometry write in flight, and remember what the
+    // geometry was when the read started (lib/geometryWriteOrder.ts, BUG-0268).
+    const anchor = { sheetIndex, row, col };
+    const writes = controlGeometryWritesInFlight(anchor);
+    if (writes) await writes;
+    const readIsCurrent = beginControlGeometryRead(anchor);
     const resolved = await resolveControlProperties(sheetIndex, row, col);
     if (!resolved || Object.keys(resolved).length === 0) return;
 
@@ -1239,23 +1215,14 @@ async function fetchShapeData(
     });
     staleEntries.delete(controlId);
 
-    // Update floating control dimensions if width/height resolved from formula
-    const resolvedWidth = resolved.width ? parseFloat(resolved.width) : NaN;
-    const resolvedHeight = resolved.height ? parseFloat(resolved.height) : NaN;
-    if (!isNaN(resolvedWidth) || !isNaN(resolvedHeight)) {
-      const {
-        getFloatingControl,
-        resizeFloatingControl,
-        syncFloatingControlRegions,
-      } = await import("../lib/floatingStore");
-      const ctrl = getFloatingControl(controlId);
-      if (ctrl) {
-        const w = !isNaN(resolvedWidth) && resolvedWidth > 0 ? resolvedWidth : ctrl.width;
-        const h = !isNaN(resolvedHeight) && resolvedHeight > 0 ? resolvedHeight : ctrl.height;
-        if (w !== ctrl.width || h !== ctrl.height) {
-          resizeFloatingControl(controlId, ctrl.x, ctrl.y, w, h);
-          syncFloatingControlRegions();
-        }
+    // The resolved width/height (a formula-driven size) goes back into the
+    // store -- unless the geometry changed while this read was on its way: then
+    // it describes the OLD rectangle (BUG-0268) and the size is read again at
+    // the next paint, after the write has landed.
+    if (resolved.width || resolved.height) {
+      const { applyResolvedControlSize } = await import("../lib/floatingStore");
+      if (applyResolvedControlSize(controlId, resolved, readIsCurrent) === "superseded") {
+        staleEntries.add(controlId);
       }
     }
 
@@ -1267,33 +1234,6 @@ async function fetchShapeData(
   } finally {
     pendingFetches.delete(controlId);
   }
-}
-
-// ============================================================================
-// Drawing Helpers
-// ============================================================================
-
-function drawResizeHandles(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-): void {
-  const handleSize = 6;
-  ctx.fillStyle = "#0e639c";
-
-  // Four corners
-  ctx.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x + w - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x - handleSize / 2, y + h - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x + w - handleSize / 2, y + h - handleSize / 2, handleSize, handleSize);
-
-  // Four midpoints
-  ctx.fillRect(x + w / 2 - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x + w / 2 - handleSize / 2, y + h - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x - handleSize / 2, y + h / 2 - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x + w - handleSize / 2, y + h / 2 - handleSize / 2, handleSize, handleSize);
 }
 
 // ============================================================================

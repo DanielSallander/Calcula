@@ -164,6 +164,12 @@ pub struct PullResult {
     pub other_scope_pins: Vec<crate::integrity::OtherScopePin>,
     /// The publisher's display name asserted in the (now verified) manifest.
     pub publisher_name: String,
+    /// The key that signed this version, from the SAME verified manifest bytes
+    /// the rest of this result was read under. A checkout checks it against
+    /// the application's root-anchored publishers (BUG-0262); taking it from a
+    /// re-read instead would let a hostile transport answer that question
+    /// about a different manifest than the one materialized.
+    pub publisher_key: String,
 }
 
 /// A generic custom object pulled from an application (distribution brick 4).
@@ -1095,6 +1101,7 @@ pub fn pull_with_options(
         trust_status,
         other_scope_pins,
         publisher_name: ver_manifest.publisher_name.clone(),
+        publisher_key: ver_manifest.publisher_key.clone(),
     })
 }
 
@@ -1990,6 +1997,64 @@ mod tests {
         assert!(matches!(s.selection_mode, persistence::SavedSlicerSelectionMode::Multi));
         assert_eq!(s.connected_sources.len(), 1);
         assert_eq!(s.connected_sources[0].source_id, connected_pivot_id);
+    }
+
+    /// BUG-0263. A slicer's COMPUTED PROPERTIES travel with it now (checkout
+    /// used to strip them, so an untouched push republished every slicer
+    /// without them; subscribers never had them). Each is a formula that names
+    /// sheets by NAME exactly as a cell formula does, so a collision rename on
+    /// pull ("Dashboard" arriving as "Dashboard (2)") must reach it -- or the
+    /// slicer silently sizes itself from the SUBSCRIBER's own "Dashboard".
+    ///
+    /// SABOTAGE: drop the `rename_slicer_formulas` call from `rename_pull`.
+    #[test]
+    fn a_pull_rename_reaches_the_slicers_computed_property_formulas() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook();
+        let dashboard = wb.sheets[0].id;
+        let mut slicer = make_test_slicer("ByRegion", dashboard);
+        let new_id = || identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        slicer.computed_properties = vec![
+            persistence::SavedSlicerComputedProperty {
+                id: new_id(),
+                attribute: "width".to_string(),
+                formula: "=Dashboard!A1*4".to_string(),
+            },
+            persistence::SavedSlicerComputedProperty {
+                id: new_id(),
+                attribute: "columns".to_string(),
+                formula: "=A1".to_string(),
+            },
+        ];
+        wb.slicers = vec![slicer];
+        let request = publish_objects_req(&wb, "slicer-formulas", vec![0]);
+        publish::publish(&reg, &request, prof.path()).unwrap();
+
+        let pull_req = PullRequest {
+            package_name: "slicer-formulas".to_string(),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Latest),
+            now: "2026-09-30T01:00:00Z".to_string(),
+        };
+        let mut result =
+            pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        assert_eq!(
+            result.slicers[0].computed_properties.len(),
+            2,
+            "precondition: the published slicer carries its computed properties"
+        );
+
+        let counts = crate::sheet_renames::SheetRenames::new([("Dashboard", "Dashboard (2)")])
+            .rename_pull(&mut result);
+        let props = &result.slicers[0].computed_properties;
+        assert_eq!(
+            props[0].formula, "='Dashboard (2)'!A1*4",
+            "the slicer's formula still names the publisher's spelling -- the subscriber's own sheet"
+        );
+        assert_eq!(props[1].formula, "=A1", "a formula naming no sheet keeps its bytes");
+        assert_eq!(counts.slicer_formulas, 1);
     }
 
     fn publish_objects_req<'a>(

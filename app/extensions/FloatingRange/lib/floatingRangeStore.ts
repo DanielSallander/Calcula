@@ -24,7 +24,7 @@ import {
   objectGeometryEditable,
   onLayoutSurfaceChanged,
 } from "@api/layoutSurface";
-import { onObjectSelectionChanged } from "@api/objectSelection";
+import { isObjectInSelection, onObjectSelectionChanged } from "@api/objectSelection";
 import { showToast } from "@api/notifications";
 import { frameWidth, frameHeight } from "./frDimensions";
 import { clearFrScroll, resetFrScrolls } from "./frScroll";
@@ -484,7 +484,8 @@ export function frObjectEditable(id: string): boolean {
  *     band) moves the range in every mode, on every sheet kind -- unless the
  *     sheet is a subscribed canvas or the canvas locks the range. Core reads it
  *     before a move; the canvas's arrange, nudge and group drag read it too.
- *   - `resizable`: the same, AND the range is SELECTED, AND none of its cells
+ *   - `resizable`: the same, AND the range is SELECTED (by this family or by
+ *     the canvas selection set, `frRangeInSelection`), AND none of its cells
  *     is being edited -- the handles exist only on a selected object (Excel /
  *     Power BI), so an unselected range's corner boxes and edge balls never
  *     take a click meant for its cells, and never sit over the cell the user
@@ -512,18 +513,42 @@ export function syncFloatingRangeRegions(): void {
       ...region.data,
       movable: geometry,
       resizable:
-        geometry && isFloatingRangeSelected(entry.id) && getFrEditingRange() !== entry.id,
+        geometry && frRangeInSelection(entry.id, region) && getFrEditingRange() !== entry.id,
       bodyGrab: geometry && designing && !entry.showTitle,
       // On a canvas the frame's POSITION snaps to the layout grid like every
       // object's, but its SIZE is whole rows and columns (quantised by this
       // extension on resize): a second, pixel-grid snap on top would make most
       // row/column counts unreachable. Core honours this for resize only.
       snapResize: false,
+      // Core's selection handles: the four CORNERS only (they change the
+      // row/column COUNTS). The edge midpoints carry this extension's yellow
+      // balls, which scale the CELLS through its own content zone (frZoneAt);
+      // Core scans its handles BEFORE the body press, so a Core midpoint there
+      // would take every press meant for a ball.
+      handles: "corners",
+      // A grid WITHOUT a title has only its 4px border band (frZoneAt
+      // 'border') to be moved by: Core shows its six-dot grip while it is
+      // hovered or selected (@api/gridOverlays, BUG-0258 design phase 5). The
+      // band stays.
+      ...(entry.showTitle ? {} : { grip: "hover" }),
     };
     return region;
   });
 
   replaceGridRegionsByType(FLOATING_RANGE_REGION_TYPE, regions);
+}
+
+/**
+ * Whether range `frId` (published as `region`) is SELECTED for its handles:
+ * held by this family's own selection, or by the canvas selection SET
+ * (@api/objectSelection). The family holds one range at a time (its provider
+ * has no addToSelection), so the second and later grids of a canvas
+ * multi-selection are set-held -- Core outlines them, and they get their
+ * corners and edge balls like every family's set-held member. The ONE answer
+ * for `resizable` and for the edge-ball painter (frRenderer.ts).
+ */
+export function frRangeInSelection(frId: string, region: GridRegion): boolean {
+  return isFloatingRangeSelected(frId) || isObjectInSelection(region);
 }
 
 /**

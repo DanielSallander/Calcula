@@ -201,6 +201,102 @@ describe("what the surfaces say", () => {
   });
 });
 
+describe("the confirm says what CODE changes (plan_M8 S5)", () => {
+  const base = {
+    packageName: "sales",
+    environment: "prod",
+    fromVersion: "1.2.0" as string | null,
+    toVersion: "1.5.0",
+    sourceLabel: "test",
+    mode: "promote" as const,
+  };
+
+  it("names the changes, cuts after three, and says everyone is asked again", () => {
+    // SABOTAGE: drop `codeParagraph` from the promote message.
+    const m = describePromotion({
+      ...base,
+      code: {
+        count: 5,
+        asksApprovalAgain: true,
+        refusesVersion: null,
+        names: ['macro "Report" (changed)', 'object script "Fetcher" (new, gains net.fetch)', "a", "b", "c"],
+      },
+    });
+    expect(m.message).toContain(
+      'Code that changes: macro "Report" (changed), object script "Fetcher" (new, gains net.fetch), a, and 2 more.',
+    );
+    expect(m.message).toContain(
+      "Everyone in prod will be asked to approve this application's code again before it runs.",
+    );
+    // Second, right after the opening line.
+    expect(m.message.indexOf("Code that changes")).toBeLessThan(m.message.indexOf("Everyone subscribed to"));
+  });
+
+  it("says nobody is asked again when nothing changes, and says it for the code that does not ask", () => {
+    const none = describePromotion({
+      ...base,
+      code: { count: 0, asksApprovalAgain: false, refusesVersion: null, names: [] },
+    });
+    expect(none.message).toContain(
+      "Code: no macro, script or button code changes, so nobody in prod is asked to approve anything again.",
+    );
+    const quiet = describePromotion({
+      ...base,
+      code: { count: 1, asksApprovalAgain: false, refusesVersion: null, names: ['macro "Old" (removed)'] },
+    });
+    expect(quiet.message).toContain('Code that changes: macro "Old" (removed). Nobody in prod is asked to approve anything again.');
+  });
+
+  it("on a FIRST promotion it lists the code it carries, asked for the first time", () => {
+    const m = describePromotion({
+      ...base,
+      fromVersion: null,
+      code: { count: 1, asksApprovalAgain: true, refusesVersion: null, names: ['macro "Report" (new)'] },
+    });
+    expect(m.message).toContain('Code it carries: macro "Report" (new).');
+    expect(m.message).toContain("will be asked to approve this application's code before it runs.");
+    expect(m.message).not.toContain("again before it runs");
+  });
+
+  it("a ROLLBACK carries the code paragraph too (each Allow replaced the approval)", () => {
+    // SABOTAGE: drop `codeParagraph` from the rollback message.
+    const m = describePromotion({
+      ...base,
+      fromVersion: "1.5.0",
+      toVersion: "1.2.0",
+      mode: "rollback",
+      code: { count: 1, asksApprovalAgain: true, refusesVersion: null, names: ['macro "Report" (changed)'] },
+    });
+    expect(m.message).toContain('Code that changes: macro "Report" (changed).');
+    expect(m.message).toContain("asked to approve this application's code again");
+    expect(m.message).toContain("OLDER");
+  });
+
+  it("a reserved script id says subscribers cannot take the version", () => {
+    const m = describePromotion({
+      ...base,
+      code: { count: 1, asksApprovalAgain: false, refusesVersion: "it carries a script under an id Calcula reserves", names: ['script under a reserved id "x" (new)'] },
+    });
+    expect(m.message).toContain("Subscribers in prod cannot take v1.5.0");
+  });
+
+  it("a FAILED comparison is said as a failure, never as no changes", () => {
+    const m = describePromotion({
+      ...base,
+      code: { count: 0, asksApprovalAgain: false, refusesVersion: null, names: [], error: "signed by mallory" },
+    });
+    expect(m.message).toContain(
+      "Code: the comparison of the application's code failed (signed by mallory), so this moves the pointer without knowing what code changes for everyone in prod.",
+    );
+    expect(m.message).not.toContain("no macro, script or button code changes");
+  });
+
+  it("without a code summary (no caller passes one today) the message is unchanged", () => {
+    const m = describePromotion(base);
+    expect(m.message).not.toContain("Code");
+  });
+});
+
 describe("editing the pipeline", () => {
   it("accepts a plain pipeline", () => {
     expect(pipelineEditValidation(["test", "prod"])).toBeNull();

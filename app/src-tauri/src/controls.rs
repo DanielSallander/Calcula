@@ -156,10 +156,12 @@ pub fn collect_controls_for_save(
     saved
 }
 
-/// The `onSelect` control property: INLINE SCRIPT SOURCE. The click path feeds
-/// it straight to `runWorkbookScript` (the QuickJS module runtime), so its value
-/// IS code. Mirror of the key read in `app/extensions/Controls/index.ts` and
-/// `app/extensions/Controls/Button/interceptors.ts`.
+/// The `onSelect` control property: INLINE SCRIPT SOURCE. The button door
+/// (`scripting::control_action::run_control_action`) reads it from this store
+/// and hands it to the QuickJS module runtime, so its value IS code. (The page
+/// used to read it in `app/extensions/Controls/index.ts` and
+/// `app/extensions/Controls/Button/interceptors.ts`; since phase 4 of BUG-0257
+/// a click names only the button.)
 pub const ON_SELECT_PROPERTY: &str = "onSelect";
 
 /// The `macroRef` control property: the module id of the recorded macro a button
@@ -191,6 +193,61 @@ pub const MACRO_REF_PROPERTY: &str = "macroRef";
 /// all. This is the EXECUTION list, not the "publisher-authored" list.
 pub const EXECUTABLE_CONTROL_PROPERTIES: &[&str] = &[ON_SELECT_PROPERTY, MACRO_REF_PROPERTY];
 
+/// THE HELD COMPARTMENT (BUG-0257): where a WORKING COPY keeps the button code
+/// its application shipped, so an untouched push publishes it unchanged.
+///
+/// Checkout used to run the subscriber's strip, so every button of an
+/// application lost its `onSelect`/`macroRef` on the way into its own working
+/// copy -- and the next push published the buttons without it. The code cannot
+/// simply stay live either: a checkout cannot tell the developer's own code from
+/// a colleague's (or from a version somebody planted), and live code runs on a
+/// click. So checkout MOVES each non-empty executable slot into its held key,
+/// which NO click path reads, and stamps the control with where it came from
+/// (`heldFrom`). The push puts it back on the published carrier only -- never in
+/// the live store -- and only when those exact bytes are in the SIGNED base
+/// version (`crate::held_button_code`).
+///
+/// Nothing writes these keys but the admission -- a checkout's, and a subscribe's
+/// or refresh's for a macro link whose macro that pull landed (phase 3, where the
+/// held link is what the click runs, after the application's approval) and for
+/// static inline code (phase 4, run only through the button door after the
+/// approval of its exact bytes) -- `move_control`, which carries them, and
+/// `adopt_held_button_code` ("Make this my own"), which MOVES them into the live
+/// slots after the code was shown: the property door refuses them by name, the metadata door
+/// strips them (so paste and duplicate make copies WITHOUT the application's
+/// code), and a script may not write them (`SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS`).
+pub const HELD_ON_SELECT_PROPERTY: &str = "heldOnSelect";
+/// The held twin of [`MACRO_REF_PROPERTY`].
+pub const HELD_MACRO_REF_PROPERTY: &str = "heldMacroRef";
+/// Which application, workspace and version the held code came with: a JSON
+/// [`crate::held_button_code::HeldFrom`], written by Rust at checkout.
+pub const HELD_FROM_PROPERTY: &str = "heldFrom";
+/// The held slots that carry CODE, one per executable slot, in the same order as
+/// `EXECUTABLE_CONTROL_PROPERTIES`.
+pub const HELD_CODE_PROPERTIES: &[&str] = &[HELD_ON_SELECT_PROPERTY, HELD_MACRO_REF_PROPERTY];
+/// Every key of the held compartment: the code slots and their stamp.
+pub const HELD_CONTROL_PROPERTIES: &[&str] =
+    &[HELD_ON_SELECT_PROPERTY, HELD_MACRO_REF_PROPERTY, HELD_FROM_PROPERTY];
+
+/// The held slot that keeps `executable`'s code, or `None` for a key that is not
+/// an executable slot.
+pub fn held_slot_of(executable: &str) -> Option<&'static str> {
+    EXECUTABLE_CONTROL_PROPERTIES
+        .iter()
+        .position(|k| *k == executable)
+        .map(|i| HELD_CODE_PROPERTIES[i])
+}
+
+/// Is `name` a key of the held compartment?
+pub fn is_held_property(name: &str) -> bool {
+    HELD_CONTROL_PROPERTIES.contains(&name)
+}
+
+/// Does this control carry any held code?
+pub fn holds_application_code(meta: &ControlMetadata) -> bool {
+    HELD_CODE_PROPERTIES.iter().any(|k| meta.properties.contains_key(*k))
+}
+
 /// Strip executable wiring from DISTRIBUTED control payloads before
 /// materialization. A control's `onSelect` value is INLINE SCRIPT SOURCE the
 /// Controls extension hands to the workbook-script runner, and its `macroRef`
@@ -211,35 +268,19 @@ pub const EXECUTABLE_CONTROL_PROPERTIES: &[&str] = &[ON_SELECT_PROPERTY, MACRO_R
 /// checked out of -- the push preview listed every button as modified (found
 /// live 2026-09-29, e2e fixall-calp C1-checkout). Only the EXACTLY empty string
 /// is kept: whitespace is non-empty source to the script runner.
+///
+/// A HELD key a package carries is discarded too (BUG-0257): a package never
+/// legitimately ships one -- the held compartment is written by THIS machine's
+/// checkout -- and one that arrived would be restored at the next push under
+/// the pusher's key. This is the plain strip (no origin to hold anything under);
+/// a checkout HOLDS, and a subscribe or refresh holds a link whose macro it
+/// landed and the application's static inline code (phase 4: run only through
+/// the button door, after the approval of its exact bytes) --
+/// `crate::held_button_code::admit_wiring`, the one implementation.
 pub fn sanitize_distributed_controls(
     saved: &[persistence::SavedSheetControls],
 ) -> Vec<persistence::SavedSheetControls> {
-    saved
-        .iter()
-        .map(|sheet_controls| {
-            let mut cloned = sheet_controls.clone();
-            if let serde_json::Value::Array(entries) = &mut cloned.controls {
-                for entry in entries {
-                    if let Some(props) = entry
-                        .get_mut("properties")
-                        .and_then(|p| p.as_object_mut())
-                    {
-                        for key in EXECUTABLE_CONTROL_PROPERTIES {
-                            let holds_no_code = props
-                                .get(*key)
-                                .and_then(|p| p.get("value"))
-                                .and_then(|v| v.as_str())
-                                .is_some_and(str::is_empty);
-                            if !holds_no_code {
-                                props.remove(*key);
-                            }
-                        }
-                    }
-                }
-            }
-            cloned
-        })
-        .collect()
+    crate::held_button_code::admit_wiring(saved, &crate::held_button_code::DistributedWiring::Strip).0
 }
 
 /// Materialize persisted per-sheet control payloads into ControlStorage
@@ -399,7 +440,18 @@ fn check_control_type_transition(
 /// shape and it stopped rendering — with the backend reporting success. The type
 /// decides which renderer owns the cell, so it is decided once, at creation, by
 /// the code that builds the control.
+///
+/// `replace_held` (optional; absent = `false`) is the Properties pane's
+/// "Remove the application's code" step, sent only after `confirmAsync` has
+/// shown the held code: with it, an EMPTY write to a code slot of a button that
+/// holds its application's code is a real edit -- it discards the held
+/// compartment as one undoable "Change button code" step -- instead of the
+/// tab-through no-op. Without some such gesture a developer could not remove an
+/// application button's action at all: the empty write was ignored and the next
+/// push restored the code. It widens nothing a script could not already do (a
+/// non-empty code write replaces the held code too); held keys stay unwritable.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn set_control_property(
     state: State<AppState>,
     file_state: State<FileState>,
@@ -410,9 +462,19 @@ pub fn set_control_property(
     property_name: String,
     value_type: String,
     value: String,
+    replace_held: Option<bool>,
 ) -> Result<ControlMetadata, String> {
-    set_control_property_core(
-        &state, &file_state, sheet_index, row, col, control_type, property_name, value_type, value,
+    set_control_property_with(
+        &state,
+        &file_state,
+        sheet_index,
+        row,
+        col,
+        control_type,
+        property_name,
+        value_type,
+        value,
+        replace_held.unwrap_or(false),
     )
 }
 
@@ -429,6 +491,40 @@ pub(crate) fn set_control_property_core(
     value_type: String,
     value: String,
 ) -> Result<ControlMetadata, String> {
+    set_control_property_with(
+        state, file_state, sheet_index, row, col, control_type, property_name, value_type, value, false,
+    )
+}
+
+/// [`set_control_property_core`] with the "Remove the application's code"
+/// flag (see [`set_control_property`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn set_control_property_with(
+    state: &AppState,
+    file_state: &FileState,
+    sheet_index: usize,
+    row: u32,
+    col: u32,
+    control_type: String,
+    property_name: String,
+    value_type: String,
+    value: String,
+    replace_held: bool,
+) -> Result<ControlMetadata, String> {
+    // THE HELD COMPARTMENT IS NOBODY'S TO WRITE (BUG-0257). It holds an
+    // application's button code, and whatever sits there is published at the
+    // next push -- under the pusher's key, once it has been matched against the
+    // signed base. A door that could write it would let the caller stage code
+    // for that publish. It changes only by checkout (Rust), by an author's own
+    // write to the live slot (below), and by deleting the control.
+    if is_held_property(&property_name) {
+        return Err(format!(
+            "'{}' holds button code that came with an application and is published \
+             unchanged at the next push; nothing may write it. To use your own code on \
+             this button, replace the application's code in the Properties pane.",
+            property_name
+        ));
+    }
     check_property_value(&property_name, &value)?;
 
     // MOVING, RESIZING, PINNING, ROTATING OR FLIPPING a control is an object
@@ -468,22 +564,71 @@ pub(crate) fn set_control_property_core(
         create_gate?;
     }
 
+    // AN EXECUTABLE SLOT (onSelect, macroRef) is the button's CODE, and two
+    // writes of it change nothing (BUG-0257):
+    //
+    // * "" into an ABSENT slot of a button that holds its application's code.
+    //   The Properties pane commits its code field on blur, and on such a
+    //   button that field reads "" -- so tabbing THROUGH it used to be an
+    //   author edit that replaced the application's code with nothing, and the
+    //   next push published the button empty. That is BUG-0257's own outcome
+    //   from an everyday gesture, so the write is a no-op here, whatever sent it.
+    // * the value the slot already has.
+    //
+    // Both return BEFORE the effect: nothing dirtied, no undo step.
+    //
+    // ...UNLESS the caller is the explicit "Remove the application's code" step
+    // (`replace_held`), which has shown the held code and been confirmed: then
+    // the empty write discards the held compartment below, undoably.
+    let executable = EXECUTABLE_CONTROL_PROPERTIES.contains(&property_name.as_str());
+    if executable {
+        if let Some(existing) = pending.get(&key) {
+            let live = existing.properties.get(&property_name);
+            let removes_held = replace_held && holds_application_code(existing);
+            let tab_through = value.is_empty() && live.is_none() && holds_application_code(existing);
+            let unchanged = live.is_some_and(|p| p.value_type == value_type && p.value == value);
+            if !removes_held && (tab_through || unchanged) {
+                return Ok(existing.clone());
+            }
+        }
+    }
+    // A CODE WRITE IS UNDOABLE. It was the one property write that could destroy
+    // work Ctrl+Z could not bring back -- the application's held code among it.
+    let previous: Option<Vec<(ControlKey, ControlMetadata)>> =
+        executable.then(|| pending.iter().map(|(k, v)| (*k, v.clone())).collect());
+
     // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
     // formula-driven properties -- and written only by the save path.
     let effect = DocumentEffect::mutates(&file_state);
-    let mut controls = pending.authorize(&effect);
+    let updated = {
+        let mut controls = pending.authorize(&effect);
 
-    let metadata = controls.entry(key).or_insert_with(|| ControlMetadata {
-        control_type: control_type.clone(),
-        properties: HashMap::new(),
-    });
+        let metadata = controls.entry(key).or_insert_with(|| ControlMetadata {
+            control_type: control_type.clone(),
+            properties: HashMap::new(),
+        });
 
-    metadata.properties.insert(
-        property_name,
-        ControlPropertyValue { value_type, value },
-    );
-
-    Ok(metadata.clone())
+        metadata.properties.insert(
+            property_name,
+            ControlPropertyValue { value_type, value },
+        );
+        // THE AUTHOR'S CODE REPLACES THE APPLICATION'S, WHOLE. A button runs one
+        // action (a click checks `macroRef` first, then `onSelect`), so keeping
+        // the application's other held slot would publish a button whose action
+        // is half theirs and half the author's. The Properties pane reaches this
+        // only after "Replace the application's code" has shown the held code.
+        if executable {
+            for held in HELD_CONTROL_PROPERTIES {
+                metadata.properties.remove(*held);
+            }
+        }
+        metadata.clone()
+    };
+    // The store guard is dropped before the undo stack is taken (never both).
+    if let Some(previous) = previous {
+        crate::undo_commands::record_controls_undo(state, previous, "Change button code");
+    }
+    Ok(updated)
 }
 
 /// Set the full control metadata for a cell (replaces existing).
@@ -518,6 +663,18 @@ pub(crate) fn set_control_metadata_core(
     col: u32,
     metadata: ControlMetadata,
 ) -> Result<ControlMetadata, String> {
+    // A CONTROL CREATED HERE HOLDS NO APPLICATION CODE (BUG-0257). This is the
+    // door paste, duplicate and every insert take, and the renderer sends it
+    // whatever map it read -- a copied button's held keys included. Copies are
+    // the author's own buttons: carrying the application's code into one would
+    // publish it at a cell the signed base never had it at, and letting a caller
+    // WRITE held keys here would let it stage code for the next signed push. So
+    // they are dropped, not refused (a paste of a held button still pastes the
+    // button). Moving a held button keeps its code: that is `move_control`.
+    let mut metadata = metadata;
+    for held in HELD_CONTROL_PROPERTIES {
+        metadata.properties.remove(*held);
+    }
     for (name, prop) in &metadata.properties {
         check_property_value(name, &prop.value)?;
     }
@@ -603,6 +760,372 @@ pub(crate) fn remove_control_metadata_core(
         crate::undo_commands::record_controls_undo(state, previous, "Delete control");
     }
     Ok(removed)
+}
+
+/// Move a control to another anchor cell on the same sheet, WITH every property
+/// it has -- the held compartment included -- as ONE undoable step.
+///
+/// WHY IT EXISTS (BUG-0257). The floating -> in-cell toggle used to re-create
+/// the button at its new cell (`set_control_metadata`) and delete the old one.
+/// That door strips the held compartment, as it must (it is the paste door), so
+/// every toggled button of a working copy lost its application's code and the
+/// next push published it empty. A MOVE is not a copy: the button is the same
+/// button, and so is its code.
+///
+/// `properties` are written over the moved control in the same step (the
+/// toggle's `embedded`/`pinToGrid`). They may not name an executable or held
+/// key: a move never writes code.
+///
+/// Refused BEFORE the effect, with nothing written: an override naming a code
+/// key or over the size bound, a protected sheet whose options do not allow
+/// editing objects, no control at `from`, and ANOTHER control at `to` (the
+/// re-create this replaces overwrote it silently). `from == to` only applies the
+/// overrides.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn move_control(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    sheet_index: usize,
+    from_row: u32,
+    from_col: u32,
+    to_row: u32,
+    to_col: u32,
+    properties: Option<HashMap<String, ControlPropertyValue>>,
+) -> Result<ControlMetadata, String> {
+    move_control_core(
+        &state,
+        &file_state,
+        sheet_index,
+        (from_row, from_col),
+        (to_row, to_col),
+        properties.unwrap_or_default(),
+    )
+}
+
+/// [`move_control`] over plain references, for the unit tier.
+pub(crate) fn move_control_core(
+    state: &AppState,
+    file_state: &FileState,
+    sheet_index: usize,
+    from: (u32, u32),
+    to: (u32, u32),
+    overrides: HashMap<String, ControlPropertyValue>,
+) -> Result<ControlMetadata, String> {
+    for (name, prop) in &overrides {
+        if EXECUTABLE_CONTROL_PROPERTIES.contains(&name.as_str()) || is_held_property(name) {
+            return Err(format!(
+                "Moving a control carries its code as it is; a move may not write '{}'.",
+                name
+            ));
+        }
+        check_property_value(name, &prop.value)?;
+    }
+    crate::protection::check_sheet_action(state, sheet_index, "editObjects", "move a control")?;
+
+    let from_key = (sheet_index, from.0, from.1);
+    let to_key = (sheet_index, to.0, to.1);
+    let pending = state.controls.lock_pending().map_err(|e| e.to_string())?;
+    let Some(existing) = pending.get(&from_key) else {
+        return Err(format!(
+            "No control at sheet {} r{}c{}; nothing was moved.",
+            sheet_index, from.0, from.1
+        ));
+    };
+    if to_key != from_key && pending.contains_key(&to_key) {
+        return Err(format!(
+            "Another control already sits at sheet {} r{}c{}; move or delete it first. Nothing was moved.",
+            sheet_index, to.0, to.1
+        ));
+    }
+    let mut moved = existing.clone();
+    for (name, prop) in overrides {
+        moved.properties.insert(name, prop);
+    }
+    let previous: Vec<(ControlKey, ControlMetadata)> =
+        pending.iter().map(|(k, v)| (*k, v.clone())).collect();
+
+    // Control metadata is persisted (`workbook.controls`).
+    let effect = DocumentEffect::mutates(file_state);
+    {
+        let mut controls = pending.authorize(&effect);
+        controls.remove(&from_key);
+        controls.insert(to_key, moved.clone());
+    }
+    // ITS OBJECT SCRIPTS MOVE WITH IT. A button's scripts find it by the id
+    // DERIVED from its anchor (`control-<sheet>-<row>-<col>`), and the rule
+    // everywhere else a control changes cells (`shift_controls`,
+    // `remap_sheet_keyed_stores`) is that the binding follows in lockstep. The
+    // toggle's move did not: a toggled button's script -- an application's
+    // DISTRIBUTED script in a working copy included -- stayed bound to the old,
+    // now empty anchor, and the next push shipped it unbound (review finding;
+    // the same loss BUG-0257 fixed for held code, through the same toggle).
+    // Taken after the store guard is released, never nested with it.
+    let previous_ids: Vec<(String, Option<String>)> = if from_key != to_key {
+        rekey_control_bindings(
+            state,
+            &effect,
+            &crate::controls::control_instance_id(sheet_index, from.0, from.1),
+            &crate::controls::control_instance_id(sheet_index, to.0, to.1),
+        )
+    } else {
+        Vec::new()
+    };
+    // The store guards are dropped before the undo stack is taken (never both).
+    // Undo puts the control AND each binding back.
+    crate::undo_commands::record_controls_undo_with_scripts(state, previous, previous_ids, "Move control");
+    Ok(moved)
+}
+
+/// "MAKE THIS MY OWN" (phase 4 of BUG-0257): the ONE way an application's
+/// button code becomes code of the user's own. The Properties pane shows the
+/// held code, asks (`confirmAsync`), and sends back exactly what it showed;
+/// this MOVES it into the live slots, as one undoable step, always audited.
+///
+/// Why only this: paste, duplicate and the floating/in-cell toggle re-create a
+/// button at another cell, so an ownership tag would be dropped there without a
+/// word and an application's code would run as the user's own. So the held
+/// compartment is never copied anywhere, and the only route out of it is this
+/// explicit step that showed the code first (owner decision Q4: button
+/// CONTROLS only -- a button CELL's held action keeps its remedy, "give it an
+/// action of your own", because dropping its stamp would WIDEN what it runs).
+///
+/// Main window only. Denylisted for non-trusted callers under `codeExecution`
+/// (backendCommands.ts): code adopted here runs with no approval.
+///
+/// A held macro LINK is adopted only when it names a macro OF THE STAMP'S
+/// APPLICATION in this workbook (review of M6b). An adopted link is live, and
+/// a live link runs whatever module carries its id, with no `requirePackage`
+/// (the click reads it as the author's own); at a checkout EVERY link is held,
+/// including ids the application never shipped, so such an id could name a
+/// macro of the developer's own -- which would then run with no approval while
+/// the confirm promised "the macro it runs stays the application's, and still
+/// runs only after you approve the application's code".
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn adopt_held_button_code(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    script_state: State<crate::scripting::types::ScriptState>,
+    sheet_index: usize,
+    row: u32,
+    col: u32,
+    shown_on_select: Option<String>,
+    shown_macro_ref: Option<String>,
+    window: tauri::Window,
+) -> Result<ControlMetadata, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // The stored modules as (application, id), read and released BEFORE the
+    // control store is taken (the store guard is the critical section).
+    let modules: Vec<(Option<String>, String)> = {
+        let map = script_state.workbook_scripts.read().map_err(|e| e.to_string())?;
+        map.values().map(|s| (s.source_package.clone(), s.id.clone())).collect()
+    };
+    adopt_held_button_code_core(
+        &state,
+        &file_state,
+        &modules,
+        sheet_index,
+        (row, col),
+        shown_on_select.as_deref(),
+        shown_macro_ref.as_deref(),
+    )
+}
+
+/// Why a held macro link may NOT be adopted, or `None` when it names a macro
+/// of the stamp's application (`modules`: the stored modules as
+/// `(application, id)`). Completes "The button at <cell> ...".
+fn held_link_refusal(
+    modules: &[(Option<String>, String)],
+    stamp: Option<&crate::held_button_code::HeldFrom>,
+    macro_id: &str,
+) -> Option<String> {
+    let Some(stamp) = stamp else {
+        return Some(format!(
+            "links the macro '{macro_id}', but its record of which application it came with cannot be read, so \
+             there is no way to tell whether that macro is the application's"
+        ));
+    };
+    let owner = modules.iter().find(|(_, id)| id == macro_id).map(|(pkg, _)| pkg.as_deref().filter(|p| !p.trim().is_empty()));
+    match owner {
+        Some(Some(app)) if app == stamp.application => None,
+        Some(Some(other)) => Some(format!(
+            "links the macro '{macro_id}', which came with the application '{other}', not with '{}'",
+            stamp.application
+        )),
+        Some(None) => Some(format!(
+            "links the macro '{macro_id}', which is a macro of your own, not one of the application '{}'",
+            stamp.application
+        )),
+        None => Some(format!(
+            "links the macro '{macro_id}', and no macro of the application '{}' with that id is in this workbook",
+            stamp.application
+        )),
+    }
+}
+
+/// [`adopt_held_button_code`] over plain references, for the unit tier.
+///
+/// Refused BEFORE the effect, with nothing written, when: there is no control;
+/// it is not a button; nothing is held; the held code is not what the dialog showed (it changed
+/// after it was shown -- the TOCTOU the shown texts close); the button
+/// already has live code of the user's own (adopting would silently replace
+/// it); or a held macro link does not name a macro of the stamp's application
+/// in `modules` (the stored modules as `(application, id)`; review of M6b).
+/// The gate and the write are ONE critical section (`lock_pending`).
+pub(crate) fn adopt_held_button_code_core(
+    state: &AppState,
+    file_state: &FileState,
+    modules: &[(Option<String>, String)],
+    sheet_index: usize,
+    at: (u32, u32),
+    shown_on_select: Option<&str>,
+    shown_macro_ref: Option<&str>,
+) -> Result<ControlMetadata, String> {
+    let (row, col) = at;
+    // The sheet name for the sentences and the row, cloned BEFORE the store is
+    // taken (the canonical sheet-then-controls order).
+    let sheet_name = state
+        .sheet_names
+        .read()
+        .map_err(|e| e.to_string())?
+        .get(sheet_index)
+        .cloned()
+        .unwrap_or_else(|| format!("Sheet{}", sheet_index + 1));
+    let cell = format!("{}!{}", sheet_name, crate::held_button_code::a1(row, col));
+    let key = (sheet_index, row, col);
+
+    let pending = state.controls.lock_pending().map_err(|e| e.to_string())?;
+    let Some(existing) = pending.get(&key) else {
+        return Err(format!("There is no control at {cell}; nothing was changed."));
+    };
+    // Owner decision Q4: button CONTROLS only. The admission holds ANY
+    // control's code for a faithful push, and only a button runs code when it
+    // is clicked (the door refuses the rest as `notAButton`) -- so moving a
+    // shape's held code into its live slot would arm nothing the user can
+    // review on a click, and drop the stamp that keeps it the application's.
+    if existing.control_type != "button" {
+        return Err(format!(
+            "The control at {cell} is a '{}', not a button. Only a button's code can be made your own; nothing \
+             was changed.",
+            existing.control_type
+        ));
+    }
+    let held = |k: &str| existing.properties.get(k).map(|p| p.value.clone()).filter(|v| !v.is_empty());
+    let held_on_select = held(HELD_ON_SELECT_PROPERTY);
+    let held_macro_ref = held(HELD_MACRO_REF_PROPERTY);
+    if held_on_select.is_none() && held_macro_ref.is_none() {
+        return Err(format!(
+            "The button at {cell} holds no code that came with an application; nothing was changed."
+        ));
+    }
+    let shown = |s: Option<&str>| s.filter(|v| !v.is_empty()).map(str::to_string);
+    if held_on_select != shown(shown_on_select) || held_macro_ref != shown(shown_macro_ref) {
+        return Err(format!(
+            "The application's code on the button at {cell} changed after it was shown; nothing was changed. \
+             Review it again before making it your own."
+        ));
+    }
+    if EXECUTABLE_CONTROL_PROPERTIES
+        .iter()
+        .any(|k| existing.properties.get(*k).is_some_and(|p| !p.value.is_empty()))
+    {
+        return Err(format!(
+            "The button at {cell} already runs code of your own, so the application's code was not moved \
+             over it; nothing was changed."
+        ));
+    }
+    let stamp = existing.properties.get(HELD_FROM_PROPERTY).and_then(|p| crate::held_button_code::HeldFrom::decode(&p.value));
+    // A HELD MACRO LINK stays the application's macro once adopted only if it
+    // names one (review of M6b): adopted, it is a live link, which runs
+    // whatever module carries its id with no application asked for.
+    if let Some(macro_id) = &held_macro_ref {
+        if let Some(why) = held_link_refusal(modules, stamp.as_ref(), macro_id) {
+            return Err(format!(
+                "The button at {cell} {why}. Made your own, the link would run that macro with no approval, so the \
+                 application's code was not moved; nothing was changed. To run a macro of your own from this \
+                 button, replace the application's code instead."
+            ));
+        }
+    }
+    let caption = existing.properties.get("text").map(|p| p.value.clone()).unwrap_or_default();
+    let previous: Vec<(ControlKey, ControlMetadata)> = pending.iter().map(|(k, v)| (*k, v.clone())).collect();
+
+    // Every gate has passed: control metadata is persisted, so the document is
+    // dirty from here.
+    let effect = DocumentEffect::mutates(file_state);
+    let mut moved: Vec<serde_json::Value> = Vec::new();
+    let adopted = {
+        let mut controls = pending.authorize(&effect);
+        let meta = controls.get_mut(&key).ok_or_else(|| format!("There is no control at {cell}."))?;
+        for (live, held_key, value) in [
+            (ON_SELECT_PROPERTY, HELD_ON_SELECT_PROPERTY, &held_on_select),
+            (MACRO_REF_PROPERTY, HELD_MACRO_REF_PROPERTY, &held_macro_ref),
+        ] {
+            // A MOVE, not a copy: a held twin left behind would fight the
+            // adopted bytes at the next push.
+            meta.properties.remove(held_key);
+            if let Some(value) = value {
+                let value_type = stamp.as_ref().map_or("static", |s| s.value_type_of(live)).to_string();
+                moved.push(serde_json::json!({
+                    "slot": live,
+                    "valueType": value_type,
+                    "sha256": calp::integrity::sha256_hex(value.as_bytes()),
+                }));
+                meta.properties.insert(live.to_string(), ControlPropertyValue { value_type, value: value.clone() });
+            }
+        }
+        meta.properties.remove(HELD_FROM_PROPERTY);
+        meta.clone()
+    };
+    // The store guard is dropped before the undo stack is taken (never both).
+    crate::undo_commands::record_controls_undo(state, previous, "Make button code my own");
+
+    let (application, version) = stamp.map(|s| (s.application, s.version)).unwrap_or_default();
+    let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
+    extra.insert("application".into(), serde_json::Value::from(application.clone()));
+    extra.insert("version".into(), serde_json::Value::from(version));
+    extra.insert("cell".into(), serde_json::Value::from(cell.clone()));
+    extra.insert("caption".into(), serde_json::Value::from(caption));
+    extra.insert("moved".into(), serde_json::Value::from(moved));
+    if application.is_empty() {
+        extra.insert("stampUnreadable".into(), serde_json::Value::from(true));
+    }
+    crate::calp_commands::record_audit_event_with_extra(
+        state,
+        calp::audit::AuditEvent::ButtonCodeAdopted,
+        format!(
+            "Made the code of the button at {cell} your own{}: it now runs as your own code, with no approval",
+            if application.is_empty() { String::new() } else { format!(" (it came with '{application}')") }
+        ),
+        extra,
+    );
+    Ok(adopted)
+}
+
+/// The object-script binding id of the control at (sheet, row, col) -- the
+/// frontend's `makeFloatingControlId`, and `shift_controls`' derivation.
+pub(crate) fn control_instance_id(sheet_index: usize, row: u32, col: u32) -> String {
+    format!("control-{}-{}-{}", sheet_index, row, col)
+}
+
+/// Re-point every object script bound to `from_id` at `to_id`. Returns
+/// (script id, the binding it had) for the undo payload.
+fn rekey_control_bindings(
+    state: &AppState,
+    effect: &DocumentEffect,
+    from_id: &str,
+    to_id: &str,
+) -> Vec<(String, Option<String>)> {
+    let Ok(mut scripts) = state.object_scripts.write(effect) else { return Vec::new() };
+    let mut previous = Vec::new();
+    for script in scripts.iter_mut() {
+        if script.instance_id.as_deref() == Some(from_id) {
+            previous.push((script.id.clone(), script.instance_id.clone()));
+            script.instance_id = Some(to_id.to_string());
+        }
+    }
+    previous
 }
 
 // ============================================================================
@@ -780,39 +1303,143 @@ pub struct MacroLinkingControl {
     pub sheet_name: String,
     pub row: u32,
     pub col: u32,
+    /// The application whose HELD link this is (BUG-0257): the button came with
+    /// that application's code, which a working copy keeps inert and publishes
+    /// unchanged at the next push. `None` for a live link of the author's own.
+    #[serde(default)]
+    pub held_by: Option<String>,
+    /// A button CONTROL's `macroRef`, or a button CELL's script action.
+    pub kind: crate::held_button_code::MacroLinkKind,
+    /// What the button says on screen: a control's `text`, a cell's `label`.
+    /// Empty when it says nothing.
+    #[serde(default)]
+    pub caption: String,
+    /// The application the button CAME WITH, read from this machine's own stamp
+    /// (a control's `heldFrom`, a button cell's `fromApplication` -- live or
+    /// held), for the approval screen's "Buttons that run this macro" (phase 3).
+    /// `None` for a button of the author's own, and for a stamp that cannot be
+    /// read: an unreadable stamp vouches for nothing.
+    #[serde(default)]
+    pub application: Option<String>,
 }
 
-/// Every control whose `macroRef` equals `macro_id`, across all sheets.
+/// Every control whose `macroRef` -- live OR held -- equals `macro_id`, across
+/// all sheets.
 ///
 /// Backs the delete-a-macro warning: deleting a macro that ≥1 button links must
 /// name those buttons rather than silently orphaning them. The scan lives here
 /// because the backend already holds control metadata for every sheet; the
 /// frontend would otherwise reassemble it from per-sheet lists.
+///
+/// THE HELD LINK COUNTS (BUG-0257). In a working copy the application's buttons
+/// keep their macro links in the held compartment, and the next push publishes
+/// them. Deleting the macro there and pushing ships buttons that name a macro
+/// the application no longer carries -- exactly what the warning exists to say.
 #[tauri::command]
 pub fn list_controls_referencing_macro(
     state: State<AppState>,
     macro_id: String,
 ) -> Vec<MacroLinkingControl> {
+    controls_referencing_macro(&state, &macro_id)
+}
+
+/// [`list_controls_referencing_macro`] over a plain reference, for the unit tier.
+///
+/// BUTTON CELLS COUNT TOO (Cell Type: Button, BUG-0260): a cell whose live
+/// action runs the macro, and -- in a working copy -- one whose action is HELD
+/// for its application (`heldAction`), which the next push publishes.
+///
+/// LOCK ORDER: the sheet names are cloned out FIRST and released, then each
+/// store is read under its own short guard. It used to hold `controls` while
+/// taking `sheet_names` -- the reverse of the canonical sheet-then-controls
+/// order `delete_sheet_impl` follows (it holds `sheet_names.write` into
+/// `remap_sheet_keyed_stores`, which takes `controls.write`), so a delete-a-
+/// macro warning racing a sheet delete could deadlock.
+pub(crate) fn controls_referencing_macro(state: &AppState, macro_id: &str) -> Vec<MacroLinkingControl> {
+    let sheet_names: Vec<String> = state.sheet_names.read().unwrap().clone();
     let controls = state.controls.read().unwrap();
-    let sheet_names = state.sheet_names.read().unwrap();
     let mut out: Vec<MacroLinkingControl> = controls
         .iter()
-        .filter(|(_, meta)| {
-            meta.properties
-                .get(MACRO_REF_PROPERTY)
-                .map(|p| p.value == macro_id)
-                .unwrap_or(false)
-        })
-        .map(|((si, r, c), _)| MacroLinkingControl {
-            sheet_index: *si,
-            sheet_name: sheet_names
-                .get(*si)
-                .cloned()
-                .unwrap_or_else(|| format!("Sheet{}", si + 1)),
-            row: *r,
-            col: *c,
+        .filter_map(|((si, r, c), meta)| {
+            let links = |key: &str| meta.properties.get(key).is_some_and(|p| p.value == macro_id);
+            // The stamp's application, or `None` when it cannot be read.
+            let stamped = meta
+                .properties
+                .get(HELD_FROM_PROPERTY)
+                .and_then(|p| crate::held_button_code::HeldFrom::decode(&p.value))
+                .map(|from| from.application);
+            // A LIVE link is the author's own (the click reads it first), so it
+            // came with no application even beside a stamp.
+            let (held_by, application) = if links(MACRO_REF_PROPERTY) {
+                (None, None)
+            } else if links(HELD_MACRO_REF_PROPERTY) {
+                (Some(stamped.clone().unwrap_or_else(|| "an application".to_string())), stamped)
+            } else {
+                return None;
+            };
+            Some(MacroLinkingControl {
+                sheet_index: *si,
+                sheet_name: sheet_names
+                    .get(*si)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Sheet{}", si + 1)),
+                row: *r,
+                col: *c,
+                held_by,
+                kind: crate::held_button_code::MacroLinkKind::Control,
+                caption: meta.properties.get("text").map(|p| p.value.clone()).unwrap_or_default(),
+                application,
+            })
         })
         .collect();
+    drop(controls);
+    {
+        let cell_types = state.cell_types.read().unwrap();
+        for ((si, r, c), assignment) in cell_types.iter() {
+            if assignment.type_id != crate::button_cells::BUTTON_CELL_TYPE_ID {
+                continue;
+            }
+            let names = |key: &str| {
+                assignment.params.get(key).is_some_and(|action| {
+                    action.get("kind").and_then(|k| k.as_str()) == Some("script")
+                        && action.get("scriptId").and_then(|s| s.as_str()) == Some(macro_id)
+                })
+            };
+            // A button cell's stamp names its application whether its action is
+            // live (a macro that application landed) or held.
+            let stamped = assignment
+                .params
+                .get(crate::button_cells::FROM_APPLICATION_PARAM)
+                .and_then(|v| v.get("application"))
+                .and_then(|a| a.as_str())
+                .map(str::to_string);
+            let held_by = if names(crate::button_cells::ACTION_PARAM) {
+                None
+            } else if names(crate::button_cells::HELD_ACTION_PARAM) {
+                Some(stamped.clone().unwrap_or_else(|| "an application".to_string()))
+            } else {
+                continue;
+            };
+            out.push(MacroLinkingControl {
+                sheet_index: *si,
+                sheet_name: sheet_names
+                    .get(*si)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Sheet{}", si + 1)),
+                row: *r,
+                col: *c,
+                held_by,
+                kind: crate::held_button_code::MacroLinkKind::Cell,
+                caption: assignment
+                    .params
+                    .get("label")
+                    .and_then(|l| l.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                application: stamped,
+            });
+        }
+    }
     // Deterministic order (sheet, row, col) so the warning reads consistently.
     out.sort_by_key(|c| (c.sheet_index, c.row, c.col));
     out
@@ -1118,15 +1745,33 @@ mod persistence_tests {
             .collect();
         ts_keys.sort();
 
-        let mut rust_keys: Vec<String> =
-            EXECUTABLE_CONTROL_PROPERTIES.iter().map(|k| k.to_string()).collect();
+        // EXECUTABLE + HELD (BUG-0257). A script writing a HELD key would stage
+        // code the next push publishes under the pusher's key -- the same harm
+        // as writing a live slot, one push later.
+        let mut rust_keys: Vec<String> = EXECUTABLE_CONTROL_PROPERTIES
+            .iter()
+            .chain(HELD_CONTROL_PROPERTIES.iter())
+            .map(|k| k.to_string())
+            .collect();
         rust_keys.sort();
 
         assert_eq!(
             rust_keys, ts_keys,
-            "the pull-side strip and the script-write refusal must name the same \
-             executable control properties"
+            "the pull-side strip, the held compartment and the script-write refusal \
+             must name the same control properties"
         );
+    }
+
+    /// Each executable slot has exactly one held twin, and the lists line up.
+    #[test]
+    fn every_executable_slot_has_its_own_held_slot() {
+        assert_eq!(EXECUTABLE_CONTROL_PROPERTIES.len(), HELD_CODE_PROPERTIES.len());
+        for key in EXECUTABLE_CONTROL_PROPERTIES {
+            let held = held_slot_of(key).expect("an executable slot has a held slot");
+            assert!(HELD_CONTROL_PROPERTIES.contains(&held));
+            assert!(!EXECUTABLE_CONTROL_PROPERTIES.contains(&held), "a held key is never live");
+        }
+        assert_eq!(held_slot_of("text"), None);
     }
 }
 

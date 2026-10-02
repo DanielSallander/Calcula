@@ -12,6 +12,7 @@ import {
   generateMacroSource,
   jsString,
   localizeInvariantNumber,
+  macroNeedsCellAccessMessage,
   mergeWrites,
   toIdentifier,
 } from "../lib/actionCodegen";
@@ -917,7 +918,7 @@ describe("wrappers", () => {
     expect(source).toContain('if (typeof context.onClick === "function") {');
     expect(source).toContain("context.onClick(async () => {");
     expect(source).toContain("await refresh(context.api);");
-    expect(source).toContain("needs an UNLOCKED script");
+    expect(source).toContain("needs cell access, and this run has none");
   });
 
   it("setup() RUNS the macro when the context is not a button", async () => {
@@ -945,7 +946,13 @@ return setup;`) as () => (
     expect(calls).toEqual([[3, 4, "hi"]]);
   });
 
-  it("setup() refuses, out loud, when the tier gives it no api", () => {
+  // OWNERB FOLLOW-UP F12: without cell access the scaffold THROWS -- before
+  // a single call -- naming how to get it. It used to notify and RETURN, so
+  // the mount resolved and the run was reported (by the caller and on the
+  // Rust run row) as "ran" when nothing had changed.
+  // SABOTAGE: restore `context.notify(...); return;` in wrapObjectScript
+  // (actionCodegen.ts) -> setup() returns instead of throwing.
+  it("setup() THROWS, naming how to get cell access, when the run gives it no api", () => {
     const { source } = generateMacroSource([act(writes([[0, 0, "x"]]))], {
       target: "objectScript",
       wrapper: "objectScript",
@@ -959,8 +966,16 @@ return setup;`) as () => (
 return setup;`) as () => (
       ctx: unknown,
     ) => void;
-    factory()({ api: null, notify: (m: string) => messages.push(m) });
-    expect(messages.join(" ")).toContain("UNLOCKED");
+    expect(() => factory()({ api: null, notify: (m: string) => messages.push(m) })).toThrow(
+      macroNeedsCellAccessMessage("Needs api"),
+    );
+    // An error, not a toast that lets the run resolve.
+    expect(messages).toEqual([]);
+    const message = macroNeedsCellAccessMessage("Needs api");
+    expect(message).toContain("Developer > Macros > Run");
+    expect(message).toContain("a button that runs it");
+    expect(message).toContain("the command line");
+    expect(message).toContain("Nothing was changed.");
   });
 
   it("wraps the body in a single undo transaction by default", () => {
@@ -1007,7 +1022,7 @@ describe("header", () => {
     expect(source).toContain("// Macro: Monthly close");
     expect(source).toContain("// Recorded: 2026-07-31T09:00:00.000Z  (1 action)");
     expect(source).toContain("// Target runtime: Calcula object script");
-    expect(source).toContain("// Requires an UNLOCKED script");
+    expect(source).toContain("// Needs cell access (`context.api`)");
   });
 
   it("lists the actions the target cannot express", () => {

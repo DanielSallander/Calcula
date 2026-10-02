@@ -5,8 +5,8 @@
 // `ScriptSummary` carries `sourcePackage` for exactly this picker, and the
 // picker dropped it: a publisher's module and the user's own were two options
 // with the same text, no line said the button would run published code, and
-// "Function to call" was offered for a module the run planner
-// (`planStoredModuleRun`) refuses to append a call to — so the user learned of
+// "Function to call" was offered for a module the run planner (today the Rust
+// button door's `plan_cell_action`) refuses to append a call to — so the user learned of
 // the refusal only when the button did nothing. Renders the real dialog over a
 // fake listing and asserts what is shown, what is withheld, and what is applied.
 

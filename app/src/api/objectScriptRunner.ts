@@ -20,10 +20,24 @@
 //          `handleMount` -> `trackActivity("setup", ...)`), and REJECTS with the
 //          script's own error when setup throws. So "mount, await, unmount" is a
 //          complete, synchronous-looking one-shot execution with a real result —
-//          no new runtime, no new privilege, and every existing guarantee
-//          intact: Script Security gates the mount, the tier decides whether
-//          `context.api` is non-null, the broker allowlist gates every call, and
-//          the audit ring records it like any other object script.
+//          no new runtime, and every existing guarantee intact: Script Security
+//          gates the mount, the tier decides whether `context.api` is non-null,
+//          the broker allowlist gates every call, and the audit ring records it
+//          like any other object script.
+//
+//          ONE NARROW EXCEPTION, BY OWNER DECISION B (2026-09-30): "An APPROVED
+//          application macro that the user runs EXPLICITLY -- a button click,
+//          Developer > Macros > Run, the command line -- gets the same CELL
+//          access in either runtime (the module runtime, Calcula.setCellValue,
+//          already has it after approval). Standing object scripts, and any run
+//          a script starts on its own, stay restricted." The door the person
+//          used hands this runner a one-time pass (`explicitRun`,
+//          explicitMacroRun.ts); the runner forwards it and decides nothing. The
+//          mount boundary (`admitMount`, scriptHost/host.ts) grants cell access
+//          -- a closed set of cell rows beside the RESTRICTED tier, for as long
+//          as the run lasts (scriptHost/explicitRunGrant.ts) -- only after every
+//          gate admitted the exact approved bytes. A script's `api.runMacro`
+//          carries no pass, so a run a script starts stays restricted.
 //
 //          WHY IT IS AN @api PRIMITIVE AND NOT A MACRO-RECORDER HELPER. "Execute
 //          this script source once" is a Bridge on the Decision Matrix: the
@@ -88,8 +102,10 @@ import {
   hostCloseBatchLeftOpen,
   hostIsMounted,
   hostMountScript,
+  hostSettleExplicitRun,
   hostUnmountScript,
   workerRealmAvailable,
+  type ExplicitRunEnd,
 } from "./scriptHost/host";
 import { parseDeclaredCapabilities } from "./scriptHost/capabilities";
 import {
@@ -100,8 +116,11 @@ import {
   scriptOriginForStoredRecord,
   type MountOrigin,
 } from "./scriptHost/scriptOrigin";
-import { getWorkbookScript, listWorkbookScripts } from "./workbookScripts";
+import { getWorkbookScript, listWorkbookScripts, type ScriptRunTrigger } from "./workbookScripts";
 import { SCRIPT_API_VERSION, type ScriptAccessLevel, type ScriptableObjectType } from "./scriptableObjects";
+import { voidExplicitMacroRun, type ExplicitMacroRun } from "./explicitMacroRun";
+import { ungrantedApiCalls } from "./scriptHost/explicitRunGrant";
+import { invokeBackend } from "./backend";
 
 /** What to run, and as what. */
 export interface RunObjectScriptOnceOptions {
@@ -145,9 +164,77 @@ export interface RunObjectScriptOnceOptions {
    * Object Scripts pane, which lists REGISTERED scripts and this one never is.
    */
   idPrefix?: string;
+  /**
+   * The button a click ran this for (phase 3 of BUG-0257). Handed to the mount
+   * gate, which verifies it against the backend's store before an
+   * application's code mounts, and names the button on the audit row. A claim
+   * that can only narrow what runs; not consulted for local code.
+   */
+  trigger?: ScriptRunTrigger;
+  /**
+   * The pass the door a PERSON used minted for this run (owner decision B;
+   * explicitMacroRun.ts). NOT a tier request -- nothing here reads it as one.
+   * It travels to the mount, where `admitMount` spends it and, only for an
+   * approved application artifact run once after every gate admitted it,
+   * grants cell access. This runner spends it too on every path that never
+   * reaches the mount, so a pass is used by this run or by nothing.
+   */
+  explicitRun?: ExplicitMacroRun;
 }
 
 let runSeq = 0;
+
+/** What the pre-flight's refusal door answered (Rust `ExplicitRunRefusalAnswer`). */
+interface ExplicitRunRefusalAnswerWire {
+  readonly reason?: string;
+  readonly message?: string | null;
+}
+
+/** How the pre-flight's refusal reached the trail. */
+interface RefusedBeforeRun {
+  /** Why it could not be recorded, or null when it was. */
+  readonly unrecorded: string | null;
+  /**
+   * The approval's own refusal, when Rust found the macro's code NOT approved
+   * (review of M6b): the person reads THAT instead of the pre-flight's
+   * sentence, which speaks of approved code. Null otherwise.
+   */
+  readonly notApproved: string | null;
+}
+
+/**
+ * Put the pre-flight's refusal on the persistent audit trail
+ * (`audit_explicit_run_refusal`, owner decision B follow-up F8). Rust reads the
+ * application from the module store, asks the APPROVAL first -- an unapproved
+ * macro is recorded `notConsented` and its refusal handed back -- and otherwise
+ * records the method names that appear in `source`. FAIL-SOFT, BUT SAID: the
+ * refusal stands either way; `unrecorded` says why it could not be recorded
+ * (logged, and appended to the refusal the user reads).
+ */
+async function recordRefusedBeforeRun(
+  scriptId: string,
+  source: string,
+  methods: readonly string[],
+): Promise<RefusedBeforeRun> {
+  try {
+    const answer = await invokeBackend<ExplicitRunRefusalAnswerWire | null>("audit_explicit_run_refusal", {
+      scriptId,
+      source,
+      methods: [...methods],
+    });
+    const notApproved =
+      answer?.reason === "notConsented" && typeof answer.message === "string" && answer.message.trim() !== ""
+        ? answer.message
+        : null;
+    return { unrecorded: null, notApproved };
+  } catch (err) {
+    console.error(
+      `[objectScriptRunner] the audit trail did not record that "${scriptId}" was refused before it ran:`,
+      err,
+    );
+    return { unrecorded: err instanceof Error ? err.message : String(err), notApproved: null };
+  }
+}
 
 /**
  * A refusal for the one thing this module may never guess at: whose code this
@@ -317,6 +404,7 @@ export async function runObjectScriptOnce(
   } = options;
 
   if (!workerRealmAvailable()) {
+    voidExplicitMacroRun(options.explicitRun);
     throw new Error(
       "Scripts cannot run in this environment: the worker realm (Web Worker) is unavailable.",
     );
@@ -324,7 +412,10 @@ export async function runObjectScriptOnce(
 
   // The artifact decides, not the caller. Resolved BEFORE anything is mounted,
   // and before the run id is minted, so a refusal costs nothing.
-  const { origin, artifact } = await resolveArtifactOrigin({ scriptId, source });
+  const { origin, artifact } = await resolveArtifactOrigin({ scriptId, source }).catch((err: unknown) => {
+    voidExplicitMacroRun(options.explicitRun);
+    throw err;
+  });
   // REFUSE A CONTRADICTION, DERIVE AN ABSENCE. A caller that says nothing about
   // the tier gets the artifact's own answer (unlocked for local, restricted for
   // distributed). A caller that EXPLICITLY asks for "unlocked" on a distributed
@@ -333,6 +424,7 @@ export async function runObjectScriptOnce(
   // code that rests on it — intact and wrong. The macro library derives its
   // request from the same record, so this fires only on a genuine caller bug.
   if (origin.kind === "package" && options.accessLevel === "unlocked") {
+    voidExplicitMacroRun(options.explicitRun);
     throw new Error(
       `"${name}" arrived inside the application "${origin.name}", so it cannot be run ` +
         "at the unlocked tier. Distributed code runs restricted and receives " +
@@ -345,6 +437,35 @@ export async function runObjectScriptOnce(
     origin,
     options.accessLevel ?? "unlocked",
   );
+  // NO HALF-RUNS (owner decision B). A person's run of an application's macro
+  // may get CELL access and nothing more. A macro that also formats, sorts or
+  // inserts would write its cells and then be refused at its first call outside
+  // that access, leaving the sheet half-changed with no single undo step -- so
+  // it is refused HERE, before anything runs, with those calls named. The
+  // broker stays the authority for whatever this text scan cannot see.
+  if (origin.kind === "package" && options.explicitRun !== undefined) {
+    const outside = ungrantedApiCalls(source);
+    if (outside.length > 0) {
+      voidExplicitMacroRun(options.explicitRun);
+      // ON THE PERSISTENT TRAIL (owner decision B, follow-up F8): this refusal
+      // happens before the mount gate is ever asked, so without this no row
+      // would say an application's macro was refused.
+      const recorded = artifact ? await recordRefusedBeforeRun(artifact.id, source, outside) : null;
+      // ITS CODE IS NOT APPROVED (review of M6b): that is why it does not run,
+      // in the approval's own words -- never "such a macro may change cells",
+      // which speaks of approved code and invites copying it into your own.
+      if (recorded?.notApproved) throw new Error(recorded.notApproved);
+      const unrecorded = recorded?.unrecorded ?? null;
+      throw new Error(
+        `"${name}" was not run: it came in the application "${origin.name}". When you run ` +
+          "such a macro yourself it may read and change cells on any sheet, but it also " +
+          `calls ${outside.join(", ")}, which is outside that access. ` +
+          "Nothing was changed. To keep using it, adapt it into a macro of your own " +
+          "(Developer > Macros: edit it and choose \"Save as my copy\")." +
+          (unrecorded ? ` (This refusal could not be recorded on the audit trail: ${unrecorded})` : ""),
+      );
+    }
+  }
   // NOTE: there is no consent call here, and its absence is the design. The
   // derived origin travels into the mount below as `provenance`/`packageName`,
   // and `hostMountScript` refuses to create a realm for a distributed
@@ -367,6 +488,7 @@ export async function runObjectScriptOnce(
   // user's gesture (or another script) opened while the run was going read as
   // "this run's", and was cancelled -- its opener's writes lost their undo step.
 
+  let failure: { readonly error: unknown } | null = null;
   try {
     await hostMountScript({
       id,
@@ -403,35 +525,93 @@ export async function runObjectScriptOnce(
       // names none; the gate never asks about it.
       consentSurface: "object-script",
       consentArtifacts: artifact ? [artifact] : undefined,
+      // The button a click claims (phase 3 of BUG-0257), for the mount gate to
+      // verify against its own store. Only a distributed mount is asked.
+      consentTrigger: options.trigger,
+      // THIS MOUNT IS A RUN (Developer > Macros > Run, the CLI, a button, a
+      // script's runMacro): the gate is asked before Script Security and again
+      // after it, and the second answer writes the always-on run row -- with or
+      // without a button. Only a run a PERSON started carries a pass below; a
+      // script's runMacro does not, so it stays restricted.
+      consentRun: true,
+      // The person's pass, forwarded untouched: `admitMount` spends it and
+      // decides, after every gate, whether this run may change cells.
+      explicitRun: options.explicitRun,
       apiVersion: SCRIPT_API_VERSION,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    // The mount deadline is phrased for a MOUNT ("Script mount timed out"),
-    // which is meaningless to someone who pressed Run. Here the mount IS the
-    // run, so say what actually happened and what the limit is.
-    if (/mount timed out/i.test(message)) {
-      throw new Error(
-        `"${name}" was still running after 10 seconds and was stopped. ` +
-          "Whatever it had already written stays in the sheet, but it has no " +
-          "single undo step — check the cells it touched. Split long work into " +
-          "smaller steps.",
-      );
-    }
-    throw err;
-  } finally {
-    // Awaited, and BEFORE the unmount, so the user's next edit cannot land in
-    // the transaction first. (The unmount sweeps a batch begun after this. On
-    // a FAILED run the mount's own teardown has swept already, and this then
-    // awaits that sweep's cancel instead of returning before it lands.)
-    try {
-      await hostCloseBatchLeftOpen(id);
-    } catch (cleanupError) {
-      console.error(
-        "[objectScriptRunner] could not close the undo transaction the run left open:",
-        cleanupError,
-      );
-    }
-    if (hostIsMounted(id)) hostUnmountScript(id);
+    failure = { error: err };
   }
+  // Awaited, and BEFORE the unmount, so the user's next edit cannot land in
+  // the transaction first. (The unmount sweeps a batch begun after this. On
+  // a FAILED run the mount's own teardown has swept already, and this then
+  // awaits that sweep's cancel instead of returning before it lands.)
+  try {
+    await hostCloseBatchLeftOpen(id);
+  } catch (cleanupError) {
+    console.error(
+      "[objectScriptRunner] could not close the undo transaction the run left open:",
+      cleanupError,
+    );
+  }
+  if (hostIsMounted(id)) hostUnmountScript(id);
+  // ALL OR NOTHING (owner decision B, follow-up F9). A run with cell access is
+  // ONE undo step, committed when it completes and TAKEN BACK, every change,
+  // when it does not -- after every call it made has finished. Its realm is
+  // gone by now, so its ending is on its way; this waits for it, so the person
+  // is told what is true by the time they read it. Null for any other run.
+  const end = await hostSettleExplicitRun(id);
+  if (failure !== null) throw describeRunFailure(name, failure.error, end);
+}
+
+/**
+ * What the person who started a run that failed is told.
+ *
+ * The mount deadline is phrased for a MOUNT ("Script mount timed out"), which
+ * is meaningless to someone who pressed Run; here the mount IS the run, so it
+ * says what happened and what the limit is. A run with cell access (owner
+ * decision B) that stopped part-way was taken back whole (F9), so it says
+ * NOTHING WAS CHANGED -- or, when it could not be taken back, why, and that
+ * its cells need checking. Any other failure passes through untouched.
+ */
+function describeRunFailure(name: string, error: unknown, end: ExplicitRunEnd | null): unknown {
+  const message = error instanceof Error ? error.message : String(error);
+  const timedOut = /mount timed out/i.test(message);
+  const tookBack = end !== null && !end.completed && end.undoable;
+  if (!tookBack) {
+    if (!timedOut) return error;
+    return new Error(
+      `"${name}" was still running after 10 seconds and was stopped. ` +
+        "Whatever it had already written stays in the sheet, but it has no " +
+        "single undo step — check the cells it touched. Split long work into " +
+        "smaller steps.",
+    );
+  }
+  const what = timedOut
+    ? `"${name}" was still running after 10 seconds and was stopped.`
+    : message.startsWith(`"${name}" stopped`)
+      ? message // the realm's own crash sentence already says it stopped
+      : `"${name}" stopped before it finished: ${/[.!?]$/.test(message.trim()) ? message.trim() : `${message.trim()}.`}`;
+  const outcome = end.rolledBack
+    ? describeRolledBack(end.othersUndone)
+    : `Its changes could not be undone automatically (${end.notUndoneBecause ?? "no reason was given"}), ` +
+      "so check the cells it changed.";
+  return new Error(`${what} ${outcome}${timedOut ? " Split long work into smaller steps." : ""}`);
+}
+
+/**
+ * What a taken-back run says it undid. The rollback takes back everything
+ * recorded after the run's savepoint -- also a cell somebody else wrote while
+ * it ran (the person typing meanwhile, another script) -- so "nothing was
+ * changed" is said only when it took back the run's own writes alone; when it
+ * took back others too, it says how many, so the person can check them.
+ */
+function describeRolledBack(othersUndone: number): string {
+  if (!(othersUndone > 0)) return "Every change it had made was undone, so nothing was changed.";
+  const one = othersUndone === 1;
+  return (
+    `Every change it had made was undone -- and so ${one ? "was" : "were"} ${othersUndone} other ` +
+    `cell ${one ? "change" : "changes"} made while it ran (yours or another script's), because ` +
+    `${one ? "it was" : "they were"} recorded in the same undo step. Check ${one ? "that cell" : "those cells"}.`
+  );
 }

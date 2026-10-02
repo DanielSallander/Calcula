@@ -91,7 +91,24 @@ describe("the user-click sites", () => {
     const direct = [...index.matchAll(/updateSlicerSelectionAsync\s*\(/g)];
     expect(direct).toHaveLength(1);
     expect(index).toMatch(/setSelectedItems\s*\([^)]*\)\s*\{\s*await updateSlicerSelectionAsync\s*\(/);
-    expect(index).toMatch(/clickSlicerItem\s*\(/);
-    expect(index).toMatch(/clickSlicerClearFilter\s*\(/);
+
+    // The pointer's clicks are the content gesture's (BUG-0258 design phase
+    // 4): an item click, a run and a button release all go through the queue,
+    // from lib/slicerItemDrag.ts. index.ts's frame click commits nothing.
+    const drag = code("../slicerItemDrag.ts");
+    expect(drag).not.toMatch(/updateSlicerSelectionAsync\s*\(/);
+    expect(drag).toMatch(/clickSlicerItem\s*\(/);
+    expect(drag).toMatch(/clickSlicerItemRun\s*\(/);
+    expect(drag).toMatch(/clickSlicerClearFilter\s*\(/);
+    expect(index).not.toMatch(/clickSlicerItem\s*\(|clickSlicerItemRun\s*\(|clickSlicerClearFilter\s*\(/);
+  });
+
+  it("a run is queued as ONE click (one commit, one undo step), computed when it runs", () => {
+    const store = code("../slicerStore.ts");
+    const at = store.indexOf("export function clickSlicerItemRun(");
+    expect(at, "clickSlicerItemRun is gone").toBeGreaterThan(0);
+    const fn = store.slice(at, store.indexOf("\n}\n", at));
+    expect(fn).toMatch(/return queueSlicerClick\(\s*slicerId,\s*\(slicer, items\) => selectionAfterItemRun\(slicer, items, values, additive\)\s*\)/);
+    expect(fn).not.toMatch(/updateSlicerSelectionAsync\s*\(/);
   });
 });

@@ -46,7 +46,11 @@ export function ObjectsSection({
   const perSheetFeatures: { label: string; sheets: string[] }[] = [
     { label: "Conditional formatting", sheets: overview.conditionalFormatSheets },
     { label: "Data validation", sheets: overview.dataValidationSheets },
-    { label: "Cell-anchored controls (disarmed at pull)", sheets: overview.controlSheets },
+    // NOT "disarmed at pull" (phase 4 of BUG-0257): a button's static inline
+    // code and its link to one of the application's own macros arrive HELD and
+    // run after the application's approval; only other code is removed. Kept
+    // short: the label cell does not wrap.
+    { label: "Cell-anchored controls (button code runs after approval)", sheets: overview.controlSheets },
     { label: "Comments (publisher opted in)", sheets: overview.commentSheets },
     { label: "Scenarios", sheets: overview.scenarioSheets },
     { label: "Outlines (row/column groups)", sheets: overview.outlineSheets },

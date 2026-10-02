@@ -277,9 +277,12 @@ fn distributed_notebook_refusal(
 ///
 /// A notebook id that is not in the store is not a stored notebook (a cell run
 /// against a document that was just deleted); there is nothing whose provenance
-/// could be read, and the run has no package to be refused for.
+/// could be read, and the run has no package to be refused for. It, and a cell
+/// of the user's own notebook, still meets the held-button-code backstop
+/// ([`own_notebook_cell_backstop`]).
 fn require_distributed_notebook_consent(
     app: &tauri::AppHandle,
+    app_state: &AppState,
     script_state: &ScriptState,
     notebook_id: &str,
     cell_id: &str,
@@ -294,9 +297,6 @@ fn require_distributed_notebook_consent(
             .get(notebook_id)
             .map(|nb| (nb.source_package.clone(), nb.name.clone()))
     }; // guard dropped: nothing below may hold it, and no await follows it
-    let Some((source_package, name)) = record else {
-        return Ok(());
-    };
     // THE USER'S OWN NOTEBOOK NEVER PAYS FOR THE CONSENT FILE. This gate runs
     // once per CELL on every path (run / run-all / rewind / run-from all funnel
     // through `run_cell_internal`), and it used to read and parse the whole
@@ -304,11 +304,15 @@ fn require_distributed_notebook_consent(
     // so a Run All over N local cells was N parses of a file that could not
     // change the answer. The blank-stamp rule below is the same one the pure
     // half applies (and its tests pin); this is only the order.
-    if !is_stamped_package(source_package.as_deref()) {
-        return Ok(());
-    }
+    let stamped = record.filter(|(source_package, _)| is_stamped_package(source_package.as_deref()));
+    let Some((source_package, name)) = stamped else {
+        // A cell of no stored notebook, or of the user's own: the user's own
+        // ad-hoc code -- which, exactly like `run_script`'s ad-hoc branch, an
+        // application's HELD button code is not.
+        return own_notebook_cell_backstop(app_state, script_state, source);
+    };
     let consent_file = crate::calp_commands::read_script_consent_file(app);
-    match distributed_notebook_refusal(
+    if let Some(message) = distributed_notebook_refusal(
         source_package.as_deref(),
         notebook_id,
         &name,
@@ -316,9 +320,43 @@ fn require_distributed_notebook_consent(
         source,
         consent_file.as_ref(),
     ) {
-        Some(message) => Err(message),
-        None => Ok(()),
+        return Err(message);
     }
+    // APPROVED application code with grid write-back: the working-copy
+    // private-sheet rule and the always-on trail, as for a macro.
+    let application = source_package.as_deref().map(str::trim).unwrap_or_default();
+    super::application_code_gate::notebook_run_gate(
+        app_state,
+        application,
+        &notebook_consent_script_id(notebook_id, cell_id),
+        source,
+    )
+}
+
+/// THE BACKSTOP FOR THE USER'S OWN CELL (M6): a cell of a notebook of the
+/// user's own, or of no stored notebook, runs as the user's own ad-hoc code
+/// and never asks the consent file -- so, exactly like `run_script`'s ad-hoc
+/// branch, it may not be (or carry) an application's HELD button code, which
+/// runs only from its button through the button door after the approval of its
+/// exact bytes (`application_code_gate::refuse_held_code_outside_its_button`,
+/// which records the refusal). Held code one of the user's own stored modules
+/// also carries is the user's too. Reads the module store (released at once),
+/// then the controls; never the consent file.
+pub(crate) fn own_notebook_cell_backstop(
+    app_state: &AppState,
+    script_state: &ScriptState,
+    source: &str,
+) -> Result<(), String> {
+    let own_modules: Vec<String> = script_state
+        .workbook_scripts
+        .read()
+        .map_err(|e| e.to_string())?
+        .values()
+        .filter(|s| s.source_package.is_none())
+        .map(|s| s.source.clone())
+        .collect();
+    let own: Vec<&str> = own_modules.iter().map(String::as_str).collect();
+    super::application_code_gate::refuse_held_code_outside_its_button(app_state, "notebook", source, None, &own)
 }
 
 /// True when a cell holds PROSE, not JavaScript.
@@ -386,7 +424,7 @@ async fn run_cell_internal(
     // arrived inside somebody's .calp does not run on the strength of the
     // user's trust in their OWN code. Checked on every path, because run /
     // run-all / rewind / run-from all funnel through here.
-    require_distributed_notebook_consent(app, script_state, notebook_id, cell_id, source)?;
+    require_distributed_notebook_consent(app, app_state, script_state, notebook_id, cell_id, source)?;
 
     // Phase 1 (sync): clone AppState data + checkpoint bookkeeping
     let grids = app_state.grids.read().map_err(|e| e.to_string())?.clone();

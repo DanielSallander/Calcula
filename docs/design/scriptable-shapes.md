@@ -325,7 +325,7 @@ section.
   `checkShapeSetProperty` in `app/src/api/scriptHost/validators.ts:4072-4086`.
   Bytes enter the document only through the picker behind `file.picker` /
   `cap.fileImportMedia`, which validates and caps them host-side. See
-  `wave3-scripting-security.md` §12 (BUG-0086).
+  `wave3-scripting-security.md` §10 (BUG-0086).
 - **Restricted access**: By default, shape scripts run at the `"restricted"` access level with read-only cell access. The `"unlocked"` level provides full cell read/write, sheet operations, and command execution.
 - **Per-script hardened Worker realm**: Shape scripts do **not** run in a "sandboxed function scope". Each runs in its own hardened Worker realm (blob-ESM import, neutered globals, no ambient DOM/Tauri, all privileged reach broker-mediated) — `app/src/api/scriptSurfaces.ts:87-99`, `script-sandbox-architecture.md` §3.
 

@@ -46,6 +46,7 @@ import {
   overlayGetRowHeight,
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
+  onFloatingHoverChanged,
   type GridRegion,
   type OverlayRenderContext,
 } from "@api/gridOverlays";
@@ -89,13 +90,16 @@ import {
 } from "./handlers/selectionHandler";
 import type { PivotRegionData, PivotEditorViewData, BiPivotModelInfo } from "./types";
 import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, getPivotCellWindow, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies } from "./lib/pivot-api";
+import { getPivotViewCell } from "./lib/pivotChromeActions";
 import {
-  togglePivotHeaderAt,
-  openPivotReportFilterAt,
-  openPivotHeaderFilter,
-  cancelPivotLoading,
-  getPivotViewCell,
-} from "./lib/pivotChromeActions";
+  overlayIconBounds,
+  overlayHeaderFilterBounds,
+  overlayFilterDropdownBounds,
+  overlayCancelBounds,
+  ICON_HIT_PADDING,
+  clearOverlayIconBounds,
+  claimPivotCellChrome,
+} from "./lib/pivotCellChrome";
 import { runPivotCellDoubleClick } from "./lib/pivotCellDoubleClick";
 import {
   publishPivotRegions,
@@ -105,7 +109,11 @@ import {
 } from "./lib/pivotVisualRegions";
 import { prunePivotVisualRecords, resetPivotVisualHits, getPivotVisualRecord } from "./lib/pivotVisualHits";
 import { resetPivotVisualScrolls } from "./lib/pivotVisualScroll";
-import { installPivotVisual, clearPivotVisualHoverOutside } from "./lib/pivotVisualOverlay";
+import {
+  clearPivotVisualHoverUnlessHovered,
+  installPivotVisual,
+  updatePivotVisualHoverAt,
+} from "./lib/pivotVisualOverlay";
 import {
   notePivotCreated,
   adoptCreatedCanvasPivot,
@@ -184,63 +192,12 @@ function getThemeForPivot(pivotId: string): PivotTheme {
 }
 
 // ============================================================================
-// Expand/Collapse Icon Bounds (populated during overlay rendering)
+// In-cell chrome bounds (populated during overlay rendering)
 // ============================================================================
-
-interface StoredIconBounds {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  gridRow: number;
-  gridCol: number;
-  isExpanded: boolean;
-  isRow: boolean;
-  pivotId: string;
-}
-
-/** Map of icon bounds keyed by "pivotId-gridRow-gridCol", updated every render. */
-const overlayIconBounds = new Map<string, StoredIconBounds>();
-
-/** Extra pixels around icon bounds for easier click targeting (12px icon -> 20px hit area). */
-const ICON_HIT_PADDING = 4;
-
-interface StoredHeaderFilterBounds {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  zone: 'row' | 'column';
-  pivotId: string;
-}
-
-/** Map of header filter button bounds keyed by "pivotId-zone", updated every render. */
-const overlayHeaderFilterBounds = new Map<string, StoredHeaderFilterBounds>();
-
-interface StoredFilterDropdownBounds {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  fieldIndex: number;
-  pivotId: string;
-  gridRow: number;
-  gridCol: number;
-}
-
-/** Map of filter dropdown button bounds keyed by "pivotId-fieldIndex", updated every render. */
-const overlayFilterDropdownBounds = new Map<string, StoredFilterDropdownBounds>();
-
-/** Map of cancel button bounds keyed by pivotId, updated every render. */
-const overlayCancelBounds = new Map<string, { x: number; y: number; width: number; height: number }>();
-
-/** Clear all stored icon bounds (called at start of each render cycle). */
-function clearOverlayIconBounds(): void {
-  overlayIconBounds.clear();
-  overlayHeaderFilterBounds.clear();
-  overlayFilterDropdownBounds.clear();
-  overlayCancelBounds.clear();
-}
+// The +/- icons, report filter combos, Row/Column Labels buttons and the
+// loading Cancel, as painted, live in lib/pivotCellChrome.ts together with the
+// ONE cell click interceptor that reads them (a release claim: the chrome acts
+// on the RELEASE over the same chrome, BUG-0258 design phase 4).
 
 /** Cache of pivot region bounds keyed by pivotId, for coordinate conversion in click handlers. */
 const gridRegionsCache = new Map<string, { startRow: number; startCol: number; endRow: number; endCol: number }>();
@@ -1417,115 +1374,19 @@ function activate(context: ExtensionContext): void {
     })
   );
 
-  // Register click interceptor - handle cancel button clicks during loading
+  // ONE cell click interceptor for the in-cell chrome -- the loading Cancel,
+  // the +/- icons, the report filter combos and the Row/Column Labels buttons.
+  // A press on the chrome is CLAIMED for its RELEASE over the same piece of
+  // chrome, and sliding off cancels (BUG-0258 design phase 4; Core holds the
+  // press, lib/pivotCellChrome.ts says what the chrome is and does). It used
+  // to be four interceptors that acted on the PRESS.
   cleanupFunctions.push(
-    context.grid.cellClicks.registerClickInterceptor(async (_row, _col, event) => {
-      if (!cachedCanvasElement || overlayCancelBounds.size === 0) return false;
-
-      const rect = cachedCanvasElement.getBoundingClientRect();
-      const canvasX = event.clientX - rect.left;
-      const canvasY = event.clientY - rect.top;
-
-      for (const [pivotId, bounds] of overlayCancelBounds.entries()) {
-        if (
-          canvasX >= bounds.x &&
-          canvasX <= bounds.x + bounds.width &&
-          canvasY >= bounds.y &&
-          canvasY <= bounds.y + bounds.height
-        ) {
-          // Restore the previous view at once, suppress the in-flight result
-          // and ask the backend to stop (shared with the canvas pivot box).
-          overlayCancelBounds.delete(pivotId);
-          cancelPivotLoading(pivotId);
-          return true;
-        }
-      }
-      return false;
-    })
-  );
-
-  // Register click interceptor - handle expand/collapse icon clicks
-  cleanupFunctions.push(
-    context.grid.cellClicks.registerClickInterceptor(async (row, col, event) => {
-      // Check if click is within any stored expand/collapse icon bounds
-      if (!cachedCanvasElement) return false;
-      const canvas = cachedCanvasElement;
-
-      const rect = canvas.getBoundingClientRect();
-      const canvasX = event.clientX - rect.left;
-      const canvasY = event.clientY - rect.top;
-
-      for (const bounds of overlayIconBounds.values()) {
-        if (
-          canvasX >= bounds.x - ICON_HIT_PADDING &&
-          canvasX <= bounds.x + bounds.width + ICON_HIT_PADDING &&
-          canvasY >= bounds.y - ICON_HIT_PADDING &&
-          canvasY <= bounds.y + bounds.height + ICON_HIT_PADDING
-        ) {
-          // Found a matching icon - toggle expand/collapse (shared with the
-          // canvas pivot box; false when the cell is not in the cached view)
-          const pivotRowIndex = bounds.gridRow - (gridRegionsCache.get(bounds.pivotId)?.startRow ?? 0);
-          const pivotColIndex = bounds.gridCol - (gridRegionsCache.get(bounds.pivotId)?.startCol ?? 0);
-          return togglePivotHeaderAt(bounds.pivotId, pivotRowIndex, pivotColIndex, bounds.isRow);
-        }
-      }
-      return false;
-    })
-  );
-
-  // Register click interceptor - handle filter dropdown clicks
-  cleanupFunctions.push(
-    context.grid.cellClicks.registerClickInterceptor(async (_row, _col, event) => {
-      if (!cachedCanvasElement) return false;
-
-      const rect = cachedCanvasElement.getBoundingClientRect();
-      const canvasX = event.clientX - rect.left;
-      const canvasY = event.clientY - rect.top;
-
-      for (const bounds of overlayFilterDropdownBounds.values()) {
-        if (
-          canvasX >= bounds.x &&
-          canvasX <= bounds.x + bounds.width &&
-          canvasY >= bounds.y &&
-          canvasY <= bounds.y + bounds.height
-        ) {
-          // Shared with the canvas pivot box.
-          return openPivotReportFilterAt(
-            bounds.gridRow,
-            bounds.gridCol,
-            bounds.fieldIndex,
-            event.clientX,
-            event.clientY,
-          );
-        }
-      }
-      return false;
-    })
-  );
-
-  // Register click interceptor - handle header filter button clicks (Row Labels / Column Labels)
-  cleanupFunctions.push(
-    context.grid.cellClicks.registerClickInterceptor(async (_row, _col, event) => {
-      if (!cachedCanvasElement) return false;
-
-      const rect = cachedCanvasElement.getBoundingClientRect();
-      const canvasX = event.clientX - rect.left;
-      const canvasY = event.clientY - rect.top;
-
-      for (const bounds of overlayHeaderFilterBounds.values()) {
-        if (
-          canvasX >= bounds.x &&
-          canvasX <= bounds.x + bounds.width &&
-          canvasY >= bounds.y &&
-          canvasY <= bounds.y + bounds.height
-        ) {
-          // Found a matching header filter button - open header filter dropdown
-          openPivotHeaderFilter(bounds.pivotId, bounds.zone, event.clientX, event.clientY + 2);
-          return true;
-        }
-      }
-      return false;
-    })
+    context.grid.cellClicks.registerClickInterceptor((_row, _col, event) =>
+      claimPivotCellChrome(event, {
+        canvas: () => cachedCanvasElement,
+        regionOrigin: (pivotId) => gridRegionsCache.get(pivotId),
+      }),
+    )
   );
 
   // Register double-click interceptor - toggle hierarchy on header double-click,
@@ -1533,8 +1394,10 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(
     context.grid.cellClicks.registerDoubleClickInterceptor((row, col, event) => {
       // Check if double-click is on a +/- icon -> just consume it (no toggle).
-      // The single-click interceptor already handled the toggle; if we toggled
-      // again here the state would flip back (double-toggle bug).
+      // Its first click already toggled at its RELEASE (the chrome's release
+      // claim) and its second release was dropped by the double-click guard
+      // (lib/pivotChromeRepeat.ts, the canvas box's own); toggling here as
+      // well would flip the state again.
       if (cachedCanvasElement) {
         const rect = cachedCanvasElement.getBoundingClientRect();
         const canvasX = event.clientX - rect.left;
@@ -1639,7 +1502,7 @@ function activate(context: ExtensionContext): void {
           hitCtx.col <= hitCtx.region.endCol
         );
       },
-      getCursor: (hitCtx) => {
+      getCellCursor: (hitCtx) => {
         const { canvasX, canvasY } = hitCtx;
 
         // Check expand/collapse icon bounds
@@ -1699,7 +1562,7 @@ function activate(context: ExtensionContext): void {
 
   // CANVAS pivots: a floating `pivot-visual` box per canvas pivot -- painted
   // clipped and scrolled inside its frame, movable/resizable through Core,
-  // with its chrome reached through the body-drag claim (the cellClicks
+  // with its chrome reached as CONTENT in its zone answer (the cellClicks
   // interceptors above are never asked over a floating object), its own
   // double-click, object selection (Tab / Escape on the canvas) and wheel.
   cleanupFunctions.push(
@@ -1719,11 +1582,12 @@ function activate(context: ExtensionContext): void {
   );
 
   // Track filter dropdown hover state for visual highlight via document-level
-  // mousemove (the core cursor system handles pointer cursor via getCursor above)
+  // mousemove (the core cursor system handles pointer cursor via getCellCursor above)
   const handleDocMouseMove = (event: MouseEvent) => {
-    // A canvas pivot box's hover (set by its getCursor) must clear when the
-    // pointer leaves the box -- getCursor is only asked over an object.
-    clearPivotVisualHoverOutside(event.clientX, event.clientY);
+    // A canvas pivot box's chrome highlight follows the pointer from here --
+    // set over the TOPMOST box's chrome, cleared everywhere else. Its zone
+    // answer (the pointer Core shows) is pure and writes nothing.
+    updatePivotVisualHoverAt(event.clientX, event.clientY, event.target);
     if (!cachedCanvasElement) return;
     const isOverCanvas = event.target === cachedCanvasElement || cachedCanvasElement.contains(event.target as Node);
 
@@ -1764,6 +1628,13 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(() => {
     document.removeEventListener("mousemove", handleDocMouseMove);
   });
+
+  // ...and CLEARED when Core's floating-object hover leaves every canvas pivot
+  // box without a mousemove to say so: the pointer left the grid, the grid
+  // scrolled, the sheet changed (BUG-0258 design phase 5, core/lib/objectHover.ts).
+  cleanupFunctions.push(
+    onFloatingHoverChanged((hoveredRegionId) => clearPivotVisualHoverUnlessHovered(hoveredRegionId)),
+  );
 
   // Subscribe to events
   cleanupFunctions.push(

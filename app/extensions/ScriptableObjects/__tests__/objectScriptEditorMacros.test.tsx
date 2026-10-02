@@ -270,7 +270,7 @@ vi.mock("../lib/authoringLanguage", () => ({
   gateObjectScriptSave: (src: string, ..._rest: unknown[]) => gateObjectScriptSave(src),
 }));
 
-import { ObjectScriptEditorApp } from "../components/ObjectScriptEditorApp";
+import { ObjectScriptEditorApp, macroTierChipTitle } from "../components/ObjectScriptEditorApp";
 
 const MACRO_A: StoredModule = {
   id: "macro-alpha",
@@ -693,6 +693,43 @@ describe("Object Script Editor — a distributed macro is visibly a publisher's"
     expect(chip.getAttribute("title")).toContain("Acme Finance Pack");
   });
 
+  // OWNER DECISION B, follow-up F5: Run and Debug in this window mount the
+  // publisher's stored bytes with no person's pass -- restricted, context.api
+  // null -- while a run YOU start from a door that carries one gets cell access
+  // on any sheet. The chip must not promise that stepping here is "exactly what
+  // a button runs"; it says what differs.
+  // SABOTAGE: drop the `runtime === "objectScript"` sentence from
+  // macroTierChipTitle -> the chip says nothing of the cell access a run you
+  // start gets.
+  it("says this window runs a publisher's object-script macro restricted, and what a run YOU start may do", async () => {
+    await mountApp();
+    await deliverMacro(THEIR_MACRO);
+    const title = container.querySelector("[data-testid='macro-tier-chip']")!.getAttribute("title") ?? "";
+    expect(title).toContain("Run and Debug in this window mount its stored code at the restricted tier");
+    expect(title).toContain("context.api is null");
+    expect(title).toContain(
+      "from Developer ▸ Macros ▸ Run, by clicking a button that runs it, or from the command line it may also read and change the cells of any sheet, and nothing more",
+    );
+    expect(title).toContain("if it stops part-way, every change it made is undone");
+    expect(title).not.toMatch(/exactly (what|as) a button/i);
+  });
+
+  it("a publisher's macro for the WORKBOOK SCRIPT RUNTIME: a run you start runs it there, not as stepped here", () => {
+    const title = macroTierChipTitle({ kind: "package", name: "Acme Finance Pack" }, "notebook");
+    expect(title).toContain("at the restricted tier");
+    expect(title).toContain("it runs in the workbook script runtime, with that runtime's reach");
+    expect(title).not.toContain("may also read and change the cells of any sheet");
+    // An unmarked module is a module-runtime one too.
+    expect(macroTierChipTitle({ kind: "package", name: "Acme" }, null)).toContain("workbook script runtime");
+  });
+
+  it("CONTROL: the user's own macro and an unreadable record keep their sentences", () => {
+    expect(macroTierChipTitle({ kind: "local" }, "objectScript")).toBe(
+      "A macro you wrote runs at the unlocked tier, where context.api is available.",
+    );
+    expect(macroTierChipTitle({ kind: "unknown" }, "objectScript")).toMatch(/could not be read/);
+  });
+
   it("still says unlocked for a macro the user recorded", async () => {
     await mountApp();
     await deliverMacro(MACRO_A);
@@ -745,7 +782,8 @@ describe("Object Script Editor — a distributed macro is visibly a publisher's"
   });
 
   // READ-ONLY IS NOT UNRUNNABLE. The mount is by id, from the module store, at
-  // the restricted tier — the same mount a button on the grid uses — so reading
+  // the restricted tier — the stored bytes a button on the grid runs (without the
+  // cell access a run YOU start gets: owner decision B) — so reading
   // and stepping through a publisher's macro is exactly what this window is for.
   // Disabling Run "because it is read-only" would be a fresh untruth.
   it("still lets a publisher's macro be run and stepped through", async () => {

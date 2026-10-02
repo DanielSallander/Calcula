@@ -39,6 +39,7 @@ import {
   objectOwnsKey,
 } from "@api/objectSelection";
 import type { GridRegion } from "@api/gridOverlays";
+import { beginChartButtonPress, cancelChartButtonPress } from "../chartButtonSession";
 
 const region = (chartId: string): GridRegion =>
   ({
@@ -141,10 +142,35 @@ describe("ownsKey", () => {
     expect(chartOwnsObjectKey("Escape")).toBe(true);
   });
 
+  it("owns Escape while a press on one of a chart's own buttons is held -- even an UNSELECTED pivot chart's field button -- and not after (M7 review)", () => {
+    expect(chartOwnsObjectKey("Escape"), "control: nothing selected, nothing held").toBe(false);
+    beginChartButtonPress({ chartId: "c1", regionId: "chart-c1", part: "fieldButton", key: "fieldButton|row|0|Region", pressX: 10, pressY: 10 });
+    try {
+      expect(chartOwnsObjectKey("Escape"), "a held button press does not own Escape: a canvas would deselect the chart under it").toBe(true);
+      expect(chartOwnsObjectKey("Tab")).toBe(false);
+    } finally {
+      cancelChartButtonPress();
+    }
+    expect(chartOwnsObjectKey("Escape")).toBe(false);
+  });
+
   it("never owns Tab", () => {
     selectChart("c1");
     setSubSelection("c1", { level: "series", seriesIndex: 0 });
     expect(chartOwnsObjectKey("Tab")).toBe(false);
+  });
+
+  // BUG-0270: the generic Delete of a selected object stands down for a family
+  // whose OWN door takes the key. Charts' door deletes the SMALLEST thing
+  // selected (the title before the chart), so a generic Delete -- or
+  // Backspace, which Charts takes on a document listener the dispatcher would
+  // pre-empt -- must never take the whole chart.
+  it("owns Delete while a chart is selected, at chart level AND walked down to its title; not with none", () => {
+    expect(chartOwnsObjectKey("Delete"), "control: nothing selected").toBe(false);
+    selectChart("c1");
+    expect(chartOwnsObjectKey("Delete"), "chart level: Charts' own door deletes the chart").toBe(true);
+    setSubSelection("c1", { level: "element", elementId: "title" });
+    expect(chartOwnsObjectKey("Delete"), "a generic Delete would take the whole chart, not its title").toBe(true);
   });
 });
 

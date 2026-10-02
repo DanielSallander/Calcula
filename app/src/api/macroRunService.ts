@@ -24,14 +24,17 @@
 // nothing about macros except this one contract. The Macro Recorder registers
 // the provider at activation; Controls calls `requireMacroRunProvider()`.
 //
-// THE OUTCOME IS NEVER SILENT. `runMacroByRef` reports exactly one of three
+// THE OUTCOME IS NEVER SILENT. `runMacroByRef` reports exactly one of four
 // states, and the caller surfaces each. `notFound` — the macro a button links no
 // longer exists (deleted locally, or missing on a subscriber that received a
 // .calp without it) — is the recurring silent-dead-button failure this whole
 // feature has fought, so it is a first-class outcome the caller MUST voice, not
 // an exception it can swallow.
 
-/** What running a macro-by-ref did. Exactly one of three states, all explicit. */
+import type { ScriptRunTrigger } from "./workbookScripts";
+import type { ExplicitMacroRun } from "./explicitMacroRun";
+
+/** What running a macro-by-ref did. Exactly one of four states, all explicit. */
 export type MacroRunOutcome =
   /** The macro ran to completion. `name` is its display name for a toast. */
   | { status: "ran"; name: string }
@@ -42,11 +45,48 @@ export type MacroRunOutcome =
    */
   | { status: "notFound"; macroId: string }
   /** The macro exists and started, but its own code threw. `message` is why. */
-  | { status: "failed"; name: string; message: string };
+  | { status: "failed"; name: string; message: string }
+  /**
+   * The macro exists but was NOT started, because the caller required it to be
+   * a particular application's (`requirePackage`) and it is not: it is the
+   * user's own (`owner: null`) or another application's. The confused-deputy
+   * refusal of phase 3 of BUG-0257 -- a button from an application runs only
+   * that application's macros, never one of the user's that happens to share
+   * the id. `message` says so in words.
+   */
+  | { status: "refused"; macroId: string; name: string; message: string; owner: string | null };
+
+/** How a macro-by-ref run is asked for. Every field is optional. */
+export interface MacroRunOptions {
+  /**
+   * The application the macro MUST have come with. PRESENT = the record's
+   * `sourcePackage` has to equal it exactly, or the run is `refused` before
+   * anything executes; an EMPTY string is a refusal too (fail closed). Absent =
+   * no such requirement (Developer ▸ Macros, the command line, a button of the
+   * user's own).
+   */
+  requirePackage?: string;
+  /** The button a click ran this for; forwarded to the Rust run gate. */
+  trigger?: ScriptRunTrigger;
+  /**
+   * The pass the door a PERSON used minted for this run (owner decision B;
+   * explicitMacroRun.ts) -- Developer ▸ Macros ▸ Run, a person's click on a
+   * button that runs the macro (with the button's `trigger` beside it, which
+   * the host requires and Rust verifies) and a `run` line typed at the command
+   * line. It is what lets an APPROVED application macro written as an object
+   * script change cells when someone runs it themselves, and what lets an
+   * application's MODULE macro run at all (follow-up F10). Minted by that door,
+   * never by this seam and never by a script's `api.runMacro` (host.ts
+   * `executeRunMacro` passes no options at all); the provider FORWARDS it and
+   * never creates one. Absent = an application's object-script macro gets no
+   * cell access, and an application's module macro is refused by Rust.
+   */
+  explicitRun?: ExplicitMacroRun;
+}
 
 /** What the Macro Recorder provides: run one macro by its module id. */
 export interface MacroRunProvider {
-  runMacroByRef(macroId: string): Promise<MacroRunOutcome>;
+  runMacroByRef(macroId: string, options?: MacroRunOptions): Promise<MacroRunOutcome>;
 }
 
 let provider: MacroRunProvider | null = null;

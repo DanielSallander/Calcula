@@ -73,7 +73,7 @@ function activate(context: ExtensionContext): void {
     type: "validation-dropdown",
     render: renderDropdownChevrons,
     hitTest: hitTestDropdownChevron,
-    getCursor: getDropdownChevronCursor,
+    getCellCursor: getDropdownChevronCursor,
     priority: 15,
   } as OverlayRegistration);
   cleanupFns.push(unregChevronOverlay);

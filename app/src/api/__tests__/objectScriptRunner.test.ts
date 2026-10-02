@@ -9,9 +9,15 @@
 //          promises now rests on the properties pinned here.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import type { ExplicitRunEnd } from "../scriptHost/host";
 
 const hostMountScript = vi.fn(async (_d: unknown) => undefined);
 const hostUnmountScript = vi.fn((_id: string) => undefined);
+/**
+ * How a run with cell access ENDED (owner decision B, follow-up F9), as the host
+ * answers it once the realm is gone: null for every other run.
+ */
+const hostSettleExplicitRun = vi.fn(async (_id: string): Promise<ExplicitRunEnd | null> => null);
 const mountedIds = new Set<string>();
 const workerAvailable = { value: true };
 
@@ -24,6 +30,7 @@ vi.mock("../scriptHost/host", () => ({
   hostIsMounted: (id: string) => mountedIds.has(id),
   workerRealmAvailable: () => workerAvailable.value,
   hostCloseBatchLeftOpen: (id: string) => hostCloseBatchLeftOpen(id),
+  hostSettleExplicitRun: (id: string) => hostSettleExplicitRun(id),
 }));
 
 /**
@@ -129,6 +136,7 @@ function storeUnreadableModule(id: string, why = "the module could not be decode
 }
 
 import { runObjectScriptOnce } from "../objectScriptRunner";
+import { claimExplicitMacroRun, mintExplicitMacroRun } from "../explicitMacroRun";
 
 /** The mount definition the last run handed the host. */
 function lastMount(): Record<string, unknown> {
@@ -141,6 +149,7 @@ function lastMount(): Record<string, unknown> {
 beforeEach(() => {
   hostMountScript.mockReset().mockResolvedValue(undefined);
   hostUnmountScript.mockReset();
+  hostSettleExplicitRun.mockReset().mockResolvedValue(null);
   cancelUndoTransaction.mockClear();
   hostCloseBatchLeftOpen.mockClear();
   moduleStore.length = 0;
@@ -463,6 +472,32 @@ describe("the distributed-consent gate belongs to the mount, not to this runner"
     expect(lastMount().accessLevel).toBe("restricted");
   });
 
+  // Phase 3 of BUG-0257: the button a click claims reaches the mount gate,
+  // which verifies it against the backend's store and names it on the audit
+  // row. No trigger, no field -- a run nobody clicked a button for.
+  //
+  // SABOTAGE: drop `consentTrigger: options.trigger` from the hostMountScript
+  // call in runObjectScriptOnce (src/api/objectScriptRunner.ts).
+  it("hands the boundary the button a click claims, and nothing when none did", async () => {
+    storePublisherModule();
+    const trigger = { kind: "buttonControl" as const, sheetIndex: 1, row: 3, col: 2 };
+
+    await runObjectScriptOnce({
+      name: "Quarter close",
+      source: PUBLISHER_SOURCE,
+      scriptId: "macro-quarter-close",
+      trigger,
+    });
+    expect(lastMount().consentTrigger).toEqual(trigger);
+
+    await runObjectScriptOnce({
+      name: "Quarter close",
+      source: PUBLISHER_SOURCE,
+      scriptId: "macro-quarter-close",
+    });
+    expect(lastMount().consentTrigger).toBeUndefined();
+  });
+
   it("keeps NO second copy of the gate — one decision, one place", async () => {
     // Two copies of a consent decision is precisely how the two run routes came
     // to differ. If this call reappears here, it will drift from the boundary's.
@@ -740,5 +775,295 @@ describe("the store is read no harder than it has to be", () => {
     });
 
     expect(lastMount().provenance).toBe("distributed");
+  });
+});
+
+// ============================================================================
+// OWNER DECISION B (2026-09-30): the person's pass travels to the mount, and a
+// macro that reaches beyond cell access is refused BEFORE anything runs.
+// ============================================================================
+
+describe("an explicit run of an application's macro (owner decision B)", () => {
+  const CELLS_ONLY =
+    'async function m(api) { await api.beginBatch("M"); await api.setCellValue(0, 0, "OWNER-B"); await api.commitBatch(); }\n' +
+    "function setup(context) { if (!context.api) return; return m(context.api); }\n";
+  const FORMATS =
+    'async function m(api) { await api.setCellValue(0, 0, "OWNER-B"); await api.setRangeFormat(0, 0, 0, 0, { bold: true }); }\n' +
+    "function setup(context) { return m(context.api); }\n";
+
+  it("(a)+(c) forwards the SAME pass to the mount, at the restricted tier", async () => {
+    storeModule({ id: "macro-b", source: CELLS_ONLY, sourcePackage: "Sales" });
+    const pass = mintExplicitMacroRun("macrosDialog", "macro-b");
+    await runObjectScriptOnce({
+      name: "B",
+      source: CELLS_ONLY,
+      scriptId: "macro-b",
+      accessLevel: "restricted",
+      explicitRun: pass,
+    });
+    expect(hostMountScript).toHaveBeenCalledTimes(1);
+    expect(lastMount().explicitRun).toBe(pass);
+    expect(lastMount().accessLevel).toBe("restricted");
+    expect(lastMount().provenance).toBe("distributed");
+  });
+
+  // SABOTAGE: delete the pre-flight block in runObjectScriptOnce -> the
+  // formatting macro is mounted (hostMountScript called) and this goes red.
+  it("(b) refuses a macro that also calls methods outside cell access -- before mounting -- and spends the pass", async () => {
+    storeModule({ id: "macro-f", source: FORMATS, sourcePackage: "Sales" });
+    const pass = mintExplicitMacroRun("macrosDialog", "macro-f");
+    let message = "";
+    try {
+      await runObjectScriptOnce({
+        name: "Formats",
+        source: FORMATS,
+        scriptId: "macro-f",
+        accessLevel: "restricted",
+        explicitRun: pass,
+      });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("api.setRangeFormat");
+    expect(message).toContain("Nothing was changed");
+    expect(message).toContain('"Sales"');
+    expect(hostMountScript).not.toHaveBeenCalled();
+    expect(claimExplicitMacroRun(pass), "a refused run left its pass usable").toBeNull();
+    // ON THE PERSISTENT TRAIL (follow-up F8): the stored macro, the source that
+    // was about to run, the calls named -- Rust reads the application itself.
+    // SABOTAGE: drop the `recordRefusedBeforeRun(` call from the pre-flight
+    // block in runObjectScriptOnce -> red.
+    expect(invokeBackend).toHaveBeenCalledWith("audit_explicit_run_refusal", {
+      scriptId: "macro-f",
+      source: FORMATS,
+      methods: ["api.setRangeFormat"],
+    });
+    expect(message, "a recorded refusal claimed it was not recorded").not.toContain("could not be recorded");
+  });
+
+  // SABOTAGE: make recordRefusedBeforeRun return null in its catch -> the
+  // user is told nothing about the missing row, and this goes red.
+  it("(b2) a refusal the trail cannot take still refuses -- and says it was not recorded", async () => {
+    storeModule({ id: "macro-f", source: FORMATS, sourcePackage: "Sales" });
+    invokeBackend.mockImplementationOnce(async (cmd: string) => {
+      if (cmd === "audit_explicit_run_refusal") throw new Error("the trail is unavailable");
+      return undefined;
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const pass = mintExplicitMacroRun("macrosDialog", "macro-f");
+      await expect(
+        runObjectScriptOnce({ name: "Formats", source: FORMATS, scriptId: "macro-f", accessLevel: "restricted", explicitRun: pass }),
+      ).rejects.toThrow(/Nothing was changed.*could not be recorded on the audit trail: the trail is unavailable/s);
+      expect(hostMountScript).not.toHaveBeenCalled();
+      expect(errors).toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  // REVIEW OF M6b: the pre-flight runs before the mount gate asks about the
+  // approval. When Rust finds the macro's code NOT approved, that is the reason
+  // -- recorded `notConsented` -- and the person reads the approval's refusal,
+  // never "when you run such a macro yourself it may read and change cells ...
+  // adapt it into a macro of your own", which speaks of approved code.
+  // SABOTAGE: drop the `if (recorded?.notApproved) throw ...` line -> the
+  // pre-flight's sentence is read instead.
+  it("(b3) an UNAPPROVED macro is refused for its approval, in the approval's words -- not as outside cell access", async () => {
+    storeModule({ id: "macro-f", source: FORMATS, sourcePackage: "Sales" });
+    const approval =
+      "DISTRIBUTED_SCRIPT_NOT_CONSENTED: 'macro-f' arrived in the application 'Sales', and its code is not approved.";
+    invokeBackend.mockImplementationOnce(async (cmd: string) =>
+      cmd === "audit_explicit_run_refusal" ? { reason: "notConsented", message: approval } : undefined,
+    );
+    const pass = mintExplicitMacroRun("macrosDialog", "macro-f");
+    const err = await runObjectScriptOnce({
+      name: "Formats",
+      source: FORMATS,
+      scriptId: "macro-f",
+      accessLevel: "restricted",
+      explicitRun: pass,
+    }).catch((e: Error) => e);
+    expect(String(err)).toBe(`Error: ${approval}`);
+    expect(String(err)).not.toContain("adapt it into a macro of your own");
+    expect(String(err)).not.toContain("may read and change cells");
+    expect(hostMountScript).not.toHaveBeenCalled();
+    expect(claimExplicitMacroRun(pass), "a refused run left its pass usable").toBeNull();
+    // CONTROL: an approved macro's refusal (the door says outsideCellAccess)
+    // keeps the pre-flight's own sentence.
+    invokeBackend.mockImplementationOnce(async (cmd: string) =>
+      cmd === "audit_explicit_run_refusal" ? { reason: "outsideCellAccess", message: null } : undefined,
+    );
+    const approved = await runObjectScriptOnce({
+      name: "Formats",
+      source: FORMATS,
+      scriptId: "macro-f",
+      accessLevel: "restricted",
+      explicitRun: mintExplicitMacroRun("macrosDialog", "macro-f"),
+    }).catch((e: Error) => e);
+    expect(String(approved)).toContain("When you run such a macro yourself it may read and change cells");
+    expect(String(approved)).not.toContain("NOT_CONSENTED");
+  });
+
+  it("(d) the user's OWN macro is never pre-flighted: it mounts unlocked, formatting and all", async () => {
+    storeModule({ id: "macro-mine", source: FORMATS, sourcePackage: null });
+    const pass = mintExplicitMacroRun("macrosDialog", "macro-mine");
+    await runObjectScriptOnce({ name: "Mine", source: FORMATS, scriptId: "macro-mine", explicitRun: pass });
+    expect(hostMountScript).toHaveBeenCalledTimes(1);
+    expect(lastMount().accessLevel).toBe("unlocked");
+  });
+
+  it("(e) an application macro run WITHOUT a pass is mounted restricted exactly as before -- no pre-flight", async () => {
+    storeModule({ id: "macro-f", source: FORMATS, sourcePackage: "Sales" });
+    await runObjectScriptOnce({ name: "Formats", source: FORMATS, scriptId: "macro-f", accessLevel: "restricted" });
+    expect(hostMountScript).toHaveBeenCalledTimes(1);
+    expect(lastMount().accessLevel).toBe("restricted");
+    expect(lastMount().explicitRun).toBeUndefined();
+    // Nothing was refused, so nothing is recorded as refused.
+    expect(invokeBackend).not.toHaveBeenCalledWith("audit_explicit_run_refusal", expect.anything());
+  });
+
+  it("a run refused before the mount (an unreadable store) spends the pass too", async () => {
+    storeUnreadableModule("macro-b");
+    const pass = mintExplicitMacroRun("macrosDialog", "macro-b");
+    await expect(
+      runObjectScriptOnce({ name: "B", source: CELLS_ONLY, scriptId: "macro-b", explicitRun: pass }),
+    ).rejects.toThrow(/could not be read/);
+    expect(hostMountScript).not.toHaveBeenCalled();
+    expect(claimExplicitMacroRun(pass)).toBeNull();
+  });
+});
+
+// ============================================================================
+// OWNER DECISION B, follow-up F9: a run with cell access that stops part-way
+// is taken back whole, and the person who started it is told -- by the time
+// they read it -- that nothing was changed (or why its changes could not be
+// undone). The host decides and does the taking back; this runner waits for it
+// AFTER the realm is gone and says it.
+// ============================================================================
+
+describe("a run with cell access that stops part-way (F9)", () => {
+  const TAKEN_BACK: ExplicitRunEnd = {
+    completed: false,
+    undoable: true,
+    rolledBack: true,
+    notUndoneBecause: null,
+    othersUndone: 0,
+  };
+
+  // SABOTAGE: return `error` unchanged from describeRunFailure (drop the
+  // taken-back branch) -> the person reads only "boom", not that nothing changed.
+  it("says it stopped and that NOTHING WAS CHANGED, after the realm is gone and the step was taken back", async () => {
+    const order: string[] = [];
+    hostMountScript.mockImplementationOnce(async (d: unknown) => {
+      mountedIds.add(String((d as { id: string }).id));
+      throw new Error("boom after two writes");
+    });
+    hostUnmountScript.mockImplementationOnce(() => {
+      order.push("unmount");
+    });
+    hostSettleExplicitRun.mockImplementationOnce(async () => {
+      order.push("settle");
+      return TAKEN_BACK;
+    });
+    await expect(runObjectScriptOnce({ name: "Owner B", source: "" })).rejects.toThrow(
+      '"Owner B" stopped before it finished: boom after two writes. Every change it had made was undone, so nothing was changed.',
+    );
+    // Its ending is asked for the run's own realm, once that realm is torn down.
+    expect(order).toEqual(["unmount", "settle"]);
+    expect(hostSettleExplicitRun).toHaveBeenCalledWith(String(lastMount().id));
+  });
+
+  it("the 10-second deadline: stopped, and taken back -- no 'stays in the sheet'", async () => {
+    hostMountScript.mockRejectedValueOnce(new Error("Script mount timed out (10s)"));
+    hostSettleExplicitRun.mockResolvedValueOnce(TAKEN_BACK);
+    const err = await runObjectScriptOnce({ name: "Owner B", source: "" }).catch((e: Error) => e);
+    expect(String(err)).toContain('"Owner B" was still running after 10 seconds and was stopped.');
+    expect(String(err)).toContain("Every change it had made was undone, so nothing was changed.");
+    expect(String(err)).not.toContain("stays in the sheet");
+  });
+
+  it("a crash sentence that already says it stopped is not said twice", async () => {
+    hostMountScript.mockRejectedValueOnce(
+      new Error('"Owner B" stopped: the script crashed while it was running (kaput). It was not started again -- a run happens once, when you start it -- so run it again if you want to.'),
+    );
+    hostSettleExplicitRun.mockResolvedValueOnce(TAKEN_BACK);
+    const err = await runObjectScriptOnce({ name: "Owner B", source: "" }).catch((e: Error) => e);
+    expect(String(err)).not.toContain("stopped before it finished");
+    expect(String(err)).toMatch(/run it again if you want to\. Every change it had made was undone, so nothing was changed\.$/);
+  });
+
+  it("when it could NOT be taken back, it says why and that the cells need checking", async () => {
+    hostMountScript.mockRejectedValueOnce(new Error("boom"));
+    hostSettleExplicitRun.mockResolvedValueOnce({
+      completed: false,
+      undoable: true,
+      rolledBack: false,
+      notUndoneBecause: "the undo step it was recorded in is no longer open",
+      othersUndone: 0,
+    });
+    const err = await runObjectScriptOnce({ name: "Owner B", source: "" }).catch((e: Error) => e);
+    expect(String(err)).toContain(
+      "Its changes could not be undone automatically (the undo step it was recorded in is no longer open), so check the cells it changed.",
+    );
+    expect(String(err)).not.toContain("nothing was changed");
+  });
+
+  it("CONTROL: a run with no cell grant (no ending) keeps its own error and its old deadline sentence", async () => {
+    hostMountScript.mockRejectedValueOnce(new Error("boom"));
+    await expect(runObjectScriptOnce({ name: "A", source: "" })).rejects.toThrow(/^boom$/);
+    hostMountScript.mockRejectedValueOnce(new Error("Script mount timed out (10s)"));
+    await expect(runObjectScriptOnce({ name: "A", source: "" })).rejects.toThrow(/stays in the sheet/);
+  });
+
+  it("a run that never got its undo step (it did not start) passes its own refusal through", async () => {
+    const refusal = '"Owner B" did not start: a macro you run with cell access is undone as a whole if it stops part-way, and that could not be arranged here (x). Nothing was changed.';
+    hostMountScript.mockRejectedValueOnce(new Error(refusal));
+    hostSettleExplicitRun.mockResolvedValueOnce({
+      completed: false,
+      undoable: false,
+      rolledBack: false,
+      notUndoneBecause: "x",
+      othersUndone: 0,
+    });
+    await expect(runObjectScriptOnce({ name: "Owner B", source: "" })).rejects.toThrow(refusal);
+  });
+
+  it("a run that completed resolves -- after its step was committed", async () => {
+    hostSettleExplicitRun.mockResolvedValueOnce({
+      completed: true,
+      undoable: true,
+      rolledBack: false,
+      notUndoneBecause: null,
+      othersUndone: 0,
+    });
+    await expect(runObjectScriptOnce({ name: "Owner B", source: "" })).resolves.toBeUndefined();
+    expect(hostSettleExplicitRun).toHaveBeenCalledTimes(1);
+  });
+
+  // REVIEW OF M6b: the rollback takes back everything recorded after the
+  // run's savepoint -- a cell the person typed meanwhile too. "Nothing was
+  // changed" would hide that their own edit was reverted.
+  // SABOTAGE: make describeRolledBack ignore othersUndone -> red.
+  it("when the rollback took back OTHER changes made while it ran, it says how many -- never only 'nothing was changed'", async () => {
+    for (const [n, said] of [
+      [1, "and so was 1 other cell change made while it ran (yours or another script's)"],
+      [3, "and so were 3 other cell changes made while it ran (yours or another script's)"],
+    ] as const) {
+      hostMountScript.mockRejectedValueOnce(new Error("boom"));
+      hostSettleExplicitRun.mockResolvedValueOnce({ ...TAKEN_BACK, othersUndone: n });
+      const err = String(await runObjectScriptOnce({ name: "Owner B", source: "" }).catch((e: Error) => e));
+      expect(err, String(n)).toContain('"Owner B" stopped before it finished: boom.');
+      expect(err, String(n)).toContain("Every change it had made was undone");
+      expect(err, String(n)).toContain(said);
+      expect(err, String(n)).toContain(n === 1 ? "Check that cell." : "Check those cells.");
+      expect(err, String(n)).not.toContain("nothing was changed");
+    }
+    // CONTROL: only its own writes taken back -> nothing was changed.
+    hostMountScript.mockRejectedValueOnce(new Error("boom"));
+    hostSettleExplicitRun.mockResolvedValueOnce(TAKEN_BACK);
+    const own = String(await runObjectScriptOnce({ name: "Owner B", source: "" }).catch((e: Error) => e));
+    expect(own).toContain("Every change it had made was undone, so nothing was changed.");
+    expect(own).not.toContain("other cell");
   });
 });

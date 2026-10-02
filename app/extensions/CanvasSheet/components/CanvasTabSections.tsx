@@ -314,7 +314,7 @@ export const CanvasPanelDefinition: PanelDefinition = {
       label: "Arrange",
       icon: <RibbonIcon.BringForward size={ICON_SIZE_MD} />,
       component: CanvasArrangeSection,
-      // Four heroes (three menus and a toggle): one tall row.
+      // Five heroes (three menus, a toggle and Size & Position): one tall row.
       ribbonPresentation: "inline",
       collapsePriority: 3,
     },

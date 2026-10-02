@@ -1,6 +1,8 @@
 //! FILENAME: app/extensions/CanvasSheet/__tests__/canvasArrangeSection.test.tsx
-// PURPOSE: The Canvas tab's ARRANGE section, rendered: four heroes (Bring
-//          Forward, Send Backward, Align -- menus -- and Lock); disabled with
+// PURPOSE: The Canvas tab's ARRANGE section, rendered: five heroes (Bring
+//          Forward, Send Backward, Align -- menus -- Lock, and Size & Position,
+//          BUG-0258 phase 5b, which opens the Size and Position dialog for the
+//          selection's PRIMARY object through @api/objectPosition); disabled with
 //          the SUBSCRIBED note on a pulled canvas and with the "select first"
 //          note when nothing is selected; Distribute disabled below three
 //          objects; the menus run the right commands; Lock reads "Unlock"
@@ -20,6 +22,7 @@ const h = vi.hoisted(() => ({
   lock: vi.fn(async (_l: boolean) => true),
   align: vi.fn(async (_e: string) => 0),
   distribute: vi.fn(async (_a: string) => 0),
+  primary: null as unknown,
 }));
 
 vi.mock("../lib/canvasSheetStore", () => ({
@@ -29,6 +32,7 @@ vi.mock("../lib/canvasSheetStore", () => ({
 vi.mock("@api/objectSelection", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api/objectSelection")>()),
   getSelectedObjectRegions: () => h.selected,
+  getPrimaryObjectRegion: () => h.primary,
   onObjectSelectionChanged: () => () => {},
 }));
 vi.mock("../lib/zOrderStore", async (importOriginal) => ({
@@ -47,6 +51,23 @@ import type { PanelSectionProps } from "@api/uiTypes";
 import { CanvasArrangeSection } from "../components/CanvasArrangeSection";
 import { CanvasPanelDefinition } from "../components/CanvasTabSections";
 import { NOTHING_SELECTED_NOTE, SUBSCRIBED_NOTE } from "../lib/canvasNotes";
+import type { GridRegion } from "@api/gridOverlays";
+import { registerObjectGeometryProvider, resetObjectGeometryProviders } from "@api/objectGeometry";
+import { registerSizeAndPositionOpener, resetObjectPosition } from "@api/objectPosition";
+
+const PRIMARY: GridRegion = {
+  id: "chart-b",
+  type: "chart",
+  startRow: 0,
+  startCol: 0,
+  endRow: 0,
+  endCol: 0,
+  data: { chartId: "b" },
+  floating: { x: 64, y: 64, width: 320, height: 200 },
+};
+const opened: string[] = [];
+let offOpener: () => void = () => {};
+let offProvider: () => void = () => {};
 
 Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
 
@@ -59,7 +80,13 @@ beforeEach(() => {
   h.snapshot = { active: { index: 2, name: "Canvas1", layout: {} }, activeSubscribed: false };
   h.selected = [{ id: "a" }, { id: "b" }];
   h.locked = false;
+  h.primary = PRIMARY;
   for (const f of [h.restack, h.lock, h.align, h.distribute]) f.mockClear();
+  resetObjectPosition();
+  resetObjectGeometryProviders();
+  opened.length = 0;
+  offProvider = registerObjectGeometryProvider({ types: ["chart"], commit: async () => {} });
+  offOpener = registerSizeAndPositionOpener((r) => opened.push(r.id));
   Reflect.set(globalThis, "ResizeObserver", class { observe() {} disconnect() {} unobserve() {} });
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -67,6 +94,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  offOpener();
+  offProvider();
   act(() => root.unmount());
   container.remove();
   document.body.innerHTML = "";
@@ -103,9 +132,9 @@ describe("the Arrange section", () => {
     expect(ids.indexOf("canvas-tab.arrange")).toBe(ids.indexOf("canvas-tab.insert") + 1);
   });
 
-  it("four heroes, enabled with a selection", () => {
+  it("five heroes, enabled with a selection", () => {
     render();
-    for (const id of ["canvas-arrange-forward", "canvas-arrange-backward", "canvas-arrange-align", "canvas-arrange-lock"]) {
+    for (const id of ["canvas-arrange-forward", "canvas-arrange-backward", "canvas-arrange-align", "canvas-arrange-lock", "canvas-arrange-size-position"]) {
       expect(byTestId(id, container).disabled).toBe(false);
     }
   });
@@ -148,10 +177,32 @@ describe("the Arrange section", () => {
     expect(h.lock).toHaveBeenLastCalledWith(false);
   });
 
+  it("Size & Position opens the dialog for the selection's PRIMARY object (BUG-0258 phase 5b)", () => {
+    render();
+    const button = byTestId("canvas-arrange-size-position", container);
+    expect(button.textContent).toContain("Size & Position");
+    click(button);
+    expect(opened).toEqual([PRIMARY.id]);
+  });
+
+  it("Size & Position is disabled when no dialog can open for the primary (none installed, or no provider)", () => {
+    offOpener();
+    render();
+    expect(byTestId("canvas-arrange-size-position", container).disabled).toBe(true);
+    act(() => root.unmount());
+    root = createRoot(container);
+    offOpener = registerSizeAndPositionOpener((r) => opened.push(r.id));
+    h.primary = { ...PRIMARY, type: "no-provider" };
+    render();
+    expect(byTestId("canvas-arrange-size-position", container).disabled).toBe(true);
+    expect(opened).toEqual([]);
+  });
+
   it("nothing selected: every hero is disabled, with the reason", () => {
     h.selected = [];
+    h.primary = null;
     render();
-    for (const id of ["canvas-arrange-forward", "canvas-arrange-backward", "canvas-arrange-align", "canvas-arrange-lock"]) {
+    for (const id of ["canvas-arrange-forward", "canvas-arrange-backward", "canvas-arrange-align", "canvas-arrange-lock", "canvas-arrange-size-position"]) {
       expect(byTestId(id, container).disabled).toBe(true);
     }
     expect(NOTHING_SELECTED_NOTE).toMatch(/Select/);
@@ -160,7 +211,7 @@ describe("the Arrange section", () => {
   it("a SUBSCRIBED canvas: every hero is disabled (the layout is the publisher's)", () => {
     h.snapshot = { ...h.snapshot, activeSubscribed: true };
     render();
-    for (const id of ["canvas-arrange-forward", "canvas-arrange-backward", "canvas-arrange-align", "canvas-arrange-lock"]) {
+    for (const id of ["canvas-arrange-forward", "canvas-arrange-backward", "canvas-arrange-align", "canvas-arrange-lock", "canvas-arrange-size-position"]) {
       expect(byTestId(id, container).disabled).toBe(true);
     }
     expect(SUBSCRIBED_NOTE).toMatch(/publisher/);

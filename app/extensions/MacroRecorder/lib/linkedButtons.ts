@@ -9,26 +9,23 @@
 //          which the backend already holds, so it lives there
 //          (`list_controls_referencing_macro`) rather than being reconstructed on
 //          the frontend from per-sheet control lists.
+//
+//          ONE WRAPPER. The same listing now also feeds the approval screen's
+//          "Buttons that run this macro" (phase 3 of BUG-0257), so it is read
+//          through `@api/heldButtonCode`'s `listButtonsRunningMacro` -- one
+//          wrapper, one wire shape -- rather than a second copy here.
 
-import { macroRecorderBackend } from "./macroRecorderBackend";
+import { listButtonsRunningMacro, type ButtonRunningMacro } from "@api/heldButtonCode";
 
 /** One button that links a macro, located for a human-readable warning. */
-export interface MacroLinkingControl {
-  sheetIndex: number;
-  /** The sheet's display name, resolved backend-side. */
-  sheetName: string;
-  row: number;
-  col: number;
-}
+export type MacroLinkingControl = Pick<ButtonRunningMacro, "sheetIndex" | "sheetName" | "row" | "col"> &
+  Partial<Omit<ButtonRunningMacro, "sheetIndex" | "sheetName" | "row" | "col">>;
 
-/** Every control whose `macroRef` equals `macroId`, across all sheets. */
+/** Every button whose `macroRef` -- live or HELD -- or script action equals `macroId`, across all sheets. */
 export async function listControlsReferencingMacro(
   macroId: string,
 ): Promise<MacroLinkingControl[]> {
-  return macroRecorderBackend.invoke<MacroLinkingControl[]>(
-    "list_controls_referencing_macro",
-    { macroId },
-  );
+  return listButtonsRunningMacro(macroId);
 }
 
 /** "Sheet1!A1" for a linking control, using its 0-based row/col. */
@@ -58,9 +55,28 @@ export function describeMacroDeletion(
   const shown = controls.slice(0, 6).map(toA1);
   const suffix = controls.length > shown.length ? ", …" : "";
   const noun = controls.length === 1 ? "button links" : "buttons link";
+  // A HELD link is an application's, and a push publishes it unchanged: deleting
+  // the macro here ships buttons naming a macro the application no longer has.
+  const held = controls.filter((c) => c.heldBy);
+  const heldNote =
+    held.length === 0
+      ? ""
+      : `${
+          held.length === controls.length
+            ? controls.length === 1
+              ? "It holds"
+              : "They hold"
+            : held.length === 1
+              ? "One of them holds"
+              : `${held.length} of them hold`
+        } the link ` +
+        `that came with the application "${held[0].heldBy}", which your next push publishes ` +
+        "unchanged -- without this macro, those buttons would name a macro the application " +
+        "no longer carries. ";
   return (
     `${controls.length} ${noun} the macro "${macroName}" (${shown.join(", ")}${suffix}). ` +
     "Deleting it leaves them with nothing to run (clicking one will say so). " +
+    heldNote +
     "Delete anyway?"
   );
 }

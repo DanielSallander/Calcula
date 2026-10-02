@@ -1,8 +1,9 @@
 //! FILENAME: app/extensions/Slicer/lib/slicerCanvasGeometry.ts
 // PURPOSE: Where a slicer is on the canvas RIGHT NOW, and which slicer (if
 //          any) a logical canvas point is on -- for the extension's own pointer
-//          paths that run outside the overlay context: the item click on
-//          mouseup, the wheel, and the right-click menu.
+//          paths that run outside the overlay context: the item drag (its
+//          window listeners follow the pointer), the wheel, and the
+//          right-click menu.
 // CONTEXT: Two defects closed here (M8):
 //
 //          THE GUTTERS ARE THE PAINTED ONES. These paths read
@@ -66,6 +67,20 @@ export function slicerCanvasBounds(
     width: slicer.width,
     height: slicer.height,
   };
+}
+
+/**
+ * A window mouse event's point in logical canvas px (Core's basis: the grid
+ * area's top-left, divided by the zoom); null before the grid mounts. The item
+ * drag (lib/slicerItemDrag.ts) follows the pointer with it.
+ */
+export function clientToSlicerCanvas(clientX: number, clientY: number): { x: number; y: number } | null {
+  if (typeof document === "undefined") return null;
+  const area = document.querySelector("[data-grid-area]");
+  if (!area) return null;
+  const rect = area.getBoundingClientRect();
+  const zoom = getGridStateSnapshot()?.zoom || 1;
+  return { x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom };
 }
 
 /**

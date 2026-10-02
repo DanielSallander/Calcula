@@ -22,7 +22,8 @@ Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
 // DISTINCT names, deliberately. This fixture used to give the local and the
 // distributed module the SAME name and expect two rows with the same inserted
 // `Report()`, on the premise that "the run planner decides by provenance, not
-// spelling". It does not: `planInlineButtonRun` resolves a bare `Name()` by
+// spelling". It does not: the planner (today the Rust button door's
+// `plan_own_inline`) resolves a bare `Name()` by
 // NAME with local-wins, so the distributed row's insertion ran the user's own
 // module while the row promised the publisher's. The shadow case is pinned
 // separately below; here each name has exactly one answer.

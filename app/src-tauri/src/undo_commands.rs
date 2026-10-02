@@ -741,6 +741,9 @@ struct IssuedUndoTicket {
     stack: usize,
     ticket: u64,
     clears_at_issue: u64,
+    /// The step was OPENED by `begin_undo_savepoint`: a granted run's one step,
+    /// which no other savepoint may join (see "ONE RUN PER STEP" below).
+    by_savepoint: bool,
 }
 
 /// At most one entry per stack. Locked ONLY while that stack's own lock is
@@ -778,6 +781,7 @@ pub(crate) fn open_or_join_undo_transaction(
         stack: key,
         ticket,
         clears_at_issue: undo_stack.clears_total(),
+        by_savepoint: false,
     });
     Some(ticket)
 }
@@ -867,6 +871,343 @@ pub fn commit_undo_transaction(state: State<AppState>, ticket: Option<u64>) {
 #[tauri::command]
 pub fn cancel_undo_transaction(state: State<AppState>, ticket: Option<u64>) {
     cancel_undo_transaction_core(&state, ticket);
+}
+
+// ============================================================================
+// Undo SAVEPOINTS: take back exactly what was recorded after a point
+// ============================================================================
+//
+// WHY THEY EXIST (owner decision B, follow-up F9). An approved application
+// macro that a PERSON runs gets cell access, and a macro written as an object
+// script then writes LIVE, one ordinary cell command at a time -- while the
+// module runtime runs on a clone and applies nothing when the script throws.
+// The owner's answer to that gap: a run that fails part-way is UNDONE, all or
+// nothing, like the module runtime, and the user is told nothing was changed.
+// None of the doors above can do it. `cancel` drops the open transaction's
+// undo record and KEEPS its writes; a commit followed by a scoped `undo`
+// leaves a window in between, pushes the step through the history cap (an
+// eviction of the user's oldest step) and clears the redo stack.
+//
+// So the run marks a SAVEPOINT in the open transaction when it starts -- it
+// opens the transaction itself, or joins the one a caller already holds (a
+// command-line run of several lines is ONE step, and its `run <macro>` line
+// joins it) -- and, if it fails, takes back EXACTLY the changes recorded after
+// that point, through the same restore Ctrl+Z uses (`apply_changes`). It
+// leaves no undo step and no redo step behind: a run that was taken back is
+// not something to redo.
+//
+// IDENTITY. A savepoint names the open transaction by the ticket its opener
+// was issued, plus the number of changes it held. Every frontend begin goes
+// through the ticketed door, and a backend command's own begin and commit
+// happen inside one command, so a transaction that is open BETWEEN commands
+// was opened through that door and carries a ticket. A savepoint is honoured
+// only while the slot still holds that very transaction -- the test a ticketed
+// close makes -- and holds at least as many changes. A sheet structure change
+// or a document swap ends the history, and every savepoint into it.
+//
+// WHAT IT CANNOT TELL APART, named rather than hidden: the backend has ONE
+// open slot, so a write somebody else makes WHILE the run lasts -- a cell the
+// user types meanwhile, another script's write -- is recorded after the
+// savepoint, and a rollback takes it back too, exactly as Ctrl+Z of the step
+// would. A run lasts until its `setup` settles (at most the 10-second mount
+// deadline). The ticket's own residual (a backend command that commits a
+// frontend-opened transaction itself, named above) applies here unchanged.
+//
+// ONE RUN PER STEP (review of M6b). A savepoint asked for while ANOTHER granted
+// run holds the step it opened would JOIN that step -- one open slot -- and
+// then the first run's rollback would take the second run's writes back too,
+// and its commit would close the step halfway through the second: the second
+// run would report success with part of its work undone. So a step a savepoint
+// OPENED is marked (`IssuedUndoTicket::by_savepoint`), and a later savepoint
+// never joins it: it answers no point and why (`SAVEPOINT_STEP_HELD`), and
+// touches nothing, so the run does not start. The page also makes granted runs
+// take turns (`waitForGrantedRunTurn`, app/src/api/scriptHost/host.ts), which
+// covers the one case this cannot see: two runs inside a CALLER's step (a
+// command-line batch), whose ticket is the caller's.
+//
+// NO REDO STEP. The restore keeps its inverse out of the history altogether
+// (`apply_changes_with(.., keep_inverse: false)`) -- pushing it onto the redo
+// stack and removing it afterwards evicted the user's OLDEST redo step whenever
+// the redo stack was at its cap (review of M6b).
+//
+// WHICH CELLS. The answer names exactly the cells the rollback took back
+// (`UndoRollback::taken_back_cells`, the `SetCell` changes after the point --
+// never a dependent a recalculation repainted, and spilled cells are never
+// recorded for undo), so the run can tell its own writes from somebody else's
+// and say so (review of M6b).
+
+/// A point in the open undo transaction, handed out by `begin_undo_savepoint`
+/// and presented back, verbatim, to `roll_back_to_undo_savepoint`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UndoSavepoint {
+    /// The ticket of the transaction the point is in.
+    pub transaction: u64,
+    /// How many changes that transaction held at the point.
+    pub changes: u64,
+}
+
+/// What `begin_undo_savepoint` answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoSavepointBegin {
+    /// The ticket when THIS call opened the transaction: the caller closes it,
+    /// presenting the ticket. `None` when it joined one a caller holds open --
+    /// that caller closes it.
+    pub ticket: Option<u64>,
+    /// The point, or `None` when the open transaction carries no ticket this
+    /// door can name (then nothing could be taken back to it, and a caller
+    /// that needs all-or-nothing must not start).
+    pub savepoint: Option<UndoSavepoint>,
+    /// Why there is no point, when this door knows: another granted run holds
+    /// the open step (`SAVEPOINT_STEP_HELD`). Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused: Option<&'static str>,
+}
+
+/// Why a savepoint can no longer be taken back to. Completes "its changes
+/// could not be undone: ...".
+pub(crate) const SAVEPOINT_STEP_GONE: &str =
+    "the undo step it was recorded in is no longer open -- a sheet was added, removed, renamed, \
+     moved or copied, or the workbook was replaced, which ends the undo history, or another \
+     change closed that step";
+
+/// A savepoint that claims more changes than its step holds: not one this
+/// door handed out for the step now open.
+pub(crate) const SAVEPOINT_PAST_THE_STEP: &str =
+    "the undo step it was recorded in holds fewer changes than when the run started";
+
+/// Why no savepoint is handed out: the open step is another granted run's
+/// (ONE RUN PER STEP). Completes "that could not be arranged here (...)".
+pub(crate) const SAVEPOINT_STEP_HELD: &str =
+    "another macro you started holds the open undo step until it ends, and one step cannot be taken back \
+     for two runs";
+
+/// The savepoint door's body: open the transaction, or JOIN the one a caller
+/// holds (marking it shared, as every frontend begin does), and name the
+/// point it is at -- under ONE acquisition of the stack lock, so nothing can
+/// record between the begin and the point.
+pub(crate) fn begin_undo_savepoint_core(state: &AppState, description: String) -> UndoSavepointBegin {
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let key = undo_ticket_stack_key(state);
+    let mut issued = issued_undo_tickets();
+    // ONE RUN PER STEP: never JOIN a step another savepoint opened. Asked
+    // BEFORE the begin, so the held step is not even marked shared.
+    if undo_stack.has_open_transaction() {
+        let clears = undo_stack.clears_total();
+        if issued.iter().any(|t| t.stack == key && t.clears_at_issue == clears && t.by_savepoint) {
+            return UndoSavepointBegin { ticket: None, savepoint: None, refused: Some(SAVEPOINT_STEP_HELD) };
+        }
+    }
+    let opened = undo_stack.begin_transaction_from_caller(description);
+    let clears = undo_stack.clears_total();
+    let ticket = if opened {
+        let ticket = NEXT_UNDO_TICKET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Whatever this stack issued before is stale: this begin could not
+        // have opened a transaction while the one it named was still open.
+        issued.retain(|t| t.stack != key);
+        issued.push(IssuedUndoTicket { stack: key, ticket, clears_at_issue: clears, by_savepoint: true });
+        Some(ticket)
+    } else {
+        None
+    };
+    let named = issued
+        .iter()
+        .find(|t| t.stack == key && t.clears_at_issue == clears)
+        .map(|t| t.ticket);
+    drop(issued);
+    let held = undo_stack.current_transaction_mut().map(|t| t.changes.len() as u64);
+    let savepoint = match (named, held) {
+        (Some(transaction), Some(changes)) => Some(UndoSavepoint { transaction, changes }),
+        _ => None,
+    };
+    UndoSavepointBegin { ticket, savepoint, refused: None }
+}
+
+/// Take the changes recorded after `savepoint` OUT of the open transaction,
+/// unapplied, as a transaction of their own -- or say why not. Under the one
+/// stack lock, so nothing can record between the check and the take; what is
+/// left in the slot is exactly what it held at the point.
+pub(crate) fn take_changes_after_undo_savepoint(
+    state: &AppState,
+    savepoint: UndoSavepoint,
+) -> Result<Transaction, &'static str> {
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let clears = undo_stack.clears_total();
+    let key = undo_ticket_stack_key(state);
+    let still_that_step = issued_undo_tickets()
+        .iter()
+        .any(|t| t.stack == key && t.ticket == savepoint.transaction && t.clears_at_issue == clears);
+    if !still_that_step {
+        return Err(SAVEPOINT_STEP_GONE);
+    }
+    let Some(open) = undo_stack.current_transaction_mut() else {
+        return Err(SAVEPOINT_STEP_GONE);
+    };
+    let at = usize::try_from(savepoint.changes)
+        .ok()
+        .filter(|at| *at <= open.changes.len())
+        .ok_or(SAVEPOINT_PAST_THE_STEP)?;
+    let mut taken = Transaction::new(open.description.clone());
+    taken.changes = open.changes.split_off(at);
+    Ok(taken)
+}
+
+/// One cell a rollback took back, by its TRUE sheet index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoCellRef {
+    pub sheet: usize,
+    pub row: u32,
+    pub col: u32,
+}
+
+/// What `roll_back_to_undo_savepoint` answers: the restore's result, and
+/// exactly which cells it took back -- the cells recorded after the point,
+/// each once (WHICH CELLS above). Empty when nothing was taken back.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoRollback {
+    #[serde(flatten)]
+    pub result: UndoResult,
+    pub taken_back_cells: Vec<UndoCellRef>,
+}
+
+/// The distinct cells a taken-back transaction recorded, first recorded first.
+/// Only `SetCell` changes: a width, a merge or a snapshot is not a cell.
+fn cells_taken_back(taken: &Transaction) -> Vec<UndoCellRef> {
+    let mut seen: std::collections::HashSet<UndoCellRef> = std::collections::HashSet::new();
+    taken
+        .changes
+        .iter()
+        .filter_map(|change| match change {
+            CellChange::SetCell { sheet, row, col, .. } => Some(UndoCellRef { sheet: *sheet, row: *row, col: *col }),
+            _ => None,
+        })
+        .filter(|cell| seen.insert(*cell))
+        .collect()
+}
+
+/// An answer that moved nothing: `success` with no cells when there was
+/// nothing to take back, a refusal (and `success: false`) otherwise.
+fn rollback_answer_without_restore(state: &AppState, refusal: Option<&str>) -> UndoResult {
+    let (active_sheet_index, active_sheet_name) = active_sheet_identity(state);
+    let (can_undo, can_redo) = {
+        let undo_stack = state.undo_stack.lock().unwrap();
+        (undo_stack.can_undo(), undo_stack.can_redo())
+    };
+    UndoResult {
+        success: refusal.is_none(),
+        description: None,
+        updated_cells: Vec::new(),
+        can_undo,
+        can_redo,
+        merge_changed: false,
+        structural_restore: false,
+        pivot_changed: false,
+        slicer_changed: false,
+        ribbon_filter_changed: false,
+        pane_control_changed: false,
+        objects_changed: false,
+        hidden_changed: false,
+        refusal: refusal.map(String::from),
+        refresh_domains: Vec::new(),
+        active_sheet_index,
+        active_sheet_name,
+        restored_anchor: None,
+        restored_range: None,
+    }
+}
+
+/// [`roll_back_to_undo_savepoint`] over plain references, for the unit tier.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn roll_back_to_undo_savepoint_core(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    slicer_state: &SlicerState,
+    ribbon_filter_state: &RibbonFilterState,
+    pane_control_state: &PaneControlState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    savepoint: UndoSavepoint,
+) -> UndoRollback {
+    let nothing_taken = |result: UndoResult| UndoRollback { result, taken_back_cells: Vec::new() };
+    let taken = match take_changes_after_undo_savepoint(state, savepoint) {
+        Ok(taken) => taken,
+        Err(why) => return nothing_taken(rollback_answer_without_restore(state, Some(why))),
+    };
+    if taken.is_empty() {
+        return nothing_taken(rollback_answer_without_restore(state, None));
+    }
+    let taken_back_cells = cells_taken_back(&taken);
+    // The undo stack is NOT held here: `apply_changes_with` takes the grid
+    // pair first and the stack after it (the canonical order). NO REDO STEP:
+    // its inverse is kept out of the history (a run that was taken back is not
+    // something to redo).
+    let result = apply_changes_with(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        slicer_state,
+        ribbon_filter_state,
+        pane_control_state,
+        timeline_state,
+        taken,
+        true,
+        false,
+    );
+    UndoRollback { result, taken_back_cells }
+}
+
+/// Mark a SAVEPOINT in the open undo transaction, opening it first when none
+/// is open -- see "Undo SAVEPOINTS" above. Answers the ticket when this call
+/// opened the transaction (close it with that ticket) and the point.
+#[tauri::command]
+pub fn begin_undo_savepoint(state: State<AppState>, description: String) -> UndoSavepointBegin {
+    begin_undo_savepoint_core(&state, description)
+}
+
+/// Take back exactly the changes recorded after `savepoint` -- through the
+/// restore Ctrl+Z uses, leaving no undo and no redo step -- or move nothing and
+/// say why in `refusal`. `success` with no cells: nothing was recorded after
+/// the point. `takenBackCells` names every cell it took back.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn roll_back_to_undo_savepoint(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    file_state: State<FileState>,
+    user_files_state: State<'_, UserFilesState>,
+    pivot_state: State<'_, PivotState>,
+    slicer_state: State<'_, SlicerState>,
+    ribbon_filter_state: State<'_, RibbonFilterState>,
+    pane_control_state: State<'_, PaneControlState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
+    savepoint: UndoSavepoint,
+) -> UndoRollback {
+    let rollback = roll_back_to_undo_savepoint_core(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &slicer_state,
+        &ribbon_filter_state,
+        &pane_control_state,
+        &timeline_state,
+        savepoint,
+    );
+    recalc_visibility_after_undo(
+        &app,
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &rollback.result,
+    );
+    rollback
 }
 
 /// Get current undo/redo state for UI.
@@ -960,6 +1301,7 @@ fn activation_target(state: &AppState, transaction: &Transaction) -> Option<usiz
 ///
 /// `pub(crate)` so tests can drive the real restore without a Tauri runtime:
 /// `undo`/`redo` themselves take an `AppHandle`, this takes plain references.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_changes(
     state: &AppState,
     file_state: &FileState,
@@ -971,6 +1313,41 @@ pub(crate) fn apply_changes(
     timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     transaction: Transaction,
     is_undo: bool,
+) -> UndoResult {
+    apply_changes_with(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        slicer_state,
+        ribbon_filter_state,
+        pane_control_state,
+        timeline_state,
+        transaction,
+        is_undo,
+        true,
+    )
+}
+
+/// [`apply_changes`], choosing where the restore's INVERSE goes. `keep_inverse`
+/// pushes it onto the other stack (redo after an undo, undo after a redo), as
+/// every Ctrl+Z / Ctrl+Y does; `false` keeps it out of the history altogether
+/// -- a rolled-back run (`roll_back_to_undo_savepoint`) is not something to
+/// redo, and pushing it then removing it evicted the user's OLDEST redo step
+/// whenever the redo stack was at its cap.
+#[allow(clippy::too_many_arguments)]
+fn apply_changes_with(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    slicer_state: &SlicerState,
+    ribbon_filter_state: &RibbonFilterState,
+    pane_control_state: &PaneControlState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    transaction: Transaction,
+    is_undo: bool,
+    keep_inverse: bool,
 ) -> UndoResult {
     // CANONICAL LOCK ORDER: the grid pair FIRST, the active-sheet mirrors next,
     // and `undo_stack` after them. This took `undo_stack` first and then
@@ -1620,7 +1997,8 @@ pub(crate) fn apply_changes(
     }
 
     // Push inverse transaction to the appropriate stack (re-acquire undo_stack)
-    {
+    // -- unless the caller keeps it out of the history (a rolled-back run).
+    if keep_inverse {
         let mut undo_stack = state.undo_stack.lock().unwrap();
         if is_undo {
             undo_stack.push_redo(inverse_transaction);
@@ -6340,6 +6718,25 @@ pub(crate) fn record_controls_undo(
     );
 }
 
+/// [`record_controls_undo`] for a step that also RE-KEYED object-script
+/// bindings -- the same control moved, and its scripts followed it
+/// (`controls::move_control_core`, like `shift_controls`). `previous_ids` is
+/// (script id, the binding it had), so undo puts each binding back with its
+/// control.
+pub(crate) fn record_controls_undo_with_scripts(
+    state: &AppState,
+    previous: Vec<((usize, u32, u32), crate::controls::ControlMetadata)>,
+    previous_ids: Vec<(String, Option<String>)>,
+    description: &str,
+) {
+    record_object_undo(
+        state,
+        "obj_controls",
+        controls_snapshot_bytes(previous, previous_ids),
+        description,
+    );
+}
+
 #[cfg(test)]
 mod sheet_tagged_restore_tests {
     //! Wave 3: the RESTORE half of the sheet-tagged undo kinds. The command
@@ -6530,3 +6927,7 @@ mod pivot_undo_cache_tests;
 #[cfg(test)]
 #[path = "undo_transaction_ticket_tests.rs"]
 mod undo_transaction_ticket_tests;
+
+#[cfg(test)]
+#[path = "undo_savepoint_tests.rs"]
+mod undo_savepoint_tests;

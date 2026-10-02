@@ -16,12 +16,15 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import type {
+  ButtonCodeRelease,
   DialogProps,
   MergeAnalysisResponse,
   PublishReport,
   PushGateStatus,
   PublishPreviewSheet,
+  UnshippedMacroLinkItem,
   VersionDiff,
+  WithheldContent,
   WorkingCopyStatus,
 } from "@api";
 import {
@@ -71,6 +74,36 @@ import { pushBlockingReason } from "../lib/pushReadiness";
 import { listedIndices } from "../lib/listedSheets";
 import { describePushLanding } from "../lib/environments";
 import { PublishReportView } from "./ApplicationExplorerPanel";
+import {
+  AddedToApplicationList,
+  IncludeInApplicationContext,
+  WithheldContentList,
+  type IncludeControls,
+} from "./WithheldContentList";
+import { ButtonCodeReview, unacknowledgedButtonCode } from "./ButtonCodeReview";
+import { UnshippedMacroLinks } from "./UnshippedMacroLinks";
+import { PromotionCodeSummary } from "./PromotionCodeSummary";
+import {
+  PROMOTION_CODE_LOADING,
+  PUSH_CODE_AUDIENCE,
+  promotionCodeFailed,
+  promotionCodeFromImpact,
+  type PromotionCodeState,
+} from "../lib/promotionCode";
+import {
+  EMPTY_INCLUDE_STATE,
+  includeList,
+  includeSignature,
+  isIncluded,
+  isReviewed,
+  isTickedForOtherCode,
+  itemKey,
+  markReviewed,
+  pruneTicks,
+  setIncluded,
+  unhonouredIncludes,
+  type IncludeState,
+} from "../lib/includeInApplication";
 
 /** Which of the two things this dialog is doing right now. */
 type Mode = "loading" | "push" | "create";
@@ -160,6 +193,15 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     setExcludedCells(new Set());
     setSelectionTouched(false);
     selectionTouchedRef.current = false;
+    // "Include in application" belongs to ONE push. A tick that outlived the
+    // push that shipped it named an item that is part of the application now
+    // -- which the next push refused (CALP_PUSH_INCLUDED_CHANGED) with no row
+    // left to untick it from, blocking every push until the dialog unmounted.
+    setIncludeState(EMPTY_INCLUDE_STATE);
+    setIncludeFor(null);
+    setAdded([]);
+    setUnshippedLinks([]);
+    setReportIncludeFor(null);
   }, [openCount]);
   /**
    * What the chosen workspace already holds. `null` while unread — which is a
@@ -213,10 +255,62 @@ export function PublishDialog({ onClose, data }: DialogProps) {
    */
   const [reportFor, setReportFor] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
+  /**
+   * What a push to this target would leave in the workbook because it is not
+   * the application's (BUG-0261), from the preview the dialog runs ON OPEN --
+   * so it is on screen before the author presses Push, not only after a
+   * manual Preview. It does not depend on the sheet selection (the filter
+   * reads the working-copy link and the workbook's content), so the open-time
+   * answer stays true while the checkboxes move.
+   */
+  const [withheld, setWithheld] = useState<WithheldContent[]>([]);
+  /**
+   * The buttons' code this push would carry (BUG-0257), from the same previews
+   * as `withheld`: restored application code, held code that refuses the push,
+   * and code the signed base does not have -- which the author must read and
+   * tick. The ticks are the hashes the push request acknowledges.
+   */
+  const [buttonCode, setButtonCode] = useState<ButtonCodeRelease | null>(null);
+  /**
+   * WHICH sheet selection `buttonCode` answers (`sheetsSignature`). The code a
+   * push carries depends on the sheets it carries, and the readiness gate reads
+   * `buttonCode`: an answer for another selection used to block a push over
+   * code on a sheet the author had unticked, and let a newly ticked sheet's code
+   * go unshown until the backend refused it (review finding). Null = no answer.
+   */
+  const [buttonCodeFor, setButtonCodeFor] = useState<string | null>(null);
+  const [ackedButtonCode, setAckedButtonCode] = useState<Set<string>>(new Set());
+  /**
+   * INCLUDE IN APPLICATION (M4): the author's own new macros, notebooks and
+   * names they have chosen to ADD to the application -- each tick carrying the
+   * hash RUST computed of the code they read -- and which code has been on
+   * screen. A tick is refused until then (lib/includeInApplication.ts). Only
+   * this dialog ever sends `includeInApplication`.
+   */
+  const [includeState, setIncludeState] = useState<IncludeState>(EMPTY_INCLUDE_STATE);
+  /**
+   * WHICH inclusion `withheld`, `added` and `unshippedLinks` answer
+   * (`includeSignature`) -- the `buttonCodeFor` rule for the ticks: an answer
+   * for another inclusion is fetched again, and the push waits for it.
+   */
+  const [includeFor, setIncludeFor] = useState<string | null>(null);
+  /** The author's own items the latest answer ADDS to the application. */
+  const [added, setAdded] = useState<WithheldContent[]>([]);
+  /** Buttons on the ticked sheets that run a macro the push would leave out. */
+  const [unshippedLinks, setUnshippedLinks] = useState<UnshippedMacroLinkItem[]>([]);
+  /** Which inclusion the visible REPORT was computed for. */
+  const [reportIncludeFor, setReportIncludeFor] = useState<string | null>(null);
   const [pushed, setPushed] = useState(false);
   const [diff, setDiff] = useState<VersionDiff | null>(null);
   const [diffBusy, setDiffBusy] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
+  /**
+   * The CODE this push changes against its signed base (owner question 14),
+   * from the same working-copy diff -- the Promote dialog's summary, shown
+   * first. `null` while there is no push to describe. A failed read is a
+   * `failed` state that says why, never "no code changes".
+   */
+  const [code, setCode] = useState<PromotionCodeState | null>(null);
   const [merge, setMerge] = useState<MergeAnalysisResponse | null>(null);
   const [mergeBusy, setMergeBusy] = useState(false);
 
@@ -259,8 +353,20 @@ export function PublishDialog({ onClose, data }: DialogProps) {
           registryPath.trim() && packageName.trim()
             ? { registryPath, packageName }
             : undefined;
-        const result = await publishPreview(selectedIndices(), includeComments, target, kind);
+        const asked = selectedIndices();
+        const including = includeList(includeState);
+        const result = await publishPreview(asked, includeComments, target, kind, including);
         setReport(result.report);
+        setWithheld(result.report.withheld ?? []);
+        setAdded(result.report.addedToApplication ?? []);
+        setIncludeState((prev) =>
+          pruneTicks(prev, result.report.withheld ?? [], result.report.addedToApplication ?? []),
+        );
+        setUnshippedLinks(result.report.unshippedMacroLinks ?? []);
+        setIncludeFor(JSON.stringify(including));
+        setReportIncludeFor(JSON.stringify(including));
+        setButtonCode(result.report.buttonCode ?? null);
+        setButtonCodeFor(sheetsSignature(asked));
         setReportLabel(`${label} ${result.sheetNames.join(", ")}`);
         setWarnings(result.warnings);
         setGates(result.gates ?? null);
@@ -279,7 +385,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     },
     // selectedIndices reads state; the deps below are what actually change it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [registryPath, packageName, includeComments, sheetSelection],
+    [registryPath, packageName, includeComments, sheetSelection, includeState],
   );
 
   // A preview with no sheet filter is how we learn the workbook's sheet names
@@ -289,12 +395,24 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     if (mode === "loading") return;
     void (async () => {
       try {
+        // The ticks as they stand when this runs; `includeFor` records which,
+        // and the refresh below asks again if they have moved since.
+        const including = includeList(includeState);
         const result = await publishPreview(
           [],
           false,
           registryPath.trim() && packageName.trim() ? { registryPath, packageName } : undefined,
           kind,
+          including,
         );
+        setWithheld(result.report.withheld ?? []);
+        setAdded(result.report.addedToApplication ?? []);
+        setIncludeState((prev) =>
+          pruneTicks(prev, result.report.withheld ?? [], result.report.addedToApplication ?? []),
+        );
+        setUnshippedLinks(result.report.unshippedMacroLinks ?? []);
+        setIncludeFor(JSON.stringify(including));
+        setButtonCode(result.report.buttonCode ?? null);
         if (result.sheets) setAvailableSheets(result.sheets);
         if (result.defaultSheetIndices) {
           setDefaultIndices(result.defaultSheetIndices);
@@ -302,8 +420,14 @@ export function PublishDialog({ onClose, data }: DialogProps) {
           // moved would silently undo their choice on every target change.
           // Only LISTED sheets: an index without a checkbox could never be
           // unticked (see lib/listedSheets.ts).
-          if (!selectionTouchedRef.current)
-            setSheetSelection(new Set(listedIndices(result.defaultSheetIndices, result.sheets)));
+          if (!selectionTouchedRef.current) {
+            const seeded = listedIndices(result.defaultSheetIndices, result.sheets);
+            setSheetSelection(new Set(seeded));
+            // This answer IS the default selection's -- no second fetch for it.
+            setButtonCodeFor(sheetsSignature(seeded));
+          } else {
+            setButtonCodeFor(null);
+          }
         }
         setGates(result.gates ?? null);
       } catch {
@@ -346,20 +470,39 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     if (kind !== "library" && sheetSelection.size === 0) {
       setDiff(null);
       setDiffError(null);
+      setCode(null);
       setExcludedCells(new Set());
       return;
     }
     let cancelled = false;
     setDiffBusy(true);
     setDiffError(null);
-    diffWorkingCopy({ sheetIndices: selectedIndices(), includeComments })
+    setCode(PROMOTION_CODE_LOADING);
+    diffWorkingCopy({
+      sheetIndices: selectedIndices(),
+      includeComments,
+      includeInApplication: includeList(includeState),
+      // THE CODE, from the same two sides as the cell diff: the signed base and
+      // the push this dialog would make (owner question 14).
+      codeSummary: true,
+    })
       .then((result) => {
-        if (!cancelled) setDiff(result.diff);
+        if (cancelled) return;
+        setDiff(result.diff);
+        // An answer without the code list is NOT "no code changes".
+        setCode(
+          result.code
+            ? promotionCodeFromImpact(result.code)
+            : promotionCodeFailed("the answer carried no code list"),
+        );
       })
       .catch((e: unknown) => {
         // A missing base version or an unreachable workspace costs the diff
-        // panel, not the dialog — the push gates still run server-side.
-        if (!cancelled) setDiffError(String(e));
+        // panel, not the dialog — the push gates still run server-side. The
+        // code summary says the comparison failed: never swallowed.
+        if (cancelled) return;
+        setDiffError(String(e));
+        setCode(promotionCodeFailed(e));
       })
       .finally(() => {
         if (!cancelled) setDiffBusy(false);
@@ -374,7 +517,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, workspace?.baseVersion, pushed, sheetSelection, availableSheets.length, includeComments, kind]);
+  }, [mode, workspace?.baseVersion, pushed, sheetSelection, availableSheets.length, includeComments, kind, includeState]);
 
   // When the base is stale, WHY it is stale matters more than the fact. Ask
   // whether the intervening work actually overlaps yours before telling the
@@ -443,6 +586,53 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     if (availableSheets.length === 0) return [];
     return listedIndices(sheetSelection, availableSheets);
   };
+
+  // THE BUTTONS' CODE FOLLOWS THE TICK LIST. Whenever the selection it answers
+  // is not the selection on screen, ask again -- only the button-code (and
+  // withheld) part of the preview is taken, so the report the author pressed
+  // Preview for is not replaced under them. Until the answer lands the push is
+  // held back (`buttonCodeStale` in pushReadiness). A failed fetch leaves it
+  // stale, and the readiness line says to press Preview.
+  useEffect(() => {
+    if (mode === "loading" || availableSheets.length === 0) return;
+    const asked = selectedIndices();
+    const signature = sheetsSignature(asked);
+    // THE INCLUSION IS PART OF THE QUESTION (M4): ticking "Include in
+    // application" changes what ships, what stays behind and which buttons
+    // still run a macro the push leaves out -- so a tick asks again, exactly as
+    // a moved sheet checkbox does.
+    const including = includeList(includeState);
+    const includeSig = includeSignature(includeState);
+    if (buttonCodeFor === signature && includeFor === includeSig) return;
+    let cancelled = false;
+    publishPreview(
+      asked,
+      includeComments,
+      registryPath.trim() && packageName.trim() ? { registryPath, packageName } : undefined,
+      kind,
+      including,
+    )
+      .then((result) => {
+        if (cancelled) return;
+        setButtonCode(result.report.buttonCode ?? null);
+        setWithheld(result.report.withheld ?? []);
+        setAdded(result.report.addedToApplication ?? []);
+        setIncludeState((prev) =>
+          pruneTicks(prev, result.report.withheld ?? [], result.report.addedToApplication ?? []),
+        );
+        setUnshippedLinks(result.report.unshippedMacroLinks ?? []);
+        setButtonCodeFor(signature);
+        setIncludeFor(includeSig);
+      })
+      .catch(() => {
+        // Stays stale: the readiness line asks for Preview.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // selectedIndices reads state; the deps are what change it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, sheetSelection, availableSheets, registryPath, packageName, kind, buttonCodeFor, includeState, includeFor]);
 
   // Publishing is the ONE flow with two legitimate gestures, and the second is
   // not a fallback for old workspaces — Subscribe and Open-for-editing have no
@@ -554,6 +744,11 @@ export function PublishDialog({ onClose, data }: DialogProps) {
         mode: mode === "push" ? "update" : "createNew",
         expectedBaseVersion: mode === "push" ? workspace?.baseVersion : undefined,
         changeSummary,
+        // Only code the dialog SHOWED and the author ticked (BUG-0257).
+        acknowledgedButtonCode: [...ackedButtonCode],
+        // Only items whose code the dialog SHOWED, each with the hash Rust
+        // computed of it (M4).
+        includeInApplication: includeList(includeState),
       });
       // WHERE THE RELEASE NOW STANDS. "Pushed v1.5.0" answers where the bytes
       // went, not who receives them, and the whole point of environments is
@@ -570,6 +765,13 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       // what the first environment promotes FROM.
       emitAppEvent(ENVIRONMENTS_CHANGED_EVENT, { registryPath, packageName });
       setReport(result.report);
+      setWithheld(result.report.withheld ?? []);
+      setAdded(result.report.addedToApplication ?? []);
+      setUnshippedLinks(result.report.unshippedMacroLinks ?? []);
+      setIncludeFor(includeSignature(includeState));
+      setReportIncludeFor(includeSignature(includeState));
+      setButtonCode(result.report.buttonCode ?? null);
+      setButtonCodeFor(sheetsSignature(selectedIndices()));
       setReportLabel(`Published ${result.packageName} v${result.version}`);
       setWarnings(result.warnings);
       setPushed(true);
@@ -585,6 +787,19 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     } catch (err: unknown) {
       setError(explainPushError(String(err)));
       setStatus(null);
+      // A push refused over button code the review did not show (it changed
+      // since, or was never fetched for this selection): fetch it again, so
+      // the items can be read and ticked instead of the refusal repeating.
+      if (/CALP_PUSH_(BUTTON_CODE_UNREVIEWED|HELD_CODE_UNVERIFIED)/.test(String(err))) {
+        setButtonCodeFor(null);
+      }
+      // Refused over what was included, or over a button whose macro the push
+      // leaves out (M4): the answer on screen was wrong about this push, so
+      // fetch it again -- the items and their remedies come back to act on.
+      if (/CALP_PUSH_(INCLUDED_CHANGED|BUTTON_MACRO_NOT_SHIPPED)/.test(String(err))) {
+        setButtonCodeFor(null);
+        setIncludeFor(null);
+      }
     } finally {
       // ALWAYS, on both paths. A failed publish must not leave the author's
       // workbook holding the base values, and a SUCCESSFUL one must not either
@@ -695,9 +910,40 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       sheetsAvailable: availableSheets.length,
       kind,
       nameAlreadyTaken: nameClash !== null,
+      buttonCodeRefused: buttonCode?.refused.length ?? 0,
+      buttonCodeUnacknowledged: unacknowledgedButtonCode(buttonCode, ackedButtonCode),
+      buttonCodeStale:
+        mode !== "loading" &&
+        availableSheets.length > 0 &&
+        buttonCodeFor !== sheetsSignature(selectedIndices()),
+      unshippedMacroLinks: unshippedLinks,
+      includeStale:
+        mode !== "loading" &&
+        availableSheets.length > 0 &&
+        includeFor !== includeSignature(includeState),
+      includeChanged:
+        includeFor === includeSignature(includeState)
+          ? unhonouredIncludes(includeState, added).map((tick) => {
+              const known = [...withheld, ...added].find((w) => itemKey(w) === itemKey(tick));
+              return known?.name || tick.id;
+            })
+          : [],
     });
   const blocked = blockingReason();
   const canPush = !blocked && !pushed;
+
+  /**
+   * What an "Include in application" row may do, for every list in this dialog
+   * (IncludeInApplicationContext). `setIncluded` refuses a tick whose code has
+   * not been on screen, whatever the checkbox's own state says.
+   */
+  const includeControls: IncludeControls = {
+    isIncluded: (item) => isIncluded(includeState, item),
+    isTickedForOtherCode: (item) => isTickedForOtherCode(includeState, item),
+    isReviewed: (item) => isReviewed(includeState, item),
+    review: (item) => setIncludeState((prev) => markReviewed(prev, item)),
+    setIncluded: (item, include) => setIncludeState((prev) => setIncluded(prev, item, include)),
+  };
 
   // ---- layout -------------------------------------------------------------
   /**
@@ -719,7 +965,14 @@ export function PublishDialog({ onClose, data }: DialogProps) {
    */
   const twoPane = mode === "push" && !isNarrowBody;
   /** Is there anything for the review side to hold? A push always has a diff. */
-  const hasReview = mode === "push" || warnings.length > 0 || report !== null;
+  const hasReview =
+    mode === "push" ||
+    warnings.length > 0 ||
+    report !== null ||
+    buttonCode !== null ||
+    unshippedLinks.length > 0 ||
+    added.length > 0 ||
+    withheld.length > 0;
 
   // ---- styles -------------------------------------------------------------
   const windowStyle: React.CSSProperties = {
@@ -818,6 +1071,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
         just stack at their natural height, which is exactly the single scroller
         this dialog always had.
       */}
+      <IncludeInApplicationContext.Provider value={includeControls}>
       <DialogBody
         ref={split.containerRef}
         stacked={!twoPane}
@@ -1267,6 +1521,26 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                   { flex: "0 0 auto", padding: "0 16px 12px" }
             }
           >
+            {/* THE CODE, FIRST -- the Promote dialog's summary, base -> this
+                push (owner question 14). A push is where the developer decides
+                what code goes out under their key, and a changed macro used to
+                sit somewhere inside the cell diff below. In two panes it
+                shrinks and scrolls on its own, so it never pushes the diff out. */}
+            {mode === "push" && code && (
+              <div
+                data-testid="push-code-summary"
+                style={twoPane ? { flex: "0 1 auto", minHeight: 0, overflowY: "auto" } : undefined}
+              >
+                <PromotionCodeSummary
+                  state={code}
+                  environment={PUSH_CODE_AUDIENCE}
+                  firstPromotion={false}
+                  toVersion={version}
+                  act="push"
+                />
+              </div>
+            )}
+
             {mode === "push" && (
               <div
                 style={
@@ -1384,6 +1658,62 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                   : { flexShrink: 0 }
               }
             >
+        {/* WHAT THIS PUSH LEAVES BEHIND, named, before anything is pushed.
+            Once a report is up it names the same list itself (PublishReportView),
+            so this box stands in only until then. */}
+        {withheld.length > 0 && report === null && (
+          <div
+            data-testid="push-withheld-notice"
+            style={{
+              fontSize: "12px",
+              margin: "8px 0",
+              padding: "6px 8px",
+              border: "1px solid var(--border-default)",
+              borderRadius: 4,
+            }}
+          >
+            <WithheldContentList items={withheld} />
+          </div>
+        )}
+
+        {/* WHAT THIS PUSH ADDS from your own content ("Include in
+            application", M4), each with its code and the tick to take it back
+            out. Once a report is up it names the same list itself. */}
+        {added.length > 0 && report === null && (
+          <div
+            data-testid="push-added-notice"
+            style={{
+              fontSize: "12px",
+              margin: "8px 0",
+              padding: "6px 8px",
+              border: "1px solid var(--border-default)",
+              borderRadius: 4,
+            }}
+          >
+            <AddedToApplicationList items={added} />
+          </div>
+        )}
+
+        {/* BUTTONS THAT RUN A MACRO THIS PUSH LEAVES OUT (M4): the push is
+            refused while any remain, so each is named with the remedy that
+            works -- for your own macro, the include tick in place. */}
+        <UnshippedMacroLinks links={unshippedLinks} withheld={withheld} />
+
+        {/* THE BUTTONS' CODE, with the code on screen, before anything is
+            pushed (BUG-0257). */}
+        <ButtonCodeReview
+          release={buttonCode}
+          acknowledged={ackedButtonCode}
+          onAcknowledge={(hash, acked) =>
+            setAckedButtonCode((prev) => {
+              const next = new Set(prev);
+              if (acked) next.add(hash);
+              else next.delete(hash);
+              return next;
+            })
+          }
+        />
+
         {warnings.length > 0 && (
           <div
             style={{
@@ -1418,6 +1748,13 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                 : {}),
             }}
           >
+            {reportIncludeFor !== null && reportIncludeFor !== includeSignature(includeState) && (
+              // Ticking "Include in application" changes what ships; a report
+              // computed before the tick overstates or understates it.
+              <div style={{ color: "#a05a00", fontWeight: 600, marginBottom: "4px" }}>
+                Out of date — what you included in the application changed. Press Preview again.
+              </div>
+            )}
             {reportFor !== null && reportFor !== previewSignature() && (
               // The report names the sheets it would ship. Once the selection
               // moves it is describing a publish nobody is about to make, and
@@ -1435,6 +1772,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
           </DialogSidePane>
         )}
       </DialogBody>
+      </IncludeInApplicationContext.Provider>
 
       {/*
         THE ANSWER STRIP — pinned, outside the scroll, directly above the button
@@ -1581,12 +1919,21 @@ function WorkspaceBanner({
 
   if (stale) {
     const head = merge?.headVersion || gates?.registryLatest || workspace.headVersion;
-    const who = merge?.headPublishedBy || gates?.latestPublishedBy || "";
+    // WHO, only from the head's VERIFIED manifest (the merge analysis, which
+    // also checked the signer is an authorised publisher). The version
+    // listing's "published by" is unsigned -- a share-writer can type a
+    // colleague's name there -- so when the analysis did not verify the head,
+    // nobody is named.
+    const signer = merge?.headSigner;
     const landed = (
       <>
         <strong>{workspace.packageName}</strong> is now at v{head}
-        {who ? `, published by ${who}` : ""} — you are working from v
-        {workspace.baseVersion}.
+        {signer ? (
+          <span data-testid="stale-head-signer">
+            {`, signed by ${signer.name || "an unnamed publisher"} (key ${signer.fingerprint})`}
+          </span>
+        ) : null}{" "}
+        — you are working from v{workspace.baseVersion}.
         {merge?.headChangeSummary ? ` They wrote: “${merge.headChangeSummary}”` : ""}
       </>
     );
@@ -1736,6 +2083,14 @@ function ChangeLists({ analysis }: { analysis: MergeAnalysisResponse["analysis"]
  * can branch; the human half is the rest of the string. Showing the code to the
  * user would be showing them our internal vocabulary.
  */
+/**
+ * A sheet selection as one comparable string: which selection a button-code
+ * answer belongs to. Order-insensitive.
+ */
+export function sheetsSignature(indices: readonly number[]): string {
+  return JSON.stringify([...indices].sort((a, b) => a - b));
+}
+
 function explainPushError(raw: string): string {
   const match = raw.match(/CALP_(?:PUSH|MERGE)_[A-Z_]+:\s*(.*)$/s);
   return match ? match[1].trim() : raw;

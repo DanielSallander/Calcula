@@ -417,19 +417,31 @@ export async function recaptureViewBookmark(
 }
 
 /**
+ * WHO activated a view bookmark (owner decision B, follow-up F10): the user
+ * (the bookmark list, the `bookmarks.activateView` command -- which is not
+ * scriptSafe, so no script reaches it), or a script (a queued
+ * `activateViewBookmark` mutation, scriptMutationHandler.ts). The bookmark's
+ * on-activate script is told, because an application's macro may run only when
+ * a PERSON started it: one a script set off is refused by the module-runtime
+ * gate. Required, so no caller can leave it unsaid.
+ */
+export type ViewBookmarkActivator = "person" | "script";
+
+/**
  * Optional script runner injected by the extension's activate() function.
  * This avoids the bookmark store needing direct access to the ScriptEditor extension.
- * Signature: (scriptId: string) => Promise<void>
  */
-let scriptRunner: ((scriptId: string) => Promise<void>) | null = null;
+type ViewBookmarkScriptRunner = (scriptId: string, activatedBy: ViewBookmarkActivator) => Promise<void>;
+
+let scriptRunner: ViewBookmarkScriptRunner | null = null;
 
 /** Set the script runner callback (called from extension index.ts during activation). */
-export function setScriptRunner(runner: ((scriptId: string) => Promise<void>) | null): void {
+export function setScriptRunner(runner: ViewBookmarkScriptRunner | null): void {
   scriptRunner = runner;
 }
 
 /** Activate a view bookmark — restore its state and optionally run its script. */
-export async function activateViewBookmark(id: string): Promise<boolean> {
+export async function activateViewBookmark(id: string, activatedBy: ViewBookmarkActivator): Promise<boolean> {
   const bm = viewBookmarks.get(id);
   if (!bm) return false;
 
@@ -438,7 +450,7 @@ export async function activateViewBookmark(id: string): Promise<boolean> {
   // Run onActivate script if linked
   if (bm.onActivateScriptId && scriptRunner) {
     try {
-      await scriptRunner(bm.onActivateScriptId);
+      await scriptRunner(bm.onActivateScriptId, activatedBy);
     } catch (error) {
       console.warn("[ViewBookmarks] Failed to run onActivate script:", error);
     }

@@ -269,6 +269,37 @@ pub struct PublishedObjectScript {
     pub capabilities: Vec<String>,
 }
 
+impl PublishedObjectScript {
+    /// The capability ceiling a subscriber's pull applies to this script
+    /// (`pull.rs` sets the pulled script's `declared_capabilities` from this
+    /// entry, R19), sorted and de-duplicated for comparison and display.
+    ///
+    /// THE one reading of an object script's capabilities that the version diff
+    /// and the promotion's code summary share. The diff once read them from the
+    /// script's ARTIFACT instead -- from a key no artifact carries -- and never
+    /// reported a gained or lost capability (BUG-0274).
+    pub fn capability_ceiling(&self) -> Vec<String> {
+        let mut capabilities = self.capabilities.clone();
+        capabilities.sort();
+        capabilities.dedup();
+        capabilities
+    }
+}
+
+impl VersionManifest {
+    /// The capability ceiling of object script `id` as a subscriber receives
+    /// it: the FIRST entry listed under that id (a pull keeps the first object
+    /// script of an id and skips a later one), empty when this version lists no
+    /// such script.
+    pub fn object_script_ceiling(&self, id: &str) -> Vec<String> {
+        self.object_scripts
+            .iter()
+            .find(|s| s.id == id)
+            .map(PublishedObjectScript::capability_ceiling)
+            .unwrap_or_default()
+    }
+}
+
 /// A standalone module script bundled with a .calp application (C8).
 /// Module scripts are inert, transparent data — the manifest entry exists so
 /// the subscriber can list/review them BEFORE pulling and locate the on-disk

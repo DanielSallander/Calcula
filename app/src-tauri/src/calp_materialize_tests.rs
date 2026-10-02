@@ -646,6 +646,7 @@ fn checkout_pull(dir: &TempDir, prof: &Path) -> calp::pull::PullResult {
     let scope = calp::workspace_scope(dir.path().to_str().unwrap()).unwrap();
     calp::checkout::checkout(&reg, "literals", None, "2026-09-25T01:00:00Z", &scope, prof)
         .expect("checkout failed")
+        .pulled
 }
 
 /// A chart ENVELOPE (as the chart store writes it) on `host`, whose data source
@@ -1333,6 +1334,10 @@ fn the_publish_report_counts_canvases_timelines_and_floating_ranges_as_included(
         data_sources: Vec::new(),
         model_writebacks: Vec::new(),
         excluded_regions: Vec::new(),
+        withheld: Vec::new(),
+        added_to_application: Vec::new(),
+        button_code: Default::default(),
+        cell_type_objects: Vec::new(),
     };
     let selection = crate::calp_commands::PublishSelection {
         indices: vec![0, 2, 1],
@@ -2934,10 +2939,12 @@ fn a_held_back_cell_reads_the_working_copys_renamed_sheet_not_the_authors_own() 
 
     let report_id = h.state.sheet_ids.read().unwrap()[h.index_of("Report")].to_string();
     let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+    let manifest = reg.get_version_manifest("literals", "1.0.0").unwrap();
     let cells = crate::calp_commands::published_cells_in_local_names(
         &reg,
         "literals",
         "1.0.0",
+        &manifest,
         &report_id,
         &[(0, 0), (9, 9)],
         &renames,
@@ -2962,6 +2969,7 @@ fn a_held_back_cell_reads_the_working_copys_renamed_sheet_not_the_authors_own() 
         &reg,
         "literals",
         "1.0.0",
+        &manifest,
         &new_sheet_id().to_string(),
         &[(0, 0)],
         &renames,
@@ -2973,6 +2981,62 @@ fn a_held_back_cell_reads_the_working_copys_renamed_sheet_not_the_authors_own() 
     assert!(crate::calp_commands::working_copy_sheet_renames(&h.state, registry, "other")
         .unwrap()
         .is_empty());
+}
+
+/// A SHEET SWAPPED AFTER IT WAS VERIFIED is refused, not written into the
+/// working copy. The merge and the hold-back verify a version (every artifact
+/// walked), then read one sheet AGAIN; a share-writer racing that window could
+/// replace the sheet's bytes after both the signature and the signer check,
+/// and the swapped cells rode the next signed push. The read now re-checks the
+/// bytes against the checksum the verified manifest records.
+///
+/// SABOTAGE: drop the `sha256_hex(&bytes) != *expected` check from
+/// `published_cells_in_local_names`.
+#[test]
+fn a_published_sheet_swapped_after_verification_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let h = checked_out_over_own_data(&dir, prof.path());
+    let report_id = h.state.sheet_ids.read().unwrap()[h.index_of("Report")].to_string();
+    let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+    // What the caller verified.
+    let manifest = reg.get_version_manifest("literals", "1.0.0").unwrap();
+    let rel = format!("sheets/{report_id}/data.json");
+    let read = |manifest: &calp::manifest::VersionManifest| {
+        crate::calp_commands::published_cells_in_local_names(
+            &reg,
+            "literals",
+            "1.0.0",
+            manifest,
+            &report_id,
+            &[(0, 0)],
+            &calp::sheet_renames::SheetRenames::default(),
+        )
+    };
+    // Positive control: the verified bytes read.
+    assert!(read(&manifest).expect("the verified sheet reads").is_some());
+
+    // The race: the sheet's bytes change after the walk.
+    let genuine = reg.read_artifact("literals", "1.0.0", &rel).unwrap().unwrap();
+    // Any change to the bytes is a swap; still valid JSON, so only the
+    // checksum can tell.
+    let swapped = format!("{} ", String::from_utf8(genuine).unwrap());
+    let path = reg.version_dir("literals", "1.0.0").unwrap().join(&rel);
+    std::fs::write(&path, swapped.as_bytes()).unwrap();
+    let err = match read(&manifest) {
+        Ok(_) => panic!("swapped bytes were read into the working copy"),
+        Err(e) => e,
+    };
+    assert!(err.contains("does not match the checksum"), "{err}");
+
+    // A manifest that does not vouch for the sheet at all vouches for nothing.
+    let mut silent = manifest.clone();
+    silent.artifact_checksums.remove(&rel);
+    let err = match read(&silent) {
+        Ok(_) => panic!("a sheet the manifest does not vouch for was read"),
+        Err(e) => e,
+    };
+    assert!(err.contains("records no checksum"), "{err}");
 }
 
 /// THE SUBSCRIBER DIFF AND THE RESET, ONE RULE. The subscriber owns "Data";
@@ -3137,4 +3201,408 @@ fn a_second_dev_subscribe_to_the_same_source_is_refused_and_changes_nothing() {
     unique.sort_by_key(|id| id.to_string());
     unique.dedup();
     assert_eq!(unique.len(), ids_before.len(), "one sheet per id");
+}
+
+// ---------------------------------------------------------------------------
+// BUG-0261: the base record of a checkout's Custom Functions
+// ---------------------------------------------------------------------------
+
+/// A Custom Functions library record holding `functions` (name, body).
+fn function_library(functions: &[(&str, &str)]) -> persistence::SavedScript {
+    let functions: Vec<serde_json::Value> = functions
+        .iter()
+        .map(|(name, body)| serde_json::json!({ "name": name, "params": [], "body": body }))
+        .collect();
+    persistence::SavedScript {
+        id: crate::calp_push_scope::CUSTOM_FUNCTIONS_LIB_ID.to_string(),
+        name: "Custom Functions (data)".to_string(),
+        description: None,
+        source: serde_json::json!({ "functions": functions }).to_string(),
+        scope: persistence::SavedScriptScope::Workbook,
+        source_package: None,
+    }
+}
+
+/// A CHECKOUT RECORDS THE FUNCTIONS ITS MERGE APPLIED, NOT THE ONES IT SKIPPED
+/// (BUG-0261). Checkout is additive and the pull merges the application's
+/// library into the developer's PER FUNCTION, keeping the developer's own
+/// function when the names collide. The base record must name only what
+/// landed: had it named the incoming `RATE`, the developer's own `RATE` -- the
+/// one the merge kept -- would ship as the application's on the next push,
+/// signed under their key, and replace the application's `RATE` for every
+/// subscriber.
+///
+/// Through the REAL publish, checkout pull and materializer, then the push
+/// filter over what the working copy holds.
+///
+/// SABOTAGE: read every function in `custom_function_keys_applied_by`
+/// (`library_function_keys(.., None)`) -- the developer's `RATE` and `PRIVATE`
+/// are then recorded as the application's and ship.
+#[test]
+fn a_checkout_records_the_functions_its_merge_applied_not_the_ones_it_skipped() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut published = mixed_workbook();
+    published.scripts = vec![function_library(&[("APPFN", "return 1"), ("RATE", "return 0.25")])];
+    publish_sheets(&dir, prof.path(), &published, vec![0]);
+
+    // The developer's workbook already has a library of their own, with a
+    // function named like the application's and one that reaches the network.
+    let h = Harness::new();
+    {
+        let mine = function_library(&[
+            ("RATE", "return 0.5"),
+            ("PRIVATE", "return fetch('https://example.invalid')"),
+        ]);
+        h.scripts.workbook_scripts.write(&test_effect()).unwrap().insert(
+            mine.id.clone(),
+            crate::scripting::types::WorkbookScript {
+                id: mine.id.clone(),
+                name: mine.name.clone(),
+                description: None,
+                source: mine.source.clone(),
+                scope: crate::scripting::types::ScriptScope::Workbook,
+                source_package: None,
+            },
+        );
+    }
+    let pulled = checkout_pull(&dir, prof.path());
+    let base_script_ids: Vec<String> = pulled.module_scripts.iter().map(|s| s.id.clone()).collect();
+    h.materialize(pulled, MaterializeMode::Checkout);
+
+    let recorded = crate::calp_commands::custom_function_keys_applied_by(&h.scripts, "literals")
+        .expect("the library reads");
+    assert_eq!(recorded, vec!["APPFN"], "only what the merge applied is the application's");
+
+    // The next push, filtered against that record.
+    let workspace = dir.path().to_string_lossy().to_string();
+    let mut link = calp::WorkingCopyLink::new(
+        &workspace,
+        "literals",
+        "report",
+        "1.0.0",
+        "2026-09-30T00:00:00Z",
+        Vec::new(),
+    );
+    link.record_content(calp::WorkingCopyContent {
+        script_ids: base_script_ids,
+        custom_function_names: recorded,
+        ..calp::WorkingCopyContent::default()
+    });
+    let live = h
+        .scripts
+        .workbook_scripts
+        .read()
+        .unwrap()
+        .get(crate::calp_push_scope::CUSTOM_FUNCTIONS_LIB_ID)
+        .cloned()
+        .expect("the merged library");
+    let mut carrier = Workbook::default();
+    carrier.scripts = vec![persistence::SavedScript {
+        id: live.id,
+        name: live.name,
+        description: live.description,
+        source: live.source,
+        scope: persistence::SavedScriptScope::Workbook,
+        source_package: live.source_package,
+    }];
+    let mut object_scripts = None;
+    let withheld = crate::calp_push_scope::withhold_content_not_in_application(
+        &mut carrier,
+        &mut object_scripts,
+        &crate::calp_push_scope::PushScope {
+            registry_path: &workspace,
+            package_name: "literals",
+            link: Some(&link),
+            subscriptions: &[],
+            published_sheets: &[],
+            included: &[],
+        },
+    )
+    .withheld;
+
+    let shipped: serde_json::Value = serde_json::from_str(&carrier.scripts[0].source).unwrap();
+    let shipped: Vec<(&str, &str)> = shipped["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| (f["name"].as_str().unwrap(), f["body"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        shipped,
+        vec![("APPFN", "return 1")],
+        "the application's function ships, and only it"
+    );
+    let mut named: Vec<(&str, crate::calp_push_scope::WithheldReason)> =
+        withheld.iter().map(|w| (w.name.as_str(), w.reason)).collect();
+    named.sort_by(|a, b| a.0.cmp(b.0));
+    assert_eq!(
+        named,
+        vec![
+            ("PRIVATE", crate::calp_push_scope::WithheldReason::NotInApplication),
+            ("RATE", crate::calp_push_scope::WithheldReason::NotInApplication),
+        ],
+        "the developer's own functions stay home, named"
+    );
+}
+
+/// The checkout command takes its function record AFTER the materializer ran
+/// (before it there is nothing merged to read) and BEFORE it writes the link.
+/// A census of the command body, because the command itself needs a window.
+///
+/// SABOTAGE: delete the `custom_function_keys_applied_by(` line from
+/// `calp_checkout`.
+#[test]
+fn checkout_records_its_functions_after_the_merge_and_before_the_link() {
+    let body = calp_commands_fn_code("pub fn calp_checkout(");
+    let merged = body.find("materialize_pull_result(").expect("checkout materializes");
+    let read = body
+        .find("custom_function_keys_applied_by(")
+        .expect("checkout no longer records the functions its merge applied");
+    let linked = body.find(".record_content(").expect("checkout records the base content");
+    assert!(merged < read && read < linked, "materialize, then read the merge, then record");
+    assert!(
+        body.contains("base_content.custom_function_names ="),
+        "the functions read back are the ones recorded"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BUG-0263: a slicer's COMPUTED PROPERTIES travel -- to a working copy and back
+// out of it unchanged, and to a subscriber, live.
+// ---------------------------------------------------------------------------
+
+/// A computed property of the test slicer, as the store holds it.
+fn slicer_prop(id: identity::EntityId, attribute: &str, formula: &str) -> persistence::SavedSlicerComputedProperty {
+    persistence::SavedSlicerComputedProperty {
+        id,
+        attribute: attribute.to_string(),
+        formula: formula.to_string(),
+    }
+}
+
+/// ["Data" (A1 = 300), "Report" (A1 = 3)] and one slicer on Report whose width
+/// follows `=Data!A1+A1` (a CROSS-sheet reference, so a collision rename has
+/// something to rewrite) and whose column count follows `=A1`. The saved
+/// attributes are the values those formulas last produced (303 wide, 3
+/// columns), as a real save writes them.
+fn report_with_a_computed_slicer() -> (Workbook, identity::EntityId) {
+    let mut data = Sheet::new("Data".to_string());
+    data.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(300.0)));
+    let mut report = Sheet::new("Report".to_string());
+    report.cells.insert((0, 0), SavedCell::from_cell(&Cell::new_number(3.0)));
+    let report_id = report.id;
+    let slicer_id = new_entity();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![data, report];
+    wb.slicers = vec![persistence::SavedSlicer {
+        id: slicer_id,
+        name: "ByRegion".to_string(),
+        header_text: None,
+        sheet_id: report_id,
+        x: 40.0,
+        y: 60.0,
+        width: 303.0,
+        height: 220.0,
+        source_type: persistence::SavedSlicerSourceType::Table,
+        cache_source_id: new_entity(),
+        field_name: "Region".to_string(),
+        selected_items: None,
+        show_header: true,
+        columns: 3,
+        style_preset: "SlicerStyleLight1".to_string(),
+        selection_mode: persistence::SavedSlicerSelectionMode::default(),
+        hide_no_data: false,
+        indicate_no_data: true,
+        sort_no_data_last: true,
+        force_selection: false,
+        show_select_all: false,
+        arrangement: persistence::SavedSlicerArrangement::default(),
+        rows: 0,
+        item_gap: 4.0,
+        autogrid: true,
+        item_padding: 0.0,
+        button_radius: 2.0,
+        computed_properties: vec![
+            slicer_prop(new_entity(), "width", "=Data!A1+A1"),
+            slicer_prop(new_entity(), "columns", "=A1"),
+        ],
+        connected_sources: Vec::new(),
+        filter_level: 1,
+        data_source_id: None,
+    }];
+    (wb, slicer_id)
+}
+
+/// The live formulas of one slicer, by attribute.
+fn live_slicer_formulas(h: &Harness, slicer: identity::EntityId) -> std::collections::BTreeMap<String, String> {
+    h.slicer
+        .computed_properties
+        .read()
+        .unwrap()
+        .get(&slicer)
+        .map(|props| props.iter().map(|p| (p.attribute.clone(), p.formula.clone())).collect())
+        .unwrap_or_default()
+}
+
+/// Write Report!A1 and re-evaluate the slicer properties that depend on it,
+/// exactly as the recalculation flow does (`commands/data.rs`).
+fn edit_and_reevaluate(h: &Harness, sheet: usize, value: f64) -> std::collections::HashSet<identity::EntityId> {
+    let effect = test_effect();
+    h.state.grids.write(&effect).unwrap()[sheet].set_cell(0, 0, Cell::new_number(value));
+    let grids = h.state.grids.read().unwrap();
+    let names = h.state.sheet_names.read().unwrap();
+    let styles = h.state.style_registry.read().unwrap();
+    crate::slicer::computed::re_evaluate_slicer_computed_properties(
+        &effect,
+        &[(sheet, 0, 0)],
+        &grids,
+        &names,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &styles,
+        &h.slicer,
+        None,
+    )
+}
+
+/// SUBSCRIBE. The application's slicer arrives WITH its computed properties,
+/// installed with the dependency index they are re-evaluated through, and the
+/// cross-sheet formula follows the collision rename: the subscriber owns a
+/// "Data" (A1 = 1000), so the application's arrives as "Data (2)", and a width
+/// computed from the subscriber's own sheet would be 1005, not 305.
+///
+/// SABOTAGE (each alone): put the `computed_properties = Vec::new()` strip back
+/// on the pull door; drop `rename_slicer_formulas` from `rename_pull`.
+#[test]
+fn a_subscriber_receives_the_slicers_computed_properties_live_on_the_renamed_sheet() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let (wb, slicer) = report_with_a_computed_slicer();
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 0, 0), None);
+    let h = harness_with_own_data();
+    h.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+
+    let report = h.index_of("Report");
+    h.index_of("Data (2)");
+    let formulas = live_slicer_formulas(&h, slicer);
+    assert_eq!(
+        formulas.get("width").map(String::as_str),
+        Some("='Data (2)'!A1+A1"),
+        "the slicer's computed properties did not arrive, or still name the subscriber's own Data: {formulas:?}"
+    );
+    assert_eq!(formulas.get("columns").map(String::as_str), Some("=A1"));
+
+    // LIVE, not merely listed: editing the cell they read moves the slicer.
+    let modified = edit_and_reevaluate(&h, report, 5.0);
+    assert!(modified.contains(&slicer), "no computed property re-evaluated: the dependency index is empty");
+    let slicers = h.slicer.slicers.read().unwrap();
+    assert_eq!(slicers[&slicer].columns, 5, "columns follows =A1");
+    assert_eq!(
+        slicers[&slicer].width, 305.0,
+        "width must read the APPLICATION's Data (300 + 5), never the subscriber's own (1000 + 5)"
+    );
+}
+
+/// REFRESH. v2 changes the width formula; the refresh replaces the
+/// application's slicer, computed properties and all, through the same
+/// materializer -- renamed onto "Data (2)" like the first pull.
+///
+/// SABOTAGE: put the `computed_properties = Vec::new()` strip back on the
+/// refresh door.
+#[test]
+fn a_refresh_brings_the_new_versions_computed_properties() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let (mut wb, slicer) = report_with_a_computed_slicer();
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 0, 0), None);
+    let h = harness_with_own_data();
+    h.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+
+    wb.slicers[0].computed_properties[0].formula = "=Data!A1+A1*2".to_string();
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "literals"))]);
+
+    let formulas = live_slicer_formulas(&h, slicer);
+    assert_eq!(
+        formulas.get("width").map(String::as_str),
+        Some("='Data (2)'!A1+A1*2"),
+        "the refresh dropped v2's computed properties: {formulas:?}"
+    );
+    let report = h.index_of("Report");
+    edit_and_reevaluate(&h, report, 5.0);
+    assert_eq!(h.slicer.slicers.read().unwrap()[&slicer].width, 310.0, "v2's width is live: 300 + 5*2");
+}
+
+/// CHECKOUT, then an untouched push: the application's `slicers.json` comes
+/// back BYTE FOR BYTE. Checkout used to empty every slicer's computed
+/// properties, so this push republished the slicer without them. The author's
+/// own "Data" sends the application's in as "Data (2)"; the checkout renames
+/// the slicer's reference to follow it and the push puts it back
+/// (`restore_published_sheet_references`), exactly as it does for a cell.
+///
+/// SABOTAGE (each alone): put the strip back on the pull door (the push loses
+/// the properties); drop the slicer loop from
+/// `restore_published_sheet_references` (the push ships "Data (2)").
+#[test]
+fn an_untouched_push_republishes_the_slicers_computed_properties_byte_for_byte() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let (wb, slicer) = report_with_a_computed_slicer();
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 0, 0), None);
+    let h = harness_with_own_data();
+    h.materialize(checkout_pull(&dir, prof.path()), MaterializeMode::Checkout);
+    h.index_of("Data (2)");
+    assert_eq!(
+        live_slicer_formulas(&h, slicer).get("width").map(String::as_str),
+        Some("='Data (2)'!A1+A1"),
+        "the working copy's slicer reads the application's Data"
+    );
+
+    // The push carrier: the application's sheets, this workbook's slicers --
+    // what `build_workbook_for_save_with_slicers` collects -- with the
+    // published names put back, as `assemble_publish_workbook` does.
+    let mut carrier = wb.clone();
+    carrier.slicers =
+        crate::persistence::collect_slicers_for_save(&h.slicer, &h.state.sheet_ids.read().unwrap());
+    let published: std::collections::HashMap<String, String> =
+        [("data (2)".to_string(), "Data".to_string())].into_iter().collect();
+    let counts = crate::calp_commands::restore_published_sheet_references(&mut carrier, &[0, 1], &published);
+    assert_eq!(counts.slicer_formulas, 1, "the slicer's reference is restored to the published name");
+    publish_as(&dir, prof.path(), &carrier, vec![0, 1], "literals", (1, 0, 1), Some((1, 0, 0)));
+
+    let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+    let base = reg.read_artifact("literals", "1.0.0", "slicers.json").unwrap().expect("v1.0.0 has slicers");
+    let pushed = reg.read_artifact("literals", "1.0.1", "slicers.json").unwrap().expect("v1.0.1 has slicers");
+    assert_eq!(
+        String::from_utf8_lossy(&pushed),
+        String::from_utf8_lossy(&base),
+        "an untouched push changed the application's slicers"
+    );
+}
+
+/// No door strips a slicer's computed properties any more, and nothing may
+/// quietly bring the strip back under another name.
+///
+/// SABOTAGE: re-add a `computed_properties = Vec::new()` anywhere in
+/// `calp_commands.rs`.
+#[test]
+fn no_door_strips_a_slicers_computed_properties() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/calp_commands.rs"),
+    )
+    .expect("cannot read calp_commands.rs");
+    let code: String = src
+        .lines()
+        .map(|l| match l.find("//") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!code.contains("sanitize_distributed_slicers"), "the slicer strip is back");
+    assert!(
+        !code.contains("computed_properties = Vec::new()"),
+        "a door empties slicers' computed properties again"
+    );
 }

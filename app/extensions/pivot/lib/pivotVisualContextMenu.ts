@@ -21,13 +21,18 @@
 //          the pointer exactly as on a worksheet -- and Core's cell items
 //          (Cut, Insert Row ...) never appear on a canvas.
 //
+//          Below the pivot's own items sits "Size and Position...", the row
+//          every object menu carries (@api/objectPosition; BUG-0258 design
+//          phase 5b): the no-drag route to place and size the box.
+//
 //          While the menu is open it owns Escape: the canvas's Escape binding
 //          asks the object-selection providers first (`ownsKey`,
 //          pivotVisualSelection.ts), so Escape closes the menu instead of
 //          deselecting the box behind it (the FloatingRange precedent).
 
 import { gridExtensions, type GridContextMenuItem, type GridMenuContext, type Selection } from "@api";
-import { topFloatingRegionAtClient } from "@api/gridOverlays";
+import { topFloatingRegionAtClient, type GridRegion } from "@api/gridOverlays";
+import { sizeAndPositionMenuEntry } from "@api/objectPosition";
 import { getGridStateSnapshot } from "@api/grid";
 import { getPivotVisualRecord, viewCellAtCanvasPoint } from "./pivotVisualHits";
 import { PIVOT_VISUAL_REGION_TYPE, pivotIdOfVisual } from "./pivotVisualRegions";
@@ -42,6 +47,8 @@ export const PIVOT_MENU_GROUP = "pivot";
 export interface PivotBoxMenuTarget {
   pivotId: string;
   context: GridMenuContext;
+  /** The box's published region (what Size and Position opens for). */
+  region: GridRegion;
 }
 
 /**
@@ -70,6 +77,7 @@ export function pivotBoxMenuTargetAt(clientX: number, clientY: number): PivotBox
   const selection: Selection = { startRow: row, startCol: col, endRow: row, endCol: col, type: "cells" };
   return {
     pivotId,
+    region: top,
     context: {
       selection,
       clickedCell: { row, col },
@@ -81,9 +89,27 @@ export function pivotBoxMenuTargetAt(clientX: number, clientY: number): PivotBox
   };
 }
 
-/** The pivot group's items for a context: visible ones, labels resolved. */
-export function pivotBoxMenuItems(context: GridMenuContext): GridContextMenuItem[] {
-  return gridExtensions.getContextMenuItemsForContext(context).filter((item) => item.group === PIVOT_MENU_GROUP);
+/** The id of the box menu's "Size and Position..." row. */
+export const PIVOT_BOX_SIZE_POSITION_ITEM_ID = "pivot.box.sizeAndPosition";
+
+/**
+ * The pivot group's items for a context (visible ones, labels resolved) and,
+ * given the box's `region`, the "Size and Position..." row under them.
+ */
+export function pivotBoxMenuItems(context: GridMenuContext, region: GridRegion | null = null): GridContextMenuItem[] {
+  const items = gridExtensions.getContextMenuItemsForContext(context).filter((item) => item.group === PIVOT_MENU_GROUP);
+  if (!region) return items;
+  const entry = sizeAndPositionMenuEntry(region);
+  const last = items[items.length - 1];
+  const out = last && !last.separatorAfter ? [...items.slice(0, -1), { ...last, separatorAfter: true }] : [...items];
+  out.push({
+    id: PIVOT_BOX_SIZE_POSITION_ITEM_ID,
+    label: entry.label,
+    group: PIVOT_MENU_GROUP,
+    disabled: entry.disabled,
+    onClick: () => entry.run(),
+  });
+  return out;
 }
 
 // ============================================================================
@@ -206,7 +232,7 @@ function buildLevel(
 /** Show the menu for `target` at a client point; false when no item applies. */
 export function openPivotBoxMenu(clientX: number, clientY: number, target: PivotBoxMenuTarget): boolean {
   closePivotBoxMenu();
-  const items = pivotBoxMenuItems(target.context);
+  const items = pivotBoxMenuItems(target.context, target.region);
   if (items.length === 0) return false;
 
   const menus: HTMLDivElement[] = [];

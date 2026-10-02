@@ -37,6 +37,7 @@ import {
   selectChart,
 } from "../handlers/selectionHandler";
 import { isChartMenuOpen } from "./chartMenuState";
+import { isChartButtonPressActive } from "./chartButtonSession";
 
 /** The side effects a selection change needs, injected by activate(). */
 export interface ChartObjectSelectionDeps {
@@ -144,21 +145,34 @@ export function chartIdOfRegion(region: GridRegion): string | null {
  *
  * Escape belongs to Charts while one of its right-click menus (the chart menu,
  * the axis menu) is open: the menu closes itself on it (lib/chartMenuState.ts,
- * BUG-0196). Otherwise it belongs to a chart whose sub-selection is below
+ * BUG-0196). It belongs to Charts while a press on one of a chart's own
+ * buttons is held: Escape cancels that press (lib/chartButtonSession.ts) and
+ * must not also deselect the chart under the pointer (the slicer, timeline,
+ * pivot-box and run-mode-button presses' precedent; BUG-0258 M7 review).
+ * Otherwise it belongs to a chart whose sub-selection is below
  * chart level (a series, a point, an axis, an element): it steps up one rung
  * first, exactly as the chart's own Escape handler does (`escapeLevelUp`),
  * which stands down for an open menu too. At chart level Escape is
  * not the chart's -- the object cycler deselects the object. Tab is never the
  * chart's: a chart has no inner Tab order. The arrows follow
  * {@link chartOwnsArrows}.
+ *
+ * Delete (bare Delete and Backspace) is the chart's whenever a chart is
+ * selected (BUG-0270): its own registry door takes Delete and its document
+ * listener takes Backspace, and both delete the SMALLEST thing selected (the
+ * title before the chart). A generic object Delete -- which runs first, in
+ * the dispatcher -- must therefore stand down, or Backspace on a selected
+ * title would take the whole chart.
  */
 export function chartOwnsObjectKey(
   key: ObjectSelectionKey,
   cueCountOf?: (chartId: string) => number,
 ): boolean {
   if (key === "Arrow") return chartOwnsArrows(cueCountOf);
+  if (key === "Delete") return getCurrentChartId() !== null;
   if (key !== "Escape") return false;
   if (isChartMenuOpen()) return true;
+  if (isChartButtonPressActive()) return true;
   if (getCurrentChartId() === null) return false;
   return escapeLevelUp(getSubSelection()) !== null;
 }

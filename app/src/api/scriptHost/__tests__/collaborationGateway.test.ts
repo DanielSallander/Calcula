@@ -199,6 +199,20 @@ describe("rule 1 — pulled code arrives switched off", () => {
       "applyConsentedCapabilities",
       "mountScript",
       "ScriptEngine",
+      // An approval is recorded, sealed to this computer, only by the approval
+      // screen (app/src-tauri/src/consent_seal.rs). Twin of the Rust census
+      // `the_gateway_holds_no_copy_of_the_verification_logic`.
+      "record_script_consent",
+      // A button click runs through the button door only (M6 Task B,
+      // app/src-tauri/src/scripting/control_action.rs); a pull never presses one.
+      "run_control_action",
+      // ...and an application's button COMMAND is authorized only for that
+      // click (plan_M8 S1, authorize_button_command); a pull never authorizes one.
+      "authorize_button_command",
+      // "Make this my own" turns an application's button code into the user's
+      // own -- only from the Properties pane or the button's right-click menu
+      // (one flow), after the code was shown.
+      "adopt_held_button_code",
     ]) {
       expect(production, `gateway must never ${forbidden}`).not.toContain(forbidden);
     }
@@ -280,6 +294,46 @@ describe("rule 2 — the script path is the same code as the UI path", () => {
       "verify_and_load_manifest",
     ]) {
       expect(production, `gateway must not reimplement ${forbidden}`).not.toContain(forbidden);
+    }
+  });
+
+  it("a scripted publish never forwards what only the push dialog may send", () => {
+    // Button code a push publishes that the signed base does not carry, and the
+    // author's own new macros, notebooks and names it ADDS to the application
+    // ("Include in application"), both go out under the pusher's key -- and only
+    // after the push dialog has put the code ON SCREEN. A script has read
+    // nothing, so the gateway's params literal must never carry either list.
+    // Twin of the Rust census `the_gateway_holds_no_copy_of_the_verification_logic`.
+    const production = gatewaySrc.split("#[cfg(test)]")[0];
+    for (const forbidden of [
+      "acknowledgedButtonCode",
+      "acknowledged_button_code",
+      "includeInApplication",
+      "include_in_application",
+    ]) {
+      expect(production, `the scripted publish forwards ${forbidden}`).not.toContain(forbidden);
+    }
+  });
+
+  it("a scripted publish or preview never RECEIVES the code only the push dialog may show", () => {
+    // The push report carries the author's own includable items' FULL TEXT
+    // (`code`) and hash for the dialog to put on screen -- a private module
+    // holding an API token among them. A script holding `distribution.publish`
+    // must get the names, never the code. Twin of the Rust census
+    // `every_publish_shaped_arm_scrubs_its_response` and its behavioural test.
+    const production = gatewaySrc.split("#[cfg(test)]")[0];
+    const fields = production.match(/const DIALOG_ONLY_ITEM_FIELDS: &\[&str\] = &\[([^\]]*)\];/);
+    expect(fields, "the dialog-only field list moved").toBeTruthy();
+    for (const field of ['"code"', '"contentHash"', '"detail"']) {
+      expect(fields![1], `${field} reaches scripts`).toContain(field);
+    }
+    for (const arm of ["Action::PublishPreview => {", "Action::Publish => {", "Action::PublishModel => {"]) {
+      const start = production.indexOf(`\n        ${arm}`);
+      expect(start, `${arm} moved`).toBeGreaterThan(-1);
+      const rest = production.slice(start + 1);
+      const next = rest.indexOf("\n        Action::", 1);
+      const body = next === -1 ? rest : rest.slice(0, next);
+      expect(body, `${arm} hands its report to the script unscrubbed`).toContain("strip_dialog_only_content(&mut ");
     }
   });
 

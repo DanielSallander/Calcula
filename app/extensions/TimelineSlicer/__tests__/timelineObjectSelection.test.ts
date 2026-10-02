@@ -38,6 +38,13 @@ vi.mock("@api/gridOverlays", async (importOriginal) => ({
   requestOverlayRedraw: vi.fn(),
 }));
 
+// Whether a timeline content gesture (a range drag) is live -- the drag module's
+// own answer is pinned by lib/__tests__/timelineRangeDrag.test.ts.
+const gesture = vi.hoisted(() => ({ active: false }));
+vi.mock("../lib/timelineRangeDrag", () => ({
+  isTimelineContentGestureActive: () => gesture.active,
+}));
+
 import type { GridRegion } from "@api/gridOverlays";
 import { resetObjectSelectionProviders, selectObject } from "@api/objectSelection";
 import {
@@ -179,5 +186,26 @@ describe("the canvas selection set (M8)", () => {
     const p = createTimelineSelectionProvider();
     expect(p.labelOf!(region("t1"))).toBe("t1");
     expect(p.labelOf!(region("gone"))).toBeNull();
+  });
+});
+
+describe("Escape during a range drag (BUG-0258)", () => {
+  afterEach(() => {
+    gesture.active = false;
+  });
+
+  it("the provider owns Escape only while a content gesture lives -- the drag cancels, the canvas does not deselect", async () => {
+    const { objectOwnsKey } = await import("@api/objectSelection");
+    const off = registerTimelineObjectSelection();
+    expect(objectOwnsKey("Escape")).toBe(false);
+    gesture.active = true;
+    expect(objectOwnsKey("Escape")).toBe(true);
+    // Only Escape: Tab, the arrows and the clipboard keys stay the canvas's.
+    expect(objectOwnsKey("Tab")).toBe(false);
+    expect(objectOwnsKey("Arrow")).toBe(false);
+    expect(objectOwnsKey("Clipboard")).toBe(false);
+    gesture.active = false;
+    expect(objectOwnsKey("Escape")).toBe(false);
+    off();
   });
 });

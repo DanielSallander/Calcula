@@ -274,6 +274,40 @@ describe("hostMountScript — the mount boundary asks about the publisher", () =
     expect(FakeWorker.instances).toHaveLength(0);
   });
 
+  // Phase 3 of BUG-0257: the button a click claims travels to the gate, which
+  // verifies it against the backend's store and names it on the audit row.
+  //
+  // SABOTAGE: drop `trigger: definition.consentTrigger ?? null` from the
+  // invoke in requireDistributedMountConsent (scriptHost/host.ts).
+  it("hands the gate the button a click claims, and null when no click did", async () => {
+    const trigger = { kind: "buttonControl", sheetIndex: 1, row: 3, col: 2 };
+    await host.hostMountScript(distributedDefinition({ consentTrigger: trigger }));
+    await host.hostMountScript(distributedDefinition({ id: "run-vendor-close-2" }));
+    const calls = gateCalls() as Array<{ trigger?: unknown }>;
+    expect(calls).toHaveLength(2);
+    expect(calls[0].trigger).toEqual(trigger);
+    expect(calls[1].trigger).toBeNull();
+  });
+
+  // The gate's OTHER refusals are "the gate said no" too: wrapping them in
+  // "whether you have approved ... could not be established" tells the user
+  // something false about why.
+  //
+  // SABOTAGE: shrink MOUNT_GATE_REFUSAL_SENTINELS (scriptHost/host.ts) back to
+  // the consent sentinel alone.
+  it.each([
+    "APPLICATION_CODE_BESIDE_PRIVATE_SHEETS: \"macro-vendor-close\" came with the application \"Acme Finance Pack\". This workbook is a working copy",
+    "APPLICATION_CODE_TRIGGER_MISMATCH: \"macro-vendor-close\" from the application \"Acme Finance Pack\" was asked for by a button",
+  ])("passes the gate's own refusal through verbatim: %s", async (refusal) => {
+    gate.unreachable = refusal;
+    const failure = await host.hostMountScript(distributedDefinition()).then(
+      () => null,
+      (e: unknown) => (e instanceof Error ? e.message : String(e)),
+    );
+    expect(failure).toBe(refusal);
+    expect(FakeWorker.instances).toHaveLength(0);
+  });
+
   it("asks BEFORE the Script Security prompt, so a refused mount mints no session approval", async () => {
     // `assertMountAllowed` can show a modal whose "yes" allows scripts for the
     // whole SESSION. Asking for that on behalf of code we are about to refuse
@@ -336,7 +370,14 @@ describe("hostStartModuleScriptDebugSession — Run/Debug on a stored module", (
 
     await host.hostStartModuleScriptDebugSession(DISTRIBUTED_MODULE.id, [2]);
 
-    expect(gateSources()).toEqual([PUBLISHER_SOURCE]);
+    // Run / Debug IS a run the user asked for: the gate is asked before Script
+    // Security and again after it (the run row) -- both times about the STORED
+    // record's source.
+    expect(gateSources()).toEqual([PUBLISHER_SOURCE, PUBLISHER_SOURCE]);
+    expect((gateCalls() as Array<{ phase?: string }>).map((c) => c.phase)).toEqual([
+      "runCheck",
+      "runAdmitted",
+    ]);
   });
 
   it("REFUSES the session for an application the user never approved", async () => {
@@ -539,8 +580,13 @@ describe("the realm-creation doors are enumerated, not discovered one per round"
       code.indexOf("async function admitMount("),
       code.indexOf("\n}\n", code.indexOf("async function admitMount(")),
     );
-    expect(admit).toContain("requireDistributedMountConsent(definition)");
+    expect(admit).toContain('requireDistributedMountConsent(definition, run ? "runCheck" : "mount", claim)');
     expect(admit).toContain("assertMountAllowed(definition.name)");
+    // An explicit run is asked AGAIN only after Script Security admitted it.
+    const scriptSecurity = admit.indexOf("assertMountAllowed(definition.name)");
+    const admitted = admit.indexOf('requireDistributedMountConsent(definition, "runAdmitted", claim)');
+    expect(admitted, "the admitted run is never recorded").toBeGreaterThan(-1);
+    expect(admitted, "the run row is asked for before Script Security").toBeGreaterThan(scriptSecurity);
   });
 
   it("hostMountScript is the only exported route to an admission", () => {
@@ -579,7 +625,7 @@ describe("the realm-creation doors are enumerated, not discovered one per round"
     // module, which is every composed realm source; asking it from here gated
     // five of the six mount routes not at all.
     const code = stripComments(readFileSync(HOST_PATH, "utf8"));
-    expect(code).toContain('invoke<void>("check_distributed_mount_consent"');
+    expect(code).toContain('invoke<MountGateAnswer | null>("check_distributed_mount_consent"');
     expect(code).not.toContain('"check_distributed_module_consent"');
     const gateBody = code.slice(
       code.indexOf("async function requireDistributedMountConsent("),

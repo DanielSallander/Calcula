@@ -41,6 +41,7 @@ import {
   contentHeight,
 } from "../frDimensions";
 import type { FloatingRangeEntry } from "../floatingRangeStore";
+import { FLOATING_HANDLE_HIT_HALF } from "@api/gridOverlays";
 
 function entry(overrides: Partial<FloatingRangeEntry> = {}): FloatingRangeEntry {
   return {
@@ -308,7 +309,7 @@ describe("frEdgeHandles", () => {
   });
 
   it("withholds the handles on an edge too short to own the click", () => {
-    // Core's corner boxes are 10px and win the mousedown. A left/right handle
+    // Core's corner boxes win the mousedown. A left/right handle
     // sits at h/2 from both corners, so on a short frame it would be INSIDE a
     // corner box: grabbing the yellow ball would resize the counts instead.
     // The rule is to not offer it at all.
@@ -330,12 +331,18 @@ describe("frEdgeHandles", () => {
 
   it("keeps every offered handle's WHOLE hit circle clear of Core's corner box", () => {
     // The property FR_EDGE_HANDLE_MIN_SPAN exists to guarantee, asserted
-    // against Core's own number rather than against the constant — so raising
-    // the constant carelessly cannot make this pass vacuously. It is the hit
-    // CIRCLE that has to clear the box, not just the centre: Core runs at a
-    // higher mousedown priority, so any overlap is a click that silently does
-    // a count resize instead of a cell resize.
-    const CORE_CORNER_HIT = 10; // HANDLE_HIT_SIZE, overlayResizeHandlers.ts
+    // against Core's own number (imported, the very constant Core hit-tests
+    // with: core/lib/floatingHandles.ts through @api/gridOverlays) rather than
+    // against the span constant — so raising the span carelessly cannot make
+    // this pass vacuously, and a change to Core's handle size is checked here
+    // the moment it lands. It is the hit CIRCLE that has to clear the box, not
+    // just the centre: Core runs at a higher mousedown priority, so any overlap
+    // is a click that silently does a count resize instead of a cell resize.
+    const CORE_CORNER_HIT = FLOATING_HANDLE_HIT_HALF;
+    expect(CORE_CORNER_HIT, "Core's handle hit half-size is a real number").toBeGreaterThan(0);
+    // Non-vacuous: the frames below include ones that offer handles only
+    // because the span is derived from Core's (smaller) box.
+    let offered = 0;
     for (const e of [
       entry(),
       entry(BARE),
@@ -360,8 +367,16 @@ describe("frEdgeHandles", () => {
             nearestX <= CORE_CORNER_HIT && nearestY <= CORE_CORNER_HIT;
           expect(overlapsCornerBox).toBe(false);
         }
+        offered++;
       }
     }
+    expect(offered, "no frame offered any edge handle: the property was never checked").toBeGreaterThan(8);
+  });
+
+  it("derives the shortest ball-carrying edge from Core's handle size (no second spelling)", () => {
+    // span / 2 - hit radius must exceed Core's half-size, with a pixel to spare.
+    expect(FR_EDGE_HANDLE_MIN_SPAN).toBe(2 * (FLOATING_HANDLE_HIT_HALF + FR_EDGE_HANDLE_HIT_R) + 2);
+    expect(FR_EDGE_HANDLE_MIN_SPAN / 2 - FR_EDGE_HANDLE_HIT_R).toBeGreaterThan(FLOATING_HANDLE_HIT_HALF);
   });
 });
 

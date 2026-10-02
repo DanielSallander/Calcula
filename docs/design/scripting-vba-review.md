@@ -2650,6 +2650,14 @@ The short, honest list. Everything here is verified absent as of 2026-08-02, not
 > silent dead button. **Explicitly deferred:** auto-*pruning* the published module set to exactly the
 > macros a button needs. The non-negotiable — a missing macro is LOUD at both publish and click — is met.
 >
+> **Superseded 2026-09-30 (BUG-0257 phase 3).** `macro_reference_warnings` is gone. A push now
+> REFUSES a button (control or button cell) whose macro it does not ship, naming each button, its
+> macro and a remedy that works (`CALP_PUSH_BUTTON_MACRO_NOT_SHIPPED`,
+> `held_button_code::refuse_push_on_unshipped_macros`); the author's own new macro is added with the
+> push dialog's "Include in application", shown first. A subscriber's link survives only when that
+> pull applied its macro, held and stamped, and runs only that application's macro after its
+> approval (`calp-workspace-collaboration.md` §3 invariants 13-14).
+>
 > **What was proven by driving the live app (not a green number).** Following the ninth correction's
 > own rule, `app/e2e/tests/macro-link-model.spec.ts` ran against a real `cargo tauri dev` build over
 > WebView2 CDP and passed. The decisive assertion is in the user's own words: record a macro writing

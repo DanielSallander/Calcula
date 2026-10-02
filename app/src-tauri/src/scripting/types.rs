@@ -44,6 +44,11 @@ pub struct ScriptState {
     /// reset). The frontend's isExecuting flag is advisory only; this lock is
     /// what actually prevents interleaved checkpoint bookkeeping.
     pub notebook_exec_lock: tokio::sync::Mutex<()>,
+    /// The runs of an application's macro the mount door granted CELL access
+    /// (owner decision B, follow-up F3), waiting for the page to report which
+    /// cells each one wrote (F15). Transient bookkeeping, never saved: a grant
+    /// lives from the mount door's `runAdmitted` answer to its one report.
+    pub explicit_run_grants: super::explicit_run_audit::ExplicitRunGrants,
 }
 
 impl ScriptState {
@@ -57,6 +62,7 @@ impl ScriptState {
             notebook_runtime: Mutex::new(NotebookRuntime::new()),
             notebook_executor: super::notebook_executor::NotebookExecutor::new(),
             notebook_exec_lock: tokio::sync::Mutex::new(()),
+            explicit_run_grants: super::explicit_run_audit::ExplicitRunGrants::default(),
         }
     }
 }
@@ -386,6 +392,137 @@ pub struct RunScriptRequest {
     /// display). Absent = keep the engine defaults.
     #[serde(default)]
     pub view_state: Option<HostViewState>,
+    /// The BUTTON this run claims to come from (phase 3 of BUG-0257), when a
+    /// click asked for it. A claim the renderer makes and Rust VERIFIES against
+    /// its own store before an application's code runs
+    /// (`scripting::application_code_gate::verify_trigger`): it can only narrow
+    /// what runs, and it is how the audit row names the button. Absent for a
+    /// run nobody clicked a button for.
+    #[serde(default)]
+    pub trigger: Option<ScriptRunTrigger>,
+    /// WHO started this run (owner decision B, follow-up F10). ABSENT means no
+    /// person's act can be named -- a script started it, or the caller cannot
+    /// say -- and then an APPLICATION's module macro is refused
+    /// (`application_code_gate::distributed_run_gate`): this runtime has no
+    /// tiers, so it cannot run an application's macro with less than its full
+    /// `Calcula.*` reach, and a run a script starts never gets that reach. The
+    /// user's own and ad-hoc code is not asked. A claim the renderer makes, and
+    /// one that can only NARROW what runs: omitting it refuses, never admits.
+    #[serde(default)]
+    pub started_by: RunStartedBy,
+}
+
+/// The act of a PERSON that started a run of the module runtime (owner
+/// decision B). The first three are the doors that may run an application's
+/// macro, and on the page they come only from a claimed one-time pass
+/// (`app/src/api/explicitMacroRun.ts`, `ExplicitMacroRunDoor`); a view
+/// bookmark is the user's OWN wiring, activated by the user (bookmarks never
+/// travel in an application). Mirrors `RunDoor` in
+/// `app/src/api/workbookScripts.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RunDoor {
+    /// Developer > Macros > Run.
+    MacrosDialog,
+    /// A click on a button that runs the macro (with the button's `trigger`).
+    Button,
+    /// `run <macro>` typed at the command line.
+    CommandLine,
+    /// The user activating a view bookmark of their own that runs the module.
+    ViewBookmark,
+}
+
+/// Who started a run: a person, through `door`, or nobody that can be named.
+/// Wire: `{ "kind": "you", "door": "<door>" }` or `{ "kind": "script" }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum RunStartedBy {
+    /// A person started it through `door`.
+    You { door: RunDoor },
+    /// A script started it (`api.runMacro`, a view bookmark a script
+    /// activated) -- or the caller could not name a person's act. The default,
+    /// so a request that says nothing is never read as a person's.
+    #[default]
+    Script,
+}
+
+impl RunStartedBy {
+    /// The person's door, or `None` for a run no person's act can be named for.
+    pub fn door(&self) -> Option<RunDoor> {
+        match self {
+            RunStartedBy::You { door } => Some(*door),
+            RunStartedBy::Script => None,
+        }
+    }
+}
+
+/// The door a PERSON used to run an application's object-script macro (owner
+/// decision B, follow-up F3): exactly the doors that mint a one-time pass on
+/// the page (`ExplicitMacroRunDoor`, app/src/api/explicitMacroRun.ts). A view
+/// bookmark is not one of them -- it starts module-runtime runs only -- so it
+/// does not exist here, and a request naming it is a wire error, never a grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExplicitRunDoor {
+    /// Developer > Macros > Run.
+    MacrosDialog,
+    /// A click on a button that runs the macro (with the button's `trigger`).
+    Button,
+    /// `run <macro>` typed at the command line.
+    CommandLine,
+}
+
+impl From<ExplicitRunDoor> for RunDoor {
+    fn from(door: ExplicitRunDoor) -> Self {
+        match door {
+            ExplicitRunDoor::MacrosDialog => RunDoor::MacrosDialog,
+            ExplicitRunDoor::Button => RunDoor::Button,
+            ExplicitRunDoor::CommandLine => RunDoor::CommandLine,
+        }
+    }
+}
+
+/// What the page says a one-off run of an application's macro is: a PERSON's
+/// run through `door`, of the macro `macro_id` (owner decision B, follow-up
+/// F3). Sent to the mount door (`check_distributed_mount_consent`, parameter
+/// `explicitRun`) only when the page would honour a grant for it -- it holds a
+/// live pass a person's door minted for that very macro, and the mount is the
+/// one-off runner's restricted, single-artifact shape.
+///
+/// A claim the renderer makes, and one that can only NARROW: Rust grants cell
+/// access only when what it can see agrees with it
+/// (`application_code_gate::explicit_run_cell_access`) and names the grant on
+/// the always-on run row; the page grants only when Rust said yes. Omitting it
+/// runs the macro restricted, never wider.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplicitRunClaim {
+    pub door: ExplicitRunDoor,
+    pub macro_id: String,
+}
+
+/// Which kind of button a run claims to come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScriptRunTriggerKind {
+    /// A button CONTROL (floating or in-cell), whose link is its `macroRef` --
+    /// live, or held for its application.
+    ButtonControl,
+    /// A button CELL (Cell Type: Button), whose link is its script action.
+    ButtonCell,
+}
+
+/// A button that asked for a run: its kind and where it sits. Never trusted as
+/// said -- the run gate reads that cell of its own store and requires it to
+/// link exactly the code that is about to run.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptRunTrigger {
+    pub kind: ScriptRunTriggerKind,
+    /// The TRUE state-vector index of the button's sheet.
+    pub sheet_index: usize,
+    pub row: u32,
+    pub col: u32,
 }
 
 /// Response payload from script execution.
@@ -418,6 +555,99 @@ pub enum RunScriptResponse {
         /// Console output collected before the error
         output: Vec<String>,
     },
+}
+
+/// Which kind of button a click on `run_control_action` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ControlActionKind {
+    /// A button CONTROL (floating or in-cell): its `onSelect` / `macroRef`,
+    /// live or held for its application.
+    Control,
+    /// A button CELL (Cell Type: Button): its action.
+    Cell,
+}
+
+/// `run_control_action`'s request (phase 4 of BUG-0257): WHICH button was
+/// clicked, never what it runs. The code is read from the backend's own store.
+///
+/// `deny_unknown_fields` is part of the contract: a page that sends `source`
+/// (or a filename, or a trigger) is REFUSED at deserialization rather than
+/// having the field silently ignored -- the old click route composed code on
+/// the page, and a request that can carry code invites a caller to send some.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunControlActionRequest {
+    pub kind: ControlActionKind,
+    /// The TRUE state-vector index of the button's sheet.
+    pub sheet_index: usize,
+    pub row: u32,
+    pub col: u32,
+    /// The frontend-owned view state, as `RunScriptRequest` carries it.
+    #[serde(default)]
+    pub view_state: Option<HostViewState>,
+}
+
+/// `authorize_button_command`'s request (plan_M8 S1): the button CELL the click
+/// named to the button door, and the command the door answered for it, which
+/// the page has since checked against the live registration and is about to
+/// run. A CLAIM, verified against the backend's own store -- the cell's live
+/// action must be exactly that command, under an application's stamp -- so it
+/// can only narrow what runs. `deny_unknown_fields`, like the door's request:
+/// the application is read from the cell's stamp, never taken from the page.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthorizeButtonCommandRequest {
+    /// The TRUE state-vector index of the button's sheet.
+    pub sheet_index: usize,
+    pub row: u32,
+    pub col: u32,
+    pub command_id: String,
+}
+
+/// What a click on a button did, tagged by `kind`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ControlActionOutcome {
+    /// The button's code ran (or ran into an error of its own).
+    #[serde(rename_all = "camelCase")]
+    Ran {
+        result: RunScriptResponse,
+        /// Modules the code names but cannot call, one notice each.
+        unavailable: Vec<super::control_action::UnavailableModule>,
+    },
+    /// The button links a macro: the page's link route runs it (Rust verifies
+    /// the stored bytes and the button there). Nothing ran here.
+    Link,
+    /// A button CELL whose action is a macro that runs only as an object script
+    /// (the Macro Recorder's default target; owner decision B, follow-up F6):
+    /// the interpreter this door hands code to has no `api`, so the page's
+    /// macro seam runs it, naming this cell as the run's `buttonCell` trigger --
+    /// which the run gate verifies against this same store (`verify_trigger`).
+    /// `application` is the application the BUTTON came with (its stamp), which
+    /// the macro must have come with too; `None` for a button of the user's own.
+    /// Nothing ran here.
+    #[serde(rename_all = "camelCase")]
+    Macro { macro_id: String, application: Option<String> },
+    /// A button CELL whose action is a Calcula command: only the page can run
+    /// an extension command. `application` is `None` for a button of the user's
+    /// own, which the page runs as it always has. `Some` names the application
+    /// the BUTTON came with: its command is on Calcula's list, approved under
+    /// its own consent key and allowed by the private-sheet rule
+    /// (`application_code_gate::button_command_gate`; every refusal recorded,
+    /// no run row yet). The page then checks the LIVE registration opts in and
+    /// asks `authorize_button_command` -- the gate again, and the run row --
+    /// before it runs it. Nothing ran here.
+    #[serde(rename_all = "camelCase")]
+    Command { command_id: String, application: Option<String> },
+    /// Refused before anything ran -- recorded on the audit trail whenever the
+    /// button, or the code it asked for, came with an application.
+    #[serde(rename_all = "camelCase")]
+    Refused { reason: String, message: String },
+    /// Nothing on the button to run; `message` says why when there is a reason
+    /// worth saying (a button cell with no action).
+    #[serde(rename_all = "camelCase")]
+    Nothing { message: Option<String> },
 }
 
 // ============================================================================

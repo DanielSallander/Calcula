@@ -29,6 +29,7 @@ fn body_of(signature: &str) -> String {
     let files = [
         include_str!("calp_diff.rs"),
         include_str!("calp_commands.rs"),
+        include_str!("calp_push_scope.rs"),
     ];
     for src in files {
         if let Some(start) = src.find(signature) {
@@ -507,11 +508,29 @@ fn the_pivot_retention_set_is_case_insensitive_like_every_other_name_compare() {
 /// The leak: a personal module script holding an API token, published into the
 /// shared workspace and disclosed as a bare count in the report.
 ///
-/// SABOTAGE: delete the `workbook.scripts.retain` from
+/// The filter lives in `withhold_content_not_in_application` (a pure function,
+/// tested by behaviour in `calp_push_scope::tests`); this pins that the one
+/// door every publish goes through still calls it, and what it filters on.
+///
+/// SABOTAGE: delete the `withhold_content_not_in_application(` call from
+/// `filter_and_release`, or the `filter_and_release(` call from
 /// `assemble_publish_workbook`.
 #[test]
 fn a_push_withholds_content_the_application_never_had() {
-    let body = body_of("fn assemble_publish_workbook(");
+    // The assembly filters through the ONE composition the include tests drive.
+    let assembly = body_of("fn assemble_publish_workbook(");
+    assert!(
+        assembly.contains("filter_and_release("),
+        "the publish assembly no longer filters through filter_and_release"
+    );
+    let composition = body_of("pub(crate) fn filter_and_release(");
+    assert!(
+        composition.contains("withhold_content_not_in_application("),
+        "the publish assembly stopped filtering what is not the application's, so a \
+         working copy publishes every script, object script and pane control in the \
+         author's workbook"
+    );
+    let body = body_of("pub(crate) fn withhold_content_not_in_application(");
     assert!(
         body.contains("base_script_ids"),
         "the publish assembly stopped filtering module scripts, so a working \
@@ -528,36 +547,55 @@ fn a_push_withholds_content_the_application_never_had() {
     );
 }
 
-/// AN UNRECORDED LINK FALLS BACK, rather than publishing nothing.
+/// AN UNRECORDED LINK NO LONGER FALLS BACK TO PUBLISHING EVERYTHING.
 ///
-/// A link written before the ids existed has empty vectors. Treating that as
-/// "the application had no scripts" would silently DROP the application's own
-/// scripts on the next push — the opposite failure, and just as quiet.
+/// A link written before the record existed has empty vectors, and the filter
+/// used to read them as "not recorded" and ship the author's whole workbook --
+/// the leak it exists to close. There is no backward-compatibility promise
+/// (CLAUDE.md): the filter reads every link's lists as recorded, and a real
+/// push from such a link is refused in `calp_publish`
+/// (`unrecorded_link_refusal`, tested in `calp_push_gate_tests`), so neither
+/// the leak nor the opposite failure (the application's own scripts dropped)
+/// can happen silently.
 ///
-/// SABOTAGE: remove the `is_empty()` fallback guard.
+/// SABOTAGE: reinstate the `base_script_ids.is_empty() &&
+/// link.base_notebook_ids.is_empty()` fallback guard.
 #[test]
-fn an_unrecorded_link_publishes_as_before() {
-    let body = body_of("fn assemble_publish_workbook(");
+fn an_unrecorded_link_is_not_a_licence_to_publish_everything() {
+    let body = body_of("pub(crate) fn withhold_content_not_in_application(");
     assert!(
-        body.contains("base_script_ids.is_empty() && link.base_notebook_ids.is_empty()"),
-        "the fallback for a link written before these ids existed is gone — an \
-         old link would now publish no scripts at all"
+        !body.contains(".is_empty() && link.base_notebook_ids.is_empty()")
+            && !body.contains("fully_recorded"),
+        "the legacy 'empty means not recorded' fallback is back -- an old link \
+         publishes the author's private scripts again"
+    );
+    assert!(
+        body.contains("let base_ids_recorded = link.is_some();"),
+        "every link to this application is filtered on its record"
     );
 }
 
 /// THE FILTER IS SCOPED TO THIS APPLICATION. A workbook can be the working copy
 /// of X while creating Y; Y must not be filtered against X's contents.
 ///
-/// SABOTAGE: drop the `link.targets(...)` term.
+/// SABOTAGE: drop the `.targets(...)` filter from `link_for_this_application`
+/// (the behaviour test `without_a_link_to_this_application_no_distributed_script_is_ours`
+/// in `calp_push_scope` fails too).
 #[test]
 fn the_content_filter_asks_whether_the_link_targets_this_application() {
-    let body = body_of("fn assemble_publish_workbook(");
+    let body = body_of("pub(crate) fn withhold_content_not_in_application(");
     let filter_at = body
         .find("base_script_ids")
         .expect("the content filter is gone");
-    let window = &body[filter_at.saturating_sub(400)..filter_at];
+    let window = &body[..filter_at];
     assert!(
-        window.contains("link.targets("),
+        window.contains("let link = scope.link_for_this_application();"),
+        "the filter must read the link only through the check that it targets the \
+         application being published"
+    );
+    let accessor = body_of("fn link_for_this_application(");
+    assert!(
+        accessor.contains(".targets(self.registry_path, self.package_name)"),
         "the filter must apply only when the link targets the application being \
          published — otherwise creating a new application from a working copy \
          filters it against an unrelated one"
@@ -570,7 +608,7 @@ fn the_content_filter_asks_whether_the_link_targets_this_application() {
 /// SABOTAGE: drop the `nr.sheet_id.is_some()` early return.
 #[test]
 fn only_workbook_scoped_names_are_filtered() {
-    let body = body_of("fn assemble_publish_workbook(");
+    let body = body_of("pub(crate) fn withhold_content_not_in_application(");
     assert!(
         body.contains("if nr.sheet_id.is_some()"),
         "a sheet-scoped name is now filtered against the workbook-scoped record, \

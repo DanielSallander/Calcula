@@ -127,7 +127,10 @@ export async function processBookmarkMutations(raw: unknown): Promise<void> {
           }
           activatingViewBookmarks.add(mutation.id);
           try {
-            await activateViewBookmark(mutation.id);
+            // A SCRIPT queued this activation: the bookmark's on-activate
+            // script runs as a run a script started (owner decision B, F10) --
+            // an application's macro is refused there, the user's own runs.
+            await activateViewBookmark(mutation.id, "script");
           } finally {
             activatingViewBookmarks.delete(mutation.id);
           }

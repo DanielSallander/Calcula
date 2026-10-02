@@ -115,8 +115,10 @@ describe("the debug channel is not a script-reachable surface", () => {
     // ...and the admission really is both gates, not a rename of one.
     const admit = host.slice(host.indexOf("async function admitMount("));
     const admitBody = admit.slice(0, admit.indexOf("\n}\n"));
-    expect(admitBody).toContain("requireDistributedMountConsent(definition)");
+    expect(admitBody).toContain('requireDistributedMountConsent(definition, run ? "runCheck" : "mount", claim)');
     expect(admitBody).toContain("assertMountAllowed(definition.name)");
+    // The module session IS a run: its run row is asked for after Script Security.
+    expect(admitBody).toContain('requireDistributedMountConsent(definition, "runAdmitted", claim)');
   });
 });
 

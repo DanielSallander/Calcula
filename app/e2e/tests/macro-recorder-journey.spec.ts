@@ -556,13 +556,13 @@ test.describe("Macro Recorder — record, Run, and click the button", () => {
 
         // Selecting the control in step 8 opened the Properties pane, which
         // takes width from the grid; re-derive the point from live state.
-        await page.evaluate(() => {
-          try {
-            const store = (window as any).__CALCULA_TASKPANE_STORE__;
-            if (store) store.getState().reset();
-          } catch {
-            /* no task pane store */
-          }
+        // Through the REAL store (by URL; the window global this used to read
+        // was never defined, so the pane stayed open -- see fixtures.ts).
+        await page.evaluate(async () => {
+          const url = "/src/shell/TaskPane/useTaskPaneStore.ts";
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const m: any = await import(/* @vite-ignore */ url);
+          m.useTaskPaneStore.getState().reset();
         });
         await page.waitForTimeout(400);
         const point = await buttonCanvasPoint(page, BUTTON.row, BUTTON.col);

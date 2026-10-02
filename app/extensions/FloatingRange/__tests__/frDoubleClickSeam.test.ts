@@ -5,7 +5,8 @@
 //          events within 350 ms.
 //
 // CONTEXT: The old workaround is the reason the seam had to be feature-neutral.
-//          It only ever fired because the FR opts into `claimsBodyDrag` — an
+//          It only ever fired because the FR claimed its body drags (the old
+//          `claimsBodyDrag`, replaced by the one zone answer `frZoneAt`) — an
 //          overlay that does not claim body drags could not have written it at
 //          all — and a timer cannot tell a double-click from two deliberate
 //          clicks a third of a second apart. The zone rules survive the move:

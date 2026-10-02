@@ -251,6 +251,12 @@ const RESET_BY_METHOD_CALL: &[(&str, &str)] = &[
         "ScriptState.notebook_executor",
         "script_state.notebook_executor.reset_detached(",
     ),
+    // Owner decision B (F3/F15): a grant of cell access names a run of the
+    // document being replaced; its write report must not reach the next one.
+    (
+        "ScriptState.explicit_run_grants",
+        "script_state.explicit_run_grants.clear(",
+    ),
 ];
 
 /// Fields that are NOT the document's, with the reason each one is not.

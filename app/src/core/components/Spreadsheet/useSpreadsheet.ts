@@ -219,6 +219,7 @@ export function useSpreadsheet() {
       handleMouseDown: selectionLogic.mouseHandlers.handleMouseDown,
       handleMouseMove: selectionLogic.mouseHandlers.handleMouseMove,
       handleMouseUp: selectionLogic.mouseHandlers.handleMouseUp,
+      handleMouseLeave: selectionLogic.mouseHandlers.handleMouseLeave,
       handleDoubleClickEvent: selectionLogic.handleDoubleClickEvent,
       
       // Use layout logic for scrolling

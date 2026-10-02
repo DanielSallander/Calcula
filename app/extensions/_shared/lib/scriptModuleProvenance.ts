@@ -15,9 +15,10 @@
 //   * two modules named "Report" from two applications were two identical
 //     options, distinguishable only by clicking each and seeing what ran;
 //   * "Function to call" was offered for a distributed module even though
-//     `planStoredModuleRun` (buttonScriptRun.ts) REFUSES that composition at
-//     click time — the user learned of the refusal only when the button did
-//     nothing.
+//     the button cell's planner (today the Rust button door's
+//     `plan_cell_action`, app/src-tauri/src/scripting/control_action.rs)
+//     REFUSES that composition at click time — the user learned of the
+//     refusal only when the button did nothing.
 //
 // The Macro Library already sets the standard (MacroRecorder's
 // `macroProvenanceTag` / `describeMacroProvenance`): a provenance tag on the row
@@ -73,10 +74,11 @@ export function scriptPickerLabel(entry: ScriptPickerEntry): string {
  * the user's own code, which needs no note (local is the baseline).
  *
  * It names the route's actual guarantee, not a generic one: the module runs as
- * its stored source, unchanged (`planStoredModuleRun` runs the record verbatim
- * and refuses any composition), and only after the user has approved the
- * application — `require_distributed_module_consent`
- * (app/src-tauri/src/scripting/commands.rs) refuses it otherwise.
+ * its stored source, unchanged (the Rust button door's `plan_cell_action`,
+ * app/src-tauri/src/scripting/control_action.rs, runs the record verbatim and
+ * refuses any composition), and only after the user has approved the
+ * application — the door's gate (`button_run_gate`,
+ * app/src-tauri/src/scripting/application_code_gate.rs) refuses it otherwise.
  */
 export function describeDistributedScriptChoice(entry: ScriptPickerEntry): string | null {
   const app = scriptEntryApplication(entry);

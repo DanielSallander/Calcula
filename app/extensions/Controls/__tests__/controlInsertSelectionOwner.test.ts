@@ -3,7 +3,10 @@
 //          refuse, with ONE toast, while a feature owns the selection
 //          (@api/selectionOwner), instead of placing the control at Core's
 //          hidden cell. Driven with the REAL seam and a test owner; the doors
-//          are pinned to the helper by their source.
+//          are pinned to the helper by their source. They ask as the door
+//          kind "objectInsert", which the generic "an object is selected"
+//          claim admits (owner call 25; the doors themselves are driven with
+//          that claim in insertWithObjectSelected.test.ts).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fs from "fs";
@@ -18,7 +21,7 @@ vi.mock("@api/notifications", async (importOriginal) => ({
 }));
 
 import { registerSelectionOwner } from "@api/selectionOwner";
-import { insertAnchorOrRefuse } from "../lib/insertAnchor";
+import { insertAnchorOrRefuse, refuseObjectInsertIfSelectionOwned } from "../lib/insertAnchor";
 
 let release: (() => void) | null = null;
 let owned = false;
@@ -53,6 +56,33 @@ describe("insertAnchorOrRefuse", () => {
     expect(insertAnchorOrRefuse("Insert Button", read)).toEqual({ endRow: 4, endCol: 2 });
     expect(toasts).toHaveLength(0);
   });
+
+  // Owner call 25: a claim that ADMITS object inserts (the generic "an object
+  // is selected" one) lets the door read its anchor; it does not end the claim.
+  it("an owner that admits objectInsert lets the door read its anchor, silently; one that does not still refuses", () => {
+    const admitting = registerSelectionOwner({
+      id: "admittingOwner",
+      label: "the selected object",
+      fallback: true,
+      admits: ["objectInsert"],
+      ownsSelection: () => true,
+    });
+    try {
+      const read = vi.fn(() => ({ endRow: 4, endCol: 2 }));
+      expect(insertAnchorOrRefuse("Insert Shape", read), "an admitting claim refused the insert").toEqual({
+        endRow: 4,
+        endCol: 2,
+      });
+      expect(refuseObjectInsertIfSelectionOwned("Insert Image")).toBe(false);
+      expect(toasts).toHaveLength(0);
+      owned = true; // the test owner admits nothing
+      expect(insertAnchorOrRefuse("Insert Shape", read)).toBeNull();
+      expect(refuseObjectInsertIfSelectionOwned("Insert Image")).toBe(true);
+      expect(toasts).toHaveLength(2);
+    } finally {
+      admitting();
+    }
+  });
 });
 
 describe("every Insert-menu control door asks the seam before it reads the selection", () => {
@@ -77,9 +107,9 @@ describe("every Insert-menu control door asks the seam before it reads the selec
     });
   }
 
-  it("insertImage refuses BEFORE it opens the file picker", () => {
+  it("insertImage refuses BEFORE it opens the file picker, asking as an object insert", () => {
     const body = bodyOf("insertImage");
-    const refuse = body.indexOf('refuseIfSelectionOwned("Insert Image")');
+    const refuse = body.indexOf('refuseObjectInsertIfSelectionOwned("Insert Image")');
     const picker = body.indexOf("pickValidatedImage(");
     expect(refuse, "insertImage does not ask the seam before the picker").toBeGreaterThan(-1);
     expect(refuse).toBeLessThan(picker);

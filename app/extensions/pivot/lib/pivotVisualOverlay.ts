@@ -1,29 +1,35 @@
 //! FILENAME: app/extensions/Pivot/lib/pivotVisualOverlay.ts
 // PURPOSE: The `pivot-visual` floating object: a canvas pivot shown in its
-//          designer-sized box. Registers the overlay (paint, hit test, cursor,
-//          press claim, double-click) and wires the floating-object events
-//          (select, move, resize, chrome press), the object-selection provider
-//          and the wheel target.
-// CONTEXT: Snap, the page clamp and consume mode (a subscribed canvas, or design
-//          mode off) are applied by the Core through @api/layoutSurface before
-//          any of the move/resize events below are dispatched -- nothing here
+//          designer-sized box. Registers the overlay (paint, hit test, the ONE
+//          zone answer, double-click), keeps the chrome's hover highlight, and
+//          wires the floating-object events (select, move, resize, chrome
+//          press), the object-selection provider and the wheel target.
+//          The chrome (+/-, report filter, Row/Column Labels button, Cancel)
+//          ACTS ON RELEASE over the same piece of chrome (BUG-0258 design
+//          phase 4, D5): the press only starts `beginPivotChromePress`
+//          (pivotChromePress.ts); sliding off cancels.
+// CONTEXT: Snap, the page clamp and consume mode (a subscribed canvas) are
+//          applied by the Core through @api/layoutSurface before any of the
+//          move/resize events below are dispatched -- nothing here
 //          re-implements them. A frame edit is persisted through
 //          `update_pivot_properties({pivotId, canvasFrame})`, undoable on the
 //          backend side; the cells do not change, so no pivot refresh follows.
 
 import { showToast } from "@api";
 import {
+  getGridRegions,
   overlayGetColumnWidth,
   overlayGetRowHeight,
   overlaySheetToCanvas,
   requestOverlayRedraw,
+  topFloatingRegionAtClient,
   type GridRegion,
   type OverlayHitTestContext,
   type OverlayRegistration,
   type OverlayRenderContext,
+  type OverlayZone,
 } from "@api/gridOverlays";
 import { getGridStateSnapshot } from "@api/grid";
-import { getLayoutSurface } from "@api/layoutSurface";
 import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
 import type { DimensionOverrides } from "@api/types";
 import { registerObjectWheelTarget } from "../../_shared/lib/objectWheelScroll";
@@ -71,7 +77,7 @@ import {
   hoverForHit,
   viewCellAtCanvasPoint,
   anyPivotVisualHover,
-  allPivotVisualRecords,
+  pivotVisualRecordCount,
   isInsidePivotVisualBox,
   type PivotVisualChromeHit,
   type PivotVisualRecord,
@@ -85,10 +91,11 @@ import {
   getPivotViewCell,
 } from "./pivotChromeActions";
 import { runPivotCellDoubleClick } from "./pivotCellDoubleClick";
+import { beginPivotChromePress, cancelPivotChromePress } from "./pivotChromePress";
+import { chromeReleaseActs, forgetChromeReleases } from "./pivotChromeRepeat";
 import { registerPivotVisualSelection } from "./pivotVisualSelection";
 import { closePivotBoxMenu, handlePivotBoxContextMenu } from "./pivotVisualContextMenu";
 import {
-  isPivotVisualSelected,
   selectPivotVisual,
   deselectPivotVisual,
 } from "../handlers/selectionHandler";
@@ -159,12 +166,6 @@ function geometryFor(oc: OverlayRenderContext, region: GridRegion, view: PivotVi
 // ============================================================================
 // Paint
 // ============================================================================
-
-/** Handles are live only where the surface lets objects be resized. */
-function surfaceEditable(): boolean {
-  const sheet = getGridStateSnapshot()?.sheetContext.activeSheetIndex ?? 0;
-  return getLayoutSurface(sheet)?.editable ?? true;
-}
 
 /** Paint one `pivot-visual` region. Exported for tests. */
 export function renderPivotVisualRegion(oc: OverlayRenderContext, deps: PivotVisualDeps): void {
@@ -266,10 +267,9 @@ export function renderPivotVisualRegion(oc: OverlayRenderContext, deps: PivotVis
   }
 
   setPivotVisualRecord(record);
-  paintPivotVisualFrame(ctx, box, {
-    selected: isPivotVisualSelected(pivotId),
-    showHandles: surfaceEditable(),
-  });
+  // The box's grey outline. Selected: Core paints the selection outline and
+  // the handles over it (floatingObjectChrome.ts, BUG-0258 phase 3).
+  paintPivotVisualFrame(ctx, box);
   // Transparency: badge a pivot that has a script attached (design mode).
   drawObjectScriptBadgeIfPresent(ctx, "pivot", pivotId, box.x, box.y, box.width);
 }
@@ -295,20 +295,24 @@ export function hitTestPivotVisual(hitCtx: OverlayHitTestContext): boolean {
   );
 }
 
-/** Pointer over chrome; also drives the hover highlight (no extra listener). */
-export function pivotVisualCursor(hitCtx: OverlayHitTestContext): string | null {
+/**
+ * The box's ONE zone answer (BUG-0258 design phase 2), from which Core derives
+ * the press, the pointer and the meaning of Ctrl/Shift. The CHROME (a +/-, a
+ * report-filter combo, a Row/Column Labels button, the loading indicator's
+ * Cancel) is content with a hand: Core hands the press to
+ * `floatingObject:bodyDragStart` (a button press, never the start of a move),
+ * also on a locked box and a subscribed page, and the chrome acts when that
+ * press is RELEASED over the same piece of chrome (pivotChromePress.ts; phase
+ * 4, D5) -- a drag that starts on a +/- neither moves the box nor toggles.
+ * The cells are frame (null): the box moves by them, as it always did.
+ *
+ * PURE, which the old `getCursor` was not -- it wrote the hover highlight as a
+ * side effect of being asked. The highlight is `updatePivotVisualHoverAt`'s.
+ */
+export function pivotVisualZoneAt(hitCtx: OverlayHitTestContext): OverlayZone | null {
   const record = recordFor(hitCtx);
   const hit = record ? hitPivotVisualChrome(record, hitCtx.canvasX, hitCtx.canvasY) : null;
-  if (setPivotVisualHover(record?.pivotId ?? null, hoverForHit(hit))) {
-    requestOverlayRedraw();
-  }
-  return hit ? "pointer" : null;
-}
-
-/** A press on chrome is a button press, never the start of a move. */
-export function pivotVisualClaimsBodyDrag(hitCtx: OverlayHitTestContext): boolean {
-  const record = recordFor(hitCtx);
-  return !!record && hitPivotVisualChrome(record, hitCtx.canvasX, hitCtx.canvasY) !== null;
+  return hit ? { kind: "content", cursor: "pointer", part: hit.kind } : null;
 }
 
 /**
@@ -349,13 +353,24 @@ function clientPointOf(canvasX: number, canvasY: number): { x: number; y: number
 }
 
 /**
- * The two presses of a double-click on a +/- would toggle it twice (back to
- * where it was). A repeat of the SAME chrome within this window is dropped.
+ * The inverse: a CLIENT point in logical canvas px (Core's basis: the grid
+ * area's top-left, divided by the zoom); null before the grid mounts. The
+ * chrome press converts its release point with it.
  */
-const REPEAT_PRESS_MS = 450;
-let lastPress: { key: string; at: number } | null = null;
+function canvasPointOf(clientX: number, clientY: number): { x: number; y: number } | null {
+  const area = document.querySelector("[data-grid-area]") as HTMLElement | null;
+  if (!area) return null;
+  const zoom = getGridStateSnapshot()?.zoom || 1;
+  const rect = area.getBoundingClientRect();
+  return { x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom };
+}
 
-function pressKey(pivotId: string, hit: PivotVisualChromeHit): string {
+/**
+ * Which piece of chrome a hit is: the pivot, the kind, and the icon / field /
+ * header button. A press acts only when it is released over the chrome with
+ * the SAME key (pivotChromePress.ts), and the double-click guard compares it.
+ */
+export function pressKey(pivotId: string, hit: PivotVisualChromeHit): string {
   switch (hit.kind) {
     case "icon":
     case "headerFilter":
@@ -368,8 +383,10 @@ function pressKey(pivotId: string, hit: PivotVisualChromeHit): string {
 }
 
 /**
- * Run the chrome action under a press. Exported for tests; returns what was
- * hit (null when the press was on no chrome or was a dropped repeat).
+ * Run the chrome action at a point: called at the RELEASE of a chrome press
+ * that ended over the chrome it began on (pivotChromePress.ts), never at the
+ * press. Exported for tests; returns what was hit (null when the point is on
+ * no chrome or the click was a dropped repeat).
  */
 export function handlePivotVisualPress(
   pivotId: string,
@@ -382,11 +399,12 @@ export function handlePivotVisualPress(
   const hit = hitPivotVisualChrome(record, canvasX, canvasY);
   if (!hit) return null;
 
-  const key = pressKey(pivotId, hit);
-  if (hit.kind !== "cancel" && lastPress && lastPress.key === key && now - lastPress.at < REPEAT_PRESS_MS) {
+  // The two clicks of a double-click on a +/- would toggle it twice (back to
+  // where it was): a repeat of the SAME chrome within the window is dropped --
+  // the one guard the worksheet chrome asks too (pivotChromeRepeat.ts).
+  if (!chromeReleaseActs(pressKey(pivotId, hit), hit.kind !== "cancel", now)) {
     return null;
   }
-  lastPress = { key, at: now };
 
   switch (hit.kind) {
     case "cancel":
@@ -416,19 +434,48 @@ export function handlePivotVisualPress(
 }
 
 /**
- * Clear a box's hover when the pointer has left it (getCursor is asked only
- * while the pointer is over SOME floating object). Called from the extension's
- * existing document mousemove observer with a CLIENT point.
+ * The chrome's hover highlight for the pointer at a CLIENT point: SET for the
+ * box Core's own hit order says is TOPMOST there (`topFloatingRegionAtClient`),
+ * so a box another object covers never lights up from behind it, and CLEARED
+ * everywhere else -- off every box, over a cell, over another object, or over
+ * DOM stacked above the grid (a menu, a dialog: `target` outside the grid
+ * area). Called from the extension's document mousemove observer; it replaced
+ * a `getCursor` that wrote the highlight while Core asked it for a pointer.
  */
-export function clearPivotVisualHoverOutside(clientX: number, clientY: number): void {
-  if (!anyPivotVisualHover()) return;
+export function updatePivotVisualHoverAt(clientX: number, clientY: number, target?: EventTarget | null): void {
+  if (!anyPivotVisualHover() && pivotVisualRecordCount() === 0) return;
   const area = document.querySelector("[data-grid-area]") as HTMLElement | null;
-  const zoom = getGridStateSnapshot()?.zoom || 1;
-  const rect = area?.getBoundingClientRect();
-  const x = (clientX - (rect?.left ?? 0)) / zoom;
-  const y = (clientY - (rect?.top ?? 0)) / zoom;
-  const over = allPivotVisualRecords().find((r) => isInsidePivotVisualBox(r, x, y));
-  if (over) return;
+  const overGrid = !!area && (!(target instanceof Node) || area.contains(target));
+  const top = overGrid ? topFloatingRegionAtClient(clientX, clientY) : null;
+  const pivotId = top && top.type === PIVOT_VISUAL_REGION_TYPE ? pivotIdOfVisual(top) : null;
+  const record = pivotId ? getPivotVisualRecord(pivotId) ?? null : null;
+  let changed: boolean;
+  if (record && area) {
+    const zoom = getGridStateSnapshot()?.zoom || 1;
+    const rect = area.getBoundingClientRect();
+    const hit = hitPivotVisualChrome(record, (clientX - rect.left) / zoom, (clientY - rect.top) / zoom);
+    changed = setPivotVisualHover(record.pivotId, hoverForHit(hit));
+  } else {
+    changed = setPivotVisualHover(null, {});
+  }
+  if (changed) requestOverlayRedraw();
+}
+
+/**
+ * Core's floating-object HOVER changed (@api/gridOverlays
+ * `onFloatingHoverChanged`) to `hoveredRegionId`: unless that is a canvas pivot
+ * box, no box's chrome may stay lit. The document mousemove above sets and
+ * clears the highlight while the pointer moves; but when the pointer LEAVES
+ * the grid, or the grid SCROLLS or the SHEET changes under a still pointer, no
+ * mousemove comes -- and Core's hover, which ends in all three, says so here.
+ * Over a box the per-button highlight stays the mousemove's.
+ */
+export function clearPivotVisualHoverUnlessHovered(hoveredRegionId: string | null): void {
+  if (!anyPivotVisualHover()) return;
+  if (hoveredRegionId !== null) {
+    const hovered = getGridRegions().find((r) => r.id === hoveredRegionId);
+    if (hovered && hovered.type === PIVOT_VISUAL_REGION_TYPE) return;
+  }
   if (setPivotVisualHover(null, {})) requestOverlayRedraw();
 }
 
@@ -439,8 +486,7 @@ export function createPivotVisualOverlay(deps: PivotVisualDeps): OverlayRegistra
     priority: PIVOT_VISUAL_PRIORITY,
     render: (oc) => renderPivotVisualRegion(oc, deps),
     hitTest: hitTestPivotVisual,
-    getCursor: pivotVisualCursor,
-    claimsBodyDrag: pivotVisualClaimsBodyDrag,
+    zoneAt: pivotVisualZoneAt,
     onDoubleClick: pivotVisualDoubleClick,
   };
 }
@@ -501,7 +547,11 @@ export function installPivotVisual(
   registerOverlay: (registration: OverlayRegistration) => () => void,
 ): Array<() => void> {
   const cleanups: Array<() => void> = [];
-  lastPress = null;
+  forgetChromeReleases();
+  // A chrome press of an earlier installation acts on nothing now; nor does
+  // one still live when this installation is torn down.
+  cancelPivotChromePress();
+  cleanups.push(cancelPivotChromePress);
 
   cleanups.push(registerOverlay(createPivotVisualOverlay(deps)));
   cleanups.push(
@@ -545,12 +595,19 @@ export function installPivotVisual(
     else deselectPivotVisual();
   });
 
-  // A press Core handed over because claimsBodyDrag said "chrome".
+  // A press Core handed over because `zoneAt` said "chrome" (content). It
+  // acts at its RELEASE over the same chrome, never here (D5).
   listen("floatingObject:bodyDragStart", (e) => {
     const d = detailOf(e);
     const pivotId = visualPivotIdOf(d);
     if (!pivotId || typeof d.canvasX !== "number" || typeof d.canvasY !== "number") return;
-    handlePivotVisualPress(pivotId, d.canvasX, d.canvasY);
+    beginPivotChromePress({
+      pivotId,
+      regionId: typeof d.regionId === "string" ? d.regionId : undefined,
+      canvasX: d.canvasX,
+      canvasY: d.canvasY,
+      clientToCanvas: canvasPointOf,
+    });
   });
 
   // Move / resize: previews patch the live frame (the box follows the pointer);

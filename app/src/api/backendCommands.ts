@@ -46,6 +46,34 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     // `grant_script_bi` outright). Handing a script a capability grant is
     // handing it authority, so it is denylisted like every other grant door.
     "grant_script_capability",
+    // Records an approval of application code, sealed to this computer
+    // (app/src-tauri/src/consent_seal.rs). An approval switches code on, so it
+    // is a grant door like the three above: the approval screen only.
+    "record_script_consent",
+    // THE BUTTON DOOR (app/src-tauri/src/scripting/control_action.rs): runs what
+    // a clicked button holds -- an application's approved code among it. Code
+    // execution like run_script, so it is denylisted like run_script.
+    "run_control_action",
+    // The SECOND question of an application's button COMMAND (plan_M8 S1,
+    // app/src-tauri/src/scripting/control_action.rs): it admits an
+    // application's button to run a Calcula command and writes the run row.
+    // A grant door, like the button door above it: the button cell's click only.
+    "authorize_button_command",
+    // "Make this my own" (app/src-tauri/src/controls.rs): turns an
+    // application's button code into code of the user's own, which runs with
+    // no approval. A grant door: the Properties pane and a button control's
+    // right-click menu, through ONE flow, after the code was shown.
+    "adopt_held_button_code",
+    // OWNER DECISION B's trail (review of M6b). The mount door opens a run's
+    // CELL GRANT and writes the "you started it ... so it could read and
+    // change cells on any sheet" run row; the two audit doors write what a
+    // granted run changed, and the refusal of one before it started. The
+    // script host is their only caller. A third party that could reach them
+    // would forge those rows, or spend a live grant with an empty report so
+    // the run's real writes never reach the trail.
+    "check_distributed_mount_consent",
+    "audit_explicit_run_writes",
+    "audit_explicit_run_refusal",
     "set_script_security_level",
     "script_http_fetch",
     "script_bi_sql",
@@ -243,6 +271,12 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
   //
   // calp_get_sheet_provenance is deliberately NOT here: it only discloses what
   // the Application Explorer already shows, and the tab badge needs it.
+  //
+  // calp_forget_developer_anchor drops what this machine remembers about who
+  // CREATED an application it develops -- the one guard a share-writer cannot
+  // forge against a planted first version. It is a deliberate hole behind a
+  // human confirmation naming both keys; a non-trusted caller forgetting it
+  // silently would make the next checkout accept the planter as the creator.
   collaborationTrust: [
     "calp_add_workspace",
     "calp_remove_workspace",
@@ -251,6 +285,7 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "calp_import_overrides",
     "calp_detach",
     "calp_detach_sheet",
+    "calp_forget_developer_anchor",
   ],
 };
 

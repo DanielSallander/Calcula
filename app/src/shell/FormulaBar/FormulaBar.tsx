@@ -23,6 +23,7 @@ import {
   endExternalFormulaSession,
 } from "../../api/externalEdit";
 import { useGridContext } from "../../api";
+import { refuseIfSelectionOwned } from "../../api/selectionOwner";
 import { CommandRegistry } from "../../api/commands";
 import { FORMULA_BAR_TOGGLE_EXPANDED_COMMAND } from "../../api/keybindings";
 import {
@@ -222,7 +223,15 @@ export function FormulaBar(): React.ReactElement {
       const src = resolveFormulaBarSource();
       if (src.kind === "session") src.session.adoptBarView();
       else if (src.kind === "cell") src.cell.beginEdit("=");
-      else startEditing("=");
+      else {
+        // An OBJECT holds the selection (a slicer, a chart, a shape, a
+        // floating grid selected whole): Core's active cell is hidden behind
+        // it, and "=" there -- then the function chosen -- would be written
+        // into that cell (BUG-0270 review). Refused out loud; no dialog with
+        // nothing it may write to.
+        if (refuseIfSelectionOwned("Insert Function")) return;
+        startEditing("=");
+      }
     }
     setShowFunctionDialog(true);
   }, [editing, startEditing]);

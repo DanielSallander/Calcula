@@ -138,7 +138,9 @@ fn identity_survives_checkout_and_push() {
 
     // A (possibly different) developer checks the application out and edits it.
     let mut working_copy_result =
-        checkout(&reg, "sales", None, "2026-08-29T02:00:00Z", &scope, author.path()).unwrap();
+        checkout(&reg, "sales", None, "2026-08-29T02:00:00Z", &scope, author.path())
+            .unwrap()
+            .pulled;
     let mut working_copy = Workbook::default();
     working_copy.sheets = working_copy_result
         .sheets
@@ -504,8 +506,23 @@ fn tampering_with_the_change_summary_breaks_the_signature() {
 /// which is the property that the old code could not offer, because it checked
 /// `version_exists` outside the lock and held the lock only over the final
 /// version-list append.
+///
+/// RUN AS A RACE, MANY TIMES (BUG-0275). One run settles the lock's order once,
+/// and the loser's answer depends on the instant it asks: the lock still held
+/// (it waits), just released (on Windows a create over a lockfile whose delete
+/// is still pending is DENIED -- which once failed this test with a raw os
+/// error 5 instead of a wait), or free. Every round is a fresh workspace, so
+/// every round is a new race.
 #[test]
 fn concurrent_pushes_from_one_base_produce_exactly_one_winner() {
+    const ROUNDS: usize = 10;
+    for round in 0..ROUNDS {
+        race_two_pushes_from_one_base(round);
+    }
+}
+
+/// One round of the race above, in a fresh workspace.
+fn race_two_pushes_from_one_base(round: usize) {
     let dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
     let reg_path = dir.path().to_path_buf();
@@ -542,11 +559,11 @@ fn concurrent_pushes_from_one_base_produce_exactly_one_winner() {
     let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     let winners: Vec<_> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
     let losers: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
-    assert_eq!(winners.len(), 1, "exactly one push may win: {results:?}");
-    assert_eq!(losers.len(), 1);
+    assert_eq!(winners.len(), 1, "round {round}: exactly one push may win: {results:?}");
+    assert_eq!(losers.len(), 1, "round {round}");
     assert!(
         matches!(losers[0], CalpError::BaseVersionStale { .. } | CalpError::WorkspaceBusy { .. }),
-        "the loser must be told the base moved (or that the registry was busy), got {:?}",
+        "round {round}: the loser must be told the base moved (or that the registry was busy), got {:?}",
         losers[0]
     );
 
@@ -555,7 +572,7 @@ fn concurrent_pushes_from_one_base_produce_exactly_one_winner() {
     assert_eq!(
         pkg.versions.len(),
         2,
-        "the created version plus exactly one winner: {:?}",
+        "round {round}: the created version plus exactly one winner: {:?}",
         pkg.versions.iter().map(|v| &v.version).collect::<Vec<_>>()
     );
 
@@ -565,7 +582,7 @@ fn concurrent_pushes_from_one_base_produce_exactly_one_winner() {
     let winner = winners[0];
     let manifest = reg.get_version_manifest("sales", winner).unwrap();
     calp::integrity::verify_version_artifacts_via(&reg, "sales", winner, &manifest)
-        .expect("the winning version must pass its own integrity walk");
+        .unwrap_or_else(|e| panic!("round {round}: the winning version must pass its own integrity walk: {e}"));
 }
 
 // ---------------------------------------------------------------------------

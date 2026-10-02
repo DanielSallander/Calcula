@@ -68,6 +68,9 @@ import {
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
 import { chartObjectClipboardRows } from "../lib/chartMenuSelection";
 import { noteChartMenuMounted } from "../lib/chartMenuState";
+import { chartIdOfRegion } from "../lib/chartObjectSelection";
+import { getGridRegions } from "@api/gridOverlays";
+import { sizeAndPositionMenuEntry } from "@api/objectPosition";
 import { getCachedChartData, invalidateChartCache } from "../rendering/chartRenderer";
 // The ONE answer to "where do this chart's error-bar options live?" — a
 // mark-dependent switch that the painter owns and this file must not re-spell.
@@ -933,6 +936,17 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
   // --------------------------------------------------------------------------
   // Object-level items
   // --------------------------------------------------------------------------
+
+  // Size and Position (@api/objectPosition; BUG-0258 design phase 5b): the
+  // no-drag route to move and size the chart, the row every object menu
+  // carries. Omitted -- this menu offers no greyed rows -- only when no dialog
+  // can open for the chart; a chart Core would refuse to move (locked, on a
+  // subscribed page) opens it read-only, with the reason.
+  const chartRegion = getGridRegions().find((r) => r.type === "chart" && chartIdOfRegion(r) === chartId);
+  const sizePos = chartRegion ? sizeAndPositionMenuEntry(chartRegion) : null;
+  if (sizePos && !sizePos.disabled) {
+    rows.push({ id: "sizeAndPosition", label: sizePos.label, run: sizePos.run });
+  }
 
   rows.push({
     id: "editScript",

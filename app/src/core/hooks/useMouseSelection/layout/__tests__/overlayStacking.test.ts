@@ -7,10 +7,19 @@
 // CONTEXT: Before M8 the body press walked REVERSE publication order and the
 //          handle scan FORWARD publication order, while paint went by overlay
 //          priority -- three different "topmost" answers. With a stacking order
-//          in force (a canvas's zOrder) all of them walk `floatingHitOrder`, and
-//          a handle of an object covered by another is not grabbable through it.
+//          in force (a canvas's zOrder) all of them walk `floatingHitOrder`.
 //          Each z case has a POSITIVE CONTROL showing the same geometry answers
 //          differently without z, so a pass cannot come from a no-op.
+//
+//          HANDLES (BUG-0258 design phase 3). Resize handles exist only on a
+//          SELECTED object and Core paints them ABOVE every object
+//          (core/lib/floatingHandles.ts), so the handle scan walks
+//          `floatingHitOrder` in BOTH modes (the topmost selected object's
+//          handle wins; without z that is the LAST published, no longer the
+//          first) and no object's body occludes a handle: a selected object's
+//          handle painted over an object stacked above it is grabbable there,
+//          and an UNSELECTED object's corner is no handle at all -- the old
+//          occlusion rule existed for exactly those invisible corners.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type React from "react";
@@ -23,6 +32,7 @@ import {
   type GridRegion,
 } from "../../../../../api/gridOverlays";
 import type { GridConfig, Viewport } from "../../../../types";
+import { selectForHandles } from "./helpers/selectForHandles";
 
 const CONFIG = { rowHeaderWidth: 50, colHeaderHeight: 24 } as GridConfig;
 const VIEWPORT = { scrollX: 0, scrollY: 0 } as Viewport;
@@ -88,10 +98,14 @@ function pressedRegionId(x: number, y: number): string | null {
 }
 
 const cleanups: Array<() => void> = [];
+/** The objects whose handles are live (selected); every test sets its own. */
+const selected = new Set<string>();
 beforeEach(() => {
+  selected.clear();
   cleanups.push(
     registerGridOverlay({ type: "pivot-visual", render: () => {}, priority: 12 }),
     registerGridOverlay({ type: "timeline-slicer", render: () => {}, priority: 16 }),
+    selectForHandles(["pivot-visual", "timeline-slicer"], (r) => selected.has(r.id)),
   );
 });
 afterEach(() => {
@@ -132,70 +146,92 @@ describe("the body press and the right-click gate walk the ONE hit order", () =>
 });
 
 describe("the resize-handle scan walks the ONE hit order", () => {
-  // Three objects sharing a top-left corner: the handle there belongs to one.
-  // Published a, b, c -- the forward scan picks a, a reverse scan would pick c,
-  // and z puts b on top, so only the stacking order can answer b.
+  // Three SELECTED objects sharing a top-left corner: the handle there belongs
+  // to one. Published a, b, c -- the old forward scan picked a, the hit order
+  // without z picks c (the last published is on top), and z puts b on top, so
+  // only the stacking order can answer b.
   const A = { x: 100, y: 100, width: 200, height: 150 };
   const B = { x: 100, y: 100, width: 120, height: 90 };
   const C = { x: 100, y: 100, width: 160, height: 110 };
   const CORNER = { x: RHW + 100 + 2, y: CHH + 100 + 2 };
 
-  it("POSITIVE CONTROL -- without z: the FIRST published region's handle (historical)", () => {
+  it("POSITIVE CONTROL -- without z: the topmost (LAST published) selected object's handle", () => {
+    ["a", "b", "c"].forEach((id) => selected.add(id));
     setGridRegions([floating("a", "pivot-visual", A), floating("b", "timeline-slicer", B), floating("c", "pivot-visual", C)]);
     const { h, stateRef } = resizeHandlers();
-    expect(h.checkOverlayResizeHandle(CORNER.x, CORNER.y)?.id).toBe("a");
+    expect(h.checkOverlayResizeHandle(CORNER.x, CORNER.y)?.region.id).toBe("c");
     expect(h.handleOverlayResizeMouseDown(CORNER.x, CORNER.y, press())).toBe(true);
-    expect(stateRef.current?.region.id).toBe("a");
+    expect(stateRef.current?.region.id).toBe("c");
   });
 
   it("with z: the topmost object's handle -- neither the first nor the last published", () => {
+    ["a", "b", "c"].forEach((id) => selected.add(id));
     setGridRegions([
       floating("a", "pivot-visual", A, 0),
       floating("b", "timeline-slicer", B, 2),
       floating("c", "pivot-visual", C, 1),
     ]);
     const { h, stateRef } = resizeHandlers();
-    expect(h.checkOverlayResizeHandle(CORNER.x, CORNER.y)?.id).toBe("b");
+    expect(h.checkOverlayResizeHandle(CORNER.x, CORNER.y)?.region.id).toBe("b");
     expect(h.handleOverlayResizeMouseDown(CORNER.x, CORNER.y, press())).toBe(true);
     expect(stateRef.current?.region.id).toBe("b");
   });
+
+  it("only SELECTED objects take part: an unselected one on top has no handle, the selected one beneath does", () => {
+    selected.add("a");
+    setGridRegions([
+      floating("a", "pivot-visual", A, 0),
+      floating("b", "timeline-slicer", B, 2),
+      floating("c", "pivot-visual", C, 1),
+    ]);
+    const { h } = resizeHandlers();
+    expect(h.checkOverlayResizeHandle(CORNER.x, CORNER.y)?.region.id).toBe("a");
+  });
 });
 
-describe("an occluded handle is not grabbable in z-mode", () => {
+describe("a selected object's handles are topmost (painted above every object, hit before any body)", () => {
   // `lower`'s bottom-right corner (sheet 300, 250) lies INSIDE `upper`'s body.
   const LOWER = { x: 100, y: 100, width: 200, height: 150 };
   const UPPER = { x: 250, y: 200, width: 200, height: 150 };
   const HIDDEN_CORNER = { x: RHW + 300, y: CHH + 250 };
   const VISIBLE_CORNER = { x: RHW + 100, y: CHH + 100 };
 
-  it("POSITIVE CONTROL -- without z the forward scan grabs it through the object on top", () => {
-    setGridRegions([floating("lower", "pivot-visual", LOWER), floating("upper", "timeline-slicer", UPPER)]);
-    const { h, stateRef } = resizeHandlers();
-    expect(h.checkOverlayResizeHandle(HIDDEN_CORNER.x, HIDDEN_CORNER.y)?.id).toBe("lower");
-    expect(h.handleOverlayResizeMouseDown(HIDDEN_CORNER.x, HIDDEN_CORNER.y, press())).toBe(true);
-    expect(stateRef.current?.region.id).toBe("lower");
+  it("an UNSELECTED lower object's corner under the upper object is no handle: the press falls to the body on top (both modes)", () => {
+    for (const zs of [[undefined, undefined], [0, 1]] as const) {
+      setGridRegions([floating("lower", "pivot-visual", LOWER, zs[0]), floating("upper", "timeline-slicer", UPPER, zs[1])]);
+      const { h, stateRef } = resizeHandlers();
+      expect(h.checkOverlayResizeHandle(HIDDEN_CORNER.x, HIDDEN_CORNER.y), `z = ${String(zs)}`).toBeNull();
+      expect(h.handleOverlayResizeMouseDown(HIDDEN_CORNER.x, HIDDEN_CORNER.y, press())).toBe(false);
+      expect(stateRef.current).toBeNull();
+      expect(pressedRegionId(HIDDEN_CORNER.x, HIDDEN_CORNER.y)).toBe("upper");
+    }
   });
 
-  it("with z: the covered handle is refused, and the press falls to the body of the object on top", () => {
-    setGridRegions([floating("lower", "pivot-visual", LOWER, 0), floating("upper", "timeline-slicer", UPPER, 1)]);
-    const { h, stateRef } = resizeHandlers();
-    expect(h.checkOverlayResizeHandle(HIDDEN_CORNER.x, HIDDEN_CORNER.y)).toBeNull();
-    expect(h.handleOverlayResizeMouseDown(HIDDEN_CORNER.x, HIDDEN_CORNER.y, press())).toBe(false);
-    expect(stateRef.current).toBeNull();
-    expect(pressedRegionId(HIDDEN_CORNER.x, HIDDEN_CORNER.y)).toBe("upper");
+  it("a SELECTED lower object's handle painted over the upper object is grabbable there (both modes)", () => {
+    selected.add("lower");
+    for (const zs of [[undefined, undefined], [0, 1]] as const) {
+      setGridRegions([floating("lower", "pivot-visual", LOWER, zs[0]), floating("upper", "timeline-slicer", UPPER, zs[1])]);
+      const { h, stateRef } = resizeHandlers();
+      expect(h.checkOverlayResizeHandle(HIDDEN_CORNER.x, HIDDEN_CORNER.y)?.region.id, `z = ${String(zs)}`).toBe("lower");
+      expect(h.handleOverlayResizeMouseDown(HIDDEN_CORNER.x, HIDDEN_CORNER.y, press())).toBe(true);
+      expect(stateRef.current?.region.id).toBe("lower");
+    }
   });
 
-  it("with z: a handle of the lower object that is NOT covered stays grabbable", () => {
+  it("with z: a handle of the selected lower object that is NOT covered is grabbable too", () => {
+    selected.add("lower");
     setGridRegions([floating("lower", "pivot-visual", LOWER, 0), floating("upper", "timeline-slicer", UPPER, 1)]);
     const { h, stateRef } = resizeHandlers();
     expect(h.handleOverlayResizeMouseDown(VISIBLE_CORNER.x, VISIBLE_CORNER.y, press())).toBe(true);
     expect(stateRef.current?.region.id).toBe("lower");
   });
 
-  it("with z: an object that cannot be resized still occludes what is beneath it", () => {
+  it("the body press still walks the stacking order: without a live handle the object on top takes the press", () => {
+    selected.add("upper");
     const upper = { ...floating("upper", "timeline-slicer", UPPER, 1), data: { resizable: false } };
     setGridRegions([floating("lower", "pivot-visual", LOWER, 0), upper]);
     const { h } = resizeHandlers();
     expect(h.checkOverlayResizeHandle(HIDDEN_CORNER.x, HIDDEN_CORNER.y)).toBeNull();
+    expect(pressedRegionId(HIDDEN_CORNER.x, HIDDEN_CORNER.y)).toBe("upper");
   });
 });

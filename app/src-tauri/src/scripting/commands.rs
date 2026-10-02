@@ -158,6 +158,8 @@ fn surface_label(surface: &str) -> &'static str {
         // the user a script edited their cells when a collaboration command did.
         "calpMerge" => "A merge from the workspace",
         "calpHoldBack" => "A push holding a change back",
+        // A button click through the Rust door (`run_control_action`).
+        "button" => "A button",
         _ => "A script",
     }
 }
@@ -191,6 +193,41 @@ pub(crate) fn record_script_grid_mutation(
     cells_modified: u32,
     range_updates: &[CellUpdateInput],
 ) {
+    let desc = format!(
+        "{} modified {} cell(s) on sheet {}",
+        surface_label(surface),
+        cells_modified,
+        sheet + 1
+    );
+    record_script_grid_mutation_with(
+        state,
+        &desc,
+        surface,
+        surface_id,
+        sheet,
+        cells_modified,
+        updates_bounds(range_updates),
+        Vec::new(),
+    );
+}
+
+/// The ONE writer of a structured grid-mutation row (`ScriptExecuted`): the
+/// shape [`record_script_grid_mutation`] writes for the Rust QuickJS surfaces,
+/// with the description, the bounds (firstRow, lastRow, firstCol, lastCol) and
+/// any further fields given by the caller. A granted object-script run's writes
+/// (`explicit_run_audit`, owner decision B follow-up F15) land in exactly this
+/// shape, so the audit viewer reads them as it reads a module macro's.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_script_grid_mutation_with(
+    state: &AppState,
+    description: &str,
+    surface: &str,
+    surface_id: &str,
+    sheet: usize,
+    cells_modified: u32,
+    bounds: Option<(u32, u32, u32, u32)>,
+    extra_fields: Vec<(&str, serde_json::Value)>,
+) {
     use serde_json::json;
     let now = chrono::Utc::now().to_rfc3339();
     let mut extra: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
@@ -200,22 +237,19 @@ pub(crate) fn record_script_grid_mutation(
     }
     extra.insert("sheet".into(), json!(sheet));
     extra.insert("cellsModified".into(), json!(cells_modified));
-    if let Some((r0, r1, c0, c1)) = updates_bounds(range_updates) {
+    if let Some((r0, r1, c0, c1)) = bounds {
         extra.insert("firstRow".into(), json!(r0));
         extra.insert("lastRow".into(), json!(r1));
         extra.insert("firstCol".into(), json!(c0));
         extra.insert("lastCol".into(), json!(c1));
     }
-    let desc = format!(
-        "{} modified {} cell(s) on sheet {}",
-        surface_label(surface),
-        cells_modified,
-        sheet + 1
-    );
+    for (k, v) in extra_fields {
+        extra.insert(k.to_string(), v);
+    }
     if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
         audit.record_with_extra(
             calp::audit::AuditEvent::ScriptExecuted,
-            &desc,
+            description,
             "local",
             &now,
             extra,
@@ -317,8 +351,10 @@ pub const DISTRIBUTED_SCRIPT_NOT_CONSENTED: &str = "DISTRIBUTED_SCRIPT_NOT_CONSE
 /// (@api/scriptSecurity), so a distributed module never lapses it and never
 /// appears in it. Meanwhile a package CAN ship a pane control or a button cell
 /// type, and both button paths (Controls/Button/interceptors.ts,
-/// CellTypes/types/button.ts) resolve a workbook script by name and hand its
-/// source straight to `run_script`. So a report the user trusted for their OWN
+/// CellTypes/types/button.ts) resolved a workbook script by name and handed its
+/// source straight to `run_script` (since phase 4 of BUG-0257 every click goes
+/// through the button door `control_action::run_control_action` instead, whose
+/// gate asks the same module approval). So a report the user trusted for their OWN
 /// scripts would execute a stranger's module the moment they clicked its button
 /// — with no package consent anywhere in the path.
 ///
@@ -340,11 +376,42 @@ pub const DISTRIBUTED_SCRIPT_NOT_CONSENTED: &str = "DISTRIBUTED_SCRIPT_NOT_CONSE
 /// the refusal requires that NO local (subscriber-authored) script carries the
 /// same source, so copying a distributed module to your own script — the
 /// documented way to adapt distributed content — keeps working.
+///
+/// PHASE 3 OF BUG-0257: the consent question is now the FIRST step of the run
+/// gate (`application_code_gate::distributed_run_gate`), which then applies the
+/// working-copy private-sheet rule, verifies the button a click claims
+/// (`trigger`) against the backend's store, and writes an always-on row for
+/// every run and every refusal of an application's code. Its refusal text is
+/// unchanged; local and ad-hoc runs pass exactly as before, unrecorded.
+///
+/// OWNER DECISION B (follow-up F10): an application's module macro also needs
+/// a PERSON to have started the run (`started_by`); one a script started is
+/// refused and recorded, because this runtime cannot run it with less reach.
 fn require_distributed_module_consent(
+    state: &AppState,
     script_state: &ScriptState,
     window: &tauri::Window,
     source: &str,
+    trigger: Option<&super::types::ScriptRunTrigger>,
+    started_by: &super::types::RunStartedBy,
 ) -> Result<(), String> {
+    let (scripts, consent_file) = module_consent_inputs(script_state, window)?;
+    super::application_code_gate::distributed_run_gate(
+        state,
+        &scripts,
+        consent_file.as_ref(),
+        source,
+        trigger,
+        started_by,
+    )
+}
+
+/// What the consent questions are asked over: every stored module as
+/// `(source_package, id, source)`, and the workbook's parsed consent file.
+fn module_consent_inputs(
+    script_state: &ScriptState,
+    window: &tauri::Window,
+) -> Result<(Vec<(Option<String>, String, String)>, Option<serde_json::Value>), String> {
     use tauri::Manager;
 
     let scripts: Vec<(Option<String>, String, String)> = {
@@ -358,17 +425,15 @@ fn require_distributed_module_consent(
     };
     let consent_file =
         crate::calp_commands::read_script_consent_file(Manager::app_handle(window));
-    match distributed_module_refusal(&scripts, consent_file.as_ref(), source) {
-        Some(msg) => Err(msg),
-        None => Ok(()),
-    }
+    Ok((scripts, consent_file))
 }
 
 /// The decision half of {@link require_distributed_module_consent}: `Some(msg)`
 /// to refuse, `None` to allow. Pure over `(source_package, id, source)` triples
 /// and the parsed consent file, so every branch is unit-testable without a
-/// Tauri window or a workbook.
-fn distributed_module_refusal(
+/// Tauri window or a workbook. Also asked by the run gate
+/// (`application_code_gate`), which is what both doors now call.
+pub(crate) fn distributed_module_refusal(
     scripts: &[(Option<String>, String, String)],
     consent_file: Option<&serde_json::Value>,
     source: &str,
@@ -575,7 +640,7 @@ pub struct MountConsentArtifact {
 /// record does not cover are all refusals — "I could not establish that you
 /// approved this publisher's code" is not approval, and this is the path that
 /// spawns a real worker realm for a stranger's JavaScript.
-fn distributed_mount_refusal(
+pub(crate) fn distributed_mount_refusal(
     consent_file: Option<&serde_json::Value>,
     application: &str,
     surface: Option<&str>,
@@ -593,6 +658,22 @@ fn distributed_mount_refusal(
             "{}: this code arrived inside a distributed application, but the mount named no \
              application, so there is no approval to check it against. It will not run.",
             DISTRIBUTED_SCRIPT_NOT_CONSENTED
+        ));
+    }
+    // NO APPLICATION IS CALLED `x:y`. A .calp's name is refused a ':' wherever
+    // one is taken in (`calp::workspace::validate_component`), and every
+    // surface's key is `<prefix><application><suffix>` with a ':'-bearing prefix
+    // or suffix (`custom-functions:`, `chart-marks:`, `::writeback-validators`,
+    // and the button commands' `button-commands:`). A mount NAMING one -- only
+    // the renderer names it, and the renderer can be compromised -- would have
+    // this surface judged under another surface's approvals: the object-script
+    // floor (prefix "") answered by an application's command approvals. Refused
+    // before any key is formed.
+    if application.contains(':') {
+        return Some(format!(
+            "{}: the mount named the application '{}', and no application's name contains ':', so \
+             there is no approval it can be checked against. It will not run.",
+            DISTRIBUTED_SCRIPT_NOT_CONSENTED, application
         ));
     }
     // THE SURFACE, BEFORE THE FILE. A mount that does not say what it is cannot
@@ -655,6 +736,22 @@ fn distributed_mount_refusal(
             DISTRIBUTED_SCRIPT_NOT_CONSENTED, application, application
         ));
     }
+    // An approval of BUTTON code (`buttonAction:<sha256>`, M6) is never a
+    // mount artifact: those bytes run only from their button, through the
+    // button door, in the interpreter -- never as a worker realm with
+    // capabilities of its own. They share the object-script key (the
+    // application's bare record), so without this a mount naming
+    // `{ id: buttonAction:<h>, source: <the held bytes> }` would pass the hash
+    // check below. A pull refuses the prefix on every artifact an application
+    // ships, so no honest mount names one.
+    let button_action = super::control_action::BUTTON_ACTION_CONSENT_PREFIX;
+    if let Some(artifact) = artifacts.iter().find(|a| a.id.starts_with(button_action)) {
+        return Some(format!(
+            "{}: '{}' names the approval of a button's code from the application '{}'. A button's \
+             code runs only from its own button, never mounted as {}, so it will not run.",
+            DISTRIBUTED_SCRIPT_NOT_CONSENTED, artifact.id, application, surface.what
+        ));
+    }
     for artifact in artifacts {
         let source_hash = calp::integrity::sha256_hex(artifact.source.as_bytes());
         if !crate::calp_commands::consent_granted_in(file, &key, &artifact.id, &source_hash) {
@@ -676,12 +773,32 @@ fn distributed_mount_refusal(
 /// it will mint a `MountAdmission`, and therefore what every worker-realm mount
 /// of distributed code passes through:
 ///
-///   1. `require_distributed_module_consent` — UNCHANGED, exactly as the
-///      module-runtime route (`run_script`) applies it, local-source escape
-///      hatch included. A stored module a `.calp` shipped is still refused
-///      unless the record names that module and its hash.
+///   1. the module question `require_distributed_module_consent` asks —
+///      UNCHANGED, exactly as the module-runtime route (`run_script`) asks it,
+///      local-source escape hatch included (`distributed_module_refusal`). A
+///      stored module a `.calp` shipped is still refused unless the record
+///      names that module and its hash.
 ///   2. `distributed_mount_refusal` — the application-and-surface question
 ///      above, over the artifacts the mount names.
+///   3. PHASE 3 OF BUG-0257 (`application_code_gate::mount_run_gate`): the
+///      working-copy private-sheet rule for the surfaces whose code can write
+///      the grid (`PRIVATE_SHEET_RULE_SURFACES`), and -- when a click asked for
+///      the mount (`trigger`) -- the button, verified against the backend's
+///      store. `phase` says which question this is (`MountGatePhase`): a
+///      standing mount records only a private-sheet refusal (a workbook mounts
+///      its approved charts and functions on every load); an explicit run is
+///      asked before Script Security (`runCheck`: every refusal recorded) and
+///      after it (`runAdmitted`: the always-on run row, button or not); and a
+///      realm that is already running asks `standing` before it acts, so a
+///      private sheet that appears after the mount stops it.
+///
+/// Answers whether the host must keep asking `standing` while the realm runs
+/// (a working copy, on a surface the private-sheet rule gates) -- and, for an
+/// admitted run a PERSON started (`explicit_run`, owner decision B follow-up
+/// F3), whether it may read and change cells on any sheet, with the id of that
+/// grant (`application_code_gate::explicit_run_cell_access`). The grant is
+/// kept in `ScriptState::explicit_run_grants` until the page reports what the
+/// run wrote (`explicit_run_audit::audit_explicit_run_writes`).
 ///
 /// `surface` is the mount's own statement of which kind of code it is (see
 /// `CONSENT_SURFACES`); `artifacts` is what its consent record lists for it.
@@ -689,32 +806,49 @@ fn distributed_mount_refusal(
 /// worth. Neither may be omitted to get a weaker check: no surface is a
 /// refusal, and an empty artifact list is a refusal.
 ///
-/// It reads state and executes nothing, so it takes no `DocumentEffect` and no
-/// window-label guard: the standalone Object Script Editor is its own webview and
-/// must be able to ask the same question the main window asks.
+/// It executes nothing, so it takes no `DocumentEffect` (its only write is the
+/// audit trail, which is `deliberately_clean`) and no window-label guard: the
+/// standalone Object Script Editor is its own webview and must be able to ask
+/// the same question the main window asks.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn check_distributed_mount_consent(
+    state: State<AppState>,
     script_state: State<ScriptState>,
     window: tauri::Window,
     package_name: String,
     source: String,
     surface: Option<String>,
     artifacts: Option<Vec<MountConsentArtifact>>,
-) -> Result<(), String> {
-    use tauri::Manager;
-
-    require_distributed_module_consent(&script_state, &window, &source)?;
-    let consent_file =
-        crate::calp_commands::read_script_consent_file(Manager::app_handle(&window));
-    match distributed_mount_refusal(
+    trigger: Option<super::types::ScriptRunTrigger>,
+    phase: Option<super::application_code_gate::MountGatePhase>,
+    explicit_run: Option<super::types::ExplicitRunClaim>,
+) -> Result<super::application_code_gate::MountGateAnswer, String> {
+    let phase = phase.unwrap_or_default();
+    // A STANDING check (a mounted realm about to act) asks only the
+    // private-sheet rule, and it is asked per call: it must not read and parse
+    // every stored module and the consent file each time.
+    let (scripts, consent_file) = if phase == super::application_code_gate::MountGatePhase::Standing {
+        (Vec::new(), None)
+    } else {
+        module_consent_inputs(&script_state, &window)?
+    };
+    let claimed = explicit_run.as_ref().map(|claim| super::application_code_gate::ExplicitRunAsk {
+        claim,
+        grants: &script_state.explicit_run_grants,
+    });
+    super::application_code_gate::mount_run_gate(
+        &state,
+        &scripts,
         consent_file.as_ref(),
         &package_name,
+        &source,
         surface.as_deref(),
         artifacts.as_deref(),
-    ) {
-        Some(msg) => Err(msg),
-        None => Ok(()),
-    }
+        trigger.as_ref(),
+        phase,
+        claimed,
+    )
 }
 
 /// Error sentinel for an AI tool call blocked by the MCP access ceiling.
@@ -777,6 +911,11 @@ pub fn grant_script_session_approval(
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    grant_session_approval(&script_state)
+}
+
+/// The body of [`grant_script_session_approval`] without the window guard.
+pub(crate) fn grant_session_approval(script_state: &ScriptState) -> Result<(), String> {
     let mut grants = script_state
         .permission_grants
         .lock()
@@ -1359,9 +1498,59 @@ pub fn run_script(
     check_script_security(&script_state)?;
     // ...and, on top of the global floor, refuse code that ARRIVED IN A PACKAGE
     // and was never consented. The floor is about "may user code run at all";
-    // this is about "whose code is this".
-    require_distributed_module_consent(&script_state, &window, &request.source)?;
+    // this is about "whose code is this". Since phase 3 it is the whole run
+    // gate for an application's code: the approval, the working-copy
+    // private-sheet rule, the button a click claims, and the audit row for the
+    // run or the refusal -- all BEFORE a single grid is cloned.
+    require_distributed_module_consent(
+        &state,
+        &script_state,
+        &window,
+        &request.source,
+        request.trigger.as_ref(),
+        &request.started_by,
+    )?;
 
+    run_in_interpreter(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &request.source,
+        &request.filename,
+        request.view_state.as_ref(),
+        request.cell_bookmarks_json,
+        request.view_bookmarks_json,
+        "run_script",
+        &request.filename,
+    )
+}
+
+/// The interpreter half of a script run, shared by `run_script` and the button
+/// door (`control_action::run_control_action`): clone the grids, run `source` in an
+/// isolated QuickJS runtime under the one-off limits, replay what it wrote through
+/// the edit pipeline (parsed, recalculated, undoable), and convert the result.
+///
+/// It asks NOTHING about whose code this is: every caller gates first. `surface`
+/// and `surface_id` name the run on the always-on `ScriptExecuted` row.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_in_interpreter(
+    state: &State<AppState>,
+    file_state: &State<FileState>,
+    user_files_state: &State<UserFilesState>,
+    pivot_state: &State<'_, crate::pivot::PivotState>,
+    pane_control_state: &PaneControlState,
+    ribbon_filter_state: &RibbonFilterState,
+    source: &str,
+    filename: &str,
+    view_state: Option<&super::types::HostViewState>,
+    cell_bookmarks_json: Option<String>,
+    view_bookmarks_json: Option<String>,
+    surface: &str,
+    surface_id: &str,
+) -> Result<RunScriptResponse, String> {
     // 1. Clone data from AppState for isolated execution
     let grids = state.grids.read().map_err(|e| e.to_string())?.clone();
     let style_registry = state.style_registry.read().map_err(|e| e.to_string())?.clone();
@@ -1371,20 +1560,20 @@ pub fn run_script(
     // 2. Run the script with the REAL application info + live workbook state,
     //    under the one-off runtime limits (memory + stack + wall-clock budget).
     let options = script_engine::ScriptRunOptions {
-        app_info: super::types::build_app_info(&state),
+        app_info: super::types::build_app_info(state),
         host_state: super::types::build_host_state(
-            &state,
-            Some(&file_state),
+            state,
+            Some(file_state.inner()),
             active_sheet,
-            request.view_state.as_ref(),
+            view_state,
         ),
-        cell_bookmarks_json: request.cell_bookmarks_json.unwrap_or_else(|| "[]".to_string()),
-        view_bookmarks_json: request.view_bookmarks_json.unwrap_or_else(|| "[]".to_string()),
+        cell_bookmarks_json: cell_bookmarks_json.unwrap_or_else(|| "[]".to_string()),
+        view_bookmarks_json: view_bookmarks_json.unwrap_or_else(|| "[]".to_string()),
         limits: script_engine::ScriptLimits::default(),
     };
     let (result, modified_grids) = script_engine::ScriptEngine::run_with_options(
-        &request.source,
-        &request.filename,
+        source,
+        filename,
         grids,
         style_registry,
         sheet_names,
@@ -1408,18 +1597,18 @@ pub fn run_script(
     } = &result
     {
         apply_script_result(
-            &state,
-            &file_state,
-            &user_files_state,
-            &pivot_state,
-            &pane_control_state,
-            &ribbon_filter_state,
+            state,
+            file_state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
             &modified_grids,
             active_sheet,
             *cells_modified,
             workbook_properties_changed,
-            "run_script",
-            &request.filename,
+            surface,
+            surface_id,
         )?;
     }
 
@@ -2461,6 +2650,65 @@ mod tests {
         assert!(refusal.contains("empty list"), "{}", refusal);
         // ...while naming none at all is the floor, deliberately weaker.
         assert!(distributed_mount_refusal(Some(&file), "acme.stats", Some("lib"), None).is_none());
+    }
+
+    // ---- M6: an approval of BUTTON code never opens a mount ----
+
+    /// The bare record (the object-script key) also holds the approvals of the
+    /// application's held BUTTON code (`buttonAction:<sha256>`). Those approve
+    /// bytes that run only from their button: a record holding nothing else is
+    /// not an approval of the application's object scripts, so the floor stays
+    /// shut.
+    ///
+    /// SABOTAGE: let `consent_record_exists_in` count `buttonAction:` ids again
+    /// (`!scripts.is_empty()`).
+    #[test]
+    fn a_record_that_approves_only_button_code_does_not_open_the_mount_floor() {
+        let held = "Calcula.setCellValue(0, 0, 'from the application');";
+        let id = super::super::control_action::button_action_consent_id(held);
+        let only_buttons = consent_file_under_key("Acme", &id, held);
+        let refusal = distributed_mount_refusal(Some(&only_buttons), "Acme", Some("object-script"), None)
+            .expect("a button approval opened the object-script floor");
+        assert!(refusal.starts_with(DISTRIBUTED_SCRIPT_NOT_CONSENTED), "{}", refusal);
+        assert!(refusal.contains("object scripts"), "{}", refusal);
+
+        // Positive control: the same record ALSO approving an object script
+        // meets the floor.
+        let mut both = only_buttons.clone();
+        both["consents"][0]["scripts"].as_array_mut().unwrap().push(serde_json::json!({
+            "id": "obj-1",
+            "sourceHash": calp::integrity::sha256_hex(b"function setup(c) {}"),
+            "source": "function setup(c) {}",
+        }));
+        assert!(distributed_mount_refusal(Some(&both), "Acme", Some("object-script"), None).is_none());
+    }
+
+    /// A mount may not NAME a button-code approval as its artifact -- even with
+    /// the exact approved bytes, under an application whose object scripts are
+    /// approved too: button code is never mounted as a worker realm.
+    ///
+    /// SABOTAGE: drop the `buttonAction:` artifact refusal from
+    /// `distributed_mount_refusal`.
+    #[test]
+    fn a_mount_naming_a_button_code_approval_is_refused() {
+        let held = "Calcula.setCellValue(0, 0, 'from the application');";
+        let id = super::super::control_action::button_action_consent_id(held);
+        let mut file = consent_file_under_key("Acme", &id, held);
+        file["consents"][0]["scripts"].as_array_mut().unwrap().push(serde_json::json!({
+            "id": "obj-1",
+            "sourceHash": calp::integrity::sha256_hex(b"function setup(c) {}"),
+            "source": "function setup(c) {}",
+        }));
+        let button = MountConsentArtifact { id: id.clone(), source: held.to_string() };
+        let object_script = MountConsentArtifact { id: "obj-1".into(), source: "function setup(c) {}".into() };
+        for named in [vec![button.clone()], vec![object_script.clone(), button.clone()]] {
+            let refusal = distributed_mount_refusal(Some(&file), "Acme", Some("object-script"), Some(named.as_slice()))
+                .expect("approved button code was admitted as a mount artifact");
+            assert!(refusal.starts_with(DISTRIBUTED_SCRIPT_NOT_CONSENTED), "{}", refusal);
+            assert!(refusal.contains(&id) && refusal.contains("its own button"), "{}", refusal);
+        }
+        // Positive control: the approved object script alone mounts.
+        assert!(distributed_mount_refusal(Some(&file), "Acme", Some("object-script"), Some(&[object_script])).is_none());
     }
 
     /// A changed literal value produces an update carrying the new literal,

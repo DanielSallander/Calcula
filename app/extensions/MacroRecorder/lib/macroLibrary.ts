@@ -69,6 +69,10 @@ import {
   scriptOriginForStoredRecord,
 } from "@api";
 import type { MacroRunOutcome, ScriptRunResult, ScriptScope } from "@api";
+import type { MacroRunOptions } from "@api/macroRunService";
+import type { ScriptRunTrigger } from "@api/workbookScripts";
+import { voidExplicitMacroRun, type ExplicitMacroRun } from "@api/explicitMacroRun";
+import { describeMacroNotFromApplication } from "../../_shared/lib/buttonScriptRun";
 import type { MacroTarget } from "./types";
 
 /** Which interpreter a stored module's source was written for. */
@@ -157,7 +161,8 @@ export function describeRunRoute(
   const tier = isDistributedMacro(sourcePackage)
     ? "restricted object script (it came from an application, so it cannot be " +
       "granted the unlocked tier, and it does not run at all unless you have " +
-      "approved that application's code)"
+      "approved that application's code; run from here, it may also read and " +
+      "change cells on any sheet, and nothing more)"
     : "unlocked object script";
   return (
     "This macro is written for the OBJECT-SCRIPT runtime (`api.*`), which the " +
@@ -236,17 +241,44 @@ export function describeMacroProvenance(
   const origin = scriptOriginForStoredRecord({ sourcePackage });
   const lead = `${originTagTitle(origin)} — you did not write this macro.`;
   if (macroRunRoute(description) === "objectScript") {
+    // Owner decision B (2026-09-30): a run YOU start gets cell access, and
+    // nothing more. The doors named are the ones that carry a pass: the Macros
+    // dialog, a button's click (a floating or in-cell button that links the
+    // macro, or a button cell that runs it -- ownerB follow-ups F1/F6) and the
+    // command line's `run` (F2). macroProvenance.test.ts derives both lists
+    // from the explicit-run census, so the sentence cannot drift from the
+    // doors that actually mint.
+    //
+    // EVERY CLAUSE IS A STATEMENT ABOUT THE CODE (explicitRunGrant.ts, host.ts):
+    // a fill copies the styles of the cells it fills from, as a module macro's
+    // fill does (and, like it, repeats no merges and adds no sparklines); the
+    // restricted formatting rows are refused to such a run; and started any
+    // other way it keeps what EVERY restricted realm has -- the sheet on screen,
+    // which the broker admits for any restricted script -- not "nothing".
     return (
       `${lead} It does not run unless you have approved this application's code, ` +
       "exactly as it is stored; if you have, it is mounted as a RESTRICTED object " +
-      "script (never unlocked) and can use a capability only through that approval."
+      "script (never unlocked) and can use a capability only through that approval. " +
+      "When you run it yourself from Developer ▸ Macros ▸ Run, by clicking a button " +
+      "that runs it, or from the command line, it may also read and change cells on " +
+      "any sheet -- the same cell access an approved module macro has, where filling a " +
+      "range also copies the formatting of the cells it fills from -- and nothing more: " +
+      "no other formatting, no sheet structure, no files, no other macros or commands. " +
+      "Started any other way -- by another script, for example -- it has only what " +
+      "every restricted script has: the sheet on screen."
     );
   }
+  // Owner decision B, follow-up F10: this runtime cannot run an application's
+  // macro with less than its full reach, so a run a script starts is refused
+  // outright (the Rust module-runtime gate, APPLICATION_MACRO_NOT_STARTED_BY_YOU).
   return (
     `${lead} It runs in the workbook script runtime, which has no tiers at all — ` +
     "no `api` object and no capability broker — so what protects you here is " +
     "consent, not a tier: the run is refused unless you have approved this " +
-    "application's code, exactly as it is stored."
+    "application's code, exactly as it is stored. It also runs only when you " +
+    "start it yourself -- from Developer ▸ Macros ▸ Run, a button that runs it, " +
+    "the command line or a view bookmark of your own: a run another script starts " +
+    "is refused, because this runtime cannot give it less than the macro's full reach."
   );
 }
 
@@ -696,9 +728,27 @@ export async function runMacroModule(entry: {
    * from the published artifact. Required — see `editedDistributedRunRefusal`.
    */
   storedSource: string | null;
+  /**
+   * The button a click ran this for (phase 3 of BUG-0257), forwarded on BOTH
+   * routes to the Rust gate that verifies it: `run_script`'s
+   * `request.trigger`, or the one-off mount's `check_distributed_mount_consent`.
+   * Absent for Developer ▸ Macros ▸ Run and every other run nobody clicked a
+   * button for.
+   */
+  trigger?: ScriptRunTrigger;
+  /**
+   * The pass the door a PERSON used minted (owner decision B; @api
+   * explicitMacroRun). Forwarded on BOTH routes: on the object-script route an
+   * approved application macro may then change cells; on the module runtime it
+   * is what lets an application's macro run at all (without it Rust refuses a
+   * run no person started, follow-up F10). Spent unused on every path that
+   * runs nothing, so it serves this one run or nothing. Never created here.
+   */
+  explicitRun?: ExplicitMacroRun;
 }): Promise<ScriptRunResult> {
   const refusal = editedDistributedRunRefusal(entry);
   if (refusal) {
+    voidExplicitMacroRun(entry.explicitRun);
     return { type: "error", message: refusal, output: [] };
   }
 
@@ -712,7 +762,15 @@ export async function runMacroModule(entry: {
   // question a composed realm source can be judged on. Nothing is asserted here
   // on either side.
   if (macroRunRoute(entry.description) === "moduleRuntime") {
-    return runWorkbookScript(entry.source, `${entry.id}.js`);
+    // The module runtime has no tiers: an application's module macro runs with
+    // its full reach or not at all. So the pass travels to the run, which
+    // claims it and tells Rust who started it -- and Rust refuses an
+    // application's macro no person started (owner decision B, F10). The
+    // user's own macros are not asked.
+    return runWorkbookScript(entry.source, `${entry.id}.js`, {
+      trigger: entry.trigger,
+      startedBy: { kind: "macro", macroId: entry.id, explicitRun: entry.explicitRun },
+    });
   }
 
   const started = Date.now();
@@ -728,6 +786,10 @@ export async function runMacroModule(entry: {
       instanceId: null,
       accessLevel: macroRunAccessLevel(entry.sourcePackage),
       idPrefix: `macro_${entry.id}`,
+      trigger: entry.trigger,
+      // The person's pass, if a person's door minted one. The mount boundary
+      // decides -- after every gate -- whether it becomes cell access.
+      explicitRun: entry.explicitRun,
     });
   } catch (e) {
     return {
@@ -754,31 +816,84 @@ export async function runMacroModule(entry: {
  * of the button. It reuses the identical `runMacroModule` path Developer ▸
  * Macros… ▸ Run uses — one execution path, one set of guarantees.
  *
- * Three outcomes, all explicit, none silent:
+ * Four outcomes, all explicit, none silent:
  *   - `notFound`  the id is not in the workbook script store. The button links a
  *                 macro that was deleted, or a .calp arrived without it. This is
  *                 the orphan case the whole feature has fought to make loud.
+ *   - `refused`   `requirePackage` was given and the record is not that
+ *                 application's (below). Nothing ran.
  *   - `failed`    the macro exists but could not be read or its code threw.
  *   - `ran`       it completed.
+ *
+ * `requirePackage` IS THE CONFUSED-DEPUTY GUARD (phase 3 of BUG-0257). A button
+ * that came with an application keeps its link to that application's macro,
+ * and the id resolves against EVERY module in the workbook -- so without this a
+ * publisher's button naming `macro-report` would run the user's own
+ * `macro-report`, as the user's code. When the caller names an application, the
+ * record must have come with exactly that one; anything else -- the user's own,
+ * another application's, a blank stamp, an empty requirement -- is refused
+ * BEFORE anything runs. The Rust run gate then asks the same question from its
+ * own store (`verify_trigger`), so this is the first of two independent layers.
+ *
+ * `explicitRun` IS FORWARDED, NEVER MINTED (owner decision B). A pass exists
+ * only when the door a person used made one; `api.runMacro` (host.ts
+ * `executeRunMacro`) calls this with no options at all, so a run a script
+ * starts carries none: an application's object-script macro stays restricted,
+ * and an application's module macro is refused by the Rust gate -- reported as
+ * `failed` with the gate's APPLICATION_MACRO_NOT_STARTED_BY_YOU sentinel, like
+ * every Rust-gate refusal (follow-up F10). Every return below that runs
+ * nothing spends the pass unused.
  */
-export async function runMacroByRef(macroId: string): Promise<MacroRunOutcome> {
+export async function runMacroByRef(
+  macroId: string,
+  options: MacroRunOptions = {},
+): Promise<MacroRunOutcome> {
   // Existence check first, so a MISSING macro (orphan link) is distinguished
   // from a macro that exists but fails to load — get_script cannot tell those
   // apart (both surface as an error), and the caller voices them differently.
   const summaries = await listWorkbookScripts();
   const summary = summaries.find((s) => s.id === macroId);
-  if (!summary) return { status: "notFound", macroId };
+  if (!summary) {
+    voidExplicitMacroRun(options.explicitRun);
+    return { status: "notFound", macroId };
+  }
 
   let record: Awaited<ReturnType<typeof getWorkbookScript>>;
   try {
     record = await getWorkbookScript(macroId);
   } catch (e) {
+    voidExplicitMacroRun(options.explicitRun);
     // Listed but unreadable: not "gone", so a failure rather than notFound.
     return {
       status: "failed",
       name: summary.name,
       message: e instanceof Error ? e.message : String(e),
     };
+  }
+
+  // PRESENT means required -- an empty string included, which refuses: a
+  // caller that meant to name an application and could not is not a caller
+  // that asked for no requirement. Compared exactly, as Rust compares a stamp
+  // with `source_package`.
+  if (options.requirePackage !== undefined) {
+    const required = options.requirePackage;
+    const stamped = record.sourcePackage ?? null;
+    if (required === "" || stamped !== required) {
+      voidExplicitMacroRun(options.explicitRun);
+      const owner = macroProvenanceTag(stamped);
+      return {
+        status: "refused",
+        macroId,
+        name: record.name,
+        owner,
+        message:
+          required === ""
+            ? `The button that asked for "${record.name}" could not say which application ` +
+              "it came with, so there is no way to tell whether this is that application's " +
+              "macro. It did not run."
+            : describeMacroNotFromApplication(required, record.name, owner),
+      };
+    }
   }
 
   let result: ScriptRunResult;
@@ -795,8 +910,17 @@ export async function runMacroByRef(macroId: string): Promise<MacroRunOutcome> {
       // A link runs the STORED module, so the stored text and the text being
       // run are the same read of the same record — never an edited buffer.
       storedSource: record.source,
+      // The button, for the Rust gate to verify and name on the audit row.
+      trigger: options.trigger,
+      // Forwarded as handed in -- a person's pass, or nothing.
+      explicitRun: options.explicitRun,
     });
   } catch (e) {
+    // A refusal of the Rust run gate lands here too -- not approved, private
+    // sheets, an unbacked click, or (owner decision B, F10) an application's
+    // module macro no person started -- as a `failed` carrying the gate's
+    // sentinel, which every caller reads to say "did not run". `refused` stays
+    // the seam's own requirePackage refusal, which its caller records.
     return {
       status: "failed",
       name: record.name,

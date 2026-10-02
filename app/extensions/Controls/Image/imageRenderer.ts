@@ -13,7 +13,7 @@ import {
   overlaySheetToCanvas,
 } from "@api/gridOverlays";
 import { resolveControlProperties } from "../lib/controlApi";
-import { isFloatingControlSelected } from "../Button/floatingSelection";
+import { beginControlGeometryRead, controlGeometryWritesInFlight } from "../lib/geometryWriteOrder";
 import { dataUrlToBlob, mediaHashOf } from "./mediaRefs";
 
 // ============================================================================
@@ -364,15 +364,10 @@ export function renderFloatingImage(overlayCtx: OverlayRenderContext): void {
   // Restore opacity
   ctx.globalAlpha = prevAlpha;
 
-  // Selection indicators (images are always selectable, like shapes)
-  const selected = isFloatingControlSelected(controlId);
-  if (selected) {
-    ctx.strokeStyle = "#0e639c";
-    ctx.lineWidth = 2;
-    ctx.setLineDash([]);
-    ctx.strokeRect(canvasX + 1, canvasY + 1, imgWidth - 2, imgHeight - 2);
-    drawResizeHandles(ctx, canvasX, canvasY, imgWidth, imgHeight);
-  }
+  // A selected picture's outline and its EIGHT resize handles are Core's
+  // (core/lib/gridRenderer/rendering/floatingObjectChrome.ts, BUG-0258 design
+  // phase 3) -- and all eight now resize: the edge midpoints this renderer used
+  // to paint were never live, so a press there MOVED the picture.
 
   ctx.restore();
 }
@@ -411,6 +406,12 @@ async function fetchImageData(
 ): Promise<void> {
   pendingFetches.add(controlId);
   try {
+    // Never read under a geometry write in flight, and remember what the
+    // geometry was when the read started (lib/geometryWriteOrder.ts, BUG-0268).
+    const anchor = { sheetIndex, row, col };
+    const writes = controlGeometryWritesInFlight(anchor);
+    if (writes) await writes;
+    const readIsCurrent = beginControlGeometryRead(anchor);
     const resolved = await resolveControlProperties(sheetIndex, row, col);
     if (!resolved || Object.keys(resolved).length === 0) return;
 
@@ -426,23 +427,14 @@ async function fetchImageData(
     // package refresh). Whatever the old one was, nothing points at it now.
     releaseUnreferencedMedia();
 
-    // Update floating control dimensions if width/height resolved from formula
-    const resolvedWidth = resolved.width ? parseFloat(resolved.width) : NaN;
-    const resolvedHeight = resolved.height ? parseFloat(resolved.height) : NaN;
-    if (!isNaN(resolvedWidth) || !isNaN(resolvedHeight)) {
-      const {
-        getFloatingControl,
-        resizeFloatingControl,
-        syncFloatingControlRegions,
-      } = await import("../lib/floatingStore");
-      const ctrl = getFloatingControl(controlId);
-      if (ctrl) {
-        const w = !isNaN(resolvedWidth) && resolvedWidth > 0 ? resolvedWidth : ctrl.width;
-        const h = !isNaN(resolvedHeight) && resolvedHeight > 0 ? resolvedHeight : ctrl.height;
-        if (w !== ctrl.width || h !== ctrl.height) {
-          resizeFloatingControl(controlId, ctrl.x, ctrl.y, w, h);
-          syncFloatingControlRegions();
-        }
+    // The resolved width/height (a formula-driven size) goes back into the
+    // store -- unless the geometry changed while this read was on its way: then
+    // it describes the OLD rectangle (BUG-0268) and the size is read again at
+    // the next paint, after the write has landed.
+    if (resolved.width || resolved.height) {
+      const { applyResolvedControlSize } = await import("../lib/floatingStore");
+      if (applyResolvedControlSize(controlId, resolved, readIsCurrent) === "superseded") {
+        staleEntries.add(controlId);
       }
     }
 
@@ -503,27 +495,4 @@ function drawPlaceholder(
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
   ctx.fillText(label, cx, cy + iconSize / 2 + 4);
-}
-
-function drawResizeHandles(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-): void {
-  const handleSize = 6;
-  ctx.fillStyle = "#0e639c";
-
-  // Four corners
-  ctx.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x + w - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x - handleSize / 2, y + h - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x + w - handleSize / 2, y + h - handleSize / 2, handleSize, handleSize);
-
-  // Four midpoints
-  ctx.fillRect(x + w / 2 - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x + w / 2 - handleSize / 2, y + h - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x - handleSize / 2, y + h / 2 - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x + w - handleSize / 2, y + h / 2 - handleSize / 2, handleSize, handleSize);
 }

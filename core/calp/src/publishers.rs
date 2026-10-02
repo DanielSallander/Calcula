@@ -30,17 +30,31 @@
 //!
 //! On a share that developers can write to, REMOVING a delegate is
 //! rollback-vulnerable: someone can restore an older `publishers.json` along
-//! with its still-valid signature. `revision` is monotonic and clients remember
-//! the highest they have seen per application, which makes that DETECTABLE rather
-//! than silent. It does not make it preventable. Real revocation means rotating
-//! the root key, which is out of scope — and the workspace was never a trust
-//! boundary against people who can write to it (see `calp-distribution.md`).
+//! with its still-valid signature, and the removed delegate is authorised again.
+//!
+//! On the DEVELOPER side that is now detected. `revision` is monotonic when the
+//! root writes the list, and every door `authorize_signer` guards (checkout, the
+//! push merge, the hold-back, the held-code restore at push) and every push
+//! checks it against this machine's high-water mark for the (workspace,
+//! application) -- kept with the per-machine root anchor in
+//! `developer_anchor.rs` -- and refuses a lower one
+//! (`CalpError::PublisherListRolledBack`). A machine that never saw the newer
+//! list cannot know it existed, so the protection starts at the first revision
+//! this machine sees.
+//!
+//! On the SUBSCRIBER side it is still open: the TOFU delegate path
+//! (`integrity::delegate_is_authorized`, reading `load_verified`) keeps no mark,
+//! so a rolled-back list re-authorises a removed delegate for a subscriber's
+//! refresh. Real revocation means rotating the root key, which is out of scope --
+//! and the workspace was never a trust boundary against people who can write to
+//! it (see `calp-distribution.md`).
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::developer_anchor::{AnchorGate, AnchorPolicy, AnchorStatus};
 use crate::error::CalpError;
 use crate::signing::{verify_signature, PublisherKeypair};
 use crate::transport::WorkspaceTransport;
@@ -251,6 +265,296 @@ pub fn load_for_profile(
         None => false,
     };
     Ok((root, list, holds_root))
+}
+
+// ---------------------------------------------------------------------------
+// Who may have signed what a DEVELOPER opens (BUG-0262)
+// ---------------------------------------------------------------------------
+
+/// The application's authorised publishers, ANCHORED AT ITS ROOT and proved
+/// rather than read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RootAnchoredPublishers {
+    /// The key that signed the application's first version, taken from that
+    /// version's manifest AFTER its signature verified under this very key.
+    pub root_key: String,
+    /// The name the first version's signed manifest gives. Display only.
+    pub root_name: String,
+    /// The first version, as the workspace listing names it.
+    pub root_version: String,
+    /// The root-signed co-publisher list, when the application has one.
+    pub list: Option<PublisherList>,
+}
+
+impl RootAnchoredPublishers {
+    /// Whether `key` may publish this application: the root, or a delegate the
+    /// root's own list names. An empty key (an unsigned version) never may.
+    pub fn allows(&self, key: &str) -> bool {
+        if key.is_empty() {
+            return false;
+        }
+        match &self.list {
+            // `PublisherList::allows` includes the root by construction, and
+            // `load_verified` has already refused a list naming another root.
+            Some(list) => list.allows(key),
+            None => key == self.root_key,
+        }
+    }
+
+    /// The root publisher, named for a person: their name and key fingerprint.
+    pub fn root_holder(&self) -> String {
+        let name = if self.root_name.trim().is_empty() {
+            "the publisher who created it"
+        } else {
+            self.root_name.as_str()
+        };
+        format!("{name} (key {})", crate::signing::key_fingerprint(&self.root_key))
+    }
+}
+
+/// Who may publish `package`, anchored at its ROOT: the key that signed its
+/// FIRST version, proved by that version's own signature.
+///
+/// # Why the root and nothing else
+///
+/// The question a working copy must answer — "is the version I am about to
+/// edit, or merge into my next push, one an authorised publisher signed?" —
+/// needs an anchor that planted versions cannot move:
+///
+/// * the HEAD's signer (what `publish::resolve_authorized_keys` falls back to
+///   when there is no list) is circular — ONE planted head names itself;
+/// * the PREVIOUS version's signer is circular too — TWO planted versions name
+///   each other.
+///
+/// # Fails CLOSED, unlike [`root_key_of`]
+///
+/// `root_key_of` answers `None` for an unsigned first version, read with no
+/// signature check, and the push-side check turns that into "no continuity to
+/// enforce". Planting an UNSIGNED `0.0.1` was therefore the cheapest way to
+/// switch the check off. Here, every one of these is an error:
+///
+/// * no versions at all;
+/// * a first version with no signature or no publisher key;
+/// * a first version that does not verify under the key it names;
+/// * a co-publisher list that exists but does not verify under that root.
+///
+/// # What this function cannot see, and what sees it instead
+///
+/// The version listing itself is unsigned, so someone who can write to the
+/// share can plant a fake first version signed by THEIR OWN key, and this
+/// function -- which needs nothing remembered -- proves it just as well as the
+/// real one. Nor can it see a ROLLED-BACK co-publisher list: an older
+/// `publishers.json` the root really signed, restored with its signature,
+/// verifies here too.
+///
+/// Both are caught one step later, by what THIS MACHINE remembers:
+/// `developer_anchor::anchor_root` refuses a root that contradicts the one this
+/// machine recorded for the (workspace, application), and a list revision lower
+/// than the highest it has seen. [`authorize_signer`] runs it on every developer
+/// door. What stays open is the first contact (trust on first use: a machine
+/// whose first sight of an application is a planted root remembers that root)
+/// and every machine that has not recorded anything yet -- subscribers among
+/// them.
+pub fn root_anchored_publishers(
+    registry: &dyn WorkspaceTransport,
+    package: &str,
+) -> Result<RootAnchoredPublishers, CalpError> {
+    let root = verified_root(registry, package)?;
+    let list = load_verified(registry, package, &root.root_key)?;
+    Ok(RootAnchoredPublishers {
+        root_key: root.root_key,
+        root_name: root.root_name,
+        root_version: root.root_version,
+        list,
+    })
+}
+
+/// The application's ROOT alone: the first version, proved by its own
+/// signature, FAILING CLOSED exactly as [`root_anchored_publishers`] does --
+/// without reading the co-publisher list.
+///
+/// For the one caller that must go on when the list cannot be trusted: the
+/// creator REPLACING that list. A tampered or rolled-back list must not lock
+/// the root out of the only repair there is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedRoot {
+    pub root_key: String,
+    pub root_name: String,
+    pub root_version: String,
+}
+
+/// See [`VerifiedRoot`].
+pub fn verified_root(
+    registry: &dyn WorkspaceTransport,
+    package: &str,
+) -> Result<VerifiedRoot, CalpError> {
+    let manifest = registry.get_application_manifest(package)?;
+    let mut versions = manifest.parsed_versions();
+    versions.sort();
+    let Some(first) = versions.first() else {
+        return Err(CalpError::ApplicationRootUnverifiable {
+            package: package.to_string(),
+            reason: "the workspace lists no versions of it".to_string(),
+        });
+    };
+    let first = first.to_string();
+
+    // Crypto only: the root is not a trust decision this machine has made, so
+    // no pin is read or written — the signature must simply verify under the
+    // key the manifest names, over exactly the bytes that name it.
+    let signed = crate::integrity::load_signed_manifest_via(registry, package, &first).map_err(
+        |e| CalpError::ApplicationRootUnverifiable {
+            package: package.to_string(),
+            reason: match e {
+                CalpError::MissingSignature { .. } => {
+                    format!("its first version, v{first}, is not signed")
+                }
+                other => format!(
+                    "its first version, v{first}, does not verify under the key it names ({other})"
+                ),
+            },
+        },
+    )?;
+    let root_key = signed.manifest.publisher_key.clone();
+    if root_key.is_empty() {
+        // `load_signed_manifest_via` already refuses this; kept so the rule
+        // does not depend on a helper's current behaviour.
+        return Err(CalpError::ApplicationRootUnverifiable {
+            package: package.to_string(),
+            reason: format!("its first version, v{first}, names no publisher key"),
+        });
+    }
+
+    Ok(VerifiedRoot {
+        root_key,
+        root_name: signed.manifest.publisher_name.clone(),
+        root_version: first,
+    })
+}
+
+/// On what authority a version's signer published it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignerRole {
+    /// The key that signed the application's first version.
+    Root,
+    /// A co-publisher named in the root-signed `publishers.json`.
+    CoPublisher,
+}
+
+/// A version's signer, checked against [`root_anchored_publishers`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizedSigner {
+    /// The key that signed the version (lowercase hex).
+    pub key: String,
+    /// The name the version's own signed manifest gives. Display only.
+    pub name: String,
+    pub role: SignerRole,
+    /// For a co-publisher, the name the ROOT gave them in its signed list —
+    /// which, unlike `name`, the signer did not write about themselves. Empty
+    /// for the root.
+    pub listed_as: String,
+    pub root_key: String,
+    pub root_name: String,
+    /// What THIS MACHINE remembers about the root: recorded just now, matched,
+    /// or (for a passive read) nothing remembered and nothing recorded.
+    pub anchor: crate::developer_anchor::AnchorStatus,
+}
+
+/// Refuse a version whose signer is not an authorised publisher of `package`,
+/// anchored at the root. Every door that opens a published version FOR
+/// EDITING — checkout, and the push merge that brings a newer head into a
+/// working copy — asks this before it writes anything.
+///
+/// `signer_key` / `signer_name` MUST come from the version's VERIFIED manifest
+/// (the one whose signature the caller already checked), never from a re-read:
+/// the answer is about the bytes the caller is about to use.
+///
+/// `anchor` is REQUIRED: the root the workspace proves is checked against the
+/// root THIS MACHINE remembers, and the co-publisher list against the highest
+/// revision it has seen (`developer_anchor::anchor_root`), BEFORE the signer is
+/// judged -- a planted first version would otherwise authorise every version
+/// its planter signs. Whether first contact may RECORD is the gate's policy,
+/// which each door states; a record happens only AFTER the signer passed, so a
+/// refused version leaves nothing remembered (BUG-0266).
+pub fn authorize_signer(
+    registry: &dyn WorkspaceTransport,
+    package: &str,
+    version: &str,
+    signer_key: &str,
+    signer_name: &str,
+    anchor: &AnchorGate,
+) -> Result<AuthorizedSigner, CalpError> {
+    authorize_signer_under(registry, package, version, signer_key, signer_name, anchor)
+        .map(|(signer, _)| signer)
+}
+
+/// [`authorize_signer`], also returning the authority the signer was judged
+/// against -- for a door that records first contact itself, LATER, after gates
+/// of its own (`checkout::PendingCheckout::admit`), and must record exactly
+/// the root it judged rather than whatever the workspace names by then.
+pub(crate) fn authorize_signer_under(
+    registry: &dyn WorkspaceTransport,
+    package: &str,
+    version: &str,
+    signer_key: &str,
+    signer_name: &str,
+    anchor: &AnchorGate,
+) -> Result<(AuthorizedSigner, RootAnchoredPublishers), CalpError> {
+    let authority = root_anchored_publishers(registry, package)?;
+    // Asked FIRST, so a contradicted root or a rolled-back list is named for
+    // what it is rather than as the signer refusal it would also cause -- but
+    // asked WITHOUT recording. Recording before the signer is judged is how a
+    // fresh machine refused a planted root's application remembered the
+    // PLANTER as its creator, and then refused the genuine one (BUG-0266).
+    let check_only = AnchorGate {
+        profile_dir: anchor.profile_dir,
+        scope: anchor.scope,
+        policy: AnchorPolicy::CheckOnly,
+    };
+    let mut anchor_status = crate::developer_anchor::anchor_root(&check_only, package, &authority)?;
+    if !authority.allows(signer_key) {
+        return Err(CalpError::SignerNotAuthorized {
+            package: package.to_string(),
+            version: version.to_string(),
+            signer_name: if signer_name.trim().is_empty() {
+                "an unnamed publisher".to_string()
+            } else {
+                signer_name.to_string()
+            },
+            signer_fingerprint: crate::signing::key_fingerprint(signer_key),
+            root_holder: authority.root_holder(),
+        });
+    }
+    let (role, listed_as) = if signer_key == authority.root_key {
+        (SignerRole::Root, String::new())
+    } else {
+        let listed_as = authority
+            .list
+            .as_ref()
+            .and_then(|l| l.authorized_keys.iter().find(|k| k.key == signer_key))
+            .map(|k| k.name.clone())
+            .unwrap_or_default();
+        (SignerRole::CoPublisher, listed_as)
+    };
+    // The signer passed: first contact may now be recorded, when the door's
+    // policy allows. `anchor_root` re-asks under its own lock, so a record
+    // another thread or process made in between is matched or contradicted,
+    // never overwritten.
+    if anchor_status == AnchorStatus::NotAnchored && anchor.policy != AnchorPolicy::CheckOnly {
+        anchor_status = crate::developer_anchor::anchor_root(anchor, package, &authority)?;
+    }
+    Ok((
+        AuthorizedSigner {
+            key: signer_key.to_string(),
+            name: signer_name.to_string(),
+            role,
+            listed_as,
+            root_key: authority.root_key.clone(),
+            root_name: authority.root_name.clone(),
+            anchor: anchor_status,
+        },
+        authority,
+    ))
 }
 
 #[cfg(test)]

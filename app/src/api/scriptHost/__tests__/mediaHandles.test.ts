@@ -313,6 +313,23 @@ describe("the shape-property key list tracks the Controls extension", () => {
     expect(m, "MACRO_REF_PROPERTY not found in buttonControlService.ts").not.toBeNull();
     expect(SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS).toContain(m![1]);
   });
+
+  // BUG-0257. A working copy keeps its application's button code in a HELD
+  // compartment that the next push PUBLISHES under the pusher's key. A script
+  // that could write a held key would be staging code for that publish.
+  //
+  // SABOTAGE: delete "heldOnSelect" from SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS.
+  it("REFUSES a script write to the held compartment, spelled as @api/heldButtonCode spells it", () => {
+    const held = nodeFs.readFileSync(nodePath.resolve(__dirname, "../../heldButtonCode.ts"), "utf8");
+    const spelled = [...held.matchAll(/export const HELD_\w+_PROPERTY = "([^"]+)";/g)].map((m) => m[1]);
+    expect(spelled.sort()).toEqual(["heldFrom", "heldMacroRef", "heldOnSelect"]);
+    for (const key of spelled) {
+      expect(SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS, key).toContain(key);
+      const verdict = vSetState(["shape.setProperty", [key, "Exfiltrate();"]]);
+      expect(verdict, key).not.toBe(true);
+      expect(String(verdict)).toContain("ACTION");
+    }
+  });
 });
 
 // ============================================================================

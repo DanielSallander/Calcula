@@ -12,6 +12,7 @@ import type { UnlistenFn } from "./backend";
 import { getGridStateSnapshot } from "../core/state/GridContext";
 import { confirmAsync } from "./dialogs";
 import { scriptOriginForStoredRecord } from "./scriptHost/scriptOrigin";
+import { claimExplicitMacroRun, type ExplicitMacroRun } from "./explicitMacroRun";
 
 /** Scope of a script: workbook-level or attached to a specific sheet. */
 export type ScriptScope =
@@ -667,12 +668,99 @@ async function withScriptSecurityPrompt<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * The BUTTON a run claims to come from (phase 3 of BUG-0257). Mirrors Rust
+ * `ScriptRunTrigger` (app/src-tauri/src/scripting/types.rs).
+ *
+ * A CLAIM, never trusted as said: before an application's code runs, Rust reads
+ * that cell of its own store and requires the button there to link exactly the
+ * code about to run, under that application's stamp
+ * (`application_code_gate::verify_trigger`). So a claim can only NARROW what
+ * runs; it is also how the always-on audit row names the button. Omitting it is
+ * the weaker case the gate still gates and audits, just without the button.
+ */
+export interface ScriptRunTrigger {
+  /** A button CONTROL (its `macroRef`, live or held) or a button CELL (its script action). */
+  kind: "buttonControl" | "buttonCell";
+  /** The TRUE state-vector index of the button's sheet. */
+  sheetIndex: number;
+  row: number;
+  col: number;
+}
+
+// ============================================================================
+// WHO STARTED A RUN (owner decision B, follow-up F10)
+// ============================================================================
+//
+// "An APPROVED application macro that the user runs EXPLICITLY (button click,
+// Developer > Macros > Run, CLI) gets the same CELL access in either runtime;
+// standing object scripts and any run a script starts stay restricted." The
+// module runtime (`run_script`) has no tiers: an application's module macro
+// runs there with its full `Calcula.*` reach or not at all. So every run tells
+// Rust who started it, and Rust refuses -- and records -- an application's
+// macro that no person started (`application_code_gate::distributed_run_gate`,
+// APPLICATION_MACRO_NOT_STARTED_BY_YOU). The user's own and ad-hoc code is not
+// asked.
+//
+// THE DOOR IS READ FROM A CLAIMED PASS, NEVER WRITTEN BY THE CALLER. A macro run
+// hands over the one-time pass a person's door minted (explicitMacroRun.ts) and
+// the macro id it is running; the pass is CLAIMED here -- spent, so it serves
+// this one run -- and only a live pass for this very macro names a door. A
+// caller holding no pass (a script's `api.runMacro`) can only say "script".
+// The one person's act without a pass is the user activating a view bookmark
+// of their own (bookmarks are subscriber-local; they never come with an
+// application), named by its caller and pinned by a census of who says
+// "person" (scriptStartedModuleRun.test.ts).
+
+/** The act of a PERSON that started a run. Mirrors Rust `RunDoor` (scripting/types.rs). */
+export type RunDoor = "macrosDialog" | "button" | "commandLine" | "viewBookmark";
+
+/** Who started a run, as `run_script` reads it. Mirrors Rust `RunStartedBy`. */
+export type RunStartedBy = { kind: "you"; door: RunDoor } | { kind: "script" };
+
+/** Who is starting a run, as its caller knows it. */
+export type WorkbookScriptStarter =
+  /**
+   * A stored macro run through the macro-run seam. `explicitRun` is the pass a
+   * person's door minted for it, or undefined when none did (a script's
+   * `api.runMacro`): it is claimed here and names a door only when it is live
+   * and was minted for `macroId`.
+   */
+  | { kind: "macro"; macroId: string; explicitRun: ExplicitMacroRun | undefined }
+  /** A view bookmark's on-activate script: activated by the user, or by a script. */
+  | { kind: "viewBookmark"; activatedBy: "person" | "script" };
+
+/**
+ * The sentinel Rust starts its refusal with when an application's module macro
+ * was not started by a person. Mirrors `APPLICATION_MACRO_NOT_STARTED_BY_YOU`
+ * (app/src-tauri/src/scripting/application_code_gate.rs).
+ */
+export const APPLICATION_MACRO_NOT_STARTED_BY_YOU = "APPLICATION_MACRO_NOT_STARTED_BY_YOU";
+
+/** Spend the starter's pass (if any) and say who started the run, on the wire. */
+function startedByOnTheWire(starter: WorkbookScriptStarter): RunStartedBy {
+  if (starter.kind === "viewBookmark") {
+    return starter.activatedBy === "person" ? { kind: "you", door: "viewBookmark" } : { kind: "script" };
+  }
+  const claimed = claimExplicitMacroRun(starter.explicitRun);
+  if (claimed === null || claimed.macroId !== starter.macroId) return { kind: "script" };
+  return { kind: "you", door: claimed.door };
+}
+
 /** Extra inputs for a script run (the bookmark collections the script can read). */
 export interface RunWorkbookScriptOptions {
   /** Serialized cell bookmarks, so `Calcula.bookmarks.list()` sees them. */
   cellBookmarksJson?: string;
   /** Serialized view bookmarks, so `Calcula.bookmarks.listViews()` sees them. */
   viewBookmarksJson?: string;
+  /** The button a click ran this for, when one did (see {@link ScriptRunTrigger}). */
+  trigger?: ScriptRunTrigger;
+  /**
+   * WHO is starting this run (owner decision B, F10). REQUIRED, so no caller
+   * can forget to say: Rust refuses an application's macro that no person
+   * started, and reads a request that says nothing as exactly that.
+   */
+  startedBy: WorkbookScriptStarter;
 }
 
 /**
@@ -727,9 +815,12 @@ export function currentHostViewState(): HostViewState | undefined {
  */
 export async function runWorkbookScript(
   source: string,
-  filename: string = "script.js",
-  options: RunWorkbookScriptOptions = {},
+  filename: string,
+  options: RunWorkbookScriptOptions,
 ): Promise<ScriptRunResult> {
+  // Decided ONCE, before the Script Security retry below re-sends the request:
+  // the pass is spent by this claim, so a second claim would read "script".
+  const startedBy = startedByOnTheWire(options.startedBy);
   const result = await withScriptSecurityPrompt(() =>
     invokeBackend<ScriptRunResult>("run_script", {
       request: {
@@ -738,6 +829,10 @@ export async function runWorkbookScript(
         cellBookmarksJson: options.cellBookmarksJson,
         viewBookmarksJson: options.viewBookmarksJson,
         viewState: currentHostViewState(),
+        // Rust `RunScriptRequest.trigger` (serde default): absent = no button asked.
+        trigger: options.trigger,
+        // Rust `RunScriptRequest.started_by` (serde default = a script).
+        startedBy,
       },
     }),
   );
@@ -745,4 +840,144 @@ export async function runWorkbookScript(
     dispatchScriptSideEffects(result);
   }
   return result;
+}
+
+// ============================================================================
+// The button door (phase 4 of BUG-0257)
+// ============================================================================
+//
+// EVERY BUTTON CLICK -- a floating button control, an in-cell button control,
+// a button CELL (Cell Type: Button) -- asks Rust what it runs:
+// `run_control_action` (app/src-tauri/src/scripting/control_action.rs). The
+// request names the BUTTON (its kind and its cell) and NEVER code: Rust reads
+// the button from its own store, plans the run (the user's own inline code with
+// the user's own modules; an application's held code as its exact approved
+// bytes; a button cell's module), asks whose code the final source is (the
+// approval of its exact bytes, the working-copy private-sheet rule), records
+// every run and refusal of an application's code, and only then runs it. The
+// page composes nothing and decides nothing from cached params; it says what
+// the door answered, once.
+
+/** Which kind of button a click names. Mirrors Rust `ControlActionKind`. */
+export type ControlActionKind = "control" | "cell";
+
+/** The button a click names: its kind and its cell, nothing else. */
+export interface ControlActionButton {
+  kind: ControlActionKind;
+  /** The TRUE state-vector index of the button's sheet. */
+  sheetIndex: number;
+  row: number;
+  col: number;
+}
+
+/**
+ * `run_control_action`'s request. Mirrors Rust `RunControlActionRequest`
+ * (app/src-tauri/src/scripting/types.rs), which REFUSES an unknown field
+ * (`deny_unknown_fields`): a request that carried code would be refused, not
+ * silently stripped.
+ */
+export interface RunControlActionRequest extends ControlActionButton {
+  /** The frontend-owned view state, as `run_script`'s request carries it. */
+  viewState?: HostViewState;
+}
+
+/**
+ * A module a button's code names but cannot call, and why, as one sentence.
+ * Mirrors Rust `UnavailableModule` (scripting/control_action.rs): `distributed`
+ * (it came with an application, so it is never mixed into other code) or
+ * `objectScript` (it runs only as an object script).
+ */
+export interface UnavailableButtonModule {
+  id: string;
+  name: string;
+  reason: "distributed" | "objectScript";
+  message: string;
+}
+
+/**
+ * What a click on a button did, tagged by `kind`. Mirrors Rust
+ * `ControlActionOutcome` (scripting/types.rs; drift-tested by
+ * src/api/__tests__/runControlActionWire.test.ts).
+ */
+export type ControlActionOutcome =
+  /** The button's code ran -- or ran into an error of its own (`result.type`). */
+  | { kind: "ran"; result: ScriptRunResult; unavailable: UnavailableButtonModule[] }
+  /** The button links a macro: the page's link route runs it. Nothing ran here. */
+  | { kind: "link" }
+  /**
+   * A button CELL whose action is a macro that runs only as an object script
+   * (owner decision B, follow-up F6): the page runs it through the macro-run
+   * seam with this cell as its `buttonCell` trigger, which the Rust run gate
+   * verifies against its own store. `application` is the application the
+   * BUTTON came with (its stamp) -- the macro must have come with it too
+   * (`requirePackage`) -- or null for a button of the user's own. Nothing ran
+   * here.
+   */
+  | { kind: "macro"; macroId: string; application: string | null }
+  /**
+   * A button CELL whose action is a Calcula command: only the page can run an
+   * extension command. `application` is null for a button of the user's own,
+   * which the page runs as it always has. A string names the application the
+   * BUTTON came with: Rust's list (`DISTRIBUTABLE_BUTTON_COMMANDS`), the
+   * approval under `button-commands:<application>` and the private-sheet rule
+   * have said yes (no run row yet). The page must then check that the
+   * command's LIVE registration opts in and ask `authorize_button_command`
+   * (the gate again, and the run row) before it runs it. Nothing ran here.
+   */
+  | { kind: "command"; commandId: string; application: string | null }
+  /**
+   * Refused before anything ran. ALREADY on the audit trail whenever the
+   * button, or the code it asked for, came with an application -- the page
+   * records nothing more.
+   */
+  | { kind: "refused"; reason: string; message: string }
+  /** Nothing on the button to run; `message` says why when there is a reason worth saying. */
+  | { kind: "nothing"; message: string | null };
+
+/** The outcome kinds, in the order Rust declares them. */
+export const CONTROL_ACTION_OUTCOME_KINDS = ["ran", "link", "macro", "command", "refused", "nothing"] as const;
+
+function isControlActionOutcome(value: unknown): value is ControlActionOutcome {
+  if (!value || typeof value !== "object") return false;
+  const kind = (value as { kind?: unknown }).kind;
+  return typeof kind === "string" && (CONTROL_ACTION_OUTCOME_KINDS as readonly string[]).includes(kind);
+}
+
+/**
+ * Ask the button door what a click on `button` runs, and run it there.
+ *
+ * Script Security: when the level is "prompt", Rust refuses a RUN with the
+ * SCRIPT_PROMPT_REQUIRED sentinel until the user approves once for the
+ * session; this asks (awaited, failing closed) and retries the WHOLE door once,
+ * which decides and gates again. A link, a macro for the seam, a command,
+ * nothing and a refusal are answered before Script Security is asked (the
+ * seam's run asks it itself).
+ *
+ * A run's queued side effects (deferred UI actions, bookmark mutations) are
+ * dispatched here, as `runWorkbookScript` dispatches them. Rejects when the
+ * door itself failed (scripts disabled, the prompt declined, a backend error),
+ * or answered something that is no outcome.
+ */
+export async function runControlAction(button: ControlActionButton): Promise<ControlActionOutcome> {
+  const outcome = await withScriptSecurityPrompt(() => {
+    // Built field by field from the button, never spread from the caller's
+    // object: the request names a button and carries no code.
+    const request: RunControlActionRequest = {
+      kind: button.kind,
+      sheetIndex: button.sheetIndex,
+      row: button.row,
+      col: button.col,
+      viewState: currentHostViewState(),
+    };
+    return invokeBackend<unknown>("run_control_action", { request });
+  });
+  if (!isControlActionOutcome(outcome)) {
+    throw new Error(
+      `The button door returned no answer Calcula understands (${JSON.stringify(outcome) ?? "nothing"}), so nothing ran.`,
+    );
+  }
+  if (outcome.kind === "ran" && outcome.result.type === "success") {
+    dispatchScriptSideEffects(outcome.result);
+  }
+  return outcome;
 }

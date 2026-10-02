@@ -10,6 +10,9 @@
 //          resize instead of inserting "Float2!C5", and a press inside the open
 //          cell editor at a frame corner was taken by Core (preventDefault ate
 //          the caret placement). Driven through the REAL resize handlers.
+//          The region is SELECTED throughout (helpers/selectForHandles.ts):
+//          since BUG-0258 design phase 3 an unselected object has no live
+//          handle at all, so these guards are about a handle that WOULD be live.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type React from "react";
@@ -30,6 +33,7 @@ import { createOverlayResizeHandlers } from "../overlayResizeHandlers";
 import { setGridRegions, type GridRegion } from "../../../../../api/gridOverlays";
 import { registerExternalFormulaTarget } from "../../../../lib/formulaEditTarget";
 import { DEFAULT_GRID_CONFIG, type Viewport } from "../../../../types";
+import { selectForHandles } from "./helpers/selectForHandles";
 
 const VIEWPORT: Viewport = { scrollX: 0, scrollY: 0, startRow: 0, startCol: 0, rowCount: 30, colCount: 10 };
 const RHW = DEFAULT_GRID_CONFIG.rowHeaderWidth ?? 50;
@@ -78,14 +82,18 @@ function handlers() {
 }
 
 let unregisterTarget: (() => void) | null = null;
+let unselect: (() => void) | null = null;
 
 beforeEach(() => {
   gridFormulaMode = false;
+  unselect = selectForHandles(["floating-range"]);
 });
 
 afterEach(() => {
   unregisterTarget?.();
   unregisterTarget = null;
+  unselect?.();
+  unselect = null;
   setGridRegions([]);
 });
 
@@ -94,7 +102,7 @@ describe("floating resize handles stand down", () => {
     for (const z of [undefined, 3]) {
       setGridRegions([region(z)]);
       const h = handlers();
-      expect(h.checkOverlayResizeHandle(CORNER.x, CORNER.y)?.id).toBe("fr-1");
+      expect(h.checkOverlayResizeHandle(CORNER.x, CORNER.y)?.region.id).toBe("fr-1");
       expect(h.handleOverlayResizeMouseDown(CORNER.x, CORNER.y, press())).toBe(true);
     }
   });

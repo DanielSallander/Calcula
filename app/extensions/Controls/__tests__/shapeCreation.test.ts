@@ -263,15 +263,21 @@ describe("the seam's delete routes to the full teardown", () => {
 });
 
 describe("the embedded predicate has exactly one definition", () => {
-  it("is asked by both the loader and the delete path, never re-spelled", () => {
+  it("is asked by the loader, the delete path and the in-cell note, never re-spelled", () => {
     // If the store's inclusion rule and the delete refusal ever disagreed, a
     // control would be refused with a reason that does not describe it — and
-    // nothing would say so. One function, two callers.
-    expect(INDEX_SRC).toContain("function isEmbeddedControl(");
-    const calls = INDEX_SRC.match(/isEmbeddedControl\(/g) ?? [];
-    expect(calls.length, "definition + two call sites").toBe(3);
+    // nothing would say so. One function, three callers: owner question 8 moved
+    // it into lib/heldEmbeddedButtons.ts, whose in-cell note (the cell menu's
+    // "Make this my own…") asks it too, and index.ts imports it from there.
+    const HELD_SRC = fs.readFileSync(path.resolve(__dirname, "../lib/heldEmbeddedButtons.ts"), "utf8");
+    expect(HELD_SRC.match(/function isEmbeddedControl\(/g) ?? [], "one definition").toHaveLength(1);
+    expect(INDEX_SRC).not.toContain("function isEmbeddedControl(");
+    expect(INDEX_SRC).toMatch(/import \{[^}]*\bisEmbeddedControl\b[^}]*\} from "\.\/lib\/heldEmbeddedButtons";/);
+    expect((INDEX_SRC.match(/isEmbeddedControl\(/g) ?? []).length, "the loader + the delete path").toBe(2);
+    expect((HELD_SRC.match(/isEmbeddedControl\(/g) ?? []).length, "definition + the in-cell note").toBe(2);
     // The open-coded form this replaced must not come back in the loader.
     expect(INDEX_SRC).not.toContain("const isEmbedded = entry.metadata.controlType");
+    expect(INDEX_SRC).not.toContain('embedded?.value !== "false"');
   });
 });
 

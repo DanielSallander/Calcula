@@ -197,3 +197,66 @@ describe("fillRangeFromScript — drag parity", () => {
     expect(updates).toEqual([]);
   });
 });
+
+// OWNER DECISION B (2026-09-30): an application's macro a person ran gets "the
+// same CELL access" a module-runtime macro has -- whose fill is the backend
+// `fill_range`: values, shifted formulas and the band's styles. The drag adds two
+// things on top, and a granted run gets neither: a repeated MERGE pattern
+// (structure) and FILL_COMPLETED, whose sparkline listener creates sparkline
+// groups (objects).
+describe("fillRangeFromScript -- module parity for a granted application macro", () => {
+  function captureFillCompleted(): { events: unknown[]; stop: () => void } {
+    const events: unknown[] = [];
+    const listener = (e: Event): void => {
+      events.push((e as CustomEvent).detail);
+    };
+    window.addEventListener("app:fill-completed", listener);
+    return { events, stop: () => window.removeEventListener("app:fill-completed", listener) };
+  }
+
+  // SABOTAGE: make `moduleParity` always false in fillRangeFromScript -> the
+  // merge repeats and FILL_COMPLETED fires, and this goes red.
+  it("moduleParity: values, formulas and styles as before -- no merge repeated, no FILL_COMPLETED", async () => {
+    mergedRegions = [{ startRow: 0, startCol: 0, endRow: 0, endCol: 1 }];
+    engineMergeCalls.length = 0;
+    const fills = captureFillCompleted();
+    try {
+      const { lib, updates, undo } = makeLib([
+        { row: 0, col: 0, display: "h", styleIndex: 5 },
+        { row: 0, col: 1, display: "14", formula: "=A1*2", styleIndex: 6 },
+      ]);
+      const result = await fillRangeFromScript(
+        lib, SCRIPT, 0, 0, 2, 1, {}, undefined, { moduleParity: true },
+      );
+      expect(result).toEqual({ count: 4 });
+      // The module twin's part: values, shifted formulas, styles, one undo step.
+      expect(at(updates, 1, 0)).toMatchObject({ value: "h", styleIndex: 5 });
+      expect(at(updates, 2, 1)).toMatchObject({ value: "=A1*2|shifted(2,0)", styleIndex: 6 });
+      expect(undo).toEqual(["begin", "commit"]);
+      // ...and nothing past it.
+      expect(engineMergeCalls, "a granted fill repeated the band's merges").toEqual([]);
+      expect(fills.events, "a granted fill told the sparkline listener").toEqual([]);
+    } finally {
+      fills.stop();
+      mergedRegions = [];
+    }
+  });
+
+  it("CONTROL: the same fill without it repeats the merge and announces the fill, as the drag does", async () => {
+    mergedRegions = [{ startRow: 0, startCol: 0, endRow: 0, endCol: 1 }];
+    engineMergeCalls.length = 0;
+    const fills = captureFillCompleted();
+    try {
+      const { lib } = makeLib([{ row: 0, col: 0, display: "h", styleIndex: 5 }]);
+      await fillRangeFromScript(lib, SCRIPT, 0, 0, 2, 1, {}, undefined);
+      expect(engineMergeCalls).toEqual([
+        [1, 0, 1, 1],
+        [2, 0, 2, 1],
+      ]);
+      expect(fills.events).toHaveLength(1);
+    } finally {
+      fills.stop();
+      mergedRegions = [];
+    }
+  });
+});

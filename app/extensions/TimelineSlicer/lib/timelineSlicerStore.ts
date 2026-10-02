@@ -620,12 +620,22 @@ export function updateCachedTimelineBounds(
 // Data fetching
 // ============================================================================
 
+/**
+ * Tell whoever follows the store (TimelineSlicerEvents.TIMELINE_DATA_CHANGED)
+ * that what it holds changed. Called AFTER the cache holds the new state.
+ */
+function announceDataChanged(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(TimelineSlicerEvents.TIMELINE_DATA_CHANGED));
+}
+
 export async function refreshTimelineData(
   timelineId: string,
 ): Promise<TimelineDataResponse | null> {
   try {
     const data = await api.getTimelineData(timelineId);
     dataCache.set(timelineId, data);
+    announceDataChanged();
     return data;
   } catch (err) {
     console.error(
@@ -676,6 +686,9 @@ export async function refreshCache(): Promise<void> {
       );
     }
     syncTimelineRegions();
+    // The LEVEL lives here, in the list: a level change is announced now, not
+    // only once the new periods are read.
+    announceDataChanged();
     await Promise.all(cachedTimelines.map((t) => refreshTimelineData(t.id)));
   } catch (err) {
     console.error("[TimelineSlicer] Failed to refresh cache:", err);
@@ -717,12 +730,24 @@ export function resetStore(): void {
   dataCache.clear();
   appliedRanges.clear();
   removeGridRegionsByType("timeline-slicer");
+  announceDataChanged();
 }
 
 // ============================================================================
 // Grid region synchronization
 // ============================================================================
 
+/**
+ * Publish the ACTIVE sheet's timelines as floating regions.
+ *
+ * No `resizable` flag: Core's selection handles are live only on a SELECTED
+ * object and only where they are painted (core/lib/floatingHandles.ts,
+ * BUG-0258 design phase 3), so an unselected timeline's first and last
+ * months no longer lose presses to resize corners nobody could see. That was
+ * the interim reason this store published `resizable` = selected and
+ * re-published it on every selection change; Core now gates the handles on
+ * the selection itself, and refuses a LOCKED timeline's on its own.
+ */
 export function syncTimelineRegions(): void {
   const gridState = getGridStateSnapshot();
   const activeSheet = gridState?.sheetContext.activeSheetIndex ?? 0;
@@ -742,7 +767,10 @@ export function syncTimelineRegions(): void {
         width: tl.width,
         height: tl.height,
       },
-      data: { timelineId: tl.id },
+      // A timeline with its header HIDDEN keeps its year strip and empty space
+      // as frame, but has no header to grab: Core shows its six-dot grip while
+      // it is hovered or selected (@api/gridOverlays, BUG-0258 design phase 5).
+      data: { timelineId: tl.id, ...(tl.showHeader === false ? { grip: "hover" } : {}) },
     }));
 
   replaceGridRegionsByType("timeline-slicer", regions);

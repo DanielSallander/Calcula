@@ -1,5 +1,7 @@
 //! FILENAME: app/extensions/TimelineSlicer/handlers/timelineSlicerContextMenu.ts
-// PURPOSE: Context menu handling for timeline slicer right-click.
+// PURPOSE: Context menu handling for timeline slicer right-click -- including
+//          the "Size and Position..." row every object menu carries
+//          (@api/objectPosition; BUG-0258 design phase 5b).
 
 import { getGridStateSnapshot } from "@api/state";
 import { showDialog } from "@api";
@@ -14,8 +16,14 @@ import {
 } from "./selectionHandler";
 import { timelineAtCanvasPoint } from "../lib/timelineCanvasGeometry";
 import { TIMELINE_SETTINGS_DIALOG_ID } from "../manifest";
+import { TIMELINE_REGION_TYPE, timelineIdOf } from "../lib/timelineObjectSelection";
+import { getGridRegions, type GridRegion } from "@api/gridOverlays";
+import { sizeAndPositionMenuEntry } from "@api/objectPosition";
+import { isTimelineContextMenuOpen as menuStateOpen, setTimelineContextMenuOpen } from "../lib/timelineMenuState";
 
 let activeMenuElement: HTMLDivElement | null = null;
+/** Removes the open menu's listeners (Escape, click outside). */
+let detachMenuListeners: (() => void) | null = null;
 
 // ============================================================================
 // Public API
@@ -59,6 +67,24 @@ export function closeTimelineContextMenu(): void {
     activeMenuElement.remove();
     activeMenuElement = null;
   }
+  setTimelineContextMenuOpen(false);
+  // Every way the menu closes (an item, a click outside, Escape, a re-open)
+  // takes its listeners down: a stale Escape listener would eat the next
+  // Escape the user meant for something else.
+  detachMenuListeners?.();
+  detachMenuListeners = null;
+}
+
+/**
+ * Whether the timeline's right-click menu is open. The keyboard inside a
+ * timeline (lib/timelineKeys.ts, M8 S8) stands down while it is: a key then
+ * belongs to the menu the user is looking at, never to the timeline behind it.
+ * So does the timeline's object-selection provider, which owns Delete and
+ * Escape while it is (lib/timelineObjectSelection.ts, BUG-0270 review). The
+ * fact itself lives in lib/timelineMenuState.ts (no import cycle).
+ */
+export function isTimelineContextMenuOpen(): boolean {
+  return menuStateOpen();
 }
 
 // ============================================================================
@@ -70,6 +96,29 @@ interface MenuItem {
   onClick?: () => void;
   disabled?: boolean;
   separator?: boolean;
+  /** The row's tooltip (why it is disabled, or what it will show). */
+  title?: string;
+}
+
+/** The published region of a timeline on the active sheet, or null. */
+function timelineRegionOf(timelineId: string): GridRegion | null {
+  return getGridRegions().find((r) => r.type === TIMELINE_REGION_TYPE && timelineIdOf(r) === timelineId) ?? null;
+}
+
+/** The "Size and Position..." row (and its rule) for the timeline's region; none when it is not published. */
+function sizeAndPositionRows(timelineId: string): MenuItem[] {
+  const region = timelineRegionOf(timelineId);
+  if (!region) return [];
+  const entry = sizeAndPositionMenuEntry(region);
+  return [
+    {
+      label: entry.label,
+      disabled: entry.disabled,
+      title: entry.reason ?? undefined,
+      onClick: entry.run,
+    },
+    { label: "", separator: true },
+  ];
 }
 
 function showContextMenu(
@@ -104,6 +153,7 @@ function showContextMenu(
       },
     },
     { label: "", separator: true },
+    ...sizeAndPositionRows(timelineId),
     {
       label: "Remove Timeline",
       onClick: () => {
@@ -155,6 +205,7 @@ function renderMenu(
       white-space: nowrap;
     `;
     row.textContent = item.label;
+    if (item.title) row.title = item.title;
 
     if (!item.disabled && item.onClick) {
       const onClick = item.onClick;
@@ -188,13 +239,32 @@ function renderMenu(
   }
 
   activeMenuElement = menu;
+  setTimelineContextMenuOpen(true);
 
   // Close on click outside
   const closeHandler = (e: MouseEvent) => {
     if (!menu.contains(e.target as Node)) {
       closeTimelineContextMenu();
-      window.removeEventListener("mousedown", closeHandler, true);
     }
   };
   window.addEventListener("mousedown", closeHandler, true);
+  // Escape closes the menu -- and is CONSUMED: the Escape that closes the menu
+  // is the menu's alone, so nothing behind it (the grid's keyboard, the
+  // timeline's selection) hears it as well. Capture phase, on document (the
+  // Slicer menu's precedent): the dispatcher's Escape bindings run earlier
+  // (window capture) and stand down while the menu is open, because the
+  // timeline's provider owns Escape then (`ownsKey`, BUG-0270 review). Before
+  // this the menu had no key handling at all: Escape deselected the timeline
+  // and left the menu standing over it (the BUG-0196 pattern).
+  const escHandler = (e: KeyboardEvent) => {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeTimelineContextMenu();
+  };
+  document.addEventListener("keydown", escHandler, true);
+  detachMenuListeners = () => {
+    window.removeEventListener("mousedown", closeHandler, true);
+    document.removeEventListener("keydown", escHandler, true);
+  };
 }

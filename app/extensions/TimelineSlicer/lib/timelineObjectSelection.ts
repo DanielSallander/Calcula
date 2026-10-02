@@ -21,6 +21,9 @@ import {
   selectTimeline,
 } from "../handlers/selectionHandler";
 import { deleteTimelinesReporting, getTimelineById } from "./timelineSlicerStore";
+import { isTimelineContentGestureActive } from "./timelineRangeDrag";
+import { isTimelineKeyFocusActive } from "./timelineKeyFocus";
+import { isTimelineContextMenuOpen } from "./timelineMenuState";
 
 /** The `GridRegion.type` timelines publish (see timelineSlicerStore). */
 export const TIMELINE_REGION_TYPE = "timeline-slicer";
@@ -53,6 +56,33 @@ export function createTimelineSelectionProvider(): ObjectSelectionProvider {
     deselectAll(): void {
       // No-op (and no repaint) when nothing is selected.
       deselectTimeline();
+    },
+
+    // While a range drag (or a press on a timeline button or scrollbar) is
+    // live, Escape CANCELS it (lib/timelineRangeDrag.ts). Owning the key keeps
+    // a canvas's Escape binding from also deselecting the timeline under the
+    // pointer -- that binding runs first, in the keybinding dispatcher. And
+    // while the KEYBOARD is inside a timeline (lib/timelineKeys.ts, M8 S8)
+    // Escape drops its preview or leaves the periods -- the timeline stays
+    // selected -- and the arrows move the focus ring: a canvas's Escape and
+    // arrow-nudge bindings run first and stand down on this answer.
+    //
+    // Delete / Backspace (BUG-0270): a SELECTED timeline is deleted by the
+    // generic object Delete (ObjectPosition lib/selectedObjectKeys.ts), which
+    // asks this first. Inside, the keys are refused by the inside claim
+    // (lib/timelineKeys.ts) -- they must never delete the timeline the
+    // keyboard is in; nor, during a live range drag, the timeline under it.
+    //
+    // The timeline's right-click MENU, while open, owns both keys too
+    // (BUG-0270 review). It takes no focus, so the grid keeps the keyboard:
+    // Delete deleted the timeline BEHIND the open menu, and the generic
+    // Escape deselected it and left the menu standing (the BUG-0196 pattern;
+    // the menu now closes itself on Escape, handlers/timelineSlicerContextMenu.ts).
+    ownsKey(key): boolean {
+      if (key === "Escape" || key === "Delete") {
+        return isTimelineContentGestureActive() || isTimelineKeyFocusActive() || isTimelineContextMenuOpen();
+      }
+      return key === "Arrow" && isTimelineKeyFocusActive();
     },
 
     refOf(region: GridRegion) {

@@ -23,6 +23,14 @@
 //! is the same "open the latest version" as a conflict's. Being clear about
 //! which of the two happened is the difference between "you two collided" and
 //! "we cannot do this for you yet".
+//!
+//! **Every published version a merge reads must be signed by an authorised
+//! publisher** (BUG-0262), anchored at the application's root — the same rule
+//! checkout applies, through `calp_inspector::open_authorized_content`. A
+//! planted head is exactly what makes a push stale and steers its author here;
+//! checking only the signature would let its cells ride the author's next
+//! signed push. Both the head it brings in and the base it diffs against are
+//! checked, so a working-copy link naming a planted base is refused too.
 
 use std::collections::HashMap;
 
@@ -44,9 +52,14 @@ pub struct MergeAnalysisResponse {
     pub base_version: String,
     /// The registry's current head.
     pub head_version: String,
-    /// Who published the head.
-    pub head_published_by: String,
-    /// What the head's author said they changed.
+    /// Who SIGNED the head, and on what authority -- read from the head's
+    /// VERIFIED manifest, after its signer passed the authorised-publisher
+    /// check. It used to be the version listing's `published_by`, which is
+    /// unsigned: a share-writer could make the stale-push banner say a
+    /// colleague published a version they planted.
+    pub head_signer: crate::calp_commands::CheckoutSignerInfo,
+    /// What the head's author said they changed, from the same verified
+    /// manifest (not the unsigned listing).
     pub head_change_summary: String,
     pub analysis: MergeAnalysis,
 }
@@ -90,14 +103,10 @@ pub fn calp_push_merge_analyze(
     let head = calp::head_version(&package_manifest)
         .ok_or_else(|| format!("'{}' has no published versions.", ctx.package_name))?;
     let head_str = head.to_string();
-    let head_entry = package_manifest
-        .versions
-        .iter()
-        .find(|e| e.version == head_str);
 
     // Both diffs are taken against the SAME base, or the two sets of touched
     // pieces are not comparable — which is the whole basis of the decision.
-    let theirs = diff_head_against_base(&ctx, &head_str)?;
+    let (theirs, head) = diff_head_against_base(&state, &ctx, &head_str)?;
     let yours = diff_working_copy_against_base(
         &state,
         &bi_state,
@@ -124,8 +133,15 @@ pub fn calp_push_merge_analyze(
         package_name: ctx.package_name,
         base_version: ctx.base_version,
         head_version: head_str,
-        head_published_by: head_entry.map(|e| e.published_by.clone()).unwrap_or_default(),
-        head_change_summary: head_entry.map(|e| e.change_summary.clone()).unwrap_or_default(),
+        head_signer: crate::calp_commands::CheckoutSignerInfo::from_signer(
+            &head.signer,
+            calp::signing::profile_holds_publisher_key(
+                &crate::calp_commands::calcula_profile_dir(),
+                &head.signer.key,
+            )
+            .unwrap_or(false),
+        ),
+        head_change_summary: head.change_summary,
         analysis,
     })
 }
@@ -182,7 +198,7 @@ pub fn calp_push_merge_apply(
         );
     }
 
-    let theirs = diff_head_against_base(&ctx, &head_str)?;
+    let (theirs, _head) = diff_head_against_base(&state, &ctx, &head_str)?;
     // The SAME objects the analysis the user saw was given, or this re-run
     // could reach a different verdict than the dialog showed.
     let yours = diff_working_copy_against_base(
@@ -333,19 +349,36 @@ fn merge_diff_options(sheet_id_map: HashMap<String, String>) -> DiffOptions {
     }
 }
 
-fn diff_head_against_base(ctx: &MergeContext, head: &str) -> Result<VersionDiff, String> {
-    let (base_registry, base_version, base_manifest) = crate::calp_inspector::open_verified_content(
+/// The head a merge diffs, as its VERIFIED manifest names it.
+struct VerifiedHead {
+    signer: calp::AuthorizedSigner,
+    change_summary: String,
+}
+
+fn diff_head_against_base(
+    state: &AppState,
+    ctx: &MergeContext,
+    head: &str,
+) -> Result<(VersionDiff, VerifiedHead), String> {
+    let (base_registry, base_version, base_manifest) = crate::calp_inspector::open_authorized_content(
         &ctx.registry_url,
         &ctx.package_name,
         &format!("={}", ctx.base_version),
         true,
+        Some((state, "merge")),
     )?;
-    let (head_registry, head_version, head_manifest) = crate::calp_inspector::open_verified_content(
-        &ctx.registry_url,
-        &ctx.package_name,
-        &format!("={head}"),
-        true,
-    )?;
+    let (head_registry, head_version, head_manifest, head_signer) =
+        crate::calp_inspector::open_authorized_content_with_signer(
+            &ctx.registry_url,
+            &ctx.package_name,
+            &format!("={head}"),
+            true,
+            Some((state, "merge")),
+        )?;
+    let verified_head = VerifiedHead {
+        signer: head_signer,
+        change_summary: head_manifest.change_summary.clone(),
+    };
     calp::diff::diff_sides(
         &DiffSide::Published {
             transport: &base_registry,
@@ -361,6 +394,7 @@ fn diff_head_against_base(ctx: &MergeContext, head: &str) -> Result<VersionDiff,
         },
         &merge_diff_options(HashMap::new()),
     )
+    .map(|diff| (diff, verified_head))
     .map_err(|e| e.to_string())
 }
 
@@ -378,11 +412,12 @@ fn diff_working_copy_against_base(
     ctx: &MergeContext,
     frontend_custom_objects: Option<Vec<crate::calp_commands::FrontendCustomObject>>,
 ) -> Result<VersionDiff, String> {
-    let (base_registry, base_version, base_manifest) = crate::calp_inspector::open_verified_content(
+    let (base_registry, base_version, base_manifest) = crate::calp_inspector::open_authorized_content(
         &ctx.registry_url,
         &ctx.package_name,
         &format!("={}", ctx.base_version),
         true,
+        Some((state, "merge")),
     )?;
 
     let frontend_objects_supplied = frontend_custom_objects.is_some();
@@ -408,6 +443,9 @@ fn diff_working_copy_against_base(
         frontend_custom_objects,
         // A working copy's collision renames are undone by the assembly itself.
         &HashMap::new(),
+        // A merge compares what the author CHANGED; adding items to the
+        // application is the push dialog's act, never the merge's.
+        &[],
     )?;
     let working_str = working_version.to_string();
     let working_manifest = memory
@@ -449,11 +487,12 @@ fn overlay_their_cells(
     head: &str,
     theirs: &VersionDiff,
 ) -> Result<(Vec<engine::grid::Grid>, usize, Vec<String>, usize), String> {
-    let (registry, head_version, _manifest) = crate::calp_inspector::open_verified_content(
+    let (registry, head_version, manifest) = crate::calp_inspector::open_authorized_content(
         &ctx.registry_url,
         &ctx.package_name,
         &format!("={head}"),
         true,
+        Some((state, "merge")),
     )?;
 
     // The head speaks the APPLICATION's sheet names; a working copy whose
@@ -492,6 +531,7 @@ fn overlay_their_cells(
             &*registry,
             &ctx.package_name,
             &head_version,
+            &manifest,
             &sheet.sheet_id,
             &positions,
             &renames,
@@ -519,4 +559,138 @@ fn overlay_their_cells(
     }
 
     Ok((grids, cells_applied, sheets_touched, active_sheet))
+}
+
+// ---------------------------------------------------------------------------
+// Tests — BUG-0262: a merge reads only versions an authorised publisher signed
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::calp_signer_trust_tests::{location, workspace_with_planted, PKG};
+
+    fn ctx(dir: &tempfile::TempDir, base: &str) -> MergeContext {
+        MergeContext {
+            registry_url: location(dir),
+            package_name: PKG.to_string(),
+            base_version: base.to_string(),
+            kind: "report".to_string(),
+        }
+    }
+
+    fn refusal(result: Result<(VersionDiff, VerifiedHead), String>) -> String {
+        match result {
+            Ok(_) => panic!("expected the merge to refuse"),
+            Err(e) => e,
+        }
+    }
+
+    /// THE MERGE DOOR. A head planted by someone who can write to the share is
+    /// exactly what makes a developer's push stale, and "stale" steers them
+    /// straight here. The merge used to bring that head's cells in on the
+    /// strength of its signature alone, and the developer's next push signed
+    /// them. Both commands reach the head through this diff before writing.
+    ///
+    /// SABOTAGE: change `diff_head_against_base`'s HEAD read back to
+    /// `open_verified_content(`.
+    #[test]
+    fn a_merge_refuses_a_head_no_authorised_publisher_signed() {
+        let (dir, _alice, _mallory) = workspace_with_planted(&["1.2.0"]);
+        let state = crate::create_app_state();
+        let err = refusal(diff_head_against_base(&state, &ctx(&dir, "1.1.0"), "1.2.0"));
+        assert!(err.contains("not an authorised publisher"), "{err}");
+        assert!(err.contains("mallory"), "the refusal names the signer: {err}");
+    }
+
+    /// EVERY REFUSAL OF APPLICATION CODE IS AUDITED (guardrail 6). A planted
+    /// head refused at the merge leaves an always-on row -- with auditing OFF,
+    /// the default -- naming the door, the version, the signer and their key
+    /// fingerprint.
+    ///
+    /// SABOTAGE: pass `None` instead of `Some((state, "merge"))` to the head
+    /// read in `diff_head_against_base`.
+    #[test]
+    fn a_merge_refusing_a_planted_head_leaves_a_signer_refused_row() {
+        let (dir, _alice, mallory) = workspace_with_planted(&["1.2.0"]);
+        let state = crate::create_app_state();
+        assert!(!state.audit_log.read().unwrap().enabled, "precondition: auditing is off");
+        refusal(diff_head_against_base(&state, &ctx(&dir, "1.1.0"), "1.2.0"));
+        let log = state.audit_log.read().unwrap();
+        let rows: Vec<&calp::audit::AuditEntry> = log
+            .entries
+            .iter()
+            .filter(|e| matches!(e.event, calp::audit::AuditEvent::SignerRefused))
+            .collect();
+        assert_eq!(rows.len(), 1, "{:?}", log.entries);
+        let extra = &rows[0].extra;
+        assert_eq!(extra["door"], "merge");
+        assert_eq!(extra["version"], "1.2.0");
+        assert_eq!(extra["signer"], "mallory");
+        assert_eq!(
+            extra["signerFingerprint"],
+            calp::signing::key_fingerprint(&mallory.public_key_hex()).as_str()
+        );
+    }
+
+    /// WHO PUBLISHED THE HEAD comes from its VERIFIED manifest. The version
+    /// listing is unsigned: a share-writer can put any name and summary there,
+    /// and the stale-push banner used to repeat them.
+    ///
+    /// SABOTAGE: build `VerifiedHead` from the listing's entry
+    /// (`published_by` / `change_summary`) instead of the verified manifest.
+    #[test]
+    fn the_heads_signer_and_summary_come_from_its_verified_manifest() {
+        let (dir, alice, _mallory) = workspace_with_planted(&[]);
+        let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+        let mut app = reg.get_application_manifest(PKG).unwrap();
+        for entry in app.versions.iter_mut() {
+            entry.published_by = "a trusted colleague".to_string();
+            entry.change_summary = "nothing to see here".to_string();
+        }
+        reg.write_application_manifest(&app).unwrap();
+
+        let state = crate::create_app_state();
+        let (_, head) = diff_head_against_base(&state, &ctx(&dir, "1.1.0"), "1.2.0")
+            .unwrap_or_else(|e| panic!("authorised versions must diff: {e}"));
+        let signed = reg.get_version_manifest(PKG, "1.2.0").unwrap();
+        assert_eq!(
+            head.signer.key,
+            crate::calp_signer_trust_tests::keypair(alice.path()).public_key_hex(),
+            "the key that signed the head"
+        );
+        assert_eq!(head.signer.name, signed.publisher_name);
+        assert_ne!(head.signer.name, "a trusted colleague", "the unsigned listing named the signer");
+        assert_eq!(head.change_summary, "a change", "the summary the signer signed");
+    }
+
+    /// The BASE is read through the same check: the working-copy link lives in
+    /// the .cala, so a link naming a planted base must not make it the thing
+    /// the merge diffs against.
+    ///
+    /// SABOTAGE: change `diff_head_against_base`'s BASE read back to
+    /// `open_verified_content(`.
+    #[test]
+    fn a_merge_refuses_a_base_no_authorised_publisher_signed() {
+        let (dir, _alice, _mallory) = workspace_with_planted(&["1.1.0"]);
+        let state = crate::create_app_state();
+        let err = refusal(diff_head_against_base(&state, &ctx(&dir, "1.1.0"), "1.2.0"));
+        assert!(err.contains("not an authorised publisher"), "{err}");
+        assert!(err.contains("1.1.0"), "the refusal names the version: {err}");
+    }
+
+    /// The positive control: two versions the root signed diff as before.
+    #[test]
+    fn a_merge_between_authorised_versions_still_diffs() {
+        let (dir, _alice, _mallory) = workspace_with_planted(&[]);
+        let state = crate::create_app_state();
+        let diff = match diff_head_against_base(&state, &ctx(&dir, "1.1.0"), "1.2.0") {
+            Ok((d, _)) => d,
+            Err(e) => panic!("authorised versions must diff: {e}"),
+        };
+        assert!(
+            diff.sheets.iter().any(|s| !s.sample.is_empty()),
+            "v1.2.0 changed a cell, and the diff must see it"
+        );
+    }
 }

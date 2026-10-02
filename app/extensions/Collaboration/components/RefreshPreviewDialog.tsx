@@ -48,6 +48,7 @@ import { confirmAsync } from "@api/dialogs";
 import { useDialogWindow } from "@api/dialogWindow";
 import { DialogBody, DialogPane, useDialogSplit, dialogWidth } from "@api/dialogLayout";
 import { ThreeWayRow, type RowChoice } from "./ThreeWayRow";
+import { ButtonActionsNotice, ButtonLinksNotice, InlineButtonCodeNotice } from "./ButtonActionsNotice";
 import { announceSubscribedContentReplaced } from "../lib/refreshAftermath";
 import { describeRefreshCard, formatSubscriptionTarget } from "../lib/environments";
 
@@ -63,6 +64,15 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
   const [resetting, setResetting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
+  // Button-cell actions the refresh REMOVED (BUG-0260), one sentence each.
+  const [removedButtonActions, setRemovedButtonActions] = useState<string[]>([]);
+  // Button CONTROLS' macro links the refresh REMOVED (phase 3 of BUG-0257): the
+  // refreshed version did not bring the linked macro into this workbook.
+  const [removedButtonLinks, setRemovedButtonLinks] = useState<string[]>([]);
+  // Button CONTROLS' inline code the refresh removed (phase 4 of BUG-0257):
+  // code written as a formula, which cannot be approved as exact bytes. Static
+  // inline code is held again under the new version and asks for approval.
+  const [removedInlineButtonCode, setRemovedInlineButtonCode] = useState<string[]>([]);
   /** cellKey -> choice. Absent means "keep mine", the default. */
   const [choices, setChoices] = useState<Record<string, RowChoice>>({});
 
@@ -235,6 +245,9 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
       }
 
       const took = resolutions.filter((x) => x.choice === "takeTheirs").length;
+      setRemovedButtonActions(r.buttonActionsRemoved ?? []);
+      setRemovedButtonLinks(r.buttonLinksRemoved ?? []);
+      setRemovedInlineButtonCode(r.inlineButtonCodeRemoved ?? []);
       setResult(
         `Refreshed ${r.subscriptionsRefreshed} subscription(s). ` +
           `${r.sheetsAdded} added, ${r.sheetsUpdated} updated, ${r.sheetsRemoved} removed. ` +
@@ -264,6 +277,10 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
     if (!ok) return;
     setResetting(s.packageName);
     setError(null);
+    // A reset replaces cells only; an earlier refresh's list is not about it.
+    setRemovedButtonActions([]);
+    setRemovedButtonLinks([]);
+    setRemovedInlineButtonCode([]);
     try {
       const r = await resetSubscription(s.registryUrl, s.packageName);
       await announceSubscribedContentReplaced();
@@ -380,6 +397,22 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
           {loading && <div>Computing refresh preview...</div>}
 
           {!loading && result && <p style={{ margin: 0 }}>{result}</p>}
+          {!loading && result && (
+            <ButtonActionsNotice
+              actions={removedButtonActions}
+              mode="removed"
+              testId="refresh-button-actions-removed"
+            />
+          )}
+          {!loading && result && (
+            <ButtonLinksNotice links={removedButtonLinks} testId="refresh-button-links-removed" />
+          )}
+          {!loading && result && (
+            <InlineButtonCodeNotice
+              removed={removedInlineButtonCode}
+              testId="refresh-inline-button-code-removed"
+            />
+          )}
 
           {!loading && !result && error && !preview && (
             <div style={{ color: "var(--text-error, #d33)", fontSize: "12px" }}>{error}</div>

@@ -10,6 +10,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { webcrypto } from "node:crypto";
 
+import { createConsentStoreDouble } from "./helpers/consentStoreDouble";
+
 if (!globalThis.crypto?.subtle) {
   Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
 }
@@ -65,7 +67,11 @@ function pickVersion(pkg: FakePackage, pin: string): string {
   return pin;
 }
 
+/** Approvals go through the shared double of the two Rust consent commands. */
+const consentStore = createConsentStoreDouble();
+
 const invokeBackend = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+  if (consentStore.handles(cmd)) return consentStore.invoke(cmd, args);
   if (cmd === "calp_browse_workspace") {
     return [...registry.entries()].map(([name, p]) => ({
       name,
@@ -183,6 +189,7 @@ const src = (exportName: string, extra = ""): string =>
 beforeEach(() => {
   registry.clear();
   vfs.clear();
+  consentStore.reset();
   pinStore.clear();
   resolveCalls = 0;
   invokeBackend.mockClear();
@@ -542,6 +549,7 @@ describe("preview never pins; install does", () => {
     await expect(applyInstall(plan)).rejects.toThrow(/changed between review and install/);
     // NOTHING is consented, locked or cached: the code was not approved.
     expect(await loadConsents()).toEqual([]);
+    expect(consentStore.requests, "an approval reached Rust for code nobody reviewed").toEqual([]);
     expect((await loadLockfile()).libraries).toEqual([]);
     expect(vfs.size).toBe(0);
     // The publisher pin DOES stand, and honestly so: the user approved trusting

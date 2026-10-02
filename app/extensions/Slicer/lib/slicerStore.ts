@@ -28,6 +28,7 @@ import {
 import {
   selectionAfterClear,
   selectionAfterItemClick,
+  selectionAfterItemRun,
   type SlicerSelectionChange,
 } from "./slicerClickSelection";
 import { emitAppEvent, AppEvents } from "@api/events";
@@ -476,6 +477,16 @@ export function clickSlicerItem(slicerId: string, itemValue: string, ctrlHeld: b
   );
 }
 
+/**
+ * A drag across items (BUG-0258 design phase 4), queued as ONE click: one
+ * commit, one undo step, computed from the committed selection when it runs.
+ * `values` is the run in the order the drag swept it (the last is the item
+ * under the release); `additive` is Ctrl (see `selectionAfterItemRun`).
+ */
+export function clickSlicerItemRun(slicerId: string, values: readonly string[], additive: boolean): Promise<void> {
+  return queueSlicerClick(slicerId, (slicer, items) => selectionAfterItemRun(slicer, items, values, additive));
+}
+
 /** Clear the slicer's filter (Clear button, Select All, the context menu), queued. */
 export function clickSlicerClearFilter(slicerId: string): Promise<void> {
   return queueSlicerClick(slicerId, (slicer) => selectionAfterClear(slicer));
@@ -523,10 +534,20 @@ export function updateCachedSlicerBounds(
 // Item fetching
 // ============================================================================
 
+/**
+ * Tell whoever follows the store (SlicerEvents.SLICER_DATA_CHANGED) that what
+ * it holds changed. Called AFTER the cache holds the new state.
+ */
+function announceDataChanged(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(SlicerEvents.SLICER_DATA_CHANGED));
+}
+
 export async function refreshSlicerItems(slicerId: string): Promise<SlicerItem[]> {
   try {
     const items = await api.getSlicerItems(slicerId);
     itemsCache.set(slicerId, items);
+    announceDataChanged();
     return items;
   } catch (err) {
     // A PIVOT slicer whose column left its BI pivot (dragged out of Rows, or
@@ -546,6 +567,7 @@ export async function refreshSlicerItems(slicerId: string): Promise<SlicerItem[]
         const items = await listPivotSlicerItemsFromModel(slicer);
         if (items) {
           itemsCache.set(slicerId, items);
+          announceDataChanged();
           return items;
         }
       } catch (modelErr) {
@@ -596,6 +618,7 @@ export async function refreshCache(): Promise<void> {
       );
     }
     syncSlicerRegions();
+    announceDataChanged();
     // Also refresh items for all slicers so hit-testing works
     await Promise.all(cachedSlicers.map((s) => refreshSlicerItems(s.id)));
   } catch (err) {
@@ -800,6 +823,7 @@ export function resetStore(): void {
   clickQueue = Promise.resolve();
   reconcilesSettled = Promise.resolve();
   removeGridRegionsByType("slicer");
+  announceDataChanged();
 }
 
 // ============================================================================
@@ -826,7 +850,10 @@ export function syncSlicerRegions(): void {
         width: slicer.width,
         height: slicer.height,
       },
-      data: { slicerId: slicer.id },
+      // A slicer with its header HIDDEN has only a thin border and padding to
+      // grab (its items are content): Core shows its six-dot grip while it is
+      // hovered or selected (@api/gridOverlays, BUG-0258 design phase 5).
+      data: { slicerId: slicer.id, ...(slicer.showHeader === false ? { grip: "hover" } : {}) },
     }));
 
   replaceGridRegionsByType("slicer", regions);

@@ -1351,7 +1351,9 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("calp_merge.rs", "overlay_their_cells", "builds a DETACHED copy of the grids with the intervening version's cells laid over it; it mutates nothing in AppState and hands the result to apply_script_modified_grids, which diffs, records undo and recalculates — the same arrangement parse_script_formula_writes has"),
         ("calp_commands.rs", "calp_hold_back_cells", "the same arrangement as overlay_their_cells above: a DETACHED clone of the grids with the base version's cells laid over the unticked positions, handed to apply_script_modified_grids, which owns the spill map for the write. Nothing in AppState is mutated here"),
         ("tables.rs", "write_table_formula_cell", "helper: one totals cell; its two callers seed the shared cascade"),
-        ("undo_commands.rs", "apply_changes", "every SetCell restore is a cascade seed, and the cascade's tear-down phase releases whatever the restored cell stopped owning"),
+        // The restore's body since the review of M6b (`apply_changes` is its wrapper; a
+        // rollback calls it with `keep_inverse: false`).
+        ("undo_commands.rs", "apply_changes_with", "every SetCell restore is a cascade seed, and the cascade's tear-down phase releases whatever the restored cell stopped owning"),
         ("undo_commands.rs", "apply_object_swap_restore", "reports its sheet; apply_changes cascades"),
         ("undo_commands.rs", "apply_pivot_create_restore", "reports its sheet; apply_changes cascades"),
         ("undo_commands.rs", "apply_pivot_definition_restore", "reports its sheet; apply_changes cascades"),
@@ -1459,7 +1461,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         // The command's writing body (testability split — the `update_cell_on_sheets`
         // wrapper itself writes nothing).
         ("commands/data.rs", "update_cell_on_sheets_inner"),
-        ("undo_commands.rs", "apply_changes"),
+        ("undo_commands.rs", "apply_changes_with"),
     ] {
         assert!(
             seen.iter().any(|(f, n)| f == file && n == func),

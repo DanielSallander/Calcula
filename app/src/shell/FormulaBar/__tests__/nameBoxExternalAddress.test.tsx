@@ -101,6 +101,7 @@ import {
   __resetExternalEditForTests,
 } from "../../../core/lib/formulaEditTarget";
 import { createFakeExternalEdit } from "../../../core/lib/__tests__/helpers/fakeExternalEdit";
+import { registerSelectionOwner } from "../../../api/selectionOwner";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -282,6 +283,53 @@ describe("Name Box -- what it ACCEPTS", () => {
   });
 
   it("positive control: with no external cell a new name is defined over the selection", async () => {
+    await paint();
+    await commit("Totals");
+    expect(h.createNamedRange).toHaveBeenCalledWith("Totals", null, "=Sheet1!$B$2");
+  });
+});
+
+describe("Name Box -- a new name is NOT defined over the cell hidden behind a selected OBJECT (BUG-0270 review)", () => {
+  // With a slicer, a chart or a shape selected on a worksheet (the generic
+  // "an object is selected" claim, @api/selectionOwner), Core's selection is
+  // the active cell hidden behind the object. Typing a new name defined it
+  // over THAT cell; only the floating-grid cell case was refused.
+  const SENTENCE = (action: string) => `${action} is not available while an object is selected.`;
+  let owned = false;
+  let release: (() => void) | null = null;
+  beforeEach(() => {
+    owned = false;
+    release = registerSelectionOwner({
+      id: "test.selectedObject",
+      label: "the selected object",
+      fallback: true,
+      ownsSelection: () => owned,
+      refusal: SENTENCE,
+    });
+  });
+  afterEach(() => {
+    release?.();
+    release = null;
+  });
+
+  it("refuses with the owner's sentence and defines nothing", async () => {
+    owned = true;
+    await paint();
+    await commit("Totals");
+    expect(h.createNamedRange, "a name was defined over the cell behind the selected object").not.toHaveBeenCalled();
+    expect(h.showToast).toHaveBeenCalledTimes(1);
+    expect(String(h.showToast.mock.calls[0][0])).toBe(SENTENCE("Define Name"));
+  });
+
+  it("control: an ADDRESS still navigates while an object is selected (going to a cell is the way back, not a write)", async () => {
+    owned = true;
+    await paint();
+    await commit("C3");
+    expect(h.createNamedRange).not.toHaveBeenCalled();
+    expect(h.showToast).not.toHaveBeenCalled();
+  });
+
+  it("control: once the object let go, the same entry defines the name over the selection", async () => {
     await paint();
     await commit("Totals");
     expect(h.createNamedRange).toHaveBeenCalledWith("Totals", null, "=Sheet1!$B$2");

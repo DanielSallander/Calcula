@@ -21,6 +21,7 @@ import { createOverlayResizeHandlers } from "../overlayResizeHandlers";
 import { setGridRegions, type GridRegion } from "../../../../../api/gridOverlays";
 import { registerLayoutSurfaceProvider, type LayoutSurface } from "../../../../lib/layoutSurface";
 import { DEFAULT_GRID_CONFIG, type Viewport } from "../../../../types";
+import { selectForHandles } from "./helpers/selectForHandles";
 
 const ACTIVE = 2;
 const VIEWPORT: Viewport = { scrollX: 0, scrollY: 0, startRow: 0, startCol: 0, rowCount: 30, colCount: 10 };
@@ -66,12 +67,16 @@ function press(): React.MouseEvent<HTMLElement> {
 }
 
 let unregister: (() => void) | null = null;
+let unselect: (() => void) | null = null;
 let events: string[];
 const record = (e: Event) => events.push(e.type);
 
 beforeEach(() => {
   lockedIds = new Set();
   events = [];
+  // SELECTED: only a selected object has live resize handles (BUG-0258 phase
+  // 3), so the lock is the one thing that turns them off in the cases below.
+  unselect = selectForHandles(["chart"]);
   for (const t of ["floatingObject:selected", "floatingObject:movePreview", "floatingObject:moveComplete", "floatingObject:resizeComplete"]) {
     window.addEventListener(t, record);
   }
@@ -83,6 +88,8 @@ afterEach(() => {
   }
   unregister?.();
   unregister = null;
+  unselect?.();
+  unselect = null;
   setGridRegions([]);
 });
 
@@ -166,7 +173,7 @@ describe("a LOCKED object on the layout surface", () => {
       unregister?.();
       useSurface(surface());
       const h = resizeHandlers();
-      expect(h.checkOverlayResizeHandle(CORNER.x, CORNER.y)?.id).toBe("chart-1");
+      expect(h.checkOverlayResizeHandle(CORNER.x, CORNER.y)?.region.id).toBe("chart-1");
       expect(h.handleOverlayResizeMouseDown(CORNER.x, CORNER.y, press())).toBe(true);
     }
   });

@@ -86,7 +86,7 @@ binding id in the cell-behaviors store) and `panel` (UI objects keyed by panel i
 > Import is a field-by-field validator; anything unknown or malformed is refused with
 > `TemplateImportError`. Any future "share a template" affordance must keep both rules, and the UI
 > must not invite the user to "import a file" as though they were choosing a document. Full write-up:
-> `wave3-scripting-security.md` §12.
+> `wave3-scripting-security.md` §10 (BUG-0092).
 
 ### 4. Discoverability: Monaco Editor + Scaffolded Templates
 - Code tab uses an embedded **Monaco editor** with full IntelliSense

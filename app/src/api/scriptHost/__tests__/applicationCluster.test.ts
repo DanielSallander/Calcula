@@ -33,6 +33,8 @@ vi.mock("../../../core/lib/cellEvents", () => ({
 }));
 vi.mock("../../workbookScripts", () => ({
   listWorkbookScripts: vi.fn(async () => []),
+  // executeRunMacro reads it to tell a refused run from a failed one (owner B, F10).
+  APPLICATION_MACRO_NOT_STARTED_BY_YOU: "APPLICATION_MACRO_NOT_STARTED_BY_YOU",
 }));
 
 import * as grid from "../../grid";

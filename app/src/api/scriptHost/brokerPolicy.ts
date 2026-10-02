@@ -28,6 +28,11 @@
 //          the enforcement point's dependencies along with it.
 
 import { ALLOWLIST, type CapabilityId, type MethodClass, type MethodPolicy } from "./allowlist";
+import {
+  explicitRunAdmits,
+  explicitRunRefusalMessage,
+  explicitRunRestrictedRefusal,
+} from "./explicitRunGrant";
 
 /** The refusal codes this decision can produce. Mirrors `RpcErrorCode`. */
 export type PolicyRefusalCode =
@@ -45,6 +50,15 @@ export interface PolicyIdentity {
   tier: "restricted" | "unlocked";
   grants: ReadonlySet<CapabilityId>;
   declaredCapabilities: ReadonlySet<CapabilityId>;
+  /**
+   * Present ONLY on a realm that an explicit, person-started run of an approved
+   * application macro mounted (owner decision B; see explicitRunGrant.ts). The
+   * tier stays "restricted"; while `cells` is true the grant's closed set of
+   * cell rows is admitted too. Its mere presence makes the realm run-only: no
+   * exposed methods, no event subscriptions, no calls into other scripts and no
+   * restricted formatting rows -- even after `cells` has expired.
+   */
+  explicitRun?: { readonly cells: boolean };
 }
 
 export type PolicyDecision =
@@ -100,14 +114,41 @@ export function decidePolicy(
     };
   }
 
+  // A RUN-ONLY realm (an explicit run of an application's macro) may not open
+  // a channel to other code while it holds cell access (expose, subscribe,
+  // callMethod), nor use the restricted formatting rows, which the granted
+  // api.setActiveSheet would otherwise point at every sheet in turn. After
+  // validation, like the tier check, for the same reason.
+  if (identity.explicitRun !== undefined) {
+    const refusal = explicitRunRestrictedRefusal(method);
+    if (refusal !== null) {
+      return {
+        admitted: false,
+        class: policy.class,
+        code: "PermissionDenied",
+        message: refusal,
+        policy,
+      };
+    }
+  }
+
   if (policy.tier === "unlocked" && identity.tier !== "unlocked") {
-    return {
-      admitted: false,
-      class: policy.class,
-      code: "PermissionDenied",
-      message: `${method} requires unlocked access; this script is restricted`,
-      policy,
-    };
+    // The ONE exception to the tier (owner decision B): the closed set of cell
+    // rows, for a realm an explicit run of an approved application macro
+    // mounted, while that run lasts. Everything else unlocked stays refused --
+    // with the old sentence, byte for byte, for every realm without the grant.
+    if (!explicitRunAdmits(identity, method)) {
+      return {
+        admitted: false,
+        class: policy.class,
+        code: "PermissionDenied",
+        message:
+          identity.explicitRun === undefined
+            ? `${method} requires unlocked access; this script is restricted`
+            : explicitRunRefusalMessage(method),
+        policy,
+      };
+    }
   }
 
   if (policy.capability && !identity.declaredCapabilities.has(policy.capability)) {

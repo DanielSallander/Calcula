@@ -24,6 +24,12 @@ export interface Command {
   isEnabled?: (context: CommandContext) => boolean;
   /** Execute the command */
   execute: (context: CommandContext) => void | Promise<void>;
+  /**
+   * Opt in: a button cell that came with an application may run this command
+   * after the user approves it. Mirrors `CommandDefinition.distributableTrigger`
+   * (src/api/extensions.ts), whose doc is the contract.
+   */
+  distributableTrigger?: true;
 }
 
 /**

@@ -3,8 +3,14 @@
 //          as a checkbox. Click and Space toggle (undoable via the normal
 //          update path); formulas keep working (=IF(A1;...)) and formula cells
 //          render as a read-only checkbox.
+//          A click toggles on the RELEASE on the checkbox's own cell, and a
+//          press that slides off toggles nothing -- the Windows checkbox rule,
+//          through the release seam the button cell uses
+//          (@api/cellClickInterceptors `actOnCellRelease`, held by Core's press
+//          session; owner question 26, 2026-10-02). Space toggles at once.
 
 import type { CellTypeDefinition, CellTypeRenderContext } from "@api/cellTypes";
+import { actOnCellRelease, type CellClickAnswer } from "@api/cellClickInterceptors";
 
 export const CHECKBOX_TYPE_ID = "calcula.checkbox";
 
@@ -88,9 +94,10 @@ function renderCheckbox(context: CellTypeRenderContext): boolean {
 }
 
 /**
- * Toggle the checkbox value of a cell through the normal (undoable) write
- * path. Formula cells are read-only: the gesture is claimed but no write
- * happens. Returns whether the gesture was handled.
+ * SPACE: toggle the checkbox value of a cell at once (a key has no release to
+ * wait for), through the normal (undoable) write path. Formula cells are
+ * read-only: the gesture is claimed but no write happens. Returns whether the
+ * gesture was handled. A CLICK toggles at its release (`pressCheckbox`).
  */
 async function toggleCheckbox(row: number, col: number): Promise<boolean> {
   const { getCell, updateCell } = await import("../../../src/api/lib");
@@ -119,11 +126,59 @@ async function toggleCheckbox(row: number, col: number): Promise<boolean> {
   return true;
 }
 
+/**
+ * A PRESS on a checkbox cell: select the cell now (the keyboard follows the
+ * press, as a Windows checkbox takes the focus) and claim the press for its
+ * release on this same cell, which flips the value then. A formula cell is
+ * display-only: its press selects the cell and is handled, with nothing to
+ * hold. An incompatible value renders as text and is not claimed.
+ */
+async function pressCheckbox(row: number, col: number): Promise<CellClickAnswer> {
+  const { getCell } = await import("../../../src/api/lib");
+  const { dispatchGridAction } = await import("../../../src/api/gridDispatch");
+  const { setSelection } = await import("../../../src/api/grid");
+
+  const cellData = await getCell(row, col);
+  if (!isBooleanish(cellData?.display ?? "")) {
+    return false; // Incompatible value renders as text; let defaults apply.
+  }
+
+  dispatchGridAction(
+    setSelection({ startRow: row, startCol: col, endRow: row, endCol: col, type: "cells" })
+  );
+
+  if (cellData?.formula) {
+    return true; // Display-only: the formula owns the value.
+  }
+
+  // Toggle at the RELEASE on this cell (Core holds the press; sliding off cancels).
+  return actOnCellRelease(row, col, () => releaseCheckbox(row, col));
+}
+
+/**
+ * The release of a press on a checkbox cell: flip the value it holds NOW
+ * through the normal (undoable) write path. A cell that became a formula or an
+ * incompatible value while the press was held is left alone.
+ */
+async function releaseCheckbox(row: number, col: number): Promise<void> {
+  const { getCell, updateCell } = await import("../../../src/api/lib");
+
+  const cellData = await getCell(row, col);
+  const display = cellData?.display ?? "";
+  if (!isBooleanish(display) || cellData?.formula) {
+    return;
+  }
+
+  const next = display.toUpperCase() === "TRUE" ? "FALSE" : "TRUE";
+  await updateCell(row, col, next);
+  window.dispatchEvent(new CustomEvent("grid:refresh"));
+}
+
 export const checkboxCellType: CellTypeDefinition = {
   id: CHECKBOX_TYPE_ID,
   render: renderCheckbox,
   editor: "default",
-  onClick: async ({ row, col }) => toggleCheckbox(row, col),
+  onClick: async ({ row, col }) => pressCheckbox(row, col),
   onKeyDown: async ({ row, col, key }) => {
     if (key !== " ") return false;
     return toggleCheckbox(row, col);

@@ -1,7 +1,9 @@
 //! FILENAME: app/extensions/Slicer/handlers/slicerContextMenu.ts
 // PURPOSE: Right-click context menu for slicer overlays.
 // CONTEXT: Intercepts contextmenu events on slicers and shows a custom
-//          DOM-based context menu with slicer-specific options.
+//          DOM-based context menu with slicer-specific options -- and the
+//          "Size and Position..." row every object menu carries
+//          (@api/objectPosition; BUG-0258 design phase 5b).
 
 import {
   getSlicerById,
@@ -15,6 +17,9 @@ import { showDialog } from "@api";
 import { emitAppEvent } from "@api/events";
 import { SLICER_SETTINGS_DIALOG_ID, SLICER_COMPUTED_PROPS_DIALOG_ID, SLICER_CONNECTIONS_DIALOG_ID } from "../manifest";
 import { slicerAtCanvasPoint } from "../lib/slicerCanvasGeometry";
+import { slicerIdOfRegion } from "../lib/slicerGeometry";
+import { getGridRegions, type GridRegion } from "@api/gridOverlays";
+import { sizeAndPositionMenuEntry } from "@api/objectPosition";
 
 // ============================================================================
 // State
@@ -121,6 +126,29 @@ interface MenuItem {
   disabled?: boolean;
   separator?: boolean;
   checked?: boolean;
+  /** The row's tooltip (why it is disabled, or what it will show). */
+  title?: string;
+}
+
+/** The published region of a slicer on the active sheet, or null. */
+function slicerRegionOf(slicerId: string): GridRegion | null {
+  return getGridRegions().find((r) => r.type === "slicer" && slicerIdOfRegion(r) === slicerId) ?? null;
+}
+
+/** The "Size and Position..." row (and its rule) for the slicer's region; none when it is not published. */
+function sizeAndPositionRows(slicerId: string): MenuItem[] {
+  const region = slicerRegionOf(slicerId);
+  if (!region) return [];
+  const entry = sizeAndPositionMenuEntry(region);
+  return [
+    {
+      label: entry.label,
+      disabled: entry.disabled,
+      title: entry.reason ?? undefined,
+      onClick: entry.run,
+    },
+    { label: "", separator: true },
+  ];
 }
 
 function showContextMenu(clientX: number, clientY: number, slicerId: string): void {
@@ -199,6 +227,7 @@ function showContextMenu(clientX: number, clientY: number, slicerId: string): vo
       },
     },
     { label: "", separator: true },
+    ...sizeAndPositionRows(slicerId),
     {
       label: "Remove Slicer",
       onClick: () => {
@@ -275,6 +304,7 @@ function renderMenu(clientX: number, clientY: number, items: MenuItem[]): void {
       row.appendChild(check);
     }
 
+    if (item.title) row.title = item.title;
     const label = document.createElement("span");
     label.textContent = item.label;
     row.appendChild(label);

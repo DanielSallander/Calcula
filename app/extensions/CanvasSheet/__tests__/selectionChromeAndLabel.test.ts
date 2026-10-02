@@ -1,9 +1,12 @@
 //! FILENAME: app/extensions/CanvasSheet/__tests__/selectionChromeAndLabel.test.ts
-// PURPOSE: The two things the canvas derives from the selection SET:
-//          (1) the frames of the members the set holds for a single-select
-//              family (a second chart) -- painted in the families' frame style,
-//              only on a canvas, only for SET-held members (a family paints its
-//              own);
+// PURPOSE: The two things the canvas derives from the selection:
+//          (1) the LOCK MARK of a selected locked object -- and NO selection
+//              frame of its own: Core paints the outline and handles of every
+//              selected floating object, family-held or held by the set
+//              (core/lib/gridRenderer/rendering/floatingObjectChrome.ts,
+//              BUG-0258 design phase 3), so a set-held member is no longer
+//              framed by the canvas (it used to be, in a copy of the chart's
+//              frame);
 //          (2) the Name Box label: the object's name for one, "N objects" for
 //              several, nothing for none -- and nothing at all on a worksheet.
 
@@ -15,7 +18,15 @@ vi.mock("@api/grid", async (importOriginal) => ({
   getGridStateSnapshot: () => state,
 }));
 
+// The canvas layout's locks, as the lock mark reads them (lib/canvasLocks.ts).
+const lockedIds = new Set<string>();
+vi.mock("../lib/canvasLocks", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  isLockedOnActiveCanvas: (r: { id: string }) => lockedIds.has(r.id),
+}));
+
 import { paintSelectionChrome, SELECTION_CHROME_COLOUR } from "../lib/selectionChrome";
+import { FLOATING_SELECTION_COLOUR } from "@api/gridOverlays";
 import {
   canvasSelectionLabel,
   CANVAS_OBJECT_LABEL_SOURCE,
@@ -88,7 +99,7 @@ afterEach(() => {
   setGridRegions([]);
 });
 
-/** A recording 2D context: every strokeRect / fillRect call, with its colour. */
+/** A recording 2D context: every strokeRect / fillRect / path stroke, with its colour. */
 function recordingContext() {
   const calls: Array<{ op: string; args: number[]; style: string }> = [];
   const ctx = {
@@ -96,6 +107,11 @@ function recordingContext() {
     fillStyle: "",
     lineWidth: 1,
     setLineDash: () => {},
+    beginPath: () => {},
+    arc: () => {},
+    stroke() {
+      calls.push({ op: "stroke", args: [], style: String(this.strokeStyle) });
+    },
     strokeRect(...args: number[]) {
       calls.push({ op: "strokeRect", args, style: String(this.strokeStyle) });
     },
@@ -115,27 +131,35 @@ function recordingContext() {
   return { context, calls };
 }
 
-describe("set-held selection chrome", () => {
-  it("frames ONLY the member the set holds (the family paints its own), at page - scroll", () => {
+describe("the canvas's selection layer: the lock mark, and no frame of its own", () => {
+  it("a SET-held member is no longer framed by the canvas (Core paints every selected object's chrome)", () => {
     addToObjectSelection(c1); // the chart family holds c1
     addToObjectSelection(c2); // ...so the set holds c2
     const { context, calls } = recordingContext();
     paintSelectionChrome(context);
-    const frames = calls.filter((c) => c.op === "strokeRect");
-    expect(frames).toHaveLength(1);
-    // c2 at page x 200, scrolled by 50, inset by 1 for the 2px frame.
-    expect(frames[0].args).toEqual([151, 11, 98, 48]);
-    expect(frames[0].style).toBe(SELECTION_CHROME_COLOUR);
-    // Four corner handles, in the same colour.
-    expect(calls.filter((c) => c.op === "fillRect")).toHaveLength(4);
+    expect(calls, "the canvas painted a frame or handles for a set-held member").toEqual([]);
   });
 
-  it("paints nothing with no set-held member, and nothing on a worksheet", () => {
+  it("a selected LOCKED object still gets its padlock, in Core's one selection colour", () => {
     addToObjectSelection(c1);
-    const one = recordingContext();
-    paintSelectionChrome(one.context);
-    expect(one.calls).toEqual([]);
+    addToObjectSelection(c2);
+    lockedIds.add("c2");
+    cleanups.push(() => lockedIds.clear());
+    const { context, calls } = recordingContext();
+    paintSelectionChrome(context);
+    // The plate (white) and the padlock body (the chrome colour), for c2 only;
+    // nothing framed.
+    expect(calls.filter((c) => c.op === "strokeRect")).toEqual([]);
+    const fills = calls.filter((c) => c.op === "fillRect");
+    expect(fills.map((c) => c.style)).toEqual(["#ffffff", SELECTION_CHROME_COLOUR]);
+    // c2's page x 200, scrolled by 50: the mark sits inside its top-right corner.
+    expect(fills[1].args[0]).toBeGreaterThan(150);
+    expect(fills[1].args[0]).toBeLessThan(250);
+    expect(SELECTION_CHROME_COLOUR).toBe(FLOATING_SELECTION_COLOUR);
+  });
 
+  it("paints nothing on a worksheet", () => {
+    addToObjectSelection(c1);
     addToObjectSelection(c2);
     state.surface = "grid";
     const sheet = recordingContext();

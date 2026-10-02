@@ -50,7 +50,7 @@ export function frameCanvasBounds(
 }
 
 /** Client (mouse) coordinates -> zoom-corrected logical canvas coordinates —
- *  the same basis Core hands claimsBodyDrag/bodyDragStart. */
+ *  the same basis Core hands zoneAt/bodyDragStart. */
 export function clientToCanvas(clientX: number, clientY: number): { x: number; y: number } | null {
   const layer = document.querySelector("[data-grid-canvas-layer]");
   if (!layer) return null;

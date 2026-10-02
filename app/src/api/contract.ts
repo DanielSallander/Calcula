@@ -36,7 +36,7 @@ import type { ICellEditorAPI } from "./cellEditors";
 import type { IFileFormatAPI } from "./fileFormats";
 import type { CustomFunctionDef } from "./formulaFunctions";
 import type { EditGuardResult } from "./editGuards";
-import type { CellClickEvent } from "./cellClickInterceptors";
+import type { CellClickEvent, CellClickAnswer } from "./cellClickInterceptors";
 import type { CellDoubleClickEvent } from "./cellDoubleClickInterceptors";
 import type { ICellTypeAPI } from "./cellTypes";
 import type { GridLayerRegistration } from "./gridLayers";
@@ -208,7 +208,12 @@ export interface IFormulasAPI {
 
 /** Cell click interceptor registration */
 export interface ICellClickAPI {
-  registerClickInterceptor(handler: (row: number, col: number, event: CellClickEvent) => boolean | Promise<boolean>): () => void;
+  /**
+   * Answer `true` to handle the press at once, `false` to pass, or a release
+   * claim (`actOnRelease` / `actOnCellRelease`, @api/cellClickInterceptors) to
+   * act when the press is RELEASED over the same target -- sliding off cancels.
+   */
+  registerClickInterceptor(handler: (row: number, col: number, event: CellClickEvent) => CellClickAnswer | Promise<CellClickAnswer>): () => void;
   registerDoubleClickInterceptor(handler: (row: number, col: number, event: CellDoubleClickEvent) => boolean | Promise<boolean>): () => void;
 }
 

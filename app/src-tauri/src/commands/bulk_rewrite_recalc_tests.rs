@@ -823,7 +823,8 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("commands/data.rs", "erase_released_spill_cells", "helper: erases the cells a released spill owned; every caller is inside, or immediately followed by, the shared cascade"),
         ("commands/data.rs", "apply_spill_decision", "THE ONE SPILL DECISION (§3bm): the inner step every per-cell evaluator ends in — the three edit paths, the cross-sheet walk and both recalculation passes. It decides what ONE already-evaluated result does to the grid; it never chooses which cells to evaluate, so it cannot seed anything"),
         ("commands/data.rs", "release_origin_spill", "helper: the tear-down half of apply_spill_decision, called directly only where a value is written WITHOUT an EvalResult to hand it (the #CIRCULAR! stamps)"),
-        ("undo_commands.rs", "apply_changes", "drives the cascade for every restore kind"),
+        // The restore's body since the review of M6b (`apply_changes` is its wrapper).
+        ("undo_commands.rs", "apply_changes_with", "drives the cascade for every restore kind"),
         ("undo_commands.rs", "apply_calp_reset_restore", "reports its sheet; apply_changes recalculates"),
         ("undo_commands.rs", "apply_object_swap_restore", "reports its sheet; apply_changes recalculates"),
         ("undo_commands.rs", "apply_pivot_create_restore", "reports its sheet; apply_changes recalculates"),

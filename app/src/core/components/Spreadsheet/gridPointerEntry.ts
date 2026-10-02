@@ -104,6 +104,13 @@
 //                          mouseup/mousemove pair, plus a one-shot early
 //                          mouseup latch. Drag-scoped, so unreachable without
 //                          an unclaimed mousedown.
+//   core/lib/cellPressRelease.ts  mousemove/mouseup/capture keydown, bound by
+//                          that same mouse-down door for ONE cell press (a cell
+//                          click interceptor's release claim: an in-cell button,
+//                          a worksheet pivot's chrome) and removed at its end.
+//                          Opened only after this door let the press through,
+//                          and its release runs nothing over a claimed element
+//                          (BUG-0258 design phase 4).
 //   useSpreadsheetLayout.ts ~161      capture-phase keydown that only schedules
 //                          a repaint of the status bar's mode readout. It reads
 //                          no target and changes no document state.

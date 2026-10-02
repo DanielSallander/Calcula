@@ -33,6 +33,16 @@
 // doors (it would be a copied list that drifts), and a door that asks costs
 // one call.
 //
+// A door of a KIND an owner may let through asks as that kind, and the owner
+// declares the kinds it admits -- a KIND, never a list of doors:
+//
+//     if (refuseIfSelectionOwned("Insert Shape", "objectInsert")) return;
+//     registerSelectionOwner({ ..., admits: ["objectInsert"] });
+//
+// "objectInsert" is a door that adds a new floating object at Core's active
+// cell (Insert Shape / Button / Image); the generic "an object is selected"
+// claim admits it, as Excel inserts while a shape is selected.
+//
 // USE, as a SURFACE that follows Core's selection (a contextual ribbon tab):
 //
 //     const off = onSelectionOwnershipChanged(() => resyncMyTab());
@@ -58,7 +68,7 @@ export {
   refuseIfSelectionOwned,
   defaultSelectionRefusal,
 } from "../core/lib/selectionOwner";
-export type { SelectionOwner } from "../core/lib/selectionOwner";
+export type { SelectionOwner, SelectionDoorKind } from "../core/lib/selectionOwner";
 
 // One sentence per refused action, as a toast (not a modal: the user did
 // nothing wrong, the selection simply is not the sheet's).

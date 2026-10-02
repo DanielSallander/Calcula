@@ -67,6 +67,76 @@ pub enum AuditEvent {
     /// author-side counterpart of `Subscribe`: same materialization, different
     /// intent — this workbook is now something that can push.
     CheckedOut,
+    /// A checkout was REFUSED because the application carries a module,
+    /// notebook or defined name with the same identity as one this workbook
+    /// already holds (opened here, the workbook's own would have been kept and
+    /// later pushed as the application's). The colliding ids are in `extra`.
+    CheckoutRefused,
+    /// A published version was refused because of WHO SIGNED IT (BUG-0262):
+    /// its signer is not an authorised publisher of the application, or the
+    /// application's first version -- the anchor -- cannot be verified. Recorded
+    /// by every door that opens a version for editing: checkout, the push merge
+    /// and the push dialog's hold-back. `extra` names the door, the application,
+    /// the version, and the signer with their key fingerprint.
+    SignerRefused,
+    /// An application's button code was refused: a push whose held code could
+    /// not be proved to be the application's, or that would publish button code
+    /// nobody acknowledged (BUG-0257), a click on a button cell whose action is
+    /// not its application's to run (BUG-0260), a push whose buttons run a
+    /// macro it does not publish (`reason` "unshippedMacro"), and a push whose
+    /// "Include in application" names code that changed since the author read
+    /// it (`reason` "includedChanged"). `extra` names the door, the application
+    /// and the cells (or, for an inclusion, the items). Since phase 4 the button
+    /// door (`run_control_action`) records here what it refuses about the BUTTON
+    /// itself, door "click": a stamp it cannot read ("stampUnreadable"), held code
+    /// that is not static ("unsupportedValueType"), a control that is not a button
+    /// ("notAButton"), a button cell's held action in a working copy
+    /// ("heldInWorkingCopy"), and a stamped cell's foreign macro. A stamped
+    /// cell's COMMAND is refused by the command gate instead
+    /// (`ApplicationCodeRefused`, surface "buttonCommand"); the page records
+    /// here only what it refuses itself about a command (its live registration).
+    ButtonCodeRefused,
+    /// The user told THIS COMPUTER to forget who created an application it
+    /// develops (the developer anchor). A deliberate hole: the next checkout or
+    /// push records whatever root the workspace then names, which is exactly
+    /// what a planted first version needs. `extra` names the workspace (as the
+    /// user configured it), the application and the forgotten root's key
+    /// fingerprint.
+    DeveloperAnchorForgotten,
+    /// An application's code RAN (M4, phase 3 of BUG-0257): a macro that came
+    /// with an application ran through the module runtime, or an application's
+    /// code was mounted by a button click. Recorded by the host's run gate
+    /// (`scripting::application_code_gate`) AFTER every refusal it applies has
+    /// passed. `extra` names the surface, the application, the macro and the
+    /// sha256 of the source that ran -- and, for a button click, the button
+    /// (its cell, caption and whether its link came with the application), read
+    /// from the backend's own store, never from the page. Since plan_M8 S1 also a
+    /// button cell of an application's running a Calcula command on Calcula's
+    /// list, once approved (surface "buttonCommand", `commandId` in place of
+    /// `macroId`).
+    ApplicationCodeRun,
+    /// An application's code was REFUSED before it ran: not approved
+    /// (`reason` "notConsented"), a working copy with the developer's own sheets
+    /// beside the application ("privateSheets"), or a button click the stored
+    /// button does not back ("triggerMismatch"). Since phase 4 also: held button
+    /// code handed to a run that is not its button's ("heldCodeOutsideButton"),
+    /// and a click whose plan the button door refused ("objectScriptMacro",
+    /// "ambiguous", "composesApplicationCode"; surface "button"). `extra` names
+    /// the surface, the application, the macro -- for inline button code its
+    /// approval id `buttonAction:<sha256>` -- and, when a button asked, the button.
+    /// Since plan_M8 S1 also an application's button COMMAND (surface
+    /// "buttonCommand", `commandId` in place of `macroId`): not on Calcula's list
+    /// ("notAllowlisted"), not approved under its own key ("notConsented"), the
+    /// private-sheet rule, or a claim the stored cell does not back
+    /// ("triggerMismatch").
+    ApplicationCodeRefused,
+    /// The user made an application's button code THEIR OWN ("Make this my
+    /// own", phase 4 of BUG-0257): the code the application shipped moved out
+    /// of the held compartment into the button's live slots, where it runs as
+    /// the user's own code with no approval. `extra` names the application, the
+    /// version, the button's cell and caption, and each moved slot with the
+    /// sha256 of its bytes.
+    ButtonCodeAdopted,
     /// Changed which ENVIRONMENT a subscription follows — or moved it to or
     /// from the development line.
     ///
@@ -153,6 +223,37 @@ impl AuditEvent {
                 // person write this formula or did a model?". Opt-in would make
                 // the trail empty in the common case.
                 | AuditEvent::AiAssistedEdit
+                // A refused checkout names ids that SOMEBODY ELSE shipped. An
+                // application can ship a module id matching a predictable local
+                // one (`macro-<slug>`) and block every developer who owns it --
+                // a lever, and one that is only visible if the refusals are
+                // recorded where nobody had to opt in first.
+                | AuditEvent::CheckoutRefused
+                // "Every run and every refusal of application code is written
+                // to the audit trail" (the BUG-0257 guardrail). A refusal is
+                // what a planted version or a forged working copy PRODUCES, so a
+                // trail that exists only when somebody opted in first is absent
+                // exactly when it is evidence.
+                | AuditEvent::SignerRefused
+                | AuditEvent::ButtonCodeRefused
+                // Forgetting an application's remembered creator re-opens the
+                // one door the anchor closes (a planted first version). If a
+                // planted root is later accepted, this row is how anyone finds
+                // out when, and on whose say-so, the memory was dropped.
+                | AuditEvent::DeveloperAnchorForgotten
+                // "Every run and every refusal of application code is written
+                // to the audit trail" -- the guardrail phase 3 arms buttons
+                // under. A run of an application's macro is the moment a
+                // stranger's code touched this workbook; a trail that exists
+                // only when somebody opted in first is empty in the common case.
+                | AuditEvent::ApplicationCodeRun
+                | AuditEvent::ApplicationCodeRefused
+                // Making an application's code your own switches off every
+                // approval it would have needed from then on. The row is how
+                // anyone later learns that a stranger's code became "yours",
+                // when and at which button -- recorded whether or not somebody
+                // opted in to auditing.
+                | AuditEvent::ButtonCodeAdopted
         )
     }
 }
@@ -302,6 +403,90 @@ mod tests {
         // Collaboration bookkeeping stays opt-in.
         log.record(AuditEvent::Refresh, "r", "user", "2026-01-01T00:00:00Z");
         assert_eq!(log.entry_count(), 3);
+    }
+
+    /// A refused checkout names ids somebody else shipped; recorded only when
+    /// auditing is on, the refusals -- and a colleague's module id blocking
+    /// every developer who owns the same one -- would be invisible in the
+    /// common case. A successful checkout stays opt-in.
+    ///
+    /// SABOTAGE: drop `CheckoutRefused` from `is_always_recorded`.
+    #[test]
+    fn a_refused_checkout_is_recorded_even_when_auditing_is_off() {
+        let mut log = AuditLog::new();
+        assert!(!log.enabled);
+        log.record(AuditEvent::CheckoutRefused, "refused", "user", "2026-09-30T00:00:00Z");
+        assert_eq!(log.entry_count(), 1, "a refused checkout left no trail");
+        log.record(AuditEvent::CheckedOut, "opened", "user", "2026-09-30T00:00:00Z");
+        assert_eq!(log.entry_count(), 1, "a successful checkout is opt-in bookkeeping");
+        let json = serde_json::to_string(&log.entries[0].event).unwrap();
+        assert_eq!(json, "\"checkout_refused\"", "the audit viewer keys on this spelling");
+    }
+
+    /// A refusal of application code -- a version refused for who signed it, a
+    /// push or a click refused over button code -- leaves a trail with auditing
+    /// OFF (the default), under the spellings the audit viewer keys on.
+    ///
+    /// SABOTAGE: drop `SignerRefused` and `ButtonCodeRefused` from
+    /// `is_always_recorded`.
+    #[test]
+    fn refusals_of_application_code_are_recorded_even_when_auditing_is_off() {
+        let mut log = AuditLog::new();
+        assert!(!log.enabled);
+        log.record(AuditEvent::SignerRefused, "refused a planted version", "user", "2026-09-30T00:00:00Z");
+        log.record(AuditEvent::ButtonCodeRefused, "refused a forged push", "user", "2026-09-30T00:00:00Z");
+        assert_eq!(log.entry_count(), 2, "a refusal of application code left no trail");
+        let spell = |e: &AuditEvent| serde_json::to_string(e).unwrap();
+        assert_eq!(spell(&log.entries[0].event), "\"signer_refused\"");
+        assert_eq!(spell(&log.entries[1].event), "\"button_code_refused\"");
+    }
+
+    /// Forgetting a remembered creator is recorded with auditing OFF.
+    ///
+    /// SABOTAGE: drop `DeveloperAnchorForgotten` from `is_always_recorded`.
+    #[test]
+    fn forgetting_a_remembered_creator_is_recorded_even_when_auditing_is_off() {
+        let mut log = AuditLog::new();
+        assert!(!log.enabled);
+        log.record(AuditEvent::DeveloperAnchorForgotten, "forgot", "user", "2026-09-30T00:00:00Z");
+        assert_eq!(log.entry_count(), 1, "forgetting a remembered creator left no trail");
+        assert_eq!(
+            serde_json::to_string(&log.entries[0].event).unwrap(),
+            "\"developer_anchor_forgotten\""
+        );
+    }
+
+    /// Every run and every refusal of an application's code is recorded with
+    /// auditing OFF (the default), under the spellings the audit viewer keys on.
+    ///
+    /// SABOTAGE: drop `ApplicationCodeRun` and `ApplicationCodeRefused` from
+    /// `is_always_recorded`.
+    #[test]
+    fn application_code_events_are_always_recorded() {
+        let mut log = AuditLog::new();
+        assert!(!log.enabled);
+        log.record(AuditEvent::ApplicationCodeRun, "ran", "user", "2026-09-30T00:00:00Z");
+        log.record(AuditEvent::ApplicationCodeRefused, "refused", "user", "2026-09-30T00:00:00Z");
+        assert_eq!(log.entry_count(), 2, "a run or a refusal of application code left no trail");
+        let spell = |e: &AuditEvent| serde_json::to_string(e).unwrap();
+        assert_eq!(spell(&log.entries[0].event), "\"application_code_run\"");
+        assert_eq!(spell(&log.entries[1].event), "\"application_code_refused\"");
+    }
+
+    /// "Make this my own" is recorded with auditing OFF, under the spelling the
+    /// audit viewer keys on.
+    ///
+    /// SABOTAGE: drop `ButtonCodeAdopted` from `is_always_recorded`.
+    #[test]
+    fn button_code_adopted_is_always_recorded() {
+        let mut log = AuditLog::new();
+        assert!(!log.enabled);
+        log.record(AuditEvent::ButtonCodeAdopted, "adopted", "user", "2026-10-01T00:00:00Z");
+        assert_eq!(log.entry_count(), 1, "making an application's code your own left no trail");
+        assert_eq!(
+            serde_json::to_string(&log.entries[0].event).unwrap(),
+            "\"button_code_adopted\""
+        );
     }
 
     #[test]

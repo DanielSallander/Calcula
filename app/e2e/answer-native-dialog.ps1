@@ -112,21 +112,51 @@ if ($dlg -eq [IntPtr]::Zero) { Write-Output "NOTFOUND"; exit 0 }
 # Text elements (the whole ribbon: "Clipboard", "Font", "Alignment", …) and
 # report them as dialog text, which would make a `toContain` assertion pass on
 # content the dialog never showed.
+# RETRIED, and wider than Text elements. A TaskDialog that is still painting
+# its DirectUI body exposes no Text children for a moment, and a long or
+# multi-line body (a confirm that SHOWS code) can surface as a Document or Edit
+# element instead -- run 10 (2026-10-01) read "Make this my own" with custom
+# buttons and got no TEXT line at all, so "the confirm shows the code" could not
+# be asserted. Up to ~2 s, until at least one text line is seen.
 try {
   Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes -ErrorAction Stop
   $el = [System.Windows.Automation.AutomationElement]::FromHandle($dlg)
-  $textCond = New-Object System.Windows.Automation.PropertyCondition(
-    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-    [System.Windows.Automation.ControlType]::Text)
-  $texts = $el.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCond)
+  $types = @(
+    [System.Windows.Automation.ControlType]::Text,
+    [System.Windows.Automation.ControlType]::Document,
+    [System.Windows.Automation.ControlType]::Edit
+  )
   $seen = New-Object System.Collections.Generic.HashSet[string]
-  foreach ($t in $texts) {
-    $n = $t.Current.Name
-    if ([string]::IsNullOrWhiteSpace($n)) { continue }
-    if ($n -eq "MainInstructionIcon") { continue }
-    $flat = ($n -replace "`r`n", " " -replace "`n", " ")
-    if ($seen.Add($flat)) { Write-Output ("TEXT:" + $flat) }
-  }
+  $textDeadline = (Get-Date).AddMilliseconds(2000)
+  do {
+    foreach ($ct in $types) {
+      $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $ct)
+      $found = $el.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
+      foreach ($t in $found) {
+        $n = $t.Current.Name
+        if ([string]::IsNullOrWhiteSpace($n)) {
+          # A Document/Edit body carries its text in a pattern, not its Name.
+          try {
+            $vp = $t.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+            $n = $vp.Current.Value
+          } catch {
+            try {
+              $tp = $t.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+              $n = $tp.DocumentRange.GetText(-1)
+            } catch { $n = $null }
+          }
+        }
+        if ([string]::IsNullOrWhiteSpace($n)) { continue }
+        if ($n -eq "MainInstructionIcon") { continue }
+        $flat = ($n -replace "`r`n", " " -replace "`n", " ")
+        if ($seen.Add($flat)) { Write-Output ("TEXT:" + $flat) }
+      }
+    }
+    if ($seen.Count -gt 0) { break }
+    Start-Sleep -Milliseconds 150
+  } while ((Get-Date) -lt $textDeadline)
+  if ($seen.Count -eq 0) { Write-Output "TEXTNONE:no Text, Document or Edit element carried text within 2 s" }
 } catch {
   Write-Output ("TEXTERROR:" + $_.Exception.Message)
 }

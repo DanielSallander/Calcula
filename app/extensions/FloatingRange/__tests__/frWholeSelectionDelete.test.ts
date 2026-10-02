@@ -260,10 +260,27 @@ describe("the range's object-selection provider deletes (E11)", () => {
     clearLocalSelection();
   });
 
-  it("positive control: on a WORKSHEET the range's own Delete deletes the range alone", async () => {
+  // BUG-0270 review: worksheets have press parity now (a plain press deselects
+  // every other family), so a range + chart selection there is a deliberate
+  // Ctrl/Shift one, and Excel deletes it whole. It used to be the range alone
+  // (the rule was canvas-only while such a selection could be an accident).
+  it("on a WORKSHEET too, the range's Delete hands a range + chart selection to the WHOLE delete: both go, ONE step", async () => {
     surface = "grid";
     selectFloatingRange(FR_ID);
     setObjectSelectionSet([frRegion(), chartRegion]);
+    press("Delete");
+    await flush();
+    await flush();
+    expect(chartDeleted, "the chart in the selection was left standing").toHaveBeenCalledTimes(1);
+    expect(deleteFloatingRange).toHaveBeenCalledWith(FR_ID);
+    expect(confirmAsync).toHaveBeenCalledTimes(1);
+    expect(log.filter((l) => l.startsWith("begin:"))).toEqual(["begin:Delete Objects"]);
+  });
+
+  it("positive control: on a WORKSHEET the range ALONE is its own Delete's (no whole-selection step)", async () => {
+    surface = "grid";
+    selectFloatingRange(FR_ID);
+    setObjectSelectionSet([frRegion()]);
     press("Delete");
     await flush();
     await flush();

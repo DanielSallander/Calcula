@@ -912,9 +912,13 @@ describe("route: the one-off object-script runner", () => {
       scriptId: "macro-vendor-close",
     });
 
-    expect(mountGateCalls).toHaveLength(1);
-    expect(mountGateCalls[0].surface).toBe("object-script");
-    expect(mountGateCalls[0].artifacts).toEqual([{ id: "macro-vendor-close", source: MACRO_SOURCE }]);
+    // A one-off run is asked TWICE -- before Script Security (runCheck) and
+    // after it (runAdmitted, the run row) -- about the same surface and artifact.
+    expect(mountGateCalls).toHaveLength(2);
+    for (const call of mountGateCalls) {
+      expect(call.surface).toBe("object-script");
+      expect(call.artifacts).toEqual([{ id: "macro-vendor-close", source: MACRO_SOURCE }]);
+    }
 
     // Edited in the textarea: the identity still says publisher, and the
     // artifact carries the EDITED text — which is what the gate must hash.

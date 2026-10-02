@@ -202,6 +202,35 @@ pub struct PromotionImpactResponse {
     /// What the promotion does to data already collected in this environment.
     /// Empty when nothing is affected.
     pub writeback_report: String,
+    /// The CODE that changes between the version this environment holds (none,
+    /// on a first promotion) and the target, with what each change means for
+    /// its subscribers (plan_M8 S4, `calp::code_summary`). Empty when
+    /// `code_error` is set: an empty list then means "not known", never
+    /// "nothing changes".
+    pub code_changes: Vec<calp::code_summary::CodeChange>,
+    /// Whether anyone in this environment will be asked to approve the
+    /// application's code again before it runs.
+    pub asks_approval_again: bool,
+    /// Why the code could not be compared -- a target signed by a key the
+    /// application does not authorise, an artifact that fails its signed
+    /// checksum, a version that cannot be read. NAMED, never swallowed, and
+    /// serialized as `null` when there is none (TS `codeError: string | null`).
+    /// The writeback report is computed either way -- unless where the
+    /// environment points cannot be read, which leaves BOTH unknown, and both
+    /// say so.
+    pub code_error: Option<String>,
+}
+
+impl PromotionImpactResponse {
+    /// The answer for an unnamed target: nothing is known, nothing is claimed.
+    fn empty() -> Self {
+        PromotionImpactResponse {
+            writeback_report: String::new(),
+            code_changes: Vec::new(),
+            asks_approval_again: false,
+            code_error: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -332,8 +361,22 @@ fn read_environments(
     (infos, rows, String::new())
 }
 
+/// This profile's publisher key (lowercase hex), or empty when it has none. A
+/// promotion never mints one (see the module header).
+fn profile_public_key(profile: &std::path::Path) -> String {
+    calp::signing::PublisherKeypair::load_existing(profile)
+        .ok()
+        .flatten()
+        .map(|k| k.public_key_hex())
+        .unwrap_or_default()
+}
+
 /// May this computer promote? The push gate's question, asked the push gate's
-/// way — root or a delegate in the root-signed list.
+/// way — root or a delegate in the root-signed list — and anchored at the
+/// application's PROVED root (its first version, verified by its own
+/// signature), the same root [`promotion_gate`] judges by. Never the unsigned
+/// listing's first entry, and never the head signer: those name a planter as
+/// readily as the creator.
 fn may_promote(
     registry: &dyn calp::transport::WorkspaceTransport,
     package_name: &str,
@@ -345,12 +388,90 @@ fn may_promote(
     let Some(head) = calp::publish::head_version(&manifest) else {
         return (false, head_of(&manifest));
     };
-    let keys = calp::publish::resolve_authorized_keys(registry, package_name, &head)
-        .unwrap_or_default();
-    let may = keys
-        .iter()
-        .any(|k| calp::signing::profile_holds_publisher_key(profile, k).unwrap_or(false));
+    let may = calp::publishers::root_anchored_publishers(registry, package_name)
+        .map(|authority| authority.allows(&profile_public_key(profile)))
+        .unwrap_or(false);
     (may, head.to_string())
+}
+
+/// The version a promotion with nothing typed would point `environment` at:
+/// the line's head for the first environment, the previous environment's
+/// version otherwise (core `promote`'s "natural source"). `None` when there is
+/// none -- core then refuses the promotion with its own words.
+///
+/// `calp_promote` hands the answer to core as an EXPLICIT version, so the
+/// version this gate judged is the one core signs, and core's own linear rule
+/// still applies to it: a disagreement here can only refuse, never sign an
+/// unjudged version.
+fn natural_promotion_target(
+    registry: &dyn calp::transport::WorkspaceTransport,
+    package: &str,
+    environment: &str,
+) -> Result<Option<calp::SemVer>, calp::CalpError> {
+    let envs = calp::environments::environments(registry, package)?;
+    let Some(index) = envs.iter().position(|e| e.name == environment) else {
+        return Ok(None);
+    };
+    if index == 0 {
+        let manifest = registry.get_application_manifest(package)?;
+        return Ok(calp::publish::head_version(&manifest));
+    }
+    Ok(envs[index - 1].version.as_deref().and_then(|v| calp::SemVer::parse(v).ok()))
+}
+
+/// THE PROMOTION'S DEVELOPER GATE, before anything is signed.
+///
+/// A promotion is a SIGNED decision about which version every subscriber of an
+/// environment receives, so it asks what every developer door asks
+/// (BUG-0262 and the developer anchor) -- core `promote`'s own authority check
+/// finds the root through the unsigned listing and falls back to the head
+/// signer, which a share-writer's planted first version satisfies:
+///
+/// 1. the application's root, PROVED, against what this computer remembers
+///    (`CheckOnly`: a contradiction or a rolled-back co-publisher list refuses;
+///    moving a pointer is not an act that records an anchor);
+/// 2. the promoter's own key must be one that proved root authorises;
+/// 3. the TARGET version's signer (from its verified manifest) must be too.
+///
+/// Returns the target it judged (`None` when there is none to judge -- core
+/// refuses that promotion itself).
+pub(crate) fn promotion_gate(
+    registry: &dyn calp::transport::WorkspaceTransport,
+    scope: &calp::WorkspaceScope,
+    profile: &std::path::Path,
+    package: &str,
+    environment: &str,
+    version: Option<&calp::SemVer>,
+) -> Result<Option<calp::SemVer>, calp::CalpError> {
+    let authority = calp::publishers::root_anchored_publishers(registry, package)?;
+    let check = calp::AnchorGate { profile_dir: profile, scope, policy: calp::AnchorPolicy::CheckOnly };
+    calp::developer_anchor::anchor_root(&check, package, &authority)?;
+    if !authority.allows(&profile_public_key(profile)) {
+        return Err(calp::CalpError::NotAuthorizedPublisher {
+            package: package.to_string(),
+            root_holder: authority.root_holder(),
+        });
+    }
+    let target = match version {
+        Some(v) => Some(v.clone()),
+        None => natural_promotion_target(registry, package, environment)?,
+    };
+    if let Some(target) = &target {
+        let target = target.to_string();
+        // A version that does not exist is core's to refuse, in its words.
+        if registry.version_exists(package, &target) {
+            let signed = calp::integrity::load_signed_manifest_via(registry, package, &target)?;
+            calp::publishers::authorize_signer(
+                registry,
+                package,
+                &target,
+                &signed.manifest.publisher_key,
+                &signed.manifest.publisher_name,
+                &check,
+            )?;
+        }
+    }
+    Ok(target)
 }
 
 fn head_of(manifest: &calp::manifest::ApplicationManifest) -> String {
@@ -417,6 +538,11 @@ pub fn calp_environments(
 ///
 /// Read-only, no `DocumentEffect`, and reachable from the Inspector for the same
 /// reason `calp_environments` is.
+///
+/// It also carries the CODE summary (plan_M8 S4): what code changes for the
+/// environment's subscribers, read before anything else in the Promote dialog
+/// -- including on a FIRST promotion, where every piece of the target's code is
+/// new. No new command: it is the same "what would this promotion cost" read.
 #[tauri::command]
 pub fn calp_promotion_impact(
     params: PromotionImpactParams,
@@ -426,18 +552,24 @@ pub fn calp_promotion_impact(
         &window,
         crate::security::window_guard::MAIN_AND_APPLICATION_INSPECTOR,
     )?;
-    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
-        .map_err(|e| e.to_string())?;
+    promotion_impact_core(
+        &params.registry_path,
+        &params.package_name,
+        &params.environment,
+        &params.version,
+    )
+}
 
-    // Where the target currently points, from the SIGNED log — the version its
-    // subscribers are actually on, which is what the change is measured from.
-    let from = calp::environments::environments(registry.as_ref(), &params.package_name)
-        .ok()
-        .and_then(|envs| {
-            envs.into_iter()
-                .find(|e| e.name == params.environment)
-                .and_then(|e| e.version)
-        });
+/// [`calp_promotion_impact`] without the window: everything it computes, so a
+/// test can hold it against real signed workspaces.
+pub(crate) fn promotion_impact_core(
+    registry_path: &str,
+    package: &str,
+    environment: &str,
+    version: &str,
+) -> Result<PromotionImpactResponse, String> {
+    let (registry, _scope) =
+        crate::calp_registry::open_workspace_scoped(registry_path).map_err(|e| e.to_string())?;
 
     // NO GUESS AT THE TARGET. The promote command picks a natural source when
     // no version is named — head for the first environment, the previous one's
@@ -445,19 +577,103 @@ pub fn calp_promotion_impact(
     // of it, free to drift into reporting the cost of a promotion that is not
     // the one about to happen. The dialog always knows the version it is
     // offering, so an unnamed one answers nothing rather than answering wrong.
-    let to = params.version.trim().to_string();
+    let to = version.trim().to_string();
     if to.is_empty() {
-        return Ok(PromotionImpactResponse { writeback_report: String::new() });
+        return Ok(PromotionImpactResponse::empty());
     }
 
-    Ok(PromotionImpactResponse {
-        writeback_report: describe_writeback_change(
-            registry.as_ref(),
-            &params.package_name,
-            from.as_deref(),
-            &to,
+    // Where the target currently points, from the SIGNED log — the version its
+    // subscribers are actually on, which is what the change is measured from.
+    //
+    // A LOG THAT CANNOT BE READ IS NOT "NO VERSION". Read as one, the summary
+    // would be a first promotion's: every piece of the target's code "new",
+    // no approval reused, and no "stops running" row for code the environment
+    // runs today -- a read failure that looks like a normal answer. It is
+    // reported, in place of both reports.
+    let from = match calp::environments::environments(registry.as_ref(), package) {
+        Ok(envs) => envs
+            .into_iter()
+            .find(|e| e.name == environment)
+            .and_then(|e| e.version),
+        Err(e) => {
+            let why = format!("where {environment} points cannot be read ({e})");
+            return Ok(PromotionImpactResponse {
+                writeback_report: format!(
+                    "What this promotion does to data already collected in {environment} is not known: {why}"
+                ),
+                code_changes: Vec::new(),
+                asks_approval_again: false,
+                code_error: Some(why),
+            });
+        }
+    };
+
+    let writeback_report = describe_writeback_change(registry_path, package, environment, from.as_deref(), &to);
+
+    // A failure to compare the code is REPORTED beside the writeback report,
+    // never instead of it and never as an empty list: "no code changes" and
+    // "the code could not be read" must not look alike.
+    let (code_changes, asks_approval_again, code_error) =
+        match promotion_code_summary(registry_path, package, environment, from.as_deref(), &to) {
+            Ok(summary) => (summary.changes, summary.asks_approval_again, None),
+            Err(e) => (Vec::new(), false, Some(e)),
+        };
+
+    Ok(PromotionImpactResponse { writeback_report, code_changes, asks_approval_again, code_error })
+}
+
+/// The code summary between the environment's pointer and the target.
+///
+/// * THE TARGET is opened through the AUTHORISED reader -- its signer must be one
+///   the application's proved root authorises, anchored against what this
+///   computer remembers (`CheckOnly`) -- which is the judgement
+///   [`promotion_gate`] makes about the target at Promote (the gate also asks
+///   for the promoter's own key, which a preview need not). So the preview never
+///   shows code the promotion would refuse over its signer.
+/// * THE POINTER'S VERSION is opened through the VERIFIED reader: it is what the
+///   environment's subscribers already hold, even if its signer was removed
+///   from the publisher list since.
+/// * Neither walks every artifact up front. Both are read as
+///   `DiffSide::PublishedChecked`, so each code artifact the summary reads is
+///   held to its signed checksum, and no sheet is read at all.
+/// * A button cell's command is judged against the same list the subscriber's
+///   admission uses (`button_cells::DISTRIBUTABLE_BUTTON_COMMANDS`).
+fn promotion_code_summary(
+    registry_path: &str,
+    package: &str,
+    environment: &str,
+    from: Option<&str>,
+    to: &str,
+) -> Result<calp::code_summary::CodeSummary, String> {
+    let (to_registry, to_version, to_manifest) =
+        crate::calp_inspector::open_authorized_content(registry_path, package, &format!("={to}"), false, None)
+            .map_err(|e| format!("v{to} cannot be shown: {e}"))?;
+    let held = match from {
+        Some(version) => Some(
+            crate::calp_inspector::open_verified_content(registry_path, package, &format!("={version}"), false)
+                .map_err(|e| format!("v{version}, the version {environment} holds, cannot be read: {e}"))?,
         ),
-    })
+        None => None,
+    };
+    let to_side = calp::DiffSide::PublishedChecked {
+        transport: to_registry.as_ref(),
+        package,
+        version: &to_version,
+        manifest: &to_manifest,
+    };
+    let from_side = held.as_ref().map(|(registry, version, manifest)| calp::DiffSide::PublishedChecked {
+        transport: registry.as_ref(),
+        package,
+        version,
+        manifest,
+    });
+    calp::code_summary::code_summary(
+        from_side.as_ref(),
+        &to_side,
+        &calp::DiffOptions::default(),
+        crate::button_cells::DISTRIBUTABLE_BUTTON_COMMANDS,
+    )
+    .map_err(|e| format!("the code of v{to} could not be compared: {e}"))
 }
 
 /// Define the ordered pipeline. An empty list removes every environment.
@@ -512,6 +728,7 @@ pub fn calp_set_environments(
 /// No `DocumentEffect`: this writes to the workspace, not to the document.
 #[tauri::command]
 pub fn calp_promote(
+    state: State<AppState>,
     params: PromoteParams,
     window: tauri::Window,
 ) -> Result<PromoteResponse, String> {
@@ -523,14 +740,35 @@ pub fn calp_promote(
                 .to_string(),
         );
     }
-    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
+    let (registry, scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
     let profile = crate::calp_commands::calcula_profile_dir();
     let keypair = require_identity(&profile)?;
 
-    let version = match &params.version {
+    let requested = match &params.version {
         Some(v) => Some(calp::SemVer::parse(v).map_err(|e| e.to_string())?),
         None => None,
+    };
+
+    // GATE: who this computer remembers as the creator, whether that proved
+    // root authorises THIS key, and whether it authorises whoever signed the
+    // version the pointer would move to -- before anything is signed. Refusals
+    // leave an always-on `SignerRefused` row at the "promote" door.
+    let version = match promotion_gate(
+        registry.as_ref(),
+        &scope,
+        &profile,
+        &params.package_name,
+        &params.environment,
+        requested.as_ref(),
+    ) {
+        // The version the gate JUDGED is the one core signs.
+        Ok(judged) => judged.or(requested),
+        Err(refused) => {
+            let label = requested.as_ref().map(|v| v.to_string()).unwrap_or_default();
+            crate::calp_inspector::record_signer_refusal(&state, "promote", &params.package_name, &label, &refused);
+            return Err(crate::calp_inspector::developer_refusal_text(&refused));
+        }
     };
 
     let expected_current = params.check_current.then(|| {
@@ -553,8 +791,9 @@ pub fn calp_promote(
         read_environments(registry.as_ref(), &params.package_name, &profile);
     Ok(PromoteResponse {
         writeback_report: describe_writeback_change(
-            registry.as_ref(),
+            &params.registry_path,
             &params.package_name,
+            &result.environment,
             result.from.as_deref(),
             &result.to,
         ),
@@ -578,40 +817,57 @@ pub fn calp_promote(
 ///
 /// Empty when nothing is affected, so an application without writeback carries
 /// no noise about a feature it does not use.
+///
+/// READ FROM THE SIGNED MANIFESTS, through the verified reader the code summary
+/// beside it uses for the version an environment holds
+/// (`calp_inspector::open_verified_content`). The regions and model columns a
+/// version collects into are declared in its version manifest, and only the
+/// signed reading of it is the publisher's statement: the unsigned copy is
+/// whatever anyone who can write to the share last wrote, so reading it let an
+/// edit make a promotion that orphans collected data say "nothing affected".
+///
+/// A VERSION THAT CANNOT BE READ THAT WAY IS SAID, never read as one that
+/// declares nothing -- which reported "nothing affected", or a region "no
+/// longer" existing in a version nobody read. The sentence takes the report's
+/// place, the way an unreadable pointer already does in
+/// [`promotion_impact_core`].
 fn describe_writeback_change(
-    registry: &dyn calp::transport::WorkspaceTransport,
+    registry_path: &str,
     package_name: &str,
+    environment: &str,
     from: Option<&str>,
     to: &str,
 ) -> String {
-    let regions = |version: &str| -> Vec<calp::WritebackRegionDeclaration> {
-        registry
-            .get_version_manifest(package_name, version)
-            .ok()
-            .and_then(|m| m.writeback_regions)
-            .unwrap_or_default()
-    };
-    let model_columns = |version: &str| -> Vec<calp::writeback::ModelWritebackDeclaration> {
-        registry
-            .get_version_manifest(package_name, version)
-            .ok()
-            .and_then(|m| m.model_writebacks)
-            .unwrap_or_default()
-    };
-    let new_regions = regions(to);
     // Nothing promoted into this environment yet: subscribers receive the
-    // version whole, and there is no earlier collection to invalidate.
+    // version whole, and there is no earlier collection to invalidate -- so
+    // there is nothing to read either.
     let Some(from) = from else {
         return String::new();
     };
-    let old_regions = regions(from);
+    let signed = |version: &str| -> Result<calp::manifest::VersionManifest, String> {
+        crate::calp_inspector::open_verified_content(registry_path, package_name, &format!("={version}"), false)
+            .map(|(_registry, _version, manifest)| manifest)
+    };
+    let not_known = |why: String| -> String {
+        format!("What this promotion does to data already collected in {environment} is not known: {why}")
+    };
+    let held = match signed(from) {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            return not_known(format!("v{from}, the version {environment} holds, cannot be read ({e})"));
+        }
+    };
+    let target = match signed(to) {
+        Ok(manifest) => manifest,
+        Err(e) => return not_known(format!("v{to} cannot be read ({e})")),
+    };
+    let old_regions = held.writeback_regions.unwrap_or_default();
+    let new_regions = target.writeback_regions.unwrap_or_default();
+    let old_columns = held.model_writebacks.unwrap_or_default();
+    let new_columns = target.model_writebacks.unwrap_or_default();
     // An application may collect through MODEL COLUMNS and no grid regions at
     // all, so the empty short-circuit has to consider both.
-    if old_regions.is_empty()
-        && new_regions.is_empty()
-        && model_columns(from).is_empty()
-        && model_columns(to).is_empty()
-    {
+    if old_regions.is_empty() && new_regions.is_empty() && old_columns.is_empty() && new_columns.is_empty() {
         return String::new();
     }
 
@@ -619,7 +875,8 @@ fn describe_writeback_change(
     let mut parts: Vec<String> = Vec::new();
     if !compat.incompatible.is_empty() {
         parts.push(format!(
-            "{} region(s) moved or changed shape, so submissions already collected against              them stop counting: {}",
+            "{} region(s) moved or changed shape, so submissions already collected against \
+             them stop counting: {}",
             compat.incompatible.len(),
             compat
                 .incompatible
@@ -650,10 +907,7 @@ fn describe_writeback_change(
     // "nothing affected" to the promoter and surface later, on somebody else's
     // machine. The promoter is the one deciding, so the promoter is the one who
     // has to see it — which is this helper's own stated contract.
-    let model_compat = calp::writeback::check_model_writeback_compatibility(
-        &model_columns(from),
-        &model_columns(to),
-    );
+    let model_compat = calp::writeback::check_model_writeback_compatibility(&old_columns, &new_columns);
     if !model_compat.incompatible.is_empty() {
         parts.push(format!(
             "{} writeback column(s) changed key or shape, so values already collected against \

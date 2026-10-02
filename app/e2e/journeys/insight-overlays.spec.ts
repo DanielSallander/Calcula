@@ -148,13 +148,15 @@ async function chartClientBox(page: Page, chartId: string): Promise<Clip> {
  *   - every measured element rect, plus 3px, so a click cannot graze one;
  *   - the top strip (y < COMMENT_TOP_RESERVED-ish, 40px here), which the
  *     overlay's stepper pill owns — a click there STEPS the cues;
- *   - 12px of the LEFT and RIGHT canvas edges. The floating region's resize
- *     handles are the four CORNERS with a 10px half-extent
- *     (`HANDLE_HIT_SIZE`, core/hooks/useMouseSelection/layout/
- *     overlayResizeHandlers.ts), and that test is `dx <= 10 && dy <= 10`, so
- *     keeping x more than 10px from both vertical edges clears all four
- *     corners at any y. A press on a handle starts a resize and the chart's
- *     own hit-test never runs.
+ *   - 12px of the LEFT, RIGHT and BOTTOM canvas edges. Core's resize handles
+ *     (core/lib/floatingHandles.ts, BUG-0258 design phase 3) are live only on
+ *     a SELECTED object -- and the chart this journey clicks IS selected --
+ *     centred on its four corners and on the midpoint of every edge of at
+ *     least FLOATING_HANDLE_MIDPOINT_MIN_EDGE (48px), each hit at its centre
+ *     +/- FLOATING_HANDLE_HIT_HALF (6px). Keeping 12px from the left, right
+ *     and bottom edges clears the w, e and s midpoints and all four corners
+ *     at any other coordinate; the top strip above clears n. A press on a
+ *     handle starts a resize and the chart's own hit-test never runs.
  * Among the survivors it takes the one furthest from those bounds, so the
  * click has the most room around it.
  */
@@ -187,17 +189,17 @@ async function outerMarginPoint(page: Page, chartId: string): Promise<{ x: numbe
         if (list) for (const item of list) blocked.push(item.rect);
       }
       const PAD = 3;
-      const EDGE = 12; // clears the corner resize handles at any y
+      const EDGE = 12; // clears the w / e / s handles and the corners (hit +/- 6)
       const PILL_STRIP = 40; // the stepper pill's own strip at the top
       let best: { x: number; y: number; depth: number } | null = null;
-      for (let y = 2; y <= layout.height - 2; y += 2) {
+      for (let y = 2; y <= layout.height - EDGE; y += 2) {
         if (y < PILL_STRIP) continue;
         for (let x = EDGE; x <= layout.width - EDGE; x += 2) {
           const hit = blocked.some(
             (r) => x >= r.x - PAD && x <= r.x + r.width + PAD && y >= r.y - PAD && y <= r.y + r.height + PAD,
           );
           if (hit) continue;
-          const depth = Math.min(x - EDGE, layout.width - EDGE - x, y - PILL_STRIP, layout.height - y);
+          const depth = Math.min(x - EDGE, layout.width - EDGE - x, y - PILL_STRIP, layout.height - EDGE - y);
           if (best === null || depth > best.depth) best = { x, y, depth };
         }
       }

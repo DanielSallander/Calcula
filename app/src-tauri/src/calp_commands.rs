@@ -55,6 +55,19 @@ pub struct PublishParams {
     /// when the author checks "Include comments" (default false).
     #[serde(default)]
     pub include_comments: bool,
+    /// The button code this push may publish although the application's signed
+    /// base version does not carry it, one `executable_value_hash` per piece
+    /// (BUG-0257). The push dialog fills it only from code it has SHOWN, and
+    /// the author ticked; anything unlisted refuses the push by name.
+    #[serde(default)]
+    pub acknowledged_button_code: Vec<String>,
+    /// The author's own new macros, notebooks and names this push ADDS to the
+    /// application ("Include in application"), each naming the content hash
+    /// the push dialog SHOWED. An item whose content no longer has that hash is
+    /// refused by name (`CALP_PUSH_INCLUDED_CHANGED`). Only the push dialog fills
+    /// it; the scripted publish never forwards one.
+    #[serde(default)]
+    pub include_in_application: Vec<crate::calp_push_scope::IncludedItem>,
 }
 
 /// A custom object contributed by a FRONTEND provider for publishing
@@ -146,6 +159,13 @@ pub(crate) fn restore_published_sheet_references(
     }
     for pane in workbook.pane_controls.iter_mut() {
         counts.pane_controls += renames.rename_pane_control_config(&mut pane.config);
+    }
+    // The computed-property formulas of the slicers on the published sheets
+    // (BUG-0263): they travel now, so a checkout renamed them with the rest
+    // of the pull (`rename_slicer_formulas`), and a push that left them in the
+    // working copy's spelling would ship "Data (2)" in a slicer's width.
+    for slicer in workbook.slicers.iter_mut().filter(|s| published.contains(&s.sheet_id)) {
+        counts.slicer_formulas += renames.rename_slicer_formulas(std::slice::from_mut(slicer));
     }
     counts
 }
@@ -263,20 +283,42 @@ pub(crate) fn working_copy_sheet_renames(
 /// "Data". The hold-back's recalculation then computed 2000 instead of 42, and
 /// the push shipped that number beside a formula the diff called unchanged;
 /// nothing on a subscriber's machine recalculates to correct it.
+///
+/// `manifest` is the VERIFIED manifest the caller opened `version` under, and
+/// the sheet's bytes are re-checked against the checksum it records before
+/// they are parsed. The caller's verification walked every artifact, then this
+/// reads one of them AGAIN: a share-writer racing that window could swap the
+/// sheet after both the signature and the signer check, and the swapped cells
+/// went into the working copy -- to ride its next signed push (review finding;
+/// the held-code readers were already hardened against exactly this).
 pub(crate) fn published_cells_in_local_names(
     registry: &dyn calp::transport::WorkspaceTransport,
     package_name: &str,
     version: &str,
+    manifest: &calp::manifest::VersionManifest,
     sheet_id: &str,
     positions: &[(u32, u32)],
     renames: &calp::sheet_renames::SheetRenames,
 ) -> Result<Option<Vec<((u32, u32), Option<persistence::SavedCell>)>>, String> {
+    let rel = format!("sheets/{}/data.json", sheet_id);
     let Some(bytes) = registry
-        .read_artifact(package_name, version, &format!("sheets/{}/data.json", sheet_id))
+        .read_artifact(package_name, version, &rel)
         .map_err(|e| e.to_string())?
     else {
         return Ok(None);
     };
+    let expected = manifest.artifact_checksums.get(&rel).ok_or_else(|| {
+        format!(
+            "v{version}'s signed manifest records no checksum for {rel}, so its cells cannot be \
+             trusted. Nothing was written."
+        )
+    })?;
+    if calp::integrity::sha256_hex(&bytes) != *expected {
+        return Err(format!(
+            "{rel} of v{version} does not match the checksum its signed manifest records -- it \
+             changed after it was verified. Nothing was written."
+        ));
+    }
     let data: calcula_format::sheet_data::SheetData =
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let cells = calcula_format::sheet_data::sheet_data_to_cells(&data);
@@ -310,7 +352,7 @@ pub(crate) fn merge_publish_custom_objects(
 /// Collect the workbook's cell-type assignments (for the selected sheets) as
 /// generic custom objects — one per sheet that has assignments (distribution
 /// brick 4 dogfood). Mirrors how controls travel, but through the open channel.
-fn collect_cell_type_custom_objects(
+pub(crate) fn collect_cell_type_custom_objects(
     state: &AppState,
     sheet_indices: &[usize],
 ) -> Result<Vec<calp::publish::PublishCustomObject>, String> {
@@ -442,6 +484,54 @@ pub struct PullResponse {
     /// names the wrong sheet as soon as a floating range exists.
     #[serde(default)]
     pub first_pulled_sheet_index: Option<usize>,
+    /// Button code slots a CHECKOUT moved into the held compartment (BUG-0257):
+    /// kept inert and published unchanged at the next push. Always 0 for a
+    /// subscribe, whose held code is counted by `button_links_held` (macro
+    /// links) and `inline_button_code_held` (inline code) instead.
+    #[serde(default)]
+    pub button_code_held: usize,
+    /// Control property values the admission CLEARED because they were over the
+    /// 64 KiB per-value bound. Reported, not dropped silently: on a checkout
+    /// one of them may be the application's own button code.
+    #[serde(default)]
+    pub oversized_values_cleared: usize,
+    /// Button-cell actions a CHECKOUT held (BUG-0260), one sentence each: inert
+    /// in the working copy and published unchanged at the next push, after it
+    /// has matched them against the signed version. Always empty on a subscribe.
+    #[serde(default)]
+    pub button_actions_held: Vec<String>,
+    /// Button-cell actions a SUBSCRIBE removed (BUG-0260), one sentence each: an
+    /// application's button cell runs only a macro that application brought into
+    /// this workbook, or a command on Calcula's list
+    /// (`button_cells::DISTRIBUTABLE_BUTTON_COMMANDS`, empty today). Always empty
+    /// on a checkout.
+    #[serde(default)]
+    pub button_actions_removed: Vec<String>,
+    /// Button CONTROLS' macro links this pull kept HELD, stamped with the
+    /// application (phase 3 of BUG-0257): on a subscribe, each names a macro
+    /// this pull brought in for the application, and a click runs it only after
+    /// the application's code is approved. On a checkout, the macro links among
+    /// `button_code_held`.
+    #[serde(default)]
+    pub button_links_held: usize,
+    /// Button CONTROLS' macro links a SUBSCRIBE removed, one sentence each: a
+    /// link naming a macro the application did not bring into this workbook
+    /// (absent, or skipped because the id is already yours). Always empty on a
+    /// checkout, which holds every link.
+    #[serde(default)]
+    pub button_links_removed: Vec<String>,
+    /// Button controls' INLINE code a SUBSCRIBE kept HELD, stamped with the
+    /// application (phase 4 of BUG-0257): nothing arrives live, and the button
+    /// door runs it only after the approval screen has shown those exact bytes.
+    /// Always 0 on a checkout (its held code is `button_code_held`). Not
+    /// `button_actions_held`, which means button CELLS.
+    #[serde(default)]
+    pub inline_button_code_held: usize,
+    /// Inline button code a SUBSCRIBE removed, one sentence each: a
+    /// formula-typed action, which Calcula does not run as button code (only
+    /// static bytes can be approved). Always empty on a checkout.
+    #[serde(default)]
+    pub inline_button_code_removed: Vec<String>,
 }
 
 /// A pulled custom object handed to the frontend for provider materialization
@@ -508,11 +598,13 @@ pub struct SheetInfo {
 
 /// Resolve the per-user Calcula profile directory (%LOCALAPPDATA%\Calcula).
 /// This is the SAME directory used for the subscriber identity; it also holds
-/// the publisher's Ed25519 keypair (`publisher-key.json`) and the TOFU pin
-/// store (`trusted-publishers.json`) for S5 phase 2 application signing.
+/// the publisher's Ed25519 keypair (`publisher-key.json`), the TOFU pin store
+/// (`trusted-publishers.json`) for S5 phase 2 application signing, and the
+/// developer anchors (`developer-anchors.json`).
+///
+/// A test build never answers the real profile: see `crate::profile_dir`.
 pub(crate) fn calcula_profile_dir() -> std::path::PathBuf {
-    let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(local_app_data).join("Calcula")
+    crate::profile_dir::resolve()
 }
 
 // ============================================================================
@@ -537,6 +629,23 @@ pub(crate) struct PublishAssembly {
     /// (engine v21) — governance for model-keyed submissions.
     pub(crate) model_writebacks: Vec<calp::writeback::ModelWritebackDeclaration>,
     pub(crate) excluded_regions: Vec<calp::publish::ExcludedRegion>,
+    /// What the assembly left out because it is not this application's -- the
+    /// author's private content and other applications' code (BUG-0261). The
+    /// push report names every item (`PublishReport::withheld`).
+    pub(crate) withheld: Vec<crate::calp_push_scope::WithheldContent>,
+    /// The author's own items the request INCLUDED -- on the carrier, and named
+    /// in the report as added to the application
+    /// (`PublishReport::added_to_application`).
+    pub(crate) added_to_application: Vec<crate::calp_push_scope::WithheldContent>,
+    /// What the release of the held compartment did to the carrier's button
+    /// code (BUG-0257): restored, refused, and unreviewed. `calp_publish`
+    /// refuses on `refused` and on unacknowledged `unreviewed`. Button CELLS'
+    /// held actions are judged here too (BUG-0260, `button_cells`).
+    pub(crate) button_code: crate::held_button_code::ButtonCodeRelease,
+    /// The carrier's cell-type custom objects, one per published sheet with
+    /// assignments, RELEASED: the button-cell stamp removed and each held action
+    /// restored or refused. The publish and the preview both ship exactly these.
+    pub(crate) cell_type_objects: Vec<calp::publish::PublishCustomObject>,
 }
 
 /// Build the publish carrier. ONE collector — the same enriched builder as the
@@ -569,6 +678,77 @@ fn is_collision_rename(local: &str, published: &str) -> bool {
     !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
 }
 
+/// THE FILTER, THEN THE RELEASE: what `assemble_publish_workbook` does to the
+/// carrier once it holds everything the filter decides about -- the BUG-0261
+/// filter with the request's inclusions ("Include in application"), then the
+/// held button code back on the carrier (BUG-0257).
+///
+/// One function, so the push, the dry-run preview, the working-copy diff AND the
+/// include tests (`calp_include_tests::WorkingCopy::assemble`) run the same
+/// composition. A test that re-implemented it proved the helpers, not the
+/// composition: handing the filter no inclusions here dropped every ticked
+/// item from every push and left the suite green.
+///
+/// The link and the subscriptions are CLONED out under their own short read
+/// locks, never held across the filter.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn filter_and_release(
+    state: &AppState,
+    workbook: &mut persistence::Workbook,
+    object_scripts: &mut Option<Vec<persistence::SavedObjectScript>>,
+    registry_path: &str,
+    package_name: &str,
+    sheet_indices: &[usize],
+    included: &[crate::calp_push_scope::IncludedItem],
+    signed_base: &crate::held_button_code::SignedBase,
+) -> Result<(crate::calp_push_scope::PushContent, crate::held_button_code::ButtonCodeRelease), String> {
+    let content = {
+        let link: Option<calp::WorkingCopyLink> =
+            state.working_copy_link.read().map_err(|e| e.to_string())?.clone();
+        let subscriptions: Vec<calp::manifest::Subscription> =
+            state.subscriptions.read().map_err(|e| e.to_string())?.subscriptions.clone();
+        crate::calp_push_scope::withhold_content_not_in_application(
+            workbook,
+            object_scripts,
+            &crate::calp_push_scope::PushScope {
+                registry_path,
+                package_name,
+                link: link.as_ref(),
+                subscriptions: &subscriptions,
+                published_sheets: sheet_indices,
+                included,
+            },
+        )
+    };
+    if !content.withheld.is_empty() {
+        crate::log_info!(
+            "CALP",
+            "publish withheld {} item(s) not part of '{}': {}",
+            content.withheld.len(),
+            package_name,
+            content.withheld.iter().map(|w| w.describe()).collect::<Vec<_>>().join(", ")
+        );
+    }
+    if !content.added.is_empty() {
+        crate::log_info!(
+            "CALP",
+            "publish adds {} item(s) of the author's to '{}': {}",
+            content.added.len(),
+            package_name,
+            content.added.iter().map(|w| w.describe()).collect::<Vec<_>>().join(", ")
+        );
+    }
+    let button_code = crate::held_button_code::release_for_push(
+        state,
+        workbook,
+        sheet_indices,
+        registry_path,
+        package_name,
+        signed_base,
+    )?;
+    Ok((content, button_code))
+}
+
 fn assemble_publish_workbook(
     state: &State<AppState>,
     bi_state: &State<BiState>,
@@ -586,6 +766,10 @@ fn assemble_publish_workbook(
     // must not borrow its names.
     registry_path: &str,
     package_name: &str,
+    // What the request ADDS to the application ("Include in application"):
+    // the push dialog's publish, preview and diff pass theirs; every other
+    // caller passes none.
+    included: &[crate::calp_push_scope::IncludedItem],
     // The carrier, and the pivots it had to leave behind (see
     // `prune_unpublished_pivots`). A separate value rather than a field of
     // `PublishAssembly`, which tests build by hand.
@@ -729,89 +913,9 @@ fn assemble_publish_workbook(
     workbook.scripts = crate::persistence::collect_scripts_for_save(script_state);
     workbook.notebooks = crate::persistence::collect_notebooks_for_save(script_state);
 
-    // THE APPLICATION'S SCRIPTS, NOT THE AUTHOR'S.
-    //
-    // `publish()` reads an absent script list as "all from the workbook", which
-    // was harmless while checkout REPLACED the document — the workbook then held
-    // nothing but the application. Additive checkout ended that: the author's
-    // own module scripts and notebooks now sit beside the application's, and a
-    // push wrote every one of them into the shared workspace, checksummed and
-    // Ed25519-signed under the author's key, disclosed only as a bare count in
-    // the report. A private module holding an API token is exactly the shape of
-    // thing that lives in somebody's personal workbook.
-    //
-    // The link records what the base version carried, the same job `base_sheets`
-    // does for the tick list. An EMPTY record means a link written before this
-    // existed: fall back to publishing everything rather than silently dropping
-    // the application's own scripts, which is the opposite failure and just as
-    // quiet.
-    let withheld_private_content: Vec<String> = {
-        let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
-        let mut withheld = Vec::new();
-        if let Some(link) = link.as_ref() {
-            if link.targets(registry_path, package_name)
-                && !(link.base_script_ids.is_empty() && link.base_notebook_ids.is_empty())
-            {
-                let keep_scripts: std::collections::HashSet<&str> =
-                    link.base_script_ids.iter().map(|s| s.as_str()).collect();
-                let keep_notebooks: std::collections::HashSet<&str> =
-                    link.base_notebook_ids.iter().map(|s| s.as_str()).collect();
-                workbook.scripts.retain(|s| {
-                    let keep = keep_scripts.contains(s.id.as_str());
-                    if !keep {
-                        withheld.push(format!("script '{}'", s.name));
-                    }
-                    keep
-                });
-                workbook.notebooks.retain(|n| {
-                    let keep = keep_notebooks.contains(n.id.as_str());
-                    if !keep {
-                        withheld.push(format!("notebook '{}'", n.name));
-                    }
-                    keep
-                });
-
-                // NAMED RANGES, the same leak by a different route. A pull is
-                // ADDITIVE for names, so an application whose `RATE` collides
-                // with the author's own is silently DROPPED at checkout — and
-                // then the author's `RATE`, pointing at a sheet of theirs the
-                // package does not contain, shipped as the application's. Every
-                // subscriber's next refresh took that definition and started
-                // computing against a `#REF!`.
-                //
-                // Only workbook-scoped names are filtered here: a SHEET-scoped
-                // name rides with its sheet, and the sheet selection already
-                // decides whether that sheet ships at all.
-                if !link.base_named_range_keys.is_empty() {
-                    let keep_names: std::collections::HashSet<String> = link
-                        .base_named_range_keys
-                        .iter()
-                        .map(|k| k.to_uppercase())
-                        .collect();
-                    workbook.named_ranges.retain(|nr| {
-                        if nr.sheet_id.is_some() {
-                            return true;
-                        }
-                        let keep = keep_names.contains(&nr.name.to_uppercase());
-                        if !keep {
-                            withheld.push(format!("name '{}'", nr.name));
-                        }
-                        keep
-                    });
-                }
-            }
-        }
-        withheld
-    };
-    if !withheld_private_content.is_empty() {
-        crate::log_info!(
-            "CALP",
-            "publish withheld {} item(s) not part of '{}': {}",
-            withheld_private_content.len(),
-            package_name,
-            withheld_private_content.join(", ")
-        );
-    }
+    // WHAT IS NOT THIS APPLICATION'S is filtered below, together with the object
+    // scripts (`withhold_content_not_in_application`), once the carrier holds
+    // everything that filter decides about.
 
     // Ship pivot definitions + BI pivot metadata so subscribers can rebuild
     // live pivots; per-pivot data source routing reads the dataSourceId
@@ -861,6 +965,81 @@ fn assemble_publish_workbook(
         let scripts = state.object_scripts.read().map_err(|e| e.to_string())?;
         if scripts.is_empty() { None } else { Some(scripts.clone()) }
     };
+
+    // THE APPLICATION'S CONTENT -- NOT THE AUTHOR'S PRIVATE CONTENT, AND NOT
+    // ANOTHER APPLICATION'S CODE (BUG-0261).
+    //
+    // `publish()` reads an absent list as "all from the workbook", which was
+    // harmless while checkout REPLACED the document. Additive checkout ended
+    // that: the author's own module scripts, notebooks, names and pane controls
+    // sit beside the application's, and so does everything the workbook's OTHER
+    // subscriptions brought in -- their object scripts and their functions in the
+    // merged Custom Functions library included. A push signs all of it under the
+    // author's key, and core publish scrubs provenance, so another application's
+    // code reached this application's subscribers as this application's.
+    //
+    // HERE, the one door publish, the dry-run preview and the working-copy diff
+    // all go through, so the three agree on what ships. What stays behind is
+    // returned by name and travels in the push report -- it used to reach only
+    // the log, which to the person pushing is a silent drop.
+    //
+    // The link and the subscriptions are CLONED out under their own short read
+    // locks, never held across the filter.
+    //
+    // WHAT THE AUTHOR ADDED ("Include in application") is decided in the same
+    // filter: an own macro, notebook or name ships only when the request names
+    // its CURRENT hash, and `added` says so by name.
+    //
+    // THE APPLICATION'S BUTTON CODE GOES BACK ON THE CARRIER -- and only there
+    // (BUG-0257). Checkout held it inert; the release restores each held slot
+    // whose exact bytes the SIGNED base carries, refuses the rest by name, lists
+    // live code the base does not carry for the author to acknowledge, and
+    // removes every held key so none can reach `controls.json`. The live store
+    // is never re-armed.
+    //
+    // Both in ONE composition (`filter_and_release`), which the include tests
+    // drive too -- so what they prove is what every push, preview and diff does.
+    //
+    // The signed base is opened ONCE, and only if a release needs it, for both
+    // channels (`SignedBase`).
+    let signed_base = crate::held_button_code::SignedBase::new(registry_path, package_name);
+    let (
+        crate::calp_push_scope::PushContent { withheld, added: added_to_application },
+        mut button_code,
+    ) = filter_and_release(
+        state,
+        &mut workbook,
+        &mut object_scripts,
+        registry_path,
+        package_name,
+        sheet_indices,
+        included,
+        &signed_base,
+    )?;
+
+    // ...AND ON THE OTHER CHANNEL A BUTTON'S ACTION TRAVELS BY (BUG-0260). A
+    // button CELL's action rides in its cell-type params; checkout stamped every
+    // one and held the actions that name a macro the application did not bring
+    // in, or a command not on Calcula's list. The stamp never ships, and a held
+    // action goes back only when the signed base carries it -- the same judge as
+    // the controls above, so the push refuses both kinds by name through one gate.
+    let mut cell_type_objects = collect_cell_type_custom_objects(state, sheet_indices)?;
+    {
+        let sheet_names: std::collections::HashMap<SheetId, String> =
+            workbook.sheets.iter().map(|s| (s.id, s.name.clone())).collect();
+        let cells = crate::button_cells::release_cell_buttons_for_push(
+            state,
+            &mut cell_type_objects,
+            &sheet_names,
+            registry_path,
+            package_name,
+            &signed_base,
+        )?;
+        button_code.restored.extend(cells.restored);
+        button_code.refused.extend(cells.refused);
+        button_code.unreviewed.extend(cells.unreviewed);
+        button_code.withheld.extend(cells.withheld);
+    }
 
     // A CONTROL'S SCRIPT BINDING NAMES THE APPLICATION'S SHEET, NOT THE AUTHOR'S
     // TAB -- see `canonicalize_control_bindings`. Both copies: the request's
@@ -914,6 +1093,10 @@ fn assemble_publish_workbook(
             data_sources,
             model_writebacks,
             excluded_regions,
+            withheld,
+            added_to_application,
+            button_code,
+            cell_type_objects,
         },
         unpublished_pivots,
     ))
@@ -1151,6 +1334,26 @@ pub struct PublishReportItem {
 pub struct PublishReport {
     pub included: Vec<PublishReportItem>,
     pub excluded: Vec<PublishReportItem>,
+    /// Every item the push left in this workbook because it is not this
+    /// application's, BY NAME: the author's own scripts, notebooks, names,
+    /// custom functions and pane controls the application never had, and other
+    /// applications' code (BUG-0261). `excluded` says what applications cannot
+    /// carry at all; this says what THIS push chose not to.
+    pub withheld: Vec<crate::calp_push_scope::WithheldContent>,
+    /// The buttons' code this push carries, WITH the code (BUG-0257): the
+    /// application's held code it restores, held code it cannot publish (which
+    /// refuses the push), and code the signed base does not have (which the push
+    /// must acknowledge, hash by hash).
+    pub button_code: crate::held_button_code::ButtonCodeRelease,
+    /// The author's own macros, notebooks and names this push ADDS to the
+    /// application ("Include in application"), by name. They go out under the
+    /// pusher's key, and the next push keeps them without a tick.
+    pub added_to_application: Vec<crate::calp_push_scope::WithheldContent>,
+    /// Every button on a published sheet -- control or button cell -- that runs
+    /// a macro this push does not publish, with the remedy that works. A real
+    /// push is REFUSED while any remain (`CALP_PUSH_BUTTON_MACRO_NOT_SHIPPED`);
+    /// the preview and the diffs only report them.
+    pub unshipped_macro_links: Vec<crate::held_button_code::UnshippedMacroLinkItem>,
 }
 
 pub(crate) fn compute_publish_report(
@@ -1394,7 +1597,17 @@ pub(crate) fn compute_publish_report(
         excluded.push(row);
     }
 
-    PublishReport { included, excluded }
+    // What the assembly withheld, carried through verbatim: the carrier and the
+    // disclosure come from the same filter, so they cannot disagree.
+    PublishReport {
+        included,
+        excluded,
+        withheld: assembly.withheld.clone(),
+        button_code: assembly.button_code.clone(),
+        added_to_application: assembly.added_to_application.clone(),
+        // The SAME classifier the push's refusal runs, over the same carrier.
+        unshipped_macro_links: crate::held_button_code::unshipped_macro_links(assembly, sheet_indices),
+    }
 }
 
 // The `.calp` publish-coverage census table (`CALP_PUBLISH_COVERAGE`) lives at
@@ -1458,6 +1671,9 @@ pub(crate) fn publish_into_for_preview(
     // spelling, or every one reads as a change the reset would not make. A
     // WORKING COPY's renames are undone by the assembly itself.
     published_names: &std::collections::HashMap<String, String>,
+    // What the push dialog ADDS to the application ("Include in application"),
+    // so the diff describes the push it would make. The merge passes none.
+    included: &[crate::calp_push_scope::IncludedItem],
 ) -> Result<(), String> {
     let filter_links =
         FilterObjectLinks::snapshot(slicer_state, timeline_slicer_state, pivot_state)?;
@@ -1476,6 +1692,7 @@ pub(crate) fn publish_into_for_preview(
         &sheet_indices,
         registry_path,
         package_name,
+        included,
     )?;
 
     let PublishAssembly {
@@ -1485,6 +1702,17 @@ pub(crate) fn publish_into_for_preview(
         data_sources,
         model_writebacks,
         excluded_regions,
+        // The preview publish discloses nothing; the push report reads the
+        // withheld list off the assembly before it is taken apart.
+        withheld: _,
+        // Already ON the carrier -- that is what an inclusion is.
+        added_to_application: _,
+        // Nor does it gate: the carrier already holds exactly the button code
+        // the push would ship (restored held code, never a refused slot), so the
+        // diff describes that push, and the refusals are the push's to make.
+        button_code: _,
+        // Released by the assembly (BUG-0260): what the push would ship.
+        cell_type_objects,
     } = assembly;
     restore_published_sheet_references(&mut workbook, &sheet_indices, published_names);
 
@@ -1493,7 +1721,7 @@ pub(crate) fn publish_into_for_preview(
     // model overlay and report the push WOULD carry read as REMOVED in the
     // push preview and in the merge analysis.
     let custom_objects = merge_publish_custom_objects(
-        collect_cell_type_custom_objects(state, &sheet_indices)?,
+        cell_type_objects,
         frontend_custom_objects,
     );
 
@@ -1660,6 +1888,38 @@ pub(crate) fn parse_push_mode(params: &PublishParams) -> Result<calp::PushMode, 
     }
 }
 
+/// The push refusal for a working-copy link that does not carry the record of
+/// what its base version held, or `None`.
+///
+/// Every push is filtered against that record (`calp_push_scope`): the
+/// application's content ships, the author's own stays home. A link written
+/// before the record existed cannot say whether an empty list means "the
+/// application had none" or "nothing was recorded", and the filter used to
+/// answer "publish everything" -- the leak it exists to close. There is no
+/// backward-compatibility promise to keep (CLAUDE.md), and guessing either way
+/// loses something silently (the author's private code shipped, or the
+/// application's dropped), so the push is refused with the remedy instead.
+pub(crate) fn unrecorded_link_refusal(
+    link: Option<&calp::WorkingCopyLink>,
+    registry_path: &str,
+    package_name: &str,
+) -> Option<String> {
+    let link = link.filter(|l| l.targets(registry_path, package_name))?;
+    if link.content_recorded() {
+        return None;
+    }
+    Some(format!(
+        "CALP_PUSH_LINK_UNRECORDED: This working copy of '{}' was opened by an earlier \
+         build of Calcula, which did not record what the application carries. A push \
+         from it cannot tell the application's scripts, notebooks, names, pane controls \
+         and custom functions from your own, so it could publish your private ones under \
+         your key, or drop the application's. Nothing was pushed. Open the application \
+         for editing again (Collaboration > Open Application for Editing), bring your \
+         changes across, and push from there.",
+        link.package_name
+    ))
+}
+
 /// Publish selected sheets to a local workspace.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -1711,6 +1971,18 @@ pub fn calp_publish(
                 ));
             }
             Some(_) => {}
+        }
+    }
+
+    // GATE: a working copy whose link predates the record of what the
+    // application carries cannot be filtered honestly -- refused by name, with
+    // the remedy (see `unrecorded_link_refusal`).
+    {
+        let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
+        if let Some(refusal) =
+            unrecorded_link_refusal(link.as_ref(), &params.registry_path, &params.package_name)
+        {
+            return Err(refusal);
         }
     }
 
@@ -1779,7 +2051,7 @@ pub fn calp_publish(
         }
     }
 
-    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
+    let (registry, scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
 
     // The `workspace.calcula` pointer file is NOT written here. It is written by
@@ -1797,6 +2069,29 @@ pub fn calp_publish(
              from. Push to a file-share workspace instead.",
             params.registry_path
         ));
+    }
+
+    // GATE: WHAT THIS COMPUTER REMEMBERS about the application's creator (the
+    // developer anchor). An update pushes onto a line whose root the workspace
+    // PROVES but finds through an unsigned listing, so a share-writer's planted
+    // first version -- or a co-publisher list rolled back to one that still
+    // names someone the creator removed -- is refused here, by name, before
+    // the workbook is assembled and before any effect. The proved root must
+    // also AUTHORISE this computer's key: a planted root with no list names
+    // only its planter, and the push says so instead of landing quietly on
+    // core's head-signer fallback. CHECKED only: first contact is recorded
+    // after core publish has accepted the version (`anchor_after_push`,
+    // below), so a refused push -- here or at any later gate -- records nothing.
+    let profile = calcula_profile_dir();
+    if let Err(refused) =
+        anchor_push_target(&profile, registry.as_ref(), &scope, &params.package_name, &push_mode)
+    {
+        let base = match &push_mode {
+            calp::PushMode::Update { expected_base } => expected_base.to_string(),
+            calp::PushMode::CreateNew => "new".to_string(),
+        };
+        crate::calp_inspector::record_signer_refusal(&state, "push", &params.package_name, &base, &refused);
+        return Err(crate::calp_inspector::developer_refusal_text(&refused));
     }
 
     let version = SemVer::parse(&params.version)
@@ -1843,9 +2138,58 @@ pub fn calp_publish(
         &sheet_indices,
         &params.registry_path,
         &params.package_name,
+        &params.include_in_application,
     )?;
     let report =
         compute_publish_report(&assembly, &state, &sheet_indices, params.include_comments, &selection);
+
+    // GATE: WHAT THE AUTHOR ADDED IS WHAT THEY READ. Every "Include in
+    // application" names the hash of the code the push dialog showed; the
+    // filter kept only exact matches, and anything the request asked for that
+    // the carrier does not hold exactly so -- code edited since, an item now
+    // another application's, one that is gone -- refuses the push by name
+    // rather than shipping or dropping it quietly. It goes out under the
+    // pusher's key. Before core publish, before any effect; audited always.
+    crate::held_button_code::refuse_push_on_changed_inclusion(
+        &state,
+        &assembly,
+        &params.include_in_application,
+        &params.registry_path,
+        &params.package_name,
+    )?;
+
+    // GATE: THE BUTTONS' CODE (BUG-0257). Held code that cannot be proved to be
+    // the application's -- a stamp naming another application, a sheet the base
+    // never had, bytes the signed base does not carry -- refuses the push by
+    // name: a working copy is a `.cala`, and a crafted one can carry any held
+    // bytes with any stamp. And code the signed base does not have goes out
+    // under the pusher's key only once the request has acknowledged each piece
+    // by hash, which the push dialog asks for with the code on screen. Both
+    // before core publish, before any effect.
+    // Each refusal leaves an always-on audit row naming the cells.
+    crate::held_button_code::refuse_push_on_button_code(
+        &state,
+        &assembly.button_code,
+        &params.acknowledged_button_code,
+        &params.registry_path,
+        &params.package_name,
+    )?;
+
+    // GATE: A BUTTON THAT RUNS A MACRO THIS PUSH DOES NOT PUBLISH. Every
+    // subscriber would get a button that does nothing -- or, worse, one whose
+    // click finds a macro of THEIRS under that id. The link is judged on the
+    // RELEASED carrier (restored held links included) against the macros the
+    // push actually ships, after the BUG-0261 filter and the inclusions above,
+    // and each refusal names its remedy: include your own macro, unlink
+    // another application's, restore a missing one. It used to be a warning
+    // core publish printed after the version was already written.
+    crate::held_button_code::refuse_push_on_unshipped_macros(
+        &state,
+        &assembly,
+        &sheet_indices,
+        &params.registry_path,
+        &params.package_name,
+    )?;
 
     let PublishAssembly {
         workbook,
@@ -1854,15 +2198,24 @@ pub fn calp_publish(
         data_sources,
         model_writebacks,
         excluded_regions,
+        // Already copied into `report` by `compute_publish_report` above.
+        withheld: _,
+        // On the carrier, and copied into `report`.
+        added_to_application: _,
+        // Gated above, and copied into `report`.
+        button_code: _,
+        // Collected and RELEASED by the assembly (BUG-0260).
+        cell_type_objects,
     } = assembly;
 
     // Cell types travel via the generic custom-object channel (brick 4
     // dogfood): one per selected sheet, kind "cellType", payload = the sheet's
-    // opaque cell-type assignments. Frontend providers can add more via
-    // params.custom_objects (merged in — moved out of params before the request
-    // literal consumes its other fields).
+    // opaque cell-type assignments -- as the assembly RELEASED them (the
+    // button-cell stamp removed, held actions restored). Frontend providers can
+    // add more via params.custom_objects (merged in — moved out of params before
+    // the request literal consumes its other fields).
     let custom_objects = merge_publish_custom_objects(
-        collect_cell_type_custom_objects(&state, &sheet_indices)?,
+        cell_type_objects,
         params.custom_objects,
     );
 
@@ -1922,18 +2275,10 @@ pub fn calp_publish(
         // the names and this one disagreed about which names were published.
         //
         // What actually SHIPPED, for the same reason and off the same carrier:
-        // the next push filters against this, so a script added to the
-        // application by this push belongs to it from now on.
-        let published_script_ids: Vec<String> =
-            request.workbook.scripts.iter().map(|s| s.id.clone()).collect();
-        let published_notebook_ids: Vec<String> =
-            request.workbook.notebooks.iter().map(|n| n.id.clone()).collect();
-        let published_name_keys: Vec<String> = request
-            .workbook
-            .named_ranges
-            .iter()
-            .map(|nr| nr.name.to_uppercase())
-            .collect();
+        // the next push filters against this, so a script, pane control or
+        // custom function added to the application by this push belongs to it
+        // from now on -- and one this push withheld does not (BUG-0261).
+        let shipped = crate::calp_push_scope::shipped_content(request.workbook);
 
         // `request.workbook` is the carrier `assemble_publish_workbook` produced
         // and `publish()` serialized, so its sheet names ARE the manifest's.
@@ -1954,14 +2299,7 @@ pub fn calp_publish(
         let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut link = state.working_copy_link.write(&effect).map_err(|e| e.to_string())?;
         match link.as_mut() {
-            Some(existing) => existing.record_push(
-                &result.version,
-                &now,
-                published_sheets,
-                published_script_ids.clone(),
-                published_notebook_ids.clone(),
-                published_name_keys.clone(),
-            ),
+            Some(existing) => existing.record_push(&result.version, &now, published_sheets, shipped),
             None => {
                 let mut fresh = calp::WorkingCopyLink::new(
                     &params.registry_path,
@@ -1971,18 +2309,19 @@ pub fn calp_publish(
                     &now,
                     published_sheets.clone(),
                 );
-                fresh.record_push(
-                    &result.version,
-                    &now,
-                    published_sheets,
-                    published_script_ids.clone(),
-                    published_notebook_ids.clone(),
-                published_name_keys.clone(),
-                );
+                fresh.record_push(&result.version, &now, published_sheets, shipped);
                 *link = Some(fresh);
             }
         }
     }
+
+    // THE APPLICATION'S CREATOR is remembered now that the workspace has
+    // accepted this computer's version (a new application's, or the first push
+    // from here onto one), so a first version planted below it later
+    // contradicts this computer's memory. After the push has landed nothing can
+    // be refused, so a problem is a warning.
+    let anchor_warnings: Vec<String> =
+        anchor_after_push(&profile, registry.as_ref(), &scope, &result.package_name).into_iter().collect();
 
     // Audit — always recorded (publish is egress; see AuditEvent docs).
     {
@@ -2045,8 +2384,111 @@ pub fn calp_publish(
                 &request.sheet_indices,
                 &unpublished_pivots,
             ))
+            .chain(anchor_warnings)
             .collect(),
     })
+}
+
+/// This profile's publisher key (lowercase hex), or empty when it has none.
+fn profile_public_key(profile: &std::path::Path) -> String {
+    calp::signing::PublisherKeypair::load_existing(profile)
+        .ok()
+        .flatten()
+        .map(|k| k.public_key_hex())
+        .unwrap_or_default()
+}
+
+/// The push's developer-anchor gate, run BEFORE the workbook is assembled and
+/// before any `DocumentEffect` (`calp_publish`). It CHECKS and never records.
+///
+/// * **Update** -- the application's root, proved by its own signature, and its
+///   co-publisher list are checked against what this machine remembers
+///   (`calp::developer_anchor::anchor_root` under `CheckOnly`): a contradiction
+///   or a rolled-back list refuses. Then the proved root must AUTHORISE this
+///   profile's key (the root itself, or a delegate its signed list names):
+///   anything else refuses as `NotAuthorizedPublisher`, naming the creator the
+///   workspace claims -- a share-writer's planted self-signed first version
+///   with no list names only its planter, and core's own continuity gate would
+///   otherwise fall back to the HEAD signer and let the push land in silence.
+///   Returns the status (`NotAnchored` on first contact: nothing is recorded).
+/// * **CreateNew** -- nothing to check yet (the application does not exist).
+///   Returns `None`.
+///
+/// First contact is recorded only after core publish accepted the version
+/// ([`anchor_after_push`]), so a push refused here or at any later gate leaves
+/// no record. A root that cannot be established (an unsigned or unverifiable
+/// first version, a co-publisher list the root did not sign) refuses too,
+/// exactly as it refuses a checkout: fail closed.
+pub(crate) fn anchor_push_target(
+    profile: &std::path::Path,
+    registry: &dyn calp::transport::WorkspaceTransport,
+    scope: &calp::WorkspaceScope,
+    package: &str,
+    mode: &calp::PushMode,
+) -> Result<Option<calp::AnchorStatus>, calp::CalpError> {
+    match mode {
+        calp::PushMode::CreateNew => Ok(None),
+        calp::PushMode::Update { .. } => {
+            let authority = calp::publishers::root_anchored_publishers(registry, package)?;
+            let gate = calp::AnchorGate { profile_dir: profile, scope, policy: calp::AnchorPolicy::CheckOnly };
+            let status = calp::developer_anchor::anchor_root(&gate, package, &authority)?;
+            if !authority.allows(&profile_public_key(profile)) {
+                return Err(calp::CalpError::NotAuthorizedPublisher {
+                    package: package.to_string(),
+                    root_holder: authority.root_holder(),
+                });
+            }
+            Ok(Some(status))
+        }
+    }
+}
+
+/// Remember the creator of an application this computer has JUST PUSHED TO --
+/// a `CreateNew` push or a model publish (the application it created), or an
+/// update (the first push from here onto one) -- after core publish accepted
+/// the version.
+///
+/// The proved root must AUTHORISE this profile's key -- for a new application,
+/// be it: anything else means a first version appeared below the one just
+/// published (a share-writer racing the push), and remembering it would anchor
+/// the planter. Returns a warning in that case, and whenever the anchor cannot
+/// be recorded -- the version already exists, so nothing is refused, but
+/// nothing is recorded silently either.
+pub(crate) fn anchor_after_push(
+    profile: &std::path::Path,
+    registry: &dyn calp::transport::WorkspaceTransport,
+    scope: &calp::WorkspaceScope,
+    package: &str,
+) -> Option<String> {
+    let not_remembered = |why: String| {
+        format!(
+            "'{package}' was published, but this computer could not remember who created it: \
+             {why} Until it does, a checkout or push from here cannot tell a genuine first \
+             version from one planted in the workspace."
+        )
+    };
+    let authority = match calp::publishers::root_anchored_publishers(registry, package) {
+        Ok(authority) => authority,
+        Err(e) => return Some(not_remembered(format!("{e}."))),
+    };
+    if !authority.allows(&profile_public_key(profile)) {
+        return Some(not_remembered(format!(
+            "the workspace names {} (key {}) as its creator, not this computer's key, and does not \
+             list this computer's key as a co-publisher. Check the workspace folder: nobody else \
+             should have published a version below yours.",
+            authority.root_name,
+            calp::signing::key_fingerprint(&authority.root_key)
+        )));
+    }
+    let gate = calp::AnchorGate {
+        profile_dir: profile,
+        scope,
+        policy: calp::AnchorPolicy::RecordOnFirstContact { via: calp::AnchoredBy::Publish },
+    };
+    match calp::developer_anchor::anchor_root(&gate, package, &authority) {
+        Ok(_) => None,
+        Err(e) => Some(not_remembered(e.to_string())),
+    }
 }
 
 /// Core publish's warnings with every pivot-BLIND source line replaced by its
@@ -2131,7 +2573,7 @@ pub fn calp_publish_model(
     window: tauri::Window,
 ) -> Result<PublishResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
+    let (registry, scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
     let version = SemVer::parse(&params.version).map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
@@ -2226,6 +2668,15 @@ pub fn calp_publish_model(
     let result = calp::publish::publish(&registry, &request, &calcula_profile_dir())
         .map_err(|e| e.to_string())?;
 
+    // A model publish CREATES an application (always `CreateNew`): remember
+    // its creator, exactly as a workbook's first push does.
+    let anchor_warning = anchor_after_push(
+        &calcula_profile_dir(),
+        registry.as_ref(),
+        &scope,
+        &result.package_name,
+    );
+
     // Audit (B4)
     {
         let user = audit_user(&state);
@@ -2252,6 +2703,12 @@ pub fn calp_publish_model(
             ),
         }],
         excluded: Vec::new(),
+        // A model-only push assembles no workbook: nothing to withhold, and no
+        // button carries code.
+        withheld: Vec::new(),
+        button_code: Default::default(),
+        added_to_application: Vec::new(),
+        unshipped_macro_links: Vec::new(),
     };
 
     Ok(PublishResponse {
@@ -2264,7 +2721,7 @@ pub fn calp_publish_model(
         modules_published: result.modules_published,
         notebooks_published: result.notebooks_published,
         report,
-        warnings: result.warnings,
+        warnings: result.warnings.into_iter().chain(anchor_warning).collect(),
     })
 }
 
@@ -2291,6 +2748,11 @@ pub struct PublishPreviewParams {
     pub registry_path: Option<String>,
     #[serde(default)]
     pub package_name: Option<String>,
+    /// Mirror of `PublishParams::include_in_application`, so the dry run shows
+    /// what the push would ADD -- and which buttons would still run a macro it
+    /// does not publish -- exactly as the push would.
+    #[serde(default)]
+    pub include_in_application: Vec<crate::calp_push_scope::IncludedItem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2440,32 +2902,22 @@ pub fn calp_publish_preview(
         // the preview then restores exactly the names its push would.
         params.registry_path.as_deref().unwrap_or(&link_target.0),
         params.package_name.as_deref().unwrap_or(&link_target.1),
+        &params.include_in_application,
     )?;
+    // The report carries the buttons whose macro this push would not publish
+    // (`unshipped_macro_links`) -- the push REFUSES on them, so they are a
+    // structured list with a remedy each, never a warning string, and the
+    // preview reports them without failing.
     let report =
         compute_publish_report(&assembly, &state, &sheet_indices, params.include_comments, &selection);
     // Same checks core publish runs, over the same carrier — so the author sees
-    // dangling dropdown references AND macro-linked buttons whose macro is not in
-    // the module set at PREVIEW time, not only after the artifact is written.
-    // The selection's own disclosures first: a source sheet it declined to add
-    // explains the chart/object warnings below.
+    // dangling dropdown references at PREVIEW time, not only after the artifact
+    // is written. The selection's own disclosures first: a source sheet it
+    // declined to add explains the chart/object warnings below.
     let mut warnings = selection.source_warnings.clone();
     warnings.extend(calp::publish::dropdown_reference_warnings(
         &assembly.workbook,
         &sheet_indices,
-    ));
-    // Preview carries the default module set (all workbook module scripts), which
-    // is exactly what a default publish ships — so a linked macro is "missing"
-    // only if it genuinely is not among the workbook's modules.
-    let published_module_ids: std::collections::HashSet<String> = assembly
-        .workbook
-        .scripts
-        .iter()
-        .map(|s| s.id.clone())
-        .collect();
-    warnings.extend(calp::publish::macro_reference_warnings(
-        &assembly.workbook,
-        &sheet_indices,
-        &published_module_ids,
     ));
     // A chart, slicer or timeline whose source sheet is not in the selection
     // (a name that resolves nowhere, a working copy's non-base sheet the
@@ -2632,7 +3084,9 @@ fn materialize_distributed_scripts(
     // gate again EARLIER, before their `DocumentEffect`, so a refused
     // subscribe/checkout/refresh also leaves the document CLEAN — two checks,
     // two jobs: theirs is about the dirty flag, this one is the invariant.
-    refuse_reserved_distributed_script_ids(package_name, modules, notebooks)?;
+    // Object scripts do not land here: `materialize_pull_result` refuses
+    // theirs before its first write, and every door refuses all three earlier.
+    refuse_reserved_distributed_script_ids(package_name, modules, notebooks, &[])?;
 
     // (id, name) of the modules/notebooks ACTUALLY inserted — conflict-skipped
     // ones excluded, so the provenance ledger never attributes a preserved
@@ -2761,9 +3215,10 @@ fn materialize_distributed_scripts(
     Ok((applied_modules, applied_notebooks, custom_functions_changed))
 }
 
-/// Reserved module-script id under which the Custom Functions (JS UDF) library
-/// is persisted as JSON data (mirrors PERSIST_SCRIPT_ID in @api/customFunctions.ts).
-const CUSTOM_FUNCTIONS_LIB_ID: &str = "__calcula_custom_functions__";
+// Reserved module-script id under which the Custom Functions (JS UDF) library
+// is persisted as JSON data (mirrors PERSIST_SCRIPT_ID in @api/customFunctions.ts).
+// Defined once, beside the push filter that splits the record per function.
+use crate::calp_push_scope::CUSTOM_FUNCTIONS_LIB_ID;
 
 /// Refuse a published module or notebook that claims an id in the HOST's
 /// reserved `__calcula_` namespace.
@@ -2800,11 +3255,33 @@ const CUSTOM_FUNCTIONS_LIB_ID: &str = "__calcula_custom_functions__";
 /// namespace grab. Notebooks get no exemption — nothing merges a notebook, and
 /// the prefix belongs to the host on both maps regardless of which one happens
 /// to hide and protect its ids today.
+///
+/// A SECOND RESERVED PREFIX (M6, phase 4 of BUG-0257): `buttonAction:`
+/// (`scripting::control_action::BUTTON_ACTION_CONSENT_PREFIX`, spelled once).
+/// The approval of a piece of inline button code is recorded under the id
+/// `buttonAction:<sha256 of its bytes>` in the application's bare record -- the
+/// same record its object scripts and macros are approved in, where the first
+/// claim on an id wins (`packageConsentSet.ts`). An application module,
+/// notebook or OBJECT SCRIPT carrying such an id could block that approval, or
+/// be approved under a button-code label. So no code an approval can name may
+/// carry it, object scripts included (`object_scripts`; the module and
+/// notebook maps only for `__calcula_`, whose concern is those two maps).
 fn refuse_reserved_distributed_script_ids(
     package_name: &str,
     modules: &[persistence::SavedScript],
     notebooks: &[persistence::SavedNotebook],
+    object_scripts: &[persistence::SavedObjectScript],
 ) -> Result<(), String> {
+    let button_action = crate::scripting::control_action::BUTTON_ACTION_CONSENT_PREFIX;
+    let mut button_claimed: Vec<&str> = modules
+        .iter()
+        .map(|m| m.id.as_str())
+        .chain(notebooks.iter().map(|n| n.id.as_str()))
+        .chain(object_scripts.iter().map(|o| o.id.as_str()))
+        .filter(|id| id.starts_with(button_action))
+        .collect();
+    button_claimed.sort_unstable();
+    button_claimed.dedup();
     let mut claimed: Vec<&str> = modules
         .iter()
         .map(|m| m.id.as_str())
@@ -2818,8 +3295,24 @@ fn refuse_reserved_distributed_script_ids(
                 .filter(|id| crate::scripting::commands::is_reserved_script_id(id)),
         )
         .collect();
-    if claimed.is_empty() {
+    if claimed.is_empty() && button_claimed.is_empty() {
         return Ok(());
+    }
+    if claimed.is_empty() {
+        let one = button_claimed.len() == 1;
+        return Err(format!(
+            "CALP_RESERVED_SCRIPT_ID: The application '{}' ships {} whose id starts with '{}': \
+             {}. That namespace is reserved for the approvals of button code -- an approval of a \
+             button's code is recorded under it, so code there could stand in for that approval or \
+             block it. Nothing was imported. Ask the publisher to rename {}; renaming {} here instead \
+             would break the application's own references and hide the fact that it tried.",
+            package_name,
+            if one { "a script" } else { "scripts" },
+            button_action,
+            summarize_ids(button_claimed.iter().copied()),
+            if one { "it" } else { "them" },
+            if one { "it" } else { "them" },
+        ));
     }
     // Deterministic and de-duplicated: the same application must produce the
     // same sentence every time it is refused, or two reports of the same
@@ -3043,6 +3536,27 @@ fn merge_custom_function_library(
             source_package: None,
         });
     true
+}
+
+/// The keys (trimmed, uppercased names) of the custom functions this
+/// workbook's library holds STAMPED with `package_name` -- after a pull, exactly
+/// the functions `merge_custom_function_library` applied from that application.
+///
+/// Checkout records these as the base version's functions
+/// (`WorkingCopyLink::base_custom_function_names`). Not the incoming library's
+/// names: the merge keeps the author's own function when an incoming one has the
+/// same name, and recording that name would let the author's function ship as
+/// the application's on the next push (BUG-0261). Empty when the workbook holds
+/// no library.
+pub(crate) fn custom_function_keys_applied_by(
+    script_state: &crate::scripting::types::ScriptState,
+    package_name: &str,
+) -> Result<Vec<String>, String> {
+    let scripts = script_state.workbook_scripts.read().map_err(|e| e.to_string())?;
+    Ok(scripts
+        .get(CUSTOM_FUNCTIONS_LIB_ID)
+        .map(|lib| crate::calp_push_scope::library_function_keys(&lib.source, Some(package_name)))
+        .unwrap_or_default())
 }
 
 /// Grow an index-aligned per-sheet Vec store so `idx` is addressable.
@@ -4275,31 +4789,6 @@ fn orphaned_pane_script_instance_ids(
         .collect())
 }
 
-/// Strip computed properties from DISTRIBUTED slicer payloads before
-/// materialization (the on-grid controls' `sanitize_distributed_controls`
-/// precedent). A slicer's computed properties are user-authored FORMULAS
-/// evaluated with full grid context — carrying them live from an application would
-/// let publisher-authored expressions evaluate in the subscriber's workbook
-/// without the subscriber ever authoring them, outside the per-application,
-/// consent-gated model that governs every other piece of distributed
-/// executable logic. Packaged slicers therefore arrive with their visual and
-/// selection state intact but NO computed properties; the subscriber can
-/// author their own, and publisher-shipped interactivity flows through
-/// consent-gated object scripts instead. (.cala load of the user's own
-/// workbook is NOT sanitized — local formulas are the user's own code.)
-fn sanitize_distributed_slicers(
-    pulled: &[persistence::SavedSlicer],
-) -> Vec<persistence::SavedSlicer> {
-    pulled
-        .iter()
-        .map(|saved| {
-            let mut cloned = saved.clone();
-            cloned.computed_properties = Vec::new();
-            cloned
-        })
-        .collect()
-}
-
 /// Materialize pulled slicers into SlicerState — shared by calp_pull and
 /// calp_refresh_apply (Wave A). ADDITIVE with don't-clobber: a slicer whose
 /// id already exists locally is skipped (the refresh path removes the
@@ -4307,20 +4796,31 @@ fn sanitize_distributed_slicers(
 /// authored slicers are never touched). `resolve` maps the APPLICATION sheet id
 /// to the local sheet index; a slicer whose sheet wasn't pulled is dropped
 /// (chart semantics). Conversion + computed-property restore go through the
-/// same pub(crate) converters the .cala load path uses — but callers pass
-/// DISTRIBUTED payloads through `sanitize_distributed_slicers` first, so
-/// packaged computed properties (formulas) never restore.
+/// same pub(crate) converters the .cala load path uses.
 ///
 /// Returns (id, name) for each slicer ACTUALLY inserted, so callers record
 /// provenance-ledger entries only for what landed.
 ///
-/// Computed properties go in through the SAME installer `.cala` load uses
+/// COMPUTED PROPERTIES TRAVEL (BUG-0263, owner decision 2026-09-30). Every
+/// door used to empty them first (`sanitize_distributed_slicers`, on the
+/// on-grid controls' precedent), which made a CHECKOUT lossy: an untouched
+/// push republished every slicer without them. They are not code in the sense
+/// that strip was written for. A computed property is a FORMULA, run by the
+/// cell evaluator with LESS reach than a cell formula has (no file reader, no
+/// pivot lookup, no user-defined functions: `slicer::computed::
+/// evaluate_slicer_property`), and its only effect is one of twelve clamped
+/// presentation attributes of the slicer it belongs to. Cell formulas already
+/// travel in every pulled sheet, and `controls.rs` already classes a formula
+/// property as evaluated, not executed. So they reach a subscriber exactly as
+/// they reach a working copy, and a collision rename reaches their sheet
+/// references on the way in (`SheetRenames::rename_slicer_formulas`, part of
+/// `rename_pull`) and back out at the push (`restore_published_sheet_references`).
+///
+/// They go in through the SAME installer `.cala` load uses
 /// (`slicer::computed::install_restored_computed_properties`), which restores
 /// the properties and the reverse dependency index they are re-evaluated
-/// through as one act. In practice the sanitizer above leaves nothing to
-/// install; routing through the shared installer anyway means this path cannot
-/// become the second copy of the "restored, listed in the dialog, and dead"
-/// defect if that ever changes.
+/// through as one act -- so a pulled property is never "restored, listed in the
+/// dialog, and dead".
 pub(crate) fn materialize_pulled_slicers(
     effect: &crate::document_effect::DocumentEffect,
     state: &AppState,
@@ -5096,6 +5596,57 @@ pub struct TrustedPublisherReport {
     /// "I cannot tell you what this machine trusts" must never render as "this
     /// machine trusts nothing".
     pub error: String,
+    /// The applications this computer DEVELOPS and the creator it remembers for
+    /// each (the developer anchor) -- a separate store from the pins above, and
+    /// a separate question: not "whose updates do I accept?" but "who created
+    /// the applications I open for editing and push to?".
+    pub developer_anchors: Vec<DeveloperAnchorInfo>,
+    /// Non-empty when the anchor store EXISTS and could not be read -- which
+    /// also blocks every developer door until it is repaired. Never an empty
+    /// list in disguise.
+    pub developer_anchors_error: String,
+}
+
+/// One application this computer develops, as shown to a human. The workspace
+/// is named in the user's own spelling; the normalized scope id is key material
+/// and is never exposed.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeveloperAnchorInfo {
+    pub scope_label: String,
+    pub application: String,
+    pub root_name: String,
+    pub root_fingerprint: String,
+    pub root_version: String,
+    pub publishers_revision: u64,
+    /// RFC3339.
+    pub anchored_at: String,
+    /// `"checkout"`, `"publish"` or `"publisherList"`.
+    pub anchored_by: String,
+}
+
+/// The developer anchors for [`TrustedPublisherReport`]: the records, or the
+/// reason they cannot be read.
+pub(crate) fn developer_anchor_report(profile: &std::path::Path) -> (Vec<DeveloperAnchorInfo>, String) {
+    match calp::developer_anchor::list_anchors(profile) {
+        Ok(records) => (
+            records
+                .iter()
+                .map(|a| DeveloperAnchorInfo {
+                    scope_label: a.scope_label.clone(),
+                    application: a.application.clone(),
+                    root_name: a.root_name.clone(),
+                    root_fingerprint: calp::signing::key_fingerprint(&a.root_key),
+                    root_version: a.root_version.clone(),
+                    publishers_revision: a.publishers_revision,
+                    anchored_at: a.anchored_at.clone(),
+                    anchored_by: a.anchored_by.as_str().to_string(),
+                })
+                .collect(),
+            String::new(),
+        ),
+        Err(failure) => (Vec::new(), failure.to_string()),
+    }
 }
 
 /// What does this computer trust, and from where?
@@ -5109,6 +5660,7 @@ pub fn calp_list_trusted_publishers(
 ) -> Result<TrustedPublisherReport, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
+    let (developer_anchors, developer_anchors_error) = developer_anchor_report(&calcula_profile_dir());
     let store = match calp::signing::load_pins(&calcula_profile_dir()) {
         Ok(s) => s,
         Err(e) => {
@@ -5117,6 +5669,8 @@ pub fn calp_list_trusted_publishers(
                 total_pins: 0,
                 conflict_count: 0,
                 error: e.to_string(),
+                developer_anchors,
+                developer_anchors_error,
             })
         }
     };
@@ -5165,7 +5719,90 @@ pub fn calp_list_trusted_publishers(
         total_pins,
         conflict_count,
         error: String::new(),
+        developer_anchors,
+        developer_anchors_error,
     })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgetDeveloperAnchorParams {
+    /// The workspace, as the user configured it (the anchor list shows exactly
+    /// this spelling).
+    pub registry_path: String,
+    pub package_name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgetDeveloperAnchorResponse {
+    /// How many remembered records were dropped (0 when there was nothing to
+    /// forget).
+    pub forgotten: usize,
+}
+
+/// Forget who created `package` in the workspace at `registry_path`, as this
+/// computer remembers it (the developer anchor).
+///
+/// A deliberate hole in the one guard a share-writer cannot forge: after it,
+/// the next checkout or push records whatever root the workspace then names --
+/// which is exactly what a planted first version needs. The dialogs ask first,
+/// naming both keys and telling the user to confirm with the creator; this
+/// command does the forgetting and ALWAYS leaves an audit row
+/// (`DeveloperAnchorForgotten`), auditing on or off. Main window only.
+#[tauri::command]
+pub fn calp_forget_developer_anchor(
+    state: State<AppState>,
+    params: ForgetDeveloperAnchorParams,
+    window: tauri::Window,
+) -> Result<ForgetDeveloperAnchorResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let forgotten = forget_developer_anchor_core(
+        &state,
+        &calcula_profile_dir(),
+        &params.registry_path,
+        &params.package_name,
+    )?;
+    Ok(ForgetDeveloperAnchorResponse { forgotten })
+}
+
+/// [`calp_forget_developer_anchor`] without the window: forget, then audit one
+/// row per forgotten record. Returns how many were forgotten.
+pub(crate) fn forget_developer_anchor_core(
+    state: &AppState,
+    profile: &std::path::Path,
+    registry_path: &str,
+    package: &str,
+) -> Result<usize, String> {
+    let scope = calp::workspace_scope(registry_path).map_err(|e| e.to_string())?;
+    let removed =
+        calp::developer_anchor::forget_anchor(profile, &scope, package).map_err(|e| e.to_string())?;
+    for record in &removed {
+        let fingerprint = calp::signing::key_fingerprint(&record.root_key);
+        let mut extra: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        extra.insert("workspace".into(), serde_json::json!(record.scope_label));
+        extra.insert("application".into(), serde_json::json!(record.application));
+        extra.insert("rootName".into(), serde_json::json!(record.root_name));
+        extra.insert("rootFingerprint".into(), serde_json::json!(fingerprint));
+        extra.insert("rememberedSince".into(), serde_json::json!(record.anchored_at));
+        record_audit_event_with_extra(
+            state,
+            calp::audit::AuditEvent::DeveloperAnchorForgotten,
+            format!(
+                "Forgot that '{}' in {} was created by {} (key {}), as this computer had \
+                 remembered since {}. The next checkout or push records whatever creator the \
+                 workspace then names.",
+                record.application,
+                record.scope_label,
+                if record.root_name.trim().is_empty() { "an unnamed publisher" } else { &record.root_name },
+                fingerprint,
+                record.anchored_at.chars().take(10).collect::<String>()
+            ),
+            extra,
+        );
+    }
+    Ok(removed.len())
 }
 
 /// The ONE `TrustStatus` -> wire-string map lives in `calp_inspector`
@@ -5388,6 +6025,7 @@ pub fn calp_pull(
         &result.package_name,
         &result.module_scripts,
         &result.notebooks,
+        &result.object_scripts,
     )?;
 
     // ONE EFFECT, constructed after every refusal that precedes a write.
@@ -5476,6 +6114,17 @@ pub(crate) fn materialize_pull_result(
     // a test.
     window: Option<&tauri::Window>,
 ) -> Result<PullResponse, String> {
+    // THE INNER DOOR for the reserved ids of everything a subscribe or a
+    // checkout brings that an approval can name -- modules, notebooks and
+    // OBJECT scripts -- before the first write (the modules and notebooks meet
+    // it again in `materialize_distributed_scripts`, the refresh's inner door).
+    // The doors refuse all three earlier still, before their effect.
+    refuse_reserved_distributed_script_ids(
+        &result.package_name,
+        &result.module_scripts,
+        &result.notebooks,
+        &result.object_scripts,
+    )?;
     // S5 phase 2: capture the origin/trust outcome before `result` is consumed.
     let publisher_name = result.publisher_name.clone();
     // EXHAUSTIVE on purpose: a new TrustStatus must not reach the frontend
@@ -6012,6 +6661,31 @@ pub(crate) fn materialize_pull_result(
     // control lock is taken — canonical order preserved.)
     let on_grid_snapshot = snapshot_on_grid_controls(&state)?;
 
+    // Materialize pulled standalone module scripts + notebooks (C8) into
+    // ScriptState. Shared with the refresh path so updates propagate
+    // identically. Ledger entries come from the APPLIED lists (below) so a
+    // conflict-skipped local document is never attributed to this application.
+    //
+    // FIRST OF THE BUTTON-BEARING STORES, because both kinds of button keep a
+    // macro only when it names a module THIS pull applied: a button control's
+    // `macroRef` (phase 3 of BUG-0257, held and stamped at a subscribe) and a
+    // button cell's script action (BUG-0260). The applied list, never
+    // `result.module_scripts`: an id skipped on a collision is exactly the id
+    // that names the user's own macro. LOCK ORDER: the script maps (taken and
+    // released inside `materialize_distributed_scripts`), then media, then
+    // controls, then the cell types -- one at a time, never nested (pinned by
+    // `button_cells::tests::both_doors_materialize_scripts_before_controls_and_cell_types_one_lock_at_a_time`).
+    let (applied_modules, applied_notebooks, custom_functions_changed) =
+        materialize_distributed_scripts(
+            &effect,
+            &script_state,
+            &result.package_name,
+            &result.module_scripts,
+            &result.notebooks,
+        )?;
+    let applied_module_ids: std::collections::HashSet<String> =
+        applied_modules.iter().map(|(id, _)| id.clone()).collect();
+
     // Take the application's binary media BEFORE the controls that reference it, so
     // a materialized picture never points at bytes that are not there yet. Every
     // blob is re-validated (magic bytes, caps, and its key re-derived from its
@@ -6024,11 +6698,50 @@ pub(crate) fn materialize_pull_result(
     }
 
     // Materialize pulled controls (buttons/checkboxes) onto the freshly-
-    // appended sheets — SANITIZED: distributed onSelect wiring is inline
-    // script source and must not execute outside the consent model, so
-    // packaged buttons arrive visually intact but disarmed. Publisher-shipped
-    // interactivity flows through the consent-gated object scripts above.
+    // appended sheets — ADMITTED: distributed onSelect wiring is inline script
+    // source and must not execute outside the consent model, so a subscriber's
+    // packaged buttons arrive with it removed.
+    //
+    // A CHECKOUT HOLDS INSTEAD OF STRIPPING (BUG-0257). The application's button
+    // code moves into the held compartment, which no click reads, stamped with
+    // where it came from, so an untouched push publishes it unchanged
+    // (`held_button_code`). Stripping it here published every application's
+    // buttons without their code.
+    //
+    // A SUBSCRIBE HOLDS A LANDED LINK (phase 3). A `macroRef` naming a macro this
+    // pull applied for the application moves into `heldMacroRef`, stamped; the
+    // click runs it only as THAT application's macro, after its approval. Any
+    // other link -- above all one naming the subscriber's own macro of the same
+    // id, skipped on the collision -- is removed and named in the response.
+    let mut button_code_held = 0usize;
+    let mut button_links_held = 0usize;
+    let mut button_links_removed: Vec<String> = Vec::new();
+    // Phase 4: a subscriber's inline code is held too (static only).
+    let mut inline_button_code_held = 0usize;
+    let mut inline_button_code_removed: Vec<String> = Vec::new();
+    let mut oversized_values_cleared = 0usize;
+    // WHERE THIS PULL CAME FROM, as the held compartment (a checkout's button
+    // controls, a subscriber's landed links) and the button-cell stamp (every
+    // door) record it. `registry_url` IS the pull's scope label (`pull` writes
+    // it), so this is the scope the push will derive from the link's own
+    // spelling of the workspace.
+    let origin = crate::held_button_code::HeldFrom {
+        workspace: calp::workspace_scope(&result.subscription.registry_url)
+            .map(|s| s.id)
+            .unwrap_or_default(),
+        application: result.package_name.clone(),
+        version: result.resolved_version.to_string(),
+        value_types: Default::default(),
+    };
     if !result.controls.is_empty() {
+        let wiring = match mode {
+            MaterializeMode::Subscribe => crate::held_button_code::DistributedWiring::LinkLanded {
+                from: origin.clone(),
+                landed_macros: applied_module_ids.clone(),
+                sheet_names: result.sheets.iter().map(|p| (p.package_sheet_id, p.name.clone())).collect(),
+            },
+            MaterializeMode::Checkout => crate::held_button_code::DistributedWiring::Hold(origin.clone()),
+        };
         let local_sheet_ids: std::collections::HashMap<SheetId, (SheetId, String)> = result
             .sheets
             .iter()
@@ -6040,10 +6753,23 @@ pub(crate) fn materialize_pull_result(
         // this the legacy pull is the one route left that puts unvalidated
         // binary into a document. Takes the media lock, so it must precede the
         // controls lock below.
-        let sanitized = crate::media::admit_distributed_controls(&state, &effect, &result.controls)?;
+        let admitted =
+            crate::media::admit_distributed_controls(&state, &effect, &result.controls, &wiring)?;
+        button_code_held = match mode {
+            MaterializeMode::Checkout => admitted.wiring.held,
+            MaterializeMode::Subscribe => 0,
+        };
+        button_links_held = admitted.wiring.links_held;
+        button_links_removed = admitted.wiring.links_removed.clone();
+        inline_button_code_held = match mode {
+            MaterializeMode::Checkout => 0,
+            MaterializeMode::Subscribe => admitted.wiring.inline_held,
+        };
+        inline_button_code_removed = admitted.wiring.inline_removed.clone();
+        oversized_values_cleared = admitted.oversized;
         let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
         crate::controls::materialize_saved_controls(
-            &sanitized,
+            &admitted.controls,
             &mut controls,
             |sid| pkg_to_index.get(&sid).copied(),
         );
@@ -6064,23 +6790,42 @@ pub(crate) fn materialize_pull_result(
     // sheet remap. Unknown kinds fall through to the frontend response
     // (`custom_objects`) for third-party distributable-object providers. Every
     // custom object is recorded in the subscription ledger.
+    //
+    // BUTTON CELLS ARE ADMITTED, NOT COPIED (BUG-0260). Every button cell is
+    // stamped with this application; a script action survives only when it
+    // names a module this pull applied, a command action only when its command
+    // is on Calcula's list (plan_M8 S1; empty today), and every other action -- a
+    // macro the application did not bring in, a command not on the list -- is
+    // HELD at a checkout (the push restores it after matching the signed base)
+    // and REMOVED, with a notice, on a subscribe. The same step as the controls'
+    // hold-or-strip, on the other channel a button's action travels by.
     let mut frontend_custom_objects: Vec<PulledCustomObjectDto> = Vec::new();
+    let mut button_cells = crate::button_cells::ButtonCellAdmission::default();
     {
-        let cell_type_saved: Vec<persistence::SavedSheetCellTypes> = result
-            .custom_objects
-            .iter()
-            .filter(|co| co.kind == "cellType")
-            .filter_map(|co| {
-                co.package_sheet_id.map(|sid| persistence::SavedSheetCellTypes {
-                    sheet_id: sid,
-                    cells: co.payload.clone(),
-                })
-            })
-            .collect();
+        let cell_type_saved = crate::button_cells::cell_type_payloads(&result.custom_objects);
         if !cell_type_saved.is_empty() {
+            let sheet_names: std::collections::HashMap<SheetId, String> = result
+                .sheets
+                .iter()
+                .map(|p| (p.package_sheet_id, p.name.clone()))
+                .collect();
+            let (admitted, report) = crate::button_cells::admit_button_cells(
+                &cell_type_saved,
+                &crate::button_cells::ButtonCellDoor {
+                    from: origin.clone(),
+                    applied_modules: &applied_module_ids,
+                    allowed_commands: crate::button_cells::DISTRIBUTABLE_BUTTON_COMMANDS,
+                    wiring: match mode {
+                        MaterializeMode::Subscribe => crate::button_cells::CellActionWiring::Remove,
+                        MaterializeMode::Checkout => crate::button_cells::CellActionWiring::Hold,
+                    },
+                    sheet_names: &sheet_names,
+                },
+            );
+            button_cells = report;
             let mut cell_types = state.cell_types.write(&effect).map_err(|e| e.to_string())?;
             crate::cell_types::materialize_saved_cell_types(
-                &cell_type_saved,
+                &admitted,
                 &mut cell_types,
                 |sid| pkg_to_index.get(&sid).copied(),
             );
@@ -6152,18 +6897,9 @@ pub(crate) fn materialize_pull_result(
         }
     }
 
-    // Materialize pulled standalone module scripts + notebooks (C8) into
-    // ScriptState. Shared with the refresh path so updates propagate
-    // identically. Ledger entries come from the APPLIED lists so a
-    // conflict-skipped local document is never attributed to this application.
-    let (applied_modules, applied_notebooks, custom_functions_changed) =
-        materialize_distributed_scripts(
-            &effect,
-            &script_state,
-            &result.package_name,
-            &result.module_scripts,
-            &result.notebooks,
-        )?;
+    // The module scripts + notebooks materialized above, before the controls and
+    // the cell types: their ledger entries and the UDF re-install go here, where
+    // they always did.
     if custom_functions_changed {
         // Re-install the live UDF registry NOW — without this, the pulled
         // report's custom-function formulas stay #NAME? until a reopen.
@@ -6187,13 +6923,14 @@ pub(crate) fn materialize_pull_result(
     // BiConnection-sourced slicers are re-bound to the freshly materialized
     // application connections below (remap_slicer_bi_connections runs inside
     // load_embedded_data_sources, next to the ribbon-filter re-bind).
-    // Same sanitization discipline as on-grid controls: distributed
-    // computed-property formulas never materialize.
+    // Their computed properties come with them, on a subscribe AND a checkout
+    // (BUG-0263) -- see `materialize_pulled_slicers`; `rename_pull` above has
+    // already moved their sheet references onto a collision-renamed sheet.
     let applied_slicers = materialize_pulled_slicers(
         &effect,
         &state,
         &slicer_state,
-        &sanitize_distributed_slicers(&result.slicers),
+        &result.slicers,
         |sid| pkg_to_index.get(&sid).copied(),
     )?;
     for (id, name) in &applied_slicers {
@@ -6378,15 +7115,30 @@ pub(crate) fn materialize_pull_result(
                 MaterializeMode::Subscribe => (
                     calp::audit::AuditEvent::Subscribe,
                     format!(
-                        "Subscribed to {} v{} ({} sheets, {} scripts)",
-                        result.package_name, result.resolved_version, sheets_pulled, scripts_pulled
+                        "Subscribed to {} v{} ({} sheets, {} scripts, {} button-cell action(s) removed, \
+                         {} button macro link(s) held for approval and {} removed, {} inline button \
+                         action(s) held for approval and {} removed)",
+                        result.package_name,
+                        result.resolved_version,
+                        sheets_pulled,
+                        scripts_pulled,
+                        button_cells.removed.len(),
+                        button_links_held,
+                        button_links_removed.len(),
+                        inline_button_code_held,
+                        inline_button_code_removed.len()
                     ),
                 ),
                 MaterializeMode::Checkout => (
                     calp::audit::AuditEvent::CheckedOut,
                     format!(
-                        "Opened {} v{} for editing ({} sheets, {} scripts)",
-                        result.package_name, result.resolved_version, sheets_pulled, scripts_pulled
+                        "Opened {} v{} for editing ({} sheets, {} scripts, {} button code slot(s) and {} button-cell action(s) held for publishing)",
+                        result.package_name,
+                        result.resolved_version,
+                        sheets_pulled,
+                        scripts_pulled,
+                        button_code_held,
+                        button_cells.held.len()
                     ),
                 ),
             };
@@ -6408,6 +7160,14 @@ pub(crate) fn materialize_pull_result(
         other_scope_pins,
         custom_objects: frontend_custom_objects,
         first_pulled_sheet_index: first_pulled_user_sheet,
+        button_code_held,
+        oversized_values_cleared,
+        button_actions_held: button_cells.held,
+        button_actions_removed: button_cells.removed,
+        button_links_held,
+        button_links_removed,
+        inline_button_code_held,
+        inline_button_code_removed,
     })
 }
 
@@ -6448,6 +7208,129 @@ pub struct CheckoutResponse {
     /// omits object-backed sheets, so `len - materialized` names the wrong one
     /// whenever a floating range is present.
     pub first_sheet_index: Option<usize>,
+    /// WHO SIGNED the version just opened, and on what authority (BUG-0262).
+    /// The checkout has already REFUSED any signer the application does not
+    /// authorise, so this is never a warning to act on — it is what the
+    /// developer is entitled to see about the code they are about to edit and
+    /// re-sign.
+    pub signer: CheckoutSignerInfo,
+    /// The application's button code slots this checkout HELD (BUG-0257): inert
+    /// in the working copy -- no click runs them -- and published unchanged by
+    /// the next push, after it has matched them against this signed version.
+    pub button_code_held: usize,
+    /// Control property values cleared on the way in because they were over the
+    /// 64 KiB per-value bound. Every door into a workbook runs the same file
+    /// checks, a checkout included; this says how many it cleared rather than
+    /// letting the loss be silent.
+    pub oversized_values_cleared: usize,
+    /// The application's button-cell actions this checkout HELD (BUG-0260), one
+    /// sentence each: an action that runs a macro the application did not bring
+    /// in, or a command not on Calcula's list. Inert in the working copy; the
+    /// next push publishes it unchanged after matching it against this signed
+    /// version.
+    pub button_actions_held: Vec<String>,
+    /// The names of the sheets this workbook holds BESIDE the application --
+    /// every sheet that holds a cell and is not one of the version's sheets
+    /// (phase 3 of BUG-0257). While any remain, the application's macros and
+    /// object scripts do not run in this working copy: code from an application
+    /// can read every sheet, and what it writes into the application's sheets
+    /// goes out with the next push. Computed by the run gate's own rule
+    /// (`application_code_gate::private_sheets`) from the link just written.
+    pub private_sheets: Vec<String>,
+}
+
+/// The signer of a checked-out version, for the Checkout dialog.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutSignerInfo {
+    /// The name the version's own signed manifest gives. Display only.
+    pub name: String,
+    /// Lowercase hex of the key that signed it.
+    pub key: String,
+    /// `calp::signing::key_fingerprint` of `key` — the short form a refusal
+    /// names, so the two can be compared.
+    pub fingerprint: String,
+    /// `"root"` (signed the application's first version) or `"coPublisher"`
+    /// (named in the root-signed co-publisher list).
+    pub role: String,
+    /// For a co-publisher, the name the ROOT gave them. Empty for the root.
+    pub listed_as: String,
+    pub root_name: String,
+    pub root_fingerprint: String,
+    /// This computer holds the signing key. DISPLAY ONLY, never an exemption:
+    /// a version signed with your key can hold a colleague's code after a
+    /// merge or a delegate push, so nothing may run on the strength of it.
+    pub is_your_key: bool,
+    /// What THIS COMPUTER remembers about the application's creator (the
+    /// developer anchor): recorded by this very checkout, matched, or -- for a
+    /// passive read such as the merge's head -- nothing remembered.
+    pub anchor: CheckoutAnchorInfo,
+}
+
+/// The developer anchor, for the Checkout dialog and the merge banner.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutAnchorInfo {
+    /// `"firstContact"` (recorded just now), `"matches"` (the creator this
+    /// computer remembers) or `"notAnchored"` (a passive read that remembers
+    /// nothing and records nothing).
+    pub status: String,
+    /// RFC3339 when the creator was remembered; empty when not anchored.
+    pub anchored_at: String,
+    /// `"checkout"`, `"publish"` or `"publisherList"`; empty when not anchored.
+    pub anchored_by: String,
+    /// The highest co-publisher list revision this computer has seen.
+    pub publishers_revision: u64,
+}
+
+impl CheckoutAnchorInfo {
+    /// Exhaustive on purpose (no `_` arm): a new anchor state must not reach the
+    /// dialog until someone has decided how it reads. The dialog's table is
+    /// checked against these strings at test time.
+    pub(crate) fn from_status(status: &calp::AnchorStatus) -> Self {
+        match status {
+            calp::AnchorStatus::FirstContact { recorded } => Self {
+                status: "firstContact".to_string(),
+                anchored_at: recorded.anchored_at.clone(),
+                anchored_by: recorded.anchored_by.as_str().to_string(),
+                publishers_revision: recorded.publishers_revision,
+            },
+            calp::AnchorStatus::Matches { anchor } => Self {
+                status: "matches".to_string(),
+                anchored_at: anchor.anchored_at.clone(),
+                anchored_by: anchor.anchored_by.as_str().to_string(),
+                publishers_revision: anchor.publishers_revision,
+            },
+            calp::AnchorStatus::NotAnchored => Self {
+                status: "notAnchored".to_string(),
+                anchored_at: String::new(),
+                anchored_by: String::new(),
+                publishers_revision: 0,
+            },
+        }
+    }
+}
+
+impl CheckoutSignerInfo {
+    pub(crate) fn from_signer(signer: &calp::AuthorizedSigner, is_your_key: bool) -> Self {
+        Self {
+            name: signer.name.clone(),
+            key: signer.key.clone(),
+            fingerprint: calp::signing::key_fingerprint(&signer.key),
+            // Exhaustive on purpose: a new authority kind must not reach the
+            // dialog until someone has decided how it reads.
+            role: match signer.role {
+                calp::SignerRole::Root => "root",
+                calp::SignerRole::CoPublisher => "coPublisher",
+            }
+            .to_string(),
+            listed_as: signer.listed_as.clone(),
+            root_name: signer.root_name.clone(),
+            root_fingerprint: calp::signing::key_fingerprint(&signer.root_key),
+            is_your_key,
+            anchor: CheckoutAnchorInfo::from_status(&signer.anchor),
+        }
+    }
 }
 
 /// Open a published application version for editing.
@@ -6496,10 +7379,36 @@ pub fn calp_checkout(
     let now = chrono::Utc::now().to_rfc3339();
 
     // Read + verify BEFORE touching the open document. Every gate — signature,
-    // TOFU (VerifyOnly), min_app_version, the full per-artifact checksum walk —
-    // runs in here, so an application that fails any of them leaves the user's
-    // current workbook exactly as it was.
-    let result = calp::checkout::checkout(
+    // TOFU (VerifyOnly), min_app_version, the full per-artifact checksum walk,
+    // and WHO SIGNED IT against the application's root-anchored publishers
+    // (BUG-0262, fail closed) — runs in here, so an application that fails any
+    // of them leaves the user's current workbook exactly as it was. The signer
+    // check lives in `calp::checkout` itself, so nothing can open a version for
+    // editing without it.
+    //
+    // PREPARED, not yet admitted: nothing is remembered about the application
+    // until every gate of THIS door has passed too (BUG-0266) -- see
+    // `pending.admit()` below, the one place this command records the
+    // developer anchor.
+    let refusal_version =
+        params.version.as_deref().filter(|v| !v.trim().is_empty()).unwrap_or("latest").to_string();
+    let refuse = |refused: calp::CalpError| -> String {
+        // A version refused for WHO SIGNED IT leaves an always-on row naming
+        // the signer ("every refusal of application code is written to the
+        // audit trail"); any other failure records nothing.
+        crate::calp_inspector::record_signer_refusal(
+            &state,
+            "checkout",
+            &params.package_name,
+            &refusal_version,
+            &refused,
+        );
+        // The two developer-anchor refusals carry a code prefix, so the dialog
+        // can offer their remedies; every other refusal reads as its own
+        // sentence.
+        crate::calp_inspector::developer_refusal_text(&refused)
+    };
+    let pending = calp::checkout::prepare_checkout(
         &registry,
         &params.package_name,
         version,
@@ -6507,7 +7416,8 @@ pub fn calp_checkout(
         &scope,
         &calcula_profile_dir(),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(&refuse)?;
+    let result = pending.pulled();
 
     let resolved_version = result.resolved_version.to_string();
     let kind_for_link = registry
@@ -6522,16 +7432,20 @@ pub fn calp_checkout(
             name: s.name.clone(),
         })
         .collect();
-    // Captured BEFORE `result` moves into the materializer.
-    let base_script_ids: Vec<String> =
-        result.module_scripts.iter().map(|s| s.id.clone()).collect();
-    let base_notebook_ids: Vec<String> =
-        result.notebooks.iter().map(|n| n.id.clone()).collect();
-    let base_named_range_keys: Vec<String> = result
-        .named_ranges
-        .iter()
-        .map(|nr| nr.name.to_uppercase())
-        .collect();
+    // WHAT THE BASE VERSION CARRIED -- captured BEFORE `result` moves into the
+    // materializer. Additive checkout leaves the author's own scripts,
+    // notebooks, names, pane controls and custom functions beside the
+    // application's (and any a subscription brought in), and every push filters
+    // against this record.
+    let mut base_content = calp::WorkingCopyContent {
+        script_ids: result.module_scripts.iter().map(|s| s.id.clone()).collect(),
+        notebook_ids: result.notebooks.iter().map(|n| n.id.clone()).collect(),
+        named_range_keys: result.named_ranges.iter().map(|nr| nr.name.to_uppercase()).collect(),
+        pane_control_ids: result.pane_controls.iter().map(|pc| pc.id.to_string()).collect(),
+        // Filled AFTER the materializer, from what its per-function merge
+        // actually applied (see below).
+        custom_function_names: Vec::new(),
+    };
 
     // ROLE GATES, before anything is written.
     //
@@ -6587,7 +7501,39 @@ pub fn calp_checkout(
         &params.package_name,
         &result.module_scripts,
         &result.notebooks,
+        &result.object_scripts,
     )?;
+
+    // ...and nothing of the application may share an identity with something
+    // the workbook already holds (BUG-0264). Additive checkout used to keep the
+    // workbook's same-id macro, notebook or name, drop the application's, and
+    // record the id as the application's -- so the next push published the
+    // author's own item under the application's name. Refused, naming each item
+    // and the remedy (a new workbook); the refusal is audited. Before the
+    // effect, like every gate above. The Custom Functions library is exempt:
+    // its id is shared by design and it merges per function.
+    crate::checkout_collisions::refuse_checkout_collisions(
+        &state,
+        &script_state,
+        &params.package_name,
+        result,
+    )?;
+
+    // ADMITTED: every gate above passed, so the checkout goes ahead, and only
+    // now does this machine remember the application's creator on first
+    // contact (BUG-0266 -- a refused checkout used to remember whatever root it
+    // was refused under, and then refuse the genuine application as a
+    // contradiction). Before the effect: the admission re-asks the anchor under
+    // its lock and can still refuse -- a root recorded since the checks -- and
+    // a refusal must leave the document untouched.
+    let checked_out = pending.admit().map_err(&refuse)?;
+    // "Your key" is shown, never trusted: see `CheckoutSignerInfo::is_your_key`.
+    let signer = CheckoutSignerInfo::from_signer(
+        &checked_out.signer,
+        calp::signing::profile_holds_publisher_key(&calcula_profile_dir(), &checked_out.signer.key)
+            .unwrap_or(false),
+    );
+    let result = checked_out.pulled;
 
     // ONE effect for the whole command. Unlike `new_file`/`open_file` — which
     // tear down under `deliberately_clean` because they END clean — a checkout
@@ -6610,6 +7556,15 @@ pub fn calp_checkout(
         Some(&window),
     )?;
 
+    // THE APPLICATION'S CUSTOM FUNCTIONS are the ones the merge STAMPED with it,
+    // read back after the merge ran -- not the incoming library. The merge keeps
+    // the author's own function when an incoming one has the same name
+    // (preserve-local), so recording the incoming name would make the author's
+    // function the application's, and the next push would ship it under that
+    // name. Recording only what landed leaves it home, named in the push report.
+    base_content.custom_function_names =
+        custom_function_keys_applied_by(&script_state, &params.package_name)?;
+
     // The workbook now IS this application version. Record it, so the push gates
     // have an answer to "which application, from which base".
     {
@@ -6622,10 +7577,11 @@ pub fn calp_checkout(
             &now,
             base_sheets,
         );
-        // WHICH SCRIPTS AND NOTEBOOKS ARE THE APPLICATION'S. Additive checkout
-        // leaves the author's own beside them, and without this record a push
-        // published every one — a private module with an API token included.
-        fresh.record_content(base_script_ids, base_notebook_ids, base_named_range_keys);
+        // WHICH SCRIPTS, NOTEBOOKS, NAMES, PANE CONTROLS AND FUNCTIONS ARE THE
+        // APPLICATION'S. Additive checkout leaves the author's own beside them,
+        // and without this record a push published every one — a private module
+        // with an API token included.
+        fresh.record_content(base_content);
         *link = Some(fresh);
     }
 
@@ -6634,6 +7590,16 @@ pub fn calp_checkout(
     // of its own. It is now additive: the application's sheets join the workbook
     // the user already has open, so clearing the path would turn their next
     // Ctrl+S into a Save As for a file they never closed.
+
+    // THE DEVELOPER'S OWN SHEETS BESIDE THE APPLICATION, by the run gate's own
+    // rule over the link just written -- so the dialog says in advance what a
+    // click on the application's button would be refused for.
+    let private_sheets = {
+        let link: Option<calp::WorkingCopyLink> =
+            state.working_copy_link.read().map_err(|e| e.to_string())?.clone();
+        let sheets = crate::scripting::application_code_gate::workbook_sheet_facts(&state)?;
+        crate::scripting::application_code_gate::private_sheets(link.as_ref(), &sheets)
+    };
 
     let cells = crate::persistence::collect_active_sheet_cells(&state)?;
 
@@ -6647,6 +7613,11 @@ pub fn calp_checkout(
         cells,
         custom_objects: materialized.custom_objects,
         first_sheet_index: materialized.first_pulled_sheet_index,
+        signer,
+        button_code_held: materialized.button_code_held,
+        oversized_values_cleared: materialized.oversized_values_cleared,
+        button_actions_held: materialized.button_actions_held,
+        private_sheets,
     })
 }
 
@@ -6780,12 +7751,16 @@ pub fn calp_hold_back_cells(
     }
 
 
-    // The base side, through the same verification every content read uses.
-    let (registry, base_version, _manifest) = crate::calp_inspector::open_verified_content(
+    // The base side, through the same verification every content read uses —
+    // PLUS the signer check (BUG-0262): these values are written into the
+    // working copy and published by the push that follows, so they must come
+    // from a version an authorised publisher signed, not merely a signed one.
+    let (registry, base_version, manifest) = crate::calp_inspector::open_authorized_content(
         &params.registry_path,
         &params.package_name,
         &format!("={}", params.base_version),
         true,
+        Some((&state, "holdBack")),
     )?;
 
     // The base speaks the APPLICATION's sheet names; a working copy whose
@@ -6822,6 +7797,7 @@ pub fn calp_hold_back_cells(
             &*registry,
             &params.package_name,
             &base_version,
+            &manifest,
             sheet_id,
             positions,
             &renames,
@@ -9059,6 +10035,9 @@ pub fn calp_refresh_apply(
             conflicts_created: 0,
             overrides_auto_cleared: 0,
             structural_conflicts: Vec::new(),
+            button_actions_removed: Vec::new(),
+            button_links_removed: Vec::new(),
+            inline_button_code_removed: Vec::new(),
         });
     }
 
@@ -9207,6 +10186,7 @@ pub(crate) fn prepare_refresh_payloads(
             &payload.pull_result.package_name,
             &payload.pull_result.module_scripts,
             &payload.pull_result.notebooks,
+            &payload.pull_result.object_scripts,
         )?;
     }
     Ok(by_payload)
@@ -9653,33 +10633,11 @@ pub(crate) fn apply_refresh_payloads(
         }
     }
 
-    // Cell types (distribution brick 4): refresh analog of the calp_pull
-    // materialization — RESET each refreshed sheet's assignments then apply the
-    // new version's, mirroring CF/DV so publisher add/change/remove all land.
-    // Per payload, through its own map, like everything else here.
-    {
-        let mut cell_types = state.cell_types.write(&effect).map_err(|e| e.to_string())?;
-        cell_types.retain(|(si, _, _), _| !refreshed_indices.contains(si));
-        for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
-            let saved: Vec<persistence::SavedSheetCellTypes> = payload
-                .pull_result
-                .custom_objects
-                .iter()
-                .filter(|co| co.kind == "cellType")
-                .filter_map(|co| {
-                    co.package_sheet_id.map(|sid| persistence::SavedSheetCellTypes {
-                        sheet_id: sid,
-                        cells: co.payload.clone(),
-                    })
-                })
-                .collect();
-            crate::cell_types::materialize_saved_cell_types(
-                &saved,
-                &mut cell_types,
-                |sid| pkg_to_index.get(&sid).copied(),
-            );
-        }
-    }
+    // Cell types (distribution brick 4) are materialized BELOW, after the
+    // module scripts: a button cell's script action survives only when it names
+    // a module this refresh applied for its application (BUG-0260), which is
+    // known only once the modules have landed. Their payloads are collected
+    // before `apply_refresh` moves the payloads (`cell_type_updates`).
 
     // (The refreshed sheets' presentation state was materialized above, before
     // the partition repair.)
@@ -9758,6 +10716,79 @@ pub(crate) fn apply_refresh_payloads(
         }
     }
 
+    // C8: materialize each refreshed application's standalone module scripts +
+    // notebooks so upstream updates (incl. removals) actually land on refresh,
+    // while preserving subscriber-local same-id documents.
+    //
+    // FIRST OF THE BUTTON-BEARING STORES (phase 3 of BUG-0257), as on the pull
+    // door: a button control's macro link survives only when it names a module
+    // THIS refresh applied for its application, and so does a button cell's
+    // script action (BUG-0260) -- which is known only once the modules have
+    // landed. The applied list, never the incoming one: an id skipped on a
+    // collision is exactly the id that names the subscriber's own macro. LOCK
+    // ORDER: the script maps are taken and released inside
+    // `materialize_distributed_scripts`, before the media and controls locks
+    // below and the cell types further down -- never nested. Their ledger
+    // entries are appended where they always were, after the object-script swap.
+    //
+    // KNOWN COST: the modules now land before `apply_refresh`, so the
+    // concurrent-detach bail below ("Subscriptions changed while the refresh
+    // was running") returns with them in place -- partial state on an error
+    // path, the same class the cell types accepted.
+    let mut any_custom_functions_changed = false;
+    // The module ids each payload's materialization ACTUALLY applied, aligned
+    // with `payloads`, for the button admissions below.
+    let mut applied_modules_by_payload: Vec<std::collections::HashSet<String>> = Vec::new();
+    let mut module_script_entries: Vec<(String, Vec<calp::manifest::SubscribedObject>)> = Vec::new();
+    for payload in &payloads {
+        let pkg = &payload.pull_result.package_name;
+        let (applied_modules, applied_notebooks, cf_changed) = materialize_distributed_scripts(
+            &effect,
+            &script_state,
+            pkg,
+            &payload.pull_result.module_scripts,
+            &payload.pull_result.notebooks,
+        )?;
+        any_custom_functions_changed |= cf_changed;
+        applied_modules_by_payload.push(applied_modules.iter().map(|(id, _)| id.clone()).collect());
+        let mut entries: Vec<calp::manifest::SubscribedObject> = Vec::new();
+        for (id, name) in applied_modules {
+            entries.push(calp::manifest::SubscribedObject {
+                kind: "moduleScript".to_string(),
+                id,
+                name,
+                extra: std::collections::HashMap::new(),
+            });
+        }
+        for (id, name) in applied_notebooks {
+            entries.push(calp::manifest::SubscribedObject {
+                kind: "notebook".to_string(),
+                id,
+                name,
+                extra: std::collections::HashMap::new(),
+            });
+        }
+        module_script_entries.push((pkg.clone(), entries));
+    }
+
+    // WHERE EACH PAYLOAD CAME FROM, as its landed links and its button cells are
+    // stamped. Aligned with `payloads`.
+    let payload_origins: Vec<crate::held_button_code::HeldFrom> = payloads
+        .iter()
+        .map(|p| crate::held_button_code::HeldFrom {
+            workspace: calp::workspace_scope(&p.pull_result.subscription.registry_url)
+                .map(|s| s.id)
+                .unwrap_or_default(),
+            application: p.pull_result.package_name.clone(),
+            version: p.pull_result.resolved_version.to_string(),
+            value_types: Default::default(),
+        })
+        .collect();
+    // Macro links -- and formula-typed inline actions (phase 4) -- the
+    // controls' admission removed, for the result.
+    let mut button_links_removed: Vec<String> = Vec::new();
+    let mut inline_button_code_removed: Vec<String> = Vec::new();
+
     // Sparklines + controls: RESET each refreshed sheet's entries then apply
     // v2's (CF/DV semantics — sparklines carry no id, and controls are
     // publisher-owned presentation on subscribed sheets). Yields the on-grid
@@ -9818,12 +10849,33 @@ pub(crate) fn apply_refresh_payloads(
             // media-then-controls is the order this whole block already uses.
             let mut admitted_controls: Vec<Vec<persistence::SavedSheetControls>> =
                 Vec::with_capacity(payloads.len());
-            for payload in &payloads {
-                admitted_controls.push(crate::media::admit_distributed_controls(
+            for ((payload, applied), from) in
+                payloads.iter().zip(applied_modules_by_payload.iter()).zip(payload_origins.iter())
+            {
+                // A refresh is a SUBSCRIBER's door: static inline code is HELD,
+                // stamped with the new version (phase 4) -- changed code is new
+                // code, approved by its own hash -- and a macro link is HELD,
+                // stamped, only when its macro landed in THIS refresh for the
+                // application (phase 3): a v2 that drops the macro drops the
+                // link with it.
+                let admitted = crate::media::admit_distributed_controls(
                     &state,
                     &effect,
                     &payload.pull_result.controls,
-                )?);
+                    &crate::held_button_code::DistributedWiring::LinkLanded {
+                        from: from.clone(),
+                        landed_macros: applied.clone(),
+                        sheet_names: payload
+                            .pull_result
+                            .sheets
+                            .iter()
+                            .map(|ps| (ps.package_sheet_id, ps.name.clone()))
+                            .collect(),
+                    },
+                )?;
+                button_links_removed.extend(admitted.wiring.links_removed);
+                inline_button_code_removed.extend(admitted.wiring.inline_removed);
+                admitted_controls.push(admitted.controls);
             }
             let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
             controls.retain(|(sheet_idx, _, _), _| !refreshed.contains(sheet_idx));
@@ -9968,13 +11020,14 @@ pub(crate) fn apply_refresh_payloads(
             }
         }
         for (payload, pkg_to_index) in payloads.iter().zip(pkg_maps.iter()) {
-            // Same sanitization as first pull: distributed computed-property
-            // formulas never materialize.
+            // The same materializer as a first pull, computed properties and
+            // all (BUG-0263); `prepare_refresh_payloads` already renamed their
+            // sheet references with the rest of the pull.
             let applied = materialize_pulled_slicers(
                 &effect,
                 &state,
                 &slicer_state,
-                &sanitize_distributed_slicers(&payload.pull_result.slicers),
+                &payload.pull_result.slicers,
                 |sid| pkg_to_index.get(&sid).copied(),
             )?;
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
@@ -10356,23 +11409,29 @@ pub(crate) fn apply_refresh_payloads(
         })
         .collect();
 
-    // C8: likewise collect the refreshed standalone module scripts + notebooks
-    // before the move, so the refresh can materialize them (without this they are
-    // pulled then silently dropped, leaving a subscriber stuck on the version
-    // present at first subscribe). Kept PER APPLICATION so removal-on-refresh +
-    // preserve-local can scope to the owning application.
+    // BUG-0260: each payload's cell-type payloads and the stamp its button
+    // cells get, collected before the move. Aligned with `payloads` (and so
+    // with `pkg_maps` and `applied_modules_by_payload`).
     #[allow(clippy::type_complexity)]
-    let module_notebook_updates: Vec<(String, Vec<persistence::SavedScript>, Vec<persistence::SavedNotebook>)> =
-        payloads
-            .iter()
-            .map(|p| {
-                (
-                    p.pull_result.package_name.clone(),
-                    p.pull_result.module_scripts.clone(),
-                    p.pull_result.notebooks.clone(),
-                )
-            })
-            .collect();
+    let cell_type_updates: Vec<(
+        crate::held_button_code::HeldFrom,
+        Vec<persistence::SavedSheetCellTypes>,
+        std::collections::HashMap<SheetId, String>,
+    )> = payloads
+        .iter()
+        .zip(payload_origins.iter())
+        .map(|(p, from)| {
+            (
+                from.clone(),
+                crate::button_cells::cell_type_payloads(&p.pull_result.custom_objects),
+                p.pull_result
+                    .sheets
+                    .iter()
+                    .map(|ps| (ps.package_sheet_id, ps.name.clone()))
+                    .collect(),
+            )
+        })
+        .collect();
 
     // Apply refresh: update subscription metadata and rebase overrides.
     let mut subs = state.subscriptions.write(&effect).map_err(|e| e.to_string())?;
@@ -10582,38 +11641,55 @@ pub(crate) fn apply_refresh_payloads(
         }
     }
 
-    // C8: materialize each refreshed application's standalone module scripts +
-    // notebooks so upstream updates (incl. removals) actually land on refresh,
-    // while preserving subscriber-local same-id documents.
-    let mut any_custom_functions_changed = false;
-    for (pkg, modules, notebooks) in &module_notebook_updates {
-        let (applied_modules, applied_notebooks, cf_changed) =
-            materialize_distributed_scripts(&effect, &script_state, pkg, modules, notebooks)?;
-        any_custom_functions_changed |= cf_changed;
-        let mut entries: Vec<calp::manifest::SubscribedObject> = Vec::new();
-        for (id, name) in applied_modules {
-            entries.push(calp::manifest::SubscribedObject {
-                kind: "moduleScript".to_string(),
-                id,
-                name,
-                extra: std::collections::HashMap::new(),
-            });
-        }
-        for (id, name) in applied_notebooks {
-            entries.push(calp::manifest::SubscribedObject {
-                kind: "notebook".to_string(),
-                id,
-                name,
-                extra: std::collections::HashMap::new(),
-            });
-        }
-        applied_script_entries.push((pkg.clone(), entries));
-    }
+    // C8: the module scripts + notebooks were materialized ABOVE, before the
+    // controls (phase 3); their ledger entries join the object scripts' here,
+    // where they always did.
+    applied_script_entries.extend(module_script_entries);
     if any_custom_functions_changed {
         // Re-install the live UDF registry NOW — without this, refreshed
         // custom-function formulas stay stale/#NAME? until a reopen.
         if let Some(window) = window {
             let _ = tauri::Emitter::emit(window, "custom-functions:refresh", ());
+        }
+    }
+
+    // Cell types (distribution brick 4): refresh analog of the calp_pull
+    // materialization — RESET each refreshed sheet's assignments then apply the
+    // new version's, mirroring CF/DV so publisher add/change/remove all land.
+    // Per payload, through its own map, like everything else here.
+    //
+    // ADMITTED, NOT COPIED (BUG-0260): a refresh is a subscriber's door, so a
+    // button cell keeps a script action only when it names a module THIS
+    // refresh applied for its application, and every other action is removed
+    // and named in the result. LOCK ORDER as on the pull door: the script maps
+    // were taken and released inside `materialize_distributed_scripts` long
+    // before, ahead of the media and controls locks.
+    result.button_links_removed.extend(std::mem::take(&mut button_links_removed));
+    result.inline_button_code_removed.extend(std::mem::take(&mut inline_button_code_removed));
+    {
+        let mut cell_types = state.cell_types.write(&effect).map_err(|e| e.to_string())?;
+        cell_types.retain(|(si, _, _), _| !refreshed_indices.contains(si));
+        for (((from, saved, sheet_names), applied), pkg_to_index) in cell_type_updates
+            .iter()
+            .zip(applied_modules_by_payload.iter())
+            .zip(pkg_maps.iter())
+        {
+            let (admitted, report) = crate::button_cells::admit_button_cells(
+                saved,
+                &crate::button_cells::ButtonCellDoor {
+                    from: from.clone(),
+                    applied_modules: applied,
+                    allowed_commands: crate::button_cells::DISTRIBUTABLE_BUTTON_COMMANDS,
+                    wiring: crate::button_cells::CellActionWiring::Remove,
+                    sheet_names,
+                },
+            );
+            result.button_actions_removed.extend(report.removed);
+            crate::cell_types::materialize_saved_cell_types(
+                &admitted,
+                &mut cell_types,
+                |sid| pkg_to_index.get(&sid).copied(),
+            );
         }
     }
 
@@ -10783,7 +11859,13 @@ pub(crate) fn apply_refresh_payloads(
         if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
             audit.record(
                 calp::audit::AuditEvent::Refresh,
-                "Refreshed subscriptions from workspace",
+                &format!(
+                    "Refreshed subscriptions from workspace ({} button-cell action(s) removed, {} button \
+                     macro link(s) removed, {} inline button action(s) removed)",
+                    result.button_actions_removed.len(),
+                    result.button_links_removed.len(),
+                    result.inline_button_code_removed.len()
+                ),
                 &user,
                 &now,
             );
@@ -10806,6 +11888,18 @@ pub(crate) fn record_audit_event(
     event: calp::audit::AuditEvent,
     description: String,
 ) {
+    record_audit_event_with_extra(state, event, description, std::collections::HashMap::new());
+}
+
+/// [`record_audit_event`] with structured `extra` fields, so a row can be
+/// queried by what it names (a refused checkout's colliding ids) rather than
+/// only read.
+pub(crate) fn record_audit_event_with_extra(
+    state: &AppState,
+    event: calp::audit::AuditEvent,
+    description: String,
+    extra: std::collections::HashMap<String, serde_json::Value>,
+) {
     let now = chrono::Utc::now().to_rfc3339();
     let user = audit_user(state);
     if let Ok(mut audit) = state.audit_log.write(
@@ -10813,7 +11907,7 @@ pub(crate) fn record_audit_event(
             crate::document_effect::CleanReason::AuditTrail,
         ),
     ) {
-        audit.record(event, &description, &user, &now);
+        audit.record_with_extra(event, &description, &user, &now, extra);
     }
 }
 
@@ -11653,6 +12747,21 @@ pub(crate) fn dev_subscribe_inner(
         trust_status: "dev".to_string(),
         other_scope_pins: Vec::new(),
         custom_objects: Vec::new(),
+        // A dev pull strips (only a checkout holds); the clamp count is logged by
+        // the admission.
+        button_code_held: 0,
+        oversized_values_cleared: 0,
+        // A dev pull carries NO cell types (`calp::dev_mode::DevPullResult` has
+        // no custom objects), so no button cell passes this door (BUG-0260).
+        button_actions_held: Vec::new(),
+        button_actions_removed: Vec::new(),
+        // ...and no modules, so no macro link can land: every one is stripped
+        // (`materialize_dev_controls`) -- and so is inline code, which no signed
+        // application's approval could name.
+        button_links_held: 0,
+        button_links_removed: Vec::new(),
+        inline_button_code_held: 0,
+        inline_button_code_removed: Vec::new(),
     })
 }
 
@@ -11681,7 +12790,21 @@ fn materialize_dev_controls(
     if result.controls.is_empty() {
         return Ok(());
     }
-    let sanitized = crate::media::admit_distributed_controls(state, effect, &result.controls)?;
+    // A dev pull is a subscriber-side preview: it strips (BUG-0257 holds only at
+    // a checkout). It STRIPS even a macro link, where a subscribe would hold a
+    // landed one (phase 3): a dev pull brings NO modules (`scripts_pulled: 0`),
+    // so no link can name a macro this pull landed, and there is no signed
+    // application whose approval a held link could run under. It strips inline
+    // code too, where a subscribe holds it (phase 4): the approval of held inline
+    // code is recorded under a signed application's name, and a dev pull brings
+    // none an approval could name.
+    let sanitized = crate::media::admit_distributed_controls(
+        state,
+        effect,
+        &result.controls,
+        &crate::held_button_code::DistributedWiring::Strip,
+    )?
+    .controls;
     let mut controls = state.controls.write(effect).map_err(|e| e.to_string())?;
     crate::controls::materialize_saved_controls(&sanitized, &mut controls, |sid| {
         dev_map.get(&sid).copied()
@@ -11979,6 +13102,20 @@ pub(crate) fn dev_refresh_inner(
         trust_status: "dev".to_string(),
         other_scope_pins: Vec::new(),
         custom_objects: Vec::new(),
+        // A dev pull strips (only a checkout holds); the clamp count is logged by
+        // the admission.
+        button_code_held: 0,
+        oversized_values_cleared: 0,
+        // A dev pull carries NO cell types (`calp::dev_mode::DevPullResult` has
+        // no custom objects), so no button cell passes this door (BUG-0260).
+        button_actions_held: Vec::new(),
+        button_actions_removed: Vec::new(),
+        // ...and no modules, so no macro link can land (`materialize_dev_controls`),
+        // and no signed application whose approval inline code could run under.
+        button_links_held: 0,
+        button_links_removed: Vec::new(),
+        inline_button_code_held: 0,
+        inline_button_code_removed: Vec::new(),
     })
 }
 
@@ -13278,12 +14415,20 @@ pub fn calp_reconcile_writeback(
 //
 // CONSENT. Publisher code that runs on a subscriber's machine goes through the
 // same door as every other distributed script: the shared consent store in the
-// workbook (`.calcula/script-consent.json`, written by @api/distributedConsent),
-// keyed by application AND by SHA-256 of the exact source. Changing the body changes
-// the hash and re-prompts; an un-consented validator fails closed at submit.
-// Validators are keyed under `<application>::writeback-validators` so granting them
-// neither clobbers nor inherits the object-script consent record for the same
-// application (two independent writers, one file).
+// workbook (`.calcula/script-consent.json`), keyed by application AND by SHA-256
+// of the exact source. Changing the body changes the hash and re-prompts; an
+// un-consented validator fails closed at submit. Validators are keyed under
+// `<application>::writeback-validators` so granting them neither clobbers nor
+// inherits the object-script consent record for the same application (two
+// independent writers, one file).
+//
+// The store is SEALED TO THIS COMPUTER (crate::consent_seal). Only
+// `record_script_consent` writes it, computing every hash itself and sealing the
+// record with a key that never leaves this computer; the page cannot write the
+// file (create/rename refuse its key). Every gate reads it through
+// `read_script_consent_file_in`, which keeps only the records this computer
+// sealed and that still match their seal -- so a workbook handed over from
+// anywhere else arrives with no approvals and asks again.
 //
 // The frontend mirror in @api/writebackValidators.ts mounts the SAME source in
 // the hardened worker realm for as-you-type feedback. That run is advisory by
@@ -13293,8 +14438,6 @@ pub fn calp_reconcile_writeback(
 const VALIDATOR_NAME_KEY: &str = "customValidator";
 /// Schema `extra` key holding the validator's JS body (a function expression).
 const VALIDATOR_SOURCE_KEY: &str = "customValidatorSource";
-/// The workbook-embedded distributed-script consent store.
-const SCRIPT_CONSENT_FILE: &str = ".calcula/script-consent.json";
 
 /// Consent-store application key for an application's writeback validators.
 /// MUST match `writebackValidatorConsentKey` in @api/writebackValidators.ts.
@@ -13399,7 +14542,12 @@ pub(crate) fn consent_granted_in(
 /// on to require `consent_granted_in` for it.
 ///
 /// A record with an EMPTY script list is not an approval: it names an
-/// application without approving any of its code.
+/// application without approving any of its code. Nor is a record that
+/// approves only BUTTON code (`buttonAction:<sha256>` ids, M6): those approvals
+/// sit in the application's bare record -- the object-script key -- but they
+/// approve bytes that run only from their button, through the button door, so
+/// approving a ten-character button action must not open the mount floor for
+/// an application that ships no object scripts.
 pub(crate) fn consent_record_exists_in(
     consent_file: &serde_json::Value,
     package_key: &str,
@@ -13407,13 +14555,17 @@ pub(crate) fn consent_record_exists_in(
     let Some(consents) = consent_file.get("consents").and_then(|c| c.as_array()) else {
         return false;
     };
+    let button_action = crate::scripting::control_action::BUTTON_ACTION_CONSENT_PREFIX;
     consents.iter().any(|record| {
         record.get("packageName").and_then(|v| v.as_str()) == Some(package_key)
             && record
                 .get("scripts")
                 .and_then(|s| s.as_array())
-                .map(|scripts| !scripts.is_empty())
-                .unwrap_or(false)
+                .is_some_and(|scripts| {
+                    scripts.iter().any(|s| {
+                        s.get("id").and_then(|v| v.as_str()).is_some_and(|id| !id.starts_with(button_action))
+                    })
+                })
     })
 }
 
@@ -13426,14 +14578,30 @@ fn window_app_handle(window: &tauri::Window) -> &tauri::AppHandle {
     Manager::app_handle(window)
 }
 
-/// Read the workbook's distributed-script consent store. `None` when the
-/// workbook carries no consent file or it is not parseable JSON.
+/// Read the workbook's distributed-script consent store, as every gate must see
+/// it. `None` when the workbook carries no consent file or it is not parseable
+/// JSON. A one-line wrapper: the reading is [`read_script_consent_file_in`].
 pub(crate) fn read_script_consent_file(app: &tauri::AppHandle) -> Option<serde_json::Value> {
     use tauri::Manager;
-    let user_files = app.state::<crate::persistence::UserFilesState>();
-    let files = user_files.files.lock().ok()?;
-    let bytes = files.get(SCRIPT_CONSENT_FILE)?;
-    serde_json::from_slice::<serde_json::Value>(bytes).ok()
+    read_script_consent_file_in(&app.state::<crate::persistence::UserFilesState>())
+}
+
+/// The VERIFIED consent store: only the records THIS computer sealed and that
+/// still match their seal (crate::consent_seal), in the JSON shape
+/// `consent_granted_in` / `consent_record_exists_in` read. A record another
+/// computer sealed, an unsealed one, or one altered after sealing counts for
+/// nothing here.
+///
+/// The bytes are copied and the user-files guard DROPPED before verifying:
+/// verifying reads this computer's key, and key I/O never runs under that mutex.
+pub(crate) fn read_script_consent_file_in(
+    user_files: &crate::persistence::UserFilesState,
+) -> Option<serde_json::Value> {
+    let bytes = {
+        let files = user_files.files.lock().ok()?;
+        files.get(crate::consent_seal::SCRIPT_CONSENT_FILE)?.clone()
+    };
+    crate::consent_seal::verified_view(&bytes)
 }
 
 /// Whether the user has consented to run this exact validator body for this

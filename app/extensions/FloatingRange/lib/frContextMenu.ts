@@ -1,6 +1,7 @@
 //! FILENAME: app/extensions/FloatingRange/lib/frContextMenu.ts
 // PURPOSE: The item MODEL for a floating range's own right-click menu
-//          (Add/Delete Row/Column, Rename…, Properties…, Delete).
+//          (Add/Delete Row/Column, Size and Position…, Rename…, Properties…,
+//          Delete).
 // CONTEXT: These items used to be registered into `gridExtensions`, the
 //          registry only `GridContextMenuHost` renders — and that host is only
 //          opened by `AppEvents.CONTEXT_MENU_REQUEST`, which Core deliberately
@@ -16,6 +17,14 @@
 //          this module is reduced to the part worth keeping — the item list —
 //          so the menu component stays a renderer and the actions stay with
 //          the lifecycle owner.
+//
+//          "Size and Position..." is the row EVERY object menu carries
+//          (@api/objectPosition; BUG-0258 design phase 5b): the no-drag route
+//          to place the grid. Its Width and Height stay disabled -- a range's
+//          size is its rows and columns, which the four size items change.
+
+import type { GridRegion } from "@api/gridOverlays";
+import { SIZE_AND_POSITION_LABEL, sizeAndPositionMenuEntry } from "@api/objectPosition";
 
 /** How many of these menus are mounted (0 or 1 in practice; a count, because
  *  a re-open mounts the new menu before the old one's cleanup runs). */
@@ -72,6 +81,8 @@ export interface FrContextMenuHandlers {
    * (or one on a subscribed canvas, whose menu does not open at all).
    */
   canEditGeometry(frId: string): boolean;
+  /** The range's published region on the active sheet (null when it is not published). */
+  regionOf(frId: string): GridRegion | null;
 }
 
 /**
@@ -85,6 +96,8 @@ export function buildFrContextMenu(
 ): FrMenuItem[] {
   const counts = handlers.getCounts(frId);
   const geometry = handlers.canEditGeometry(frId);
+  const region = handlers.regionOf(frId);
+  const sizePos = region ? sizeAndPositionMenuEntry(region) : null;
   return [
     {
       id: "floatingRange.addRow",
@@ -110,6 +123,15 @@ export function buildFrContextMenu(
       enabled: geometry && (counts?.cols ?? 1) > 1,
       separatorAfter: true,
       run: () => handlers.deleteLastColumn(frId),
+    },
+    {
+      id: "floatingRange.sizeAndPosition",
+      label: SIZE_AND_POSITION_LABEL,
+      // Hidden only when no dialog can open for the range (not published, no
+      // dialog installed); a LOCKED range still opens it, read-only.
+      enabled: !!sizePos && !sizePos.disabled,
+      separatorAfter: true,
+      run: () => sizePos?.run(),
     },
     {
       id: "floatingRange.rename",

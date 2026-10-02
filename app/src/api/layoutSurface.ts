@@ -20,7 +20,6 @@ export {
   clampResizeToPage,
   applySurfaceToMove,
   applySurfaceToResize,
-  edgesOfCorner,
   LAYOUT_PAGE_MARGIN,
   GRID_SCROLLBAR_GUTTER_PX,
   pageScrollExtent,

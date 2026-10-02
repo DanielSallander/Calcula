@@ -7,6 +7,9 @@
 //!   Read-only, available to the Package Inspector window.
 //! * `calp_diff_working_copy` — the open workbook against the version it was
 //!   authored from. Main window only, because it reads the live document.
+//!   Asked by the push dialog (`codeSummary`), it also carries the CODE this
+//!   push changes -- the Promote dialog's code summary, base -> push
+//!   (`push_code_summary`, owner question 14).
 //!
 //! **Verification posture: the inspector's, unchanged.** Both published sides
 //! go through `open_verified_content` with the full per-artifact SHA-256 walk
@@ -196,6 +199,18 @@ pub struct DiffWorkingCopyParams {
     /// them: every one reads as REMOVED against a base that carries it.
     #[serde(default)]
     pub custom_objects: Option<Vec<crate::calp_commands::FrontendCustomObject>>,
+    /// What the push dialog ADDS to the application ("Include in application",
+    /// `PublishParams::include_in_application`), so the working side is the
+    /// push the dialog would make. Empty for every other caller.
+    #[serde(default)]
+    pub include_in_application: Vec<crate::calp_push_scope::IncludedItem>,
+    /// Also compare the CODE (owner question 14): the push dialog asks, so the
+    /// developer reads which macros, scripts, functions, notebooks, buttons and
+    /// validators this push changes -- and what each change means for everyone
+    /// on the development line -- before anything goes out under their key.
+    /// False for every other caller, whose answer then carries `code: null`.
+    #[serde(default)]
+    pub code_summary: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -204,6 +219,75 @@ pub struct WorkingCopyDiff {
     pub package_name: String,
     pub base_version: String,
     pub diff: VersionDiff,
+    /// The code this push changes, when the caller asked for it
+    /// (`code_summary`); `null` otherwise.
+    pub code: Option<WorkingCopyCode>,
+}
+
+/// The CODE this push changes against its signed base (owner question 14): the
+/// Promote dialog's code summary (`calp::code_summary`), here between the base
+/// version and what the push would publish, with what each change means for
+/// everyone on the development line. The same three fields as the promotion's
+/// `PromotionImpactResponse` carries, so one TypeScript reader reads both.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkingCopyCode {
+    /// Empty when `code_error` is set: an empty list then means "not known",
+    /// never "no code changes".
+    pub code_changes: Vec<calp::code_summary::CodeChange>,
+    /// Whether anyone who approved the application's code will be asked again.
+    pub asks_approval_again: bool,
+    /// Why the code could not be compared -- an artifact of the base that no
+    /// longer matches its signed checksum, a file that cannot be read. NAMED,
+    /// never swallowed, and serialized as `null` when there is none.
+    pub code_error: Option<String>,
+}
+
+/// The code summary of a push: the BASE (already opened by the caller through
+/// the verified reader) against the push's in-memory publish.
+///
+/// * THE BASE is read as `DiffSide::PublishedChecked`, so each code artifact the
+///   summary reads is held to the base's SIGNED checksum at the moment it is
+///   read -- the caller verified the base and then spent a whole publish before
+///   this runs, and a module rewritten on the share in between must not become
+///   the BEFORE side of a row.
+/// * THE PUSH is the in-memory publish the cell diff compares, so the two
+///   halves of the preview describe one push.
+/// * A button cell's command is judged against the same list the subscriber's
+///   admission uses (`button_cells::DISTRIBUTABLE_BUTTON_COMMANDS`), exactly as
+///   the promotion's summary judges it.
+pub(crate) fn push_code_summary(
+    base_transport: &dyn WorkspaceTransport,
+    package: &str,
+    base_version: &str,
+    base_manifest: &calp::VersionManifest,
+    working_manifest: &calp::VersionManifest,
+    working_artifacts: &BTreeMap<String, Vec<u8>>,
+) -> WorkingCopyCode {
+    let base = DiffSide::PublishedChecked {
+        transport: base_transport,
+        package,
+        version: base_version,
+        manifest: base_manifest,
+    };
+    let push = DiffSide::InMemory { manifest: working_manifest, artifacts: working_artifacts };
+    match calp::code_summary::code_summary(
+        Some(&base),
+        &push,
+        &DiffOptions::default(),
+        crate::button_cells::DISTRIBUTABLE_BUTTON_COMMANDS,
+    ) {
+        Ok(summary) => WorkingCopyCode {
+            code_changes: summary.changes,
+            asks_approval_again: summary.asks_approval_again,
+            code_error: None,
+        },
+        Err(e) => WorkingCopyCode {
+            code_changes: Vec::new(),
+            asks_approval_again: false,
+            code_error: Some(format!("the code of this push could not be compared with v{base_version}: {e}")),
+        },
+    }
 }
 
 /// What this workbook's next push would change.
@@ -325,6 +409,7 @@ pub fn calp_diff_working_copy(
         params.include_comments,
         params.custom_objects,
         &published_names,
+        &params.include_in_application,
     )?;
     let working_version_str = working_version.to_string();
     let working_manifest = memory
@@ -332,6 +417,22 @@ pub fn calp_diff_working_copy(
         .map_err(|e| e.to_string())?;
     let artifacts: BTreeMap<String, Vec<u8>> =
         memory.artifacts_of(&package_name, &working_version_str);
+
+    // THE CODE, when asked (the push dialog): the verified base against the
+    // very publish the cell diff below compares, so both halves of the preview
+    // describe one push. A failure is carried in `code_error`, beside the diff.
+    let code = if params.code_summary {
+        Some(push_code_summary(
+            base_registry.as_ref(),
+            &package_name,
+            &base_version,
+            &base_manifest,
+            &working_manifest,
+            &artifacts,
+        ))
+    } else {
+        None
+    };
 
     // A workbook that SUBSCRIBED to this package carries its own local sheet
     // ids; without the remap every sheet would read as removed-and-added. A
@@ -365,6 +466,7 @@ pub fn calp_diff_working_copy(
         package_name,
         base_version,
         diff: scope_diff(diff, params.scope_sheet_ids.as_deref()),
+        code,
     })
 }
 

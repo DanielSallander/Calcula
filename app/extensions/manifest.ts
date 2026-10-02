@@ -25,6 +25,7 @@ import ZoomSliderExtension from "./BuiltIn/ZoomSlider";
 import HomeTabExtension from "./BuiltIn/HomeTab";
 import DocumentThemeExtension from "./BuiltIn/DocumentTheme";
 import CollectionPreviewExtension from "./BuiltIn/CollectionPreview";
+import ObjectPositionExtension from "./BuiltIn/ObjectPosition";
 
 // Activity Bar views (migrated from Path B)
 import FileExplorerExtension from "./FileExplorer";
@@ -221,6 +222,11 @@ export const builtInExtensions: ExtensionModule[] = [
   // is dragged, the page painter, and the contextual Canvas tab. After every
   // floating-object family, whose objects it lays out.
   CanvasSheetExtension,
+  // Size and Position (BUG-0258 phase 5b): the grip's menu and the no-drag
+  // dialog every object family's right-click menu opens through
+  // @api/objectPosition. After the families and the canvas, whose grip-menu
+  // items it lists (order-independent: read when the menu opens).
+  ObjectPositionExtension,
   BusinessIntelligenceExtension,
   // In-app model authoring (measures) — edits BI connections' embedded models
   ModelEditorExtension,

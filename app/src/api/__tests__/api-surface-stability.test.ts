@@ -211,6 +211,7 @@ describe("api/objectSelection.ts selection-set surface", () => {
       "onObjectSelectionChanged",
       "notifyObjectSelectionChanged",
       "noteObjectPress",
+      "noteWorksheetObjectPress",
       "objectLabelOf",
     ]) {
       expect(typeof mod[fn]).toBe("function");

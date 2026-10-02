@@ -309,7 +309,12 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
     runtime: "rust-quickjs",
     containment: "Ephemeral QuickJS over cloned state; grid-only, no ambient access (no model provider is installed for this surface)",
     capabilities: [],
-    gate: "Coarse session approval (check_script_security)",
+    // An APPLICATION's code on this surface -- its macros, and since M6 its
+    // button actions (inline button code, run by the Rust button door
+    // run_control_action) -- also needs that application's approval of its
+    // exact bytes: consent_granted_in over the approvals sealed to THIS
+    // computer (app/src-tauri/src/consent_seal.rs), asked in Rust.
+    gate: "Coarse session approval (check_script_security); an application's macros and button actions also need that application's approval of their exact bytes (sha256), sealed to this computer and enforced in Rust by the run gate and the button door (run_control_action)",
     executesUserCode: true,
   },
   {

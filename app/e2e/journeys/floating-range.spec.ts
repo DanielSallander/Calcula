@@ -522,9 +522,10 @@ test.describe.serial("floating ranges, live", () => {
   //
   // The corner handles change the row/column COUNTS. These change the cell
   // SIZES. The interesting part is not the arithmetic (unit-tested) but that
-  // the gesture survives at all: Core consults claimsBodyDrag and then
-  // dispatches bodyDragStart synchronously, and that second handler used to
-  // tear the edge drag down before its first mousemove.
+  // the gesture survives at all: Core resolves the grid's zone (an edge
+  // handle is CONTENT) and then dispatches bodyDragStart synchronously, and
+  // that second handler used to tear the edge drag down before its first
+  // mousemove.
   // -------------------------------------------------------------------------
 
   test("dragging an edge handle scales the cells without changing the counts", async ({

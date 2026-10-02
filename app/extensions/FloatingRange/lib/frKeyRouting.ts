@@ -143,8 +143,9 @@ export function frRefusesCombo(): boolean {
 
 /**
  * The range's Delete door (index.ts `deleteFrSelection`) asks this BEFORE its
- * own delete: on a CANVAS whose object selection spans families, with no
- * inner cell selection, Delete acts on the WHOLE selection
+ * own delete: when the object selection spans families (on a canvas, and on a
+ * worksheet since its press parity, BUG-0270 review), with no inner cell
+ * selection, Delete acts on the WHOLE selection
  * (@api/objectSelection) -- a second chart and a slicer beside the range are
  * deleted with it, through each family's `deleteObjects`. The keybinding
  * dispatcher runs ONE winner per key, so whichever family's Delete binding

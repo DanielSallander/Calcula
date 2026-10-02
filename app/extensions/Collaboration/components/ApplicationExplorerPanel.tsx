@@ -21,6 +21,7 @@ import type {
   PublishPreviewResponse,
 } from "@api";
 import { openApplicationInspectorWindow } from "../lib/openApplicationInspectorWindow";
+import { AddedToApplicationList, WithheldContentList } from "./WithheldContentList";
 
 const KIND_LABELS: Record<string, string> = {
   table: "Tables",
@@ -248,7 +249,10 @@ export function PublishReportView({ report }: { report: PublishReport }): React.
       ))}
 
       <div style={{ ...groupLabelStyle, color: "#b8860b" }}>Stays behind</div>
-      {report.excluded.length === 0 ? (
+      {/* "Nothing is left out" must also be true of what THIS push withheld
+          (BUG-0261): a working copy's private scripts and other applications'
+          code are left out by name, just below. */}
+      {report.excluded.length === 0 && (report.withheld ?? []).length === 0 ? (
         <div style={{ ...rowStyle, ...mutedStyle }}>
           Nothing in this workbook is left out.
         </div>
@@ -263,6 +267,10 @@ export function PublishReportView({ report }: { report: PublishReport }): React.
           </div>
         ))
       )}
+      <WithheldContentList items={report.withheld ?? []} />
+      {/* What this push ADDS from your own content ("Include in application",
+          M4) -- it goes out under your key, so it is named too. */}
+      <AddedToApplicationList items={report.addedToApplication ?? []} />
 
       <div style={{ ...rowStyle, ...mutedStyle, marginTop: "6px" }}>
         By policy, credentials, the audit log, subscriber-local files and pivot

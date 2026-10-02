@@ -141,6 +141,40 @@ describe("backend command capability model (A3)", () => {
       "ai_builtin_start", "ai_builtin_stop", "ai_builtin_delete_model"]) {
       expect(commandCapability(c), c).toBe("localRuntime");
     }
+    // Forgetting a remembered creator (the developer anchor) lowers the one
+    // guard against a planted first version: human-UI only.
+    expect(commandCapability("calp_forget_developer_anchor")).toBe("collaborationTrust");
+    // Recording an approval switches application code on: a grant door (M6).
+    // Listing approvals only reads, and stays feature-open.
+    expect(commandCapability("record_script_consent")).toBe("codeExecution");
+    expect(isPrivilegedCommand("list_script_consents")).toBe(false);
+    expect(backendCommandNames().has("list_script_consents")).toBe(true);
+    // The button door runs code -- an application's approved code among it --
+    // exactly as run_script does (M6 Task B).
+    expect(commandCapability("run_control_action")).toBe("codeExecution");
+    expect(backendCommandNames().has("run_control_action")).toBe(true);
+    // "Make this my own" turns an application's button code into code that
+    // runs with no approval: a grant door, human-UI only.
+    expect(commandCapability("adopt_held_button_code")).toBe("codeExecution");
+    expect(backendCommandNames().has("adopt_held_button_code")).toBe(true);
+    // An application's button COMMAND is admitted -- and its run row written --
+    // by the second question (plan_M8 S1): a grant door, the button cell's
+    // click only. SABOTAGE: remove it from the codeExecution list -> red.
+    expect(commandCapability("authorize_button_command")).toBe("codeExecution");
+    expect(backendCommandNames().has("authorize_button_command")).toBe(true);
+    expect(() => assertExtensionMayInvoke("authorize_button_command", { trusted: false })).toThrow(
+      BackendCapabilityError,
+    );
+    // Owner decision B's trail (review of M6b): the mount door opens a run's
+    // cell grant and writes its run row; the audit doors write what a granted
+    // run changed and a refusal before it started. Feature-open, any caller
+    // could forge those rows or spend a live grant with an empty report.
+    // SABOTAGE: remove the three from the codeExecution list -> red.
+    for (const c of ["check_distributed_mount_consent", "audit_explicit_run_writes", "audit_explicit_run_refusal"]) {
+      expect(commandCapability(c), c).toBe("codeExecution");
+      expect(backendCommandNames().has(c), c).toBe(true);
+      expect(() => assertExtensionMayInvoke(c, { trusted: false }), c).toThrow(BackendCapabilityError);
+    }
     // A normal data/feature command is open.
     expect(isPrivilegedCommand("get_charts")).toBe(false);
     expect(commandCapability("delete_columns")).toBeNull(); // grid op, not privileged

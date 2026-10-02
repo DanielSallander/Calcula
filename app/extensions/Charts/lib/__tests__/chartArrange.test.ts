@@ -151,7 +151,8 @@ describe("pressArmsChartLadder (C6)", () => {
     const at = src.indexOf("if (isChartSelected(chartId)) {");
     expect(at).toBeGreaterThan(0);
     const block = src.slice(at, at + 900);
-    expect(block).toContain("if (pressArmsPendingChartClick(detail)) {");
+    // (A grip press arms no click either: BUG-0258 phase 5's guard, chartButtonRelease.test.ts.)
+    expect(block).toMatch(/if \(detail\.part !== "grip" && pressArmsPendingChartClick\(detail\)\) \{/);
     expect(block.indexOf("pressArmsPendingChartClick")).toBeLessThan(block.indexOf("setPendingClick("));
   });
 });
@@ -181,10 +182,12 @@ describe("clientToChartCanvas (BUG-0156)", () => {
     expect(clientToChartCanvas(210, 20, { left: 10, top: 0 })).toEqual({ x: 100, y: 10 });
   });
 
-  it("both pointer paths of Charts/index.ts go through it (no raw clientX - rect.left left)", () => {
+  it("every pointer path of Charts/index.ts goes through it (no raw clientX - rect.left left)", () => {
     const src = readFileSync(path.resolve(__dirname, "../../index.ts"), "utf8");
     expect(src).not.toMatch(/=\s*e\.clientX\s*-\s*rect\.left\s*;/);
-    expect(src.match(/clientToChartCanvas\(e\.clientX, e\.clientY, rect/g)?.length).toBe(2);
+    // The hover, the right-click, and the release of a press on one of the
+    // chart's own buttons (BUG-0258 phase 4b: it acts only over the same button).
+    expect(src.match(/clientToChartCanvas\(e\.clientX, e\.clientY, rect/g)?.length).toBe(3);
     expect(src.match(/chartCanvasToClient\(canvasX, canvasY, rect\)/g)?.length).toBe(2);
   });
 });

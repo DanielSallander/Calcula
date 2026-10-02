@@ -172,7 +172,8 @@ fn a_checkout_materializes_literals_as_well_as_formulas() {
         &scope,
         prof.path(),
     )
-    .unwrap();
+    .unwrap()
+    .pulled;
 
     assert_eq!(
         out.sheets[0].sheet.cells.len(),

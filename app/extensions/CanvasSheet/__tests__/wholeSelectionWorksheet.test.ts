@@ -1,16 +1,18 @@
 //! FILENAME: app/extensions/CanvasSheet/__tests__/wholeSelectionWorksheet.test.ts
-// PURPOSE: The whole-selection Delete (open-items 2.af row 1) is a CANVAS rule.
-//          On a WORKSHEET, a chart walked down to its TITLE with a slicer still
-//          selected must keep "Delete deletes the title" -- not the whole chart
-//          and the slicer with it (wave A review of V1).
-// CONTEXT: A worksheet has no selection set: Core gates press parity on the
-//          canvas surface (overlayMoveHandlers.ts), and Slicer and Controls
-//          ignore presses on other types, so a slicer clicked before a chart
-//          stays selected there. `objectSelectionSpansFamilies()` therefore
-//          answers yes on a worksheet too, and Charts' and Controls' Delete
-//          doors used to ask exactly that, ahead of the chart's title rung.
-//          The doors now ask the seam's one rule,
-//          `shouldActOnWholeObjectSelection()` (canvas AND spans). Driven with
+// PURPOSE: The whole-selection Delete (open-items 2.af row 1) on a WORKSHEET.
+//          A selection that spans families is deleted WHOLE there too
+//          (BUG-0270 review); a chart walked down to its TITLE on its own keeps
+//          "Delete deletes the title"; and the CANVAS binding stays a canvas
+//          binding.
+// CONTEXT: The rule used to be canvas-only (wave A review of V1): a worksheet
+//          had no press parity, so a slicer clicked before a chart stayed
+//          selected by ACCIDENT, and a Delete on the chart's title must not
+//          take the chart and the slicer with it. Core now calls the seam's
+//          worksheet press hook (`noteWorksheetObjectPress`): a plain press
+//          deselects every other family, so a chart + slicer selection on a
+//          worksheet is a DELIBERATE Ctrl/Shift one, which Excel deletes whole.
+//          The doors ask the seam's one rule,
+//          `shouldActOnWholeObjectSelection()` (spans families). Driven with
 //          the real Charts and Slicer selection providers and the real seam.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -59,7 +61,7 @@ import {
   setSubSelection,
 } from "../../Charts/handlers/selectionHandler";
 import { createSlicerSelectionProvider } from "../../Slicer/lib/slicerObjectSelection";
-import { selectSlicer } from "../../Slicer/handlers/selectionHandler";
+import { deselectSlicer, selectSlicer } from "../../Slicer/handlers/selectionHandler";
 import { canvasDeleteApplies } from "../lib/canvasDelete";
 
 const chartRegion: GridRegion = {
@@ -111,16 +113,26 @@ afterEach(() => {
   gridContainer.remove();
 });
 
-describe("the whole-selection rule is a canvas rule", () => {
-  it("on a WORKSHEET a chart's title with a slicer still selected is NOT a whole-selection Delete", () => {
+describe("the whole-selection rule on a worksheet", () => {
+  it("a chart + slicer selection (a deliberate Ctrl/Shift one, press parity) IS a whole-selection Delete; the CANVAS binding still stands aside", () => {
     expect(getSubSelection()).toMatchObject({ level: "element", elementId: "title" });
     // Precondition: both families hold a member, so the selection spans them.
     expect(objectSelectionSpansFamilies(), "precondition: chart + slicer both selected").toBe(true);
     expect(
       shouldActOnWholeObjectSelection(),
+      "a worksheet Delete on a chart + slicer selection deleted the chart and left the slicer",
+    ).toBe(true);
+    expect(canvasDeleteApplies(), "the canvas binding claimed a worksheet Delete").toBe(false);
+  });
+
+  it("the chart's TITLE alone (one family) is NOT a whole-selection Delete: Delete deletes the title", () => {
+    deselectSlicer();
+    expect(getSubSelection()).toMatchObject({ level: "element", elementId: "title" });
+    expect(objectSelectionSpansFamilies()).toBe(false);
+    expect(
+      shouldActOnWholeObjectSelection(),
       "a worksheet Delete on the chart's TITLE was handed to the whole-selection delete",
     ).toBe(false);
-    expect(canvasDeleteApplies(), "the canvas binding claimed a worksheet Delete").toBe(false);
   });
 
   it("on a CANVAS the same selection is one (control: the rule still fires where it belongs)", () => {
@@ -130,7 +142,7 @@ describe("the whole-selection rule is a canvas rule", () => {
   });
 });
 
-describe("the families' Delete doors ask the seam's canvas rule before their own rungs", () => {
+describe("the families' Delete doors ask the seam's whole-selection rule before their own rungs", () => {
   function body(src: string, from: string, to: string): string {
     const at = src.indexOf(from);
     expect(at, `missing: ${from}`).toBeGreaterThan(-1);

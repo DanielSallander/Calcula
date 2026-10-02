@@ -11,6 +11,7 @@ import {
   FLOATING_RANGE_MAX_ROWS,
   FLOATING_RANGE_MAX_COLS,
 } from "@api/floatingRanges";
+import { FLOATING_HANDLE_HIT_HALF } from "@api/gridOverlays";
 import { firstEndingAfter, lastStartingBefore } from "../../_shared/lib/offsetSearch";
 
 // ============================================================================
@@ -367,23 +368,27 @@ export const FR_EDGE_HANDLE_HIT_R = 7;
 /**
  * Shortest edge that may carry a handle.
  *
- * Core claims a 10 px SQUARE box around each corner (`HANDLE_HIT_SIZE`,
- * `overlayResizeHandlers.ts`) and is consulted at a HIGHER mousedown priority
- * than this overlay's claim. An edge midpoint sits half the edge's length from
- * both of its corners, so on a short edge the midpoint is inside a corner box
- * and Core takes the drag — the user would grab a yellow ball and get a count
- * resize. Below this span the handle is therefore not offered at all: an
- * affordance that is painted and then loses the click is worse than none.
+ * Core claims a SQUARE hit box around each corner handle of a selected range
+ * (`FLOATING_HANDLE_HIT_HALF` px either side of the corner, inclusive --
+ * core/lib/floatingHandles.ts, re-exported through @api/gridOverlays) and
+ * scans it BEFORE this overlay's own zone answer. An edge midpoint sits half
+ * the edge's length from both of its corners, so on a short edge the midpoint
+ * is inside a corner box and Core takes the drag — the user would grab a
+ * yellow ball and get a count resize. Below this span the handle is therefore
+ * not offered at all: an affordance that is painted and then loses the click
+ * is worse than none. (The range publishes `handles: "corners"`, so Core
+ * offers no midpoint handle of its own that could pre-empt a ball.)
  *
- * The number is derived, not chosen. The whole HIT circle must clear the
- * corner box, and Core's test is INCLUSIVE (`dy <= 10`), so the requirement is
- * `span / 2 - FR_EDGE_HANDLE_HIT_R > 10`, i.e. `span > 2 * (10 + 7) = 34`.
- * 34 itself still leaves the outermost pixel of the circle to Core; 36 clears
- * it with a pixel to spare. `frEdgeHandles clears Core's corner box` in
- * frDimensions.test.ts asserts the property against Core's 10 directly, so
- * raising this constant carelessly cannot make it pass vacuously.
+ * The number is DERIVED from Core's constant, never typed. The whole HIT
+ * circle must clear the corner box, and Core's test is INCLUSIVE, so the
+ * requirement is `span / 2 - FR_EDGE_HANDLE_HIT_R > HALF`, i.e.
+ * `span > 2 * (HALF + FR_EDGE_HANDLE_HIT_R)`; two more pixels clear it with one
+ * to spare (28 at today's HALF of 6; it was 36 against the old 10px box).
+ * `keeps every offered handle's WHOLE hit circle clear of Core's corner box`
+ * in frDimensions.test.ts asserts the property against the same imported
+ * constant, so the two cannot drift apart.
  */
-export const FR_EDGE_HANDLE_MIN_SPAN = 36;
+export const FR_EDGE_HANDLE_MIN_SPAN = 2 * (FLOATING_HANDLE_HIT_HALF + FR_EDGE_HANDLE_HIT_R) + 2;
 
 export interface FrEdgeHandle {
   edge: FrEdge;

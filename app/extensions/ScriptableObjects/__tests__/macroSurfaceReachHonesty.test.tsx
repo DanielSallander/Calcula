@@ -48,7 +48,7 @@ vi.mock("@api/events", () => ({
   emitAppEvent: () => undefined,
 }));
 
-import ScriptConsentDialog from "../components/ScriptConsentDialog";
+import ScriptConsentDialog, { describeObjectScriptMacroReach } from "../components/ScriptConsentDialog";
 
 const REPO_ROOT = path.resolve(__dirname, "../../../..");
 const MANIFEST = fs.readFileSync(
@@ -138,10 +138,12 @@ function surfaceCapabilityIds(id: string): string[] {
 /**
  * THE SURFACE A MACRO RUNS ON.
  *
- * Both macro run routes reach `run_script`: the library's Run goes through
- * `runMacroModule` -> `runWorkbookScript` (extensions/MacroRecorder/lib/
- * macroLibrary.ts), and a publisher's button cell through `planStoredModuleRun`
- * -> `runWorkbookScript` (extensions/CellTypes/types/button.ts). That command is
+ * Both macro run routes reach the same interpreter: the library's Run goes
+ * through `runMacroModule` -> `runWorkbookScript` -> `run_script`
+ * (extensions/MacroRecorder/lib/macroLibrary.ts), and a publisher's button cell
+ * through the Rust button door `run_control_action`
+ * (app/src-tauri/src/scripting/control_action.rs), which hands its source to
+ * the same `run_in_interpreter` core `run_script` uses. That core is
  * `ScriptEngine::run_with_options`, which is exactly what the `one-off-script`
  * profile names as its entry point.
  */
@@ -329,5 +331,134 @@ describe("the prompt says what Allow cannot cover", () => {
 
   it("says nothing of the sort when everything is approvable", () => {
     expect(render(OBJECT_ONLY)).not.toContain("cannot be approved");
+  });
+});
+
+// ===========================================================================
+// OWNER DECISION B, follow-up F4: a macro WRITTEN AS AN OBJECT SCRIPT (the
+// Macro Recorder's default) does not run in the interpreter the paragraph
+// above describes. It runs in a restricted worker realm, and a run YOU start
+// may also change the cells of any sheet -- and nothing more. The screen says
+// exactly that, names exactly the doors that carry a person's pass, and never
+// tells such a macro it "is not an object script".
+// ===========================================================================
+
+describe("a macro written as an OBJECT SCRIPT gets its own paragraph (owner decision B)", () => {
+  const OBJECT_SCRIPT_MACRO_ONLY = { ...MACRO_ONLY, objectScriptMacroIds: ["macro-month-end"] };
+
+  // SABOTAGE: drop the `{objectScriptMacroCount > 0 && (...)}` paragraph from
+  // ScriptConsentDialog.tsx -> the screen says nothing of cell access.
+  it("says what a run YOU start may do -- the cells of any sheet, and nothing more -- and that a part-way run is undone", () => {
+    const text = render(OBJECT_SCRIPT_MACRO_ONLY);
+    expect(text).toContain("This macro is written as an object script");
+    expect(text).toContain("it may also read and change the cells of any sheet in this workbook");
+    expect(text).toContain("no other formatting, no sheet structure, no files, no other macros");
+    expect(text).toContain("If it stops part-way, every change it made is undone.");
+    expect(text).toContain("Started by another script, it has only what every restricted script has: the sheet on screen.");
+  });
+
+  // SABOTAGE: render the interpreter paragraph whenever there are macros
+  // (`moduleScriptNames.length > 0`) -> an object-script macro is told it runs
+  // "in Calcula's isolated interpreter, on a copy of this workbook".
+  it("does not describe it as running in the interpreter, on a copy of the workbook", () => {
+    const text = render(OBJECT_SCRIPT_MACRO_ONLY);
+    expect(text).not.toContain("on a copy of this workbook");
+    expect(text).not.toContain("A macro is not an object script");
+  });
+
+  it("an application with BOTH runtimes gets both paragraphs, each naming its own", () => {
+    const text = render({
+      ...MACRO_ONLY,
+      moduleScriptNames: ["Month end", "Report"],
+      moduleScriptIds: ["macro-month-end", "macro-report"],
+      objectScriptMacroIds: ["macro-month-end"],
+    });
+    expect(text).toContain("A macro written for the workbook script runtime is not an object script");
+    expect(text).toContain("on a copy of this workbook");
+    expect(text).toContain("One of these macros is written as an object script");
+  });
+
+  it("CONTROL: an application whose macros are all for the workbook script runtime reads exactly as before", () => {
+    const text = render(MACRO_ONLY);
+    expect(text).toContain("A macro is not an object script");
+    expect(container.querySelector("[data-consent-object-script-macros]")).toBeNull();
+    expect(text).not.toContain("may also read and change the cells of any sheet");
+  });
+
+  it("an id the prompt does not list as a macro cannot add the paragraph", () => {
+    const text = render({ ...MACRO_ONLY, objectScriptMacroIds: ["macro-someone-else"] });
+    expect(container.querySelector("[data-consent-object-script-macros]")).toBeNull();
+    expect(text).not.toContain("may also read and change the cells of any sheet");
+  });
+
+  // THE DOORS IT NAMES ARE EXACTLY THE DOORS THAT MINT A PASS -- read from the
+  // production source, the way macroProvenance.test.ts reads them for the
+  // Macros dialog's sentence. Unwiring a door (or wiring a new one) turns this
+  // red until the screen follows.
+  // SABOTAGE: drop ", or from the command line" from describeObjectScriptMacroReach.
+  it("names exactly the doors that mint a person's pass, and the Macros dialog says the same", async () => {
+    const appRoot = path.resolve(__dirname, "..", "..", "..");
+    const strip = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+    const minted = new Set<string>();
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "node_modules" || entry.name === "__tests__") continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(ts|tsx)$/.test(entry.name) && !/\.(test|spec)\.(ts|tsx)$/.test(entry.name)) {
+          for (const m of strip(fs.readFileSync(full, "utf8")).matchAll(/mintExplicitMacroRun\("(\w+)"/g)) {
+            minted.add(m[1]);
+          }
+        }
+      }
+    };
+    walk(path.join(appRoot, "src"));
+    walk(path.join(appRoot, "extensions"));
+    const PHRASE: Record<string, string> = {
+      macrosDialog: "Developer ▸ Macros ▸ Run",
+      button: "clicking a button that runs it",
+      commandLine: "the command line",
+    };
+    const passModule = fs.readFileSync(path.join(appRoot, "src/api/explicitMacroRun.ts"), "utf8");
+    const union = passModule.match(/export type ExplicitMacroRunDoor = ([^;]+);/)?.[1] ?? "";
+    const doors = [...union.matchAll(/"(\w+)"/g)].map((m) => m[1]).sort();
+    expect(doors, "a door the screen has no words for").toEqual(Object.keys(PHRASE).sort());
+    // Positive control: today every door mints.
+    expect([...minted].sort()).toEqual(["button", "commandLine", "macrosDialog"]);
+
+    const sentence = describeObjectScriptMacroReach(1, 1);
+    const yours = sentence.slice(sentence.indexOf("When you run"), sentence.indexOf("it may also read"));
+    expect(yours.length, "the 'when you run it yourself' clause moved").toBeGreaterThan(0);
+    for (const door of doors) {
+      if (minted.has(door)) expect(yours, `"${door}" mints a pass, so the screen must name it`).toContain(PHRASE[door]);
+      else expect(sentence, `"${door}" mints no pass, yet the screen promises it cell access`).not.toContain(PHRASE[door]);
+    }
+    // ONE PROMISE IN TWO PLACES: the Macros dialog's note on such a macro says
+    // the same doors and the same limits (macroLibrary.ts describeMacroProvenance).
+    // Read from its source (its module needs more of @api than this file
+    // doubles), with the concatenated string literals joined back into prose.
+    const libSrc = fs.readFileSync(path.join(appRoot, "extensions/MacroRecorder/lib/macroLibrary.ts"), "utf8");
+    const at = libSrc.indexOf("export function describeMacroProvenance(");
+    expect(at, "describeMacroProvenance moved").toBeGreaterThan(-1);
+    const note = libSrc.slice(at, libSrc.indexOf("export function macroRunAccessLevel(", at)).replace(/"\s*\+\s*"/g, "");
+    const noteYours = note.slice(note.indexOf("When you run it yourself"), note.indexOf("it may also read"));
+    for (const door of doors) {
+      if (minted.has(door)) expect(noteYours, door).toContain(PHRASE[door]);
+    }
+    expect(note).toContain("no other formatting, no sheet structure, no files, no other macros");
+    expect(sentence).toContain("no other formatting, no sheet structure, no files, no other macros");
+  });
+
+  // THE "UNDONE" CLAUSE IS A STATEMENT ABOUT THE HOST: a granted run that does
+  // not complete is taken back to the savepoint marked before it ran
+  // (host.ts closeGrantedRunStep -> roll_back_to_undo_savepoint; proven end to
+  // end by MacroRecorder/__tests__/explicitRunEndToEnd.test.ts "throws after TWO
+  // writes"). If that door goes, the sentence must go with it.
+  it("the 'undone' clause is backed by the host's rollback door", () => {
+    const appRoot = path.resolve(__dirname, "..", "..", "..");
+    const host = fs.readFileSync(path.join(appRoot, "src/api/scriptHost/host.ts"), "utf8");
+    // The rollback answers the restore AND the cells it took back (review of M6b).
+    expect(host).toContain('invokeBackend<UndoRollbackWire>("roll_back_to_undo_savepoint"');
+    expect(host).toContain('"begin_undo_savepoint"');
   });
 });

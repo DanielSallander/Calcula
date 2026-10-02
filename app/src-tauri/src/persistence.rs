@@ -1278,9 +1278,11 @@ fn collect_protection_for_save(
     (sheet_protections, workbook_protection)
 }
 
-/// Collect slicers from SlicerState into SavedSlicer format.
-fn collect_slicers_for_save(
-    slicer_state: &State<crate::slicer::SlicerState>,
+/// Collect slicers from SlicerState into SavedSlicer format, each with its
+/// computed properties. pub(crate) so a test can build the exact slicer list a
+/// save or a publish carrier holds (`State<SlicerState>` derefs to the store).
+pub(crate) fn collect_slicers_for_save(
+    slicer_state: &crate::slicer::SlicerState,
     sheet_ids: &[SheetId],
 ) -> Vec<persistence::SavedSlicer> {
     let slicers = slicer_state.slicers.read().unwrap();
@@ -4832,6 +4834,14 @@ pub(crate) fn reset_document_scoped_stores(
     // guaranteed dropped before the next cell runs. See `reset_detached`.
     script_state.notebook_executor.reset_detached();
 
+    // ---- Grants of cell access waiting for their write report ---------------
+    // Owner decision B (F3/F15): a grant names a run of THIS document's
+    // application macro, and its one report records which of this document's
+    // cells it changed. Reported after the swap, those rows would land on the
+    // NEW document's trail -- so every waiting grant closes with its document
+    // (the page drops its pending report too, `hostResetAll`).
+    script_state.explicit_run_grants.clear()?;
+
     Ok(())
 }
 
@@ -5059,22 +5069,42 @@ pub fn create_virtual_file(
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    create_virtual_file_core(&user_files_state, &file_state, &path, content)?;
+
+    // Notify frontend so cells using FILEREAD/FILELINES/FILEEXISTS can recalculate
+    let _ = app_handle.emit("virtual-file-changed", &path);
+
+    Ok(())
+}
+
+/// The body of [`create_virtual_file`] without the window guard and the event,
+/// so its refusals are testable in the unit tier.
+pub(crate) fn create_virtual_file_core(
+    user_files_state: &UserFilesState,
+    file_state: &FileState,
+    path: &str,
+    content: Option<String>,
+) -> Result<(), String> {
     if path.trim().is_empty() {
         return Err("Path cannot be empty".to_string());
     }
     if path.contains("..") {
         return Err("Invalid path".to_string());
     }
+    // APPROVALS ARE NOT A FILE THE PAGE WRITES. They are recorded, sealed to
+    // this computer, by `record_script_consent` (crate::consent_seal). A page
+    // write could only plant or clobber them; deleting stays allowed, because
+    // removing approvals is always safe.
+    if crate::consent_seal::is_consent_file_key(path) {
+        return Err(crate::consent_seal::consent_file_write_refused());
+    }
 
     let mut files = user_files_state.files.lock().map_err(|e| e.to_string())?;
     let bytes = content.unwrap_or_default().into_bytes();
-    files.insert(path.clone(), bytes);
+    files.insert(path.to_string(), bytes);
 
     // Mark file as modified
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
-
-    // Notify frontend so cells using FILEREAD/FILELINES/FILEEXISTS can recalculate
-    let _ = app_handle.emit("virtual-file-changed", &path);
+    let _ = crate::document_effect::DocumentEffect::mutates(file_state);
 
     Ok(())
 }
@@ -5117,12 +5147,27 @@ pub fn delete_virtual_file(
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    delete_virtual_file_core(&user_files_state, &file_state, &path)?;
+
+    // Notify frontend so cells using FILEREAD/FILELINES/FILEEXISTS can recalculate
+    let _ = app_handle.emit("virtual-file-changed", &path);
+
+    Ok(())
+}
+
+/// The body of [`delete_virtual_file`] without the window guard and the event.
+/// Deleting the consent file stays allowed: removing approvals is always safe.
+pub(crate) fn delete_virtual_file_core(
+    user_files_state: &UserFilesState,
+    file_state: &FileState,
+    path: &str,
+) -> Result<(), String> {
     let mut files = user_files_state.files.lock().map_err(|e| e.to_string())?;
 
     // If it's a directory, remove all files under it
     let prefix = format!("{}/", path.trim_end_matches('/'));
     let keys_to_remove: Vec<String> = files.keys()
-        .filter(|k| **k == path || k.starts_with(&prefix))
+        .filter(|k| k.as_str() == path || k.starts_with(&prefix))
         .cloned()
         .collect();
 
@@ -5135,10 +5180,7 @@ pub fn delete_virtual_file(
     }
 
     // Mark file as modified
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
-
-    // Notify frontend so cells using FILEREAD/FILELINES/FILEEXISTS can recalculate
-    let _ = app_handle.emit("virtual-file-changed", &path);
+    let _ = crate::document_effect::DocumentEffect::mutates(file_state);
 
     Ok(())
 }
@@ -5154,48 +5196,70 @@ pub fn rename_virtual_file(
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    rename_virtual_file_core(&user_files_state, &file_state, &old_path, &new_path)?;
+
+    // Notify frontend so cells using FILEREAD/FILELINES/FILEEXISTS can recalculate
+    let _ = app_handle.emit("virtual-file-changed", &old_path);
+
+    Ok(())
+}
+
+/// The body of [`rename_virtual_file`] without the window guard and the event.
+///
+/// Refuses any rename that would PRODUCE the consent file's key -- a single file
+/// renamed onto it, or a folder renamed so that one of its files lands on it --
+/// before anything moves. Renaming the consent file AWAY is allowed, like
+/// deleting it: removing approvals is always safe.
+pub(crate) fn rename_virtual_file_core(
+    user_files_state: &UserFilesState,
+    file_state: &FileState,
+    old_path: &str,
+    new_path: &str,
+) -> Result<(), String> {
     if new_path.trim().is_empty() {
         return Err("New name cannot be empty".to_string());
     }
     if new_path.contains("..") {
         return Err("Invalid path".to_string());
     }
+    if crate::consent_seal::is_consent_file_key(new_path) {
+        return Err(crate::consent_seal::consent_file_write_refused());
+    }
 
     let mut files = user_files_state.files.lock().map_err(|e| e.to_string())?;
 
     // Check if it's a single file rename
-    if let Some(content) = files.remove(&old_path) {
-        if files.contains_key(&new_path) {
+    if let Some(content) = files.remove(old_path) {
+        if files.contains_key(new_path) {
             // Put it back
-            files.insert(old_path, content);
+            files.insert(old_path.to_string(), content);
             return Err(format!("'{}' already exists", new_path));
         }
-        files.insert(new_path, content);
+        files.insert(new_path.to_string(), content);
     } else {
         // It's a folder rename — rename all files under old_path/
         let old_prefix = format!("{}/", old_path.trim_end_matches('/'));
         let new_prefix = format!("{}/", new_path.trim_end_matches('/'));
-        let keys_to_rename: Vec<(String, Vec<u8>)> = files.iter()
+        let keys_to_rename: Vec<(String, String, Vec<u8>)> = files.iter()
             .filter(|(k, _)| k.starts_with(&old_prefix))
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (k.clone(), format!("{}{}", new_prefix, &k[old_prefix.len()..]), v.clone()))
             .collect();
 
         if keys_to_rename.is_empty() {
             return Err(format!("Not found: {}", old_path));
         }
+        if keys_to_rename.iter().any(|(_, new_key, _)| crate::consent_seal::is_consent_file_key(new_key)) {
+            return Err(crate::consent_seal::consent_file_write_refused());
+        }
 
-        for (old_key, content) in keys_to_rename {
+        for (old_key, new_key, content) in keys_to_rename {
             files.remove(&old_key);
-            let new_key = format!("{}{}", new_prefix, &old_key[old_prefix.len()..]);
             files.insert(new_key, content);
         }
     }
 
     // Mark file as modified
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
-
-    // Notify frontend so cells using FILEREAD/FILELINES/FILEEXISTS can recalculate
-    let _ = app_handle.emit("virtual-file-changed", &old_path);
+    let _ = crate::document_effect::DocumentEffect::mutates(file_state);
 
     Ok(())
 }
@@ -6172,9 +6236,7 @@ mod collaboration_user_file_restore_tests {
                 sheet_id: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
                 name: "Dashboard".to_string(),
             }],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            calp::WorkingCopyContent::default(),
         );
         *state.working_copy_link.write(&effect).unwrap() = Some(link.clone());
 

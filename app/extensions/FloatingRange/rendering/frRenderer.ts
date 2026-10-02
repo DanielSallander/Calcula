@@ -1,8 +1,11 @@
 //! FILENAME: app/extensions/FloatingRange/rendering/frRenderer.ts
 // PURPOSE: Overlay render + hit-test for floating ranges: opaque frame (title
 //          bar, local A1 headers, gridlines), backend display strings with
-//          type-based alignment, FR-local selection paint, object-selection
-//          chrome, and the quantized-resize ghost.
+//          type-based alignment, FR-local selection paint, the yellow edge
+//          balls (a grid layer, `paintFrEdgeBalls`), and the quantized-resize
+//          ghost. The OBJECT-selection outline and the corner handles are
+//          Core's (core/lib/gridRenderer/rendering/floatingObjectChrome.ts,
+//          BUG-0258 design phase 3); the range publishes `handles: "corners"`.
 // CONTEXT: Async-fetch/sync-render cache per Controls/Shape/shapeRenderer.ts
 //          (stale data kept visible while a re-fetch is in flight — no
 //          blink). Floating regions get NO gridline suppression from Core, so
@@ -34,16 +37,20 @@ import type {
   OverlayHitTestContext,
 } from "@api/gridOverlays";
 import {
+  getLiveGridRegions,
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
   overlaySheetToCanvas,
   requestOverlayRedraw,
+  topFloatingRegionAt,
 } from "@api/gridOverlays";
-import { columnToLetter } from "@api";
+import { columnToLetter, type GridLayerContext } from "@api";
 import type { TypedCellData } from "@api/lib";
 import { paintScrollIndicators } from "../../_shared/lib/scrollIndicators";
 import {
   getFloatingRangeById,
+  frRangeInSelection,
+  FLOATING_RANGE_REGION_TYPE,
   type FloatingRangeEntry,
 } from "../lib/floatingRangeStore";
 import type { GridRegion } from "@api/gridOverlays";
@@ -65,14 +72,10 @@ import {
   frVisibleRange,
   frEdgeHandles,
   frEdgeHandleAt,
-  frBorderGrabAt,
-  localCellFromPoint,
-  edgeAxis,
   type FrCellRange,
   type FrView,
 } from "../lib/frDimensions";
 import {
-  isFloatingRangeSelected,
   getLocalSelection,
   localSelectionRect,
 } from "../lib/frSelection";
@@ -99,13 +102,13 @@ import { layoutFrEditorForFrame, getFrEditorCell } from "../editor/frEditor";
  * being edited -- and the range's own cell editor is not open. The store
  * re-publishes `resizable` when the editor opens or closes (that is what Core's
  * corner boxes read), and the editor half is ALSO read live here, because the
- * region a press hands `claimsBodyDrag` is the one Core captured before the
- * press: a handle painted or grabbable over the cell the user is typing in is
- * the one thing the owner ruled out (2026-09-27).
+ * region a press hands `frZoneAt` (index.ts) is the one Core captured before
+ * the press: a handle painted or grabbable over the cell the user is typing in
+ * is the one thing the owner ruled out (2026-09-27).
  *
- * The ONE gate for the paint, the extended hit area, the cursor and the edge
- * gesture's claim (index.ts), so a ball is never grabbable where it is not
- * painted, nor painted where it is not grabbable.
+ * The ONE gate for the paint, the extended hit area and the edge-ball zone
+ * (`frZoneAt`, whose answer is also the pointer), so a ball is never grabbable
+ * where it is not painted, nor painted where it is not grabbable.
  */
 export function frHandlesLive(region: GridRegion, frId: string): boolean {
   if (region.data?.resizable !== true) return false;
@@ -583,51 +586,12 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
   }
   ctx.restore(); // the cell viewport clip
 
-  // ---- 7. Object-selection chrome (FR paints its own — Core paints none) ----
-  if (isFloatingRangeSelected(frId)) {
-    ctx.strokeStyle = COLORS.objectChrome;
-    ctx.lineWidth = 2;
-    ctx.setLineDash([]);
-    ctx.strokeRect(canvasX + 1, canvasY + 1, w - 2, h - 2);
-
-    // The two families of handle are painted ONLY when they are armed
-    // (`frHandlesLive`: geometry editable, the range selected, its cell
-    // editor closed). Core skips every resize handle on a region with
-    // `resizable === false`, so painting them on a subscribed canvas or a
-    // locked range would draw an affordance that silently did nothing — the
-    // selection outline above is what marks a selected object, always.
-    if (frHandlesLive(region, frId)) {
-      // 4 CORNER handles (blue squares) at Core's getFloatingCornerPixels
-      // positions: these change the row/column COUNTS.
-      const handle = 6;
-      ctx.fillStyle = COLORS.objectChrome;
-      for (const [hx, hy] of [
-        [canvasX, canvasY],
-        [canvasX + w, canvasY],
-        [canvasX, canvasY + h],
-        [canvasX + w, canvasY + h],
-      ] as const) {
-        ctx.fillRect(hx - handle / 2, hy - handle / 2, handle, handle);
-      }
-
-      // 4 EDGE handles (yellow balls) at the edge midpoints: these scale the
-      // CELLS. Round and yellow precisely so they do not read as more of the
-      // same — two different resizes should not look alike. An edge too short
-      // to carry one is simply not offered (frEdgeHandles).
-      for (const eh of frEdgeHandles(entry)) {
-        const hx = canvasX + eh.x;
-        const hy = canvasY + eh.y;
-        ctx.beginPath();
-        ctx.arc(hx, hy, FR_EDGE_HANDLE_R, 0, Math.PI * 2);
-        ctx.fillStyle = COLORS.edgeHandleFill;
-        ctx.fill();
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = COLORS.edgeHandleBorder;
-        ctx.stroke();
-      }
-    }
-    ctx.lineWidth = 1;
-  }
+  // ---- 7. Object-selection chrome: NONE here. ----
+  // The selection outline and the four corner handles (they change the
+  // row/column COUNTS) are Core's, painted after every object from the one
+  // geometry Core's resize hit test reads (BUG-0258 design phase 3). The
+  // yellow edge balls (they scale the CELLS) are this extension's own, and
+  // are painted ABOVE Core's outline by the `paintFrEdgeBalls` grid layer.
 
   // ---- 8. Quantized-resize ghost (snapped to whole rows/cols) ----
   if (resizeGhost && resizeGhost.frId === frId) {
@@ -652,7 +616,75 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
 }
 
 // ============================================================================
-// Hit-testing + cursor
+// The yellow edge balls (a grid layer above Core's selection chrome)
+// ============================================================================
+
+/** The id of the grid layer that paints the edge balls. */
+export const FR_EDGE_BALL_LAYER_ID = "floating-range-edge-balls";
+
+/**
+ * Paint the yellow EDGE BALLS (they scale the CELLS) of every published range
+ * that is SELECTED -- by this family or by the canvas selection set
+ * (`frRangeInSelection`, the store's one answer) -- and whose handles are live
+ * (`frHandlesLive`: geometry editable, selected, its cell editor closed) -- registered as a grid layer at
+ * "over-selection", which runs AFTER Core's selection chrome. Core paints the
+ * outline of a selected object after every object; a ball painted in the
+ * range's own overlay pass would have that 2px outline drawn across it.
+ *
+ * A ball is painted only where it can be GRABBED: where the range itself is
+ * the topmost object at the ball's centre. The ball is the range's own content
+ * zone (`frZoneAt` part 'edgeHandle'), reached only when Core's press finds
+ * the range on top at the point, so a ball whose centre lies under an object
+ * stacked above the range is neither painted nor grabbable (the overlay-pass
+ * paint had the same property: the object on top painted over it).
+ *
+ * Round and yellow precisely so they do not read as more of Core's square
+ * handles -- two different resizes should not look alike. An edge too short
+ * to carry one is simply not offered (frEdgeHandles). `regions` defaults to
+ * the live published list (the regions a press can reach).
+ */
+export function paintFrEdgeBalls(
+  context: GridLayerContext,
+  regions: readonly GridRegion[] = getLiveGridRegions(),
+): void {
+  const { ctx, config, viewport } = context;
+  // The overlay pass's own placement (overlaySheetToCanvas), so a ball sits
+  // exactly where the range was painted.
+  const rhw = config.rowHeaderWidth ?? 50;
+  const chh = config.colHeaderHeight ?? 24;
+  const geo = { rowHeaderWidth: rhw, colHeaderHeight: chh, scrollX: viewport.scrollX, scrollY: viewport.scrollY };
+  let opened = false;
+  for (const region of regions) {
+    if (region.type !== FLOATING_RANGE_REGION_TYPE || !region.floating) continue;
+    const frId = region.data?.frId as string | undefined;
+    if (!frId || !frRangeInSelection(frId, region) || !frHandlesLive(region, frId)) continue;
+    const entry = getFloatingRangeById(frId);
+    if (!entry) continue;
+    const originX = rhw + region.floating.x - viewport.scrollX;
+    const originY = chh + region.floating.y - viewport.scrollY;
+    for (const eh of frEdgeHandles(entry)) {
+      const hx = originX + eh.x;
+      const hy = originY + eh.y;
+      if (topFloatingRegionAt(hx, hy, geo, regions)?.id !== region.id) continue;
+      if (!opened) {
+        ctx.save();
+        ctx.setLineDash([]);
+        opened = true;
+      }
+      ctx.beginPath();
+      ctx.arc(hx, hy, FR_EDGE_HANDLE_R, 0, Math.PI * 2);
+      ctx.fillStyle = COLORS.edgeHandleFill;
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = COLORS.edgeHandleBorder;
+      ctx.stroke();
+    }
+  }
+  if (opened) ctx.restore();
+}
+
+// ============================================================================
+// Hit-testing (the pointer is the zone's: frZoneAt in index.ts)
 // ============================================================================
 
 export function hitTestFloatingRange(hitCtx: OverlayHitTestContext): boolean {
@@ -677,40 +709,4 @@ export function hitTestFloatingRange(hitCtx: OverlayHitTestContext): boolean {
   const entry = getFloatingRangeById(frId);
   if (!entry) return false;
   return frEdgeHandleAt(entry, hitCtx.canvasX - b.x, hitCtx.canvasY - b.y) !== null;
-}
-
-/**
- * "move" wherever a drag would MOVE the object, "cell" wherever it would
- * select. Must stay in lockstep with `claimsBodyDrag` (index.ts):
- *
- *   - the title zone moves when the store published `movable` (every mode,
- *     every sheet kind; not on a subscribed canvas or a locked range, where
- *     Core refuses the drag -- the cursor then says so, rather than
- *     promising a move that does nothing, which is how the owner found this);
- *   - with the title hidden, the 4px border band moves (`movable`), and in
- *     Design Mode the whole body does (`bodyGrab`);
- *   - everything else is the working surface.
- */
-export function getFrCursor(hitCtx: OverlayHitTestContext): string | null {
-  const b = hitCtx.floatingCanvasBounds;
-  if (!b) return null;
-  const frId = hitCtx.region.data?.frId as string | undefined;
-  const entry = frId ? getFloatingRangeById(frId) : null;
-  if (!entry) return null;
-  const dx = hitCtx.canvasX - b.x;
-  const dy = hitCtx.canvasY - b.y;
-  // Edge handles first — they sit on the border, on top of whatever zone is
-  // underneath, and they are the only thing there when they are painted.
-  if (frHandlesLive(hitCtx.region, entry.id)) {
-    const edge = frEdgeHandleAt(entry, dx, dy);
-    if (edge) return edgeAxis(edge) === "cols" ? "ew-resize" : "ns-resize";
-  }
-  const movable = hitCtx.region.data?.movable === true;
-  // The title ZONE, exactly as the claim resolves it (it includes the corner
-  // box above the row gutter when a title is shown). Core's own default for
-  // an object that will not move is "pointer".
-  if (localCellFromPoint(entry, dx, dy).zone === "title") return movable ? "move" : "pointer";
-  if (hitCtx.region.data?.bodyGrab === true) return "move";
-  if (!entry.showTitle && movable && frBorderGrabAt(entry, dx, dy)) return "move";
-  return "cell";
 }

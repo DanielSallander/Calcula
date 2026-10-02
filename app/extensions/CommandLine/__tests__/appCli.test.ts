@@ -13,6 +13,24 @@ import { createAppDomain } from "../cli/appDomain";
 import { createAppCliSession } from "../cli/appSession";
 import type { AppCliGateway } from "../cli/appGateway";
 import { macroEntriesFrom } from "../cli/macroProvenance";
+import { claimExplicitMacroRun } from "@api/explicitMacroRun";
+
+/**
+ * The run reached the seam ONCE, for `macroId`, carrying the pass the typed
+ * line minted (owner decision B, follow-up F2): a live pass that claims as the
+ * command-line door for exactly that macro. Claiming spends it, as the run
+ * would.
+ */
+function expectRunWithCliPass(calls: Record<string, unknown[][]>, macroId: string): void {
+  expect(calls.runMacroByRef, "the run never reached the seam").toHaveLength(1);
+  const [id, pass, ...rest] = calls.runMacroByRef[0];
+  expect(id).toBe(macroId);
+  expect(rest).toEqual([]);
+  expect(claimExplicitMacroRun(pass), "the line handed the seam no live pass").toEqual({
+    door: "commandLine",
+    macroId,
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Mock gateway
@@ -541,18 +559,18 @@ describe("multi-write runs", () => {
 describe("run <macro>", () => {
   it("resolves by name and runs through the seam", async () => {
     const { calls, lines } = await runApp("run Hello");
-    expect(calls.runMacroByRef).toEqual([["macro-hello"]]);
+    expectRunWithCliPass(calls, "macro-hello");
     expect(allText(lines)).toContain("Hello");
   });
 
   it("resolves a multi-word bare name", async () => {
     const { calls } = await runApp("run Monthly Cleanup");
-    expect(calls.runMacroByRef).toEqual([["macro-cleanup"]]);
+    expectRunWithCliPass(calls, "macro-cleanup");
   });
 
   it("resolves by id", async () => {
     const { calls } = await runApp("run macro-cleanup");
-    expect(calls.runMacroByRef).toEqual([["macro-cleanup"]]);
+    expectRunWithCliPass(calls, "macro-cleanup");
   });
 
   it("errors with close matches for an unknown macro", async () => {
@@ -571,6 +589,28 @@ describe("run <macro>", () => {
     });
     expect(ok).toBe(false);
     expect(lines.some((l) => l.cls === "err" && l.text.includes("script threw"))).toBe(true);
+  });
+
+  // Phase 3 of BUG-0257 added a fourth outcome. The CLI asks for no particular
+  // application, so the seam should never refuse it -- but if it does, the
+  // macro did not run, and the run must fail loudly rather than fall through.
+  //
+  // SABOTAGE: delete the `case "refused"` arm in runMacro (cli/appWriters.ts).
+  it("reports a refused macro as a failure that did not run", async () => {
+    const { ok, lines } = await runApp("run Hello", {
+      runMacroByRef: () =>
+        Promise.resolve({
+          status: "refused" as const,
+          macroId: "macro-hello",
+          name: "Hello",
+          message: "a button from 'Sales' runs only its own macros",
+          owner: null,
+        }),
+    });
+    expect(ok).toBe(false);
+    const err = lines.find((l) => l.cls === "err");
+    expect(err?.text).toContain("did not run");
+    expect(err?.text).toContain("runs only its own macros");
   });
 });
 
@@ -643,7 +683,7 @@ describe("macro provenance on the run path", () => {
       ...mixed,
       runMacroByRef: () => Promise.resolve({ status: "ran" as const, name: "Remit" }),
     });
-    expect(calls.runMacroByRef).toEqual([["macro-remit"]]);
+    expectRunWithCliPass(calls, "macro-remit");
     const notice = lines.findIndex((l) => l.text.includes('arrived in the application "Q3 Report"'));
     const outcome = lines.findIndex((l) => l.text.includes("ran (from application"));
     expect(notice).toBeGreaterThanOrEqual(0);

@@ -530,6 +530,48 @@ fn require_publish_identity(
     })
 }
 
+/// Fields of a withheld or added item that only the PUSH DIALOG may receive.
+///
+/// The push report names what a push leaves behind (`withheld`) and what it
+/// adds (`addedToApplication`), and for the author's own includable items it
+/// carries the item's FULL TEXT (`code`: a private module's source -- the one
+/// holding an API token -- a notebook's cells, a name's `refers_to`) and its
+/// hash, so the dialog can put the code on screen before the author may tick
+/// it. That is the dialog's, and only the dialog's: no capability lets a script
+/// read module sources, and a script holding `distribution.publish` would
+/// otherwise read every private module the application does not have -- the
+/// exact content BUG-0261 withholds -- straight out of a preview. A script has
+/// no use for the hash either (it may never include anything), nor for the
+/// caveat that names the sheets a push leaves home.
+const DIALOG_ONLY_ITEM_FIELDS: &[&str] = &["code", "contentHash", "detail"];
+
+/// Remove [`DIALOG_ONLY_ITEM_FIELDS`] from every item of every `withheld` and
+/// `addedToApplication` list, at any depth, of a response bound for a script.
+/// The names, kinds, reasons and owners stay: what a push leaves behind is
+/// still the script's to know.
+fn strip_dialog_only_content(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if key == "withheld" || key == "addedToApplication" {
+                    if let Value::Array(items) = child {
+                        for item in items.iter_mut() {
+                            if let Value::Object(fields) = item {
+                                for field in DIALOG_ONLY_ITEM_FIELDS {
+                                    fields.remove(*field);
+                                }
+                            }
+                        }
+                    }
+                }
+                strip_dialog_only_content(child);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_dialog_only_content),
+        _ => {}
+    }
+}
+
 /// The publisher display name this machine signs as. The script does NOT get to
 /// supply `publishedBy`: it is the human-readable byline other people read next
 /// to the package, and letting an automation write "Microsoft" there — while
@@ -1070,7 +1112,9 @@ fn dispatch(
                 params,
                 window.clone(),
             )?;
-            serde_json::to_value(preview).map_err(|e| e.to_string())
+            let mut preview = serde_json::to_value(preview).map_err(|e| e.to_string())?;
+            strip_dialog_only_content(&mut preview);
+            Ok(preview)
         }
         Action::NextVersion => {
             let registry_path = registry_location(p)?;
@@ -1126,7 +1170,9 @@ fn dispatch(
                 window.clone(),
             )?;
             response.warnings.push(SCRIPT_PUBLISH_PAYLOAD_NOTE.to_string());
-            serde_json::to_value(response).map_err(|e| e.to_string())
+            let mut response = serde_json::to_value(response).map_err(|e| e.to_string())?;
+            strip_dialog_only_content(&mut response);
+            Ok(response)
         }
         Action::PublishModel => {
             let registry_path = registry_location(p)?;
@@ -1147,7 +1193,9 @@ fn dispatch(
                 params,
                 window.clone(),
             )?;
-            serde_json::to_value(response).map_err(|e| e.to_string())
+            let mut response = serde_json::to_value(response).map_err(|e| e.to_string())?;
+            strip_dialog_only_content(&mut response);
+            Ok(response)
         }
     }
 }
@@ -1795,6 +1843,41 @@ mod tests {
             // conflicting scripted pull fail with PublisherNameConflict rather
             // than pin a second claimant to a familiar package name.
             "acceptNameConflict",
+            // Button code a push publishes that the signed base does not carry
+            // goes out only once the push REQUEST acknowledges it, hash by
+            // hash -- and only the push dialog, with the code on screen, may
+            // fill that list (BUG-0257). A script cannot have read the code in
+            // any sense that counts, so the scripted publish's params literal
+            // must never forward one: such a push is refused, by design.
+            "acknowledgedButtonCode",
+            "acknowledged_button_code",
+            // "Include in application" (M4) signs the author's own new macros,
+            // notebooks and names into the application under their key. The
+            // push dialog allows it only after the code has been ON SCREEN and
+            // sends the hash Rust computed of what was shown. A script has seen
+            // nothing, so its publish must never forward an inclusion: an item
+            // it wants shipped stays withheld, and a button linked to it is
+            // refused by name.
+            "includeInApplication",
+            "include_in_application",
+            // An approval of application code is recorded -- sealed to this
+            // computer -- only by the approval screen, after the code has been
+            // on screen (crate::consent_seal). A pull brings code in switched
+            // off; the gateway must never be the thing that switches it on.
+            // Twin: rule 1 of app/src/api/scriptHost/__tests__/collaborationGateway.test.ts.
+            "record_script_consent",
+            // A button's code runs only through the button door, when a person
+            // clicks the button (crate::scripting::control_action); a pull
+            // never presses one.
+            "run_control_action",
+            // ...and an application's button COMMAND is authorized only for
+            // that click, after the page checked the live registration
+            // (plan_M8 S1); a pull never authorizes one.
+            "authorize_button_command",
+            // "Make this my own" turns an application's button code into code
+            // of the user's own, after the Properties pane showed it; a pull
+            // never decides that.
+            "adopt_held_button_code",
         ] {
             assert!(
                 !me.contains(forbidden),
@@ -1811,6 +1894,74 @@ mod tests {
             "calp_cmds::calp_inspect_application(",
         ] {
             assert!(me.contains(expected), "missing dispatch into {}", expected);
+        }
+    }
+
+    /// A SCRIPT NEVER RECEIVES THE CODE the push report carries for the dialog.
+    /// Built from the REAL `WithheldContent` serialization (so a renamed wire
+    /// key cannot slip past the scrub), nested the way `PublishResponse` /
+    /// `PublishPreview` nest it; the names, kinds and reasons stay.
+    ///
+    /// SABOTAGE: empty `DIALOG_ONLY_ITEM_FIELDS`, or skip the
+    /// `addedToApplication` key in `strip_dialog_only_content`.
+    #[test]
+    fn a_scripted_publish_or_preview_never_carries_the_dialogs_code() {
+        let item = |id: &str| crate::calp_push_scope::WithheldContent {
+            kind: crate::calp_push_scope::WithheldKind::ModuleScript,
+            id: id.to_string(),
+            name: id.to_string(),
+            reason: crate::calp_push_scope::WithheldReason::NotInApplication,
+            owner: String::new(),
+            includable: true,
+            content_hash: "abc123".to_string(),
+            code: "const API_TOKEN = 'sk-secret';".to_string(),
+            detail: "names the sheet 'Salaries', which this push does not publish".to_string(),
+        };
+        let mut response = json!({
+            "packageName": "sales",
+            "report": {
+                "withheld": [serde_json::to_value(item("macro-private")).unwrap()],
+                "addedToApplication": [serde_json::to_value(item("macro-added")).unwrap()],
+                "buttonCode": { "withheld": [{ "cell": "Dashboard!B2", "code": "held" }] },
+            },
+            "warnings": ["keep me"],
+        });
+        let raw = response.to_string();
+        assert!(raw.contains("sk-secret") && raw.contains("contentHash"), "the fixture carries the code: {raw}");
+
+        strip_dialog_only_content(&mut response);
+        let scrubbed = response.to_string();
+        for leaked in ["sk-secret", "\"code\"", "contentHash", "abc123", "Salaries"] {
+            assert!(!scrubbed.contains(leaked), "`{leaked}` reached the script: {scrubbed}");
+        }
+        assert_eq!(response["report"]["withheld"][0]["id"], "macro-private", "the name stays");
+        assert_eq!(response["report"]["withheld"][0]["includable"], true);
+        assert_eq!(response["report"]["addedToApplication"][0]["id"], "macro-added");
+        assert_eq!(response["report"]["buttonCode"]["withheld"][0]["cell"], "Dashboard!B2");
+        assert_eq!(response["warnings"][0], "keep me");
+    }
+
+    /// Every gateway arm that returns a push report scrubs it on the way out.
+    ///
+    /// SABOTAGE: return `serde_json::to_value(preview)` unscrubbed again.
+    #[test]
+    fn every_publish_shaped_arm_scrubs_its_response() {
+        let me = production_source();
+        // Line-anchored: `Action::PublishPreview => {` also ends an OR-pattern
+        // in the bucket table above the dispatch.
+        for arm in [
+            "\n        Action::PublishPreview => {",
+            "\n        Action::Publish => {",
+            "\n        Action::PublishModel => {",
+        ] {
+            let start = me.find(arm).unwrap_or_else(|| panic!("`{arm}` moved"));
+            let body = &me[start..];
+            let end = body[arm.len()..].find("        Action::").map(|i| i + arm.len()).unwrap_or(body.len());
+            let body = &body[..end];
+            assert!(
+                body.contains("strip_dialog_only_content(&mut "),
+                "{arm} returns its report to the script without scrubbing the dialog's code"
+            );
         }
     }
 

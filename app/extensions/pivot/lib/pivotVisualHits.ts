@@ -5,11 +5,14 @@
 // CONTEXT: The cellClicks interceptors never run on a canvas (a press on a
 //          floating object is consumed by Core before them), so the +/-, the
 //          report-filter combos, the Row/Column Labels buttons and the Cancel
-//          button are reached through the overlay hooks instead: getCursor
-//          (hover), claimsBodyDrag + `floatingObject:bodyDragStart` (press) and
-//          onDoubleClick. All three ask `hitPivotVisualChrome` against the record
-//          of the box under the pointer. The records are this module's own --
-//          the worksheet overlay clears ITS bound maps on every paint.
+//          button are reached through the overlay hooks instead: `zoneAt` (the
+//          press and the pointer; chrome is CONTENT), `floatingObject:bodyDragStart`
+//          (the press, which acts when it is RELEASED over the same chrome:
+//          pivotChromePress.ts), onDoubleClick, and the document-mousemove hover
+//          (`updatePivotVisualHoverAt`, occlusion-aware). All of them ask
+//          `hitPivotVisualChrome` against the record of the box under the
+//          pointer. The records are this module's own -- the worksheet overlay
+//          clears ITS bound maps on every paint.
 
 import type { PivotInteractiveBounds } from "@api/pivotTypes";
 import type {
@@ -57,6 +60,11 @@ export function getPivotVisualRecord(pivotId: string): PivotVisualRecord | undef
 
 export function allPivotVisualRecords(): PivotVisualRecord[] {
   return [...records.values()];
+}
+
+/** How many boxes have a record -- without copying them (the hover observer asks on every mousemove). */
+export function pivotVisualRecordCount(): number {
+  return records.size;
 }
 
 /** Drop the records of boxes that are no longer published. */

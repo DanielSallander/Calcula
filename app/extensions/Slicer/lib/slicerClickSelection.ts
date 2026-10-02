@@ -69,3 +69,91 @@ export function selectionAfterItemClick(
 export function selectionAfterClear(slicer: Pick<Slicer, "selectedItems">): SlicerSelectionChange {
   return slicer.selectedItems === null ? undefined : null;
 }
+
+/**
+ * Whether a slicer carries a filter -- the ONE predicate the renderer (the
+ * clear button lit or dimmed), the zone answer (the clear button is content
+ * or header) and the button's release all read (BUG-0258 design D9, the
+ * timeline's `isTimelineFiltered` precedent).
+ */
+export function isSlicerFiltered(slicer: Pick<Slicer, "selectedItems">): boolean {
+  return slicer.selectedItems !== null;
+}
+
+/**
+ * A DRAG across items (BUG-0258 design phase 4, owner decision D4): `values`
+ * is the run the drag covered, in the order the pointer swept it -- the LAST
+ * value is the item under the release. The slicer's selectionMode decides:
+ * - "standard": a plain drag selects exactly the run; Ctrl+drag (`additive`)
+ *   ADDS the run to the selection (never toggles: a run is not a click);
+ * - "single": the item the button was released on, alone (Ctrl is ignored,
+ *   as it is for a click);
+ * - "multi": the run is added (a click there toggles, a drag adds).
+ *
+ * FROM AN UNFILTERED SLICER (`selectedItems` null: every item shows
+ * selected) an ADDING run -- Ctrl+drag, or any drag in 'multi' -- selects
+ * exactly the run, as a plain drag does. Adding to "every item" is every item:
+ * the drag would write nothing and show nothing while the button is held, and
+ * the user cannot have meant that; "a drag across items selects the run" is
+ * the grammar's sentence. (A CLICK there still toggles its item OFF:
+ * `selectionAfterItemClick`. Fixer decision after the M7 review, refining D4;
+ * flagged to the owner beside D4 in docs/design/canvas-sheets.md section 2c.)
+ *
+ * A result that selects every item is no filter at all (null). A result equal
+ * to the current selection is `undefined`: nothing is written, so no undo step
+ * that changes nothing. Values the item list does not hold are ignored, and
+ * without an item list nothing happens (the click's rule).
+ *
+ * The drag's preview paints exactly this (`selectionShownDuringRun`), so what
+ * the user sees while the button is held is what the release commits.
+ */
+export function selectionAfterItemRun(
+  slicer: Pick<Slicer, "selectedItems" | "selectionMode">,
+  items: readonly SlicerItem[] | undefined,
+  values: readonly string[],
+  additive: boolean,
+): SlicerSelectionChange {
+  if (!items) return undefined;
+  const known = new Set(items.map((i) => i.value));
+  const run = values.filter((v) => known.has(v));
+  if (run.length === 0) return undefined;
+  const mode = slicer.selectionMode ?? "standard";
+
+  let chosen: Set<string>;
+  if (mode === "single") {
+    chosen = new Set([run[run.length - 1]]);
+  } else if ((mode === "multi" || additive) && slicer.selectedItems !== null) {
+    chosen = new Set(slicer.selectedItems);
+    for (const v of run) chosen.add(v);
+  } else {
+    // A plain drag -- or an adding one from an unfiltered slicer (above).
+    chosen = new Set(run);
+  }
+
+  // In the item list's order, so the stored selection reads like the slicer.
+  const next = items.map((i) => i.value).filter((v) => chosen.has(v));
+  const result = next.length >= known.size ? null : next;
+  return sameSelection(slicer.selectedItems, result) ? undefined : result;
+}
+
+/**
+ * The selection a live (or landing) drag PAINTS: what its release would
+ * commit, or the current selection when that commits nothing.
+ */
+export function selectionShownDuringRun(
+  slicer: Pick<Slicer, "selectedItems" | "selectionMode">,
+  items: readonly SlicerItem[] | undefined,
+  values: readonly string[],
+  additive: boolean,
+): string[] | null {
+  const next = selectionAfterItemRun(slicer, items, values, additive);
+  return next === undefined ? slicer.selectedItems : next;
+}
+
+/** Two selections name the same items (order ignored; null = every item). */
+function sameSelection(a: readonly string[] | null, b: readonly string[] | null): boolean {
+  if (a === null || b === null) return a === b;
+  if (a.length !== b.length) return false;
+  const set = new Set(a);
+  return b.every((v) => set.has(v));
+}

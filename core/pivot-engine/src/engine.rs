@@ -3452,7 +3452,7 @@ impl<'a> PivotCalculator<'a> {
 // ============================================================================
 
 /// Formats the display name for a date grouping level.
-pub fn format_date_level_name(field_name: &str, level: DateGroupLevel) -> String {
+pub(crate) fn format_date_level_name(field_name: &str, level: DateGroupLevel) -> String {
     match level {
         DateGroupLevel::Year => format!("{} (Year)", field_name),
         DateGroupLevel::Quarter => format!("{} (Quarter)", field_name),
@@ -3464,7 +3464,7 @@ pub fn format_date_level_name(field_name: &str, level: DateGroupLevel) -> String
 
 /// Converts a parsed date to a CacheValue for a specific date level.
 /// Uses Number values for correct sorting (Month 1 < 2 < ... < 12).
-pub fn date_to_cache_value(date: &crate::cache::ParsedDate, level: DateGroupLevel) -> CacheValue {
+pub(crate) fn date_to_cache_value(date: &crate::cache::ParsedDate, level: DateGroupLevel) -> CacheValue {
     match level {
         DateGroupLevel::Year => CacheValue::Number(OrderedFloat(date.year as f64)),
         DateGroupLevel::Quarter => CacheValue::Number(OrderedFloat(date.quarter() as f64)),
@@ -3476,7 +3476,7 @@ pub fn date_to_cache_value(date: &crate::cache::ParsedDate, level: DateGroupLeve
 
 /// Gets the ValueId for a record at an effective field index.
 /// Supports both source fields (in record.values) and virtual fields (in virtual_records).
-pub fn record_value_at(
+pub(crate) fn record_value_at(
     record: &crate::cache::CacheRecord,
     record_idx: usize,
     field_source_index: usize,

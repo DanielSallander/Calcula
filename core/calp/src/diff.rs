@@ -68,6 +68,24 @@ pub enum DiffSide<'a> {
         /// `rel_path -> bytes`.
         artifacts: &'a BTreeMap<String, Vec<u8>>,
     },
+    /// A published version whose every READ is checked against its signed
+    /// checksum map (the `SignedBase` posture, `held_button_code.rs` in the app).
+    ///
+    /// For a caller that verified the manifest's SIGNATURE but did not walk
+    /// every artifact up front -- the promotion's code summary reads a handful
+    /// of code artifacts out of an application that may hold megabytes of
+    /// sheets, so it checks what it reads instead of hashing what it does not.
+    ///
+    /// A path the signed map does not list reads as ABSENT (`Ok(None)`): it is
+    /// not part of the version, and bytes a loose file on the share might serve
+    /// for it are never returned. A listed path that cannot be read, or whose
+    /// bytes do not hash to the signed value, is an ERROR -- never a skip.
+    PublishedChecked {
+        transport: &'a dyn WorkspaceTransport,
+        package: &'a str,
+        version: &'a str,
+        manifest: &'a VersionManifest,
+    },
 }
 
 impl<'a> DiffSide<'a> {
@@ -75,33 +93,56 @@ impl<'a> DiffSide<'a> {
         match self {
             DiffSide::Published { manifest, .. } => manifest,
             DiffSide::InMemory { manifest, .. } => manifest,
+            DiffSide::PublishedChecked { manifest, .. } => manifest,
         }
     }
 
     /// The signed checksum map for a published side; a computed one in memory.
-    fn checksums(&self) -> BTreeMap<String, String> {
+    pub(crate) fn checksums(&self) -> BTreeMap<String, String> {
         match self {
             DiffSide::Published { manifest, .. } => manifest.artifact_checksums.clone(),
             DiffSide::InMemory { artifacts, .. } => artifacts
                 .iter()
                 .map(|(rel, bytes)| (rel.clone(), crate::integrity::sha256_hex(bytes)))
                 .collect(),
+            DiffSide::PublishedChecked { manifest, .. } => manifest.artifact_checksums.clone(),
         }
     }
 
-    fn read(&self, rel: &str) -> Result<Option<Vec<u8>>, CalpError> {
+    pub(crate) fn read(&self, rel: &str) -> Result<Option<Vec<u8>>, CalpError> {
         match self {
             DiffSide::Published { transport, package, version, .. } => {
                 transport.read_artifact(package, version, rel)
             }
             DiffSide::InMemory { artifacts, .. } => Ok(artifacts.get(rel).cloned()),
+            DiffSide::PublishedChecked { transport, package, version, manifest } => {
+                let Some(expected) = manifest.artifact_checksums.get(rel) else {
+                    return Ok(None);
+                };
+                let bytes = transport.read_artifact(package, version, rel)?.ok_or_else(|| {
+                    CalpError::MissingArtifact {
+                        package: (*package).to_string(),
+                        version: (*version).to_string(),
+                        file: rel.to_string(),
+                    }
+                })?;
+                if crate::integrity::sha256_hex(&bytes) != *expected {
+                    return Err(CalpError::ChecksumMismatch {
+                        package: (*package).to_string(),
+                        version: (*version).to_string(),
+                        file: rel.to_string(),
+                    });
+                }
+                Ok(Some(bytes))
+            }
         }
     }
 
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             DiffSide::Published { version, .. } => (*version).to_string(),
             DiffSide::InMemory { .. } => "working copy".to_string(),
+            DiffSide::PublishedChecked { version, .. } => (*version).to_string(),
         }
     }
 }
@@ -210,8 +251,12 @@ pub struct ObjectChange {
     pub after_truncated: bool,
     /// Capabilities a script gained. An expansion is the one script change a
     /// consumer must be shown, so it is a field rather than prose in `detail`.
+    /// Read from the two versions' SIGNED manifests (an object script's
+    /// `PublishedObjectScript.capabilities`, the ceiling a subscriber's pull
+    /// applies), never from the artifact (BUG-0274).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub added_capabilities: Vec<String>,
+    /// Capabilities a script no longer has, from the same source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed_capabilities: Vec<String>,
 }
@@ -385,9 +430,11 @@ pub fn diff_sides(
     apply_manifest_sheet_facts(from, to, &opts.sheet_id_map, &mut sheets);
 
     // Manifest-level facts that are not artifacts: writeback declarations,
-    // publisher identity, the compat floor.
+    // publisher identity, the compat floor, and an object script's ceiling
+    // when its artifact did not change.
     let manifest_changes = diff_manifest_fields(from.manifest(), to.manifest());
     diff_writeback_declarations(from.manifest(), to.manifest(), &mut objects);
+    diff_object_script_ceilings(from.manifest(), to.manifest(), &mut objects);
 
     sheets.sort_by(|a, b| a.name.cmp(&b.name).then(a.sheet_id.cmp(&b.sheet_id)));
     objects.sort_by(|a, b| {
@@ -926,8 +973,9 @@ impl DiffContext<'_, '_> {
             return Ok(false);
         }
 
+        let ceilings = self.ceilings(domain, id);
         let (name, detail, before_src, after_src, caps_added, caps_removed) =
-            describe_object(domain, id, before.as_ref(), after.as_ref(), self.opts);
+            describe_object(domain, id, before.as_ref(), after.as_ref(), &ceilings, self.opts);
 
         self.objects.push(ObjectChange {
             domain: domain.to_string(),
@@ -981,8 +1029,9 @@ impl DiffContext<'_, '_> {
                 (Some(x), Some(y)) if !same_object(domain, x, y) => Presence::Changed,
                 _ => continue,
             };
+            let ceilings = self.ceilings(domain, key);
             let (name, detail, before_src, after_src, caps_added, caps_removed) =
-                describe_object(domain, key, b.copied(), a.copied(), self.opts);
+                describe_object(domain, key, b.copied(), a.copied(), &ceilings, self.opts);
             self.objects.push(ObjectChange {
                 domain: domain.to_string(),
                 id: key.clone(),
@@ -1043,6 +1092,13 @@ impl DiffContext<'_, '_> {
             .find(|s| s.sheet_id.to_string() == package_sheet_id)
             .map(|s| s.name.clone())
             .unwrap_or_else(|| package_sheet_id.to_string())
+    }
+
+    /// One object's capability ceiling on each side: for an object script, the
+    /// SIGNED manifest's declaration a subscriber's pull applies -- never the
+    /// artifact's own claim (BUG-0274). Nothing else carries a ceiling.
+    fn ceilings(&self, domain: &str, id: &str) -> Ceilings {
+        Ceilings::of(domain, id, self.from.manifest(), self.to.manifest())
     }
 }
 
@@ -1211,6 +1267,48 @@ fn diff_writeback_declarations(
     }
 }
 
+/// An object script whose signed ceiling moved while its artifact did not.
+///
+/// Every other ceiling change rides on its artifact's row (`push_json_object`
+/// reads both manifests for it). This catches the one that has no row to ride
+/// on: a byte-identical script whose manifest grants more, or less -- a
+/// hand-signed version, or a pragma id this build has started to recognise. The
+/// subscriber's pull applies the manifest, so the subscriber receives the
+/// change, and a diff that said nothing would hide the one script change a
+/// consumer must be shown.
+fn diff_object_script_ceilings(
+    before: &VersionManifest,
+    after: &VersionManifest,
+    objects: &mut Vec<ObjectChange>,
+) {
+    let listed_before: BTreeSet<&str> = before.object_scripts.iter().map(|s| s.id.as_str()).collect();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for script in &after.object_scripts {
+        let id = script.id.as_str();
+        if !listed_before.contains(id) || !seen.insert(id) {
+            continue;
+        }
+        if objects.iter().any(|o| o.domain == "objectScript" && o.id == id) {
+            continue;
+        }
+        let ceilings = Ceilings::of("objectScript", id, before, after);
+        let (added, removed) = ceilings.changes();
+        if added.is_empty() && removed.is_empty() {
+            continue;
+        }
+        let mut row = simple_object(
+            "objectScript",
+            id,
+            "modified",
+            &format!("capabilities changed; {}", capability_clause(&added, &removed)),
+        );
+        row.name = script.name.clone();
+        row.added_capabilities = added;
+        row.removed_capabilities = removed;
+        objects.push(row);
+    }
+}
+
 fn simple_object(domain: &str, id: &str, change: &str, detail: &str) -> ObjectChange {
     ObjectChange {
         domain: domain.to_string(),
@@ -1281,11 +1379,55 @@ type ObjectDescription = (
     Vec<String>,
 );
 
+/// One object's capability ceiling on each side of a comparison.
+#[derive(Debug, Default)]
+struct Ceilings {
+    before: BTreeSet<String>,
+    after: BTreeSet<String>,
+}
+
+impl Ceilings {
+    /// For an object script, each side's SIGNED manifest declaration -- the
+    /// ceiling a subscriber's pull applies (`VersionManifest::object_script_ceiling`,
+    /// shared with the promotion's code summary). Empty for every other domain:
+    /// no other artifact carries a ceiling.
+    fn of(domain: &str, id: &str, before: &VersionManifest, after: &VersionManifest) -> Self {
+        match domain {
+            "objectScript" => Ceilings {
+                before: before.object_script_ceiling(id).into_iter().collect(),
+                after: after.object_script_ceiling(id).into_iter().collect(),
+            },
+            _ => Ceilings::default(),
+        }
+    }
+
+    /// (gained, lost), each sorted.
+    fn changes(&self) -> (Vec<String>, Vec<String>) {
+        (
+            self.after.difference(&self.before).cloned().collect(),
+            self.before.difference(&self.after).cloned().collect(),
+        )
+    }
+}
+
+/// "gains a, b; loses c" -- empty when nothing moved.
+fn capability_clause(added: &[String], removed: &[String]) -> String {
+    let mut parts = Vec::new();
+    if !added.is_empty() {
+        parts.push(format!("gains {}", added.join(", ")));
+    }
+    if !removed.is_empty() {
+        parts.push(format!("loses {}", removed.join(", ")));
+    }
+    parts.join("; ")
+}
+
 fn describe_object(
     domain: &str,
     id: &str,
     before: Option<&serde_json::Value>,
     after: Option<&serde_json::Value>,
+    ceilings: &Ceilings,
     opts: &DiffOptions,
 ) -> ObjectDescription {
     let latest = after.or(before);
@@ -1304,7 +1446,7 @@ fn describe_object(
         "objectScript" | "moduleScript" => Some("source"),
         _ => None,
     };
-    let (before_src, after_src) = match source_field {
+    let (mut before_src, mut after_src) = match source_field {
         Some(field) => (
             before
                 .and_then(|v| v.get(field))
@@ -1318,12 +1460,37 @@ fn describe_object(
         None => (None, None),
     };
 
-    let before_caps = capability_set(before);
-    let after_caps = capability_set(after);
-    let added_capabilities: Vec<String> =
-        after_caps.difference(&before_caps).cloned().collect();
-    let removed_capabilities: Vec<String> =
-        before_caps.difference(&after_caps).cloned().collect();
+    // A BUTTON'S CODE IS SHOWN, like a script's (BUG-0257). `controls.json`
+    // holds one entry per SHEET, so a changed button used to read as a
+    // sheet-level "control modified" with an empty detail -- and code that
+    // somebody else wrote, about to be re-signed under the pusher's key, was
+    // invisible in the push preview. Compared per (row, col), so the detail
+    // names the button and before/after carry its code.
+    //
+    // ...AND A BUTTON CELL'S ACTION (BUG-0260). A `calcula.button` cell carries
+    // its action in its cell-type params, which publish as an opaque
+    // `customObject` payload -- so a re-pointed action read as a bare
+    // "modified" with no detail, and the push preview could not show what the
+    // button would run. Recognised by the payload's SHAPE (the artifact path is
+    // an index, and the kind lives in the manifest), compared per (row, col).
+    let button_code = match domain {
+        "control" => Some(describe_button_code(before, after, opts)),
+        "customObject" if holds_button_cells(before) || holds_button_cells(after) => {
+            Some(describe_code_by_cell(
+                cell_button_actions_by_cell(before),
+                cell_button_actions_by_cell(after),
+                "button action",
+                opts,
+            ))
+        }
+        _ => None,
+    };
+    if let Some((_, b, a)) = &button_code {
+        before_src = b.clone();
+        after_src = a.clone();
+    }
+
+    let (added_capabilities, removed_capabilities) = ceilings.changes();
 
     let detail = match domain {
         "notebook" => {
@@ -1345,27 +1512,174 @@ fn describe_object(
             }
         }
         "objectScript" | "moduleScript" => {
-            if !added_capabilities.is_empty() {
-                format!("source changed; gains {}", added_capabilities.join(", "))
-            } else {
+            let capabilities = capability_clause(&added_capabilities, &removed_capabilities);
+            if capabilities.is_empty() {
                 "source changed".to_string()
+            } else {
+                format!("source changed; {capabilities}")
             }
         }
+        "control" | "customObject" => button_code.map(|(detail, _, _)| detail).unwrap_or_default(),
         _ => String::new(),
     };
 
     (name, detail, before_src, after_src, added_capabilities, removed_capabilities)
 }
 
-fn capability_set(v: Option<&serde_json::Value>) -> BTreeSet<String> {
-    v.and_then(|v| v.get("capabilities"))
-        .and_then(|c| c.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
+/// The slots of a control whose value is CODE: the host's
+/// `EXECUTABLE_CONTROL_PROPERTIES` (app/src-tauri/src/controls.rs), which a host
+/// test pins against this list through the diff's own output.
+const BUTTON_CODE_SLOTS: &[&str] = &["onSelect", "macroRef"];
+
+/// Every piece of button code in one sheet's control entry, by (row, col):
+/// slot -> its text as a reader should see it.
+fn button_code_by_cell(
+    v: Option<&serde_json::Value>,
+) -> BTreeMap<(u64, u64), BTreeMap<&'static str, String>> {
+    let mut out: BTreeMap<(u64, u64), BTreeMap<&'static str, String>> = BTreeMap::new();
+    let Some(entries) = v.and_then(|v| v.get("controls")).and_then(|c| c.as_array()) else {
+        return out;
+    };
+    for entry in entries {
+        let row = entry.get("row").and_then(|r| r.as_u64()).unwrap_or(0);
+        let col = entry.get("col").and_then(|c| c.as_u64()).unwrap_or(0);
+        let Some(props) = entry.get("properties").and_then(|p| p.as_object()) else { continue };
+        for slot in BUTTON_CODE_SLOTS {
+            let Some(p) = props.get(*slot) else { continue };
+            let Some(text) = p.get("value").and_then(|v| v.as_str()) else { continue };
+            if text.is_empty() {
+                continue;
+            }
+            let value_type = p.get("valueType").and_then(|t| t.as_str()).unwrap_or("static");
+            let shown = match (*slot, value_type) {
+                ("macroRef", _) => format!("runs macro {text}"),
+                (_, "static") => text.to_string(),
+                (_, other) => format!("({other}) {text}"),
+            };
+            out.entry((row, col)).or_default().insert(*slot, shown);
+        }
+    }
+    out
+}
+
+/// A1 for a 0-based (row, col).
+pub(crate) fn a1_of(row: u64, col: u64) -> String {
+    let mut letters = String::new();
+    let mut c = col as i64;
+    loop {
+        letters.insert(0, (b'A' + (c % 26) as u8) as char);
+        c = c / 26 - 1;
+        if c < 0 {
+            break;
+        }
+    }
+    format!("{letters}{}", row + 1)
+}
+
+/// The detail line and the before/after code texts for the buttons whose code
+/// differs between two versions of one sheet's controls. An empty detail and
+/// no texts when no button's code changed (a caption edit stays a plain
+/// "control modified").
+fn describe_button_code(
+    before: Option<&serde_json::Value>,
+    after: Option<&serde_json::Value>,
+    opts: &DiffOptions,
+) -> (String, Option<(String, bool)>, Option<(String, bool)>) {
+    describe_code_by_cell(button_code_by_cell(before), button_code_by_cell(after), "button code", opts)
+}
+
+/// The button cell type's id: the host's `button_cells::BUTTON_CELL_TYPE_ID`.
+const BUTTON_CELL_TYPE_ID: &str = "calcula.button";
+
+/// Is this custom-object payload a sheet's cell-type assignments holding at
+/// least one button cell?
+fn holds_button_cells(v: Option<&serde_json::Value>) -> bool {
+    v.and_then(|v| v.as_array()).is_some_and(|entries| {
+        entries
+            .iter()
+            .any(|e| e.get("typeId").and_then(|t| t.as_str()) == Some(BUTTON_CELL_TYPE_ID))
+    })
+}
+
+/// Every button cell's action in one cell-type payload, by (row, col), as a
+/// reader should see it: what it runs, then the action exactly (canonical JSON,
+/// keys sorted -- the bytes the host hashes and acknowledges).
+fn cell_button_actions_by_cell(
+    v: Option<&serde_json::Value>,
+) -> BTreeMap<(u64, u64), BTreeMap<&'static str, String>> {
+    let mut out: BTreeMap<(u64, u64), BTreeMap<&'static str, String>> = BTreeMap::new();
+    let Some(entries) = v.and_then(|v| v.as_array()) else { return out };
+    for entry in entries {
+        if entry.get("typeId").and_then(|t| t.as_str()) != Some(BUTTON_CELL_TYPE_ID) {
+            continue;
+        }
+        let Some(action) = entry.get("params").and_then(|p| p.get("action")) else { continue };
+        if action.is_null() {
+            continue;
+        }
+        let row = entry.get("row").and_then(|r| r.as_u64()).unwrap_or(0);
+        let col = entry.get("col").and_then(|c| c.as_u64()).unwrap_or(0);
+        let text = |key: &str| action.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let what = match action.get("kind").and_then(|k| k.as_str()) {
+            Some("script") => {
+                let function = text("functionName");
+                if function.is_empty() {
+                    format!("runs macro {}", text("scriptId"))
+                } else {
+                    format!("runs macro {}, then calls {function}()", text("scriptId"))
+                }
+            }
+            Some("command") => format!("runs command {}", text("commandId")),
+            _ => "an action of an unknown kind".to_string(),
+        };
+        let exact = serde_json::to_string(action).unwrap_or_default();
+        out.entry((row, col)).or_default().insert("action", format!("{what}\n{exact}"));
+    }
+    out
+}
+
+/// The detail line and the before/after texts for the cells whose code differs
+/// between two versions: `noun` added/changed/removed at A1, B2, ...
+fn describe_code_by_cell(
+    b: BTreeMap<(u64, u64), BTreeMap<&'static str, String>>,
+    a: BTreeMap<(u64, u64), BTreeMap<&'static str, String>>,
+    noun: &str,
+    opts: &DiffOptions,
+) -> (String, Option<(String, bool)>, Option<(String, bool)>) {
+    let cells: BTreeSet<&(u64, u64)> = b.keys().chain(a.keys()).collect();
+    let (mut added, mut changed, mut removed) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut before_text, mut after_text) = (String::new(), String::new());
+    let render = |out: &mut String, at: &str, code: &BTreeMap<&'static str, String>| {
+        for (slot, text) in code {
+            out.push_str(&format!("// {at} {slot}\n{text}\n"));
+        }
+    };
+    for cell in cells {
+        let (bc, ac) = (b.get(cell), a.get(cell));
+        if bc == ac {
+            continue;
+        }
+        let at = a1_of(cell.0, cell.1);
+        match (bc, ac) {
+            (None, Some(_)) => added.push(at.clone()),
+            (Some(_), None) => removed.push(at.clone()),
+            _ => changed.push(at.clone()),
+        }
+        if let Some(code) = bc {
+            render(&mut before_text, &at, code);
+        }
+        if let Some(code) = ac {
+            render(&mut after_text, &at, code);
+        }
+    }
+    let mut parts = Vec::new();
+    for (verb, cells) in [("added", &added), ("changed", &changed), ("removed", &removed)] {
+        if !cells.is_empty() {
+            parts.push(format!("{noun} {verb} at {}", cells.join(", ")));
+        }
+    }
+    let text = |t: String| (!t.is_empty()).then(|| truncate(&t, opts.max_source_bytes));
+    (parts.join("; "), text(before_text), text(after_text))
 }
 
 fn cell_count(v: Option<&serde_json::Value>) -> usize {
@@ -1450,7 +1764,7 @@ fn diff_model(
     }
 }
 
-fn truncate(s: &str, max: usize) -> (String, bool) {
+pub(crate) fn truncate(s: &str, max: usize) -> (String, bool) {
     if s.len() <= max {
         return (s.to_string(), false);
     }
@@ -1811,6 +2125,111 @@ mod tests {
         let pane = |reference: &str| json!({ "id": "p", "config": { "type": "dropdown", "source": { "type": "cellRange", "reference": reference } } });
         assert!(same_object("paneControl", &pane("data!a1:a5"), &pane("'Data'!A1:A5")));
         assert!(!same_object("paneControl", &pane("Data!A1:A5"), &pane("Data!A1:A6")));
+    }
+
+    /// BUG-0257: the push preview named a changed button only as "control
+    /// modified", with no code. A button's code is now compared per (row, col)
+    /// and shown before/after, like a script's.
+    ///
+    /// SABOTAGE: drop the `"control"` arm of `describe_object`'s detail match
+    /// (or its before/after assignment) -- the detail and texts go empty.
+    #[test]
+    fn a_changed_buttons_code_is_named_and_shown_before_and_after() {
+        let sheet = |b4: &str, c2_macro: Option<&str>, caption: &str| {
+            let mut controls = vec![serde_json::json!({
+                "row": 3, "col": 1, "controlType": "button",
+                "properties": {
+                    "onSelect": { "valueType": "static", "value": b4 },
+                    "text": { "valueType": "static", "value": caption }
+                }
+            })];
+            if let Some(m) = c2_macro {
+                controls.push(serde_json::json!({
+                    "row": 1, "col": 2, "controlType": "button",
+                    "properties": { "macroRef": { "valueType": "static", "value": m } }
+                }));
+            }
+            serde_json::json!({ "sheetId": "s", "controls": controls })
+        };
+        let opts = DiffOptions::default();
+
+        let before = sheet("Report();", None, "Go");
+        let after = sheet("Evil();", Some("macro-x"), "Go");
+        let (_, detail, b, a, _, _) = describe_object("control", "s", Some(&before), Some(&after), &Ceilings::default(), &opts);
+        assert!(detail.contains("button code changed at B4"), "{detail}");
+        assert!(detail.contains("button code added at C2"), "{detail}");
+        let (b, a) = (b.expect("before code shown").0, a.expect("after code shown").0);
+        assert!(b.contains("Report();") && !b.contains("Evil();"), "{b}");
+        assert!(a.contains("Evil();") && a.contains("runs macro macro-x"), "{a}");
+
+        // A caption edit is not a code change: no code shown, no code detail.
+        let (_, detail, b, a, _, _) =
+            describe_object("control", "s", Some(&sheet("Report();", None, "Go")), Some(&sheet("Report();", None, "Run")), &Ceilings::default(), &opts);
+        assert!(detail.is_empty(), "{detail}");
+        assert!(b.is_none() && a.is_none());
+
+        // The empty slot every recipe button carries is not code.
+        let (_, detail, _, _, _, _) =
+            describe_object("control", "s", Some(&sheet("", None, "Go")), Some(&sheet("", None, "Go2")), &Ceilings::default(), &opts);
+        assert!(detail.is_empty(), "{detail}");
+    }
+
+    /// A BUTTON CELL'S ACTION is shown too (BUG-0260 review): a re-pointed
+    /// action names the cell and shows what it ran before and what it runs
+    /// after, exactly -- it used to read as a bare "modified" on an opaque
+    /// custom object. A label edit is not an action change.
+    ///
+    /// SABOTAGE: drop the `"customObject"` arm of `button_code` in
+    /// `describe_object`.
+    #[test]
+    fn a_changed_button_cells_action_is_named_and_shown_before_and_after() {
+        let cells = |c3: serde_json::Value, d4_label: &str| {
+            serde_json::json!([
+                { "row": 2, "col": 2, "typeId": "calcula.button", "params": { "label": "Go", "action": c3 } },
+                { "row": 3, "col": 3, "typeId": "calcula.button", "params": { "label": d4_label } },
+                { "row": 5, "col": 0, "typeId": "calcula.checkbox", "params": {} }
+            ])
+        };
+        let opts = DiffOptions::default();
+        let report = serde_json::json!({ "kind": "script", "scriptId": "macro-report" });
+        let exfil = serde_json::json!({ "kind": "script", "scriptId": "macro-report", "functionName": "Exfiltrate" });
+
+        let (_, detail, b, a, _, _) =
+            describe_object("customObject", "0", Some(&cells(report.clone(), "x")), Some(&cells(exfil, "x")), &Ceilings::default(), &opts);
+        assert_eq!(detail, "button action changed at C3");
+        let (b, a) = (b.expect("before shown").0, a.expect("after shown").0);
+        assert!(b.contains("runs macro macro-report") && !b.contains("Exfiltrate"), "{b}");
+        assert!(a.contains("then calls Exfiltrate()"), "{a}");
+        assert!(a.contains(r#""functionName":"Exfiltrate""#), "the exact action is shown: {a}");
+
+        // Added and removed, and a command is named as one.
+        let (_, detail, _, a, _, _) = describe_object(
+            "customObject",
+            "0",
+            Some(&cells(serde_json::Value::Null, "x")),
+            Some(&cells(serde_json::json!({ "kind": "command", "commandId": "format.bold" }), "x")),
+            &Ceilings::default(),
+            &opts,
+        );
+        assert_eq!(detail, "button action added at C3");
+        assert!(a.unwrap().0.contains("runs command format.bold"));
+
+        // A label edit changes no action: no detail, no code.
+        let (_, detail, b, a, _, _) =
+            describe_object("customObject", "0", Some(&cells(report.clone(), "x")), Some(&cells(report, "y")), &Ceilings::default(), &opts);
+        assert!(detail.is_empty(), "{detail}");
+        assert!(b.is_none() && a.is_none());
+
+        // Another extension's custom object is left alone.
+        let (_, detail, b, _, _, _) = describe_object(
+            "customObject",
+            "1",
+            Some(&serde_json::json!({ "anything": 1 })),
+            Some(&serde_json::json!({ "anything": 2 })),
+            &Ceilings::default(),
+            &opts,
+        );
+        assert!(detail.is_empty() && b.is_none());
     }
 
     #[test]

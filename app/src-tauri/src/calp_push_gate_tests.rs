@@ -23,6 +23,8 @@ fn params(mode: Option<&str>, base: Option<&str>, summary: &str) -> PublishParam
         mode: mode.map(|m| m.to_string()),
         expected_base_version: base.map(|b| b.to_string()),
         change_summary: summary.to_string(),
+        acknowledged_button_code: Vec::new(),
+        include_in_application: Vec::new(),
     }
 }
 
@@ -115,7 +117,12 @@ fn recording_a_push_moves_the_base_so_the_next_push_is_measured_from_it() {
         "2026-08-29T00:00:00Z",
         Vec::new(),
     );
-    link.record_push("1.1.0", "2026-08-29T10:00:00Z", Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    link.record_push(
+        "1.1.0",
+        "2026-08-29T10:00:00Z",
+        Vec::new(),
+        calp::WorkingCopyContent::default(),
+    );
     assert_eq!(
         link.base_version, "1.1.0",
         "after a push, the version just published IS the base — otherwise the \
@@ -370,4 +377,48 @@ fn the_push_assembly_and_the_merge_follow_a_working_copys_collision_renames() {
         diff.contains("subscriber_published_names(") && diff.contains("&published_names,"),
         "the subscriber diff no longer compares renamed references in the published spelling"
     );
+}
+
+/// A working copy whose link predates the record of what the application
+/// carries is REFUSED, with the remedy -- never pushed on a guess. The filter
+/// used to answer such a link with "publish everything", which is the leak the
+/// record exists to close (review finding on BUG-0261; no backward
+/// compatibility is kept, CLAUDE.md).
+///
+/// SABOTAGE: make `unrecorded_link_refusal` return `None` for every link.
+#[test]
+fn a_push_from_a_link_without_its_record_is_refused_with_the_remedy() {
+    use crate::calp_commands::unrecorded_link_refusal;
+    let ws = r"\\server\registry";
+    let legacy = calp::WorkingCopyLink::new(ws, "sales", "report", "1.0.0", "2026-09-30T00:00:00Z", Vec::new());
+    let refusal = unrecorded_link_refusal(Some(&legacy), ws, "sales").expect("an unrecorded link is refused");
+    assert!(refusal.starts_with("CALP_PUSH_LINK_UNRECORDED:"), "{refusal}");
+    assert!(refusal.contains("Open Application for Editing"), "the refusal names the remedy: {refusal}");
+    assert!(refusal.contains("Nothing was pushed"), "{refusal}");
+
+    let mut recorded = legacy.clone();
+    recorded.record_content(calp::WorkingCopyContent::default());
+    assert_eq!(unrecorded_link_refusal(Some(&recorded), ws, "sales"), None, "an EMPTY record is a record");
+    // A link to ANOTHER application is not this push's business (a new
+    // application created from the workbook has no link of its own yet).
+    assert_eq!(unrecorded_link_refusal(Some(&legacy), ws, "sales-2026"), None);
+    assert_eq!(unrecorded_link_refusal(None, ws, "sales"), None, "a first publish has no link");
+}
+
+/// The gate runs in `calp_publish` before anything is assembled or published.
+///
+/// SABOTAGE: delete the `unrecorded_link_refusal(` call from `calp_publish`.
+#[test]
+fn the_unrecorded_link_gate_runs_before_the_assembly() {
+    let cmds: String = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/calp_commands.rs"))
+        .unwrap()
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let publish = &cmds[cmds.find("pub fn calp_publish(").unwrap()..];
+    let publish = &publish[..publish.find("\n}\n").unwrap()];
+    let gate = publish.find("unrecorded_link_refusal(").expect("calp_publish no longer refuses an unrecorded link");
+    let assembly = publish.find("assemble_publish_workbook(").expect("the assembly moved");
+    assert!(gate < assembly, "the gate runs before the carrier is assembled");
 }

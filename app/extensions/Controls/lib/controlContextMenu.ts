@@ -1,7 +1,8 @@
 //! FILENAME: app/extensions/Controls/lib/controlContextMenu.ts
 // PURPOSE: The item MODEL and the actions for a floating control's own
 //          right-click menu (Duplicate, Copy, Paste, Group, Order, Flip, Edit
-//          Script, Apply Template, Delete).
+//          Script, Apply Template, Size and Position, Make this my own…,
+//          Delete).
 // CONTEXT: Every item here used to be registered into `gridExtensions`, the
 //          registry only `GridContextMenuHost` renders — and that host opens
 //          solely on `AppEvents.CONTEXT_MENU_REQUEST`, which Core deliberately
@@ -18,15 +19,34 @@
 //          keeping — the items and what they do — so there is still exactly one
 //          place that decides what a control's menu offers.
 //
-//          ONE item stays registered with `gridExtensions`: "Paste", whose
-//          context is a CELL ("put the copied control here"), not an object.
-//          Core does open the cell menu there, so that one was never dead.
+//          TWO items stay registered with `gridExtensions`, because their
+//          context is a CELL, not a floating object, and Core does open the
+//          cell menu there: "Paste" ("put the copied control here"), and
+//          "Make this my own…" on an IN-CELL button control (below).
+//
+//          "Make this my own…" (owner question 8, 2026-10-02) is the one item
+//          that needs a backend READ to be offered: the floating store knows a
+//          control's type and geometry, never its code. So the object menu
+//          opens at once with what the store knows, and
+//          `refineControlObjectMenu` hands it the whole list again once the
+//          read says the BUTTON holds an application's code. An IN-CELL button
+//          control has no object menu -- its right-click is Core's cell menu,
+//          asked synchronously -- so there the answer is read AHEAD of the
+//          right-click (lib/heldEmbeddedButtons.ts). Either way, choosing it
+//          runs the Properties pane's own flow (`makeHeldButtonCodeOwnAt`),
+//          in run mode as in Design Mode: it runs no button, and its confirm
+//          shows the code before anything moves. A button CELL (Cell Type:
+//          Button) is not a control and gets no such entry anywhere: its held
+//          action keeps "give it an action of your own" (owner decision Q4).
 
 import { gridExtensions } from "@api";
 import { AppEvents } from "@api";
 import { emitAppEvent } from "@api/events";
+import { showToast } from "@api/notifications";
+import { readHeldButtonCode, type HeldButtonCode } from "@api/heldButtonCode";
 import { getGridRegions } from "@api/gridOverlays";
 import { getObjectStackingService, type ObjectStackingCommand } from "@api/objectStacking";
+import { sizeAndPositionMenuEntry } from "@api/objectPosition";
 import type { GridContextMenuItem, GridMenuContext } from "@api/extensions";
 import {
   getSelectedFloatingControls,
@@ -47,7 +67,10 @@ import {
 import {
   setControlProperty,
   getControlMetadata,
+  adoptHeldButtonCode,
 } from "./controlApi";
+import { requestHeldAdoption, type HeldAdoptionShown } from "../PropertiesPane/HeldCodeSection";
+import { inCellButtonHoldsCode, installInCellButtonUpkeep } from "./heldEmbeddedButtons";
 import {
   copyControls,
   pasteControl,
@@ -279,6 +302,138 @@ async function handleDuplicate(id: string): Promise<void> {
 }
 
 // ============================================================================
+// "Make this my own…" (owner question 8)
+// ============================================================================
+
+/**
+ * The id of "Make this my own…" on a button CONTROL's right-click menu (owner
+ * question 8, 2026-10-02): a floating button's object menu and, for an
+ * in-cell button control, Core's cell menu -- one id, like Paste's, so the two
+ * menus cannot drift apart. Button CONTROLS only: a button CELL keeps its own
+ * remedy, "give it an action of your own" (owner decision Q4) -- dropping its
+ * stamp would WIDEN what it runs.
+ */
+export const MAKE_HELD_CODE_OWN_ITEM_ID = "controls.makeHeldCodeOwn";
+
+/**
+ * What the object menu can know only from a backend READ: the floating store
+ * holds a control's type and geometry, never its code.
+ */
+export interface ControlMenuFacts {
+  /** The application code a BUTTON holds (`readHeldButtonCode`); null or absent for none. */
+  heldCode?: HeldButtonCode | null;
+}
+
+/**
+ * The application code a button control holds right now, read from the
+ * backend through the same reading the Properties pane uses
+ * (`readHeldButtonCode`). Null when it holds none, or is no longer a button.
+ * Rejects when the read fails: each caller decides what that means.
+ */
+async function readButtonHeldCode(ctrl: {
+  sheetIndex: number;
+  row: number;
+  col: number;
+}): Promise<HeldButtonCode | null> {
+  const metadata = await getControlMetadata(ctrl.sheetIndex, ctrl.row, ctrl.col);
+  return metadata?.controlType === "button" ? readHeldButtonCode(metadata.properties) : null;
+}
+
+/** A refused or failed adoption, in the Properties pane's words (PropertiesPane.handleAdoptHeld). */
+function sayAdoptionFailed(err: unknown): void {
+  showToast(`Could not make the application's code your own: ${String(err)}`, { type: "error" });
+}
+
+/**
+ * "Make this my own…" chosen from a button's right-click menu: the Properties
+ * pane's flow, step for step, so the two doors cannot drift apart --
+ *
+ *   1. read what the button holds NOW (the menu may have been open a while);
+ *   2. capture exactly the texts the confirm is about to show, BEFORE it is
+ *      asked (HeldCodeSection's rule);
+ *   3. `requestHeldAdoption` -- the pane's own confirm, which SHOWS the code
+ *      and says what follows; `confirmAsync`, awaited, failing closed;
+ *   4. on an explicit yes only, `adoptHeldButtonCode` with the shown texts.
+ *      Rust MOVES the held code into the live slots as ONE undo step and
+ *      writes the always-on `ButtonCodeAdopted` row; it refuses, with nothing
+ *      written, code that changed after it was shown;
+ *   5. a refusal is said in the pane's words.
+ *
+ * Then an open Properties pane on this button re-reads it: it shows the held
+ * view and its own "Make this my own…" step, which Rust would refuse once the
+ * code has moved.
+ */
+export async function makeHeldButtonCodeOwn(controlId: string): Promise<void> {
+  const ctrl = getFloatingControl(controlId);
+  if (!ctrl || ctrl.controlType !== "button") return;
+  await makeHeldButtonCodeOwnAt(ctrl);
+}
+
+/**
+ * The same flow for the button control anchored at a cell -- how the cell
+ * menu reaches an IN-CELL button control, which is not in the floating store.
+ * The read in step 1 is what decides: a cell that holds no button control, or
+ * one whose code is no longer held, is said and nothing is changed.
+ */
+export async function makeHeldButtonCodeOwnAt(at: {
+  sheetIndex: number;
+  row: number;
+  col: number;
+}): Promise<void> {
+  const { sheetIndex, row, col } = at;
+
+  let held: HeldButtonCode | null;
+  try {
+    held = await readButtonHeldCode(at);
+  } catch (err) {
+    sayAdoptionFailed(err);
+    return;
+  }
+  if (!held) {
+    showToast("This button no longer holds code that came with an application; nothing was changed.", {
+      type: "warning",
+    });
+    return;
+  }
+
+  // Exactly what the confirm is about to show: if the held code changes while
+  // the dialog is open, Rust refuses these texts -- a read after the confirm
+  // would adopt code the author never saw.
+  const shown: HeldAdoptionShown = { onSelect: held.onSelect, macroRef: held.macroRef };
+  if (!(await requestHeldAdoption(held))) return;
+
+  try {
+    await adoptHeldButtonCode(sheetIndex, row, col, shown.onSelect, shown.macroRef);
+  } catch (err) {
+    sayAdoptionFailed(err);
+  }
+  window.dispatchEvent(
+    new CustomEvent("controls:metadata-refresh", { detail: { sheetIndex, row, col } }),
+  );
+}
+
+/**
+ * The object menu once the facts only a backend read can give are known:
+ * resolves to the WHOLE list again, now with "Make this my own…" when the
+ * BUTTON holds an application's code, or null when the read adds nothing -- the
+ * menu then keeps the list it opened with. Only a button is read. A read that
+ * fails offers nothing more; the Properties pane still shows the code and its
+ * own step.
+ */
+export async function refineControlObjectMenu(controlId: string): Promise<ControlMenuItem[] | null> {
+  const ctrl = getFloatingControl(controlId);
+  if (!ctrl || ctrl.controlType !== "button") return null;
+  let heldCode: HeldButtonCode | null;
+  try {
+    heldCode = await readButtonHeldCode(ctrl);
+  } catch (err) {
+    console.warn("[Controls] The button's code could not be read; its menu offers no \"Make this my own\":", err);
+    return null;
+  }
+  return heldCode ? buildControlObjectMenu(controlId, { heldCode }) : null;
+}
+
+// ============================================================================
 // The Object Menu
 // ============================================================================
 
@@ -288,13 +443,15 @@ async function handleDuplicate(id: string): Promise<void> {
  * Evaluated at OPEN time, against the control the pointer is actually over, so
  * the offer matches the object: a button has no Flip and no Edit Script, a
  * shape has both, and Group appears only when a second control is selected to
- * group it with.
+ * group it with. `facts` carries what only a backend read can say
+ * ({@link refineControlObjectMenu}); without them nothing that depends on them
+ * is offered.
  *
  * Items that do not apply are OMITTED, never greyed out — the same rule the
  * `visible()` predicates carried when these items still lived in the grid
  * registry.
  */
-export function buildControlObjectMenu(controlId: string): ControlMenuItem[] {
+export function buildControlObjectMenu(controlId: string, facts: ControlMenuFacts = {}): ControlMenuItem[] {
   const ctrl = getFloatingControl(controlId);
   if (!ctrl) return [];
 
@@ -410,6 +567,34 @@ export function buildControlObjectMenu(controlId: string): ControlMenuItem[] {
     });
   }
 
+  // Size and Position (@api/objectPosition; BUG-0258 design phase 5b): the
+  // no-drag route to place and size the control, the row every object menu
+  // carries. Omitted (this menu greys nothing out) only when no dialog can
+  // open for it; a RUN-MODE button opens it read-only, saying that Design Mode
+  // is what lets it move.
+  const region = getGridRegions().find((r) => r.id === controlId);
+  const sizePos = region ? sizeAndPositionMenuEntry(region) : null;
+  if (sizePos && !sizePos.disabled) {
+    items.push({
+      id: "controls.sizeAndPosition",
+      label: sizePos.label,
+      separatorAfter: true,
+      run: sizePos.run,
+    });
+  }
+
+  // "Make this my own…" (owner question 8): only when a read found an
+  // application's code on this BUTTON. In its own group right above Delete, so
+  // when the read answers after the menu opened, only Delete moves.
+  if (ctrl.controlType === "button" && facts.heldCode) {
+    items.push({
+      id: MAKE_HELD_CODE_OWN_ITEM_ID,
+      label: "Make this my own…",
+      separatorAfter: true,
+      run: () => void makeHeldButtonCodeOwn(controlId),
+    });
+  }
+
   items.push({
     id: "controls.delete",
     label: "Delete",
@@ -432,14 +617,20 @@ export function buildControlObjectMenu(controlId: string): ControlMenuItem[] {
 // ============================================================================
 
 /**
- * Register the one control item whose context is a CELL rather than an object:
- * "Paste", which answers "put the copied control HERE".
+ * Register the control items whose context is a CELL rather than an object:
  *
- * Core does open its cell menu on an empty cell, so this item — unlike the
- * fourteen object items that used to sit beside it — has always been reachable,
- * and it is the only route to paste a control when none is selected (the
- * Ctrl+V handler in index.ts requires a selected control before it intercepts).
- * Returns a cleanup function that unregisters it.
+ *   - "Paste", which answers "put the copied control HERE". Core does open its
+ *     cell menu on an empty cell, so this item — unlike the fourteen object
+ *     items that used to sit beside it — has always been reachable, and it is
+ *     the only route to paste a control when none is selected (the Ctrl+V
+ *     handler in index.ts requires a selected control before it intercepts).
+ *   - "Make this my own…" on an IN-CELL button control that holds an
+ *     application's code (owner question 8): its right-click IS this cell
+ *     menu. Offered from the answer read ahead of the right-click
+ *     (lib/heldEmbeddedButtons.ts, kept current by the upkeep installed here);
+ *     choosing it reads the button again and runs the pane's flow.
+ *
+ * Returns a cleanup function that unregisters both and stops the upkeep.
  */
 export function registerControlContextMenu(): () => void {
   const items: GridContextMenuItem[] = [
@@ -452,11 +643,28 @@ export function registerControlContextMenu(): () => void {
       visible: () => hasClipboardControl(),
       onClick: (context: GridMenuContext) => void handlePaste(context.sheetIndex),
     },
+    {
+      id: MAKE_HELD_CODE_OWN_ITEM_ID,
+      label: "Make this my own…",
+      group: "controls",
+      order: 4,
+      visible: (context: GridMenuContext) =>
+        context.clickedCell !== null &&
+        inCellButtonHoldsCode(context.sheetIndex, context.clickedCell.row, context.clickedCell.col),
+      onClick: (context: GridMenuContext) => {
+        const cell = context.clickedCell;
+        if (!cell) return;
+        void makeHeldButtonCodeOwnAt({ sheetIndex: context.sheetIndex, row: cell.row, col: cell.col });
+      },
+    },
   ];
 
   gridExtensions.registerContextMenuItems(items);
+  const stopUpkeep = installInCellButtonUpkeep();
 
   return () => {
+    stopUpkeep();
     gridExtensions.unregisterContextMenuItem(PASTE_ITEM_ID);
+    gridExtensions.unregisterContextMenuItem(MAKE_HELD_CODE_OWN_ITEM_ID);
   };
 }

@@ -31,12 +31,13 @@ vi.mock("../../manifest", () => ({
 }));
 
 import type { GridRegion } from "@api/gridOverlays";
-import { objectRefOf, resetObjectSelectionProviders } from "@api/objectSelection";
+import { objectOwnsKey, objectRefOf, resetObjectSelectionProviders } from "@api/objectSelection";
 import {
   createPivotVisualSelectionProvider,
   registerPivotVisualSelection,
 } from "../pivotVisualSelection";
 import { PIVOT_VISUAL_REGION_TYPE } from "../pivotVisualRegions";
+import { notePivotBoxMenuOpened, setPivotChromePressLive } from "../pivotVisualMenuState";
 
 function region(pivotId: string, type = PIVOT_VISUAL_REGION_TYPE): GridRegion {
   return {
@@ -99,5 +100,51 @@ describe("the canvas selection set (M8)", () => {
     expect(seen).toHaveBeenCalledTimes(2);
     off();
     resetSelectionHandlerState();
+  });
+});
+
+// BUG-0270 review: the generic object Delete (ObjectPosition
+// lib/selectedObjectKeys.ts) now reaches a canvas pivot box -- it stands down
+// only while a family owns Delete. The box's right-click menu takes no focus,
+// so the grid keeps the keyboard while it is open: Delete there deleted the
+// whole PivotTable BEHIND the menu. The menu and a held chrome press (a +/-, a
+// filter button) own Delete exactly as they own Escape.
+describe("ownsKey: the box's menu and a held chrome press own Escape AND Delete", () => {
+  afterEach(() => setPivotChromePressLive(false));
+
+  it("Delete and Escape are owned while the box's right-click menu is open, and not once it closed", () => {
+    const p = createPivotVisualSelectionProvider();
+    expect(p.ownsKey!("Delete"), "control: no menu").toBe(false);
+    const release = notePivotBoxMenuOpened();
+    try {
+      expect(p.ownsKey!("Delete"), "Delete with the box's menu open deleted the PivotTable behind it").toBe(true);
+      expect(p.ownsKey!("Escape")).toBe(true);
+      expect(p.ownsKey!("Arrow"), "the arrows are not the menu's").toBe(false);
+      expect(p.ownsKey!("Tab")).toBe(false);
+    } finally {
+      release();
+    }
+    expect(p.ownsKey!("Delete")).toBe(false);
+    expect(p.ownsKey!("Escape")).toBe(false);
+  });
+
+  it("Delete is owned while a chrome press is held", () => {
+    const p = createPivotVisualSelectionProvider();
+    setPivotChromePressLive(true);
+    expect(p.ownsKey!("Delete"), "Delete during a held +/- press deleted the PivotTable under it").toBe(true);
+    setPivotChromePressLive(false);
+    expect(p.ownsKey!("Delete")).toBe(false);
+  });
+
+  it("reaches objectOwnsKey through the seam -- the question the generic Delete asks", () => {
+    const off = registerPivotVisualSelection();
+    const release = notePivotBoxMenuOpened();
+    try {
+      expect(objectOwnsKey("Delete")).toBe(true);
+    } finally {
+      release();
+      off();
+    }
+    expect(objectOwnsKey("Delete")).toBe(false);
   });
 });

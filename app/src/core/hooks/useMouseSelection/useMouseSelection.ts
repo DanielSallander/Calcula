@@ -37,10 +37,11 @@ import { getColumnHeaderOverride } from "../../../api/columnHeaderOverrides";
 import { getCellCursorOverride } from "../../lib/cellClickInterceptors";
 import { getColumnWidth } from "../../lib/gridRenderer/layout/dimensions";
 import { createEmptyDimensionOverrides } from "../../types";
-import { getLiveGridRegions, getOverlayRegistration } from "../../../api/gridOverlays";
+import { getLiveGridRegions, getOverlayRegistration, isContentGestureHeld } from "../../../api/gridOverlays";
 import { isPointModeOnForeignSheet } from "../../lib/pointModeView";
 import { getGridStateSnapshot } from "../../state/GridContext";
 import { rowHeaderGutter } from "../../lib/gridRenderer/layout/headerVisibility";
+import { clearFloatingHover, setHoveredFloatingRegion } from "../../lib/objectHover";
 
 // Custom cursor data URLs for Excel-style header selection arrows
 const COLUMN_SELECT_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 L12 18 M12 18 L8 14 M12 18 L16 14' stroke='black' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 12 12, pointer`;
@@ -477,6 +478,20 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         return;
       }
 
+      // Priority 1.6: a floating object's visible six-dot GRIP
+      // (core/lib/floatingGrip.ts; BUG-0258 design phase 5). After the handles
+      // (a handle overlapping a grip is painted over it) and before every body:
+      // the grip sits just OUTSIDE its object, and where it lies over a
+      // neighbour it is painted above it and takes the press there. The same
+      // point-mode gate as the handles: no grip is painted on a sheet the
+      // published objects do not belong to.
+      if (
+        !isPointModeOnForeignSheet() &&
+        overlayMoveHandlers.handleGripMouseDown(mouseX, mouseY, event)
+      ) {
+        return;
+      }
+
       // Priority 1.7: Check for floating overlay move (e.g., chart body drag)
       if (overlayMoveHandlers.handleOverlayMoveMouseDown(mouseX, mouseY, event)) {
         return;
@@ -673,8 +688,55 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
 
       // Update cursor based on position (when not dragging)
       if (!isDragging && !isFormulaDragging && !isResizing && !isRefDragging && !isRefResizing && !isSelectionDragging && !isOverlayResizing && !isOverlayMoving) {
-        // Check fill handle first (highest priority for crosshair)
-        if (isOverFillHandle(mouseX, mouseY)) {
+        if ((() => {
+          // A FLOATING OBJECT first -- in the order the PRESS takes it
+          // (BUG-0258: the pointer is the press's answer). The mouse-down
+          // wrapper (useSpreadsheetSelection.ts) hands a press on a live
+          // resize handle of a floating object, or on its body, to the object
+          // BEFORE the fill handle, the cell click interceptors, the formula
+          // reference borders and the selection border, because the objects
+          // and their handles are painted over all of them (core.ts); there
+          // the resize scan (the floating handles, then a cell-anchored
+          // region's corner) runs before the body. So: a handle's own pointer
+          // (nwse / nesw / ns / ew, core/lib/floatingHandles.ts), else the
+          // body's ONE zone answer (@api/gridOverlays resolveFloatingZone):
+          // the content's own pointer, 'move' only where the frame can really
+          // move, 'default' over a locked, immovable or subscribed frame, or
+          // a live content gesture's.
+          //
+          // No handle while a content gesture holds the pointer: its button is
+          // held, so nothing can start a resize -- and the timeline's range
+          // drag SELECTS its timeline, so its handles turn live halfway
+          // through, right over the first and last months.
+          //
+          // THE GRIP (core/lib/floatingGrip.ts) ranks between the handles and
+          // the bodies, as in the press, and shows 'move'. This pass is also
+          // Core's HOVER (core/lib/objectHover.ts): the object whose handle,
+          // grip or body is under the pointer, or none -- set on EVERY
+          // non-drag move, so moving onto a cell, a header or empty page
+          // clears it. A grip that shows only while its object is hovered
+          // stays shown as the pointer moves from the body up onto it: the
+          // object is still the hovered one when the grip is asked.
+          const body = overlayMoveHandlers.checkOverlayBody(mouseX, mouseY);
+          const resizeHit =
+            !isContentGestureHeld() &&
+            !isPointModeOnForeignSheet() &&
+            overlayResizeHandlers.checkOverlayResizeHandle(mouseX, mouseY);
+          const grip =
+            !resizeHit && !isPointModeOnForeignSheet()
+              ? overlayMoveHandlers.checkGrip(mouseX, mouseY)
+              : null;
+          const floatingResize = resizeHit && resizeHit.region.floating ? resizeHit : null;
+          setHoveredFloatingRegion(
+            floatingResize?.region.id ?? grip?.region.id ?? body?.region.id ?? null,
+          );
+          if (!floatingResize && !grip && !body) return false;
+          setCursorStyle(resizeHit ? resizeHit.cursor : grip ? "move" : body!.cursor);
+          setHoveringOverReferenceBorder(false);
+          return true;
+        })()) {
+        } else if (isOverFillHandle(mouseX, mouseY)) {
+          // The fill handle (crosshair), where no floating object covers it.
           setCursorStyle("crosshair");
           setHoveringOverReferenceBorder(false);
         } else if ((isEditingFormula() || isChartSeriesRefMode()) && referenceResizeHandlers.getCornerAtPosition(mouseX, mouseY)) {
@@ -697,23 +759,17 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
           // Only when NOT editing a formula
           setCursorStyle("move");
           setHoveringOverReferenceBorder(false);
-        } else if (
-          !isPointModeOnForeignSheet() &&
-          overlayResizeHandlers.checkOverlayResizeHandle(mouseX, mouseY)
-        ) {
-          // Check if over an overlay (table/chart) resize handle
-          setCursorStyle("nwse-resize");
-          setHoveringOverReferenceBorder(false);
         } else if ((() => {
-          const hit = overlayMoveHandlers.checkOverlayBody(mouseX, mouseY);
-          if (hit) {
-            // Use cursor from overlay registration if provided, otherwise default logic
-            const defaultCursor = hit.region.data?.movable === false ? "pointer" : "move";
-            setCursorStyle(hit.cursor ?? defaultCursor);
-            setHoveringOverReferenceBorder(false);
-            return true;
-          }
-          return false;
+          // Over a CELL-ANCHORED region's resize corner (a table): 'nwse-resize'.
+          // Floating objects answered first, above; this reaches the resize
+          // scan only where none is.
+          const resizeHit =
+            !isPointModeOnForeignSheet() &&
+            overlayResizeHandlers.checkOverlayResizeHandle(mouseX, mouseY);
+          if (!resizeHit) return false;
+          setCursorStyle(resizeHit.cursor);
+          setHoveringOverReferenceBorder(false);
+          return true;
         })()) {
         } else {
           setHoveringOverReferenceBorder(false);
@@ -763,7 +819,10 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
                   // Check if over a cell (standard cell cursor)
                   const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions, { freezeConfig: propFreezeConfig, splitBarSize: propSplitBarSize, splitViewport: propSplitViewport });
                   if (cell) {
-                    // Check if the cell is within a non-floating overlay that provides a cursor
+                    // A CELL-ANCHORED overlay's own pointer over this cell
+                    // (`getCellCursor`: a worksheet pivot's icons, a filter
+                    // or validation chevron). Floating objects never reach
+                    // here -- their pointer is their zone's, above.
                     let overlayCursor: string | null = null;
                     for (const region of getLiveGridRegions()) {
                       if (region.floating) continue;
@@ -772,8 +831,8 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
                         cell.col >= region.startCol && cell.col <= region.endCol
                       ) {
                         const registration = getOverlayRegistration(region.type);
-                        if (registration?.getCursor) {
-                          overlayCursor = registration.getCursor({
+                        if (registration?.getCellCursor) {
+                          overlayCursor = registration.getCellCursor({
                             region,
                             canvasX: mouseX,
                             canvasY: mouseY,
@@ -986,9 +1045,26 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       // nothing to fall through TO: the cells below it are covered, so "the owner
       // declined" and "no owner registered" must both end in today's behaviour.
       // The boolean says whether the gesture was taken, not what Core does next.
+      //
+      // A visible GRIP first, as in the press: its presses moved or clicked
+      // its object, so a double-click there opens no cell editor and is never
+      // offered to a neighbour the grip lies over.
+      if (!isPointModeOnForeignSheet() && overlayMoveHandlers.checkGrip(mouseX, mouseY)) {
+        return null;
+      }
       const overlayHit = overlayMoveHandlers.checkOverlayBody(mouseX, mouseY);
       if (overlayHit) {
         overlayMoveHandlers.handleOverlayDoubleClick(overlayHit.region, mouseX, mouseY, event);
+        return null;
+      }
+      // The OUTER half of a selected object's live resize handle lies over the
+      // neighbouring cells; its presses resized the object (the mouse-down
+      // wrapper hands them to the object first), so the double-click never
+      // opens the editor of the cell under it.
+      const handleHit =
+        !isPointModeOnForeignSheet() &&
+        overlayResizeHandlers.checkOverlayResizeHandle(mouseX, mouseY);
+      if (handleHit && handleHit.region.floating) {
         return null;
       }
 
@@ -1023,7 +1099,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
 
       return getCellFromPixel(mouseX, mouseY, config, viewport, dimensions, { freezeConfig: propFreezeConfig, splitBarSize: propSplitBarSize, splitViewport: propSplitViewport });
     },
-    [containerRef, zoom, config, viewport, dimensions, overlayMoveHandlers, isOverFillHandle, onFillHandleDoubleClick, onAutoFitColumn, onAutoFitRow]
+    [containerRef, zoom, config, viewport, dimensions, overlayMoveHandlers, overlayResizeHandlers, isOverFillHandle, onFillHandleDoubleClick, onAutoFitColumn, onAutoFitRow]
   );
 
   // -------------------------------------------------------------------------
@@ -1287,13 +1363,37 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   // -------------------------------------------------------------------------
   // Return
   // -------------------------------------------------------------------------
-  // Expose floating overlay check for use by wrapper hooks
+  // Expose floating overlay check for use by wrapper hooks: whether a press
+  // here belongs to a FLOATING OBJECT -- a live resize handle of a selected
+  // object (whose outer half lies over the neighbouring cells), or its body
+  // (with the family's extended hitTest). The mouse-down wrapper
+  // (useSpreadsheetSelection.ts) hands such a press to this hook BEFORE the
+  // fill handle and the cell click interceptors; the hover asks in the same
+  // order (handleMouseMove).
   const isOverFloatingOverlay = useCallback(
     (mouseX: number, mouseY: number): boolean => {
+      const resizeHit =
+        !isPointModeOnForeignSheet() &&
+        overlayResizeHandlers.checkOverlayResizeHandle(mouseX, mouseY);
+      if (resizeHit && resizeHit.region.floating) return true;
+      // A visible grip (core/lib/floatingGrip.ts) lies OUTSIDE its object,
+      // over cells: its press is the object's, before the fill handle and the
+      // cell click interceptors.
+      if (!isPointModeOnForeignSheet() && overlayMoveHandlers.checkGrip(mouseX, mouseY)) return true;
       return overlayMoveHandlers.checkOverlayBody(mouseX, mouseY) !== null;
     },
-    [overlayMoveHandlers],
+    [overlayResizeHandlers, overlayMoveHandlers],
   );
+
+  /**
+   * The pointer LEFT the grid area (onto the ribbon, a task pane, a menu):
+   * nothing floating is hovered any more, so a grip shown only on hover
+   * disappears (core/lib/objectHover.ts). No mousemove reaches the grid to
+   * say so.
+   */
+  const handleMouseLeave = useCallback((): void => {
+    clearFloatingHover();
+  }, []);
 
   return {
     isDragging,
@@ -1311,6 +1411,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     handleMouseMove,
     handleMouseUp,
     handleDoubleClick,
+    handleMouseLeave,
     isOverFloatingOverlay,
   };
 }

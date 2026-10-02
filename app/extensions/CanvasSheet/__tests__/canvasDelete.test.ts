@@ -33,7 +33,8 @@ import {
   setObjectSelectionSet,
   type ObjectSelectionProvider,
 } from "@api/objectSelection";
-import { installCanvasObjectDelete } from "../lib/canvasDelete";
+import { CANVAS_DELETE_SELECTION_COMMAND, installCanvasObjectDelete } from "../lib/canvasDelete";
+import { CommandRegistry } from "@api/commands";
 
 initKeybindings();
 
@@ -136,6 +137,22 @@ describe("Delete on a canvas multi-selection", () => {
     press("Delete");
     await settle();
     expect(deleted).toEqual([]);
+  });
+
+  // The seam's whole-selection rule answers on a worksheet too since worksheets
+  // gained press parity (BUG-0270 review); the canvas command keeps its OWN
+  // canvas check, so the palette or a script running it on a worksheet does
+  // nothing (the families' doors and the generic object Delete answer there).
+  it("the command run from the palette or a script on a WORKSHEET deletes nothing", async () => {
+    surface = "grid";
+    setObjectSelectionSet([c1, c2, p1], c1);
+    await CommandRegistry.execute(CANVAS_DELETE_SELECTION_COMMAND);
+    await settle();
+    expect(deleted, "the canvas command deleted a worksheet selection").toEqual([]);
+    surface = "canvas";
+    await CommandRegistry.execute(CANVAS_DELETE_SELECTION_COMMAND);
+    await settle();
+    expect(deleted.sort(), "control: on a canvas the command deletes the whole selection").toEqual(["c1", "c2", "p1"]);
   });
 });
 

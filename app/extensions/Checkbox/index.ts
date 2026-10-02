@@ -3,6 +3,7 @@
 // CONTEXT: Loaded by the ExtensionManager during app initialization.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { topFloatingRegionAtClient } from "@api/gridOverlays";
 import {
   ExtensionRegistry,
   AppEvents,
@@ -122,14 +123,29 @@ function activate(context: ExtensionContext): void {
  * Set up a mousemove listener that changes the cursor to "default" (arrow)
  * when hovering over a checkbox cell, instead of the standard "cell" crosshair.
  * Sets cursor on the canvas element (child overrides parent container cursor).
+ *
+ * Never where a FLOATING OBJECT lies on the cell: over an object the pointer
+ * is the object's zone answer (Core, @api/gridOverlays resolveFloatingZone),
+ * and this inline cursor on the canvas would override it -- the cell's arrow
+ * over a chart's 'move' or a slicer item's hand (BUG-0258: one answer).
+ * Exported for its test.
  */
-function setupCheckboxCursor(): () => void {
+export function setupCheckboxCursor(): () => void {
   let lastCanvas: HTMLCanvasElement | null = null;
   let pendingLookup = false;
 
   const handleMouseMove = async (event: MouseEvent) => {
     const target = event.target;
     if (!(target instanceof HTMLCanvasElement)) {
+      if (lastCanvas) {
+        lastCanvas.style.cursor = "";
+        lastCanvas = null;
+      }
+      return;
+    }
+
+    // A floating object covers the cell: its pointer is Core's answer.
+    if (topFloatingRegionAtClient(event.clientX, event.clientY) !== null) {
       if (lastCanvas) {
         lastCanvas.style.cursor = "";
         lastCanvas = null;

@@ -4,61 +4,49 @@
 //          (e.g., table or floating chart) and handles drag-to-resize.
 //          For cell-based overlays: dispatches "overlay:resizeComplete".
 //          For floating overlays: dispatches "floatingObject:resizeComplete".
+//
+//          FLOATING HANDLES (BUG-0258 design phase 3) come from ONE geometry,
+//          core/lib/floatingHandles.ts, which Core's selection-chrome painter
+//          reads too: a handle is live only on a SELECTED object (never in
+//          consume mode, on a locked object or while a formula is picking a
+//          reference), it is hit exactly where it is painted, all eight resize
+//          (each drags its own sides -- the right-edge handle changes the width
+//          only), and each shows its own pointer.
 
 import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig } from "../../../types";
 import { createEmptyDimensionOverrides } from "../../../types";
-import {
-  getGridRegions,
-  floatingHitOrder,
-  hasStackingOrder,
-  type GridRegion,
-} from "../../../../api/gridOverlays";
+import { getGridRegions, type GridRegion } from "../../../../api/gridOverlays";
 import { getCellFromPixel } from "../../../lib/gridRenderer";
 import { rowHeaderGutter, colHeaderGutter } from "../../../lib/gridRenderer/layout/headerVisibility";
-import { getLayoutSurface, applySurfaceToResize, edgesOfCorner, isRegionLocked } from "../../../lib/layoutSurface";
+import { getLayoutSurface, applySurfaceToResize, type DraggedEdges } from "../../../lib/layoutSurface";
 import { getGridStateSnapshot } from "../../../state/GridContext";
 import { isGlobalFormulaMode } from "../../useEditing";
-import { getExternalFormulaTarget } from "../../../lib/formulaEditTarget";
+import {
+  floatingHandleAt,
+  registerGridReferencePickProbe,
+  type FloatingHandleId,
+} from "../../../lib/floatingHandles";
+import { setFloatingGestureActive } from "../../../lib/objectHover";
+
+// The GRID editor's "a formula is picking a reference" answer, handed to the
+// one handle geometry: the renderer that paints the handles cannot import
+// useEditing (useEditing imports the renderer), and this module -- which owns
+// the press -- already depends on it. While a pick is live no handle is: the
+// press belongs to the object's reference pick, which only its owner's content
+// zone (`zoneAt`) knows how to make, and the resize scan runs BEFORE the move
+// path, so a live handle would swallow the pick and start a resize instead.
+registerGridReferencePickProbe(isGlobalFormulaMode);
 
 /** The layout surface of the sheet being edited (null = unconstrained). */
 function activeLayoutSurface() {
   return getLayoutSurface(getGridStateSnapshot()?.sheetContext.activeSheetIndex ?? 0);
 }
 
-/** False in consume mode: no resize handle is live on any floating object. */
-function floatingResizeAllowed(): boolean {
-  const surface = activeLayoutSurface();
-  return !surface || surface.editable;
-}
-
-/**
- * Whether ONE floating region's handles are live: its family did not set
- * `resizable: false`, and the layout surface does not LOCK it. A locked
- * object still occludes what lies beneath it and a press still selects it --
- * only its geometry is frozen.
- */
-function floatingResizable(region: GridRegion): boolean {
-  if (region.data?.resizable === false) return false;
-  return !isRegionLocked(activeLayoutSurface(), region);
-}
-
-/**
- * Whether a formula is PICKING a reference right now -- in the grid's own
- * editor, or in an extension's external editor (a floating grid's cell
- * editor, @api/editing). A press on a floating object then belongs to the
- * object's reference pick, which only its owner's `claimsBodyDrag` knows
- * how to make; the resize scan runs BEFORE the move path, so a live corner
- * box would swallow the pick and start a resize instead.
- */
-function referencePickActive(): boolean {
-  return isGlobalFormulaMode() || getExternalFormulaTarget()?.isExpectingReference() === true;
-}
-
 /**
  * Whether a press landed on a real, editable DOM control stacked on the
  * canvas (the floating grid's cell editor <textarea> is the live example).
- * The corner boxes are pure GEOMETRY and never look at what the mouse landed
- * on; claiming such a press would preventDefault the control's own caret
+ * The handles are pure GEOMETRY and never look at what the mouse landed on;
+ * claiming such a press would preventDefault the control's own caret
  * placement. The same rule `handleOverlayMoveMouseDown` applies.
  */
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -72,14 +60,14 @@ function isEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
-/** Size of the resize handle hit area in pixels */
-const HANDLE_HIT_SIZE = 10;
+/**
+ * Hit half-size, in px, of a CELL-ANCHORED region's bottom-right handle (a
+ * table). Floating objects use the one handle geometry instead.
+ */
+const CELL_HANDLE_HIT_SIZE = 10;
 
 /** Minimum floating overlay size in pixels */
 const MIN_FLOATING_SIZE = 16;
-
-/** Which corner or edge is being dragged */
-type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 
 // ============================================================================
 // Overlay Resize State
@@ -92,8 +80,10 @@ interface OverlayResizeState {
   currentEndRow: number;
   /** Current target end col during drag (cell-based overlays) */
   currentEndCol: number;
-  /** For floating overlays: which corner is being dragged */
-  corner?: ResizeCorner;
+  /** For floating overlays: the handle being dragged */
+  handle?: FloatingHandleId;
+  /** For floating overlays: the sides that handle drags */
+  edges?: DraggedEdges;
   /** For floating overlays: current bounds during drag */
   floatingBounds?: { x: number; y: number; width: number; height: number };
   /** For floating overlays: mouse position at drag start */
@@ -122,9 +112,16 @@ interface OverlayResizeDependencies {
 // Handler Interface
 // ============================================================================
 
+/** A resize handle under the pointer: its object, and the pointer it shows. */
+export interface OverlayResizeHit {
+  region: GridRegion;
+  /** The handle's own pointer (per corner and edge); "nwse-resize" for a cell-anchored region. */
+  cursor: string;
+}
+
 export interface OverlayResizeHandlers {
   /** Check if mouse is over an overlay resize handle */
-  checkOverlayResizeHandle: (mouseX: number, mouseY: number) => GridRegion | null;
+  checkOverlayResizeHandle: (mouseX: number, mouseY: number) => OverlayResizeHit | null;
   /** Handle mousedown on an overlay resize handle. Returns true if resize started. */
   handleOverlayResizeMouseDown: (
     mouseX: number,
@@ -176,75 +173,6 @@ function getOverlayBottomRightPixel(
 }
 
 // ============================================================================
-// Helper: Get all 4 corner pixel positions for a floating overlay
-// ============================================================================
-
-function getFloatingCornerPixels(
-  region: GridRegion,
-  config: GridConfig,
-  viewport: Viewport,
-): { corner: ResizeCorner; x: number; y: number; cursor: string }[] | null {
-  if (!region.floating) return null;
-
-  const rhw = config.rowHeaderWidth ?? 50;
-  const chh = config.colHeaderHeight ?? 24;
-  const f = region.floating;
-
-  const left = rhw + f.x - viewport.scrollX;
-  const top = chh + f.y - viewport.scrollY;
-  const right = left + f.width;
-  const bottom = top + f.height;
-
-  return [
-    { corner: "top-left", x: left, y: top, cursor: "nwse-resize" },
-    { corner: "top-right", x: right, y: top, cursor: "nesw-resize" },
-    { corner: "bottom-left", x: left, y: bottom, cursor: "nesw-resize" },
-    { corner: "bottom-right", x: right, y: bottom, cursor: "nwse-resize" },
-  ];
-}
-
-type FloatingCorner = { corner: ResizeCorner; x: number; y: number; cursor: string };
-
-/**
- * The floating resize handle under the point while a STACKING ORDER is in
- * force (@api/gridOverlays `hasStackingOrder`), or null.
- *
- * Walks `floatingHitOrder` (topmost first) and STOPS at the first region whose
- * body contains the point: a handle of an object covered by another must not
- * be grabbable through the object on top. A region's own handles -- which
- * reach HANDLE_HIT_SIZE past its edge -- are tested before its body occludes,
- * and a region that cannot be resized still occludes what lies beneath it.
- *
- * Without a stacking order the historical forward scan runs instead, unchanged.
- */
-function findStackedFloatingHandle(
-  mouseX: number,
-  mouseY: number,
-  config: GridConfig,
-  viewport: Viewport,
-  floatingAllowed: boolean,
-): { region: GridRegion; corner: FloatingCorner } | null {
-  for (const region of floatingHitOrder(getGridRegions())) {
-    const corners = getFloatingCornerPixels(region, config, viewport);
-    if (!corners) continue;
-    if (floatingAllowed && floatingResizable(region)) {
-      for (const c of corners) {
-        if (Math.abs(mouseX - c.x) <= HANDLE_HIT_SIZE && Math.abs(mouseY - c.y) <= HANDLE_HIT_SIZE) {
-          return { region, corner: c };
-        }
-      }
-    }
-    const f = region.floating!;
-    const left = corners[0].x;
-    const top = corners[0].y;
-    if (mouseX >= left && mouseX <= left + f.width && mouseY >= top && mouseY <= top + f.height) {
-      return null; // occluded: nothing beneath this object is reachable here
-    }
-  }
-  return null;
-}
-
-// ============================================================================
 // Factory
 // ============================================================================
 
@@ -252,7 +180,9 @@ function findStackedFloatingHandle(
  * Creates handlers for overlay region resize operations.
  * Supports both cell-based overlays (tables) and floating overlays (charts).
  * For cell-based: detects bottom-right corner, dispatches "overlay:resizeComplete".
- * For floating: detects all 4 corners, dispatches "floatingObject:resizeComplete".
+ * For floating: the live handles of a SELECTED object (core/lib/floatingHandles.ts
+ * -- eight, or the four corners for a region publishing `handles: "corners"`),
+ * dispatches "floatingObject:resizeComplete".
  */
 export function createOverlayResizeHandlers(
   deps: OverlayResizeDependencies
@@ -270,66 +200,37 @@ export function createOverlayResizeHandlers(
     overlayResizeStateRef,
   } = deps;
 
+  /** Where the floating handles sit: the painted gutters and the scroll. */
+  const gutters = { rowHeaderWidth: rowHeaderGutter(config), colHeaderHeight: colHeaderGutter(config) };
+  const scroll = { scrollX: viewport.scrollX, scrollY: viewport.scrollY };
+
   /**
    * Check if mouse is near a resize handle of any overlay region.
+   * For floating: the live handles of SELECTED objects, topmost first
+   * (`floatingHandleAt`) -- none in consume mode, on a locked object or while
+   * a formula is picking a reference, so the hover pointer never promises a
+   * resize the press will not start.
    * For cell-based: checks bottom-right corner only.
-   * For floating: checks all 4 corners.
-   * Returns the region if found, or null.
+   * Returns the region and the handle's own pointer, or null.
    */
   const checkOverlayResizeHandle = (
     mouseX: number,
     mouseY: number,
-  ): GridRegion | null => {
+  ): OverlayResizeHit | null => {
     const regions = getGridRegions();
-    // No floating handle is live in consume mode, nor while a formula is
-    // picking a reference (the hover cursor must not promise a resize the
-    // press will not start).
-    const floatingAllowed = floatingResizeAllowed() && !referencePickActive();
-
-    // Stacking order in force: floating handles topmost first, occlusion
-    // respected; then the cell-anchored regions, scanned exactly as before.
-    if (hasStackingOrder(regions)) {
-      const stacked = findStackedFloatingHandle(mouseX, mouseY, config, viewport, floatingAllowed);
-      if (stacked) return stacked.region;
-      for (const region of regions) {
-        if (region.floating) continue;
-        const corner = getOverlayBottomRightPixel(region, config, viewport, dimensions);
-        if (!corner) continue;
-        if (Math.abs(mouseX - corner.x) <= HANDLE_HIT_SIZE && Math.abs(mouseY - corner.y) <= HANDLE_HIT_SIZE) {
-          return region;
-        }
-      }
-      return null;
-    }
+    const floating = floatingHandleAt(mouseX, mouseY, gutters, scroll, regions);
+    if (floating) return { region: floating.region, cursor: floating.handle.cursor };
 
     for (const region of regions) {
-      // Floating overlay: check all 4 corners
-      if (region.floating) {
-        // Skip if region is not resizable (or the surface is in consume mode)
-        if (!floatingAllowed || !floatingResizable(region)) continue;
-
-        const corners = getFloatingCornerPixels(region, config, viewport);
-        if (!corners) continue;
-
-        for (const c of corners) {
-          const dx = Math.abs(mouseX - c.x);
-          const dy = Math.abs(mouseY - c.y);
-          if (dx <= HANDLE_HIT_SIZE && dy <= HANDLE_HIT_SIZE) {
-            return region;
-          }
-        }
-        continue;
-      }
-
+      if (region.floating) continue;
       // Cell-based overlay: check bottom-right corner only
       const corner = getOverlayBottomRightPixel(region, config, viewport, dimensions);
       if (!corner) continue;
-
-      const dx = Math.abs(mouseX - corner.x);
-      const dy = Math.abs(mouseY - corner.y);
-
-      if (dx <= HANDLE_HIT_SIZE && dy <= HANDLE_HIT_SIZE) {
-        return region;
+      if (
+        Math.abs(mouseX - corner.x) <= CELL_HANDLE_HIT_SIZE &&
+        Math.abs(mouseY - corner.y) <= CELL_HANDLE_HIT_SIZE
+      ) {
+        return { region, cursor: "nwse-resize" };
       }
     }
     return null;
@@ -346,68 +247,38 @@ export function createOverlayResizeHandlers(
   ): boolean => {
     const regions = getGridRegions();
 
-    // Check floating overlays first (all 4 corners). None is live in consume
-    // mode (a subscribed canvas), while a formula is picking a reference, or
-    // for a press that landed on an editable control stacked on the canvas --
-    // the last two mirror the move path, which the resize scan runs BEFORE.
-    const floatingAllowed =
-      floatingResizeAllowed() && !referencePickActive() && !isEditableTarget(event.target);
-
-    // Stacking order in force: topmost first, and a handle covered by another
-    // object is not grabbable through it (findStackedFloatingHandle). The
-    // historical forward scan below then has nothing left to do.
-    const stackingOrder = hasStackingOrder(regions);
-    if (stackingOrder) {
-      const stacked = findStackedFloatingHandle(mouseX, mouseY, config, viewport, floatingAllowed);
-      if (stacked) {
-        const { region, corner: c } = stacked;
-        event.preventDefault();
-        setIsOverlayResizing(true);
-        setCursorStyle(c.cursor);
-        overlayResizeStateRef.current = {
-          region,
-          currentEndRow: 0,
-          currentEndCol: 0,
-          corner: c.corner,
-          floatingBounds: { ...region.floating! },
-          startMouseX: mouseX,
-          startMouseY: mouseY,
-        };
-        return true;
-      }
-    }
-
-    for (const region of stackingOrder ? [] : regions) {
-      if (!region.floating) continue;
-      // Skip if region is not resizable (extensions set this via data)
-      if (!floatingAllowed || !floatingResizable(region)) continue;
-
-      const corners = getFloatingCornerPixels(region, config, viewport);
-      if (!corners) continue;
-
-      for (const c of corners) {
-        const dx = Math.abs(mouseX - c.x);
-        const dy = Math.abs(mouseY - c.y);
-        if (dx <= HANDLE_HIT_SIZE && dy <= HANDLE_HIT_SIZE) {
-          event.preventDefault();
-          setIsOverlayResizing(true);
-          setCursorStyle(c.cursor);
-          overlayResizeStateRef.current = {
-            region,
-            currentEndRow: 0,
-            currentEndCol: 0,
-            corner: c.corner,
-            floatingBounds: { ...region.floating },
-            startMouseX: mouseX,
-            startMouseY: mouseY,
-          };
-          return true;
-        }
-      }
+    // Floating objects first: a live handle of a SELECTED object, topmost
+    // first (`floatingHandleAt`: none in consume mode, on a locked object or
+    // while a formula is picking a reference). Never for a press that landed on
+    // an editable control stacked on the canvas -- that mirrors the move path,
+    // which the resize scan runs BEFORE.
+    const floating = isEditableTarget(event.target)
+      ? null
+      : floatingHandleAt(mouseX, mouseY, gutters, scroll, regions);
+    if (floating) {
+      const { region, handle } = floating;
+      event.preventDefault();
+      setIsOverlayResizing(true);
+      setCursorStyle(handle.cursor);
+      // A Core floating GESTURE until the release: no grip shows during a
+      // resize (core/lib/objectHover.ts, core/lib/floatingGrip.ts).
+      setFloatingGestureActive(true);
+      overlayResizeStateRef.current = {
+        region,
+        currentEndRow: 0,
+        currentEndCol: 0,
+        handle: handle.id,
+        edges: handle.edges,
+        floatingBounds: { ...region.floating! },
+        startMouseX: mouseX,
+        startMouseY: mouseY,
+      };
+      return true;
     }
 
     // Check cell-based overlays (bottom-right corner only)
-    const region = checkOverlayResizeHandle(mouseX, mouseY);
+    const hit = checkOverlayResizeHandle(mouseX, mouseY);
+    const region = hit?.region;
     if (!region || region.floating) return false;
 
     event.preventDefault();
@@ -433,44 +304,29 @@ export function createOverlayResizeHandlers(
     if (!resizeState) return;
 
     // Floating overlay resize
-    if (resizeState.corner && resizeState.floatingBounds && resizeState.startMouseX != null) {
+    if (resizeState.edges && resizeState.floatingBounds && resizeState.startMouseX != null) {
       const deltaX = mouseX - resizeState.startMouseX!;
       const deltaY = mouseY - resizeState.startMouseY!;
       const orig = resizeState.region.floating!;
+      const edges = resizeState.edges;
       const bounds = resizeState.floatingBounds;
 
-      switch (resizeState.corner) {
-        case "bottom-right":
-          bounds.width = Math.max(MIN_FLOATING_SIZE, orig.width + deltaX);
-          bounds.height = Math.max(MIN_FLOATING_SIZE, orig.height + deltaY);
-          break;
-        case "bottom-left":
-          {
-            const newWidth = Math.max(MIN_FLOATING_SIZE, orig.width - deltaX);
-            bounds.x = orig.x + (orig.width - newWidth);
-            bounds.width = newWidth;
-            bounds.height = Math.max(MIN_FLOATING_SIZE, orig.height + deltaY);
-          }
-          break;
-        case "top-right":
-          {
-            const newHeight = Math.max(MIN_FLOATING_SIZE, orig.height - deltaY);
-            bounds.y = orig.y + (orig.height - newHeight);
-            bounds.height = newHeight;
-            bounds.width = Math.max(MIN_FLOATING_SIZE, orig.width + deltaX);
-          }
-          break;
-        case "top-left":
-          {
-            const newWidth = Math.max(MIN_FLOATING_SIZE, orig.width - deltaX);
-            const newHeight = Math.max(MIN_FLOATING_SIZE, orig.height - deltaY);
-            bounds.x = orig.x + (orig.width - newWidth);
-            bounds.y = orig.y + (orig.height - newHeight);
-            bounds.width = newWidth;
-            bounds.height = newHeight;
-          }
-          break;
-      }
+      // Each DRAGGED side follows the pointer and MIN_FLOATING_SIZE holds from
+      // the opposite side; a side the handle does not drag never moves (the
+      // right-edge handle changes the width only, the top-edge handle the top
+      // and the height with the bottom fixed).
+      let left = orig.x;
+      let top = orig.y;
+      let right = orig.x + orig.width;
+      let bottom = orig.y + orig.height;
+      if (edges.left) left = Math.min(orig.x + deltaX, right - MIN_FLOATING_SIZE);
+      if (edges.right) right = Math.max(orig.x + orig.width + deltaX, left + MIN_FLOATING_SIZE);
+      if (edges.top) top = Math.min(orig.y + deltaY, bottom - MIN_FLOATING_SIZE);
+      if (edges.bottom) bottom = Math.max(orig.y + orig.height + deltaY, top + MIN_FLOATING_SIZE);
+      bounds.x = left;
+      bounds.y = top;
+      bounds.width = right - left;
+      bounds.height = bottom - top;
 
       // Clamp position to non-negative WITHOUT moving the fixed edge: a
       // left/top drag past the sheet origin shrinks the object at 0 instead of
@@ -493,7 +349,7 @@ export function createOverlayResizeHandlers(
         const snapped = applySurfaceToResize(
           surface,
           { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
-          edgesOfCorner(resizeState.corner),
+          edges,
           MIN_FLOATING_SIZE,
           {
             bypassSnap: altKey,
@@ -559,7 +415,7 @@ export function createOverlayResizeHandlers(
     if (!resizeState) return;
 
     // Floating overlay resize complete
-    if (resizeState.corner && resizeState.floatingBounds) {
+    if (resizeState.edges && resizeState.floatingBounds) {
       const orig = resizeState.region.floating!;
       const bounds = resizeState.floatingBounds;
 
@@ -586,6 +442,7 @@ export function createOverlayResizeHandlers(
       setIsOverlayResizing(false);
       setCursorStyle("cell");
       overlayResizeStateRef.current = null;
+      setFloatingGestureActive(false);
       return;
     }
 

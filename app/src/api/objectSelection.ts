@@ -41,10 +41,10 @@
 //          family's share -- set-held members included -- goes to its
 //          provider's `deleteObjects`, inside ONE undo transaction. A family's
 //          own Delete door hands over a selection for which
-//          `shouldActOnWholeObjectSelection` answers yes (a CANVAS selection
-//          that spans families), because the keybinding dispatcher runs one
-//          winner per key and a family's door only knows its own objects. A
-//          worksheet keeps each family's own door.
+//          `shouldActOnWholeObjectSelection` answers yes (a selection that
+//          spans families, on a canvas or a worksheet), because the keybinding
+//          dispatcher runs one winner per key and a family's door only knows
+//          its own objects. One family's objects stay with its own door.
 //
 //          COPY / PASTE / DUPLICATE act on the whole set as well, through the
 //          feature-neutral OBJECT CLIPBOARD (@api/objectClipboard): each
@@ -60,11 +60,21 @@
 //          of a multi-selection keeps the set until mouseup (the user may be
 //          starting a group drag) and narrows to that object only if nothing
 //          moved -- the rule Slicer already follows for its own multi-select.
-//          Worksheets are untouched: Core gates the call on the canvas surface.
+//
+//          ON A WORKSHEET (BUG-0270 review) Core calls
+//          `noteWorksheetObjectPress` instead: the plain rule only -- a plain
+//          press deselects every OTHER family, a Ctrl/Shift press keeps them.
+//          A worksheet has no cross-family group drag (CanvasSheet
+//          lib/groupDrag.ts is canvas-only) and no set built by presses, so
+//          nothing is armed. Without it a chart clicked before a slicer stayed
+//          selected beside it, Charts' own door owned Delete, and Delete
+//          removed the chart clicked EARLIER and left the slicer just clicked.
 
 import { getGridRegions, stackedFloatingRegions, type GridRegion } from "./gridOverlays";
 import { getGridStateSnapshot } from "../core/state/GridContext";
 import { runInUndoTransaction } from "./objectGeometry";
+import { getLayoutSurface } from "./layoutSurface";
+import { SIZE_POSITION_SUBSCRIBED } from "./objectPosition";
 import { showToast } from "./notifications";
 import type { CanvasObjectRef } from "./lib";
 import type { CanvasObjectKind } from "./canvasSheet";
@@ -76,8 +86,14 @@ import type { CanvasObjectKind } from "./canvasSheet";
  * for Copy, Paste and Duplicate (Ctrl+C / Ctrl+V / Ctrl+D) -- the canvas's
  * object clipboard (@api/objectClipboard) asks it before copying OBJECTS, so
  * a floating range with a selected cell keeps those keys for its cells.
+ * "Delete" stands for bare Delete and Backspace: a family whose OWN door, or
+ * an inner keyboard, takes them right now (a chart -- its door deletes the
+ * smallest thing selected, the title before the chart; a floating grid,
+ * whose door clears a selected cell; the keyboard inside a slicer, where the
+ * key is refused) owns them, and the generic Delete of a selected object
+ * (BUG-0270) stands down.
  */
-export type ObjectSelectionKey = "Tab" | "Escape" | "Arrow" | "Clipboard";
+export type ObjectSelectionKey = "Tab" | "Escape" | "Arrow" | "Clipboard" | "Delete";
 
 /**
  * Where a family creates the copies a paste or a duplicate makes
@@ -634,20 +650,24 @@ export function objectSelectionSpansFamilies(regions: readonly GridRegion[] = ge
 
 /**
  * THE rule a family's own door (Delete, Copy, Duplicate) asks before acting on
- * its own share: is this a CANVAS multi-selection that spans families (see
+ * its own share: is this a multi-selection that spans families (see
  * {@link objectSelectionSpansFamilies})? Then the door must speak for the
  * whole selection -- hand a Delete to {@link deleteSelectedObjects}, refuse a
  * copy it cannot make whole -- instead of acting on what its family holds.
  *
- * Canvas ONLY. A worksheet has no selection set (Core gates press parity on
- * the canvas surface), so a chart and a slicer clicked in turn both stay
- * "selected" there, and the chart may be walked down to its TITLE: Delete on
- * a worksheet must keep deleting the smallest thing selected (the title), not
- * the whole chart and every other family's object with it (wave A review).
- * One helper, so the doors cannot disagree about where the line is.
+ * On a canvas AND a worksheet (BUG-0270 review). It used to be canvas-only:
+ * a worksheet had no press parity, so a chart and a slicer clicked in turn
+ * both stayed "selected" there by ACCIDENT, and a Delete on the chart's TITLE
+ * must not take the chart and the slicer with it (wave A review). Press
+ * parity now reaches worksheets (`noteWorksheetObjectPress`): a plain press
+ * deselects every other family, so a selection that spans families is a
+ * DELIBERATE one (Ctrl/Shift+click), and Excel deletes such a selection whole.
+ * One family's objects alone are not a spanning selection: a chart walked to
+ * its title keeps "Delete deletes the title". One helper, so the doors cannot
+ * disagree about where the line is.
  */
 export function shouldActOnWholeObjectSelection(regions: readonly GridRegion[] = getGridRegions()): boolean {
-  return getGridStateSnapshot()?.surface === "canvas" && objectSelectionSpansFamilies(regions);
+  return objectSelectionSpansFamilies(regions);
 }
 
 /** What an action on the whole selection did. */
@@ -677,11 +697,23 @@ export interface ObjectSelectionActionOutcome {
  * (`runInUndoTransaction`, @api/objectGeometry). A member whose family has no
  * `deleteObjects`, or whose family refused, STAYS -- it is left as the
  * selection, and ONE toast names the ones not deleted (and the refusal).
+ *
+ * A READ-ONLY page (a subscribed canvas: its layout surface is not
+ * `editable`) refuses the whole delete before anything is sent: one toast
+ * with the subscribed sentence, no undo step, the selection kept -- the rule
+ * Paste and Duplicate already follow there (@api/objectClipboard).
  */
 export async function deleteSelectedObjects(label = "Delete Objects"): Promise<ObjectSelectionActionOutcome> {
   const members = getSelectedObjectRegions();
   const outcome: ObjectSelectionActionOutcome = { acted: 0, unsupported: 0, failed: 0 };
   if (members.length === 0) return outcome;
+
+  const sheetIndex = getGridStateSnapshot()?.sheetContext?.activeSheetIndex ?? 0;
+  if (getLayoutSurface(sheetIndex)?.editable === false) {
+    outcome.failed = members.length;
+    showToast(`${label}: ${SIZE_POSITION_SUBSCRIBED} Nothing was changed.`, { type: "info" });
+    return outcome;
+  }
 
   const groups = new Map<ObjectSelectionProvider, GridRegion[]>();
   const kept: GridRegion[] = [];
@@ -831,6 +863,40 @@ export function noteObjectPress(region: GridRegion, mods: ObjectPressModifiers =
   retained = mode === "toggle" ? before.filter((r) => r.id !== region.id) : before;
   if (mode !== "toggle") primaryId = region.id;
   armPress(region, mode);
+}
+
+/**
+ * Core's hook for a LEFT press on a floating object on a WORKSHEET (the
+ * canvas twin is {@link noteObjectPress}), called BEFORE
+ * `floatingObject:selected` is dispatched, so the pressed family's own handler
+ * still decides what the press means inside the family (a group, a chart's
+ * next rung, a slicer's pending click):
+ *
+ *   - plain press: every OTHER family is deselected and the set drops what it
+ *     held -- the object pressed is the only family's selection, so Delete
+ *     deletes what was just clicked (BUG-0270 review);
+ *   - Ctrl/Shift press: nothing here -- the pressed family adds or toggles
+ *     within itself, and the other families' objects stay: a deliberate
+ *     multi-selection, which Delete removes whole
+ *     ({@link shouldActOnWholeObjectSelection}).
+ *
+ * Nothing is armed: a worksheet has no cross-family group drag, so a plain
+ * press on a member of a multi-selection simply narrows it to its family.
+ * Core passes `{}` for a press on an object's CONTENT (the modifiers are the
+ * content's there), which is a plain press.
+ */
+export function noteWorksheetObjectPress(region: GridRegion, mods: ObjectPressModifiers = {}): void {
+  settlePress();
+  if (mods.ctrlKey === true || mods.shiftKey === true) return;
+  const owner = providers.get(region.type);
+  batch(() => {
+    heldIds.clear();
+    for (const p of distinctProviders()) {
+      if (p !== owner) guarded("deselectAll", () => p.deselectAll(), undefined);
+    }
+    primaryId = region.id;
+    markChanged();
+  });
 }
 
 function armPress(region: GridRegion, mode: PressMode): void {

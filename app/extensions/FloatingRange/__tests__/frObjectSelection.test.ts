@@ -138,6 +138,22 @@ describe("ownsKey follows the inner cell selection", () => {
     innerCell("fr-deleted");
     expect(p.ownsKey!("Tab")).toBe(false);
   });
+
+  // BUG-0270: the generic Delete of a selected object stands down for a family
+  // whose OWN door takes the key. The range's door (frKeyRouting.ts) clears a
+  // selected CELL or deletes the selected range -- the generic must never
+  // delete the whole range instead of clearing its cell, whatever the
+  // activation order.
+  it("owns Delete while the range is selected on the sheet shown -- as an object AND with a cell selected; not with nothing", () => {
+    const p = createFloatingRangeSelectionProvider();
+    expect(p.ownsKey!("Delete"), "control: nothing selected").toBe(false);
+    p.select(region("fr-a"));
+    expect(p.ownsKey!("Delete"), "the range's own door deletes the selected range").toBe(true);
+    innerCell("fr-a");
+    expect(p.ownsKey!("Delete"), "a generic Delete would delete the range instead of clearing its cell").toBe(true);
+    p.deselectAll();
+    expect(p.ownsKey!("Delete")).toBe(false);
+  });
 });
 
 describe("select / deselect", () => {

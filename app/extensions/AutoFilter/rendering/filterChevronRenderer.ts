@@ -197,7 +197,7 @@ export function isMouseOverAnyChevronButton(clientX: number, clientY: number): b
 }
 
 /**
- * getCursor callback for the overlay registration.
+ * getCellCursor callback for the overlay registration (a cell-anchored region).
  * Returns "pointer" when hovering over a chevron button, null otherwise.
  */
 export function getFilterChevronCursor(ctx: OverlayHitTestContext): string | null {

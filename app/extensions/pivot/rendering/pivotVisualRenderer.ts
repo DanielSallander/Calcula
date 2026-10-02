@@ -299,47 +299,20 @@ export function paintPivotVisual(args: PivotVisualPaintArgs): PivotVisualPaintRe
 
 /** Box outline colour (visible on the page even when the view is empty). */
 const BOX_BORDER = "#c8c8c8";
-const SELECTION_BORDER = "#0078D4";
-const HANDLE_SIZE = 7;
 
 /**
  * The box chrome drawn OUTSIDE the content clip: a thin outline so the box is
- * visible on the page, and -- when the pivot is the selected object -- a
- * selection border plus the four corner handles Core's resize answers to
- * (`showHandles` false in consume mode, where no handle is live).
+ * visible on the page, selected or not. A SELECTED box's outline and its
+ * resize handles are Core's (core/lib/gridRenderer/rendering/
+ * floatingObjectChrome.ts), painted from the one geometry Core's resize hit
+ * test reads -- and not at all in consume mode or on a locked box, where no
+ * handle is live (BUG-0258 design phase 3).
  */
-export function paintPivotVisualFrame(
-  ctx: CanvasRenderingContext2D,
-  box: PivotVisualBox,
-  opts: { selected: boolean; showHandles: boolean },
-): void {
+export function paintPivotVisualFrame(ctx: CanvasRenderingContext2D, box: PivotVisualBox): void {
   ctx.save();
   ctx.setLineDash([]);
   ctx.strokeStyle = BOX_BORDER;
   ctx.lineWidth = 1;
   ctx.strokeRect(box.x + 0.5, box.y + 0.5, Math.max(0, box.width - 1), Math.max(0, box.height - 1));
-
-  if (opts.selected) {
-    ctx.strokeStyle = SELECTION_BORDER;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(box.x - 1, box.y - 1, box.width + 2, box.height + 2);
-
-    if (opts.showHandles) {
-      const half = HANDLE_SIZE / 2;
-      const corners: Array<[number, number]> = [
-        [box.x, box.y],
-        [box.x + box.width, box.y],
-        [box.x, box.y + box.height],
-        [box.x + box.width, box.y + box.height],
-      ];
-      ctx.lineWidth = 1;
-      for (const [cx, cy] of corners) {
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(Math.round(cx - half), Math.round(cy - half), HANDLE_SIZE, HANDLE_SIZE);
-        ctx.strokeStyle = SELECTION_BORDER;
-        ctx.strokeRect(Math.round(cx - half) + 0.5, Math.round(cy - half) + 0.5, HANDLE_SIZE - 1, HANDLE_SIZE - 1);
-      }
-    }
-  }
   ctx.restore();
 }

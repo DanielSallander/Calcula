@@ -65,10 +65,11 @@ pub struct WorkingCopyLink {
     /// went into the shared workspace, checksummed and signed under the
     /// author's key, disclosed only as a bare count.
     ///
-    /// Empty means "not recorded" (a link written before this existed), and the
-    /// assembly then falls back to the old behaviour rather than publishing
-    /// nothing — a silent drop of the application's own scripts would be the
-    /// opposite failure.
+    /// Empty means "the application has none" whenever the link carries its
+    /// record ([`WorkingCopyLink::content_recorded`]). A link from before the
+    /// record existed cannot say which, and a push from it is REFUSED by the
+    /// host (`CALP_PUSH_LINK_UNRECORDED`) rather than falling back to publishing
+    /// everything -- the leak the record exists to close.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_script_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -82,8 +83,57 @@ pub struct WorkingCopyLink {
     /// Every subscriber's next refresh takes that definition.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_named_range_keys: Vec<String>,
+    /// Ids of the Controls-pane controls the base version carried (BUG-0261).
+    ///
+    /// Same job again. Pane controls are workbook-scoped, and checkout is
+    /// additive, so the author's own pane controls -- and any pulled in by a
+    /// SUBSCRIPTION to another application -- sit beside the application's, and a
+    /// push shipped every one of them together with their `pane-{id}` object
+    /// scripts, signed under the author's key.
+    ///
+    /// An `Option`, unlike the lists above, because "the application had no pane
+    /// controls" and "not recorded" must be different answers: an empty list
+    /// read as "not recorded" would publish every private pane control of a
+    /// working copy whose application has none. `None` is a link written before
+    /// this field existed: the assembly reads it as empty and a real push from
+    /// it is refused ([`WorkingCopyLink::content_recorded`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_pane_control_ids: Option<Vec<String>>,
+    /// TRIMMED, UPPERCASED names of the Custom Functions the base version
+    /// carried (BUG-0261).
+    ///
+    /// Same job again, one level down. The Custom Functions library is ONE
+    /// record (`__calcula_custom_functions__`) merged per function on every
+    /// pull, so the author's own functions -- which may declare `net.fetch` --
+    /// sit in the same record as the application's, and a push shipped the whole
+    /// record. A function another application brought in is recognisable by its
+    /// `sourcePackage` stamp; the author's own carries none, and neither does a
+    /// function a standalone workbook published as a NEW application. This list
+    /// is what tells those two apart.
+    ///
+    /// An `Option` for the pane-control reason: "the application had no
+    /// functions" (`Some([])`) must not read as "not recorded" (`None`, a link
+    /// from before the field, whose push the host refuses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_custom_function_names: Option<Vec<String>>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// What the base version carried, beyond its sheets: the record every push
+/// filters against (`WorkingCopyLink::record_content` / `record_push`).
+///
+/// Named fields rather than positional arguments: these are five lists of the
+/// same type, and two swapped positional lists compile.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WorkingCopyContent {
+    pub script_ids: Vec<String>,
+    pub notebook_ids: Vec<String>,
+    /// UPPERCASED workbook-scoped name keys.
+    pub named_range_keys: Vec<String>,
+    pub pane_control_ids: Vec<String>,
+    /// TRIMMED, UPPERCASED Custom Functions names.
+    pub custom_function_names: Vec<String>,
 }
 
 /// One sheet of the base version: its application sheet id and the name it had.
@@ -124,24 +174,45 @@ impl WorkingCopyLink {
             base_script_ids: Vec::new(),
             base_notebook_ids: Vec::new(),
             base_named_range_keys: Vec::new(),
+            base_pane_control_ids: None,
+            base_custom_function_names: None,
             extra: HashMap::new(),
         }
     }
 
-    /// Record which module scripts and notebooks the base version carried.
+    /// Record which module scripts, notebooks, names, pane controls and custom
+    /// functions the base version carried.
     ///
     /// Separate from `new` because the ids come from the pulled result rather
     /// than from the link's own identity, and both the checkout and the
     /// first-publish paths build the link before they have them.
-    pub fn record_content(
-        &mut self,
-        script_ids: Vec<String>,
-        notebook_ids: Vec<String>,
-        named_range_keys: Vec<String>,
-    ) {
+    pub fn record_content(&mut self, content: WorkingCopyContent) {
+        let WorkingCopyContent {
+            script_ids,
+            notebook_ids,
+            named_range_keys,
+            pane_control_ids,
+            custom_function_names,
+        } = content;
         self.base_script_ids = script_ids;
         self.base_notebook_ids = notebook_ids;
         self.base_named_range_keys = named_range_keys;
+        // Always `Some`: this link was written by a build that knows the
+        // fields, so an empty list means "the application has none".
+        self.base_pane_control_ids = Some(pane_control_ids);
+        self.base_custom_function_names = Some(custom_function_names);
+    }
+
+    /// Whether this link carries the record of what its base version held
+    /// (`record_content` / `record_push` always write both optional lists).
+    ///
+    /// `false` only for a link written before the record existed: its empty
+    /// lists cannot say whether the application had nothing or nothing was
+    /// recorded, so a push from it cannot tell the application's content from
+    /// the author's own. The host refuses such a push rather than guess either
+    /// way (`CALP_PUSH_LINK_UNRECORDED`).
+    pub fn content_recorded(&self) -> bool {
+        self.base_pane_control_ids.is_some() && self.base_custom_function_names.is_some()
     }
 
     /// Whether this link targets the given application in the given workspace.
@@ -167,17 +238,13 @@ impl WorkingCopyLink {
         // What actually shipped, so the NEXT push's filter is measured against
         // this version rather than against the checkout's. A script added to the
         // application by this push belongs to it from now on.
-        script_ids: Vec<String>,
-        notebook_ids: Vec<String>,
-        named_range_keys: Vec<String>,
+        shipped: WorkingCopyContent,
     ) {
         self.base_version = version.to_string();
         self.last_pushed_version = version.to_string();
         self.last_pushed_at = now.to_string();
         self.base_sheets = sheets;
-        self.base_script_ids = script_ids;
-        self.base_notebook_ids = notebook_ids;
-        self.base_named_range_keys = named_range_keys;
+        self.record_content(shipped);
     }
 }
 
@@ -212,10 +279,85 @@ mod tests {
     fn record_push_advances_the_base() {
         let mut l = link();
         assert_eq!(l.last_pushed_version, "");
-        l.record_push("1.3.0", "2026-08-30T00:00:00Z", Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        l.record_push(
+            "1.3.0",
+            "2026-08-30T00:00:00Z",
+            Vec::new(),
+            WorkingCopyContent::default(),
+        );
         assert_eq!(l.base_version, "1.3.0");
         assert_eq!(l.last_pushed_version, "1.3.0");
         assert_eq!(l.last_pushed_at, "2026-08-30T00:00:00Z");
+    }
+
+    /// Each list lands in ITS field. Five lists of one type were positional
+    /// arguments until BUG-0261 added the fifth; two swapped lists compile, and
+    /// a swap would filter the next push against the wrong kind of id.
+    #[test]
+    fn a_push_records_each_list_in_its_own_field() {
+        let mut l = link();
+        let ids = |s: &str| vec![s.to_string()];
+        l.record_push(
+            "1.3.0",
+            "2026-08-30T00:00:00Z",
+            Vec::new(),
+            WorkingCopyContent {
+                script_ids: ids("macro-1"),
+                notebook_ids: ids("nb-1"),
+                named_range_keys: ids("RATE"),
+                pane_control_ids: ids("pc-1"),
+                custom_function_names: ids("FXRATE"),
+            },
+        );
+        assert_eq!(l.base_script_ids, ids("macro-1"));
+        assert_eq!(l.base_notebook_ids, ids("nb-1"));
+        assert_eq!(l.base_named_range_keys, ids("RATE"));
+        assert_eq!(
+            l.base_pane_control_ids,
+            Some(ids("pc-1")),
+            "a push records what shipped, so the next push is measured from it"
+        );
+        assert_eq!(l.base_custom_function_names, Some(ids("FXRATE")));
+    }
+
+    /// "The application has none" is not "not recorded" (BUG-0261), for pane
+    /// controls and for custom functions alike.
+    ///
+    /// An empty base list must survive a save as an EMPTY list, or the push
+    /// filter reads it as a link written before the field existed and publishes
+    /// every private pane control -- or every private custom function -- of a
+    /// working copy whose application has none.
+    ///
+    /// SABOTAGE: have `record_content` store an empty function list as `None`
+    /// (the empty record then reads as "not recorded").
+    #[test]
+    fn an_empty_record_is_not_the_same_as_no_record() {
+        let mut l = link();
+        assert_eq!(l.base_pane_control_ids, None, "a fresh link has recorded nothing yet");
+        assert!(!l.content_recorded(), "a fresh link has not recorded its content");
+        assert_eq!(l.base_custom_function_names, None, "a fresh link has recorded nothing yet");
+        l.record_content(WorkingCopyContent::default());
+        assert!(l.content_recorded(), "an EMPTY record is a record");
+        assert_eq!(l.base_pane_control_ids, Some(Vec::new()));
+        assert_eq!(l.base_custom_function_names, Some(Vec::new()));
+
+        let json = serde_json::to_string(&l).unwrap();
+        assert!(json.contains("\"basePaneControlIds\":[]"), "{json}");
+        assert!(json.contains("\"baseCustomFunctionNames\":[]"), "{json}");
+        let back: WorkingCopyLink = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.base_pane_control_ids, Some(Vec::new()), "the empty record survives a save");
+        assert_eq!(back.base_custom_function_names, Some(Vec::new()), "the empty record survives a save");
+
+        // A link from before the fields existed deserializes as "not recorded".
+        let legacy = json
+            .replace(",\"basePaneControlIds\":[]", "")
+            .replace(",\"baseCustomFunctionNames\":[]", "");
+        assert!(!legacy.contains("basePaneControlIds"), "{legacy}");
+        assert!(!legacy.contains("baseCustomFunctionNames"), "{legacy}");
+        let old: WorkingCopyLink = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(old.base_pane_control_ids, None);
+        assert_eq!(old.base_custom_function_names, None);
+        assert!(!old.content_recorded(), "an old link's push is refused, not guessed");
     }
 
     #[test]

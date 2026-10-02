@@ -26,6 +26,9 @@
 //          types Alt+; as Alt+Shift+comma, Ctrl+] as Ctrl+AltGr+9) -- except
 //          that in READY mode an AltGr character is typed into the cell, never
 //          read as a shortcut (typesAltGrCharacterIntoACell, W17).
+//          Two keys are spelled by NAME in a combo, "Space" and "Plus": the
+//          grammar splits on "+" and trims, so neither can stand as itself
+//          (see "Keys the grammar spells by name", M8 S9).
 //          Grid-scoped commands (GRID_SCOPED_COMMANDS) fire only with grid focus
 //          and defer to native otherwise; copy/cut additionally defer when a DOM
 //          text selection exists. Supports user customization, conflict
@@ -60,6 +63,9 @@ import { isSelectionOwned, selectionOwnerReceivesTyping } from "../core/lib/sele
 // The module's other imports are the reducer and its types, none of which reach
 // back here.
 import { getGridStateSnapshot } from "../core/state/GridContext";
+// Core's cell press session, for ONE question: is a claimed press held (its
+// Escape is the press's)? It imports only core/lib/cellClickInterceptors.
+import { isCellPressHeld } from "../core/lib/cellPressRelease";
 
 // ============================================================================
 // Types
@@ -312,7 +318,9 @@ function loadUserOverrides(): void {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Record<string, string>;
-      userOverrides = new Map(Object.entries(parsed));
+      userOverrides = new Map(
+        Object.entries(parsed).filter(([id, combo]) => !dropStoredBareKey(`the remap of '${id}'`, combo)),
+      );
     }
   } catch {
     userOverrides = new Map();
@@ -346,13 +354,69 @@ function getCachedParsedCombo(combo: string): ParsedCombo {
   return parsed;
 }
 
+// ---------------------------------------------------------------------------
+// Keys the grammar spells by name ("Space", "Plus") -- M8 S9
+// ---------------------------------------------------------------------------
+//
+// A combo is split on "+" and every part is TRIMMED, so two keys cannot stand
+// in one as their own character: the space bar (`event.key` " ") and the plus
+// key ("+"). eventToCombo used to record them as characters anyway -- "Ctrl+ ",
+// which parses to an EMPTY key, and "Ctrl++", which splits to
+// ["Ctrl", "", ""], an empty key again -- so Settings saved a shortcut a user
+// recorded on Ctrl+Space or Ctrl+Plus, showed it, and it never fired. Each now
+// has a NAME: the combo text and the parsed combo carry "Space" / "Plus"
+// (eventToCombo writes it, parseCombo canonicalises any casing of it), and the
+// matchers compare the keystroke's `event.key` with the name's CHARACTER.
+// "+" is a layout symbol (US types it with Shift), so the symbol tier reads
+// the character too; a space is not (whitespace), and the physical-key tier
+// takes only letters and digits, so Space is matched exactly or not at all.
+// Stored "Ctrl+ " combinations are not migrated (no backward compatibility --
+// CLAUDE.md); a literal "Ctrl++" is still read as the plus key (parseCombo).
+
+/** A named key -> the `KeyboardEvent.key` it stands for. */
+const NAMED_KEY_CHARACTERS: ReadonlyMap<string, string> = new Map([
+  ["Space", " "],
+  ["Plus", "+"],
+]);
+
+/** "space" / "SPACE" -> "Space" (and Plus alike); any other key unchanged. */
+function canonicalKeyName(key: string): string {
+  const lower = key.toLowerCase();
+  for (const name of NAMED_KEY_CHARACTERS.keys()) {
+    if (lower === name.toLowerCase()) return name;
+  }
+  return key;
+}
+
+/** The `KeyboardEvent.key` a parsed combo key is pressed as: " " for Space,
+ *  "+" for Plus, any other key itself. */
+function comboKeyToEventKey(key: string): string {
+  return NAMED_KEY_CHARACTERS.get(key) ?? key;
+}
+
+/** A keystroke's key as a combo spells it: "Space" for " ", "Plus" for "+". */
+function eventKeyToComboKey(key: string): string {
+  for (const [name, character] of NAMED_KEY_CHARACTERS) {
+    if (key === character) return name;
+  }
+  return key;
+}
+
 /**
  * Parse a combo string like "Ctrl+Shift+B" into structured form.
- * The last token is always the key, everything before is modifiers.
+ * The last token is always the key, everything before is modifiers. The key
+ * is canonical for the two named keys ("ctrl+space" -> key "Space"), and a
+ * LITERAL plus key ("Ctrl++", "+") is read as "Plus": it leaves two empty
+ * parts at the end, the two sides of the "+" that is the key. ONE empty part
+ * ("Ctrl+", or a trimmed "Ctrl+ ") names no key and never matches.
  */
 export function parseCombo(combo: string): ParsedCombo {
   const parts = combo.split("+").map((p) => p.trim());
   const result: ParsedCombo = { key: "", ctrl: false, shift: false, alt: false, meta: false };
+
+  const literalPlus =
+    parts.length >= 2 && parts[parts.length - 1] === "" && parts[parts.length - 2] === "";
+  if (literalPlus) parts.pop();
 
   for (let i = 0; i < parts.length - 1; i++) {
     const mod = parts[i].toLowerCase();
@@ -362,13 +426,14 @@ export function parseCombo(combo: string): ParsedCombo {
     else if (mod === "meta" || mod === "cmd") result.meta = true;
   }
 
-  result.key = parts[parts.length - 1];
+  result.key = literalPlus ? "Plus" : canonicalKeyName(parts[parts.length - 1]);
   return result;
 }
 
 /**
  * Check if a KeyboardEvent matches a combo string.
- * Uses cached parsed combos to avoid repeated string splitting.
+ * Uses cached parsed combos to avoid repeated string splitting. A named key
+ * ("Space", "Plus") matches the character it stands for.
  */
 export function matchesEvent(combo: string, event: KeyboardEvent): boolean {
   const parsed = getCachedParsedCombo(combo);
@@ -376,7 +441,7 @@ export function matchesEvent(combo: string, event: KeyboardEvent): boolean {
   if (parsed.shift !== event.shiftKey) return false;
   if (parsed.alt !== event.altKey) return false;
   if (parsed.meta !== event.metaKey) return false;
-  return event.key.toLowerCase() === parsed.key.toLowerCase();
+  return event.key.toLowerCase() === comboKeyToEventKey(parsed.key).toLowerCase();
 }
 
 /**
@@ -428,7 +493,9 @@ export function matchesEventOnLayout(
   options: { altGr: boolean },
 ): boolean {
   const parsed = getCachedParsedCombo(combo);
-  if (!isLayoutSymbol(parsed.key) || event.key !== parsed.key) return false;
+  // "Plus" is the "+" symbol (US types it with Shift); "Space" is no symbol.
+  const key = comboKeyToEventKey(parsed.key);
+  if (!isLayoutSymbol(key) || event.key !== key) return false;
   if (parsed.meta !== event.metaKey) return false;
   if (parsed.shift && !event.shiftKey) return false;
   if (options.altGr && event.ctrlKey && event.altKey) {
@@ -538,7 +605,10 @@ export function formatCombo(combo: string): string {
  * "Ctrl+Alt+Μ", a GREEK capital mu (the micro sign µ upper-cased), which no
  * keystroke can ever match -- and a Russian Ctrl+Z as "Ctrl+Я". A SYMBOL keeps
  * its character ("Ctrl+Alt+]", "Ctrl+Alt+@"): the symbol tier matches it by
- * what the layout types, whatever key it sits on.
+ * what the layout types, whatever key it sits on. The space bar and the plus
+ * key are written by NAME ("Ctrl+Space", "Ctrl+Plus"): as characters the
+ * grammar trims or splits them away and the recorded shortcut never fired
+ * (see "Keys the grammar spells by name").
  */
 export function eventToCombo(event: KeyboardEvent): string | null {
   // Skip pure modifier keys
@@ -559,7 +629,7 @@ export function eventToCombo(event: KeyboardEvent): string | null {
   if (key.length === 1) {
     key = key.toUpperCase();
   }
-  parts.push(key);
+  parts.push(eventKeyToComboKey(key));
   return parts.join("+");
 }
 
@@ -788,6 +858,91 @@ export function getDefaultCombo(id: string): string {
 // User Customization
 // ============================================================================
 
+// ---------------------------------------------------------------------------
+// A BARE printable key is never a user shortcut (owner call 23, 2026-10-02)
+// ---------------------------------------------------------------------------
+//
+// A user's binding on a key the GRID owns wins, with the conflict named in
+// Settings (Ctrl+Space, M8 S9) -- the user's choice, and it stays. A binding on
+// a BARE key is not that choice. This dispatcher is a window-capture listener,
+// so a bare "A" (context "always") took every "a" typed into a dialog's text
+// field, and a bare Space every space; Enter stopped confirming entries.
+// Forcing such a binding to "not while editing" would not have saved it:
+// typing into a CELL begins in ready mode, which is not editing, so a
+// "not-editing" bare "A" still took the first letter of every cell entry. So
+// the two doors a user shortcut is written through -- a remap
+// (setUserKeybinding) and a new shortcut (addCustomKeybinding) -- REFUSE it
+// before anything is stored, and Settings shows the same sentence and offers
+// no Accept. A bare-key binding STORED before the rule is dropped when the
+// bindings load, said on the console, so the next save writes it out
+// (`dropStoredBareKey`). BARE means no Ctrl, Alt, Shift or Meta; the keys are Space,
+// Enter and every key that types one printable character (a letter, a digit,
+// a symbol, "+" spelled "Plus"). Keys that type nothing -- F1-F12, Delete,
+// Tab, the arrows -- stay bindable bare, as before.
+
+/** "Space", "Enter", or the one character a bare key types, as Settings shows it. */
+function bareTypingKeyName(key: string): string | null {
+  // parseCombo canonicalises "space"; "enter" is matched case-blind like any
+  // other named key (matchesEvent), so it is read that way here too.
+  if (key === "Space") return key;
+  if (key.toLowerCase() === "enter") return "Enter";
+  const character = comboKeyToEventKey(key);
+  if ([...character].length !== 1 || /\s/u.test(character) || /\p{C}/u.test(character)) return null;
+  return character.toUpperCase();
+}
+
+/**
+ * Why a USER may not put a shortcut on `combo`, or null when the rule does
+ * not apply: a bare Space, Enter or printable character is refused (see
+ * above). The ONE spelling of the rule: the two write doors throw this
+ * sentence, and Settings shows it and offers no Accept.
+ */
+export function bareKeyShortcutRefusal(combo: string): string | null {
+  if (typeof combo !== "string" || combo.trim() === "") return null;
+  const parsed = parseCombo(combo.trim());
+  if (parsed.ctrl || parsed.alt || parsed.shift || parsed.meta) return null;
+  const name = bareTypingKeyName(parsed.key);
+  if (name === null) return null;
+  const holdAModifier = " Hold Ctrl or Alt with it.";
+  if (name === "Space") {
+    return (
+      "Space cannot be a shortcut on its own: it types a space in cells and text fields, and the " +
+      "shortcut would take every space typed there." + holdAModifier
+    );
+  }
+  if (name === "Enter") {
+    return (
+      "Enter cannot be a shortcut on its own: it confirms a cell entry or a dialog and starts a new " +
+      "line in a text field, and the shortcut would take every one of those." + holdAModifier
+    );
+  }
+  return (
+    `"${name}" cannot be a shortcut on its own: it is typed into cells and text fields, and the ` +
+    `shortcut would take every "${name}" typed there.` + holdAModifier
+  );
+}
+
+/** Throw the refusal for a bare-key combination (see `bareKeyShortcutRefusal`). */
+function refuseBareKeyShortcut(combo: string): void {
+  const refusal = bareKeyShortcutRefusal(combo);
+  if (refusal !== null) throw new Error(refusal);
+}
+
+/**
+ * True -- said on the console with the rule's sentence -- when a STORED user
+ * binding (a remap or a custom shortcut, `what` names it) sits on a bare
+ * typing key. Such a binding was stored before the rule; both write doors
+ * refuse it today, and loaded verbatim it took the typing exactly as before.
+ * The loaders drop it, so it is never in effect and the next save writes it
+ * out.
+ */
+function dropStoredBareKey(what: string, combo: unknown): boolean {
+  const refusal = typeof combo === "string" ? bareKeyShortcutRefusal(combo) : null;
+  if (refusal === null) return false;
+  console.warn(`[Keybindings] Dropped ${what} on "${combo}": ${refusal}`);
+  return true;
+}
+
 /**
  * Set a user override for a keybinding.
  *
@@ -795,6 +950,9 @@ export function getDefaultCombo(id: string): string {
  * shortcut onto a combination a running script holds is the same silent takeover
  * as creating a new one, so it gets the same warning — see
  * `findScriptKeybindingCollision`.
+ *
+ * THROWS, storing nothing, for a bare Space, Enter or printable character
+ * (`bareKeyShortcutRefusal`, owner call 23).
  */
 export function setUserKeybinding(id: string, combo: string): KeybindingCollision | null {
   // Script shortcuts are not remappable (see getEffectiveCombo): storing an
@@ -809,6 +967,7 @@ export function setUserKeybinding(id: string, combo: string): KeybindingCollisio
     );
     return null;
   }
+  refuseBareKeyShortcut(combo);
   const collision = findScriptKeybindingCollision(combo, id);
   userOverrides.set(id, combo);
   saveUserOverrides();
@@ -854,6 +1013,7 @@ function loadCustomBindings(): void {
     if (raw) {
       const bindings = JSON.parse(raw) as StoredCustomBinding[];
       for (const b of bindings) {
+        if (dropStoredBareKey(`the shortcut '${b.label}'`, b.combo)) continue;
         const binding: KeyBinding = {
           ...b,
           source: "user",
@@ -977,9 +1137,14 @@ export interface AddCustomKeybindingResult {
 /**
  * Add a new custom keybinding created by the user.
  *
- * Never refuses: the user's keyboard is the user's. It DOES report — and
- * announce — when the new shortcut takes a combination a running script holds,
- * because app-wins silently is indistinguishable from the script being broken.
+ * Never refuses a combination something else holds: the user's keyboard is the
+ * user's. It DOES report — and announce — when the new shortcut takes a
+ * combination a running script holds, because app-wins silently is
+ * indistinguishable from the script being broken.
+ *
+ * THROWS, adding nothing, for a bare Space, Enter or printable character,
+ * whatever the context (`bareKeyShortcutRefusal`, owner call 23): that is not
+ * a key anyone else holds but the typing itself.
  */
 export function addCustomKeybinding(
   combo: string,
@@ -988,6 +1153,7 @@ export function addCustomKeybinding(
   category?: string,
   context?: "always" | "editing" | "not-editing",
 ): AddCustomKeybindingResult {
+  refuseBareKeyShortcut(combo);
   const id = `user.custom.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
   const binding: KeyBinding = {
     id,
@@ -1043,7 +1209,46 @@ export function getAvailableCommands(): string[] {
 // ============================================================================
 
 /**
- * Find conflicts for a given combo (excluding a specific binding id).
+ * The SPACE keys the grid answers itself (core/hooks/useGridKeyboard.ts, its
+ * Spacebar block; bare Space also applies the focused slicer or timeline item
+ * while the keyboard is inside one, M8 S7/S8), none of which the registry
+ * holds. Until M8 S9 no combination on Space could fire at all. Now a user's
+ * binding on one takes the key BEFORE the grid -- this dispatcher is a
+ * window-capture listener -- which is the user's choice to make; but
+ * Settings' conflict check reads findConflicts, and without these rows it
+ * presented Ctrl+Space as FREE.
+ *
+ * So they are reported as conflicts and nothing else: never in the registry
+ * (no row in the shortcut list, nothing to remap), never matched by the
+ * dispatcher, so with nothing bound the keystroke reaches the grid exactly as
+ * before. (The grid also reads Meta as Ctrl here; Windows keeps Win+Space.)
+ *
+ * SPACE ONLY, knowingly: the grid's other own keys (Escape, Tab, Enter, the
+ * arrows, F2, Ctrl+A, Ctrl+B/I/U, ...) are the same gap and predate S9 -- see
+ * the sandboxed-contribution check in scriptHost/extensionWorkerHost.ts.
+ */
+const GRID_SPACE_KEYS: readonly KeyBinding[] = [
+  { id: "grid.space", combo: "Space", commandId: "", label: "Toggle Check Box / Apply Slicer or Timeline Item (built-in key)", category: "Grid", source: "built-in" },
+  { id: "grid.shiftSpace", combo: "Shift+Space", commandId: "", label: "Select Entire Row (built-in key)", category: "Grid", source: "built-in" },
+  { id: "grid.ctrlSpace", combo: "Ctrl+Space", commandId: "", label: "Select Entire Column (built-in key)", category: "Grid", source: "built-in" },
+  { id: "grid.ctrlShiftSpace", combo: "Ctrl+Shift+Space", commandId: "", label: "Select All (built-in key)", category: "Grid", source: "built-in" },
+];
+
+/** Same key (named keys canonical, letters case-blind) and the same modifiers. */
+function sameCombo(a: ParsedCombo, b: ParsedCombo): boolean {
+  return (
+    a.key.toLowerCase() === b.key.toLowerCase() &&
+    a.ctrl === b.ctrl &&
+    a.shift === b.shift &&
+    a.alt === b.alt &&
+    a.meta === b.meta
+  );
+}
+
+/**
+ * Find conflicts for a given combo (excluding a specific binding id): every
+ * registry binding on it, and the grid's own Space key on it (GRID_SPACE_KEYS
+ * -- a copy, never a registry row).
  */
 export function findConflicts(combo: string, excludeId?: string): KeyBinding[] {
   const parsed = getCachedParsedCombo(combo);
@@ -1052,18 +1257,14 @@ export function findConflicts(combo: string, excludeId?: string): KeyBinding[] {
   registry.forEach((binding) => {
     if (excludeId && binding.id === excludeId) return;
     const effectiveCombo = getEffectiveCombo(binding.id);
-    const otherParsed = getCachedParsedCombo(effectiveCombo);
-
-    if (
-      parsed.key.toLowerCase() === otherParsed.key.toLowerCase() &&
-      parsed.ctrl === otherParsed.ctrl &&
-      parsed.shift === otherParsed.shift &&
-      parsed.alt === otherParsed.alt &&
-      parsed.meta === otherParsed.meta
-    ) {
+    if (sameCombo(parsed, getCachedParsedCombo(effectiveCombo))) {
       conflicts.push(binding);
     }
   });
+
+  for (const gridKey of GRID_SPACE_KEYS) {
+    if (sameCombo(parsed, getCachedParsedCombo(gridKey.combo))) conflicts.push({ ...gridKey });
+  }
 
   return conflicts;
 }
@@ -1618,6 +1819,17 @@ export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
     }
     return true;
   }
+
+  // A HELD CELL PRESS OWNS ESCAPE. Core's press session (core/lib/
+  // cellPressRelease.ts) holds a press an in-cell button or a pivot +/-
+  // claimed for its release, and Escape cancels it. This listener runs FIRST
+  // (window capture, installed at startup, before the session's own
+  // window-capture listener added at the press), so it stands aside: a binding
+  // on Escape -- BUG-0270's object deselect -- acting on the same keystroke
+  // made one Escape do two things. Not prevented here: the session prevents
+  // it and stops it. Before a claim arrives nobody owns the press, and this
+  // does not apply.
+  if (event.key === "Escape" && isCellPressHeld()) return false;
 
   if (registry.size === 0) return false;
 

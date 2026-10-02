@@ -1040,7 +1040,8 @@ function buildHeader(
   ];
   if (o.target === "objectScript") {
     lines.push(
-      "// Requires an UNLOCKED script: `context.api` is null in the restricted tier.",
+      "// Needs cell access (`context.api`): your own macro has it, and an application's",
+      "// macro has it when YOU run it (Developer > Macros > Run, its button, the command line).",
     );
   }
   if (usesCaps) {
@@ -1058,6 +1059,22 @@ function buildHeader(
     for (const u of unsupportedList) lines.push(`//   - ${u}`);
   }
   return lines;
+}
+
+/**
+ * What a recorded object-script macro throws when it is run without cell
+ * access (`context.api` is null): a run another script started, or a
+ * restricted standing mount. Names the ways that DO give it cell access --
+ * exactly the doors that mint a run pass (owner decision B) -- and says that
+ * nothing changed, which is true because the guard runs before the first call.
+ * Exported so tests pin the generated text against one source.
+ */
+export function macroNeedsCellAccessMessage(name: string): string {
+  return (
+    `"${name}" did not run: it needs cell access, and this run has none. Run it yourself ` +
+    "-- from Developer > Macros > Run, a button that runs it, or the command line; a run " +
+    "another script starts never gets cell access. Nothing was changed."
+  );
 }
 
 function wrapObjectScript(
@@ -1095,6 +1112,12 @@ function wrapObjectScript(
   // than merely exist. A module that only declared the function above — with a
   // comment explaining how someone else might call it — is what "I pressed Run
   // and nothing happened" actually was.
+  //
+  // NO CELL ACCESS IS AN ERROR, NOT A QUIET RETURN (ownerB follow-up F12). The
+  // guard used to notify and RETURN, so the mount resolved and the run was
+  // reported -- by the caller and on the Rust run row -- as "ran" when nothing
+  // had changed. It THROWS now: the run fails with a sentence naming how to
+  // get cell access, before a single call, so "Nothing was changed" is true.
   return [
     ...fn,
     ``,
@@ -1103,8 +1126,7 @@ function wrapObjectScript(
     `//   • run directly (Developer > Macros... > Run) -> it runs once, now`,
     `function setup(context) {`,
     `  if (!context.api) {`,
-    `    context.notify(${jsString(`"${o.name}" needs an UNLOCKED script; this one is restricted.`)}, "error");`,
-    `    return;`,
+    `    throw new Error(${jsString(macroNeedsCellAccessMessage(o.name))});`,
     `  }`,
     `  if (typeof context.onClick === "function") {`,
     `    context.onClick(async () => {`,

@@ -1,0 +1,40 @@
+{
+  "comment": "Shared by app/src-tauri/src/scripting/control_action_tests.rs (include_str!), app/extensions/_shared/lib/__tests__/buttonNameDrift.test.ts and app/extensions/ScriptableObjects/__tests__/consentButtonActions.test.ts. Rust (scripting/control_action.rs) decides what a button click runs; the TypeScript copies that remain on the page (the Properties pane's sanitizeScriptName, the shared sanitizeScriptName, the approval screen's buttonCallName, parseModuleScriptRuntime) must answer every row exactly as Rust does. The page's old call-name copy, whose JavaScript whitespace class disagreed on U+FEFF, was deleted with the page planners in phase 4 of BUG-0257.",
+  "sanitize": [
+    { "name": "Report", "expected": "Report" },
+    { "name": "My Macro", "expected": "My_Macro" },
+    { "name": "2nd pass", "expected": "_2nd_pass" },
+    { "name": "Café", "expected": "Caf_" },
+    { "name": "Go 😀", "expected": "Go___" },
+    { "name": "", "expected": "_unnamed" },
+    { "name": "!!!", "expected": "___" },
+    { "name": "_x$", "expected": "_x_" },
+    { "name": "9", "expected": "_9" }
+  ],
+  "callName": [
+    { "code": "Report()", "expected": "Report" },
+    { "code": "Report();", "expected": "Report" },
+    { "code": "  Report ( ) ; ", "expected": "Report" },
+    { "code": "\tReport()\r\n", "expected": "Report" },
+    { "code": "$go()", "expected": "$go" },
+    { "code": "Report(1)", "expected": null },
+    { "code": "Report(); evil();", "expected": null },
+    { "code": "if (x) Report();", "expected": null },
+    { "code": "a.Report()", "expected": null },
+    { "code": "Report();;", "expected": null },
+    { "code": "", "expected": null },
+    { "code": "﻿Report()", "expected": null }
+  ],
+  "runtime": [
+    { "description": "Recorded macro · runtime=objectScript · 3 actions · recorded 2026-09-30", "expected": "objectScript" },
+    { "description": "Recorded macro · runtime=notebook · 1 action", "expected": "notebook" },
+    { "description": "runtime=objectScript", "expected": "objectScript" },
+    { "description": "xruntime=objectScript", "expected": null },
+    { "description": "runtime=objectScripts", "expected": null },
+    { "description": "runtime=objectScripts runtime=notebook", "expected": "notebook" },
+    { "description": "éruntime=objectScript", "expected": "objectScript" },
+    { "description": "runtime=notebook_", "expected": null },
+    { "description": "", "expected": null },
+    { "description": null, "expected": null }
+  ]
+}

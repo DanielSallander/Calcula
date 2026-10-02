@@ -121,10 +121,16 @@ export function macroProvenanceNotice(entry: MacroEntry): string | null {
     );
   }
   if (isLocalOrigin(entry.origin)) return null;
+  // Owner decision B: a macro you run yourself from here -- the command line is
+  // one of the doors (follow-up F2) -- may change cells. Said for both runtimes,
+  // because the listing does not carry the runtime marker: an object-script
+  // macro gets cell access and nothing more; a module macro has its full reach.
   return (
     `'${entry.name}' arrived in the application "${entry.origin.name}" — this is the ` +
-    "publisher's code, not yours. It runs sandboxed at the restricted tier, and only " +
-    "if you have approved that application's code."
+    "publisher's code, not yours. It runs only if you have approved that application's " +
+    "code. Because you are running it yourself, it may read and change cells on any " +
+    "sheet: a macro written as an object script gets that and nothing more, and a " +
+    "macro for the workbook script runtime has that runtime's full reach."
   );
 }
 

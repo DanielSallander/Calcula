@@ -10,6 +10,7 @@ import {
 } from "@api/gridOverlays";
 import { getDesignMode } from "./designMode";
 import { announceFloatingControlRegions } from "./regionPublication";
+import { noteControlGeometryChanged } from "./geometryWriteOrder";
 
 // ============================================================================
 // Types
@@ -220,7 +221,13 @@ export function recalcPinnedOffset(
 }
 
 
-/** Resize a floating control (full bounds update for all-corner resize). */
+/**
+ * Resize a floating control (full bounds update for all-corner resize).
+ *
+ * A SIZE change is noted for the renderers' reads (lib/geometryWriteOrder.ts,
+ * BUG-0268): a property read already on its way describes the old size and must
+ * not be written back over this one.
+ */
 export function resizeFloatingControl(
   id: string,
   x: number,
@@ -230,11 +237,50 @@ export function resizeFloatingControl(
 ): void {
   const ctrl = floatingControls.find((c) => c.id === id);
   if (ctrl) {
+    const resized = ctrl.width !== width || ctrl.height !== height;
     ctrl.x = x;
     ctrl.y = y;
     ctrl.width = width;
     ctrl.height = height;
+    if (resized) noteControlGeometryChanged(ctrl);
   }
+}
+
+/**
+ * THE write-back of a renderer's RESOLVED width/height into the store -- one
+ * function for the button, shape and picture renderers, which each re-read a
+ * control's properties after an invalidation (a formula-driven size is the
+ * reason the write-back exists).
+ *
+ * `readIsCurrent` comes from `beginControlGeometryRead`, taken when the read
+ * started. When the control's geometry changed while the read was on its way --
+ * a resize, a geometry write started or landed, one still in flight -- the read
+ * describes a rectangle that is no longer the control's and is NOT applied:
+ * "superseded", and the caller reads again at the next paint. Writing it back
+ * is BUG-0268: a Core-handle resize's own repaint read the OLD width before the
+ * persisted one landed, and the region went back to the old rectangle while the
+ * backend held the new one.
+ *
+ * "none": the read carried no size (or the control is gone); "unchanged": the
+ * store already has it; "applied": the store and the region changed.
+ */
+export function applyResolvedControlSize(
+  id: string,
+  resolved: Readonly<Record<string, string | undefined>>,
+  readIsCurrent: () => boolean,
+): "none" | "superseded" | "unchanged" | "applied" {
+  const resolvedWidth = resolved.width ? parseFloat(resolved.width) : NaN;
+  const resolvedHeight = resolved.height ? parseFloat(resolved.height) : NaN;
+  if (isNaN(resolvedWidth) && isNaN(resolvedHeight)) return "none";
+  const ctrl = floatingControls.find((c) => c.id === id);
+  if (!ctrl) return "none";
+  if (!readIsCurrent()) return "superseded";
+  const w = !isNaN(resolvedWidth) && resolvedWidth > 0 ? resolvedWidth : ctrl.width;
+  const h = !isNaN(resolvedHeight) && resolvedHeight > 0 ? resolvedHeight : ctrl.height;
+  if (w === ctrl.width && h === ctrl.height) return "unchanged";
+  resizeFloatingControl(id, ctrl.x, ctrl.y, w, h);
+  syncFloatingControlRegions();
+  return "applied";
 }
 
 /**
@@ -686,6 +732,7 @@ export function resizeGroupControls(
     ctrl.y = newBounds.y + relY * scaleY;
     ctrl.width = Math.max(10, ctrl.width * scaleX);
     ctrl.height = Math.max(10, ctrl.height * scaleY);
+    noteControlGeometryChanged(ctrl);
   }
 }
 

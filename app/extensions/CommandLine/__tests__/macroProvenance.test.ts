@@ -59,6 +59,18 @@ describe("macroEntriesFrom", () => {
     expect(macroProvenanceNotice(entry)).toContain("publisher's code");
   });
 
+  // OWNER DECISION B (follow-up F2): the command line is one of the doors, so a
+  // macro you `run` here may change cells -- and the notice printed before it
+  // runs says so, for both runtimes, instead of promising a restricted tier
+  // the run no longer has (and the module runtime never had).
+  it("says, before the run, that a macro you run yourself may change cells", () => {
+    const notice = macroProvenanceNotice(entryOf({ sourcePackage: "Sales" }))!;
+    expect(notice).toContain("It runs only if you have approved that application's code.");
+    expect(notice).toContain("Because you are running it yourself, it may read and change cells on any sheet");
+    expect(notice).toContain("a macro written as an object script gets that and nothing more");
+    expect(notice).not.toMatch(/restricted tier/);
+  });
+
   it("carries scope and the read failure through unchanged", () => {
     const entry = entryOf({ scope: { type: "sheet", name: "Sheet2" }, loadError: "gone" });
     expect(entry.scope).toEqual({ type: "sheet", name: "Sheet2" });

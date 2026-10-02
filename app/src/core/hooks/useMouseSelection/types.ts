@@ -245,6 +245,8 @@ export interface UseMouseSelectionReturn {
   handleMouseUp: () => void;
   /** Handle double-click on the grid */
   handleDoubleClick: (event: React.MouseEvent<HTMLElement>) => { row: number; col: number } | null;
+  /** The pointer left the grid area: clear Core's floating-object hover (core/lib/objectHover.ts). */
+  handleMouseLeave: () => void;
   /** Check if a canvas position is over a floating overlay (e.g., chart) */
   isOverFloatingOverlay: (mouseX: number, mouseY: number) => boolean;
 }

@@ -10,12 +10,16 @@
 // points here.
 
 import React, { useEffect, useMemo, useState } from "react";
-import type { DialogProps, ApplicationInfo } from "@api";
+import type { DialogProps, ApplicationInfo, CheckoutResponse } from "@api";
 import { listApplicationsInWorkspace, checkoutApplication } from "@api";
 import { listWorkspaces, type SavedWorkspace, isHttpWorkspace } from "@api/collaborationWorkspaces";
 import { useDialogWindow } from "@api/dialogWindow";
+import { parseAnchorRefusal } from "@api/collaboration";
 import { pickWorkspaceFile } from "../lib/pickWorkspace";
 import { environmentsAtVersion } from "../lib/environments";
+import { checkoutIntoNewWorkbook, isCheckoutCollisionRefusal } from "../lib/checkoutIntoNewWorkbook";
+import { confirmAndForgetAnchor } from "../lib/forgetAnchor";
+import { CheckoutSignerPanel } from "./CheckoutSignerPanel";
 
 export function CheckoutDialog({ onClose, data }: DialogProps) {
   const win = useDialogWindow({ minWidth: 460, minHeight: 380 });
@@ -34,6 +38,12 @@ export function CheckoutDialog({ onClose, data }: DialogProps) {
   const [selectedVersion, setSelectedVersion] = useState<string>("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The checkout that just succeeded. KEPT, not discarded (BUG-0262): the
+   * dialog stays open on it so the developer sees who signed the version they
+   * are about to edit and re-sign, and what this computer knows about that key.
+   */
+  const [opened, setOpened] = useState<CheckoutResponse | null>(null);
 
   useEffect(() => {
     listWorkspaces()
@@ -117,12 +127,82 @@ export function CheckoutDialog({ onClose, data }: DialogProps) {
         version: selectedVersion || undefined,
       });
       setBusy(null);
-      onClose();
-      void result;
+      // Stay open on the result. The backend has already refused a signer the
+      // application does not authorise; what is left is for the developer to
+      // SEE who signed it — the one thing the old `void result` threw away.
+      setOpened(result);
     } catch (err: unknown) {
       setError(String(err));
       setBusy(null);
     }
+  };
+
+  // THE REMEDY THE COLLISION REFUSAL NAMES (BUG-0264). The backend refused
+  // because this workbook already holds a macro, notebook or name with the same
+  // id as one of the application's; an empty workbook holds none. It replaces
+  // the open workbook, so unsaved changes are asked about first (fail closed).
+  const handleCheckoutIntoNewWorkbook = async () => {
+    setBusy("Opening in a new workbook…");
+    try {
+      const result = await checkoutIntoNewWorkbook({
+        registryPath,
+        packageName: selectedPackage,
+        version: selectedVersion || undefined,
+      });
+      setBusy(null);
+      // The user kept the open workbook: nothing happened, the refusal stands.
+      if (!result) return;
+      setError(null);
+      setOpened(result);
+    } catch (err: unknown) {
+      setError(String(err));
+      setBusy(null);
+    }
+  };
+
+  // THE PRIVATE-SHEET REMEDY (phase 3 of BUG-0257). The checkout succeeded, but
+  // this workbook also holds sheets of the developer's own, so the run gate
+  // keeps the application's code from running here. The same version, opened
+  // in a new, empty workbook, has none beside it. `checkoutIntoNewWorkbook`
+  // asks before it closes a modified workbook (awaited, failing closed); a No
+  // leaves everything as it is.
+  const handleReopenInNewWorkbook = async (current: CheckoutResponse) => {
+    setBusy("Opening in a new workbook…");
+    try {
+      const result = await checkoutIntoNewWorkbook({
+        registryPath,
+        packageName: current.packageName,
+        version: current.version,
+      });
+      setBusy(null);
+      if (!result) return;
+      setOpened(result);
+    } catch (err: unknown) {
+      setBusy(null);
+      setOpened(null);
+      setError(String(err));
+    }
+  };
+
+  // THE DEVELOPER-ANCHOR REFUSALS. The workspace named a different creator than
+  // this computer remembers, or served a co-publisher list older than one it
+  // has seen. The first has one remedy, and it is a deliberate hole: forget
+  // the remembered creator -- asked first, naming both keys, failing closed --
+  // then open again. The second is the creator's to fix; nothing is offered.
+  const anchorRefusal = parseAnchorRefusal(error);
+
+  const handleForgetAnchor = async () => {
+    if (!anchorRefusal) return;
+    try {
+      const forgotten = await confirmAndForgetAnchor(registryPath, selectedPackage, anchorRefusal);
+      // A No, or a dialog that could not be shown: nothing forgotten, the
+      // refusal stands.
+      if (!forgotten) return;
+    } catch (err: unknown) {
+      setError(String(err));
+      return;
+    }
+    await handleCheckout();
   };
 
   const httpRegistry = registryPath.trim() !== "" && isHttpWorkspace(registryPath);
@@ -206,207 +286,304 @@ export function CheckoutDialog({ onClose, data }: DialogProps) {
       </div>
 
       <div style={bodyStyle}>
-        <div
-          style={{
-            fontSize: "12px",
-            color: "var(--text-secondary)",
-            marginBottom: "12px",
-            lineHeight: 1.45,
-          }}
-        >
-          Adds the application&rsquo;s sheets to this workbook as a working copy
-          you can edit and push back. Your own sheets stay where they are, and a
-          push carries the application&rsquo;s sheets only. The copy keeps the
-          application&rsquo;s own identity — so subscribers see your next version
-          as an update, not as a new report.
-        </div>
-
-        <div style={fieldStyle}>
-          <label>Workspace</label>
-          {saved.length > 0 && (
-            <select
-              style={inputStyle}
-              value={saved.find((r) => r.location === registryPath)?.id ?? ""}
-              onChange={(e) => {
-                const reg = saved.find((r) => r.id === e.target.value);
-                if (reg) {
-                  setRegistryPath(reg.location);
-                  void loadPackages(reg.location);
-                }
-              }}
-            >
-              <option value="">Choose a saved workspace…</option>
-              {saved.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.name} — {r.location}
-                </option>
-              ))}
-            </select>
-          )}
-          <div style={{ display: "flex", gap: "4px" }}>
-            <input
-              style={{ ...inputStyle, flex: 1 }}
-              value={registryPath}
-              onChange={(e) => setRegistryPath(e.target.value)}
-              placeholder="C:\shared\workspace"
-            />
-            <button
-              onClick={handleBrowseFolder}
-              style={{ whiteSpace: "nowrap" }}
-              title="Pick a workspace by its workspace.calcula file"
-            >
-              Browse…
-            </button>
-            <button
-              onClick={() => void loadPackages(registryPath)}
-              disabled={!registryPath.trim()}
-              style={{ whiteSpace: "nowrap" }}
-            >
-              List applications
-            </button>
-          </div>
-          {httpRegistry && (
-            <div style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
-              This is a read-only HTTP registry: you can open a package from it,
-              but you will not be able to push back to it.
-            </div>
-          )}
-        </div>
-
-        {packages && packages.length === 0 && (
-          <div style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
-            No packages in this registry.
-          </div>
-        )}
-
-        {packages && packages.length > 0 && (
-          <div style={fieldStyle}>
-            <label>Application</label>
-            <select
-              style={inputStyle}
-              value={selectedPackage}
-              onChange={(e) => {
-                const p = packages.find((x) => x.name === e.target.value);
-                if (p) selectPackage(p);
-              }}
-            >
-              <option value="">Choose an application…</option>
-              {packages.map((p) => (
-                <option key={p.name} value={p.name}>
-                  {p.name}
-                  {p.kind && p.kind !== "report" ? ` (${p.kind})` : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        {pkg && (
-          <div style={fieldStyle}>
-            <label>Version</label>
+        {opened ? (
+          <CheckoutSignerPanel
+            result={opened}
+            // The private-sheet remedy (phase 3 of BUG-0257): the SAME version,
+            // opened again in an empty workbook, where no sheet of the
+            // developer's sits beside it. Asks first; fails closed.
+            onOpenInNewWorkbook={() => void handleReopenInNewWorkbook(opened)}
+            busy={busy !== null}
+          />
+        ) : (
+          <>
             <div
               style={{
-                border: "1px solid var(--border-default)",
-                borderRadius: "3px",
-                maxHeight: "180px",
-                overflowY: "auto",
+                fontSize: "12px",
+                color: "var(--text-secondary)",
+                marginBottom: "12px",
+                lineHeight: 1.45,
               }}
             >
-              {versionsNewestFirst.map((v, i) => (
-                <label
-                  key={v.version}
-                  style={{
-                    display: "flex",
-                    gap: "8px",
-                    alignItems: "flex-start",
-                    padding: "6px 8px",
-                    cursor: "pointer",
-                    borderBottom:
-                      i < versionsNewestFirst.length - 1
-                        ? "1px solid var(--border-default)"
-                        : "none",
-                    background:
-                      selectedVersion === v.version ? "var(--bg-selected, #e8f0fe)" : "transparent",
+              Adds the application&rsquo;s sheets to this workbook as a working copy
+              you can edit and push back. Your own sheets stay where they are, and a
+              push carries the application&rsquo;s sheets only. The copy keeps the
+              application&rsquo;s own identity — so subscribers see your next version
+              as an update, not as a new report.
+            </div>
+
+            <div style={fieldStyle}>
+              <label>Workspace</label>
+              {saved.length > 0 && (
+                <select
+                  style={inputStyle}
+                  value={saved.find((r) => r.location === registryPath)?.id ?? ""}
+                  onChange={(e) => {
+                    const reg = saved.find((r) => r.id === e.target.value);
+                    if (reg) {
+                      setRegistryPath(reg.location);
+                      void loadPackages(reg.location);
+                    }
                   }}
                 >
-                  <input
-                    type="radio"
-                    name="checkout-version"
-                    checked={selectedVersion === v.version}
-                    onChange={() => setSelectedVersion(v.version)}
-                    style={{ marginTop: "2px" }}
-                  />
-                  <span style={{ flex: 1, minWidth: 0 }}>
-                    <span style={{ fontWeight: 600 }}>v{v.version}</span>
-                    {/* WHICH ONE IS LIVE. A developer opening an application to
-                        fix something needs to know whether the version they are
-                        about to base on is the one an audience is running —
-                        that is the hotfix shape, and the push dialog warns about
-                        it, but it is cheaper to see it here first. */}
-                    {environmentsAtVersion(pkg?.environments ?? [], v.version).map((name) => (
-                      <span
-                        key={name}
-                        style={{
-                          marginLeft: 6,
-                          fontSize: "11px",
-                          padding: "0 5px",
-                          borderRadius: 8,
-                          background: "#e8f0fe",
-                          color: "#1a5fb4",
-                        }}
-                      >
-                        {name}
-                      </span>
-                    ))}
-                    {i === 0 && (
-                      <span
-                        style={{
-                          marginLeft: 6,
-                          fontSize: "11px",
-                          color: "var(--text-secondary)",
-                        }}
-                      >
-                        (current)
-                      </span>
-                    )}
-                    <span
+                  <option value="">Choose a saved workspace…</option>
+                  {saved.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name} — {r.location}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <div style={{ display: "flex", gap: "4px" }}>
+                <input
+                  style={{ ...inputStyle, flex: 1 }}
+                  value={registryPath}
+                  onChange={(e) => setRegistryPath(e.target.value)}
+                  placeholder="C:\shared\workspace"
+                />
+                <button
+                  onClick={handleBrowseFolder}
+                  style={{ whiteSpace: "nowrap" }}
+                  title="Pick a workspace by its workspace.calcula file"
+                >
+                  Browse…
+                </button>
+                <button
+                  onClick={() => void loadPackages(registryPath)}
+                  disabled={!registryPath.trim()}
+                  style={{ whiteSpace: "nowrap" }}
+                >
+                  List applications
+                </button>
+              </div>
+              {httpRegistry && (
+                <div style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+                  This is a read-only HTTP registry: you can open a package from it,
+                  but you will not be able to push back to it.
+                </div>
+              )}
+            </div>
+
+            {packages && packages.length === 0 && (
+              <div style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
+                No packages in this registry.
+              </div>
+            )}
+
+            {packages && packages.length > 0 && (
+              <div style={fieldStyle}>
+                <label>Application</label>
+                <select
+                  style={inputStyle}
+                  value={selectedPackage}
+                  onChange={(e) => {
+                    const p = packages.find((x) => x.name === e.target.value);
+                    if (p) selectPackage(p);
+                  }}
+                >
+                  <option value="">Choose an application…</option>
+                  {packages.map((p) => (
+                    <option key={p.name} value={p.name}>
+                      {p.name}
+                      {p.kind && p.kind !== "report" ? ` (${p.kind})` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {pkg && (
+              <div style={fieldStyle}>
+                <label>Version</label>
+                <div
+                  style={{
+                    border: "1px solid var(--border-default)",
+                    borderRadius: "3px",
+                    maxHeight: "180px",
+                    overflowY: "auto",
+                  }}
+                >
+                  {versionsNewestFirst.map((v, i) => (
+                    <label
+                      key={v.version}
                       style={{
-                        display: "block",
-                        fontSize: "11px",
-                        color: "var(--text-secondary)",
+                        display: "flex",
+                        gap: "8px",
+                        alignItems: "flex-start",
+                        padding: "6px 8px",
+                        cursor: "pointer",
+                        borderBottom:
+                          i < versionsNewestFirst.length - 1
+                            ? "1px solid var(--border-default)"
+                            : "none",
+                        background:
+                          selectedVersion === v.version ? "var(--bg-selected, #e8f0fe)" : "transparent",
                       }}
                     >
-                      {v.publishedBy ? `${v.publishedBy} · ` : ""}
-                      {v.publishedAt}
-                    </span>
-                  </span>
-                </label>
-              ))}
-            </div>
-          </div>
-        )}
+                      <input
+                        type="radio"
+                        name="checkout-version"
+                        checked={selectedVersion === v.version}
+                        onChange={() => setSelectedVersion(v.version)}
+                        style={{ marginTop: "2px" }}
+                      />
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{ fontWeight: 600 }}>v{v.version}</span>
+                        {/* WHICH ONE IS LIVE. A developer opening an application to
+                            fix something needs to know whether the version they are
+                            about to base on is the one an audience is running —
+                            that is the hotfix shape, and the push dialog warns about
+                            it, but it is cheaper to see it here first. */}
+                        {environmentsAtVersion(pkg?.environments ?? [], v.version).map((name) => (
+                          <span
+                            key={name}
+                            style={{
+                              marginLeft: 6,
+                              fontSize: "11px",
+                              padding: "0 5px",
+                              borderRadius: 8,
+                              background: "#e8f0fe",
+                              color: "#1a5fb4",
+                            }}
+                          >
+                            {name}
+                          </span>
+                        ))}
+                        {i === 0 && (
+                          <span
+                            style={{
+                              marginLeft: 6,
+                              fontSize: "11px",
+                              color: "var(--text-secondary)",
+                            }}
+                          >
+                            (current)
+                          </span>
+                        )}
+                        <span
+                          style={{
+                            display: "block",
+                            fontSize: "11px",
+                            color: "var(--text-secondary)",
+                          }}
+                        >
+                          {v.publishedBy ? `${v.publishedBy} · ` : ""}
+                          {v.publishedAt}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
 
-        {error && (
-          <div style={{ color: "var(--text-error, #d33)", fontSize: "12px", marginTop: "8px" }}>
-            {error}
-          </div>
-        )}
-        {busy && (
-          <div style={{ color: "var(--text-secondary)", fontSize: "12px", marginTop: "8px" }}>
-            {busy}
-          </div>
+            {error && (
+              <div style={{ color: "var(--text-error, #d33)", fontSize: "12px", marginTop: "8px" }}>
+                {anchorRefusal ? anchorRefusal.text : error}
+              </div>
+            )}
+            {anchorRefusal && (
+              <div
+                data-testid="checkout-anchor-remedy"
+                style={{
+                  marginTop: "8px",
+                  fontSize: "12px",
+                  color: "var(--text-secondary)",
+                  lineHeight: 1.45,
+                }}
+              >
+                {anchorRefusal.kind === "contradicted" ? (
+                  <>
+                    <div>
+                      Remembered creator key{" "}
+                      <span
+                        data-testid="anchor-remembered-fingerprint"
+                        style={{ fontFamily: "Consolas, monospace" }}
+                      >
+                        {anchorRefusal.rememberedFingerprint}
+                      </span>
+                      ; the workspace now names{" "}
+                      <span
+                        data-testid="anchor-claimed-fingerprint"
+                        style={{ fontFamily: "Consolas, monospace" }}
+                      >
+                        {anchorRefusal.claimedFingerprint}
+                      </span>
+                      .
+                    </div>
+                    <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "6px" }}>
+                      <button
+                        data-testid="checkout-forget-anchor"
+                        onClick={() => void handleForgetAnchor()}
+                        disabled={busy !== null}
+                        style={{ whiteSpace: "nowrap" }}
+                      >
+                        Forget the remembered creator…
+                      </button>
+                      <span>Only after the application&rsquo;s creator has confirmed the new key.</span>
+                    </div>
+                  </>
+                ) : (
+                  <div data-testid="checkout-anchor-rollback">
+                    Only the application&rsquo;s creator can fix this: they save the list of who may
+                    publish it again, which writes a newer revision. Nothing on this computer should
+                    be changed to get past it.
+                  </div>
+                )}
+              </div>
+            )}
+            {isCheckoutCollisionRefusal(error) && (
+              <div
+                data-testid="checkout-collision-remedy"
+                style={{
+                  display: "flex",
+                  gap: "8px",
+                  alignItems: "center",
+                  marginTop: "8px",
+                  fontSize: "12px",
+                  color: "var(--text-secondary)",
+                }}
+              >
+                <button
+                  data-testid="checkout-new-workbook"
+                  onClick={() => void handleCheckoutIntoNewWorkbook()}
+                  disabled={busy !== null}
+                  style={{ whiteSpace: "nowrap" }}
+                >
+                  Check out into a new workbook
+                </button>
+                <span>
+                  Closes this workbook and opens the application in an empty one, where nothing
+                  collides.
+                </span>
+              </div>
+            )}
+            {busy && (
+              <div style={{ color: "var(--text-secondary)", fontSize: "12px", marginTop: "8px" }}>
+                {busy}
+              </div>
+            )}
+          </>
         )}
       </div>
 
       <div style={footerStyle}>
-        <button onClick={onClose}>Cancel</button>
-        <button
-          onClick={handleCheckout}
-          disabled={!registryPath.trim() || !selectedPackage || busy !== null}
-          style={{ fontWeight: 600 }}
-        >
-          Open for Editing
-        </button>
+        {opened ? (
+          <button onClick={onClose} style={{ fontWeight: 600 }}>
+            Done
+          </button>
+        ) : (
+          <>
+            <button onClick={onClose}>Cancel</button>
+            <button
+              onClick={handleCheckout}
+              disabled={!registryPath.trim() || !selectedPackage || busy !== null}
+              style={{ fontWeight: 600 }}
+            >
+              Open for Editing
+            </button>
+          </>
+        )}
       </div>
 
       {win.resizeHandles}

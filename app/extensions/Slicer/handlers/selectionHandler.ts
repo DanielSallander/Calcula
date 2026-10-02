@@ -30,6 +30,11 @@ let optionsPanelRegistered = false;
  * Called when a slicer is clicked (from the grid overlay hit test).
  * Shows the contextual panel and broadcasts the slicer state.
  * @param additive If true (Ctrl+click), toggle the slicer in/out of the selection set.
+ *   From the mouse it is Core's OBJECT-selection Ctrl (index.ts
+ *   `floatingObject:selected`), which reaches here only from a FRAME press:
+ *   Core zeroes it on content, so a Ctrl+click on an ITEM toggles the item
+ *   (lib/slicerItemDrag.ts) and never toggles the slicer out (BUG-0258 design
+ *   phase 4). The object-selection seam's add/remove calls it too.
  */
 export function selectSlicer(slicerId: string, additive = false): void {
   const slicer = getSlicerById(slicerId);

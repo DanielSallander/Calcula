@@ -19,6 +19,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { webcrypto } from "node:crypto";
 
+import { createConsentStoreDouble } from "./helpers/consentStoreDouble";
+
 // jsdom has no WebCrypto subtle digest; sha256Hex (consent + lockfile identity)
 // needs it, and the linker needs getRandomValues.
 if (!globalThis.crypto?.subtle) {
@@ -26,17 +28,21 @@ if (!globalThis.crypto?.subtle) {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory workbook virtual filesystem + backend stub
+// In-memory workbook virtual filesystem + backend stub. Approvals are not a
+// file the page writes any more: they go through the shared double of the two
+// Rust consent commands; the lockfile and the library cache stay in `vfs`.
 // ---------------------------------------------------------------------------
 
 const vfs = new Map<string, string>();
-const invokeBackend = vi.fn(async (cmd: string) => {
+const consentStore = createConsentStoreDouble();
+const invokeBackend = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+  if (consentStore.handles(cmd)) return consentStore.invoke(cmd, args);
   if (cmd === "library_resolve") return [];
   return undefined;
 });
 
 vi.mock("../backend", () => ({
-  invokeBackend: (...a: unknown[]) => invokeBackend(...(a as [string])),
+  invokeBackend: (...a: unknown[]) => invokeBackend(...(a as [string, Record<string, unknown>?])),
   readVirtualFile: async (p: string) => {
     if (!vfs.has(p)) throw new Error(`no such file: ${p}`);
     return vfs.get(p)!;
@@ -332,6 +338,7 @@ async function mountConsumer(opts: {
 
 beforeEach(() => {
   vfs.clear();
+  consentStore.reset();
   realms.clear();
   mountSpecs.length = 0;
   sourcesByScriptId.clear();

@@ -90,25 +90,52 @@ describe("Controls owns the button-control seam", () => {
 });
 
 describe("Controls runs a macro-linked button through the macro-run seam", () => {
-  it("checks macroRef FIRST on a click, before the inline/object-script paths", () => {
+  // Since phase 3 of BUG-0257 the link is followed by Controls' ONE click rule
+  // (lib/applicationMacroLink.ts), shared by the floating and the in-cell path;
+  // since phase 4 every click first asks the Rust button door, which answers
+  // `link` for a macro-linked button (lib/controlClick.ts). The census that both
+  // paths use it lives in Controls/__tests__/applicationMacroLink.test.ts.
+  const controlsLink = fs.readFileSync(
+    path.resolve(__dirname, "../../Controls/lib/applicationMacroLink.ts"),
+    "utf8",
+  );
+  const controlsClick = fs.readFileSync(
+    path.resolve(__dirname, "../../Controls/lib/controlClick.ts"),
+    "utf8",
+  );
+
+  it("a click checks the macro link FIRST, before the button's inline code and its object script", () => {
     const click = controlsIndex.slice(
       controlsIndex.indexOf("async function runFloatingButtonClick"),
     );
     const body = click.slice(0, click.indexOf("\n}\n"));
-    // The macroRef branch must appear before executeFloatingButtonAction, so an
-    // old copy-model button (no macroRef) still falls through to the old path.
-    const macroRefAt = body.indexOf("readMacroRef");
-    const inlineAt = body.indexOf("executeFloatingButtonAction");
-    expect(macroRefAt).toBeGreaterThanOrEqual(0);
+    // The floating click asks the door; its object-script diagnosis runs only
+    // on the door's `nothing`.
+    expect(body).toContain("clickButtonControl(sheetIndex, row, col,");
+    // The DOOR reads the link before the inline code (an old copy-model button
+    // with no macroRef falls through to its inline code)...
+    const door = fs.readFileSync(
+      path.resolve(__dirname, "../../../src-tauri/src/scripting/control_action.rs"),
+      "utf8",
+    );
+    const decide = door.slice(door.indexOf("fn decide_control("));
+    const linkAt = decide.indexOf("slot(MACRO_REF_PROPERTY).is_some() || slot(HELD_MACRO_REF_PROPERTY).is_some()");
+    const inlineAt = decide.indexOf("slot(ON_SELECT_PROPERTY)");
+    expect(linkAt).toBeGreaterThanOrEqual(0);
     expect(inlineAt).toBeGreaterThanOrEqual(0);
-    expect(macroRefAt).toBeLessThan(inlineAt);
+    expect(linkAt).toBeLessThan(inlineAt);
+    // ...and the page follows a `link` answer through the seam.
+    expect(controlsClick).toContain("link: () => followMacroLink(sheetIndex, row, col, gesture),");
   });
 
   it("runs the link through @api/macroRunService, not by reaching into MacroRecorder", () => {
-    expect(controlsIndex).toContain('from "@api/macroRunService"');
-    expect(controlsIndex).toContain("requireMacroRunProvider().runMacroByRef");
+    expect(controlsIndex).toContain('from "./lib/controlClick"');
+    expect(controlsClick).toContain('from "./applicationMacroLink"');
+    expect(controlsLink).toContain('from "@api/macroRunService"');
+    expect(controlsLink).toContain("requireMacroRunProvider().runMacroByRef");
     // Facade Rule: Controls must not import MacroRecorder internals.
     expect(controlsIndex).not.toMatch(/from ["'].*MacroRecorder/);
+    expect(controlsLink).not.toMatch(/from ["'].*MacroRecorder/);
   });
 });
 

@@ -16,6 +16,15 @@
 //                                                         never registered one
 //            4. anything ran                           -> silence is correct
 //
+//          Held code never reaches this file. Since phase 4 of BUG-0257 the Rust
+//          button door (`run_control_action`, lib/controlClick.ts) answers a
+//          click on a button holding an application's code itself: it RUNS the
+//          code once its exact bytes are approved, and otherwise REFUSES it in
+//          its own words -- the approval screen comes back the next time the
+//          workbook is opened or the application is updated. A held macro LINK
+//          runs through lib/applicationMacroLink.ts behind the same approval.
+//          Only a door answer of `nothing` reaches the diagnosis below.
+//
 //          Kept out of index.ts so it can be tested without booting the whole
 //          extension, and so the wording lives in one readable place.
 
@@ -23,7 +32,7 @@
 export interface ButtonClickDiagnosis {
   reason: "unbound" | "notMounted" | "noClickHandler" | "orphanMacro";
   message: string;
-  variant: "warning" | "error";
+  variant: "info" | "warning" | "error";
 }
 
 /**

@@ -10,7 +10,6 @@ import {
   applySurfaceToResize,
   clampMoveToPage,
   clampResizeToPage,
-  edgesOfCorner,
   getLayoutSurface,
   LAYOUT_PAGE_MARGIN,
   notifyLayoutSurfaceChanged,
@@ -19,8 +18,13 @@ import {
   registerLayoutSurfaceProvider,
   snapRectEdges,
   snapValue,
+  type DraggedEdges,
   type LayoutSurface,
 } from "./layoutSurface";
+
+/** The sides a bottom-right / bottom-left corner handle drags (literal: the geometry owns handles now). */
+const BOTTOM_RIGHT: DraggedEdges = { left: false, right: true, top: false, bottom: true };
+const BOTTOM_LEFT: DraggedEdges = { left: true, right: false, top: false, bottom: true };
 
 const SURFACE: LayoutSurface = {
   snapToGrid: true,
@@ -98,7 +102,7 @@ describe("page clamps", () => {
   it("a RESIZE stops only the dragged edges at the page border", () => {
     const r = clampResizeToPage(
       { x: 1200, y: 10, width: 300, height: 50 },
-      edgesOfCorner("bottom-right"),
+      BOTTOM_RIGHT,
       SURFACE.page,
       20,
     );
@@ -110,7 +114,7 @@ describe("page clamps", () => {
     // cannot be pulled back to 960 (that is left of its own left edge).
     const r = clampResizeToPage(
       { x: 1000, y: 100, width: 110, height: 70 },
-      edgesOfCorner("bottom-right"),
+      BOTTOM_RIGHT,
       { width: 960, height: 720 },
       16,
     );
@@ -118,7 +122,7 @@ describe("page clamps", () => {
     expect(r.width).toBeGreaterThanOrEqual(16);
     const b = clampResizeToPage(
       { x: 10, y: 800, width: 50, height: 40 },
-      edgesOfCorner("bottom-left"),
+      BOTTOM_LEFT,
       { width: 960, height: 720 },
       16,
     );
@@ -144,9 +148,9 @@ describe("applying a surface", () => {
   it("resize: snap disabled on the surface leaves the edges where they were dragged", () => {
     const rect = { x: 0, y: 0, width: 101, height: 57 };
     expect(
-      applySurfaceToResize({ ...SURFACE, snapToGrid: false }, rect, edgesOfCorner("bottom-right"), 20),
+      applySurfaceToResize({ ...SURFACE, snapToGrid: false }, rect, BOTTOM_RIGHT, 20),
     ).toEqual(rect);
-    expect(applySurfaceToResize(SURFACE, rect, edgesOfCorner("bottom-right"), 20)).toEqual({
+    expect(applySurfaceToResize(SURFACE, rect, BOTTOM_RIGHT, 20)).toEqual({
       x: 0,
       y: 0,
       width: 96,

@@ -22,15 +22,18 @@ import {
   showDialog,
   showOverlay,
   registerFloatingRangeProvider,
+  registerGridLayer,
   type CellValuesChangedPayload,
   isKeyClaimed,
 } from "@api";
 import { getActiveSheet } from "@api/lib";
 import {
+  getGridRegions,
   requestOverlayRedraw,
   topFloatingRegionAt,
   isPointModeOnForeignSheet,
   type OverlayHitTestContext,
+  type OverlayZone,
 } from "@api/gridOverlays";
 import {
   endExternalFormulaSession,
@@ -139,7 +142,8 @@ import {
 import {
   renderFloatingRange,
   hitTestFloatingRange,
-  getFrCursor,
+  paintFrEdgeBalls,
+  FR_EDGE_BALL_LAYER_ID,
   invalidateFrCache,
   invalidateAllFrCaches,
   removeFrFromCache,
@@ -184,36 +188,6 @@ const FR_CONTEXT_MENU_ID = "floatingRange:contextMenu";
 /** Active drag teardown — cell drag-extend OR edge resize (also run on
  *  deactivate). One slot, because the two can never be live at once. */
 let activeDragCleanup: (() => void) | null = null;
-
-/**
- * True while an edge-handle resize owns the mouse.
- *
- * Core consults `claimsBodyDrag` and then, on a claim, dispatches
- * `floatingObject:bodyDragStart` SYNCHRONOUSLY in the same mousedown. So the
- * edge drag is already installed by the time `handleBodyDragStart` runs — and
- * that function opens its own drag by calling `activeDragCleanup?.()`, which
- * would remove the edge drag's listeners before its first mousemove and leave
- * the yellow ball looking inert. This flag is how the second handler knows the
- * first one already took the gesture.
- */
-let edgeResizeActive = false;
-
-/**
- * True when THIS press was consumed as a formula REFERENCE PICK by
- * `claimsBodyDrag` (the reference is already in the formula).
- *
- * A FACT recorded when the pick happens, never re-derived afterwards: Core
- * dispatches `floatingObject:bodyDragStart` synchronously after the claim, and
- * by then the insertion has changed the text -- "=SUM(" became
- * "=SUM(Float1!B1", which no longer EXPECTS a reference. Re-asking
- * `externalTargetExpecting()` there passed, so the pick also moved the local
- * selection onto the picked cell, and the edit-lifetime rule
- * (lib/frFormulaBar.ts) then COMMITTED the half-typed formula into the edited
- * cell -- after which the user's next keystroke typed over the cell they had
- * only meant to reference. Reset at the top of every claim, so a stale flag
- * cannot outlive the press it describes.
- */
-let pressFedReference = false;
 
 /** Pointer travel (px) below which a press on an edge ball is a CLICK, not a
  *  drag -- Core's own move threshold (overlayMoveHandlers.ts). */
@@ -733,12 +707,10 @@ function startEdgeResizeDrag(
   };
 
   activeDragCleanup?.();
-  edgeResizeActive = true;
   activeDragCleanup = () => {
     window.removeEventListener("mousemove", onMove);
     window.removeEventListener("mouseup", finish);
     activeDragCleanup = null;
-    edgeResizeActive = false;
   };
   window.addEventListener("mousemove", onMove);
   window.addEventListener("mouseup", finish);
@@ -797,123 +769,161 @@ export function quantizeCornerResize(
 }
 
 // ============================================================================
-// claimsBodyDrag — the zone router (and the M7 formula-mode branch)
+// frZoneAt -- what a point on the range is FOR (one answer per press)
 // ============================================================================
 
 /**
- * The zone router Core consults on every press of a range (after dispatching
- * `floatingObject:selected`). TRUE = the range owns the press (cells, headers,
- * an edge-handle scale, a reference pick); FALSE = Core runs its MOVE path,
- * which it refuses unless the store published `movable`.
+ * The parts of a range a press can land on, as `frZoneAt` names them. Core
+ * carries the part on both press events (`floatingObject:selected` and, for
+ * content, `floatingObject:bodyDragStart`), so the handlers act on what the
+ * press was decided to be BEFORE it selected anything.
+ */
+export type FrPressPart =
+  | "referencePick"
+  | "edgeHandle"
+  | "outside"
+  | "title"
+  | "border"
+  | "bodyGrab"
+  | "cells"
+  | "rowHeader"
+  | "colHeader";
+
+/**
+ * The range's ZONE under a point -- its `OverlayRegistration.zoneAt`
+ * (@api/gridOverlays), from which Core derives the press, the pointer and the
+ * meaning of Ctrl/Shift, so the three can never disagree (BUG-0258):
  *
- * `ctx.region` is the region Core captured BEFORE the press selected the
- * range (the store's selection re-sync publishes new objects), so its
- * `resizable` says whether the handles were live when the press began.
+ *   a formula expects a reference, anywhere   content 'cell'           referencePick
+ *   a LIVE edge ball                          content 'ew'/'ns-resize' edgeHandle
+ *   a near miss outside the frame             content 'default'        outside
+ *   the title bar                             frame                    title
+ *   no title: the 4px border band (movable)   frame                    border
+ *   no title, Design Mode: the whole body     frame                    bodyGrab
+ *   cells / row header / column header        content 'cell'           cells, rowHeader, colHeader
+ *
+ * A frame press is Core's: it selects the range, and a drag moves it when it
+ * can move (a frozen title shows 'default' and only selects). A content press
+ * is the range's own work, on a locked or subscribed range too.
+ *
+ * PURE -- a contract, not a style: Core asks on every hover move, and ONCE per
+ * press BEFORE the press selects anything. That is what makes this answer the
+ * place for the two facts the press's handlers must never re-derive later:
+ *   - the press is a REFERENCE PICK. Re-asked after the insertion it is not:
+ *     "=SUM(" became "=SUM(Float1!B1", which no longer EXPECTS a reference, so
+ *     the pick also moved the cell selection onto the picked cell, and the
+ *     edit-lifetime rule (lib/frFormulaBar.ts) then COMMITTED the half-typed
+ *     formula -- the user's next keystroke typed over the cell they had only
+ *     meant to reference.
+ *   - the edge handles were LIVE. `ctx.region` is the region Core captured
+ *     before the press selected the range (its `resizable` says whether the
+ *     balls were armed when the user pressed), and the editor is read here,
+ *     before the press's commit-before-select closes it: read after it, a
+ *     press on an invisible ball of a range being edited would commit the edit
+ *     AND start a cell-scale drag.
+ * The press's side effects live in its handlers (setupFloatingObjectEvents):
+ * the commit-before-select in `floatingObject:selected`, the reference
+ * insertion and the edge-scale drag in `floatingObject:bodyDragStart`.
  *
  * Exported for the unit tier (frMoveZones.test.ts).
  */
-export function claimsBodyDrag(ctx: OverlayHitTestContext): boolean {
-  // Every press starts clean (see `pressFedReference`).
-  pressFedReference = false;
+export function frZoneAt(ctx: OverlayHitTestContext): OverlayZone | null {
   const frId = ctx.region.data?.frId as string | undefined;
-  if (!frId || !ctx.floatingCanvasBounds) return false;
+  if (!frId || !ctx.floatingCanvasBounds) return null;
   const entry = getFloatingRangeById(frId);
-  if (!entry) return false;
+  if (!entry) return null;
+
+  // Formula-reference picking (M7): a press on the range while ANY editor
+  // expects a reference FEEDS that formula -- over a cell it inserts
+  // "Name!A1" -- and never selects or moves the object (accepted, Excel-like),
+  // wherever it lands.
+  if (externalTargetExpecting() || isGlobalFormulaMode()) {
+    return { kind: "content", cursor: "cell", part: "referencePick" };
+  }
 
   const dx = ctx.canvasX - ctx.floatingCanvasBounds.x;
   const dy = ctx.canvasY - ctx.floatingCanvasBounds.y;
-  // At the range's scroll: a click (or a reference pick) on a scrolled cell
-  // means THAT cell, not the window cell that used to sit there.
-  const hit = localCellFromPoint(entry, dx, dy, getFrView(entry));
 
-  // Formula-reference picking (M7): a click on an FR cell while ANY editor
-  // expects a reference inserts "Name!A1" instead of selecting/moving. The
-  // external target (an open FR editor) wins over the grid editor; self-
-  // reference is legal — cycles are the engine's job.
-  const extExpecting = externalTargetExpecting();
-  const gridExpecting = isGlobalFormulaMode();
-  if (extExpecting || gridExpecting) {
-    if (hit.zone === "cells") {
-      if (extExpecting) {
-        getExternalFormulaTarget()?.insertReference({
-          sheetName: entry.name,
-          startRow: hit.row,
-          startCol: hit.col,
-          endRow: hit.row,
-          endCol: hit.col,
-        });
-      } else {
-        insertTextIntoActiveFormula(buildQualifiedRef(entry.name, hit.row, hit.col));
-      }
-    }
-    // Claim regardless of zone: in formula mode a click must never select or
-    // move the object (accepted, Excel-like). Recorded as a fact for the
-    // bodyDragStart Core dispatches next, which must select nothing.
-    pressFedReference = true;
-    return true;
-  }
-
-  // With the title bar hidden, the 4px band inside the frame edge is the move
-  // handle (owner decision 2026-09-27; Excel's text box moves by its border).
-  // Gated on `movable`, so the band never hands Core a drag it will refuse --
-  // on a subscribed canvas or a locked range the band is just the edge cells.
-  const borderGrab =
-    !entry.showTitle && ctx.region.data?.movable === true && frBorderGrabAt(entry, dx, dy);
-
-  // Whether the edge handles were armed when the press BEGAN -- read before
-  // the commit below, which closes the cell editor synchronously: read after
-  // it, a press on an invisible ball of a range being edited would commit the
-  // edit AND start a cell-scale drag.
-  const handlesLive = frHandlesLive(ctx.region, frId) && frGeometryEditable(frId);
-
-  // The FR's commit-before-select. This is the ONE mousedown hook Core calls
-  // for every zone — including the title bar, which dispatches no
-  // bodyDragStart — so it is the only place that can cover all of them. A
-  // border-band press is a frame press like the title's: it commits even when
-  // it lands over the edited cell.
-  commitFrEditorBeforeSelect(
-    frId,
-    hit.zone === "cells" && !borderGrab ? { row: hit.row, col: hit.col } : null,
-  );
-
-  // Edge handles: scale the CELLS. Checked before the zone router because a
-  // handle sits ON the frame border, where the zone underneath it would
-  // otherwise answer "cells" or "rowHeader". Gated on `frHandlesLive` -- the
-  // same gate the paint uses, so a ball is never grabbable where it is not
-  // painted: `ctx.region.resizable` is the value from BEFORE this press (see
-  // above), so an unselected range's balls do not take the press that selects
-  // it, and never while its cell editor is open. `frGeometryEditable` is the
-  // one per-range answer every geometry door asks, read live.
-  if (handlesLive) {
+  // Edge handles: scale the CELLS. Checked before the zones because a handle
+  // sits ON the frame border, where the zone underneath would otherwise
+  // answer "cells" or "rowHeader". Gated on `frHandlesLive` -- the same gate
+  // the paint and the extended hit area use, so a ball is never grabbable
+  // where it is not painted: an unselected range's balls do not take the
+  // press that selects it, and never while its cell editor is open.
+  // `frGeometryEditable` is the one per-range answer every geometry door
+  // asks, read live.
+  if (frHandlesLive(ctx.region, frId) && frGeometryEditable(frId)) {
     const edge = frEdgeHandleAt(entry, dx, dy);
     if (edge) {
-      startEdgeResizeDrag(entry, edge, ctx.canvasX, ctx.canvasY);
-      return true;
+      return {
+        kind: "content",
+        cursor: edgeAxis(edge) === "cols" ? "ew-resize" : "ns-resize",
+        part: "edgeHandle",
+      };
     }
   }
 
+  // At the range's scroll: a press on a scrolled cell means THAT cell, not
+  // the window cell that used to sit there.
+  const hit = localCellFromPoint(entry, dx, dy, getFrView(entry));
+
   // The handles' hit radius reaches a few pixels PAST the frame (see
-  // hitTestFloatingRange), so a near-miss lands here with no zone. Claim it and
-  // do nothing: falling through would start a move from outside the object.
-  if (hit.zone === "outside") return true;
+  // hitTestFloatingRange), so a near miss lands here with no zone. It is the
+  // range's, and inert: as frame it would start a move from outside the
+  // object.
+  if (hit.zone === "outside") return { kind: "content", cursor: "default", part: "outside" };
 
-  // Title bar: Core runs the normal move path (floatingObject:selected has
-  // already been dispatched, so the object still gets selected). Core then
-  // refuses the drag unless the store published `movable`.
-  if (hit.zone === "title") return false;
+  // The title bar is the frame in every mode (owner decision 2026-09-27).
+  if (hit.zone === "title") return { kind: "frame", part: "title" };
 
-  // No title bar: the border band moves the range in every mode...
-  if (borderGrab) return false;
+  // With the title bar hidden, the 4px band inside the frame edge is the move
+  // handle (Excel's text box moves by its border). Gated on `movable`, so the
+  // band never offers a drag Core would refuse -- on a subscribed canvas or a
+  // locked range the band is just the edge cells.
+  if (!entry.showTitle && ctx.region.data?.movable === true && frBorderGrabAt(entry, dx, dy)) {
+    return { kind: "frame", part: "border" };
+  }
 
-  // ...and in DESIGN MODE the whole body does -- the Charts/Controls
-  // convention for an object with no title. `bodyGrab`, NOT `movable`: since
-  // a range moves outside Design Mode too, reading `movable` here would turn
-  // the whole body of every title-less range into a move handle and its cells
-  // could no longer be selected or edited.
-  if (ctx.region.data?.bodyGrab === true) return false;
+  // In DESIGN MODE the whole body of a title-less range is the frame -- the
+  // Charts/Controls convention. `bodyGrab`, NOT `movable`: a range moves
+  // outside Design Mode too, so reading `movable` here would turn the whole
+  // body of every title-less range into a move handle and its cells could no
+  // longer be selected or edited.
+  if (ctx.region.data?.bodyGrab === true) return { kind: "frame", part: "bodyGrab" };
 
-  // Headers + cells: the FR owns the interaction (local selection).
-  return true;
+  // Cells and headers: the range's working surface (its cell selection).
+  return { kind: "content", cursor: "cell", part: hit.zone };
+}
+
+/** The local cell under a press point, at the range's scroll; null over a header, the title or outside. */
+function cellUnderPress(
+  entry: FloatingRangeEntry,
+  canvasX: number,
+  canvasY: number,
+): { row: number; col: number } | null {
+  const bounds = frameCanvasBounds(entry);
+  if (!bounds) return null;
+  const hit = localCellFromPoint(entry, canvasX - bounds.x, canvasY - bounds.y, getFrView(entry));
+  return hit.zone === "cells" ? { row: hit.row, col: hit.col } : null;
+}
+
+/**
+ * A reference pick's insertion: "Name!A1" for local cell (row, col). The
+ * external target (an open FR editor, the formula bar) wins over the grid
+ * editor; self-reference is legal -- cycles are the engine's job.
+ */
+function insertReferenceTo(entry: FloatingRangeEntry, row: number, col: number): void {
+  if (externalTargetExpecting()) {
+    getExternalFormulaTarget()?.insertReference({
+      sheetName: entry.name,
+      startRow: row,
+      startCol: col,
+      endRow: row,
+      endCol: col,
+    });
+  } else {
+    insertTextIntoActiveFormula(buildQualifiedRef(entry.name, row, col));
+  }
 }
 
 // ============================================================================
@@ -931,11 +941,11 @@ export function claimsBodyDrag(ctx: OverlayHitTestContext): boolean {
  * Before that seam existed this was INFERRED from two `bodyDragStart` events on
  * the same local cell within 350 ms — a private clock that (a) could not tell a
  * double-click from two deliberate single clicks a third of a second apart, (b)
- * fired only because the FR opts into `claimsBodyDrag`, so no overlay without a
- * body-drag claim could have copied it, and (c) had to be reset on every zone
- * change by hand. The browser already knows what a double-click is; ask it.
+ * fired only because the FR claimed its body drags, so no overlay without such
+ * a claim could have copied it, and (c) had to be reset on every zone change
+ * by hand. The browser already knows what a double-click is; ask it.
  *
- * The zone router's refusals are repeated here rather than shared, because a
+ * The zone's refusals (`frZoneAt`) are repeated here rather than shared, because a
  * double-click is a different gesture with the same geometry: a reference pick
  * must not open an editor (the first click already inserted the reference), and
  * a title-bar or header double-click has no cell to edit.
@@ -991,6 +1001,21 @@ function setupFloatingObjectEvents(): void {
     const sel = getLocalSelection();
     if (sel && sel.frId !== frId) clearLocalSelection();
     selectFloatingRange(frId);
+    // The FR's COMMIT BEFORE SELECT, for every part of this press -- the
+    // title, the border band and Design Mode's body grab dispatch no
+    // bodyDragStart, so this is the one handler that covers them all. The
+    // object is selected first and the cell selection moves after (in
+    // bodyDragStart): the order a click-away has always had. A frame press
+    // names no target cell, so it commits even over the edited cell; a CELL
+    // press (the part `frZoneAt` decided before the press) names its cell, and
+    // a press on the cell being edited places the caret instead.
+    const entry = getFloatingRangeById(frId);
+    commitFrEditorBeforeSelect(
+      frId,
+      detail.part === "cells" && entry
+        ? cellUnderPress(entry, detail.canvasX as number, detail.canvasY as number)
+        : null,
+    );
     requestOverlayRedraw();
   };
   window.addEventListener("floatingObject:selected", handleSelected);
@@ -1060,35 +1085,48 @@ function setupFloatingObjectEvents(): void {
   );
 
   // --------------------------------------------------------------------------
-  // Body drag: local cell selection + drag-extend.
+  // Body drag: the CONTENT press, acting on the part `frZoneAt` decided before
+  // the press -- a reference pick, an edge-ball scale, or the local cell
+  // selection + drag-extend. A near miss outside the frame does nothing.
   // --------------------------------------------------------------------------
   const handleBodyDragStart = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== FLOATING_RANGE_REGION_TYPE) return;
-    // The ref-pick claim also dispatches bodyDragStart; insertion already
-    // happened inside claimsBodyDrag, so there is nothing to select here. The
-    // RECORDED fact decides (`pressFedReference`): the text the pick just
-    // changed no longer expects a reference, so re-asking would select the
-    // picked cell and commit the edit that was being fed.
-    if (pressFedReference) {
-      pressFedReference = false;
-      return;
-    }
-    // Second line of defence (a bodyDragStart that reached no claim).
-    if (isGlobalFormulaMode() || externalTargetExpecting()) return;
     const frId = detail.data?.frId as string | undefined;
     const entry = frId ? getFloatingRangeById(frId) : null;
     if (!frId || !entry) return;
     const bounds = frameCanvasBounds(entry);
     if (!bounds) return;
-
-    // An edge-handle drag already claimed this very mousedown (see
-    // `edgeResizeActive`). Everything below would move the local selection and
-    // then tear that drag down again.
-    if (edgeResizeActive) return;
-
     const dx = (detail.canvasX as number) - bounds.x;
     const dy = (detail.canvasY as number) - bounds.y;
+    const part = detail.part as FrPressPart | undefined;
+
+    // A REFERENCE PICK: over a cell the reference goes into the formula;
+    // anywhere else the press does nothing. Nothing is selected, and the fact
+    // is the PART, never re-asked: the insertion has just changed the text
+    // ("=SUM(" is now "=SUM(Float1!B1", which no longer expects a reference),
+    // so asking again would select the picked cell and commit the edit it was
+    // feeding.
+    if (part === "referencePick") {
+      const hit = localCellFromPoint(entry, dx, dy, getFrView(entry));
+      if (hit.zone === "cells") insertReferenceTo(entry, hit.row, hit.col);
+      return;
+    }
+
+    // An EDGE BALL that was live when the press BEGAN: the part was decided
+    // before the press's commit-before-select closed any editor, which is why
+    // it is read here and never re-derived.
+    if (part === "edgeHandle") {
+      const edge = frEdgeHandleAt(entry, dx, dy);
+      if (edge) startEdgeResizeDrag(entry, edge, detail.canvasX as number, detail.canvasY as number);
+      return;
+    }
+
+    // The working surface only: cells and headers.
+    if (part !== "cells" && part !== "rowHeader" && part !== "colHeader") return;
+    // Second line of defence (the press was decided outside formula mode).
+    if (isGlobalFormulaMode() || externalTargetExpecting()) return;
+
     const view = getFrView(entry);
     const hit = localCellFromPoint(entry, dx, dy, view);
     if (hit.zone === "outside" || hit.zone === "title") return;
@@ -1346,15 +1384,29 @@ export function deleteFrSelection(): void {
 
 function activate(context: ExtensionContext): void {
   // 1. Overlay registration (priority 13: above Controls 12, below Charts 15).
+  //    ONE zone answer (`frZoneAt`) drives the press, the pointer and the
+  //    meaning of Ctrl/Shift; no cursor or claim of its own beside it.
   cleanupFns.push(
     context.grid.overlays.register({
       type: FLOATING_RANGE_REGION_TYPE,
       render: renderFloatingRange,
       hitTest: hitTestFloatingRange,
-      getCursor: getFrCursor,
-      claimsBodyDrag,
+      zoneAt: frZoneAt,
       onDoubleClick: handleFrDoubleClick,
       priority: 13,
+    }),
+  );
+
+  // 1'. The yellow EDGE BALLS paint in a grid layer ABOVE Core's selection
+  //     chrome (Core paints a selected object's outline after every object,
+  //     BUG-0258 design phase 3; the corner handles are Core's too). Before
+  //     the canvas's lock mark (priority 0).
+  cleanupFns.push(
+    registerGridLayer({
+      id: FR_EDGE_BALL_LAYER_ID,
+      anchor: "over-selection",
+      priority: -1,
+      paint: (layerCtx) => paintFrEdgeBalls(layerCtx),
     }),
   );
 
@@ -1455,6 +1507,9 @@ function activate(context: ExtensionContext): void {
       }
     },
     canEditGeometry: (frId) => frGeometryEditable(frId),
+    // The published region "Size and Position..." opens for (@api/objectPosition).
+    regionOf: (frId) =>
+      getGridRegions().find((r) => r.type === FLOATING_RANGE_REGION_TYPE && frIdOf(r) === frId) ?? null,
     rename: (frId) => {
       void (async () => {
         const entry = getFloatingRangeById(frId);

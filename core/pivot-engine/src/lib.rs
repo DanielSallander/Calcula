@@ -20,7 +20,4 @@ pub mod calculated;
 pub use definition::*;
 pub use cache::*;
 pub use view::*;
-pub use engine::{
-    calculate_pivot, drill_down,
-    format_date_level_name, date_to_cache_value, record_value_at,
-};
+pub use engine::{calculate_pivot, drill_down};

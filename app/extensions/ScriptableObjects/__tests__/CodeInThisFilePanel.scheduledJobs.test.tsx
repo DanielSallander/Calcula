@@ -399,3 +399,45 @@ describe("CodeInThisFilePanel — reach badge", () => {
     expect(container.textContent).not.toContain("Grid + on request");
   });
 });
+
+// OWNER DECISION B, follow-up F7: an application's macro written as an object
+// script is listed with what a run YOU start may do -- on the code itself, not
+// only on the approval screen -- and is not offered to the object-script
+// editor's by-id opener, which cannot find a module.
+describe("CodeInThisFilePanel — a macro written as an object script (F7)", () => {
+  const MACRO_UNIT = {
+    ...CODE_UNIT,
+    id: "macro-close",
+    name: "Close the month",
+    residence: "Macro written as an object script — Workbook-global; runs once per start, restricted",
+    provenance: "distributed",
+    sourcePackage: "Sales",
+    tier: "restricted",
+    mounted: false,
+    interpreterReach: null,
+    interpreterCapabilities: null,
+    module: { runtime: "objectScript", cellAccessWhenYouRunIt: true },
+  };
+
+  // SABOTAGE: drop the `unit.module?.cellAccessWhenYouRunIt === true` badge
+  // from CodeInThisFilePanel.tsx -> the panel says only "Restricted".
+  it("says a run you start may change the cells of any sheet, and offers no by-id editor opener", async () => {
+    getWorkbookCodeUnits.mockResolvedValue([MACRO_UNIT]);
+    await render();
+    const badge = container.querySelector("[data-cell-access-when-you-run-it]");
+    expect(badge?.textContent).toBe("Any sheet when you run it");
+    expect(badge?.getAttribute("title")).toContain("it may also read and change the cells of any sheet, and nothing more");
+    expect(container.textContent).toContain("Restricted");
+    expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.trim() === "Open in editor")).toBe(
+      false,
+    );
+  });
+
+  it("CONTROL: an object script keeps its editor opener and has no such badge", async () => {
+    await render();
+    expect(container.querySelector("[data-cell-access-when-you-run-it]")).toBeNull();
+    expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.trim() === "Open in editor")).toBe(
+      true,
+    );
+  });
+});

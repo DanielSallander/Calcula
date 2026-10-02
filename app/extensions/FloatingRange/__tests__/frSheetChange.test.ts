@@ -188,7 +188,9 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
   },
 }));
 
-import extension, { claimsBodyDrag } from "../index";
+import extension from "../index";
+import { clickInCoreOrder } from "./helpers/frPress";
+import { registerGridOverlay, type OverlayRegistration } from "@api/gridOverlays";
 import { checkCellClickInterceptors } from "@api/cellClickInterceptors";
 import { registerLayoutSurfaceProvider } from "@api/layoutSurface";
 import { createFloatingRange } from "@api/floatingRanges";
@@ -222,7 +224,9 @@ import { getFrScroll } from "../lib/frScroll";
 
 function stubContext(): never {
   return {
-    grid: { overlays: { register: () => () => {} } },
+    // The REAL registry: Core -- and the press helper that mirrors it -- find
+    // the range's overlay there.
+    grid: { overlays: { register: (registration: OverlayRegistration) => registerGridOverlay(registration) } },
     ui: {
       menus: {
         registerItem: (_menu: string, item: { id: string; action: () => void }) => {
@@ -289,7 +293,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-  extension.deactivate();
+  extension.deactivate?.();
   layer.remove();
 });
 
@@ -306,7 +310,7 @@ describe("activation", () => {
   it("deactivation withdraws the cell and the resolver", async () => {
     selectA1();
     await flush();
-    extension.deactivate();
+    extension.deactivate?.();
     expect(getExternalCellTarget()).toBeNull();
     expect(resolveExternalAddress("Float1!B2")).toBeNull();
     extension.activate(stubContext());
@@ -446,6 +450,8 @@ describe("selection doors the formula bar depends on", () => {
           data: { frId: FR_ID },
           canvasX: start.x,
           canvasY: start.y,
+          // Core names the zone its press was decided on (@api/gridOverlays).
+          part: "cells",
         },
       }),
     );
@@ -563,8 +569,9 @@ describe("the bar's content follows writes", () => {
 
 const INFO2 = { ...INFO, id: "fr-two", name: "Float2", backingSheetIndex: 4 } as FloatingRangeInfo;
 
-/** The press Core runs over a range: selected, then the claim, then (on a
- *  claim) bodyDragStart -- synchronously, in that order, in one mousedown. */
+/** A press and release on local cell (row, col) of range `frId`, in Core's
+ *  order (helpers/frPress.ts, the one mirror every FR press test shares).
+ *  True when the range owned the press (Core never moved the object). */
 function pressLikeCore(frId: string, row: number, col: number): boolean {
   const p = cellPoint(row, col);
   const ctx = {
@@ -584,12 +591,7 @@ function pressLikeCore(frId: string, row: number, col: number): boolean {
     col: 0,
     floatingCanvasBounds: { x: 0, y: 0, width: 400, height: 300 },
   } as never;
-  const detail = { regionType: FLOATING_RANGE_REGION_TYPE, data: { frId }, canvasX: p.x, canvasY: p.y };
-  window.dispatchEvent(new CustomEvent("floatingObject:selected", { detail }));
-  const claimed = claimsBodyDrag(ctx);
-  if (claimed) window.dispatchEvent(new CustomEvent("floatingObject:bodyDragStart", { detail }));
-  window.dispatchEvent(new MouseEvent("mouseup"));
-  return claimed;
+  return clickInCoreOrder(ctx) === "content";
 }
 
 describe("(6) a reference PICK on a floating cell feeds the edit -- it never commits it", () => {
@@ -778,7 +780,7 @@ describe("(11 variant) Core's AFTER-press announcement (onGridCellPressed)", () 
 
   it("is withdrawn with the extension", () => {
     expect(h.pressListeners.size).toBe(1);
-    extension.deactivate();
+    extension.deactivate?.();
     expect(h.pressListeners.size).toBe(0);
     extension.activate(stubContext());
   });
@@ -886,7 +888,7 @@ describe("(E6) deactivating the extension while an edit is PARKED", () => {
     const dimensionRefreshes = vi.fn();
     window.addEventListener("dimensions:refresh", dimensionRefreshes);
     try {
-      extension.deactivate();
+      extension.deactivate?.();
       await flush();
       expect(h.backendActive, "the grid was left on the viewed sheet").toBe(HOST);
       expect(dimensionRefreshes).toHaveBeenCalled();
@@ -904,7 +906,7 @@ describe("(E6) deactivating the extension while an edit is PARKED", () => {
     openFrEditor(FR_ID, 0, 0, null);
     typeInto("7");
     tauri.invoke.mockClear();
-    extension.deactivate();
+    extension.deactivate?.();
     await flush();
     expect(tauri.invoke.mock.calls.filter((c) => c[0] === "set_active_sheet")).toEqual([]);
     extension.activate(stubContext());
@@ -923,7 +925,8 @@ describe("(E10) drag-select past the cell area's edge auto-scrolls", () => {
     const p = cellPoint(0, 0);
     window.dispatchEvent(
       new CustomEvent("floatingObject:bodyDragStart", {
-        detail: { regionType: FLOATING_RANGE_REGION_TYPE, data: { frId: FR_ID }, canvasX: p.x, canvasY: p.y },
+        // Core names the zone its press was decided on (@api/gridOverlays).
+        detail: { regionType: FLOATING_RANGE_REGION_TYPE, data: { frId: FR_ID }, canvasX: p.x, canvasY: p.y, part: "cells" },
       }),
     );
   }

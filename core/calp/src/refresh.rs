@@ -285,6 +285,27 @@ pub struct RefreshResult {
     pub conflicts_created: usize,
     pub overrides_auto_cleared: usize,
     pub structural_conflicts: Vec<StructuralConflict>,
+    /// Button-cell actions the host's admission REMOVED from this refresh's
+    /// sheets, one sentence each (BUG-0260): an application's button cell may run
+    /// only a macro that application brought in, and never a command. Filled by
+    /// the host (this crate treats cell types as opaque payloads); said, never
+    /// dropped silently.
+    #[serde(default)]
+    pub button_actions_removed: Vec<String>,
+    /// Button CONTROLS' macro links the host's admission REMOVED, one sentence
+    /// each (phase 3 of BUG-0257): a link survives a refresh -- held, stamped
+    /// with its application -- only when it names a macro THIS refresh brought
+    /// into the workbook for that application. Filled by the host; said, never
+    /// dropped silently.
+    #[serde(default)]
+    pub button_links_removed: Vec<String>,
+    /// Button CONTROLS' inline actions the host's admission REMOVED, one
+    /// sentence each (phase 4 of BUG-0257): static inline code is HELD at a
+    /// refresh, stamped with the new version, and runs only after the approval
+    /// of its exact bytes; a formula-typed action cannot be approved and is
+    /// removed. Filled by the host; said, never dropped silently.
+    #[serde(default)]
+    pub inline_button_code_removed: Vec<String>,
 }
 
 // ============================================================================
@@ -1270,6 +1291,9 @@ pub fn apply_refresh(
         conflicts_created,
         overrides_auto_cleared: overrides_cleared,
         structural_conflicts,
+        button_actions_removed: Vec::new(),
+        button_links_removed: Vec::new(),
+        inline_button_code_removed: Vec::new(),
     }
 }
 

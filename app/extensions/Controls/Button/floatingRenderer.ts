@@ -14,7 +14,12 @@ import {
 } from "@api/gridOverlays";
 import { getDesignMode } from "../lib/designMode";
 import { resolveControlProperties } from "../lib/controlApi";
+import { beginControlGeometryRead, controlGeometryWritesInFlight } from "../lib/geometryWriteOrder";
 import { isFloatingControlSelected } from "./floatingSelection";
+import { isFloatingButtonPressed } from "../lib/buttonPress";
+
+/** How dark a PRESSED run-mode button's face goes (a black wash, 0..1). */
+export const BUTTON_PRESSED_SHADE = 0.12;
 
 // ============================================================================
 // Cached Metadata (async fetch with sync render)
@@ -145,6 +150,11 @@ export function renderFloatingButton(overlayCtx: OverlayRenderContext): void {
 
   const isDesignMode = getDesignMode();
   const borderRadius = 3;
+  // A run-mode press held INSIDE the button (lib/buttonPress.ts, BUG-0258
+  // phase 4c): it looks pushed in -- no raised highlight, a darker face, the
+  // caption one pixel down and right -- until the release runs it or the
+  // pointer slides off.
+  const pressed = isFloatingButtonPressed(controlId);
 
   // 1. Draw button background
   ctx.beginPath();
@@ -152,13 +162,23 @@ export function renderFloatingButton(overlayCtx: OverlayRenderContext): void {
   ctx.fillStyle = data.fill;
   ctx.fill();
 
-  // 2. Top highlight for 3D effect
-  ctx.beginPath();
-  ctx.roundRect(canvasX, canvasY, btnWidth, btnHeight / 2, [borderRadius, borderRadius, 0, 0]);
-  ctx.fillStyle = "#f0f0f0";
-  ctx.globalAlpha = 0.4;
-  ctx.fill();
-  ctx.globalAlpha = 1.0;
+  if (pressed) {
+    // 2'. Pressed: a 12% black wash over the face instead of the highlight.
+    ctx.beginPath();
+    ctx.roundRect(canvasX, canvasY, btnWidth, btnHeight, borderRadius);
+    ctx.fillStyle = "#000000";
+    ctx.globalAlpha = BUTTON_PRESSED_SHADE;
+    ctx.fill();
+    ctx.globalAlpha = 1.0;
+  } else {
+    // 2. Top highlight for 3D effect
+    ctx.beginPath();
+    ctx.roundRect(canvasX, canvasY, btnWidth, btnHeight / 2, [borderRadius, borderRadius, 0, 0]);
+    ctx.fillStyle = "#f0f0f0";
+    ctx.globalAlpha = 0.4;
+    ctx.fill();
+    ctx.globalAlpha = 1.0;
+  }
 
   // 3. Border
   ctx.beginPath();
@@ -172,8 +192,9 @@ export function renderFloatingButton(overlayCtx: OverlayRenderContext): void {
   ctx.fillStyle = data.color;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  const centerX = canvasX + btnWidth / 2;
-  const centerY = canvasY + btnHeight / 2;
+  const textOffset = pressed ? 1 : 0;
+  const centerX = canvasX + btnWidth / 2 + textOffset;
+  const centerY = canvasY + btnHeight / 2 + textOffset;
 
   // Clip text to button bounds
   ctx.save();
@@ -183,29 +204,18 @@ export function renderFloatingButton(overlayCtx: OverlayRenderContext): void {
   ctx.fillText(data.text, centerX, centerY);
   ctx.restore();
 
-  // 5. Design mode selection indicators
-  if (isDesignMode) {
-    const selected = isFloatingControlSelected(controlId);
-
-    if (selected) {
-      // Selection border
-      ctx.strokeStyle = "#0e639c";
-      ctx.lineWidth = 2;
-      ctx.setLineDash([]);
-      ctx.strokeRect(canvasX + 1, canvasY + 1, btnWidth - 2, btnHeight - 2);
-
-      // Resize handles at corners
-      drawResizeHandles(ctx, canvasX, canvasY, btnWidth, btnHeight);
-    } else {
-      // Unselected design mode: dotted border
-      ctx.beginPath();
-      ctx.roundRect(canvasX - 1, canvasY - 1, btnWidth + 2, btnHeight + 2, borderRadius + 1);
-      ctx.lineWidth = 1;
-      ctx.strokeStyle = "#0078d4";
-      ctx.setLineDash([3, 3]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
+  // 5. Design Mode: an UNSELECTED button shows a dotted border (it can be
+  //    selected and moved now). A SELECTED button's outline and resize handles
+  //    are Core's (core/lib/gridRenderer/rendering/floatingObjectChrome.ts,
+  //    BUG-0258 design phase 3).
+  if (isDesignMode && !isFloatingControlSelected(controlId)) {
+    ctx.beginPath();
+    ctx.roundRect(canvasX - 1, canvasY - 1, btnWidth + 2, btnHeight + 2, borderRadius + 1);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "#0078d4";
+    ctx.setLineDash([3, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
 
   ctx.restore();
@@ -244,6 +254,12 @@ async function fetchButtonData(
 ): Promise<void> {
   pendingFetches.add(controlId);
   try {
+    // Never read under a geometry write in flight, and remember what the
+    // geometry was when the read started (lib/geometryWriteOrder.ts, BUG-0268).
+    const anchor = { sheetIndex, row, col };
+    const writes = controlGeometryWritesInFlight(anchor);
+    if (writes) await writes;
+    const readIsCurrent = beginControlGeometryRead(anchor);
     // Use resolveControlProperties to evaluate formula-type properties
     const resolved = await resolveControlProperties(sheetIndex, row, col);
     if (!resolved || Object.keys(resolved).length === 0) return;
@@ -257,23 +273,14 @@ async function fetchButtonData(
     });
     staleEntries.delete(controlId);
 
-    // Update floating control dimensions if width/height are resolved
-    const resolvedWidth = resolved.width ? parseFloat(resolved.width) : NaN;
-    const resolvedHeight = resolved.height ? parseFloat(resolved.height) : NaN;
-    if (!isNaN(resolvedWidth) || !isNaN(resolvedHeight)) {
-      const {
-        getFloatingControl,
-        resizeFloatingControl,
-        syncFloatingControlRegions,
-      } = await import("../lib/floatingStore");
-      const ctrl = getFloatingControl(controlId);
-      if (ctrl) {
-        const w = !isNaN(resolvedWidth) && resolvedWidth > 0 ? resolvedWidth : ctrl.width;
-        const h = !isNaN(resolvedHeight) && resolvedHeight > 0 ? resolvedHeight : ctrl.height;
-        if (w !== ctrl.width || h !== ctrl.height) {
-          resizeFloatingControl(controlId, ctrl.x, ctrl.y, w, h);
-          syncFloatingControlRegions();
-        }
+    // The resolved width/height (a formula-driven size) goes back into the
+    // store -- unless the geometry changed while this read was on its way: then
+    // it describes the OLD rectangle (BUG-0268) and the size is read again at
+    // the next paint, after the write has landed.
+    if (resolved.width || resolved.height) {
+      const { applyResolvedControlSize } = await import("../lib/floatingStore");
+      if (applyResolvedControlSize(controlId, resolved, readIsCurrent) === "superseded") {
+        staleEntries.add(controlId);
       }
     }
 
@@ -285,25 +292,4 @@ async function fetchButtonData(
   } finally {
     pendingFetches.delete(controlId);
   }
-}
-
-// ============================================================================
-// Drawing Helpers
-// ============================================================================
-
-function drawResizeHandles(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-): void {
-  const handleSize = 6;
-  ctx.fillStyle = "#0e639c";
-
-  // Four corners
-  ctx.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x + w - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x - handleSize / 2, y + h - handleSize / 2, handleSize, handleSize);
-  ctx.fillRect(x + w - handleSize / 2, y + h - handleSize / 2, handleSize, handleSize);
 }

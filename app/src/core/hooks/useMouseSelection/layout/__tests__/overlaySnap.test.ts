@@ -11,6 +11,8 @@
 //          canvas at index 2, and the provider answers ONLY for index 2: a
 //          handler that asked for any other index (say, a hard-coded 0) would
 //          get no surface and every snap case below would fail.
+//          The chart is SELECTED (helpers/selectForHandles.ts): since BUG-0258
+//          design phase 3 only a selected object has live resize handles.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type React from "react";
@@ -26,6 +28,7 @@ import { createOverlayResizeHandlers } from "../overlayResizeHandlers";
 import { setGridRegions } from "../../../../../api/gridOverlays";
 import { registerLayoutSurfaceProvider, type LayoutSurface } from "../../../../lib/layoutSurface";
 import { DEFAULT_GRID_CONFIG, type Viewport } from "../../../../types";
+import { selectForHandles } from "./helpers/selectForHandles";
 
 const ACTIVE = 2;
 const VIEWPORT: Viewport = { scrollX: 0, scrollY: 0, startRow: 0, startCol: 0, rowCount: 30, colCount: 10 };
@@ -67,6 +70,7 @@ function press(): React.MouseEvent<HTMLElement> {
 }
 
 let unregister: (() => void) | null = null;
+let unselect: (() => void) | null = null;
 let completes: CustomEvent[];
 let previews: CustomEvent[];
 const onComplete = (e: Event) => completes.push(e as CustomEvent);
@@ -76,6 +80,7 @@ beforeEach(() => {
   snapshot.sheetContext.activeSheetIndex = ACTIVE;
   completes = [];
   previews = [];
+  unselect = selectForHandles(["chart"]);
   window.addEventListener("floatingObject:moveComplete", onComplete);
   window.addEventListener("floatingObject:resizeComplete", onComplete);
   window.addEventListener("floatingObject:movePreview", onPreview);
@@ -89,6 +94,8 @@ afterEach(() => {
   window.removeEventListener("floatingObject:resizePreview", onPreview);
   unregister?.();
   unregister = null;
+  unselect?.();
+  unselect = null;
   setGridRegions([]);
 });
 

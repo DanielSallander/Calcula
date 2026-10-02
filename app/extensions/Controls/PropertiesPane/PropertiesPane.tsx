@@ -4,7 +4,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import type { TaskPaneViewProps } from "@api";
-import { emitAppEvent } from "@api/events";
+import { AppEvents, emitAppEvent, onAppEvent } from "@api/events";
 import { showToast } from "@api/notifications";
 import { PropertyRow } from "./PropertyRow";
 import { CollapsibleSection } from "./CollapsibleSection";
@@ -14,7 +14,9 @@ import {
   type PropertyDefinition,
 } from "../lib/types";
 import {
+  adoptHeldButtonCode,
   getControlMetadata,
+  removeApplicationButtonCode,
   setControlProperty,
 } from "../lib/controlApi";
 import { listWorkbookScripts } from "@api/workbookScripts";
@@ -23,6 +25,8 @@ import { getShapeDefinition } from "../Shape/shapeCatalog";
 import { getShapeHtmlContent, shapeHasScript } from "../Shape/shapeRenderer";
 import { getTemplateCategories, type ShapeTemplate } from "../Shape/shapeTemplateCatalog";
 import { setScriptFrameInert } from "../../_shared/scriptFrame";
+import { heldInlineVerdict, readHeldButtonCode } from "@api/heldButtonCode";
+import { HeldCodeSection, type HeldAdoptionShown } from "./HeldCodeSection";
 
 // ============================================================================
 // Styles (theme-aware via CSS variables)
@@ -338,6 +342,14 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
   // Tab state (used for shapes — must be declared before any early returns per Rules of Hooks)
   const [activeTab, setActiveTab] = useState<"properties" | "code" | "preview">("properties");
 
+  // The author confirmed "Replace the application's code" (BUG-0257): the
+  // OnSelect field is editable although the button still holds its
+  // application's code, until the author's own code is committed. Per control.
+  const [replacingHeld, setReplacingHeld] = useState(false);
+  useEffect(() => {
+    setReplacingHeld(false);
+  }, [row, col, sheetIndex]);
+
   // Listen for external metadata refreshes (e.g., after drag-resize persists new bounds)
   useEffect(() => {
     const handler = (e: Event) => {
@@ -349,6 +361,14 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
     window.addEventListener("controls:metadata-refresh", handler);
     return () => window.removeEventListener("controls:metadata-refresh", handler);
   }, [row, col]);
+
+  // An UNDO or REDO of a control step -- Ctrl+Z after "Make this my own" or
+  // "Remove the application's code" -- rewrites the backend store with no event
+  // naming this cell: the undo announces only the `controls` domain
+  // (CONTROLS_CHANGED, the shell's MUTATION_DOMAIN_EVENTS). Re-read, or the
+  // pane keeps showing code the button no longer has, and hides the
+  // application's code it holds again.
+  useEffect(() => onAppEvent(AppEvents.CONTROLS_CHANGED, () => setReloadTrigger((prev) => prev + 1)), []);
 
   // Load control metadata and scripts
   useEffect(() => {
@@ -461,6 +481,44 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
     [row, col, sheetIndex, controlType, metadata],
   );
 
+  // "Remove the application's code" (BUG-0257), after HeldCodeSection showed
+  // the held code and the author confirmed: one undoable backend step.
+  const handleRemoveHeld = useCallback(async () => {
+    if (row < 0 || col < 0) return;
+    try {
+      const updated = await removeApplicationButtonCode(sheetIndex, row, col, controlType);
+      if (mountedRef.current) {
+        setMetadata(updated);
+        setReplacingHeld(false);
+      }
+    } catch (err) {
+      showToast(`Could not remove the application's code: ${String(err)}`, { type: "error" });
+      if (mountedRef.current) setReloadTrigger((prev) => prev + 1);
+    }
+  }, [row, col, sheetIndex, controlType]);
+
+  // "Make this my own" (phase 4 of BUG-0257), after HeldCodeSection showed the
+  // held code and the author confirmed: Rust MOVES it into the live slots as
+  // one undoable, audited step. `shown` is exactly what the confirm showed --
+  // never re-read here -- so code that changed while the dialog was open is
+  // refused by Rust ("changed after it was shown"), not adopted unseen.
+  const handleAdoptHeld = useCallback(
+    async (shown: HeldAdoptionShown) => {
+      if (row < 0 || col < 0) return;
+      try {
+        const updated = await adoptHeldButtonCode(sheetIndex, row, col, shown.onSelect, shown.macroRef);
+        if (mountedRef.current) {
+          setMetadata(updated);
+          setReplacingHeld(false);
+        }
+      } catch (err) {
+        showToast(`Could not make the application's code your own: ${String(err)}`, { type: "error" });
+        if (mountedRef.current) setReloadTrigger((prev) => prev + 1);
+      }
+    },
+    [row, col, sheetIndex],
+  );
+
   // Compute control instance ID for script-declared properties
   const instanceId = row >= 0 && col >= 0 ? `control-${sheetIndex}-${row}-${col}` : undefined;
 
@@ -471,9 +529,23 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
   // offering the toggle there let the user detach the metadata from the cell
   // that actually moves.
   const isEmbeddedControl = metadata?.properties?.embedded?.value === "true";
-  const propDefs = isEmbeddedControl
-    ? allPropDefs.filter((def) => def.key !== "pinToGrid")
-    : allPropDefs;
+  // HELD CODE IS SHOWN, NEVER EDITED IN PLACE (BUG-0257). While a button holds
+  // its application's code (a working copy's, or since phase 4 a subscriber's),
+  // the editable OnSelect row is replaced by the read-only held view; it comes
+  // back only after the author chose to replace that code or make it their own.
+  const heldCode =
+    (controlType || metadata?.controlType) === "button"
+      ? readHeldButtonCode(metadata?.properties)
+      : null;
+  // What a click does with the held INLINE code, by the Rust door's own rule.
+  const heldInline = heldCode
+    ? heldInlineVerdict(controlType || metadata?.controlType || "", metadata?.properties)
+    : null;
+  const showHeldCode = heldCode !== null && !replacingHeld;
+  const propDefs = allPropDefs.filter(
+    (def) =>
+      !(isEmbeddedControl && def.key === "pinToGrid") && !(showHeldCode && def.key === "onSelect"),
+  );
 
   // Must be before early returns (Rules of Hooks)
   const handleOpenScriptEditor = useCallback(() => {
@@ -599,6 +671,23 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
                 {renderGroupProperties(defs, metadata, scripts, handlePropertyChange)}
               </CollapsibleSection>
             ))
+          )}
+          {heldCode && showHeldCode && (
+            <CollapsibleSection title="Application code (held)" defaultExpanded>
+              <HeldCodeSection
+                held={heldCode}
+                inlineVerdict={heldInline}
+                onReplace={() => setReplacingHeld(true)}
+                onRemove={handleRemoveHeld}
+                onAdopt={handleAdoptHeld}
+              />
+            </CollapsibleSection>
+          )}
+          {heldCode && replacingHeld && (
+            <div style={{ fontSize: 11, color: v("--text-secondary"), padding: "4px 14px 10px" }} data-held-replacing>
+              Enter your own code in OnSelect. The application&apos;s code stays on this button
+              until you commit yours.
+            </div>
           )}
         </div>
       )}

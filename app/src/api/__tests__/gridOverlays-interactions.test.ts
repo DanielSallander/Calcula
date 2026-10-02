@@ -395,16 +395,37 @@ describe("gridOverlays - interactions", () => {
       expect(stored.data).toEqual({ clickable: true, tooltip: "Click me", cursor: "pointer" });
     });
 
-    it("getCursor callback is preserved and accessible", () => {
+    it("getCellCursor callback (cell-anchored regions) is preserved and accessible", () => {
       const cursorFn = () => "pointer";
       registerGridOverlay({
         type: "ext-a",
         render: () => {},
-        getCursor: cursorFn,
+        getCellCursor: cursorFn,
       });
 
       const reg = getOverlayRegistration("ext-a");
-      expect(reg!.getCursor).toBe(cursorFn);
+      expect(reg!.getCellCursor).toBe(cursorFn);
+    });
+
+    it("the floating-object per-point callbacks are gone from the type: the zone answer is the only one (M5 T6)", () => {
+      // A TYPE-LEVEL pin, enforced wherever this file is type-checked: an
+      // unused @ts-expect-error is itself an error, so bringing either field
+      // back onto OverlayRegistration fails the check. The runtime half -- no
+      // source names the old claim, no floating family registers a pointer
+      // callback -- is the census in overlayZoneCensus.test.ts.
+      const claim: OverlayRegistration = {
+        type: "ext-a",
+        render: () => {},
+        // @ts-expect-error -- the per-press body-drag claim was deleted; `zoneAt` replaces it.
+        claimsBodyDrag: () => true,
+      };
+      const floatingCursor: OverlayRegistration = {
+        type: "ext-b",
+        render: () => {},
+        // @ts-expect-error -- renamed to getCellCursor, consulted only for cell-anchored regions.
+        getCursor: () => "pointer",
+      };
+      expect([claim.type, floatingCursor.type]).toEqual(["ext-a", "ext-b"]);
     });
 
     it("hitTest receives region data for interaction decisions", () => {

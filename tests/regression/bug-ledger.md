@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 263 | Open: 8 | Triaged: 0 | Fixed: 255 | Other: 0
+Total: 276 | Open: 3 | Triaged: 0 | Fixed: 273 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -2859,7 +2859,7 @@ SHOW VALUES AS WITH A BASE (Running Total In, Difference From, % Of, % Differenc
 **Repro:** See the named test in the fix.
 **Fix:** fixed
 
-## BUG-0257 `[open]`
+## BUG-0257 `[fixed]`
 
 **Found:** 2026-09-29 (manual)
 **Oracle:** calp-checkout
@@ -2867,8 +2867,9 @@ SHOW VALUES AS WITH A BASE (Running Total In, Difference From, % Of, % Differenc
 OWNER DECISION NEEDED: a working copy is sanitised like a subscription, so pushing an UNTOUCHED working copy strips every button's onSelect / macroRef wiring from the published application.
 
 **Repro:** OWNER DECISION NEEDED: a working copy is sanitised like a subscription, so pushing an UNTOUCHED working copy strips every button's onSelect / macroRef wiring from the published application.
+**Fix:** fixed
 
-## BUG-0258 `[open]`
+## BUG-0258 `[fixed]`
 
 **Found:** 2026-09-29 (manual)
 **Oracle:** timeline-range
@@ -2876,6 +2877,7 @@ OWNER DECISION NEEDED: a working copy is sanitised like a subscription, so pushi
 A TIMELINE RANGE CANNOT BE SELECTED BY DRAGGING: a press on a timeline is Core's floating-object press (select, and move on drag).
 
 **Repro:** A TIMELINE RANGE CANNOT BE SELECTED BY DRAGGING: a press on a timeline is Core's floating-object press (select, and move on drag).
+**Fix:** fixed
 
 ## BUG-0259 `[fixed]`
 
@@ -2887,7 +2889,7 @@ AN EMPTY PIVOT'S 18x3 PLACEHOLDER ERASED THE USER'S CELLS UNDER IT: on its first
 **Repro:** Empty pivot at E1 with a user value at G10 (inside E1:G18); add a row field, or Ctrl+Z the create -> G10 erased.
 **Fix:** fixed
 
-## BUG-0260 `[open]`
+## BUG-0260 `[fixed]`
 
 **Found:** 2026-09-29 (manual)
 **Oracle:** distributed-code-confused-deputy
@@ -2895,8 +2897,9 @@ AN EMPTY PIVOT'S 18x3 PLACEHOLDER ERASED THE USER'S CELLS UNDER IT: on its first
 AN IN-CELL BUTTON (calcula.button cell type) FROM A COLLABORATION APPLICATION CAN RUN THE SUBSCRIBER'S -- OR, AT CHECKOUT, THE DEVELOPER'S -- OWN LOCAL MACRO: cell-type actions travel unsanitised ({kind:'script', scriptId, functionName} naming any module by id, {kind:'command'} naming any extension command), a click resolves the id with local modules winning, and a local module runs unlocked with an appended call. The same cross-package shape got macroRef stripped from Controls buttons.
 
 **Repro:** Code path: calp_commands.rs cellType materialisation (~6061-6087, ~9676) -> CellTypes/types/button.ts:91-135 -> _shared/lib/buttonScriptRun.ts:448-508.
+**Fix:** fixed
 
-## BUG-0261 `[open]`
+## BUG-0261 `[fixed]`
 
 **Found:** 2026-09-29 (manual)
 **Oracle:** calp-push-leak
@@ -2904,8 +2907,9 @@ AN IN-CELL BUTTON (calcula.button cell type) FROM A COLLABORATION APPLICATION CA
 A WORKING-COPY PUSH RE-PUBLISHES CODE THAT IS NOT THE APPLICATION'S under the developer's key: every object script in the workbook ships, including Distributed(X) object scripts of OTHER applications the workbook subscribes to (provenance scrubbed at publish), and the merged Custom Functions library (the developer's own UDFs, possibly with net.fetch, plus the application's) ships whole.
 
 **Repro:** calp_commands.rs:859-863 (object scripts), publish.rs:1115-1118 and :1879-1885 (provenance scrub), calp_commands.rs:2657-2668 and :2766 (UDF library id).
+**Fix:** fixed
 
-## BUG-0262 `[open]`
+## BUG-0262 `[fixed]`
 
 **Found:** 2026-09-29 (manual)
 **Oracle:** calp-checkout-trust
@@ -2913,8 +2917,9 @@ A WORKING-COPY PUSH RE-PUBLISHES CODE THAT IS NOT THE APPLICATION'S under the de
 CHECKOUT DOES NOT VERIFY WHO SIGNED THE VERSION: it opens with VerifyOnly and never compares the signer with the application's authorised publishers; the Checkout dialog discards the trust status; root_key_of returns 'no root' when the lowest listed version is unsigned, which the authorised-key check treats as nothing to enforce; a push merge applies a new head without the signer check.
 
 **Repro:** CheckoutDialog.tsx:114-121 (void result); publishers.rs:132-134; publish.rs:108-121; calp_merge.rs:151ff.
+**Fix:** fixed
 
-## BUG-0263 `[open]`
+## BUG-0263 `[fixed]`
 
 **Found:** 2026-09-29 (manual)
 **Oracle:** calp-checkout-strip
@@ -2922,3 +2927,140 @@ CHECKOUT DOES NOT VERIFY WHO SIGNED THE VERSION: it opens with VerifyOnly and ne
 CHECKOUT ALSO STRIPS WHAT THE APPLICATION OWNS (siblings of BUG-0257): every slicer's computed properties are emptied (sanitize_distributed_slicers), so an untouched working-copy push republishes slicers without them; and values over 64 KiB are cleared by the distributed clamp, which the .cala load deliberately refuses for a user's own workbook.
 
 **Repro:** calp_commands.rs:6190-6198 and 4278-4301; media.rs:560-629, :672.
+**Fix:** fixed
+
+## BUG-0264 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** calp-checkout-collision
+
+A CHECKOUT SILENTLY MERGES BY IDENTITY: when an application module script, notebook or defined name has the same id as one the open workbook already holds, the additive materializer KEEPS the workbook's item and drops the application's, while calp_checkout records the id (from the INCOMING lists) as the application's in the working-copy link -- so the next push's filter, which keeps by id, ships the author's own item (a private macro, a RATE pointing at a sheet the package lacks) signed as the application's, and the application's own copy is missing from the new version. The comment above the name filter claimed this case was fixed.
+
+**Repro:** app/src-tauri/src/checkout_collisions_tests.rs below_the_gate_a_checkout_keeps_the_workbooks_item_and_drops_the_applications: publish an application with macro-report and RATE; materialize it as a checkout into a workbook that owns its own macro-report and RATE -- the workbook's definitions are kept, and the incoming lists (what calp_checkout records as the application's) name both ids.
+**Fix:** fixed
+
+## BUG-0265 `[fixed]`
+
+**Found:** 2026-09-30 (manual)
+**Oracle:** floating-object-release-order
+
+A FLOATING-OBJECT MOVE RELEASED OUTSIDE THE GRID AREA REACHED THE FAMILY'S MOUSEUP BEFORE CORE ENDED THE MOVE. Core's window mouseup is re-bound by a useEffect only after isOverlayMoving commits, so a family's bubble-phase window mouseup bound during the press (or for the extension's life) ran FIRST whenever the release landed over the ribbon, the formula bar, the sheet tabs or a task pane (inside [data-grid-area] React's onMouseUp ended the move first, so nobody saw it). Three symptoms: (1) TIMELINES: dragging one of several selected timelines saved only the lead ('Move Timeline') -- the family's mouseup took the pending click and dropped the multi-move snapshot, the co-moved timelines kept preview positions the backend never received and snapped back at the next refreshCache, and a plain press on a member also narrowed the selection to the lead; on a canvas groupDrag excludes same-family co-movers, so nothing rescued them. (2) SLICERS: the same -- only the lead saved, the selection narrowed, and handleSlicerClickAt ran at the release point, so a DRAG could act as a filter click. (3) CHARTS: an already-selected chart dragged and released outside was read as a click at the press point, so the sub-selection ladder advanced (chart -> series -> point).
+
+**Repro:** Unit: src/core/hooks/useMouseSelection/__tests__/overlayReleaseOrder.test.tsx on the pre-fix code -- a move released outside the grid area gave ['familyUp','moveComplete'] (the in-grid control gave ['moveComplete','familyUp']). Live: two timelines (or two slicers) selected, drag one by its header and release over the ribbon -- only the lead's x changes in get_all_timeline_slicers / get_all_slicers.
+**Fix:** fixed — Core binds a CAPTURE-phase window mouseup when it arms a move (overlayMoveHandlers.ts armMove / armedMoveRelease), so moveComplete precedes every family's mouseup wherever the release lands; unbound at the top of handleOverlayMoveMouseUp (whichever caller ends the move), a stale one dropped at the next arm.
+  Files: app/src/core/hooks/useMouseSelection/layout/overlayMoveHandlers.ts, app/src/core/lib/globalInputListeners.ts, app/src/core/hooks/useMouseSelection/__tests__/overlayReleaseOrder.test.tsx
+
+## BUG-0266 `[fixed]`
+
+**Found:** 2026-09-30 (manual)
+**Oracle:** calp-developer-anchor
+
+A REFUSED CHECKOUT STILL RECORDS THE DEVELOPER ANCHOR. core checkout() asks authorize_signer with AnchorPolicy::RecordOnFirstContact, and authorize_signer runs developer_anchor::anchor_root BEFORE the signer check (core/calp/src/publishers.rs:487-488); the host's role gates, reserved-id check and collision refusal in calp_checkout (app/src-tauri/src/calp_commands.rs, after the core call at :7241) come later still. So on a machine that has never opened the application, a share-writer who plants a self-signed 0.0.1 below the real versions (leaving the genuine head alone) gets the checkout REFUSED by BUG-0262's signer check -- correctly -- and the planted root REMEMBERED as the application's creator anyway. Once the share is cleaned, that machine refuses the GENUINE application as CALP_ANCHOR_CONTRADICTED with the roles inverted (remembered = the planter, claimed = the real creator), and the Forget remedy asks the developer to confirm with the creator first -- the anchor now vouches for the attacker. Not a bypass (nothing opens, nothing is signed), but a refusal that poisons the one memory meant to catch the plant; a checkout refused by a role or collision gate likewise records an anchor for an open that never happened.
+
+**Repro:** Core: publish sales v1.0.0 as Alice; plant a Mallory-signed 0.0.1 below it (the checkout tests' plant_fake_root), head untouched; checkout from a FRESH profile -> refused 'sales@1.0.0 is signed by ... who is not an authorised publisher'; developer_anchor::list_anchors(profile) then holds 1 record, and its root is Mallory's key; write the genuine listing back; checkout again -> refused as a developer-anchor contradiction. Live: the same with node fs on a temp workspace and Open for Editing twice.
+**Fix:** fixed
+
+## BUG-0267 `[fixed]`
+
+**Found:** 2026-09-30 (e2e)
+**Oracle:** script-host-message-order
+
+A WORKING COPY LOSES A DISTRIBUTED REALM'S CALLS. When the mount gate answers recheck_while_running (a working-copy link exists; application_code_gate.rs mount_run_gate), every realm call waits in handleCall on standingGate(mw), an async check_distributed_mount_consent 'standing' round trip (host.ts). The realm's 'mounted' message is NOT queued behind it: wireWorker's case "mounted" resolves hostMountScript at once. runObjectScriptOnce then unmounts in its finally (hostUnmountScript: terminated, worker.terminate, revoke_script_capabilities), the standing answer arrives, runStandingCheck sees mw.terminated and returns false, and the held call (base.notify here) is DISCARDED -- no toast, no refusal, no log. The application_code_run row is written at runAdmitted, before the worker even spawns, so the audit trail says the macro ran. It breaks the host's own invariant that calls and events are handled in arrival order (events already go through standingGateThen). Same reorder, inferred not reproduced: a library realm's unawaited base.expose (linker proceeds once hostMountScript resolves) and debug run-target registration.
+
+**Repro:** Live: publish an application whose macro is runtime=objectScript with setup(context){ context.notify('X') }, link a button to it, check it out in a workbook with no private sheet, Allow, click: application_code_run row, no toast. Unit: the FakeWorker posts the base.notify call then 'mounted' in separate setTimeout(0)s, invokeBackend answers the standing phase in a later task, drive runObjectScriptOnce with a sourcePackage record -- the toast never shows. Controls pass: a local module, and a gate answer with recheckWhileRunning:false.
+**Fix:** fixed
+
+## BUG-0268 `[fixed]`
+
+**Found:** 2026-09-30 (e2e)
+**Oracle:** floating-region-geometry
+
+A CONTROL RESIZED BY A CORE HANDLE KEEPS ITS OLD REGION. On a canvas, a shape (160 x 96) resized by its right-edge handle to 224 wide: the backend row (get_all_controls) reads width 224, but the shape's GridRegion (getGridRegions, type floating-control) still reads 160 immediately after the release, after opening the Canvas tab and after Arrange > Lock. Everything that reads the region -- Core's hit test and selection chrome, the canvas lock mark (paintLockMarks draws the padlock inside the region's top-right corner, so at the OLD edge), snapping, marquee -- works on the pre-resize rectangle until the controls are reloaded, and the shape itself may paint at its old size. Controls' handleResizeComplete (extensions/Controls/index.ts) does call resizeFloatingControl + syncFloatingControlRegions, so either it is not reached for this gesture or something republishes the store's old geometry afterwards; root cause not yet pinned.
+
+**Repro:** moving-objects.spec.ts step 9: new canvas, createShape 160x96 at (64,64), select it, drag its right-edge handle +64 px; controlsOn -> width 224; page getGridRegions() floating-control -> width 160 (probe lines '[moving-objects] step 9 region width after the resize: 160').
+**Fix:** fixed
+
+## BUG-0269 `[fixed]`
+
+**Found:** 2026-09-29 (manual)
+**Oracle:** slicer-object-selection
+
+CTRL+CLICK ON A SLICER ITEM DESELECTED THE SLICER. With a slicer selected, Ctrl+click on one of its items (to add the item to the filter) also toggled the SLICER out of the object selection: the Slicer kept its own window capture mousedown that recorded the raw e.ctrlKey (lastMousedownCtrl) and handed it to selectSlicer(slicerId, ctrl) from its floatingObject:selected handler, and selectSlicer treats Ctrl on an already-selected slicer as 'remove it from the selection' (handlers/selectionHandler.ts). So the Ctrl meant for the ITEM reached the OBJECT selection: the slicer deselected, its ribbon tab went away, and on a canvas it left the selection set. A plain click and a header Ctrl+click were right; only Ctrl on an item was wrong.
+
+**Repro:** Unit: app/extensions/Slicer/__tests__/slicerPressWiring.test.ts drives the REAL activate() -- the slicer selected, floatingObject:selected (zone content, part item, ctrlKey false) then bodyDragStart (ctrlKey true) and a window mouseup: isSlicerSelected stayed true and clickSlicerItem got ctrl=true; with the capture mousedown and its raw Ctrl put back (sabotage W1) the slicer is deselected. Live: moving-objects.spec.ts step 12 (worksheet and canvas) -- select a slicer by its header, click one item, Ctrl+click another: both items selected and objectOf(slicer).selected still true (on a canvas, selectedObjects still lists it).
+**Fix:** fixed — The Slicer's capture mousedown (handleMousedownModifiers / lastMousedownCtrl) is DELETED; the object-selection Ctrl is Core's detail.ctrlKey, which Core sends false on a CONTENT press, and the item's own Ctrl reaches the item gesture through floatingObject:bodyDragStart (lib/slicerItemDrag.ts).
+  Files: app/extensions/Slicer/index.ts, app/extensions/Slicer/handlers/selectionHandler.ts, app/extensions/Slicer/lib/slicerItemDrag.ts, app/src/core/lib/globalInputListeners.ts, app/extensions/Slicer/__tests__/slicerPressWiring.test.ts
+
+## BUG-0270 `[fixed]`
+
+**Found:** 2026-10-01 (manual)
+**Oracle:** selected-object-keys
+
+A SELECTED (not entered) slicer or timeline on a WORKSHEET leaves the hidden active cell behind it open to the keyboard: Delete clears that cell (the dispatcher's Clear Contents), a typed character starts editing it, Space and Alt+Down act on it. Excel deletes the selected slicer/timeline on Delete and sends no typed character to the cells while an object is selected. M8c closed this only while the keyboard is INSIDE the object (@api/selectionOwner claim slicerKeyFocus/timelineKeyFocus); a canvas has no cell behind the object.
+
+**Repro:** Worksheet with a value in the active cell (A1); insert a slicer elsewhere and click its header (selected, not entered); press Delete: A1 is cleared, the slicer stays. Type 'x': A1 enters edit mode with 'x'.
+**Fix:** fixed
+
+## BUG-0271 `[fixed]`
+
+**Found:** 2026-10-01 (manual)
+**Oracle:** keybinding-grammar
+
+A KEYBOARD SHORTCUT RECORDED ON SPACE OR ON '+' WAS SAVED, LISTED, AND NEVER FIRED. Settings > Keyboard Shortcuts recorded Ctrl+Space as 'Ctrl+ ' and Ctrl with the plus key as 'Ctrl++'. parseCombo (app/src/api/keybindings.ts) splits a combination on '+' and trims every part, so both read back with an EMPTY key and matchesEvent never matched: the shortcut list showed the binding, and pressing it did whatever the grid does (Ctrl+Space selected the column). Settings' conflict check also called Ctrl+Space free, because the grid's own Space keys were never in the registry.
+
+**Repro:** Settings > Keyboard Shortcuts > Insert Hyperlink > Edit > press Ctrl+Space > Accept: the box shows 'Ctrl+'; Ctrl+Space on the grid selects the column and does not open Insert Hyperlink. The same with Ctrl and the '+' key ('Ctrl++'). Unit: app/src/api/__tests__/keybindings.spaceAndPlus.test.ts, red first on the unfixed tree (23 of 25 failed).
+**Fix:** fixed
+  Files: app/src/api/keybindings.ts
+
+## BUG-0272 `[fixed]`
+
+**Found:** 2026-10-01 (manual)
+**Oracle:** properties-pane
+
+THE PROPERTIES PANE SHOWED A CONTROL AS IT WAS BEFORE AN UNDO. Undo and redo of a control step announce only the controls domain (CONTROLS_CHANGED); Controls reloads its floating store on it, but the open Properties pane never re-read. So after Ctrl+Z of 'Remove the application's code' (or of any control property change) the pane kept showing the state the undo had just taken back -- for held button code, the code as removed or as editable own code, with the held view hidden.
+
+**Repro:** Design Mode, select a button whose code came with an application, open the Properties pane, 'Remove the application's code' and confirm; press Ctrl+Z with the pane still open: the backend has the held code back, the pane still shows it removed. Unit: app/extensions/Controls/__tests__/heldButtonCodeWiring.test.tsx (the CONTROLS_CHANGED case; red with the listener removed).
+**Fix:** fixed
+  Files: app/extensions/Controls/PropertiesPane/PropertiesPane.tsx
+
+## BUG-0273 `[fixed]`
+
+**Found:** 2026-09-30 (manual)
+**Oracle:** script-host-run
+
+A ONE-OFF SCRIPT RUN THAT CRASHED WAS STARTED AGAIN BY ITSELF. crashWorker (app/src/api/scriptHost/host.ts) re-mounted any crashed worker realm with its admission, including a one-off run's realm (the one-off runner, a macro's debug session). A run's setup IS the run, so the respawn ran the script a second time with nobody starting it, no new run row on the audit trail, and possibly after the runner had already reported the run finished. A user's own unlocked one-off script re-ran unlocked.
+
+**Repro:** Unit: app/src/api/scriptHost/__tests__/explicitRunAdmission.test.ts (g2) 'a crash DURING a run: not respawned, and the run is rejected with the crash' and (g2b) 'a crash AFTER the run's setup finished' -- red with the respawn put back (a second worker is created).
+**Fix:** fixed
+  Files: app/src/api/scriptHost/host.ts
+
+## BUG-0274 `[fixed]`
+
+**Found:** 2026-10-01 (manual)
+**Oracle:** calp-version-diff
+
+THE VERSION DIFF NEVER SAYS THAT A SCRIPT GAINS A CAPABILITY. describe_object (core/calp/src/diff.rs) reads an object script's capabilities from the artifact's 'capabilities' key (capability_set), but the published object-script artifact is an ObjectScriptDef, which writes 'declaredCapabilities' (camelCase, and only when non-empty) -- and the authoritative ceiling is the signed MANIFEST's PublishedObjectScript.capabilities, which a subscriber's pull applies. So the push preview, the Inspector's Compare and the refresh preview never show 'source changed; gains net.fetch' (or any added / removed capability) for a real object script; VersionDiffView renders the fields, and they are always empty.
+
+**Repro:** Publish v1 with an object script declaring no capability; change its source to declare net.fetch and publish v2; open the Inspector's Compare (or the push preview of the change): the row says 'source changed' with no 'gains net.fetch', and addedCapabilities is empty. The Promote dialog's new code summary (core/calp/src/code_summary.rs) reads the manifest ceiling and DOES say 'It gains net.fetch.'.
+**Fix:** fixed
+  Files: core/calp/src/diff.rs, core/calp/src/manifest.rs, core/calp/src/code_summary.rs, core/calp/tests/version_diff.rs
+
+## BUG-0275 `[fixed]`
+
+**Found:** 2026-10-01 (manual)
+**Oracle:** calp-push-concurrency
+
+TWO PUSHES AT THE SAME MOMENT CAN FAIL THE LOSER WITH 'ACCESS IS DENIED' INSTEAD OF 'THE WORKSPACE IS BUSY'. WorkspaceLock::acquire (core/calp/src/workspace.rs) creates '.calp-lock' with create_new and retries only on ErrorKind::AlreadyExists. On Windows, creating a file whose previous holder is still being deleted (delete pending) answers ERROR_ACCESS_DENIED (os error 5), which is PermissionDenied, not AlreadyExists -- so the lock's loser gets a raw Io error at once instead of waiting and getting BaseVersionStale or WorkspaceBusy.
+
+**Repro:** UNREPRODUCED ON DEMAND -- observed once: core/calp/tests/working_copy_lifecycle.rs concurrent_pushes_from_one_base_produce_exactly_one_winner failed with the loser's error Io(PermissionDenied, os error 5) instead of BaseVersionStale / WorkspaceBusy, during the M6b review fixer's run of cargo test -p calp beside other builds (2026-10-01); it passed alone (582 passed). The cause above is from reading the lock code, not from a trace.
+**Fix:** fixed
+  Files: core/calp/src/workspace.rs, core/calp/src/error.rs, core/calp/tests/working_copy_lifecycle.rs
+
+## BUG-0276 `[open]`
+
+**Found:** 2026-10-02 (e2e)
+**Oracle:** touch-input
+
+TOUCH CANNOT DRAG ANYTHING AND CANNOT SELECT A CELL. Measured with CDP Input.dispatchTouchEvent (pen and mouse behave identically and correctly everywhere): a touch DRAG of a slicer by its header, a resize handle, the grip, or a timeline range does NOTHING on worksheet and canvas -- the page sees pointerdown, 3 moves, then pointercancel (the browser takes the gesture for panning; nothing sets touch-action on the grid canvas); a touch TAP, DRAG or LONG-PRESS on a grid cell does nothing (no cell is selected); a long-press acts as a tap (no context menu). What works by touch: tapping an object selects it, tapping a slicer item filters, tapping the grip opens its menu, tapping a run-mode button or a button cell runs it once.
+
+**Repro:** npx playwright test e2e/journeys/touch-pen-measure.spec.ts --project=journey: rows TP-2/3/4 (drag) 'nothing' for touch, TP-9 (cell tap/drag/long-press) 'nothing', TP-8 long-press = tap.

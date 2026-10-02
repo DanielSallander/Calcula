@@ -77,6 +77,32 @@ fn open_verified(
     ),
     String,
 > {
+    open_verified_scoped(registry_path, package_name, version_pin, check_artifacts)
+        .map(|(registry, _scope, version, trust, pins, manifest)| (registry, version, trust, pins, manifest))
+}
+
+/// [`open_verified`], also handing back the WORKSPACE SCOPE the transport was
+/// opened under -- the same string, scoped once. The authorised reader needs it
+/// to ask what this machine remembers about the application in THIS workspace
+/// (the developer anchor); deriving the scope a second time from the location
+/// is how a pin gets written under one identity and read under another.
+#[allow(clippy::type_complexity)]
+fn open_verified_scoped(
+    registry_path: &str,
+    package_name: &str,
+    version_pin: &str,
+    check_artifacts: bool,
+) -> Result<
+    (
+        Box<dyn WorkspaceTransport>,
+        calp::WorkspaceScope,
+        String,
+        TrustStatus,
+        Vec<OtherScopePin>,
+        VersionManifest,
+    ),
+    String,
+> {
     let (registry, scope) =
         crate::calp_registry::open_workspace_scoped(registry_path).map_err(|e| e.to_string())?;
     let pin = VersionPin::parse(version_pin).map_err(|e| e.to_string())?;
@@ -115,7 +141,7 @@ fn open_verified(
             )
         })?;
     }
-    Ok((registry, version, trust, other_scope_pins, manifest))
+    Ok((registry, scope, version, trust, other_scope_pins, manifest))
 }
 
 /// `open_verified` for the SECTION commands (sheet / scripts / model /
@@ -139,6 +165,212 @@ pub(crate) fn open_verified_content(
     let (registry, version, _trust, _other_scope_pins, manifest) =
         open_verified(registry_path, package_name, version_pin, check_artifacts)?;
     Ok((registry, version, manifest))
+}
+
+/// `open_verified_content` for the doors that bring a published version's
+/// content INTO A WORKING COPY — the push merge (the head it brings in and the
+/// base it diffs against) and the push dialog's hold-back (the base values it
+/// writes back). BUG-0262.
+///
+/// A signature proves the bytes were not changed; it does not say the signer
+/// may publish this application. A working copy is where the developer's next
+/// SIGNED push comes from, so content that reaches it must be signed by an
+/// authorised publisher, anchored at the application's ROOT
+/// (`calp::publishers::authorize_signer`) — the same rule checkout applies.
+/// Without it a version planted in the workspace makes the developer's push
+/// stale, the stale push steers them to "merge", and the planted cells ride
+/// their next push out under their key.
+///
+/// The signer is taken from the manifest `open_verified` just VERIFIED — the
+/// bytes the caller is about to read under — never from a re-read. FAILS
+/// CLOSED: an unsigned or unverifiable first version refuses.
+///
+/// `audit` names the DOOR (and the workbook whose trail it is) when a refusal
+/// here is itself the refusal the user meets -- the merge, the hold-back. A
+/// refused signer then leaves an always-on `SignerRefused` row naming the
+/// signer and key fingerprint ("every refusal of application code is written
+/// to the audit trail"). `None` for a reader whose caller reports the refusal
+/// in its own terms (the push's held-code check audits the push refusal).
+pub(crate) fn open_authorized_content(
+    registry_path: &str,
+    package_name: &str,
+    version_pin: &str,
+    check_artifacts: bool,
+    audit: Option<(&crate::AppState, &str)>,
+) -> Result<(Box<dyn WorkspaceTransport>, String, VersionManifest), String> {
+    open_authorized_content_with_signer(registry_path, package_name, version_pin, check_artifacts, audit)
+        .map(|(registry, version, manifest, _signer)| (registry, version, manifest))
+}
+
+/// [`open_authorized_content`], also returning WHO signed the version and on
+/// what authority -- from the manifest just verified, never from the unsigned
+/// version listing. The merge names the head's signer this way: the listing's
+/// `published_by` is whatever a share-writer typed.
+///
+/// The root is also checked against what THIS MACHINE remembers (the developer
+/// anchor), under `AnchorPolicy::CheckOnly`: every caller is a read the user
+/// experiences as passive -- the push merge's four reads, the hold-back, the
+/// signed base a push compares button code against -- so a contradiction or a
+/// rolled-back co-publisher list refuses here, but first contact never CREATES
+/// an anchor. (A newer list revision still raises the mark: that is monotonic
+/// and unforgeable, not a trust decision.)
+pub(crate) fn open_authorized_content_with_signer(
+    registry_path: &str,
+    package_name: &str,
+    version_pin: &str,
+    check_artifacts: bool,
+    audit: Option<(&crate::AppState, &str)>,
+) -> Result<(Box<dyn WorkspaceTransport>, String, VersionManifest, calp::AuthorizedSigner), String> {
+    let (registry, scope, version, _trust, _other_scope_pins, manifest) =
+        open_verified_scoped(registry_path, package_name, version_pin, check_artifacts)?;
+    let profile = calcula_profile_dir();
+    let anchor = calp::AnchorGate {
+        profile_dir: &profile,
+        scope: &scope,
+        policy: calp::AnchorPolicy::CheckOnly,
+    };
+    match calp::publishers::authorize_signer(
+        registry.as_ref(),
+        package_name,
+        &version,
+        &manifest.publisher_key,
+        &manifest.publisher_name,
+        &anchor,
+    ) {
+        Ok(signer) => Ok((registry, version, manifest, signer)),
+        Err(refused) => {
+            if let Some((state, door)) = audit {
+                record_signer_refusal(state, door, package_name, &version, &refused);
+            }
+            Err(developer_refusal_text(&refused))
+        }
+    }
+}
+
+/// Prefix of a refusal because the root contradicts the one this computer
+/// remembers. Followed by ` remembered=<fingerprint> claimed=<fingerprint>: `
+/// and the sentence, so the Open Application for Editing dialog can offer the
+/// one remedy (forget the remembered creator) naming both keys WITHOUT parsing
+/// prose that carries publisher-chosen names.
+pub(crate) const ANCHOR_CONTRADICTED_CODE: &str = "CALP_ANCHOR_CONTRADICTED";
+/// Prefix of a refusal because the co-publisher list is older than one this
+/// computer has seen. No forget is offered: the remedy is the creator's.
+pub(crate) const PUBLISHER_LIST_ROLLED_BACK_CODE: &str = "CALP_PUBLISHER_LIST_ROLLED_BACK";
+
+/// The text a DEVELOPER DOOR (checkout, push, merge, hold-back) returns for a
+/// refusal: the error's own sentence, with the machine-readable code prefix on
+/// the two developer-anchor refusals so the dialog can branch on them. Every
+/// other refusal reads exactly as before.
+pub(crate) fn developer_refusal_text(refused: &calp::CalpError) -> String {
+    match refused {
+        calp::CalpError::DeveloperAnchorContradicted {
+            remembered_fingerprint,
+            claimed_fingerprint,
+            ..
+        } => format!(
+            "{ANCHOR_CONTRADICTED_CODE} remembered={remembered_fingerprint} \
+             claimed={claimed_fingerprint}: {refused}"
+        ),
+        calp::CalpError::PublisherListRolledBack { .. } => {
+            format!("{PUBLISHER_LIST_ROLLED_BACK_CODE}: {refused}")
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Leave the always-on trail for a published version refused because of WHO
+/// SIGNED IT (BUG-0262): `door` is where it was refused ("checkout", "merge",
+/// "holdBack", "push", "promote"). Recorded for the signer refusals, the two
+/// developer-anchor refusals (a root that contradicts what this computer
+/// remembers, a rolled-back co-publisher list) and a pusher or promoter whose
+/// key the proved root does not authorise -- an I/O error or a bad signature is
+/// not a statement about the signer.
+pub(crate) fn record_signer_refusal(
+    state: &crate::AppState,
+    door: &str,
+    package_name: &str,
+    version: &str,
+    refused: &calp::CalpError,
+) {
+    let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
+    extra.insert("door".into(), serde_json::json!(door));
+    extra.insert("application".into(), serde_json::json!(package_name));
+    extra.insert("version".into(), serde_json::json!(version));
+    let description = match refused {
+        calp::CalpError::SignerNotAuthorized { version, signer_name, signer_fingerprint, root_holder, .. } => {
+            // The version the refusal is about, as resolved (a checkout may have
+            // asked for "latest").
+            extra.insert("version".into(), serde_json::json!(version));
+            extra.insert("reason".into(), serde_json::json!("signerNotAuthorized"));
+            extra.insert("signer".into(), serde_json::json!(signer_name));
+            extra.insert("signerFingerprint".into(), serde_json::json!(signer_fingerprint));
+            extra.insert("rootHolder".into(), serde_json::json!(root_holder));
+            format!(
+                "Refused {package_name} v{version} ({door}): signed by {signer_name} (key \
+                 {signer_fingerprint}), who is not an authorised publisher"
+            )
+        }
+        calp::CalpError::ApplicationRootUnverifiable { reason, .. } => {
+            extra.insert("reason".into(), serde_json::json!("rootUnverifiable"));
+            extra.insert("detail".into(), serde_json::json!(reason));
+            format!(
+                "Refused {package_name} v{version} ({door}): who may publish it cannot be \
+                 established -- {reason}"
+            )
+        }
+        calp::CalpError::DeveloperAnchorContradicted {
+            scope,
+            remembered_name,
+            remembered_fingerprint,
+            anchored_on,
+            claimed_root_version,
+            claimed_name,
+            claimed_fingerprint,
+            ..
+        } => {
+            extra.insert("reason".into(), serde_json::json!("anchorContradicted"));
+            extra.insert("workspace".into(), serde_json::json!(scope));
+            extra.insert("rememberedRoot".into(), serde_json::json!(remembered_name));
+            extra.insert("rememberedFingerprint".into(), serde_json::json!(remembered_fingerprint));
+            extra.insert("rememberedOn".into(), serde_json::json!(anchored_on));
+            extra.insert("claimedRootVersion".into(), serde_json::json!(claimed_root_version));
+            extra.insert("claimedRoot".into(), serde_json::json!(claimed_name));
+            extra.insert("claimedFingerprint".into(), serde_json::json!(claimed_fingerprint));
+            format!(
+                "Refused {package_name} v{version} ({door}): its first version, \
+                 v{claimed_root_version}, names {claimed_name} (key {claimed_fingerprint}) as \
+                 creator, and this computer remembers {remembered_name} (key \
+                 {remembered_fingerprint}) since {anchored_on}"
+            )
+        }
+        calp::CalpError::NotAuthorizedPublisher { root_holder, .. } => {
+            // A push or a promotion from a computer whose key the application's
+            // PROVED root does not authorise -- which is also what a planted
+            // root with no list looks like to its genuine developer.
+            extra.insert("reason".into(), serde_json::json!("pusherNotAuthorized"));
+            extra.insert("rootHolder".into(), serde_json::json!(root_holder));
+            format!(
+                "Refused {package_name} v{version} ({door}): the workspace names {root_holder} as its \
+                 creator, and this computer's key is not one it authorises"
+            )
+        }
+        calp::CalpError::PublisherListRolledBack { seen, found, .. } => {
+            extra.insert("reason".into(), serde_json::json!("publisherListRolledBack"));
+            extra.insert("seen".into(), serde_json::json!(seen));
+            extra.insert("found".into(), serde_json::json!(found));
+            format!(
+                "Refused {package_name} v{version} ({door}): the workspace serves co-publisher \
+                 list revision {found}, and this computer has seen revision {seen}"
+            )
+        }
+        _ => return,
+    };
+    crate::calp_commands::record_audit_event_with_extra(
+        state,
+        calp::audit::AuditEvent::SignerRefused,
+        description,
+        extra,
+    );
 }
 
 /// Wire string for `TrustStatus`. EXHAUSTIVE on purpose (no `_` arm): a new

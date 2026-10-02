@@ -23,7 +23,11 @@ import {
 } from "../cellTypes";
 import { checkCommitGuards } from "../../core/lib/commitGuards";
 import { checkEditGuards } from "../../core/lib/editGuards";
-import { getCellCursorOverride } from "../../core/lib/cellClickInterceptors";
+import {
+  getCellCursorOverride,
+  checkCellClickInterceptors,
+  actOnCellRelease,
+} from "../../core/lib/cellClickInterceptors";
 
 // ----------------------------------------------------------------------------
 // Helpers
@@ -194,6 +198,29 @@ describe("renderCellTypeCell", () => {
 // ----------------------------------------------------------------------------
 
 describe("cellTypes fan-out hooks", () => {
+  it("click interceptor: a type's RELEASE CLAIM reaches Core as it is (BUG-0258 design phase 4)", async () => {
+    const run = vi.fn();
+    const claim = actOnCellRelease(3, 4, run);
+    const onClick = vi.fn(async () => claim);
+    registerCellType(makeDef({ onClick }));
+    __seedAssignmentForTests(3, 4, "test.type");
+    expect(await checkCellClickInterceptors(3, 4, { clientX: 0, clientY: 0 }), "the claim was collapsed into 'handled'").toBe(claim);
+    expect(run, "asking the interceptor ran the claim").not.toHaveBeenCalled();
+    // An untyped cell is not the type's.
+    expect(await checkCellClickInterceptors(9, 9, { clientX: 0, clientY: 0 })).toBe(false);
+  });
+
+  it("click interceptor: true still handles at once, anything else that is not a claim does not", async () => {
+    let answer: unknown = true;
+    registerCellType(makeDef({ onClick: async () => answer as boolean }));
+    __seedAssignmentForTests(1, 1, "test.type");
+    expect(await checkCellClickInterceptors(1, 1, { clientX: 0, clientY: 0 })).toBe(true);
+    answer = false;
+    expect(await checkCellClickInterceptors(1, 1, { clientX: 0, clientY: 0 })).toBe(false);
+    answer = "yes";
+    expect(await checkCellClickInterceptors(1, 1, { clientX: 0, clientY: 0 })).toBe(false);
+  });
+
   it("handleCellTypeKeyDown dispatches to the type and reports handled", async () => {
     const onKeyDown = vi.fn(async () => true);
     registerCellType(makeDef({ onKeyDown }));

@@ -38,6 +38,20 @@
 //            its code and reach must be visible here, never hidden. The raw JSON
 //            store record is filtered out of the module list (it is data, not
 //            code) — we surface the parsed functions instead.
+//          - BUTTON ACTIONS (M6): inline `onSelect` code on controls is listed
+//            BY CONTENT (`buttonAction:<sha256>`), the user's own and each
+//            application's held code apart, on the one-off surface the Rust
+//            button door runs it on. Content-addressed so a moved button is
+//            the same unit, and so per-workbook trust counts the user's own
+//            button code without reading a move as an addition.
+//          - A MACRO WRITTEN AS AN OBJECT SCRIPT (`runtime=objectScript`, the
+//            Macro Recorder's default) is a module record but does NOT run in
+//            the interpreter: every run route mounts it once in a worker realm
+//            (objectScriptRunner.ts), restricted when it came in an
+//            application -- and since owner decision B a run YOU start from a
+//            door that carries a person's pass may also change the cells of any
+//            sheet (follow-up F7). It is listed on the surface it runs on, with
+//            that reach, never with the interpreter's.
 //          - The Rust-QuickJS surfaces' reach is DERIVED, not asserted. It used
 //            to be a hand-written "grid-only" comment on this file, which is the
 //            one link in the transparency chain nothing verified: an op module
@@ -58,7 +72,8 @@ import {
 import { listNotebooks, loadNotebook } from "./notebookBackend";
 import { listMountedHandles } from "./scriptHost/broker";
 import { isLocalOrigin, originPackageName, type ScriptOrigin } from "./scriptHost/scriptOrigin";
-import { listBackendCapabilityGrants } from "./scriptHost/capabilities";
+import { listBackendCapabilityGrants, parseDeclaredCapabilities } from "./scriptHost/capabilities";
+import { parseModuleScriptRuntime } from "./workbookScripts";
 import { loadPersistedLibrary, CUSTOM_FUNCTIONS_SCRIPT_ID } from "./customFunctions";
 import { loadPersistedTransformLibraryWithProvenance, CHART_TRANSFORMS_SCRIPT_ID } from "./chartTransformScripts";
 import { loadPersistedMarkLibraryWithProvenance, markScriptId } from "./chartMarkScripts";
@@ -70,6 +85,12 @@ import { getActiveScriptForm } from "./scriptHost/scriptForms";
 import { PANE_UPDATE_WINDOW_MS } from "./scriptHost/scriptPaneSpec";
 import { listInstalledLibraries, listLibraryRealms, readLockedSource } from "./scriptLibraries";
 import { invokeBackend } from "./backend";
+import {
+  listButtonInlineActions,
+  buttonActionConsentId,
+  type ButtonInlineAction,
+  type ButtonInlineLocation,
+} from "./heldButtonCode";
 
 // The trusted-UI half of the scheduler is re-exported through the inventory so
 // that a transparency surface has ONE door for both halves of the promise:
@@ -249,6 +270,38 @@ export interface CodeUnit {
   source: string;
   /** Lines of source (a size-at-a-glance signal). */
   lineCount: number;
+  /**
+   * Set on a BUTTON ACTION unit only: inline control code (`onSelect`) listed by
+   * CONTENT. Its `id` is `buttonAction:<sha256 of the exact bytes>` -- so moving
+   * a button keeps the id and changing its code changes it -- and these are the
+   * places those bytes sit. Per-workbook trust keys such a unit by its bare id
+   * (`collectLocalWorkbookScripts`), a spelling no `<surfaceId>:<id>` can take.
+   */
+  buttonAction?: { hash: string; locations: ButtonInlineLocation[] };
+  /**
+   * Set on a MODULE unit -- a stored macro or hand-written module (owner
+   * decision B, follow-up F7). `runtime`: `"objectScript"` for a macro WRITTEN
+   * AS AN OBJECT SCRIPT, which runs once per start in a worker realm (surface
+   * `object-script`, tier from its origin) rather than in the interpreter;
+   * `"workbookScript"` for every other module. `cellAccessWhenYouRunIt`: such a
+   * macro that came in an APPLICATION runs restricted, and a run YOU start from
+   * a door that carries a person's pass (Developer > Macros > Run, a button that
+   * runs it, the command line) may also read and change the cells of any sheet,
+   * and nothing more (scriptHost/explicitRunGrant.ts). Per-workbook trust keys
+   * every module unit by the module store, whatever its surface.
+   */
+  module?: { readonly runtime: "objectScript" | "workbookScript"; readonly cellAccessWhenYouRunIt: boolean };
+}
+
+/** Options for {@link getWorkbookCodeUnits}. */
+export interface WorkbookCodeUnitOptions {
+  /**
+   * When set, a failure to list the workbook's button actions REJECTS instead
+   * of reading as "no button code". Per-workbook trust sets it: a listing that
+   * failed is "could not look", and trust is a change detector, so it must lapse
+   * rather than compare an empty population against its record.
+   */
+  strictButtonActions?: boolean;
 }
 
 /** A roll-up of an inventory for the panel header. */
@@ -313,12 +366,88 @@ async function safely<T>(label: string, run: () => Promise<T[]>): Promise<T[]> {
   }
 }
 
+/** The first non-blank line of `source`, trimmed and capped, as a unit's name. */
+function firstLineLabel(source: string, cap = 48): string {
+  const line = source.split(/\r?\n/).map((l) => l.trim()).find((l) => l !== "") ?? "";
+  if (line === "") return "(blank)";
+  return line.length > cap ? `${line.slice(0, cap)}...` : line;
+}
+
+/**
+ * One macro WRITTEN AS AN OBJECT SCRIPT (owner decision B, follow-up F7): a
+ * module record that every run route mounts ONCE in a worker realm
+ * (objectScriptRunner.ts) -- the `object-script` surface, never the
+ * interpreter. Its tier is its origin's: the user's own runs unlocked; an
+ * application's runs restricted, and a run YOU start from a door that carries a
+ * person's pass may also read and change the cells of any sheet, and nothing
+ * more. Its ceiling is its own `// @capability` pragmas, exactly what the
+ * runner mounts it with; it is never standing, so never mounted here.
+ */
+function objectScriptMacroUnit(
+  summary: { id: string; name: string; scope: Parameters<typeof describeModuleScriptScope>[0] },
+  source: string,
+  pkg: string | null,
+): CodeUnit {
+  const distributed = pkg !== null && pkg !== "";
+  return {
+    surfaceId: "object-script",
+    id: summary.id,
+    name: summary.name,
+    residence:
+      `Macro written as an object script — ${describeModuleScriptScope(summary.scope)}; ` +
+      (distributed
+        ? "runs once per start, restricted -- and when you run it yourself it may also read and change cells on any sheet"
+        : "runs once per start, at the unlocked tier"),
+    provenance: distributed ? "distributed" : "local",
+    sourcePackage: distributed ? pkg : null,
+    declaredCapabilities: parseDeclaredCapabilities(source).caps as CapabilityId[],
+    liveGrants: null,
+    tier: distributed ? "restricted" : "unlocked",
+    mounted: false,
+    // A worker realm, not the interpreter: the broker is the whole story.
+    interpreterReach: null,
+    interpreterCapabilities: null,
+    source,
+    lineCount: lineCount(source),
+    module: { runtime: "objectScript", cellAccessWhenYouRunIt: distributed },
+  };
+}
+
+/**
+ * One button-action unit: inline control code, by content. It runs on the
+ * one-off surface -- the Rust button door hands its bytes to the same
+ * interpreter core `run_script` uses -- so its reach is that surface's,
+ * derived from the manifest mirror like every other Rust-QuickJS unit.
+ */
+function buttonActionUnit(action: ButtonInlineAction): CodeUnit {
+  const allButtons = action.locations.every((l) => l.controlType === "button");
+  const cells = action.locations.map((l) => l.cell).join(", ");
+  const held = action.provenance === "distributed";
+  return {
+    surfaceId: "one-off-script",
+    id: buttonActionConsentId(action.hash),
+    name: `Button code: ${firstLineLabel(action.source)}`,
+    residence: `${allButtons ? "Button" : "Control"} OnSelect${held ? " (held for the application)" : ""} at ${cells}`,
+    provenance: action.provenance,
+    sourcePackage: held ? action.application : null,
+    declaredCapabilities: [],
+    liveGrants: null,
+    tier: null,
+    mounted: false,
+    interpreterReach: QUICKJS_SURFACE_REACH["one-off-script"],
+    interpreterCapabilities: QUICKJS_SURFACE_CAPABILITIES["one-off-script"],
+    source: action.source,
+    lineCount: lineCount(action.source),
+    buttonAction: { hash: action.hash, locations: action.locations },
+  };
+}
+
 /**
  * Gather every piece of executable code residing in the open workbook, joined
  * with live broker state, normalized into one CodeUnit[]. Ordered by surface
  * (object scripts, then the grid-only Rust-QuickJS surfaces) then by name.
  */
-export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
+export async function getWorkbookCodeUnits(options: WorkbookCodeUnitOptions = {}): Promise<CodeUnit[]> {
   const [objectScripts, moduleSummaries, notebookSummaries, lockedLibraries, mounted] =
     await Promise.all([
       safely("object scripts", loadAllObjectScripts),
@@ -415,6 +544,10 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
   }
 
   // ---- Module scripts (Rust QuickJS; grid-only, no privileged capabilities) -
+  //
+  // ...except a macro WRITTEN AS AN OBJECT SCRIPT, a module record that runs in
+  // a worker realm (F7): listed on that surface, with its tier and the cell
+  // access a run you start gets -- not with the interpreter's reach.
   const modules = await Promise.all(
     moduleSummaries.map(async (m) => {
       try {
@@ -430,6 +563,10 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
     const full = modules[i];
     const source = full?.source ?? "";
     const pkg = full?.sourcePackage ?? null;
+    if (parseModuleScriptRuntime(full?.description) === "objectScript") {
+      units.push(objectScriptMacroUnit(summary, source, pkg));
+      continue;
+    }
     units.push({
       surfaceId: "one-off-script",
       id: summary.id,
@@ -448,7 +585,24 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
       interpreterCapabilities: QUICKJS_SURFACE_CAPABILITIES["one-off-script"],
       source,
       lineCount: lineCount(source),
+      module: { runtime: "workbookScript", cellAccessWhenYouRunIt: false },
     });
+  }
+
+  // ---- Button actions (inline `onSelect` code on controls; M6) -------------
+  //
+  // Code a button carries in its own `onSelect` is code in this file like any
+  // module: the user's own (a LIVE slot -- no admission ever writes one) and an
+  // application's (a HELD slot, run by the Rust button door only after the
+  // approval of its exact bytes). One unit per (whose, application, hash): two
+  // buttons with the same code are one unit naming both cells, and moving a
+  // button changes where it sits, never which unit it is -- per-workbook trust
+  // would otherwise read every move as an added script.
+  const buttonActions = options.strictButtonActions
+    ? await listButtonInlineActions()
+    : await safely("button actions", listButtonInlineActions);
+  for (const action of buttonActions) {
+    units.push(buttonActionUnit(action));
   }
 
   // ---- Notebooks (Rust QuickJS; grid + JIT-granted BI reach) ---------------

@@ -15,7 +15,7 @@ import {
   type ObjectSelectionKey,
   type ObjectSelectionProvider,
 } from "@api/objectSelection";
-import { isPivotBoxMenuOpen } from "./pivotVisualMenuState";
+import { isPivotBoxMenuOpen, isPivotChromePressLive } from "./pivotVisualMenuState";
 import { canvasObjectRef } from "@api/canvasSheet";
 import {
   deselectPivotVisual,
@@ -55,10 +55,19 @@ export function createPivotVisualSelectionProvider(deps?: PivotVisualSelectionDe
 
     ownsKey(key: ObjectSelectionKey): boolean {
       // A box's right-click menu, while open, owns Escape: it closes itself
-      // (a document-capture listener). A canvas's Escape binding runs
-      // EARLIER, in the dispatcher's window-capture listener, and would
-      // otherwise deselect the box behind the open menu.
-      return key === "Escape" && isPivotBoxMenuOpen();
+      // (a document-capture listener). So does a held chrome press (a +/-, a
+      // filter button, Cancel): Escape cancels it (pivotChromePress.ts). A
+      // canvas's Escape binding runs EARLIER, in the dispatcher's
+      // window-capture listener, and would otherwise deselect the box behind
+      // the open menu or under the pointer.
+      //
+      // Delete / Backspace likewise (BUG-0270 review): the generic object
+      // Delete (ObjectPosition lib/selectedObjectKeys.ts) deletes a selected
+      // box -- the whole PivotTable -- and stands down only while a family
+      // owns the key. The menu takes no focus, so the grid keeps the keyboard
+      // while it is open: without this, Delete deleted the PivotTable behind
+      // the open menu (or under a held +/- press).
+      return (key === "Escape" || key === "Delete") && (isPivotBoxMenuOpen() || isPivotChromePressLive());
     },
 
     refOf(region: GridRegion) {

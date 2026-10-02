@@ -59,6 +59,8 @@ import {
   checkCellContextMenuInterceptors,
 } from "../../lib/cellContextMenuInterceptors";
 import { findFloatingRegionAt } from "../../hooks/useMouseSelection/layout/overlayMoveHandlers";
+import { clearFloatingHover } from "../../lib/objectHover";
+import { dispatchGripContextMenu, installObjectHoverUpkeep } from "../../lib/floatingGrip";
 import {
   gridCommands,
   isClickWithinSelection,
@@ -120,6 +122,7 @@ function SpreadsheetContent({
     handleMouseDown,
     handleMouseMove,
     handleMouseUp,
+    handleMouseLeave,
     handleDoubleClickEvent,
     handleContainerKeyDown,
     handleInlineValueChange,
@@ -1062,6 +1065,26 @@ function SpreadsheetContent({
       const mouseX = (event.clientX - rect.left) / z;
       const mouseY = (event.clientY - rect.top) / z;
 
+      // A right-click on a floating object's visible GRIP (core/lib/
+      // floatingGrip.ts) that no family claimed from its own capture-phase
+      // listener (a family that looks the point up through
+      // `topFloatingRegionAt` finds the grip's object and opens its own menu,
+      // caught by the defaultPrevented check above): the grip's menu, through
+      // the same event a left click on the grip dispatches (button 2). Never
+      // the cell menu of the cell under it.
+      if (
+        dispatchGripContextMenu(
+          mouseX,
+          mouseY,
+          { rowHeaderWidth: rowHeaderGutter(config), colHeaderHeight: colHeaderGutter(config) },
+          { scrollX: viewport.scrollX || 0, scrollY: viewport.scrollY || 0 },
+          z || 1,
+          rect,
+        )
+      ) {
+        return;
+      }
+
       // Check if right-click is on the corner (select-all area)
       const isCornerClick = mouseX < (rowHeaderGutter(config)) && mouseY < (colHeaderGutter(config));
 
@@ -1259,6 +1282,27 @@ function SpreadsheetContent({
     const y = Math.min(canvasScrollY, canvasMaxScrollY);
     if (x !== canvasScrollX || y !== canvasScrollY) dispatch(scrollToPosition(x, y));
   }, [isCanvasSurface, hasCanvasPage, canvasMaxScrollX, canvasMaxScrollY, canvasScrollX, canvasScrollY, dispatch]);
+
+  // -------------------------------------------------------------------------
+  // Core's floating-object HOVER (core/lib/objectHover.ts; BUG-0258 design
+  // phase 5). The hook's hover pass sets it on every grid-area mousemove; the
+  // grid area's mouseleave (onMouseLeave below) clears it. Three things move
+  // what is under a STILL pointer and send no mousemove, so they clear it
+  // here: a scroll, a sheet switch, and the hovered object leaving the
+  // published list (deleted, moved to another sheet, the list re-published
+  // without it). The next mousemove recomputes it.
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    clearFloatingHover();
+  }, [canvasScrollX, canvasScrollY]);
+  const activeSheetIndexForHover = gridState.sheetContext.activeSheetIndex;
+  useEffect(() => {
+    clearFloatingHover();
+  }, [activeSheetIndexForHover]);
+  // A grip that shows only on hover appears and goes with the hover, every grip
+  // hides during a Core move or resize (repaint on those changes, and only
+  // those), and a hovered object that is no longer published is not hovered.
+  useEffect(() => installObjectHoverUpkeep(), []);
 
   const handleHorizontalScroll = useCallback(
     (scrollX: number) => {
@@ -1539,6 +1583,7 @@ function SpreadsheetContent({
         onMouseDown={wrappedMouseDown}
         onMouseMove={wrappedMouseMove}
         onMouseUp={wrappedMouseUp}
+        onMouseLeave={handleMouseLeave}
         onDoubleClick={wrappedDoubleClick}
         style={effectiveCursor ? { cursor: effectiveCursor } : undefined}
         onWheel={handleWheel}

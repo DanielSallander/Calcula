@@ -18,16 +18,31 @@
 //          only while the selection spans families -- a single object, or
 //          several a family holds itself, stays with that family's own
 //          Delete.
+//
+//          CANVAS ONLY, by its OWN check: the seam's rule
+//          (`shouldActOnWholeObjectSelection`) answers on a worksheet too since
+//          worksheets gained press parity (BUG-0270 review). There the
+//          families' doors hand a spanning selection over themselves, and a
+//          selection of slicers and timelines -- no door of their own -- goes
+//          to the generic object Delete (ObjectPosition
+//          lib/selectedObjectKeys.ts), which also stands down while a family
+//          owns the key (an open menu, the keyboard inside).
 
 import { CommandRegistry } from "@api/commands";
 import { registerKeybinding, isGridFocused } from "@api/keybindings";
 import { deleteSelectedObjects, shouldActOnWholeObjectSelection } from "@api/objectSelection";
+import { getGridStateSnapshot } from "@api/grid";
 
 export const CANVAS_DELETE_SELECTION_COMMAND = "canvasSheet.deleteSelection";
 
+/** Whether the active sheet is a canvas (a page, not a worksheet). */
+function onCanvas(): boolean {
+  return getGridStateSnapshot()?.surface === "canvas";
+}
+
 /** The binding's guard (exported for tests). */
 export function canvasDeleteApplies(): boolean {
-  return isGridFocused() && shouldActOnWholeObjectSelection();
+  return onCanvas() && isGridFocused() && shouldActOnWholeObjectSelection();
 }
 
 /** Register the command and its Delete / Backspace bindings; returns the cleanups. */
@@ -35,8 +50,9 @@ export function installCanvasObjectDelete(extensionId: string): Array<() => void
   const cleanups: Array<() => void> = [];
   CommandRegistry.register(CANVAS_DELETE_SELECTION_COMMAND, () => {
     // Re-checked at run time: the palette or a script may execute it -- on a
-    // worksheet too, where each family keeps its own Delete.
-    if (!shouldActOnWholeObjectSelection()) return;
+    // worksheet too, where the families' doors and the generic object Delete
+    // answer instead.
+    if (!onCanvas() || !shouldActOnWholeObjectSelection()) return;
     void deleteSelectedObjects();
   });
   cleanups.push(() => CommandRegistry.unregister(CANVAS_DELETE_SELECTION_COMMAND));

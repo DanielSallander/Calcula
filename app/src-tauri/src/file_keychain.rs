@@ -23,7 +23,7 @@ const TARGET_PREFIX: &str = "Calcula:wbpw|";
 /// Build a Credential Manager target name from a workbook path. The path is
 /// canonicalized (best effort) and lower-cased so the key is stable across the
 /// casing/short-path variations Windows hands us for the same file.
-fn make_target(path: &str) -> String {
+pub(crate) fn make_target(path: &str) -> String {
     let canon = std::fs::canonicalize(path)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| path.to_string());

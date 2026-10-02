@@ -77,7 +77,7 @@ function activate(context: ExtensionContext): void {
     type: REGION_TYPE,
     render: renderFilterChevrons,
     hitTest: hitTestFilterChevron,
-    getCursor: getFilterChevronCursor,
+    getCellCursor: getFilterChevronCursor,
     priority: 20, // Above tables and pivots
   } as OverlayRegistration);
   cleanupFns.push(unregOverlay);
@@ -174,7 +174,7 @@ function activate(context: ExtensionContext): void {
   context.commands.register(AUTOFILTER_TOGGLE_COMMAND, () => toggleFilter());
   cleanupFns.push(() => context.commands.unregister(AUTOFILTER_TOGGLE_COMMAND));
 
-  // 6. Cursor change on chevron hover is handled by getCursor in the overlay registration
+  // 6. Cursor change on chevron hover is handled by getCellCursor in the overlay registration
 
   // 6b. Listen for filter button clicks from the column header area
   // (dispatched by the Table extension when the table header row is scrolled out of view)

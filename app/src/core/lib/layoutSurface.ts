@@ -310,15 +310,3 @@ export function applySurfaceToResize(
   }
   return clampResizeToPage(out, edges, surface.page, minSize);
 }
-
-/** The dragged edges of a corner resize. */
-export function edgesOfCorner(
-  corner: "top-left" | "top-right" | "bottom-left" | "bottom-right",
-): DraggedEdges {
-  return {
-    left: corner === "top-left" || corner === "bottom-left",
-    right: corner === "top-right" || corner === "bottom-right",
-    top: corner === "top-left" || corner === "top-right",
-    bottom: corner === "bottom-left" || corner === "bottom-right",
-  };
-}

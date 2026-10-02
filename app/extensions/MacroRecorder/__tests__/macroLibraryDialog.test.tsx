@@ -142,6 +142,7 @@ vi.mock("@api/buttonControlService", () => ({
 
 import { MacroLibraryDialog } from "../components/MacroLibraryDialog";
 import { buildMacroDescription } from "../lib/macroLibrary";
+import { claimExplicitMacroRun } from "@api/explicitMacroRun";
 import {
   registerScriptEditorProvider,
   resetScriptEditorProvider,
@@ -477,6 +478,53 @@ describe("MacroLibraryDialog provenance", () => {
       accessLevel: "restricted",
       scriptId: OBJECT_SCRIPT_MACRO.id,
     });
+  });
+
+  // OWNER DECISION B (2026-09-30): this click is the person's, so it carries a
+  // pass -- and only this click's run can spend it.
+  // SABOTAGE: remove the `explicitRun:` line from the dialog's run -> the run
+  // carries no pass and this goes red (as does the explicitMacroRun census).
+  it("Run hands the run a one-time pass from the Macros dialog, for exactly this macro", async () => {
+    store.set(OBJECT_SCRIPT_MACRO.id, {
+      ...OBJECT_SCRIPT_MACRO,
+      sourcePackage: "Acme Finance Pack",
+    });
+    await render();
+    await selectFirstRow();
+
+    await press(buttonNamed("Run (object script)")!);
+
+    expect(runOnce).toHaveBeenCalledTimes(1);
+    const { explicitRun } = runOnce.mock.calls[0][0] as { explicitRun?: unknown };
+    expect(explicitRun, "the Macros dialog's Run carried no pass").toBeDefined();
+    expect(claimExplicitMacroRun(explicitRun)).toEqual({
+      door: "macrosDialog",
+      macroId: OBJECT_SCRIPT_MACRO.id,
+    });
+    // One run, one use.
+    expect(claimExplicitMacroRun(explicitRun)).toBeNull();
+  });
+
+  it("the note beside Run says what running it HERE allows, and what it does not", async () => {
+    store.set(OBJECT_SCRIPT_MACRO.id, {
+      ...OBJECT_SCRIPT_MACRO,
+      sourcePackage: "Acme Finance Pack",
+    });
+    await render();
+    await selectFirstRow();
+
+    const note = container.querySelector("[data-macro-provenance]")!;
+    expect(note.textContent).toMatch(
+      /When you run it yourself from Developer ▸ Macros ▸ Run, by clicking a button that runs it, or from the command line/,
+    );
+    expect(note.textContent).toMatch(/read and change cells on any sheet/);
+    expect(note.textContent).toMatch(/filling a range also copies the formatting of the cells it fills from/);
+    expect(note.textContent).toMatch(/no other formatting, no sheet structure, no files/);
+    expect(note.textContent).toMatch(
+      /Started any other way -- by another script, for example -- it has only what every restricted script has: the sheet on screen/,
+    );
+    const routeNote = container.querySelector("[data-macro-run-route]")!;
+    expect(routeNote.textContent).toMatch(/run from here, it may also read and change cells on any sheet/);
   });
 });
 

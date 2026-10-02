@@ -8,7 +8,10 @@
 //          - an item runs with that context; a sub-menu opens on hover;
 //          - an object ON TOP of the box keeps its own menu (not claimed);
 //          - while the menu is open it owns Escape (the canvas's Escape binding
-//            asks first), and Escape closes it.
+//            asks first), and Escape closes it;
+//          - under the pivot's items, the "Size and Position..." row every
+//            object menu carries (BUG-0258 phase 5b): it opens the dialog for
+//            the BOX's region, and is greyed when nothing can open one.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -78,6 +81,7 @@ import { resetObjectSelectionProviders, objectOwnsKey } from "@api/objectSelecti
 import { resetSelectionHandlerState } from "../../handlers/selectionHandler";
 import { closePivotBoxMenu } from "../pivotVisualContextMenu";
 import { buildPivotVisualGeometry } from "../../rendering/pivotVisualRenderer";
+import { registerSizeAndPositionOpener, resetObjectPosition, SIZE_AND_POSITION_LABEL } from "@api/objectPosition";
 import { DEFAULT_PIVOT_THEME } from "../../rendering/pivot";
 import type { PivotViewResponse } from "../pivot-api";
 
@@ -160,6 +164,7 @@ beforeEach(() => {
   resetSelectionHandlerState();
   resetPivotVisualRegionState();
   resetPivotVisualHits();
+  resetObjectPosition();
   cleanups = installPivotVisual({ getTheme: () => DEFAULT_PIVOT_THEME }, () => () => undefined);
   paintedBox();
 });
@@ -177,7 +182,7 @@ describe("a canvas pivot box's right-click menu", () => {
     const e = rightClick(250, 110);
 
     expect(e.defaultPrevented, "the grid's own menu handler must stand down").toBe(true);
-    expect(menuRows().map((r) => r.textContent)).toEqual(["Refresh", "Sort>"]);
+    expect(menuRows().map((r) => r.textContent)).toEqual(["Refresh", "Sort>", SIZE_AND_POSITION_LABEL]);
     expect(h.contexts[0]).toMatchObject({
       clickedCell: { row: 6, col: 1025 },
       selection: { startRow: 6, startCol: 1025, endRow: 6, endCol: 1025, type: "cells" },
@@ -219,6 +224,34 @@ describe("a canvas pivot box's right-click menu", () => {
     rightClick(550, 110);
     expect(h.contexts[0]).toMatchObject({ clickedCell: { row: 0, col: 1024 } });
     expect(menuRows().length, "the pivot menu still opens").toBeGreaterThan(0);
+  });
+
+  it("Size and Position... opens the dialog for the BOX's region (BUG-0258 phase 5b)", async () => {
+    const box = { ...BOX_REGION, floating: { x: 100, y: 80, width: 300, height: 200 } };
+    h.top = box;
+    const opened: Array<{ id: string }> = [];
+    cleanups.push(registerSizeAndPositionOpener((region) => opened.push(region)));
+    rightClick(250, 110);
+    const row = menuRows().find((r) => r.textContent === SIZE_AND_POSITION_LABEL);
+    expect(row, "the box menu has no Size and Position row").toBeTruthy();
+    expect(row!.getAttribute("aria-disabled")).toBe("false");
+    expect(row!.dataset.itemId).toBe("pivot.box.sizeAndPosition");
+    row!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(opened.map((r) => r.id)).toEqual([box.id]);
+    expect(h.clicked, "no pivot item ran").toEqual([]);
+    expect(document.querySelector("[data-pivot-box-menu]"), "a click closes the menu").toBeNull();
+  });
+
+  it("with no dialog installed the row is there, greyed, and runs nothing", async () => {
+    h.top = { ...BOX_REGION, floating: { x: 100, y: 80, width: 300, height: 200 } };
+    rightClick(250, 110);
+    const row = menuRows().find((r) => r.textContent === SIZE_AND_POSITION_LABEL);
+    expect(row!.getAttribute("aria-disabled")).toBe("true");
+    row!.click();
+    await Promise.resolve();
+    expect(document.querySelector("[data-pivot-box-menu]"), "a greyed row does not close the menu").not.toBeNull();
   });
 
   it("owns Escape while open (the canvas's Escape binding asks first), and Escape closes it", () => {

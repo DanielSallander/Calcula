@@ -48,10 +48,8 @@ import {
   deleteTimelineAsync,
   commitTimelineGeometryAsync,
   updateTimelineSelectionAsync,
-  getCachedTimelineData,
   updateCachedTimelinePosition,
   updateCachedTimelineBounds,
-  refreshTimelineData,
   refreshCacheAndReconcile,
   isTimelineGestureLanding,
   type TimelineGeometryWrite,
@@ -63,26 +61,33 @@ import {
 } from "@api/objectGeometry";
 import { createTimelineGeometryProvider } from "./lib/timelineGeometry";
 
+import { renderTimelineSlicer, hitTestTimeline } from "./rendering/timelineSlicerRenderer";
 import {
-  renderTimelineSlicer,
-  hitTestTimeline,
-  getTimelineHitDetail,
-  getTimelineCursor,
   getScrollOffset,
   setScrollOffset,
   getMaxScrollOffset,
   resetScrollOffsets,
-} from "./rendering/timelineSlicerRenderer";
+  timelineOverlayZoneAt,
+} from "./lib/timelineView";
+import {
+  beginTimelineContentPress,
+  resetTimelineContentPress,
+} from "./lib/timelineRangeDrag";
 import { timelineBackend } from "./lib/timelineBackend";
 import { TimelineSlicerEvents } from "./lib/timelineSlicerEvents";
-import type { TimelineLevel } from "./lib/timelineSlicerTypes";
 import {
   armPendingTimelineClick,
   clearPendingTimelineClick,
   takePendingTimelineClick,
 } from "./lib/timelinePendingClick";
 import { registerTimelineObjectSelection } from "./lib/timelineObjectSelection";
-import { timelineAtCanvasPoint, timelineCanvasBounds } from "./lib/timelineCanvasGeometry";
+import { installTimelineKeys } from "./lib/timelineKeys";
+import { leaveTimelineKeyFocus } from "./lib/timelineKeyFocus";
+import {
+  clientToTimelineCanvas,
+  timelineAtCanvasPoint,
+  timelineCanvasBounds,
+} from "./lib/timelineCanvasGeometry";
 
 // ============================================================================
 // Module State
@@ -90,10 +95,10 @@ import { timelineAtCanvasPoint, timelineCanvasBounds } from "./lib/timelineCanva
 
 let cleanupFunctions: Array<() => void> = [];
 let gridContainer: HTMLElement | null = null;
-// The pending click (armed on floatingObject:selected, consumed on mouseup)
-// lives in lib/timelinePendingClick.ts, so the rule that only a real mouse
-// press may arm it is testable.
-let lastMousedownCtrl = false;
+// The pending click (armed on floatingObject:selected, consumed by that
+// press's mouseup or taken by a content press on bodyDragStart) lives in
+// lib/timelinePendingClick.ts, so the rule that only a real mouse press may
+// arm it is testable.
 let dragStartPositions: Map<string, { x: number; y: number }> | null = null;
 
 // ============================================================================
@@ -143,7 +148,15 @@ function activate(context: ExtensionContext): void {
   context.ui.dialogs.register(InsertTimelineDialogDefinition);
   context.ui.dialogs.register(TimelineSettingsDialogDefinition);
 
-  // Register grid overlay renderer
+  // Register grid overlay renderer. Its `zoneAt` is the ONE answer Core
+  // derives the press, the pointer and the meaning of Ctrl/Shift from
+  // (lib/timelineView.ts over the zone table in lib/timelineZones.ts): the
+  // month tiles, the range-end markers, the clear and level buttons and the
+  // scrollbar are CONTENT -- Core selects the timeline as a plain press, hands
+  // the press to `floatingObject:bodyDragStart` below and never moves it --
+  // while the header, the year-label strip and the empty space are FRAME,
+  // where Core moves the timeline (Core's 'move' pointer) unless it is locked
+  // or on a subscribed page ('default') (BUG-0258).
   cleanupFunctions.push(
     context.grid.overlays.register({
       type: "timeline-slicer",
@@ -151,15 +164,28 @@ function activate(context: ExtensionContext): void {
         renderTimelineSlicer(ctx);
       },
       hitTest: hitTestTimeline,
-      getCursor: getTimelineCursor,
+      zoneAt: timelineOverlayZoneAt,
       priority: 16, // Above slicers
     }),
   );
+
+  // No resize-flag resync: Core's selection handles are live only on a
+  // SELECTED timeline and only where Core paints them (core/lib/
+  // floatingHandles.ts), so an unselected timeline's months never lose a press
+  // to a corner nobody can see (BUG-0258 design phase 3).
 
   // Keyboard / programmatic selection (@api/objectSelection): a canvas sheet's
   // Tab cycling selects timelines through this, never through the mouse route
   // below, which arms a pending click the next mouseup anywhere would complete.
   cleanupFunctions.push(registerTimelineObjectSelection());
+
+  // The keyboard INSIDE a selected timeline (M8 S8, lib/timelineKeys.ts):
+  // Enter goes in, Left / Right move a focus ring between the periods,
+  // Shift+arrows preview a range, Enter or Space commits it as ONE undo step,
+  // Escape drops the preview and then leaves. One window-capture keydown for
+  // the extension's life; it claims nothing until Enter went in (except Alt+C
+  // on a single selected, filtered timeline).
+  cleanupFunctions.push(installTimelineKeys());
 
   // Move / resize timelines WITHOUT a pointer gesture (@api/objectGeometry):
   // the canvas's align, distribute, nudge and group drag.
@@ -173,12 +199,33 @@ function activate(context: ExtensionContext): void {
   // Floating object events (selection, move, resize)
   // -----------------------------------------------------------------------
 
-  const handleMousedownModifiers = (e: MouseEvent) => {
-    lastMousedownCtrl = e.ctrlKey || e.metaKey;
+  // Ctrl comes from Core's press (`floatingObject:selected` detail.ctrlKey),
+  // never from a capture mousedown of our own: Core zeroes it on the CONTENT
+  // -- Ctrl/Shift there are the content's -- so a Ctrl or Shift press on the
+  // month tiles never toggles the timeline out of the selection.
+
+  // Mouseup: complete a click on the FRAME. Bound by the press that arms the
+  // pending click (handleFloatingSelected, below) and unbound by the first
+  // mouseup after it -- that press's own release -- so it lives exactly as
+  // long as the press it completes (the census in
+  // core/lib/globalInputListeners.ts calls it session-scoped, and that is a
+  // claim about its lifetime). The frame does nothing on a click but select
+  // the timeline -- which the press already did -- so all that is left is
+  // narrowing a kept multi-selection to the timeline pressed. Every period,
+  // range-end and button click is the content gesture's (bodyDragStart
+  // below, which TAKES the pending click), and a frame drag is Core's move,
+  // which clears it (moveComplete).
+  const handleMouseUp = () => {
+    window.removeEventListener("mouseup", handleMouseUp);
+    const pendingClick = takePendingTimelineClick();
+    if (!pendingClick) return;
+    dragStartPositions = null;
+    if (pendingClick.deferNarrow) {
+      selectTimeline(pendingClick.timelineId, false);
+    }
   };
-  window.addEventListener("mousedown", handleMousedownModifiers, true);
   cleanupFunctions.push(() => {
-    window.removeEventListener("mousedown", handleMousedownModifiers, true);
+    window.removeEventListener("mouseup", handleMouseUp);
   });
 
   // Handle floating object selection
@@ -191,11 +238,13 @@ function activate(context: ExtensionContext): void {
 
     const alreadySelected = isTimelineSelected(timelineId);
     const wasMultiSelected = getSelectedTimelineIds().size > 1;
+    // The OBJECT-selection Ctrl: Core's, false on a content press.
+    const ctrl = detail.ctrlKey === true;
 
-    if (alreadySelected && wasMultiSelected && !lastMousedownCtrl) {
+    if (alreadySelected && wasMultiSelected && !ctrl) {
       broadcastSelectedTimelines();
     } else {
-      selectTimeline(timelineId, lastMousedownCtrl);
+      selectTimeline(timelineId, ctrl);
     }
 
     // Snapshot positions for multi-move
@@ -205,10 +254,19 @@ function activate(context: ExtensionContext): void {
       if (t) dragStartPositions.set(id, { x: t.x, y: t.y });
     }
 
+    // A press on the object's GRIP (Core's chrome, BUG-0258 design phase 5) is
+    // a frame press that never acts: it selects and may move the timeline,
+    // and its click opens the grip's menu -- no pending click, nothing
+    // narrowed here (the Slicer's rule).
+    if (detail.part === "grip") return;
+
     armPendingTimelineClick({
       timelineId,
-      deferNarrow: alreadySelected && wasMultiSelected && !lastMousedownCtrl,
+      deferNarrow: alreadySelected && wasMultiSelected && !ctrl,
     });
+    // For THIS press only: its release completes the click and unbinds.
+    // (Binding the same listener twice is a no-op.)
+    window.addEventListener("mouseup", handleMouseUp);
   };
   window.addEventListener("floatingObject:selected", handleFloatingSelected);
   cleanupFunctions.push(() => {
@@ -345,46 +403,57 @@ function activate(context: ExtensionContext): void {
   });
 
   // -----------------------------------------------------------------------
-  // Mouseup handler: process deferred clicks (period selection, level buttons)
+  // Content press: a range drag, a button, the scrollbar (BUG-0258)
   // -----------------------------------------------------------------------
 
-  const handleMouseUp = (e: MouseEvent) => {
-    const pendingClick = takePendingTimelineClick();
-    if (!pendingClick) return;
+  // Core dispatches this for a press the registration's `zoneAt` answered
+  // CONTENT -- after the press selected the timeline (a plain press: the
+  // modifiers are the content's) and whatever the lock or the subscription,
+  // so a locked timeline and a subscribed canvas page still filter (owner
+  // decision 2026-09-29). The chart brush's shape (Charts/index.ts): the
+  // press is the content's, so the pending click it armed is TAKEN here --
+  // its mouseup must not also be read as a click on the frame -- and a kept
+  // multi-selection it deferred still narrows, at the release. The RAW Shift
+  // arrives here, and only here: it extends the range. lib/timelineRangeDrag.ts
+  // owns the rest: its window listeners live only while the gesture does,
+  // and it commits ONCE, at release.
+  const handleBodyDragStart = (e: Event) => {
+    const detail = (e as CustomEvent).detail as {
+      regionId?: unknown;
+      regionType?: string;
+      data?: { timelineId?: unknown };
+      canvasX?: number;
+      canvasY?: number;
+      shiftKey?: unknown;
+    };
+    if (detail?.regionType !== "timeline-slicer") return;
+    const timelineId = detail.data?.timelineId;
+    if (typeof timelineId !== "string" || timelineId.length === 0) return;
+    if (typeof detail.regionId !== "string" || detail.regionId.length === 0) return;
+    if (typeof detail.canvasX !== "number" || typeof detail.canvasY !== "number") return;
 
-    const { timelineId, deferNarrow } = pendingClick;
+    const pending = takePendingTimelineClick();
     dragStartPositions = null;
+    const narrow = pending?.timelineId === timelineId && pending.deferNarrow === true;
 
-    if (deferNarrow) {
-      selectTimeline(timelineId, false);
-    }
-
-    if (!gridContainer) {
-      gridContainer = document.querySelector("[data-grid-area]") as HTMLElement | null;
-    }
-    if (!gridContainer) return;
-
-    const rect = gridContainer.getBoundingClientRect();
-    const gridState = getGridStateSnapshot();
-    const zoom = gridState?.zoom ?? 1.0;
-    const canvasX = (e.clientX - rect.left) / zoom;
-    const canvasY = (e.clientY - rect.top) / zoom;
-
-    handleTimelineClickAt(timelineId, canvasX, canvasY);
+    beginTimelineContentPress({
+      timelineId,
+      regionId: detail.regionId,
+      canvasX: detail.canvasX,
+      canvasY: detail.canvasY,
+      extend: detail.shiftKey === true,
+      boundsOf: () => {
+        const tl = getTimelineById(timelineId);
+        return tl ? timelineCanvasBounds(tl) : null;
+      },
+      clientToCanvas: clientToTimelineCanvas,
+      onRelease: narrow ? () => selectTimeline(timelineId, false) : undefined,
+    });
   };
-  window.addEventListener("mouseup", handleMouseUp);
+  window.addEventListener("floatingObject:bodyDragStart", handleBodyDragStart);
   cleanupFunctions.push(() => {
-    window.removeEventListener("mouseup", handleMouseUp);
+    window.removeEventListener("floatingObject:bodyDragStart", handleBodyDragStart);
   });
-
-  // No period DRAG. A period is selected by the pending click, which completes
-  // on MOUSEUP -- and it used to arm a "range drag" right there, with no
-  // button held: hovering afterwards grew the selection, and the NEXT mouseup
-  // anywhere (a click on a cell) committed it -- re-applying a period the user
-  // had just undone (found live 2026-09-29, e2e fixall-pivot WF-D3). A press
-  // on a timeline is Core's floating-object press (select, and move on drag),
-  // so a drag-to-select range needs Core to leave the period strip to the
-  // timeline first; recorded in docs/design/open-items.md.
 
   // -----------------------------------------------------------------------
   // Context menu
@@ -460,6 +529,8 @@ function activate(context: ExtensionContext): void {
 
   cleanupFunctions.push(
     context.events.on(AppEvents.SHEET_CHANGED, () => {
+      // The keyboard leaves a timeline the sheet switch took off screen.
+      leaveTimelineKeyFocus();
       refreshCache().catch(console.error);
     }),
   );
@@ -564,6 +635,7 @@ function deactivate(): void {
   closeTimelineContextMenu();
   resetStore();
   resetScrollOffsets();
+  resetTimelineContentPress();
   gridContainer = null;
   clearPendingTimelineClick();
   dragStartPositions = null;
@@ -572,71 +644,6 @@ function deactivate(): void {
   ExtensionRegistry.unregisterAddIn(TimelineSlicerManifest.id);
 
   console.log("[TimelineSlicer Extension] Unregistered");
-}
-
-// ============================================================================
-// Internal: Timeline Click Handling
-// ============================================================================
-
-function handleTimelineClickAt(
-  timelineId: string,
-  canvasX: number,
-  canvasY: number,
-): void {
-  const tl = getTimelineById(timelineId);
-  if (!tl) return;
-
-  // Timeline sheet-space position -> canvas space, with the gutters Core
-  // PAINTED (a canvas shows none; the stored config still says 22 x 20).
-  const bounds = timelineCanvasBounds(tl);
-  if (!bounds) return;
-
-  const hit = getTimelineHitDetail(canvasX, canvasY, bounds, timelineId);
-  if (!hit) return;
-
-  switch (hit.type) {
-    case "clearButton":
-      if (tl.selectionStart !== null) {
-        updateTimelineSelectionAsync(timelineId, null, null, { askBeforeOverwrite: true }).catch(console.error);
-      }
-      break;
-
-    case "levelButton":
-      if (hit.level) {
-        import("./lib/timelineSlicerStore").then(({ updateTimelineAsync }) => {
-          updateTimelineAsync(timelineId, { level: hit.level }).then(() => {
-            requestOverlayRedraw();
-          }).catch(console.error);
-        });
-      }
-      break;
-
-    case "period":
-      if (hit.periodIndex != null) {
-        handlePeriodClick(timelineId, hit.periodIndex);
-      }
-      break;
-
-    case "header":
-    case "body":
-      break;
-  }
-}
-
-function handlePeriodClick(timelineId: string, periodIndex: number): void {
-  const data = getCachedTimelineData(timelineId);
-  if (!data || periodIndex >= data.periods.length) return;
-
-  const period = data.periods[periodIndex];
-
-  // Single-period selection -- and NO drag state: this runs on the mouseup
-  // that completed the click (see the note where the mousemove handler was).
-  updateTimelineSelectionAsync(
-    timelineId,
-    period.startDate,
-    period.endDate,
-    { askBeforeOverwrite: true },
-  ).catch(console.error);
 }
 
 // ============================================================================

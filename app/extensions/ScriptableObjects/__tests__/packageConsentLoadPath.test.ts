@@ -25,15 +25,16 @@
 // WHY THIS SUITE ACTIVATES THE REAL EXTENSION. The failure modes are "no event
 // was emitted" and "a check was skipped", which no assertion on a helper can
 // see. So the extension is activated against mocked collaborators and a REAL
-// consent store over an in-memory virtual filesystem (the technique
-// packageMacroConsent.test.ts established), and the suite asserts on the events
-// the load path emits and the JSON bytes Rust reads.
+// consent store (@api/distributedConsent) over the shared double of its two
+// Rust commands (src/api/__tests__/helpers/consentStoreDouble), and the suite
+// asserts on the events the load path emits and on what Rust recorded.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { ExtensionContext } from "@api/contract";
 // NOT mocked: the placeholder spelling and the origin derivation are the very
 // things under test, so they are read from the module that owns them.
 import { scriptOriginForMount } from "@api/scriptHost/scriptOrigin";
+import { createConsentStoreDouble } from "../../../src/api/__tests__/helpers/consentStoreDouble";
 
 // ===========================================================================
 // The workbook's stores, as the load path sees them
@@ -61,8 +62,8 @@ interface FakeModuleRecord {
   loadError: string | null;
 }
 
-/** The consent store's file system. */
-const files = new Map<string, string>();
+/** The consent store: the double of `list_script_consents` / `record_script_consent`. */
+const consentStore = createConsentStoreDouble();
 let objectScripts: FakeObjectScript[] = [];
 let moduleRecords: FakeModuleRecord[] = [];
 let moduleListingThrows: Error | null = null;
@@ -89,6 +90,31 @@ const pendingHandlers: Array<Promise<unknown>> = [];
 /** Every toast the extension raised, in order. */
 const toasts: string[] = [];
 
+/** What the backend lists as the buttons that run each macro id (phase 3). */
+const buttonsByMacro = new Map<string, Array<Record<string, unknown>>>();
+
+/**
+ * The workbook's CONTROLS by sheet index, as `get_all_controls` returns them
+ * (M6, phase 4): a held inline `onSelect` is an approval item, listed by the
+ * REAL @api/heldButtonCode walk over these rows.
+ */
+const controlsBySheet = new Map<number, Array<Record<string, unknown>>>();
+/** When set, the workbook's control listing FAILS. */
+let controlListingThrows: Error | null = null;
+
+/** The workbook-listing commands the button-code walk asks (consent goes to the double). */
+async function workbookBackend(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
+  if (cmd === "get_sheets") {
+    return { sheets: [{ index: 0, name: "Sheet1" }, { index: 1, name: "Dashboard" }] };
+  }
+  if (cmd === "get_all_controls") {
+    if (controlListingThrows) throw controlListingThrows;
+    return controlsBySheet.get(Number(args?.sheetIndex)) ?? [];
+  }
+  if (cmd === "get_all_cell_types") return [];
+  throw new Error(`packageConsentLoadPath: no answer for backend command "${cmd}"`);
+}
+
 // ===========================================================================
 // Mocks
 // ===========================================================================
@@ -103,14 +129,8 @@ const toasts: string[] = [];
 /* eslint-disable @typescript-eslint/naming-convention -- the doubles must match the real export names */
 
 vi.mock("@api/backend", () => ({
-  readVirtualFile: async (p: string) => {
-    const v = files.get(p);
-    if (v === undefined) throw new Error("not found");
-    return v;
-  },
-  createVirtualFile: async (p: string, content: string) => {
-    files.set(p, content);
-  },
+  invokeBackend: (cmd: string, args?: Record<string, unknown>) =>
+    consentStore.handles(cmd) ? consentStore.invoke(cmd, args) : workbookBackend(cmd, args),
 }));
 
 vi.mock("@api", async () => {
@@ -209,6 +229,15 @@ vi.mock("@api/events", () => ({
 
 vi.mock("@api/scriptSecurity", () => ({
   ensureScriptsAllowed: async () => true,
+}));
+
+// Phase 3 of BUG-0257: the buttons that run each macro, as the backend lists
+// them (`list_controls_referencing_macro`) -- the rows of every application
+// and of the user's own, for the emitter to filter. The real listing helpers,
+// with only the listing call doubled.
+vi.mock("@api/heldButtonCode", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@api/heldButtonCode")>()),
+  listButtonsRunningMacro: async (macroId: string) => buttonsByMacro.get(macroId) ?? [],
 }));
 
 vi.mock("@api/scriptHost/host", () => ({
@@ -327,7 +356,6 @@ vi.mock("../components/ScriptMarketplace", () => ({ default: () => null }));
 // Harness
 // ===========================================================================
 
-const CONSENT_FILE = ".calcula/script-consent.json";
 const CONSENT_NEEDED = "scriptable-objects:consent-needed";
 const PKG = "Quarterly Reports";
 
@@ -427,36 +455,27 @@ async function allowWithStalePrompt(
 }
 
 /**
- * `consent_granted_in` (app/src-tauri/src/calp_commands.rs), over the SAME JSON
- * Rust parses: a record under this application key naming this artifact id with
- * this exact source hash. Asserting through the file rather than through the
- * TypeScript helpers is the point — the backend is what refuses, and it reads
- * the bytes, not our types.
+ * `consent_granted_in` (app/src-tauri/src/calp_commands.rs), over what Rust
+ * RECORDED: a record under this application key naming this artifact id with
+ * this exact source hash, hashed by the double with node:crypto. Asserting
+ * through the store rather than through the TypeScript helpers is the point —
+ * the backend is what refuses, and it reads its own record, not our types.
  */
 async function consentGrantedIn(
   packageKey: string,
   scriptId: string,
   source: string,
 ): Promise<boolean> {
-  const raw = files.get(CONSENT_FILE);
-  if (raw === undefined) return false;
-  const { sha256Hex } = await import("@api/distributedConsent");
-  const hash = await sha256Hex(source);
-  const parsed = JSON.parse(raw) as {
-    consents?: Array<{
-      packageName?: string;
-      scripts?: Array<{ id?: string; sourceHash?: string }>;
-    }>;
-  };
-  return (parsed.consents ?? []).some(
-    (r) =>
-      r.packageName === packageKey &&
-      (r.scripts ?? []).some((s) => s.id === scriptId && s.sourceHash === hash),
-  );
+  return consentStore.grantedIn(packageKey, scriptId, source);
+}
+
+/** Nothing was recorded, and nothing was even SENT to Rust to record. */
+function nothingRecorded(): unknown[] {
+  return [...consentStore.records(), ...consentStore.requests];
 }
 
 beforeEach(() => {
-  files.clear();
+  consentStore.reset();
   objectScripts = [];
   moduleRecords = [];
   moduleListingThrows = null;
@@ -467,6 +486,9 @@ beforeEach(() => {
   emittedEvents.length = 0;
   pendingHandlers.length = 0;
   toasts.length = 0;
+  buttonsByMacro.clear();
+  controlsBySheet.clear();
+  controlListingThrows = null;
 });
 
 afterEach(() => {
@@ -500,6 +522,68 @@ describe("an application that ships only macros is still offered for approval", 
     // The ids travel too, so the prompt's Inspect affordance has something to
     // open when there is no object script to open.
     expect(prompt!.moduleScriptIds).toEqual(["macro-month-end"]);
+  });
+
+  // OWNER DECISION B, follow-up F4: a macro WRITTEN AS AN OBJECT SCRIPT does
+  // not run in the interpreter the macro paragraph describes, and a run you
+  // start may change the cells of any sheet -- so the screen must know which
+  // macros those are, by the same runtime marker the run routes read.
+  // SABOTAGE: drop `objectScriptMacroIds` from the SCRIPT_CONSENT_NEEDED payload
+  // (ScriptableObjects/index.ts) -> undefined, and the screen says nothing of it.
+  it("names which macros are written as object scripts, by the runtime marker the run routes read", async () => {
+    moduleRecords = [
+      moduleRecord({ id: "macro-month-end", name: "Month end", description: "Recorded macro · runtime=objectScript · 2 actions" }),
+      moduleRecord({ id: "macro-report", name: "Report", description: "Recorded macro · runtime=notebook · 1 action" }),
+      moduleRecord({ id: "macro-plain", name: "Plain", description: null }),
+    ];
+    await activateFreshExtension();
+    const prompt = promptFor(PKG);
+    expect(prompt!.moduleScriptIds).toEqual(["macro-month-end", "macro-plain", "macro-report"]);
+    expect(prompt!.objectScriptMacroIds).toEqual(["macro-month-end"]);
+  });
+
+  // Phase 3 of BUG-0257: the screen names the buttons Allow arms -- only THIS
+  // application's (its stamp), never another application's button on the same
+  // macro id, never one of the user's own.
+  //
+  // SABOTAGE: drop `macroButtons,` from the SCRIPT_CONSENT_NEEDED payload in
+  // emitPackageConsentPrompt (ScriptableObjects/index.ts).
+  it("lists, under each macro, the buttons of THIS application that run it", async () => {
+    moduleRecords = [moduleRecord()];
+    const at = (row: number, application: string | null, caption: string) => ({
+      sheetIndex: 1,
+      sheetName: "Dashboard",
+      row,
+      col: 1,
+      heldBy: application,
+      kind: "control",
+      caption,
+      application,
+    });
+    buttonsByMacro.set("macro-month-end", [
+      at(1, PKG, "Close the month"),
+      at(5, "Someone Else", "Theirs"),
+      at(6, null, "Mine"),
+    ]);
+
+    await activateFreshExtension();
+
+    expect(promptFor(PKG)!.macroButtons).toEqual({
+      "macro-month-end": [{ cell: "Dashboard!B2", caption: "Close the month", kind: "control" }],
+    });
+  });
+
+  // plan_M8 S3: the payload always carries the command-button lists (the full
+  // command rule is consentButtonCommands.test.tsx); an application with no
+  // command buttons lists none, and its Allow writes no command record.
+  it("carries commandButtons and commandsWontRun, empty for an application without command buttons", async () => {
+    moduleRecords = [moduleRecord()];
+    await activateFreshExtension();
+    const prompt = promptFor(PKG)!;
+    expect(prompt.commandButtons).toEqual([]);
+    expect(prompt.commandsWontRun).toEqual([]);
+    await allow(PKG);
+    expect(consentStore.records().map((r) => r.packageName)).toEqual([PKG]);
   });
 
   it("...and allowing writes the record the Rust module gate reads", async () => {
@@ -673,7 +757,7 @@ describe("the prompt and the recorder agree on the application's name", () => {
     await activateFreshExtension();
     await allow(SPACED);
 
-    const record = JSON.parse(files.get(CONSENT_FILE)!) as {
+    const record = { consents: consentStore.records() } as {
       consents: Array<{ packageName: string }>;
     };
     expect(record.consents.map((c) => c.packageName)).toEqual([
@@ -782,7 +866,7 @@ describe("a grant is tied to the screen that produced it", () => {
     await activateFreshExtension();
     await allow(PKG);
 
-    const record = JSON.parse(files.get(CONSENT_FILE)!) as {
+    const record = { consents: consentStore.records() } as {
       consents: Array<{ packageName: string; scripts: Array<{ id: string }> }>;
     };
     const prompt = lastPromptFor(PKG);
@@ -815,10 +899,10 @@ describe("a grant is tied to the screen that produced it", () => {
     await allowWithStalePrompt(PKG, stale);
 
     expect(
-      files.get(CONSENT_FILE),
+      nothingRecorded(),
       "the grant was applied to a set the screen never showed — 'wipeEverything();' " +
         "was approved by a click on a screen that never named it",
-    ).toBeUndefined();
+    ).toEqual([]);
     expect(
       consentPrompts().length,
       "refusing without re-asking would strand the application with no way to approve it",
@@ -838,9 +922,9 @@ describe("a grant is tied to the screen that produced it", () => {
     await allowWithStalePrompt(PKG, standing);
 
     expect(
-      files.get(CONSENT_FILE),
+      nothingRecorded(),
       "the macro's body changed under the screen and Allow recorded the NEW body",
-    ).toBeUndefined();
+    ).toEqual([]);
 
     const reasked = lastPromptFor(PKG);
     expect(reasked.promptId, "the user must be asked again").not.toBe(standing);
@@ -866,9 +950,9 @@ describe("a grant is tied to the screen that produced it", () => {
     await allow(PKG);
 
     expect(
-      files.get(CONSENT_FILE),
+      nothingRecorded(),
       "an unverifiable artifact set must not be approved",
-    ).toBeUndefined();
+    ).toEqual([]);
     expect(
       consentPrompts().length,
       "re-prompting on a listing FAILURE is an unbreakable loop, not a second chance",
@@ -905,7 +989,7 @@ describe("a grant is tied to the screen that produced it", () => {
 
     await allowWithStalePrompt(PKG, undefined);
 
-    expect(files.get(CONSENT_FILE)).toBeUndefined();
+    expect(nothingRecorded()).toEqual([]);
   });
 });
 
@@ -959,7 +1043,7 @@ describe("a refused grant is re-asked a bounded number of times per session", ()
     expect(toasts[toasts.length - 1]).toContain("will not re-ask on its own again");
     expect(toasts[toasts.length - 1]).toContain(`${MAX} times this session`);
     // Nothing was approved at any point.
-    expect(files.get(CONSENT_FILE)).toBeUndefined();
+    expect(nothingRecorded()).toEqual([]);
   });
 
   it("the next update's load pass still asks, and a grant that goes through resets the count", async () => {
@@ -1114,5 +1198,284 @@ describe("Allow after a revoking update re-mounts, it does not just re-record", 
       "the mount loop skipped anything already mounted, so the user approved the " +
         "new code and the OLD realm kept running",
     ).toEqual(["unmount:obj-refresh", "mount:obj-refresh"]);
+  });
+});
+
+// ===========================================================================
+// (7) A REFUSED APPROVAL IS SAID, AND NOTHING MOUNTS
+// ===========================================================================
+//
+// Approvals are sealed to this computer by Rust (`record_script_consent`,
+// app/src-tauri/src/consent_seal.rs), which can refuse -- this computer's
+// approvals key cannot be read, for one. The handler used to console.warn and
+// mount anyway: every mount was then refused by the same Rust gate, and the user
+// was told the scripts were enabled over nothing running.
+
+describe("a refused approval is said, and nothing mounts", () => {
+  const REASON =
+    "this computer's approvals key cannot be read (the Credential Manager refused the read), " +
+    "so nothing can be approved and no earlier approval counts";
+
+  it("names the application and Rust's reason, records nothing and mounts nothing", async () => {
+    objectScripts = [objectScript()];
+    moduleRecords = [moduleRecord()];
+    await activateFreshExtension();
+    expect(promptFor(PKG), "the premise: the application is waiting for approval").toBeDefined();
+    consentStore.refuseRecords(REASON);
+    toasts.length = 0;
+    mountLog.length = 0;
+
+    await allow(PKG);
+
+    expect(consentStore.requests, "the approval must have been asked of Rust").toHaveLength(1);
+    expect(consentStore.records()).toEqual([]);
+    expect(mountLog, "a refused approval mounted application code").toEqual([]);
+    expect(toasts, "a refused approval must be said").toContain(
+      `Nothing was approved for "${PKG}": ${REASON}`,
+    );
+    expect(toasts.join(" | "), "a refused approval was announced as enabled").not.toMatch(/enabled/i);
+  });
+
+  it("the positive control: the same Allow, with Rust recording it, mounts the script", async () => {
+    objectScripts = [objectScript()];
+    await activateFreshExtension();
+    mountLog.length = 0;
+
+    await allow(PKG);
+
+    expect(mountLog).toEqual(["mount:obj-refresh"]);
+    expect(toasts[toasts.length - 1]).toBe(`Scripts from "${PKG}" enabled.`);
+  });
+});
+
+// ===========================================================================
+// (7) BUTTON ACTIONS JOIN THE PLAN (M6, phase 4 of BUG-0257)
+// ===========================================================================
+//
+// A subscribe or refresh HOLDS an application's static inline button code, and
+// the Rust button door runs it only after the approval of its exact bytes --
+// `buttonAction:<sha256>` in the application's bare record. This pass is the
+// only thing that can ask for that approval, so an application whose only code
+// is its buttons' must still be prompted, the package is not current until
+// every action's hash is recorded, and a button whose code changed under the
+// screen refuses the grant exactly as a changed macro does.
+
+describe("an application's inline button code is on its approval screen", () => {
+  const CODE = "Calcula.setCellValue('Dashboard!A1', 'refreshed');";
+
+  /** A button on Dashboard holding `code` for `application`. */
+  const heldButton = (
+    row: number,
+    code: string,
+    over: { application?: string; controlType?: string; extra?: Record<string, unknown> } = {},
+  ): Record<string, unknown> => ({
+    sheetIndex: 1,
+    row,
+    col: 1,
+    metadata: {
+      controlType: over.controlType ?? "button",
+      properties: {
+        text: { valueType: "static", value: `Button ${row}` },
+        heldOnSelect: { valueType: "static", value: code },
+        heldFrom: {
+          valueType: "static",
+          value: JSON.stringify({ workspace: "ws-1", application: over.application ?? PKG, version: "1.0.0" }),
+        },
+        ...(over.extra ?? {}),
+      },
+    },
+  });
+
+  const actionId = (code: string): string => `buttonAction:${consentStore.hash(code)}`;
+
+  // SABOTAGE: drop `...buttonActionsByPackage.keys()` from the load pass's
+  // package union (ScriptableObjects/index.ts) -> no prompt at all.
+  it("an application with ONLY inline button code is prompted, with the code and every place it sits", async () => {
+    controlsBySheet.set(1, [heldButton(3, CODE), heldButton(1, CODE)]);
+    await activateFreshExtension();
+
+    const prompt = promptFor(PKG);
+    expect(
+      prompt,
+      "an application shipping only button code emitted no prompt, so every click stays refused forever",
+    ).toBeDefined();
+    expect(prompt!.scriptCount).toBe(0);
+    expect(prompt!.moduleScriptNames).toEqual([]);
+    expect(prompt!.buttonActions).toEqual([
+      {
+        id: actionId(CODE),
+        hash: consentStore.hash(CODE),
+        source: CODE,
+        locations: [
+          { cell: "Dashboard!B2", caption: "Button 1" },
+          { cell: "Dashboard!B4", caption: "Button 3" },
+        ],
+        runsMacro: null,
+        refusedBecause: null,
+      },
+    ]);
+  });
+
+  it("Allow records each button action by its id and the hash of its exact bytes -- what the door asks", async () => {
+    controlsBySheet.set(1, [heldButton(1, CODE)]);
+    await activateFreshExtension();
+    await allow(PKG);
+    expect(await consentGrantedIn(PKG, actionId(CODE), CODE)).toBe(true);
+    // ...and the next load hydrates as current: no second screen.
+    emittedEvents.length = 0;
+    bus.clear();
+    await activateFreshExtension();
+    expect(promptFor(PKG)).toBeUndefined();
+  });
+
+  // SABOTAGE: make isPackageConsentCurrent ignore its buttonActions argument
+  // (lib/packageConsentSet.ts) -> the application hydrates as current.
+  it("the application is NOT current until every button action's hash is recorded", async () => {
+    objectScripts = [objectScript()];
+    // This computer approved the object script earlier -- but not the button.
+    consentStore.seed({
+      packageName: PKG,
+      scripts: [{ id: "obj-refresh", source: objectScript().source }],
+      grantedCapabilities: [{ capability: "storage" }],
+    });
+    controlsBySheet.set(1, [heldButton(1, CODE)]);
+    await activateFreshExtension();
+    const prompt = promptFor(PKG);
+    expect(prompt, "a button's unapproved code must re-prompt the application").toBeDefined();
+    expect((prompt!.buttonActions as Array<{ id: string }>).map((a) => a.id)).toEqual([actionId(CODE)]);
+  });
+
+  it("a NEW or CHANGED button's code arriving in an update re-prompts an approved application", async () => {
+    controlsBySheet.set(1, [heldButton(1, CODE)]);
+    await activateFreshExtension();
+    await allow(PKG);
+    emittedEvents.length = 0;
+
+    controlsBySheet.set(1, [heldButton(1, "Calcula.clearRange('A1:Z99');")]);
+    const { emitAppEvent } = await import("@api/events");
+    emitAppEvent("app:package-updated", {});
+    await settle();
+
+    const prompt = promptFor(PKG);
+    expect(prompt, "the changed code was never put in front of the user").toBeDefined();
+    expect((prompt!.buttonActions as Array<{ source: string }>).map((a) => a.source)).toEqual([
+      "Calcula.clearRange('A1:Z99');",
+    ]);
+  });
+
+  // SABOTAGE: drop the button actions from the grant handler's live
+  // re-derivation (`packageConsentPlan(scripts, macros, buttonActions)` in the
+  // consent-granted handler) -> the fingerprint matches and the NEW code is
+  // recorded under the old screen's authority.
+  it("a button whose code changed while the screen was open refuses the grant and asks again", async () => {
+    controlsBySheet.set(1, [heldButton(1, CODE)]);
+    await activateFreshExtension();
+    const standing = consentPrompts().filter((p) => p.packageName === PKG).pop()!.promptId;
+
+    controlsBySheet.set(1, [heldButton(1, "Calcula.clearRange('A1:Z99');")]);
+    await allowWithStalePrompt(PKG, standing);
+
+    expect(nothingRecorded(), "Allow approved code the screen never showed").toEqual([]);
+    const reasked = consentPrompts().filter((p) => p.packageName === PKG).pop()!;
+    expect(reasked.promptId, "the user must be asked again").not.toBe(standing);
+    expect((reasked.buttonActions as Array<{ source: string }>).map((a) => a.source)).toEqual([
+      "Calcula.clearRange('A1:Z99');",
+    ]);
+  });
+
+  it("a button listing that fails at Allow records nothing and does NOT re-prompt into the same failure", async () => {
+    controlsBySheet.set(1, [heldButton(1, CODE)]);
+    await activateFreshExtension();
+    const promptsBefore = consentPrompts().length;
+
+    controlListingThrows = new Error("backend down");
+    await allow(PKG);
+
+    expect(nothingRecorded()).toEqual([]);
+    expect(consentPrompts().length).toBe(promptsBefore);
+    expect(toasts.join(" | ")).toContain("could not read this workbook's macros or button code");
+  });
+
+  it("an application's macros and button actions are ONE screen and ONE record", async () => {
+    moduleRecords = [moduleRecord({ name: "Report", id: "macro-report", description: "runtime=notebook" })];
+    controlsBySheet.set(1, [heldButton(1, "Report();"), heldButton(2, CODE)]);
+    await activateFreshExtension();
+
+    expect(consentPrompts().filter((p) => p.packageName === PKG)).toHaveLength(1);
+    const prompt = promptFor(PKG)!;
+    expect(prompt.moduleScriptIds).toEqual(["macro-report"]);
+    const actions = prompt.buttonActions as Array<{ source: string; runsMacro: string | null }>;
+    expect(actions.find((a) => a.source === "Report();")!.runsMacro).toBe("Report");
+
+    await allow(PKG);
+    const records = consentStore.records();
+    expect(records).toHaveLength(1);
+    expect(records[0].scripts.map((s) => s.id).sort()).toEqual(
+      ["macro-report", actionId("Report();"), actionId(CODE)].sort(),
+    );
+  });
+
+  it("records exactly the artifacts the screen enumerated -- button actions included", async () => {
+    objectScripts = [objectScript()];
+    moduleRecords = [moduleRecord()];
+    controlsBySheet.set(1, [heldButton(1, CODE)]);
+    await activateFreshExtension();
+    await allow(PKG);
+    const prompt = consentPrompts().filter((p) => p.packageName === PKG).pop()!;
+    const shown = [
+      ...(prompt.scriptIds as string[]),
+      ...(prompt.moduleScriptIds as string[]),
+      ...(prompt.buttonActions as Array<{ id: string }>).map((a) => a.id),
+    ].sort();
+    expect(consentStore.records()[0].scripts.map((s) => s.id).sort()).toEqual(shown);
+  });
+
+  // SABOTAGE: remove the `plan.artifacts.length === 0` early return from
+  // emitPackageConsentPrompt -> a screen whose Allow can only fail.
+  it("an application whose only code sits in the reserved id space gets no screen Allow cannot satisfy", async () => {
+    objectScripts = [objectScript({ id: "buttonAction:crafted", name: "Crafted" })];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await activateFreshExtension();
+    expect(promptFor(PKG), "Allow could record nothing, so the screen could never be satisfied").toBeUndefined();
+    expect(warn.mock.calls.map((c) => String(c[0])).join(" ")).toContain("buttonAction:crafted");
+    // ...while an approvable object script beside it is still asked about, and
+    // the reserved one is named as something Allow does not cover.
+    objectScripts = [objectScript({ id: "buttonAction:crafted", name: "Crafted" }), objectScript()];
+    emittedEvents.length = 0;
+    bus.clear();
+    await activateFreshExtension();
+    const prompt = promptFor(PKG)!;
+    expect(prompt.scriptIds).toEqual(["obj-refresh"]);
+    expect(prompt.reservedIdNames).toEqual(["Crafted"]);
+    await allow(PKG);
+    expect(consentStore.records()[0].scripts.map((s) => s.id)).toEqual(["obj-refresh"]);
+  });
+
+  it("code no click can run is not offered: a shape's, or a button whose link wins", async () => {
+    controlsBySheet.set(1, [
+      heldButton(1, "Shape();", { controlType: "shape" }),
+      heldButton(2, "Linked();", { extra: { heldMacroRef: { valueType: "static", value: "macro-report" } } }),
+    ]);
+    await activateFreshExtension();
+    expect(promptFor(PKG), "nothing here can run, so there is nothing to approve").toBeUndefined();
+  });
+
+  // SABOTAGE: drop `approvalMadeElsewhere: approvalMadeElsewhereFor(ignored, pkg)`
+  // from the payload -> the screen never says why it is asking again.
+  it("says when the workbook carries an approval that was made on another computer", async () => {
+    controlsBySheet.set(1, [heldButton(1, CODE)]);
+    consentStore.setIgnored([
+      { packageName: PKG, reason: "otherComputer" },
+      { packageName: "Someone Else", reason: "unsealed" },
+    ]);
+    await activateFreshExtension();
+    expect(promptFor(PKG)!.approvalMadeElsewhere).toBe(true);
+  });
+
+  it("...and does not, when nothing for this application was ignored", async () => {
+    controlsBySheet.set(1, [heldButton(1, CODE)]);
+    consentStore.setIgnored([{ packageName: "Someone Else", reason: "otherComputer" }]);
+    await activateFreshExtension();
+    expect(promptFor(PKG)!.approvalMadeElsewhere).toBe(false);
   });
 });

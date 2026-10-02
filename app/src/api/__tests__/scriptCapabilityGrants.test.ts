@@ -19,17 +19,22 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+import { createConsentStoreDouble } from "./helpers/consentStoreDouble";
+
 // ---------------------------------------------------------------------------
 // Backend double. createVirtualFile is the tripwire proving a grant can never
-// ride inside a .cala / .calp to another machine.
+// ride inside a .cala / .calp to another machine, and the shared consent-store
+// double the one proving it is never recorded as a package approval (which Rust
+// keeps inside the workbook, sealed to this computer).
 // ---------------------------------------------------------------------------
-const invokeMock = vi.fn(async () => undefined as unknown);
+const consentStore = createConsentStoreDouble();
+const invokeMock = vi.fn(async (..._args: unknown[]) => undefined as unknown);
 const createVirtualFileMock = vi.fn();
 const readVirtualFileMock = vi.fn(async () => {
   throw new Error("no such virtual file");
 });
 vi.mock("../backend", () => ({
-  invokeBackend: (...args: unknown[]) => invokeMock(...(args as [])),
+  invokeBackend: (...args: unknown[]) => invokeMock(...args),
   createVirtualFile: (...args: unknown[]) => createVirtualFileMock(...args),
   readVirtualFile: (...args: unknown[]) => readVirtualFileMock(...args),
 }));
@@ -129,7 +134,11 @@ async function mountRestore(
 beforeEach(() => {
   localStorage.clear();
   invokeMock.mockReset();
-  invokeMock.mockImplementation(async () => undefined);
+  invokeMock.mockImplementation(async (...args: unknown[]) => {
+    const [cmd, cmdArgs] = args as [string, Record<string, unknown> | undefined];
+    return consentStore.handles(cmd) ? consentStore.invoke(cmd, cmdArgs) : undefined;
+  });
+  consentStore.reset();
   createVirtualFileMock.mockReset();
   currentPath = "C:\\Books\\Q4 Report.cala";
   inventory = [];
@@ -224,6 +233,7 @@ describe("a grant survives a restart", () => {
       capability: "schedule",
     });
     expect(createVirtualFileMock).not.toHaveBeenCalled();
+    expect(consentStore.requests, "a grant was recorded as a package approval").toEqual([]);
     const raw = localStorage.getItem("calcula.scriptTrust.v1") ?? "";
     expect(raw).toContain(SCRIPT_ID);
     expect(raw).toContain("schedule");

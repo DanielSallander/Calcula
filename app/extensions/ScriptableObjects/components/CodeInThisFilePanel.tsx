@@ -83,6 +83,17 @@ import type { PanelSectionProps } from "@api/uiTypes";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { ScriptableObjectEvents } from "../index";
 import { confirmAsync } from "@api/dialogs";
+import {
+  listApplicationCellCommands,
+  listHeldButtonCode,
+  type ApplicationCellCommand,
+  type HeldButtonCodeEntry,
+} from "@api/heldButtonCode";
+import { loadConsentReport, type ConsentReport } from "@api/distributedConsent";
+import { HeldButtonCodeSection } from "./HeldButtonCodeSection";
+import { ApplicationCommandButtonsSection } from "./ApplicationCommandButtonsSection";
+import { CarriedApprovalsSection } from "./CarriedApprovalsSection";
+import { DeveloperAnchorsSection } from "./DeveloperAnchorsSection";
 
 // ============================================================================
 // Capability labels (short, human; the ids are the single vocabulary source)
@@ -1167,6 +1178,24 @@ function CodeUnitRow({
             {unit.tier === "unlocked" ? "Unlocked" : "Restricted"}
           </span>
         )}
+        {/* OWNER DECISION B (follow-up F7): an application's macro written as an
+            object script is restricted -- but a run YOU start may also change
+            the cells of any sheet. Said on the code itself, not only on the
+            approval screen. */}
+        {unit.module?.cellAccessWhenYouRunIt === true && (
+          <span
+            style={capCeilingBadge}
+            data-cell-access-when-you-run-it
+            title={
+              "When you run it yourself -- Developer ▸ Macros ▸ Run, a button that runs it, or the " +
+              "command line -- it may also read and change the cells of any sheet, and nothing more. " +
+              "If it stops part-way, every change it made is undone. Started by another script, it " +
+              "has only what every restricted script has: the sheet on screen."
+            }
+          >
+            Any sheet when you run it
+          </span>
+        )}
         {unit.mounted && (
           <span style={{ ...chipStyle, backgroundColor: "#E6F0E6", color: "#3A6B3A" }}>
             Active
@@ -1239,7 +1268,9 @@ function CodeUnitRow({
         <button style={linkBtnStyle} onClick={() => setExpanded((e) => !e)}>
           {expanded ? "Hide code" : "View code"}
         </button>
-        {unit.surfaceId === "object-script" && (
+        {/* An object script opens by id; a MODULE listed on this surface (a
+            macro written as an object script, F7) is not in that store. */}
+        {unit.surfaceId === "object-script" && !unit.module && (
           <button style={linkBtnStyle} onClick={openInEditor}>
             Open in editor
           </button>
@@ -1274,6 +1305,17 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
     forms: [],
   });
   const [trail, setTrail] = useState<ExtensionAuditTrail | null>(null);
+  // Button code a working copy holds for its application (BUG-0257).
+  const [heldButtons, setHeldButtons] = useState<HeldButtonCodeEntry[]>([]);
+  const [heldButtonsError, setHeldButtonsError] = useState<string | null>(null);
+  // Button cells an application brought that run a Calcula command (plan_M8 S3).
+  const [commandButtons, setCommandButtons] = useState<ApplicationCellCommand[]>([]);
+  const [commandButtonsError, setCommandButtonsError] = useState<string | null>(null);
+  // The approvals as Rust lists them (M6): which count on this computer -- the
+  // held inline rows' approval state -- and which the workbook carries from
+  // elsewhere and do not.
+  const [consentReport, setConsentReport] = useState<ConsentReport | null>(null);
+  const [consentReportError, setConsentReportError] = useState<string | null>(null);
   const [pins, setPins] = useState<TrustedPublisherReport | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
@@ -1319,6 +1361,32 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
     } finally {
       setLoading(false);
     }
+    // Held button code is read on the same reload as the inventory: it is code
+    // this file carries, even though nothing here runs it.
+    try {
+      setHeldButtons(await listHeldButtonCode());
+      setHeldButtonsError(null);
+    } catch (e) {
+      setHeldButtonsError(e instanceof Error ? e.message : String(e));
+    }
+    // ...and so are the buttons an application brought that run a Calcula
+    // command: WHEN that command runs is the application's code to decide.
+    try {
+      setCommandButtons(await listApplicationCellCommands());
+      setCommandButtonsError(null);
+    } catch (e) {
+      setCommandButtonsError(e instanceof Error ? e.message : String(e));
+    }
+    // A failure is SAID (each held row then reads "could not be read"), never
+    // turned into "no approvals": that is the reassuring answer, and it would be
+    // the wrong one.
+    try {
+      setConsentReport(await loadConsentReport());
+      setConsentReportError(null);
+    } catch (e) {
+      setConsentReport(null);
+      setConsentReportError(e instanceof Error ? e.message : String(e));
+    }
     await reloadJobs();
     // The machine trail is not workbook state, so it is read on an explicit
     // reload only — never on the 15s poll, which would turn a rare, deliberate
@@ -1329,11 +1397,14 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
     try {
       setPins(await listTrustedPublishers());
     } catch (e) {
+      const failure = e instanceof Error ? e.message : String(e);
       setPins({
         names: [],
         totalPins: 0,
         conflictCount: 0,
-        error: e instanceof Error ? e.message : String(e),
+        error: failure,
+        developerAnchors: [],
+        developerAnchorsError: failure,
       });
     }
   }, [reloadJobs]);
@@ -1446,7 +1517,11 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
       )}
 
       {!error && summary && summary.total === 0 && (
-        <div style={emptyStyle}>This workbook contains no code.</div>
+        <div style={emptyStyle}>
+          {heldButtons.length > 0 || commandButtons.length > 0
+            ? "This workbook contains no code that runs."
+            : "This workbook contains no code."}
+        </div>
       )}
 
       {!error &&
@@ -1465,7 +1540,14 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
               </div>
               {group.units.map((u) => (
                 <CodeUnitRow
-                  key={`${u.surfaceId}:${u.id}`}
+                  // A button action's id is the hash of its bytes, so the user's
+                  // own copy and an application's held copy of the same code
+                  // share it: the key adds whose it is.
+                  key={
+                    u.buttonAction
+                      ? `${u.surfaceId}:${u.provenance}:${u.sourcePackage ?? ""}:${u.id}`
+                      : `${u.surfaceId}:${u.id}`
+                  }
                   unit={u}
                   scheduledCount={jobsByScriptId.get(u.id) ?? 0}
                 />
@@ -1474,12 +1556,35 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
           );
         })}
 
+      {/* The button code an application brought, held for it: each row says
+          whether it may run here (inline code runs only after the approval of
+          its exact bytes on this computer), and a working copy publishes it
+          with the application on push. */}
+      <HeldButtonCodeSection entries={heldButtons} error={heldButtonsError} report={consentReport} />
+
+      {/* The button cells an application brought that run a Calcula command
+          (plan_M8 S3): each says whether a click runs it here -- the page's
+          rule over the live registration, then the approval under the
+          application's command key on this computer. */}
+      <ApplicationCommandButtonsSection
+        entries={commandButtons}
+        error={commandButtonsError}
+        report={consentReport}
+      />
+
+      {/* Approvals this workbook carries that do not count on this computer --
+          the reason an application asks again here. */}
+      <CarriedApprovalsSection report={consentReport} error={consentReportError} />
+
       {/* LAST, and visually separated: the only section here that is not about
           the open workbook. It answers "what else did I let onto this machine?"
           — the widest consent Calcula asks for, and the one that used to leave
           no record anywhere. */}
       <AddInTrailSection trail={trail} />
       <TrustedPublishersSection report={pins} />
+      {/* Beside the pins, and as clearly machine-scoped: who this computer
+          remembers as the creator of each application it DEVELOPS. */}
+      <DeveloperAnchorsSection report={pins} onChanged={() => void reload()} />
     </div>
   );
 }

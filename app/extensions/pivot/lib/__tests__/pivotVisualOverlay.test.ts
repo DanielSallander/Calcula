@@ -6,8 +6,12 @@
 //            opens the field list from the hidden-grid anchor; a press on any
 //            other object deselects it; a keyboard select (the object-selection
 //            provider) opens no pane; a pane the user closed stays closed.
-//          - CHROME. `floatingObject:bodyDragStart` over a +/- toggles THAT view
-//            cell; the second press of a double-click is dropped.
+//          - CHROME. `floatingObject:bodyDragStart` over a +/- only STARTS a
+//            press (pivotChromePress.ts); its release over the same +/-
+//            toggles THAT view cell, the second click of a double-click is
+//            dropped, and a release off it toggles nothing (BUG-0258 phase 4,
+//            D5). The listener starts the press and never acts itself (a
+//            source census); the held press owns Escape; teardown cancels it.
 //          - FRAME EDITS. moveComplete / resizeComplete persist through
 //            update_pivot_properties({pivotId, canvasFrame}).
 //          - DOUBLE-CLICK. A body cell maps view cell -> hidden-grid cell and
@@ -91,13 +95,17 @@ vi.mock("../pivotCellDoubleClick", () => ({
 }));
 
 import type { OverlayRegistration } from "@api/gridOverlays";
-import { setGridRegions, getGridRegions } from "@api/gridOverlays";
+import { setGridRegions, getGridRegions, contentGestureCursorFor, clearContentGestureCursor } from "@api/gridOverlays";
 import { setCachedPivotView, deleteCachedPivotView } from "../pivotViewStore";
 import { setPivotVisualScroll } from "../pivotVisualScroll";
 import { getPivotVisualRecord } from "../pivotVisualHits";
 import { createRecordingCtx } from "../../../_shared/lib/__tests__/recordingCtx";
 import { resetObjectSelectionProviders, selectObject, deselectAllObjects } from "@api/objectSelection";
 import { installPivotVisual, handlePivotVisualPress } from "../pivotVisualOverlay";
+import { isPivotChromePressActive } from "../pivotChromePress";
+import { objectOwnsKey } from "@api/objectSelection";
+import { readFileSync } from "fs";
+import { resolve } from "path";
 import { publishPivotRegions, resetPivotVisualRegionState, PIVOT_VISUAL_REGION_TYPE } from "../pivotVisualRegions";
 import { setPivotVisualRecord, resetPivotVisualHits } from "../pivotVisualHits";
 import { notePivotCreated, adoptCreatedCanvasPivot, resetCreatedPivotTracking } from "../pivotVisualSelection";
@@ -302,7 +310,7 @@ describe("selection bridge", () => {
   });
 });
 
-describe("chrome presses arrive through the body-drag claim", () => {
+describe("chrome presses arrive as CONTENT (the zone answer) through bodyDragStart", () => {
   function recordWithIcon() {
     setPivotVisualRecord({
       pivotId: "cp1",
@@ -320,19 +328,61 @@ describe("chrome presses arrive through the body-drag claim", () => {
     });
   }
 
-  it("claimsBodyDrag is true on chrome and false on a plain cell", () => {
+  it("zoneAt: chrome is content with a hand, a plain cell is frame -- and the registration has no second answer", () => {
     recordWithIcon();
     const region = { id: "pivot-visual-cp1", type: PIVOT_VISUAL_REGION_TYPE, startRow: 0, startCol: 1024, endRow: 0, endCol: 0, data: { pivotId: "cp1" } };
-    expect(overlay!.claimsBodyDrag!({ region, canvasX: 112, canvasY: 164, row: 0, col: 0 })).toBe(true);
-    expect(overlay!.claimsBodyDrag!({ region, canvasX: 250, canvasY: 200, row: 0, col: 0 })).toBe(false);
+    expect(overlay!.zoneAt!({ region, canvasX: 112, canvasY: 164, row: 0, col: 0 })).toEqual({
+      kind: "content",
+      cursor: "pointer",
+      part: "icon",
+    });
+    expect(overlay!.zoneAt!({ region, canvasX: 259, canvasY: 90, row: 0, col: 0 })).toMatchObject({
+      kind: "content",
+      part: "filter",
+    });
+    expect(overlay!.zoneAt!({ region, canvasX: 250, canvasY: 200, row: 0, col: 0 })).toBeNull();
+    // No second answer beside the zone (M5 T6 removed the old fields from the
+    // type; the cast reads what the object actually carries).
+    const fields = overlay as unknown as Record<string, unknown>;
+    expect(fields.getCursor).toBeUndefined();
+    expect(fields.getCellCursor).toBeUndefined();
+    expect(fields.claimsBodyDrag).toBeUndefined();
   });
 
-  it("a +/- press toggles THAT view cell, and the second press of a double-click is dropped", () => {
+  // The release point is converted through the grid area (a jsdom box at
+  // (0, 0), zoom 1 from the @api/grid mock): client px = canvas px here.
+  let gridArea: HTMLElement | null = null;
+  beforeEach(() => {
+    gridArea = document.createElement("div");
+    gridArea.setAttribute("data-grid-area", "");
+    document.body.appendChild(gridArea);
+  });
+  afterEach(() => {
+    gridArea?.remove();
+    gridArea = null;
+  });
+
+  function releaseAt(x: number, y: number): void {
+    window.dispatchEvent(new MouseEvent("mouseup", { clientX: x, clientY: y, button: 0 }));
+  }
+
+  it("a +/- press toggles nothing until its RELEASE over the same +/-, which toggles THAT view cell; the second click of a double-click is dropped", () => {
     recordWithIcon();
     fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 112, canvasY: 164 }));
+    expect(api.togglePivotHeaderAt, "the +/- acted on the PRESS").not.toHaveBeenCalled();
+    releaseAt(113, 165);
     expect(api.togglePivotHeaderAt).toHaveBeenCalledWith("cp1", 7, 0, true);
     fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 112, canvasY: 164 }));
+    releaseAt(112, 164);
     expect(api.togglePivotHeaderAt).toHaveBeenCalledTimes(1);
+  });
+
+  it("a +/- press released OFF the icon toggles nothing (a drag that starts on it)", () => {
+    recordWithIcon();
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 112, canvasY: 164 }));
+    window.dispatchEvent(new MouseEvent("mousemove", { clientX: 172, clientY: 164, buttons: 1 }));
+    releaseAt(172, 164);
+    expect(api.togglePivotHeaderAt).not.toHaveBeenCalled();
   });
 
   it("the same press after the double-click window toggles again", () => {
@@ -343,18 +393,61 @@ describe("chrome presses arrive through the body-drag claim", () => {
     expect(api.togglePivotHeaderAt).toHaveBeenCalledTimes(2);
   });
 
-  it("a report-filter press opens the menu for the hidden-grid cell of that combo", () => {
+  it("a report-filter press opens the menu at its RELEASE, for the hidden-grid cell of that combo", () => {
     recordWithIcon();
     fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 259, canvasY: 90 }));
+    expect(api.openPivotReportFilterAt, "the filter menu opened on the PRESS").not.toHaveBeenCalled();
+    releaseAt(259, 90);
     expect(api.openPivotReportFilterAt).toHaveBeenCalledTimes(1);
     const [gridRow, gridCol, fieldIndex] = api.openPivotReportFilterAt.mock.calls[0] as unknown as number[];
     expect([gridRow, gridCol, fieldIndex]).toEqual([0, 1025, 2]);
   });
 
+  it("the listener hands the press Core's REGION: the held press holds Core's pointer over the box (no grip, no handle under it), let go at the release", () => {
+    recordWithIcon();
+    clearContentGestureCursor();
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 112, canvasY: 164 }));
+    expect(contentGestureCursorFor("pivot-visual-cp1"), "the box's chrome press does not hold Core's pointer").toBe("pointer");
+    releaseAt(113, 165);
+    expect(contentGestureCursorFor("pivot-visual-cp1")).toBeNull();
+  });
+
   it("a press on another object type is ignored", () => {
     recordWithIcon();
     fire("floatingObject:bodyDragStart", { regionType: "chart", data: { pivotId: "cp1" }, canvasX: 112, canvasY: 164 });
+    expect(isPivotChromePressActive()).toBe(false);
+    releaseAt(112, 164);
     expect(api.togglePivotHeaderAt).not.toHaveBeenCalled();
+  });
+
+  it("while the press is held the box owns Escape (a canvas does not deselect it under the pointer); not after", () => {
+    recordWithIcon();
+    expect(objectOwnsKey("Escape"), "control: an idle box claims Escape").toBe(false);
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 112, canvasY: 164 }));
+    expect(objectOwnsKey("Escape"), "a held chrome press does not own Escape").toBe(true);
+    expect(objectOwnsKey("Tab"), "a held press claims another key").toBe(false);
+    releaseAt(112, 164);
+    expect(objectOwnsKey("Escape")).toBe(false);
+  });
+
+  it("the box's teardown cancels a held press: its release acts on nothing", () => {
+    recordWithIcon();
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 112, canvasY: 164 }));
+    expect(isPivotChromePressActive()).toBe(true);
+    cleanups.forEach((c) => c());
+    cleanups = [];
+    expect(isPivotChromePressActive(), "the teardown left the press live").toBe(false);
+    releaseAt(112, 164);
+    expect(api.togglePivotHeaderAt).not.toHaveBeenCalled();
+  });
+
+  it("SOURCE: the bodyDragStart listener starts the press (beginPivotChromePress) and never runs the chrome itself", () => {
+    const src = readFileSync(resolve(__dirname, "../pivotVisualOverlay.ts"), "utf8").replace(/\/\/.*$/gm, "");
+    const at = src.indexOf('listen("floatingObject:bodyDragStart"');
+    expect(at, "the bodyDragStart listener is gone").toBeGreaterThan(0);
+    const body = src.slice(at, src.indexOf("});", at));
+    expect(body).toMatch(/beginPivotChromePress\(\{/);
+    expect(body, "the listener acts on the PRESS again").not.toMatch(/handlePivotVisualPress\(/);
   });
 });
 

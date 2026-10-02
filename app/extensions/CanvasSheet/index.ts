@@ -31,6 +31,10 @@
 //              (lib/groupDrag.ts) and the arrow-key NUDGE (lib/objectNudge.ts)
 //              -- every multi-object move through @api/objectGeometry, as ONE
 //              undo step,
+//            - the GRIP MENU's page verbs (Bring Forward, Send Backward,
+//              Lock -- lib/gripMenuItems.ts, through @api/objectPosition) and
+//              Arrange's "Size & Position" (the dialog every object menu
+//              opens),
 //            - DELETE, COPY, PASTE and DUPLICATE of the whole selection across
 //              families (lib/canvasDelete.ts, lib/canvasClipboard.ts through
 //              @api/objectClipboard), each one undo step,
@@ -74,6 +78,7 @@ import { installCanvasObjectNudge } from "./lib/objectNudge";
 import { installCanvasObjectDelete } from "./lib/canvasDelete";
 import { installCanvasObjectClipboard } from "./lib/canvasClipboard";
 import { installCanvasLayoutRefs } from "./lib/layoutRefs";
+import { installCanvasGripMenuItems } from "./lib/gripMenuItems";
 
 /** The id of the page layer; one per app. */
 export const CANVAS_PAGE_LAYER_ID = "canvas-sheet-page";
@@ -99,8 +104,10 @@ function activate(_context: ExtensionContext): void {
     }),
   );
 
-  // Above every object: the frames of the selection set's set-held members
-  // (a second chart, a second floating range), then the marquee band.
+  // Above every object and above Core's selection chrome: the lock mark of a
+  // selected locked object (Core paints every selected object's outline and
+  // handles itself, set-held members included -- BUG-0258 design phase 3),
+  // then the marquee band.
   cleanupFns.push(
     registerGridLayer({
       id: CANVAS_SELECTION_CHROME_LAYER_ID,
@@ -196,6 +203,10 @@ function activate(_context: ExtensionContext): void {
   // a family that RECYCLES ids (Controls' anchors) never hands a new object
   // a dead one's lock and paint slot (lib/layoutRefs.ts).
   cleanupFns.push(installCanvasLayoutRefs());
+  // The grip's menu (BUG-0258 phase 5b): under its "Size and Position...",
+  // Bring Forward, Send Backward and Lock for the object whose grip was
+  // clicked -- the Arrange group's own commands (lib/gripMenuItems.ts).
+  cleanupFns.push(...installCanvasGripMenuItems());
 
   cleanupFns.push(() => resetCanvasTab());
   cleanupFns.push(() => resetCanvasSheetStore());

@@ -44,6 +44,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import { showToast } from "@api/notifications";
+import { mintExplicitMacroRun } from "@api/explicitMacroRun";
 import { hasButtonControlProvider } from "@api/buttonControlService";
 import {
   hasScriptEditorProvider,
@@ -334,6 +335,12 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
         // ...and what the store actually holds, so a run of EDITED publisher
         // text is refused rather than slipping past the content-keyed gate.
         storedSource: loaded.source,
+        // THIS CLICK IS THE PERSON'S (owner decision B). The pass is what lets
+        // an APPROVED application macro written as an object script change
+        // cells when you run it here -- the same cell access a module macro
+        // has -- and it is spent by this one run. The script host decides,
+        // after every gate; a script's own runMacro never carries one.
+        explicitRun: mintExplicitMacroRun("macrosDialog", loaded.id),
       });
       if (result.type === "error") {
         setError(result.message);

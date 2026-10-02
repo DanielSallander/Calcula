@@ -3,15 +3,17 @@
 //          report floating controls (buttons, shapes, pictures) for a caller
 //          that is NOT a mouse press: a canvas sheet's Tab / Shift+Tab object
 //          cycling, its Escape, its click on the empty page.
-// CONTEXT: The only other way a control becomes selected is Core's
-//          `floatingObject:selected`, and Controls' handler for that event is a
-//          CLICK handler: in run mode it emits `button:clicked` and runs the
-//          button's script (macro link, inline onSelect, object script), it
-//          emits `shape:clicked` to object scripts, and it opens the Properties
-//          pane. A keyboard user cycling past a "Delete all rows" button must
-//          never press it. So "select" here means: the selection set changes,
-//          the canvas repaints, and NOTHING else happens — no event a script
-//          can hear, no pane, no run.
+// CONTEXT: The only other way a control becomes selected is a mouse PRESS,
+//          and Controls' handlers for a press are CLICK handlers: Core's
+//          `floatingObject:selected` emits `shape:clicked` to object scripts
+//          and opens the Properties pane, and a run-mode button's press
+//          (`floatingObject:bodyDragStart`, lib/buttonPress.ts) emits
+//          `button:clicked` and runs the button's script (macro link, inline
+//          onSelect, object script) at its release inside the button
+//          (BUG-0258 phase 4c). A keyboard user cycling past a "Delete all
+//          rows" button must never press it. So "select" here means: the
+//          selection set changes, the canvas repaints, and NOTHING else
+//          happens — no event a script can hear, no pane, no run.
 //
 //          Group expansion is the SAME rule the right-click menu uses
 //          (`selectControlWithGroup`, shared with controlObjectMenu.ts): a
@@ -30,6 +32,7 @@ import {
   type ObjectSelectionProvider,
 } from "@api/objectSelection";
 import { isControlMenuOpen } from "./controlMenuState";
+import { isFloatingButtonPressActive } from "./buttonPress";
 import { canvasObjectRef } from "@api/canvasSheet";
 import type { CanvasObjectRef } from "@api";
 import { FLOATING_CONTROL_REGION_TYPE } from "./controlHitTest";
@@ -43,11 +46,13 @@ import {
   addFloatingControlsToSelection,
   deselectFloatingControl,
   getSelectedControlCount,
+  getSelectedFloatingControls,
   isFloatingControlSelected,
   removeFloatingControlsFromSelection,
   selectFloatingControl,
   selectFloatingControls,
 } from "../Button/floatingSelection";
+import { onDesignModeChange } from "./designMode";
 
 /**
  * Make `controlId` — expanded to its whole group when it has one — THE
@@ -158,10 +163,13 @@ export function createControlSelectionProvider(deps: ControlObjectSelectionDeps 
     // itself. The canvas's Escape binding runs EARLIER (the dispatcher's
     // window-capture listener) and stops the key, so unless Controls claims
     // it here, Escape deselected the control and left its menu open
-    // (BUG-0196; lib/controlMenuState.ts). A control has no inner selection,
-    // so nothing else is ever Controls'.
+    // (BUG-0196; lib/controlMenuState.ts). The same for a run-mode button's
+    // held PRESS (lib/buttonPress.ts, BUG-0258 phase 4c): Escape cancels it,
+    // and must not also deselect the button under the pointer (the slicer and
+    // timeline gestures' precedent). A control has no inner selection, so
+    // nothing else is ever Controls'.
     ownsKey(key: ObjectSelectionKey): boolean {
-      return key === "Escape" && isControlMenuOpen();
+      return key === "Escape" && (isControlMenuOpen() || isFloatingButtonPressActive());
     },
 
     // Controls hold several (the Ctrl+click set), so a canvas multi-selection
@@ -200,7 +208,36 @@ export function createControlSelectionProvider(deps: ControlObjectSelectionDeps 
   return provider;
 }
 
-/** Register the provider; returns the cleanup for the extension's list. */
+/**
+ * Design Mode ENDING deselects the selected BUTTONS -- each with its group, the
+ * rule `select` follows -- and leaves shapes and pictures selected (they are
+ * selected in run mode too). A button is selected for EDITING in Design Mode;
+ * once it ends, a press runs the button instead. Before this the button stayed
+ * selected (its chrome painted), and since a selected object claims the
+ * selection on a worksheet (BUG-0270) the keyboard was refused until Escape or
+ * a cell click. Excel deselects controls when Design Mode ends. No-op on
+ * Design Mode turning ON, and when no button is selected.
+ */
+export function deselectButtonsWhenDesignModeEnds(designMode: boolean): void {
+  if (designMode) return;
+  const buttons = [...getSelectedFloatingControls()].filter((id) => getFloatingControl(id)?.controlType === "button");
+  if (buttons.length === 0) return;
+  const leaving = new Set<string>();
+  for (const id of buttons) for (const member of withGroup(id)) leaving.add(member);
+  removeFloatingControlsFromSelection([...leaving]);
+  emitAppEvent(AppEvents.GRID_REFRESH);
+}
+
+/**
+ * Register the provider, and the Design Mode rule above (it runs before
+ * Controls' own Design Mode listener, which then re-syncs the regions and the
+ * Properties pane); returns the cleanup for the extension's list.
+ */
 export function registerControlObjectSelection(deps: ControlObjectSelectionDeps = {}): () => void {
-  return registerObjectSelectionProvider(createControlSelectionProvider(deps));
+  const offProvider = registerObjectSelectionProvider(createControlSelectionProvider(deps));
+  const offDesignMode = onDesignModeChange(deselectButtonsWhenDesignModeEnds);
+  return () => {
+    offDesignMode();
+    offProvider();
+  };
 }
