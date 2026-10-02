@@ -6,6 +6,7 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   ExtensionRegistry,
   AppEvents,
+  gridCommands,
 } from "@api";
 import { emitAppEvent } from "@api/events";
 import { onSelectionOwnershipChanged } from "@api/selectionOwner";
@@ -40,6 +41,7 @@ import {
   refreshCache,
   getTableAtCell,
   getTableById,
+  getAllTables,
   checkAutoExpand,
   enforceHeaderAsync,
   resizeTableAsync,
@@ -49,6 +51,7 @@ import {
 import { drawTableBorder, hitTestTable } from "./lib/tableOverlayRenderer";
 import { registerTableStyleInterceptor } from "./lib/tableStyleInterceptor";
 import { TableEvents } from "./lib/tableEvents";
+import { tableMergeGuard, TABLE_MERGE_GUARDED_COMMANDS } from "./lib/tableMergeGuard";
 
 // ============================================================================
 // Module State
@@ -227,6 +230,14 @@ function activate(context: ExtensionContext): void {
   // ...and to a selection owner's claim starting or ending: the tab stands
   // aside while a floating grid's cell holds the selection (W22).
   cleanupFunctions.push(onSelectionOwnershipChanged(() => syncDesignTabToSelectionOwner()));
+
+  // Excel refuses to merge (or unmerge) cells of a table. The cache holds the
+  // ACTIVE sheet's tables, which is the sheet every merge gesture acts on.
+  cleanupFunctions.push(
+    gridCommands.registerGuard([...TABLE_MERGE_GUARDED_COMMANDS], (selection) =>
+      tableMergeGuard(selection, getAllTables()),
+    ),
+  );
 
   // Initial cache load
   refreshCache().catch(console.error);

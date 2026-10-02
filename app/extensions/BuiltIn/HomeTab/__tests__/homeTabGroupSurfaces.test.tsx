@@ -44,6 +44,20 @@ vi.mock("@api/locale", () => ({
   onLocaleChanged: () => () => {},
 }));
 
+// The Merge & Center split button reads the selection, the merge state and
+// the sheet's protection itself (MergeSplitButton). Nothing merged, nothing
+// protected: the button renders at rest.
+vi.mock("@api/grid", () => ({
+  useGridState: () => ({
+    selection: { startRow: 0, startCol: 0, endRow: 0, endCol: 2, type: "cells" },
+    editing: null,
+  }),
+}));
+vi.mock("@api/lib", () => ({
+  readSelectionMergeState: async () => ({ touchesMerge: false }),
+  isSheetProtected: async () => false,
+}));
+
 // The document theme the colour popover shows (ColorPopover reads it through
 // src/api/theme.ts, which would otherwise invoke Tauri).
 vi.mock("@api/theme", () => ({
@@ -75,6 +89,7 @@ vi.mock("../components/useHomeTabState", () => ({
     handleFontFamilyChange,
     handleFontSizeChange,
     handleNumberFormatChange: vi.fn(),
+    handleMergeCommand: vi.fn(),
     // Bold and Center Vertically are lit: the latched-toggle look.
     isActive: (id: string) => id === "bold" || id === "alignMiddle",
     getCurrentColor: (id: string) =>
@@ -359,6 +374,9 @@ describe("hooks, names and tooltips", () => {
     }
     await render(DEFAULT_LAYOUT.groups[2].items, bandLayout(1200));
     expect(fmt("wrapText").getAttribute("aria-label")).toBe("Wrap Text");
+    // Excel's Merge & Center split button: both halves are named.
+    expect(fmt("mergeCells").getAttribute("aria-label")).toBe("Merge & Center");
+    expect(fmt("mergeCells-options").getAttribute("aria-label")).toBe("Merge options");
     await render(DEFAULT_LAYOUT.groups[5].items, bandLayout(1200));
     expect(fmt("insertRow").getAttribute("aria-label")).toBe("Insert Row");
   });

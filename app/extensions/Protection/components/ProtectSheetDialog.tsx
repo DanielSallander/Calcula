@@ -250,6 +250,10 @@ export function ProtectSheetDialog(props: DialogProps) {
 
       if (result.success) {
         await refreshProtectionState();
+        // Tell everyone else whose state follows protection (the Home tab's
+        // Merge & Center greys out on a protected sheet). Without it only this
+        // extension knew, until the next sheet switch.
+        window.dispatchEvent(new CustomEvent("protection:refresh"));
         // Reset form state
         setPassword("");
         setConfirmPassword("");

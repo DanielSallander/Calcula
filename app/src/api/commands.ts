@@ -49,6 +49,11 @@ export const CoreCommands = {
   // Grid
   MERGE_CELLS: "core.grid.merge",
   UNMERGE_CELLS: "core.grid.unmerge",
+  // Excel's Merge menu (2026-10-02): the Home tab's split button runs
+  // MERGE_CENTER (a toggle: it unmerges while the selection holds a merge);
+  // MERGE_ACROSS merges each row of the selection on its own.
+  MERGE_CENTER: "core.grid.mergeCenter",
+  MERGE_ACROSS: "core.grid.mergeAcross",
   FREEZE_PANES: "core.grid.freeze",
   INSERT_ROW: "core.grid.insertRow",
   INSERT_COLUMN: "core.grid.insertColumn",
@@ -103,6 +108,8 @@ const GRID_COMMAND_MAP: Record<string, GridCommand> = {
   [CoreCommands.DELETE_COLUMN]: "deleteColumn",
   [CoreCommands.MERGE_CELLS]: "mergeCells",
   [CoreCommands.UNMERGE_CELLS]: "unmergeCells",
+  [CoreCommands.MERGE_CENTER]: "mergeCenter",
+  [CoreCommands.MERGE_ACROSS]: "mergeAcross",
   [CoreCommands.FILL_DOWN]: "fillDown",
   [CoreCommands.FILL_RIGHT]: "fillRight",
   [CoreCommands.FILL_UP]: "fillUp",
@@ -127,6 +134,11 @@ const SCRIPT_SAFE_GRID_COMMANDS: ReadonlySet<string> = new Set([
   CoreCommands.DELETE_COLUMN,
   CoreCommands.MERGE_CELLS,
   CoreCommands.UNMERGE_CELLS,
+  // The same reach as MERGE_CELLS plus a horizontal alignment, which the
+  // unlocked format API already grants; like MERGE_CELLS they now raise
+  // Excel's data-loss confirmation when a merge would discard values.
+  CoreCommands.MERGE_CENTER,
+  CoreCommands.MERGE_ACROSS,
   CoreCommands.FILL_DOWN,
   CoreCommands.FILL_RIGHT,
   CoreCommands.FILL_UP,

@@ -27,6 +27,7 @@ import {
 import type { AutoFitColumnContribution, AutoFitRowContribution } from "@api";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
+import { pivotMergeGuard, PIVOT_MERGE_GUARDED_COMMANDS } from "./lib/pivotMergeGuard";
 
 import { PivotEvents } from "../_shared/lib/pivotEvents";
 import type { PivotProgressEvent } from "../_shared/lib/pivotEvents";
@@ -1340,6 +1341,14 @@ function activate(context: ExtensionContext): void {
       }
       return true;
     })
+  );
+
+  // Merging or unmerging cells of a PivotTable: refused for every block of
+  // the selection (see lib/pivotMergeGuard.ts).
+  cleanupFunctions.push(
+    gridCommands.registerGuard([...PIVOT_MERGE_GUARDED_COMMANDS], (selection) =>
+      pivotMergeGuard(selection, getCachedRegions(), pivotStructuralGuardMessage),
+    ),
   );
 
   // Register range guard - block operations that PARTIALLY overlap pivot regions.

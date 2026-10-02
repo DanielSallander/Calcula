@@ -1391,11 +1391,45 @@ export interface MergedRegion {
   endCol: number;
 }
 
+/**
+ * What the ribbon's merge gestures ask of `merge_cells` beyond a plain
+ * Range.Merge (mirrors `MergeOptions` in api_types.rs). Every field defaults to
+ * false, so leaving the options out is exactly the old command.
+ */
+export interface MergeOptions {
+  /** Excel's Merge Across: one merged region per ROW of the range. */
+  across?: boolean;
+  /** Merges wholly inside the range are dissolved into the new one instead of
+   *  refusing; a PARTIAL overlap is still refused. */
+  absorb?: boolean;
+  /** Excel's value rule: a region whose top-left holds nothing takes the first
+   *  cell in reading order that does (value, formula and style move). */
+  keepFirstValue?: boolean;
+  /** Run every gate and report the plan; change nothing, record nothing. */
+  probe?: boolean;
+}
+
+/** A cell `merge_cells` moved into a merge's top-left (`keepFirstValue`). */
+export interface MovedCell {
+  fromRow: number;
+  fromCol: number;
+  toRow: number;
+  toCol: number;
+}
+
 /** Result of merge operations */
 export interface MergeResult {
   success: boolean;
   mergedRegions: MergedRegion[];
   updatedCells: CellData[];
+  /** Regions created (in probe mode: that WOULD be created). */
+  createdRegions: MergedRegion[];
+  /** Regions dissolved -- absorbed or unmerged (probe: that WOULD be). */
+  removedRegions: MergedRegion[];
+  /** How many created regions have two or more cells holding content. */
+  lossyRegions: number;
+  /** Cells moved into a merge's top-left cell. */
+  movedCells: MovedCell[];
 }
 
 // ============================================================================

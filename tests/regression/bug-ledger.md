@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 276 | Open: 3 | Triaged: 0 | Fixed: 273 | Other: 0
+Total: 283 | Open: 4 | Triaged: 0 | Fixed: 279 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -3064,3 +3064,72 @@ TWO PUSHES AT THE SAME MOMENT CAN FAIL THE LOSER WITH 'ACCESS IS DENIED' INSTEAD
 TOUCH CANNOT DRAG ANYTHING AND CANNOT SELECT A CELL. Measured with CDP Input.dispatchTouchEvent (pen and mouse behave identically and correctly everywhere): a touch DRAG of a slicer by its header, a resize handle, the grip, or a timeline range does NOTHING on worksheet and canvas -- the page sees pointerdown, 3 moves, then pointercancel (the browser takes the gesture for panning; nothing sets touch-action on the grid canvas); a touch TAP, DRAG or LONG-PRESS on a grid cell does nothing (no cell is selected); a long-press acts as a tap (no context menu). What works by touch: tapping an object selects it, tapping a slicer item filters, tapping the grip opens its menu, tapping a run-mode button or a button cell runs it once.
 
 **Repro:** npx playwright test e2e/journeys/touch-pen-measure.spec.ts --project=journey: rows TP-2/3/4 (drag) 'nothing' for touch, TP-9 (cell tap/drag/long-press) 'nothing', TP-8 long-press = tap.
+
+## BUG-0277 `[fixed]`
+
+**Found:** 2026-10-02 (manual)
+**Oracle:** merge-refusal-visibility
+
+A REFUSED MERGE OR UNMERGE FROM THE RIBBON OR CTRL+M SAID NOTHING. Spreadsheet.tsx handleMergeCells / handleUnmergeCells caught every backend error and only console.error'd it, before useHomeTabState's alert could see it -- so a merge refused by sheet protection, a writeback claim, a dynamic array or an overlapping merge looked like a dead button.
+
+**Repro:** Protect the sheet (Format Cells not allowed), select A1:C1, press Ctrl+M or the Merge button: nothing happens and nothing is shown; the reason is only in the devtools console.
+**Fix:** fixed
+
+## BUG-0278 `[fixed]`
+
+**Found:** 2026-10-02 (manual)
+**Oracle:** document-effect-order
+
+A MERGE THAT CHANGED NOTHING STILL DIRTIED THE DOCUMENT. merge_cells (active sheet) constructed DocumentEffect::mutates after the protection/claim/spill gates but BEFORE its 1x1 no-op and its overlap refusal, so a refused or no-op merge set the dirty flag (close prompt, AutoRecover) -- against CLAUDE.md's 'construct it AFTER every gate that can still refuse'. A second, redundant mutates followed the write.
+
+**Repro:** Open a saved workbook, merge A1:B1, save, then call merge_cells over A1:C3 (overlaps): Err, and file_state.is_dirty() is true.
+**Fix:** fixed
+
+## BUG-0279 `[fixed]`
+
+**Found:** 2026-10-02 (manual)
+**Oracle:** merge-unmerge-scope
+
+UNMERGE REACHED ONLY THE MERGE UNDER THE SELECTION'S TOP-LEFT CELL. handleUnmergeCells called unmerge_cells(row, col) with the selection's top-left corner, so selecting a block holding two merges (or one away from the top-left) and choosing Unmerge left them merged. Excel unmerges every merged area in the selection.
+
+**Repro:** Merge A1:B1 and A3:B3, select A1:D4, run core.grid.unmerge: A3:B3 stays merged (and nothing happens at all when A1 is not merged).
+**Fix:** fixed
+
+## BUG-0280 `[fixed]`
+
+**Found:** 2026-10-02 (manual)
+**Oracle:** ribbon-state-refresh
+
+NOTHING ANNOUNCED A MERGE, SO RIBBON STATE DERIVED FROM THE DOCUMENT NEVER RE-READ. handleMergeCells refreshed the canvas but dispatched no grid:refresh, the event the Home tab's coalesced document re-read listens for -- with an unmoved selection, any merge-dependent ribbon state stayed stale.
+
+**Repro:** Select A1:C1 and merge it: a listener on window 'grid:refresh' never fires.
+**Fix:** fixed
+
+## BUG-0281 `[fixed]`
+
+**Found:** 2026-10-02 (manual)
+**Oracle:** merge-contained-refused
+
+MERGING A BLOCK THAT ALREADY CONTAINED A MERGE WAS ALWAYS REFUSED. merge_cells refused ANY intersection with an existing merge, including one wholly inside the range, and Calcula's selection grows to take in whole merges (useSelection) -- so selecting across a merge and pressing Merge always failed (silently, see the swallowed-refusal entry). Excel absorbs the inner merge into the bigger one.
+
+**Repro:** Merge B2:C2, select A1:D3, merge: refused with 'Cannot merge: selection overlaps with existing merged region'.
+**Fix:** fixed
+
+## BUG-0282 `[fixed]`
+
+**Found:** 2026-10-02 (manual)
+**Oracle:** merge-dense-scan
+
+MERGING A HUGE RANGE WALKED EVERY COORDINATE. merge_cells recorded and cleared slaves with a nested row x column loop, calling clear_cell (and lookup_cache::notify_write) on every coordinate whether or not a cell existed. Select All + Ctrl+M is 1,048,576 x 16,384 = 17.2 billion iterations -- the app froze; a whole column is a million per column.
+
+**Repro:** Select All (Ctrl+A), press Ctrl+M: the app stops responding.
+**Fix:** fixed
+
+## BUG-0283 `[open]`
+
+**Found:** 2026-10-02 (manual)
+**Oracle:** script-error-text
+
+A SCRIPT'S MERGE OF ONE CELL IS REPORTED AS AN OVERLAP. executeMergeCells (app/src/api/scriptHost/host.ts) throws 'mergeCells was refused (the range overlaps an existing merge)' whenever merge_cells answers success:false -- but success:false means a 1x1 range; a real overlap arrives as a thrown error with its own text.
+
+**Repro:** In an object script, await api.mergeCells('A1') (or the same cell twice): the error blames an overlap that does not exist.

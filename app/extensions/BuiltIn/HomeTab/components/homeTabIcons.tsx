@@ -41,7 +41,10 @@ const ICONS: Record<string, React.ComponentType<RibbonIconProps>> = {
   wrapText: RibbonIcon.WrapText,
   increaseIndent: RibbonIcon.IndentIncrease,
   decreaseIndent: RibbonIcon.IndentDecrease,
-  mergeCells: RibbonIcon.MergeCells,
+  // The Merge & Center split button: its face is Excel's Merge & Center
+  // picture. (The frozen MergeCells key draws Excel's plain Merge Cells, the
+  // menu's third row -- see MERGE_MENU_ICONS.)
+  mergeCells: RibbonIcon.MergeCenter,
   // Number (numberFormat renders as a Dropdown in the ribbon; its icon shows
   // in the customize dialog)
   numberFormat: RibbonIcon.NumberFormat,
@@ -88,6 +91,24 @@ export function homeTabIcon(itemId: string, size?: number): React.ReactNode | nu
   if (TYPOGRAPHIC_ITEM_IDS.has(itemId)) return null;
   const Icon = ICONS[itemId];
   return Icon ? <Icon size={size} /> : null;
+}
+
+/** The four rows of the Merge & Center menu, Excel's order. */
+export type MergeMenuCommand = "mergeCenter" | "mergeAcross" | "mergeCells" | "unmergeCells";
+
+/** Each Merge menu row's icon: Excel's four pictures, drawn in the set's own
+ *  language (a two-column grid whose middle row is the merged cell). */
+export const MERGE_MENU_ICONS: Readonly<Record<MergeMenuCommand, React.ComponentType<RibbonIconProps>>> = {
+  mergeCenter: RibbonIcon.MergeCenter,
+  mergeAcross: RibbonIcon.MergeAcross,
+  mergeCells: RibbonIcon.MergeCells,
+  unmergeCells: RibbonIcon.UnmergeCells,
+};
+
+/** The icon of one Merge menu row. */
+export function mergeMenuIcon(command: MergeMenuCommand, size?: number): React.ReactNode {
+  const Icon = MERGE_MENU_ICONS[command];
+  return <Icon size={size} />;
 }
 
 // ============================================================================

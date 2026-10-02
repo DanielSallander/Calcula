@@ -95,8 +95,14 @@ export type {
 export { SegmentedTabs } from "./primitives/SegmentedTabs";
 export type { SegmentedTabsProps, SegmentedTab } from "./primitives/SegmentedTabs";
 
-export { MenuButton, Menu, MenuItem, MenuSeparator, MenuHeading } from "./primitives/Menu";
-export type { MenuButtonProps, MenuProps, MenuItemProps, MenuItemRole } from "./primitives/Menu";
+export { MenuButton, Menu, MenuItem, MenuSeparator, MenuHeading, SplitMenuButton } from "./primitives/Menu";
+export type {
+  MenuButtonProps,
+  MenuProps,
+  MenuItemProps,
+  MenuItemRole,
+  SplitMenuButtonProps,
+} from "./primitives/Menu";
 
 export { Dropdown } from "./primitives/Dropdown";
 export type { DropdownProps, DropdownOption } from "./primitives/Dropdown";

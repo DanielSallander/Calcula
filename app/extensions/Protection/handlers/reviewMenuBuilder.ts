@@ -51,6 +51,8 @@ async function toggleProtectSheet(): Promise<void> {
       const result = await unprotectSheet();
       if (result.success) {
         await refreshProtectionState();
+        // As the dialogs do: everything whose state follows protection hears it.
+        window.dispatchEvent(new CustomEvent("protection:refresh"));
         if (_context) {
           refreshMenu(_context);
         }

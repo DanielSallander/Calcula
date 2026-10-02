@@ -135,7 +135,11 @@ export const ALL_ITEMS: HomeTabItem[] = [
   { id: "wrapText", label: "Wrap Text", tooltip: "Wrap Text", type: "toggle", icon: "\u21B5", category: "Alignment" },
   { id: "increaseIndent", label: "Increase Indent", tooltip: "Increase Indent", type: "button", icon: "\u21E5", category: "Alignment", segment: "indent" },
   { id: "decreaseIndent", label: "Decrease Indent", tooltip: "Decrease Indent", type: "button", icon: "\u21E4", category: "Alignment", segment: "indent" },
-  { id: "mergeCells", label: "Merge Cells", tooltip: "Merge Cells", type: "button", icon: "\u29EA", category: "Alignment" },
+  // Excel's Merge & Center split button (2026-10-02). The id stays "mergeCells"
+  // FOREVER: it is persisted in every customised layout. The ribbon renders it
+  // as a split button whose menu holds Excel's four Merge commands
+  // (components/MergeSplitButton.tsx); label and tooltip are catalog-only.
+  { id: "mergeCells", label: "Merge & Center", tooltip: "Merge & Center", type: "button", icon: "\u29EA", category: "Alignment" },
 
   // --- Number ---
   { id: "numberFormat", label: "Number Format", tooltip: "Number Format", type: "dropdown", icon: "#", category: "Number" },

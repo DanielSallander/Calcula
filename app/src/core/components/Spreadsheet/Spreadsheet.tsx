@@ -35,8 +35,6 @@ import {
   getAllColumnWidths,
   getAllRowHeights,
   getDefaultDimensions,
-  mergeCells,
-  unmergeCells,
   beginUndoTransaction,
   commitUndoTransaction,
   cancelUndoTransaction,
@@ -48,6 +46,7 @@ import {
   type UndoTransactionCloses,
 } from "../../lib/undoTransactionOwnership";
 import { cellEvents } from "../../lib/cellEvents";
+import { runMergeGesture, type MergeGestureHost } from "../../lib/merge";
 import { getCellFromPixel } from "../../lib/gridRenderer";
 import { calculateFreezePaneLayout, calculateVisibleRange } from "../../lib/gridRenderer/layout/viewport";
 import { getColumnWidth, getRowHeight } from "../../lib/gridRenderer/layout/dimensions";
@@ -941,45 +940,40 @@ function SpreadsheetContent({
   }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
 
   // -------------------------------------------------------------------------
-  // Merge Cells Handler
+  // Merge Handlers -- Excel's Merge menu (2026-10-02)
   // -------------------------------------------------------------------------
+  // The four commands share ONE gesture runner (core/lib/merge): every block
+  // of the selection, Excel's data-loss warning, the value rule, one undo step,
+  // and every refusal shown to the user (the old handlers sent refusals to the
+  // console, so a refused merge looked like a dead button). "grid:refresh"
+  // is dispatched so the ribbon's pressed state re-reads -- nothing did before.
+  const mergeHost = useCallback(
+    (): MergeGestureHost => ({
+      selection,
+      refresh: async () => {
+        await canvasRef.current?.refreshCells();
+        canvasRef.current?.redraw();
+        window.dispatchEvent(new CustomEvent("grid:refresh"));
+      },
+    }),
+    [selection, canvasRef],
+  );
+
   const handleMergeCells = useCallback(async () => {
-    if (!selection) return;
+    await runMergeGesture("mergeCells", mergeHost());
+  }, [mergeHost]);
 
-    const startRow = Math.min(selection.startRow, selection.endRow);
-    const startCol = Math.min(selection.startCol, selection.endCol);
-    const endRow = Math.max(selection.startRow, selection.endRow);
-    const endCol = Math.max(selection.startCol, selection.endCol);
-
-    // Need at least a 2-cell range to merge
-    if (startRow === endRow && startCol === endCol) return;
-
-    try {
-      await mergeCells(startRow, startCol, endRow, endCol);
-      await canvasRef.current?.refreshCells();
-      canvasRef.current?.redraw();
-    } catch (error) {
-      console.error("[Spreadsheet] Failed to merge cells:", error);
-    }
-  }, [selection, canvasRef]);
-
-  // -------------------------------------------------------------------------
-  // Unmerge Cells Handler
-  // -------------------------------------------------------------------------
   const handleUnmergeCells = useCallback(async () => {
-    if (!selection) return;
+    await runMergeGesture("unmergeCells", mergeHost());
+  }, [mergeHost]);
 
-    const row = Math.min(selection.startRow, selection.endRow);
-    const col = Math.min(selection.startCol, selection.endCol);
+  const handleMergeCenter = useCallback(async () => {
+    await runMergeGesture("mergeCenter", mergeHost());
+  }, [mergeHost]);
 
-    try {
-      await unmergeCells(row, col);
-      await canvasRef.current?.refreshCells();
-      canvasRef.current?.redraw();
-    } catch (error) {
-      console.error("[Spreadsheet] Failed to unmerge cells:", error);
-    }
-  }, [selection, canvasRef]);
+  const handleMergeAcross = useCallback(async () => {
+    await runMergeGesture("mergeAcross", mergeHost());
+  }, [mergeHost]);
 
   // -------------------------------------------------------------------------
   // Register Command Handlers
@@ -999,6 +993,8 @@ function SpreadsheetContent({
     gridCommands.register("deleteColumn", handleDeleteColumn);
     gridCommands.register("mergeCells", handleMergeCells);
     gridCommands.register("unmergeCells", handleUnmergeCells);
+    gridCommands.register("mergeCenter", handleMergeCenter);
+    gridCommands.register("mergeAcross", handleMergeAcross);
 
     return () => {
       gridCommands.unregister("cut");
@@ -1015,6 +1011,8 @@ function SpreadsheetContent({
       gridCommands.unregister("deleteColumn");
       gridCommands.unregister("mergeCells");
       gridCommands.unregister("unmergeCells");
+      gridCommands.unregister("mergeCenter");
+      gridCommands.unregister("mergeAcross");
     };
   }, [
     handleCut,
@@ -1031,6 +1029,8 @@ function SpreadsheetContent({
     handleDeleteColumn,
     handleMergeCells,
     handleUnmergeCells,
+    handleMergeCenter,
+    handleMergeAcross,
   ]);
 
   // Keep gridCommands aware of the current selection for guard checks

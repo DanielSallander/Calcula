@@ -17,6 +17,7 @@ import {
   MenuHeading,
   MenuItem,
   MenuSeparator,
+  SplitMenuButton,
   type MenuButtonProps,
 } from "../primitives/Menu";
 import { declared, hardcodedColours } from "./colourScan";
@@ -665,5 +666,186 @@ describe("Menu colours", () => {
     click(byTestId("trigger"));
     expect(menu()).not.toBeNull();
     expect(hardcodedColours(document.body)).toEqual([]);
+  });
+});
+
+// ============================================================================
+// SplitMenuButton — Excel's split button with its menu
+// ============================================================================
+
+/** Excel's Merge & Center: the icon half runs, the chevron opens the menu. */
+function Merge({
+  onRun = () => undefined,
+  onPick = () => undefined,
+  disabled,
+  pressed,
+}: {
+  onRun?: () => void;
+  onPick?: (id: string) => void;
+  disabled?: boolean;
+  pressed?: boolean;
+}): React.ReactElement {
+  return (
+    <>
+      <SplitMenuButton
+        icon={<Icon />}
+        label="Merge & Center"
+        pressed={pressed}
+        disabled={disabled}
+        data-testid="main"
+        chevronTestId="chevron"
+        chevronLabel="Merge options"
+        menuLabel="Merge"
+        onClick={onRun}
+      >
+        <MenuItem testId="center" role="menuitemcheckbox" checked={pressed} onSelect={() => onPick("center")}>
+          Merge &amp; Center
+        </MenuItem>
+        <MenuItem testId="across" onSelect={() => onPick("across")}>
+          Merge Across
+        </MenuItem>
+        <MenuItem testId="cells" onSelect={() => onPick("cells")} shortcut="Ctrl+M">
+          Merge Cells
+        </MenuItem>
+        <MenuItem testId="unmerge" onSelect={() => onPick("unmerge")}>
+          Unmerge Cells
+        </MenuItem>
+      </SplitMenuButton>
+      <input data-testid="elsewhere" />
+    </>
+  );
+}
+
+describe("SplitMenuButton", () => {
+  it("is two named halves: the icon half runs, the chevron announces its menu", () => {
+    const onRun = vi.fn();
+    render(<Merge onRun={onRun} pressed />);
+    const main = byTestId("main");
+    const chevron = byTestId("chevron");
+    expect(main.getAttribute("aria-label")).toBe("Merge & Center");
+    expect(main.getAttribute("aria-pressed")).toBe("true");
+    expect(chevron.getAttribute("aria-label")).toBe("Merge options");
+    expect(chevron.getAttribute("aria-haspopup")).toBe("menu");
+    expect(chevron.getAttribute("aria-expanded")).toBe("false");
+    click(main);
+    expect(onRun).toHaveBeenCalledTimes(1);
+    expect(menu()).toBeNull();
+  });
+
+  it("the chevron opens the menu under the whole control, in order, focusing the first row", () => {
+    render(<Merge />);
+    click(byTestId("chevron"));
+    const m = menu()!;
+    expect(m).not.toBeNull();
+    expect(m.getAttribute("aria-label")).toBe("Merge");
+    expect(byTestId("chevron").getAttribute("aria-expanded")).toBe("true");
+    expect(byTestId("chevron").getAttribute("aria-controls")).toBe(m.id);
+    expect(items().map((i) => i.getAttribute("data-testid"))).toEqual(["center", "across", "cells", "unmerge"]);
+    expect(document.activeElement).toBe(byTestId("center"));
+  });
+
+  it("a second click on the chevron closes it", () => {
+    render(<Merge />);
+    click(byTestId("chevron"));
+    mouseDown(byTestId("chevron"));
+    click(byTestId("chevron"));
+    expect(menu()).toBeNull();
+  });
+
+  it("a click on the icon half while the menu is open closes it and runs", () => {
+    const onRun = vi.fn();
+    render(<Merge onRun={onRun} />);
+    click(byTestId("chevron"));
+    mouseDown(byTestId("main"));
+    click(byTestId("main"));
+    expect(menu()).toBeNull();
+    expect(onRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("ArrowDown on the ICON half opens on the first row; ArrowUp on the chevron on the last", () => {
+    render(<Merge />);
+    const down = key(byTestId("main"), "ArrowDown");
+    expect(down.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(byTestId("center"));
+    key(byTestId("center"), "Escape");
+    expect(menu()).toBeNull();
+    // Escape returns focus to the half that opened the menu.
+    expect(document.activeElement).toBe(byTestId("main"));
+
+    key(byTestId("chevron"), "ArrowUp");
+    expect(document.activeElement).toBe(byTestId("unmerge"));
+  });
+
+  it("Enter on the icon half does NOT open the menu (it runs the command natively)", () => {
+    render(<Merge />);
+    const enter = key(byTestId("main"), "Enter");
+    expect(enter.defaultPrevented).toBe(false);
+    expect(menu()).toBeNull();
+  });
+
+  it("a row runs AFTER the menu closed and focus went back to the chevron", () => {
+    let focusedAtRun: Element | null = null;
+    const onPick = vi.fn(() => {
+      focusedAtRun = document.activeElement;
+    });
+    render(<Merge onPick={onPick} />);
+    click(byTestId("chevron"));
+    key(byTestId("center"), "ArrowDown");
+    key(byTestId("across"), "Enter");
+    expect(onPick).toHaveBeenCalledWith("across");
+    expect(menu()).toBeNull();
+    expect(focusedAtRun).toBe(byTestId("chevron"));
+  });
+
+  it("Tab closes it and lets focus move on from the chevron", () => {
+    render(<Merge />);
+    click(byTestId("chevron"));
+    const tab = key(byTestId("center"), "Tab");
+    expect(tab.defaultPrevented).toBe(false);
+    expect(menu()).toBeNull();
+    expect(document.activeElement).toBe(byTestId("chevron"));
+  });
+
+  it("an outside press dismisses it", () => {
+    render(<Merge />);
+    click(byTestId("chevron"));
+    mouseDown(byTestId("elsewhere"));
+    expect(menu()).toBeNull();
+  });
+
+  it("disabled: both halves announce it, run nothing and open nothing -- but stay reachable", () => {
+    const onRun = vi.fn();
+    render(<Merge disabled onRun={onRun} />);
+    const main = byTestId("main") as HTMLButtonElement;
+    const chevron = byTestId("chevron") as HTMLButtonElement;
+    expect(main.getAttribute("aria-disabled")).toBe("true");
+    expect(chevron.getAttribute("aria-disabled")).toBe("true");
+    // NOT natively disabled: a native disabled button can show no tooltip
+    // (React drops its onMouseEnter) and cannot be focused, so the REASON it
+    // is disabled could never be read.
+    expect(main.disabled).toBe(false);
+    expect(chevron.disabled).toBe(false);
+    click(main);
+    expect(onRun).not.toHaveBeenCalled();
+    click(chevron);
+    expect(menu()).toBeNull();
+    key(main, "ArrowDown");
+    expect(menu()).toBeNull();
+  });
+
+  it("a row can show a command's LIVE binding as its shortcut", () => {
+    render(
+      <SplitMenuButton icon={<Icon />} label="X" chevronTestId="chevron" onClick={() => undefined}>
+        <MenuItem testId="live" shortcutCommandId="no.such.command" onSelect={() => undefined}>
+          Live
+        </MenuItem>
+        <MenuItem testId="literal" shortcut="Ctrl+M" shortcutCommandId="no.such.command" onSelect={() => undefined}>
+          Literal
+        </MenuItem>
+      </SplitMenuButton>,
+    );
+    click(byTestId("chevron"));
+    expect(byTestId("live").querySelector("kbd")).toBeNull();
+    expect(byTestId("literal").querySelector("kbd")?.textContent).toBe("Ctrl+M");
   });
 });

@@ -90,7 +90,7 @@ describe('CoreCommands', () => {
   });
 
   it('command count stays stable', () => {
-    expect(Object.keys(CoreCommands).length).toMatchInlineSnapshot(`33`);
+    expect(Object.keys(CoreCommands).length).toMatchInlineSnapshot(`35`);
   });
 
   it('all values use the core. prefix', () => {

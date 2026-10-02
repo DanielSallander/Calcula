@@ -8837,8 +8837,9 @@ mod writeback_range_guard_wiring_tests {
             (STRUCTURE_RS, "delete_columns", "ensure_col_shift_unclaimed("),
             (SEARCH_RS, "replace_all", "ensure_cells_unclaimed("),
             (SEARCH_RS, "replace_single", "ensure_range_unclaimed("),
-            (MERGE_RS, "merge_cells", "ensure_range_unclaimed("),
-            (MERGE_RS, "unmerge_cells", "ensure_range_unclaimed("),
+            // The commands delegate to these bodies (unit-testable twins).
+            (MERGE_RS, "merge_cells_core", "ensure_range_unclaimed("),
+            (MERGE_RS, "unmerge_cells_core", "ensure_range_unclaimed("),
         ]
     }
 
@@ -9018,6 +9019,15 @@ mod spill_ref_tests;
 #[cfg(test)]
 #[path = "d8_structural_recalc_tests.rs"]
 mod d8_structural_recalc_tests;
+
+/// Excel's Merge menu (2026-10-02): the `MergeOptions` the ribbon gestures pass
+/// to `merge_cells` (across, absorb, the value rule, the probe), the range form
+/// of `unmerge_cells` and the rectangle filter of `get_merged_regions`. A CHILD
+/// module of `data` for the same reason as above: it drives the merge bodies
+/// through the shared `Workbook` harness.
+#[cfg(test)]
+#[path = "merge_commands_tests.rs"]
+mod merge_commands_tests;
 
 /// BUG-0054 — a structural delete that fully covers a pivot region must give
 /// the pivot the same death `delete_pivot_table` gives one (cascade, undo

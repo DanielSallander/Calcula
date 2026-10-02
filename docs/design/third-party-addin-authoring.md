@@ -402,7 +402,7 @@ renders or registers it. No component, no markup, no closure, ever.
 | **Worksheet functions** | `ctx.formulas.registerFunction(name, {params, description, volatile}, impl)` | a real `registerFunction` UDF whose `implementation` RPCs back into the worker | needs `formula.udf` ⇒ effectively signature-gated |
 | Commands | `ctx.commands.register(id, handler)` | `CommandRegistry` under `ext:<extId>:<id>`, never `scriptSafe` | pre-existing; now ceiling-gated |
 | Menu items | `ctx.ui.menus.registerMenuItem(menuId, item)` | a real menu item whose action runs the extension's own command | pre-existing; now ceiling-gated |
-| **Ribbon buttons** | `ctx.ui.ribbon.registerButton({id,label,group,icon,tooltip,command,order})` | a host-drawn `CommandButton` hero in the **Add-ins** ribbon tab, one cluster per group (§8) | `icon` is a TOKEN from `RibbonIcon` (170 keys, §8.3); unknown ⇒ generic glyph |
+| **Ribbon buttons** | `ctx.ui.ribbon.registerButton({id,label,group,icon,tooltip,command,order})` | a host-drawn `CommandButton` hero in the **Add-ins** ribbon tab, one cluster per group (§8) | `icon` is a TOKEN from `RibbonIcon` (180 keys, §8.3); unknown ⇒ generic glyph |
 | **Keyboard shortcuts** | `ctx.keybindings.register({id,combo,command,label})` | a real `KeyBinding` with `category` = the extension's name | host owns the listener; no keystroke reaches the sandbox |
 | **Cell styling** | `ctx.grid.cellStyles.register(id, batchHandler)` + `.invalidate()` | a `registerCellRenderCache` SWR cache | one-frame lag by construction; every override sanitized key-by-key |
 | **File import** | `ctx.fileFormats.registerImporter(format, importer)` | a `registerFileFormat` with an importer only | host does the I/O; result rebuilt field-by-field |
@@ -907,7 +907,7 @@ renamed or removed, so a token that resolves today resolves in every later build
 example add-in's `"Percent"` (`docs/examples/addin-tax-tools/tax-tools.js`) is one of the 34 keys
 frozen since before this redesign.
 
-### 8.3 The token vocabulary (177 keys, 2026-09-25)
+### 8.3 The token vocabulary (180 keys, 2026-10-02)
 
 Authoritative list and drawing rules: `docs/design/ICONS.md` §4. By family:
 
@@ -915,7 +915,7 @@ Authoritative list and drawing rules: `docs/design/ICONS.md` §4. By family:
 |---|---|
 | **Clipboard and history** | Cut, Copy, Paste, FormatPainter, Undo, Redo |
 | **Font and fill** | FontSizeUp, FontSizeDown, FontColor, FillColor, Superscript, Subscript, FormatCells, CellStyles |
-| **Alignment** | AlignTop, AlignMiddle, AlignBottom, AlignLeft, AlignCenter, AlignRight, WrapText, IndentIncrease, IndentDecrease, MergeCells |
+| **Alignment** | AlignTop, AlignMiddle, AlignBottom, AlignLeft, AlignCenter, AlignRight, WrapText, IndentIncrease, IndentDecrease, MergeCells, MergeCenter, MergeAcross, UnmergeCells |
 | **Number** | Percent, Comma, NumberFormat, DecimalIncrease, DecimalDecrease |
 | **Cells and editing** | InsertRow, InsertColumn, DeleteRow, DeleteColumn, Find, Replace, ClearContents, ClearFormatting, ClearAll |
 | **Chart types** | ChartColumn, ChartBar, ChartLine, ChartArea, ChartPie, ChartDonut, ChartScatter, ChartWaterfall, ChartCombo, ChartRadar, ChartBubble, ChartHistogram, ChartFunnel, ChartTreemap, ChartStock, ChartBoxPlot, ChartSunburst, ChartPareto |

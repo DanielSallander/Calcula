@@ -24,6 +24,15 @@ import { FONT_SIZES } from "../../../_shared/lib/fontList";
 import { alertAsync } from "@api/dialogs";
 import { refuseIfSelectionOwned } from "@api/selectionOwner";
 import { clipboardDoorCommand } from "@api/objectClipboard";
+import type { MergeMenuCommand } from "./homeTabIcons";
+
+/** The CoreCommand behind each row of the Merge & Center menu. */
+export const MERGE_MENU_COMMAND_IDS: Readonly<Record<MergeMenuCommand, string>> = {
+  mergeCenter: CoreCommands.MERGE_CENTER,
+  mergeAcross: CoreCommands.MERGE_ACROSS,
+  mergeCells: CoreCommands.MERGE_CELLS,
+  unmergeCells: CoreCommands.UNMERGE_CELLS,
+};
 
 export function useHomeTabState() {
   const gridState = useGridState();
@@ -252,7 +261,9 @@ export function useHomeTabState() {
         case "wrapText": await applyFormat({ wrapText: !(currentStyle?.wrapText ?? false) }, action); break;
         case "increaseIndent": await applyFormat({ indent: Math.min(15, (currentStyle?.indent ?? 0) + 1) }, action); break;
         case "decreaseIndent": await applyFormat({ indent: Math.max(0, (currentStyle?.indent ?? 0) - 1) }, action); break;
-        case "mergeCells": await CommandRegistry.execute(CoreCommands.MERGE_CELLS); break;
+        // The Merge & Center split button's icon half: Excel's toggle (merges
+        // and centres, or unmerges while the selection holds a merge).
+        case "mergeCells": await CommandRegistry.execute(CoreCommands.MERGE_CENTER); break;
         case "percentFormat": await applyFormat({ numberFormat: "0%" }, action); break;
         case "commaFormat": await applyFormat({ numberFormat: "#,##0" }, action); break;
         case "increaseDecimal": {
@@ -296,6 +307,20 @@ export function useHomeTabState() {
     },
     [applyFormat, currentStyle, gridState.selection]
   );
+
+  /**
+   * One row of the Merge & Center menu. Each runs its CoreCommand -- the ONE
+   * door the ribbon, Ctrl+M and scripts share, so the warning, the refusals
+   * and the undo step are the same from everywhere -- and a refusal that
+   * escapes as an error reaches the user, as handleItemClick's do.
+   */
+  const handleMergeCommand = useCallback(async (command: MergeMenuCommand) => {
+    try {
+      await CommandRegistry.execute(MERGE_MENU_COMMAND_IDS[command]);
+    } catch (err) {
+      void alertAsync(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
 
   // Handle color selection
   const handleColorSelect = useCallback(
@@ -396,6 +421,7 @@ export function useHomeTabState() {
     handleFontFamilyChange,
     handleFontSizeChange,
     handleNumberFormatChange,
+    handleMergeCommand,
     isActive,
     getCurrentColor,
     applyFormat,

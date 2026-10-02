@@ -711,13 +711,62 @@ pub struct MergedRegion {
     pub end_col: u32,
 }
 
+/// What the ribbon's merge gestures ask of `merge_cells` beyond a plain
+/// Range.Merge. Every field defaults to false, so an absent `options` is
+/// exactly the old command (api.mergeCells, the fill engine, the walker, the
+/// TestRunner suites).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MergeOptions {
+    /// Excel's Merge Across: one merged region per ROW of the range.
+    pub across: bool,
+    /// Merged regions wholly inside the range are dissolved and re-merged into
+    /// the new region(s) instead of refusing. A region that only PARTLY
+    /// overlaps the range is still refused.
+    pub absorb: bool,
+    /// Excel's value rule: a planned region whose top-left cell holds no
+    /// content takes the first cell in reading order (row by row, left to
+    /// right) that does -- value, formula and style move as they are.
+    pub keep_first_value: bool,
+    /// Run every gate and report the plan; change nothing, record nothing,
+    /// leave the document clean.
+    pub probe: bool,
+}
+
+/// One cell `merge_cells` MOVED into a merge's top-left cell (Excel's value
+/// rule, `MergeOptions::keep_first_value`). The caller re-points references
+/// from `from` to `to` (`relocate_cell_references`) so formulas that read the
+/// moved value keep reading it, as Excel's do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MovedCell {
+    pub from_row: u32,
+    pub from_col: u32,
+    pub to_row: u32,
+    pub to_col: u32,
+}
+
 /// Result of merge operations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeResult {
     pub success: bool,
     pub merged_regions: Vec<MergedRegion>,
     pub updated_cells: Vec<CellData>,
+    /// Regions this call created -- in probe mode, the regions it WOULD create.
+    #[serde(default)]
+    pub created_regions: Vec<MergedRegion>,
+    /// Regions this call dissolved (absorbed into a bigger merge, or unmerged)
+    /// -- in probe mode, the ones it WOULD dissolve.
+    #[serde(default)]
+    pub removed_regions: Vec<MergedRegion>,
+    /// How many of `created_regions` have two or more cells holding content:
+    /// each of those discards values, which is what Excel warns about.
+    #[serde(default)]
+    pub lossy_regions: u32,
+    /// Cells moved into a merge's top-left cell (`keep_first_value`).
+    #[serde(default)]
+    pub moved_cells: Vec<MovedCell>,
 }
 
 // ============================================================================

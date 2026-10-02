@@ -46,6 +46,7 @@ import { FONT_LIST, FONT_SIZES } from "../../../_shared/lib/fontList";
 import { useHomeTabState } from "./useHomeTabState";
 import { homeTabIcon } from "./homeTabIcons";
 import { itemTooltip } from "./itemTooltip";
+import { MergeSplitButton } from "./MergeSplitButton";
 import {
   CUSTOM_FORMAT_LABEL,
   CUSTOM_FORMAT_VALUE,
@@ -437,6 +438,21 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
     if (item.id === "fontSize") return renderFontSize(item);
     if (item.id === "numberFormat") return renderNumberFormat(item);
     if (item.type === "color") return renderColor(item);
+    // Excel's Merge & Center split button and its Merge menu. Icon-only even
+    // beside a hero: @api/layout has no labelled split, and Excel's own label
+    // shows only when the window is wide. `data-testid` lets segmentOf see
+    // the item (it joins no pill).
+    if (item.id === "mergeCells") {
+      return (
+        <MergeSplitButton
+          key={item.id}
+          data-testid={`fmt-${item.id}`}
+          item={item}
+          onRun={() => state.handleItemClick(item)}
+          onCommand={(command) => void state.handleMergeCommand(command)}
+        />
+      );
+    }
     return renderCommand(item, labelled);
   };
 

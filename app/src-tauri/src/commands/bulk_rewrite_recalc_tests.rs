@@ -661,8 +661,9 @@ fn every_bulk_cell_rewrite_seeds_the_shared_cascade() {
         ("remove_duplicates", DATA_RS),
         ("replace_all", SEARCH_RS),
         ("replace_single", SEARCH_RS),
-        // A merge DESTROYS every slave cell's value.
-        ("merge_cells", MERGE_RS),
+        // A merge DESTROYS every slave cell's value. The `merge_cells` command
+        // is a one-line delegation to this body.
+        ("merge_cells_core", MERGE_RS),
     ];
     for (name, source) in active {
         let body = body_of(source, name);

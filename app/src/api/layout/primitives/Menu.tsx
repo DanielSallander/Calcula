@@ -60,6 +60,8 @@ import {
   listTrailingClass,
 } from "./listRow";
 import { Popover, type PopoverPlacement } from "./Popover";
+import { IconButton, type IconButtonProps } from "./Button";
+import { resolveShortcutLabel } from "./Tooltip";
 import {
   focusWhenVisible,
   isTypeaheadKey,
@@ -253,6 +255,10 @@ export interface MenuItemProps
   hint?: React.ReactNode;
   /** Trailing keyboard shortcut ("Ctrl+B"), in the mono face. */
   shortcut?: string;
+  /** Show the LIVE binding of this command as the shortcut instead of a
+   *  literal (a rebound key is never contradicted by a stale menu); the
+   *  literal 'shortcut' wins when both are given. */
+  shortcutCommandId?: string;
   disabled?: boolean;
   /** Rendered as data-testid. */
   testId?: string;
@@ -266,7 +272,8 @@ export function MenuItem({
   role = "menuitem",
   icon,
   hint,
-  shortcut,
+  shortcut: shortcutLiteral,
+  shortcutCommandId,
   disabled = false,
   testId,
   className,
@@ -275,6 +282,7 @@ export function MenuItem({
   ...rest
 }: MenuItemProps): React.ReactElement {
   const ctx = useContext(MenuContext);
+  const shortcut = resolveShortcutLabel(shortcutLiteral, shortcutCommandId) ?? undefined;
   const checkable = role === "menuitemradio" || role === "menuitemcheckbox";
   const hasHint = hint !== undefined && hint !== null && hint !== false && hint !== "";
 
@@ -478,6 +486,191 @@ export function MenuButton({
             ariaLabel={ariaLabel}
             aria-labelledby={ariaLabel ? undefined : triggerId}
           >
+            {children}
+          </Menu>
+        </MenuContext.Provider>
+      </Popover>
+    </>
+  );
+}
+
+// ============================================================================
+// SplitMenuButton
+// ============================================================================
+
+/** The disabled idiom (Button.tsx: opacity .5, cursor default, no hover or
+ *  press tint) for a half that is aria-disabled rather than natively disabled.
+ *  The doubled class out-ranks the base recipe's `:hover:not(:disabled)`; a
+ *  PRESSED half keeps its pressed fill (Excel shows Merge & Center pressed but
+ *  disabled on a protected sheet). */
+const softDisabled = css`
+  &&[aria-disabled="true"] {
+    opacity: 0.5;
+    cursor: default;
+  }
+  &&[aria-disabled="true"]:hover,
+  &&[aria-disabled="true"]:active {
+    background: ${LT.buttonBg};
+  }
+  &&[aria-disabled="true"][aria-pressed="true"] {
+    background: ${LT.pressed};
+  }
+`;
+
+export interface SplitMenuButtonProps
+  extends Omit<IconButtonProps, "split" | "chevron" | "onChevronClick" | "chevronProps" | "children"> {
+  /** MenuItems, MenuSeparators and MenuHeadings of the chevron's menu. */
+  children: React.ReactNode;
+  /** data-testid of the chevron half. */
+  chevronTestId?: string;
+  /** Accessible name of the menu; defaults to the chevron's label. */
+  menuLabel?: string;
+  /** Default "bottom-start": under the whole control, left edges aligned. */
+  placement?: PopoverPlacement;
+  /** Popover width in px (content sizes it otherwise). */
+  width?: number;
+}
+
+/**
+ * Excel's split button WITH its menu: the icon half runs the command
+ * (`onClick`), the chevron half opens a card Popover holding a Menu -- with
+ * the popup menu's full keyboard model (focus on open, arrows, type-ahead,
+ * Escape back to the half that opened it, Tab out, close on select), which a
+ * standalone Menu beside an IconButton `split` does not get.
+ *
+ * KEYBOARD (Excel's split button):
+ * - icon half: Enter/Space run the command (it is a native button);
+ *   ArrowDown opens the menu on the first item, ArrowUp on the last;
+ * - chevron half: click/Enter/Space toggle the menu; ArrowDown/ArrowUp open
+ *   it on the first/last item;
+ * - the menu: everything `Menu` does inside a MenuButton.
+ *
+ * The menu drops under the WHOLE control (the split wrapper is the anchor),
+ * as Excel's does, and a press on either half while it is open is not an
+ * outside press: the chevron toggles it shut, the icon half closes it and runs.
+ *
+ * DISABLED IS aria-disabled, NOT the native attribute. A natively disabled
+ * button never shows its tooltip -- React drops onMouseEnter on a disabled
+ * control, and it cannot take keyboard focus -- so a control greyed out FOR A
+ * REASON ("isn't available on a protected sheet") could never say why. Both
+ * halves stay hoverable and focusable, look disabled (the one disabled idiom:
+ * opacity .5, no hover tint), announce aria-disabled, and do nothing when
+ * pressed.
+ */
+export function SplitMenuButton({
+  children,
+  chevronLabel,
+  chevronTestId,
+  menuLabel,
+  placement = "bottom-start",
+  width,
+  label,
+  disabled,
+  onClick,
+  onKeyDown,
+  ...rest
+}: SplitMenuButtonProps): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const [initialFocus, setInitialFocus] = useState<"first" | "last">("first");
+  // The half that opened the menu: Escape and a chosen item give focus back
+  // to it, so the keyboard user is where they started.
+  const returnTo = useRef<HTMLElement | null>(null);
+  const baseId = useId();
+  const menuId = `${baseId}-menu`;
+  const halfLabel = chevronLabel ?? `${label} options`;
+
+  const dismiss = useCallback(() => setOpen(false), []);
+  const close = useCallback(() => {
+    setOpen(false);
+    returnTo.current?.focus();
+  }, []);
+  const ctx = useMemo<MenuContextValue>(
+    () => ({ close, closeOnSelect: true, initialFocus }),
+    [close, initialFocus],
+  );
+
+  const openFrom = (half: HTMLElement, where: "first" | "last"): void => {
+    returnTo.current = half;
+    setAnchor(half.parentElement ?? half);
+    setInitialFocus(where);
+    setOpen(true);
+  };
+
+  /** ArrowDown/ArrowUp on either half: open (or step into) the menu. */
+  const arrowOpens = (e: React.KeyboardEvent<HTMLButtonElement>): void => {
+    if (disabled || (e.key !== "ArrowDown" && e.key !== "ArrowUp")) return;
+    e.preventDefault();
+    const where = e.key === "ArrowUp" ? "last" : "first";
+    if (open) {
+      const enabled = menuItemsOf(document.getElementById(menuId)).filter((el) => !isDisabled(el));
+      enabled[where === "last" ? enabled.length - 1 : 0]?.focus();
+      return;
+    }
+    openFrom(e.currentTarget, where);
+  };
+
+  const chevronProps = {
+    // eslint-disable-next-line @typescript-eslint/naming-convention -- a DOM attribute name
+    "data-testid": chevronTestId,
+    // eslint-disable-next-line @typescript-eslint/naming-convention -- a DOM attribute name
+    "aria-haspopup": "menu",
+    // eslint-disable-next-line @typescript-eslint/naming-convention -- a DOM attribute name
+    "aria-expanded": open,
+    // eslint-disable-next-line @typescript-eslint/naming-convention -- a DOM attribute name
+    "aria-controls": open ? menuId : undefined,
+    // eslint-disable-next-line @typescript-eslint/naming-convention -- a DOM attribute name
+    "aria-disabled": disabled ? true : undefined,
+    className: disabled ? softDisabled : undefined,
+    onKeyDown: arrowOpens,
+  } as React.ButtonHTMLAttributes<HTMLButtonElement>;
+
+  return (
+    <>
+      <IconButton
+        {...rest}
+        split
+        label={label}
+        aria-disabled={disabled ? true : undefined}
+        className={[rest.className, disabled ? softDisabled : undefined].filter(Boolean).join(" ") || undefined}
+        chevronLabel={halfLabel}
+        chevronProps={chevronProps}
+        onClick={(e) => {
+          if (disabled) {
+            e.preventDefault();
+            return;
+          }
+          if (open) setOpen(false);
+          onClick?.(e);
+        }}
+        onKeyDown={(e) => {
+          onKeyDown?.(e);
+          if (e.defaultPrevented) return;
+          arrowOpens(e);
+        }}
+        onChevronClick={(e) => {
+          if (disabled) {
+            e.preventDefault();
+            return;
+          }
+          if (open) {
+            setOpen(false);
+            return;
+          }
+          openFrom(e.currentTarget, "first");
+        }}
+      />
+      <Popover
+        anchorEl={anchor}
+        open={open && anchor !== null && !disabled}
+        onClose={dismiss}
+        card
+        placement={placement}
+        width={width}
+        role="presentation"
+      >
+        <MenuContext.Provider value={ctx}>
+          <Menu id={menuId} ariaLabel={menuLabel ?? halfLabel}>
             {children}
           </Menu>
         </MenuContext.Provider>

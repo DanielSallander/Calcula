@@ -4,7 +4,7 @@
 **Code:** the drawings live in `app/src/api/icons/` (`frame.tsx` + four groups: `home.tsx`,
 `chart.tsx`, `data.tsx`, `generic.tsx`); `app/src/api/ribbonIcons.tsx` aggregates them into the one
 `RibbonIcon` namespace every ribbon, rail, sidebar, launcher, menu and add-in token resolves against.
-**Guard:** `app/src/api/__tests__/ribbonIcons.test.tsx` (1,204 cases over 170 keys).
+**Guard:** `app/src/api/__tests__/ribbonIcons.test.tsx` (1,277 cases over 180 keys, 2026-10-02).
 **Approved drawings:** the mockup artifact https://claude.ai/artifact/W2RwKUxBA79azM4Qznargi (the
 Icons board, rev 2).
 
@@ -87,7 +87,11 @@ by default because the control that hosts them already carries the name.
   clean pixel at 20px, on the 1.2 grid) of background between ACCENT/DANGER and every SOFT/STRONG
   shape: move it, shrink it, or cut a notch (Paste) or a HOLE — a reverse-wound subpath, like
   Search's lens and the Lock keyhole — into the ground. No `<mask>`. Parts left beside a cut stay
-  at least 2.4 wide. A gap centred on the box cannot be 1.2 AND on whole pixels, so centred gaps
+  at least 2.4 wide, with one recorded exception: the arrow HOLE in MergeCenter and MergeAcross
+  leaves 1.2 of green above and below each head, which is the merged cell's outline (Excel draws
+  that row as a 1px outline round its arrow); heads short enough to leave 2.4 painted as a bar
+  with fat ends at 100% (both rendered 2026-10-02; the reasoning is in their doc comments). A gap
+  centred on the box cannot be 1.2 AND on whole pixels, so centred gaps
   are 2.4 (Cell Styles). `npm run check:icon-contact` (`app/scripts/icon-accent-contact.mjs`)
   measures this in Chromium from the source against
   `app/scripts/icon-accent-contact.allowlist.json`, where the icons that still break it are pinned
@@ -102,7 +106,8 @@ by default because the control that hosts them already carries the name.
 ### 2.3 Shape
 
 - **Filled shapes**, not outlines. Rect corners `rx >= 1.4`, with two exceptions: a 3px pixel-grid
-  cell takes rx 0.75-1.0, because at 1.4 it paints as a plus sign (Merge Cells, Waterfall, Keyboard);
+  cell takes rx 0.75-1.0, because at 1.4 it paints as a plus sign (Merge & Center and Merge
+  Across's cell rows, Unmerge Cells' cut row, Waterfall, Keyboard);
   a 2.4-thick bar takes rx 1.2, a full pill.
 - **Nothing thinner than 3 grid units, with one exception.** A line or arrow is a stroke of at least
   `MIN_STROKE` (2.6) with round caps and joins — use the `line(channel, width = 3)` helper, which
@@ -180,10 +185,10 @@ never drift apart; the test checks identity with `toBe`.
 
 ---
 
-## 4. The vocabulary (177 keys, 2026-09-25)
+## 4. The vocabulary (180 keys, 2026-10-02)
 
 Recount from the source rather than trusting this list (it is what an add-in author reads, and it
-must be current). **Home** (`icons/home.tsx`, 38):
+must be current). **Home** (`icons/home.tsx`, 41):
 
 - *Frozen 34:* Cut, Copy, Paste, FormatPainter, FontSizeUp, FontSizeDown, FormatCells, FillColor,
   AlignTop, AlignMiddle, AlignBottom, AlignLeft, AlignCenter, AlignRight, WrapText, IndentIncrease,
@@ -191,6 +196,13 @@ must be current). **Home** (`icons/home.tsx`, 38):
   CellStyles, InsertRow, InsertColumn, DeleteRow, DeleteColumn, Undo, Redo, Find, ClearContents,
   ClearFormatting, ClearAll
 - *Extras:* Superscript, Subscript, FontColor, Replace
+- *Merge menu (2026-10-02):* MergeCenter (the face of the Home tab's Merge & Center split
+  button), MergeAcross, UnmergeCells. With the frozen MergeCells (redrawn the same day as Excel's
+  plain Merge Cells) these are Excel's four Merge commands, drawn in Excel's metaphor: a grid two
+  cells wide and three rows tall whose middle row is the merged cell, as an ACCENT bar with any
+  arrow cut out of it pointing OUTWARD. A tall row with a double arrow (Merge & Center) or a
+  right arrow (Merge Across), a thin row (Merge Cells), the thin row cut into four cells (Unmerge
+  Cells): the four differ by shape, so they also differ in high contrast.
 
 **Chart** (`icons/chart.tsx`, 41):
 
@@ -271,8 +283,11 @@ would use it, it is a key: propose it for the shared set instead.
 
 The owner designs replacements in an SVG editor and drops them in `icons/` at the repo root (one
 file per button, icon only, no text). FormatPainter, MergeCells and ClearFormatting were converted
-this way on 2026-09-24; their doc comments list every departure from the owner's file and why. The
-conversion rules, learned on those three:
+this way on 2026-09-24; their doc comments list every departure from the owner's file and why.
+The MergeCells conversion (inward wedges at a merged cell over a row of cells) was superseded on
+2026-10-02, when the owner asked for Merge "as in Excel": its inward arrows were Google Sheets'
+metaphor, and the key now draws Excel's plain Merge Cells (§4). The conversion rules, learned on
+those three:
 
 - **Scale 64 -> 24 is x0.375, then fit the set's 1.5-2.5 margins.** Owner drawings tend to fill the
   whole box.
@@ -281,7 +296,8 @@ conversion rules, learned on those three:
   Formatting's green eraser tip is ACCENT, not DANGER).
 - **Every line under 2.6 units must change:** an owner's 1.7-2.5 stroke at 64 is 0.6-0.9 units.
   Thicken it to 2.6 and move it clear of its neighbours (Format Painter's wire), or redraw it as a
-  filled shape (Merge Cells' arrows became wedges, Clear Formatting's % rings became dots).
+  filled shape (the retired Merge Cells conversion's arrows became wedges, Clear Formatting's %
+  rings became dots).
 - **Gaps of at least 1.2 units, edges on multiples of 1.2** (whole pixels at 20px). A 0.75-unit gap
   smears into a grey line, and the Dark skin's STRONG vs ACCENT is only 1.46:1, so the gap is often
   the only thing separating two channels.

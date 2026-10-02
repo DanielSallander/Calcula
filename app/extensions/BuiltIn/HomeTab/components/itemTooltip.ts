@@ -26,7 +26,10 @@ export const ITEM_COMMAND_IDS: Readonly<Record<string, string>> = {
   paste: CoreCommands.PASTE,
   formatPainter: CoreCommands.FORMAT_PAINTER,
   formatCells: CoreCommands.FORMAT_CELLS,
-  mergeCells: CoreCommands.MERGE_CELLS,
+  // The Merge & Center split button's icon half. Unbound by default (Excel has
+  // no merge shortcut), so it shows no chip; Ctrl+M is Merge Cells, and its
+  // chip is on that row of the button's menu.
+  mergeCells: CoreCommands.MERGE_CENTER,
   undo: CoreCommands.UNDO,
   redo: CoreCommands.REDO,
   find: CoreCommands.FIND,

@@ -255,6 +255,18 @@ describe("gridCommands.execute refuses every grid command while the selection is
     expect(announced.length).toBe(1);
   });
 
+  it("the refusal names Merge & Center as Excel does, not by a word split", async () => {
+    gridCommands.register("mergeCenter", vi.fn());
+    gridCommands.register("mergeAcross", vi.fn());
+    setSelectionRefusalAnnouncer((m) => announced.push(m));
+    owner(() => true);
+    await gridCommands.execute("mergeCenter");
+    await gridCommands.execute("mergeAcross");
+    expect(announced[0]).toContain("Merge & Center");
+    expect(announced[0]).not.toContain("Merge Center");
+    expect(announced[1]).toContain("Merge Across");
+  });
+
   it("positive control: with no owner the handler runs", async () => {
     const handler = vi.fn();
     gridCommands.register("fillDown", handler);

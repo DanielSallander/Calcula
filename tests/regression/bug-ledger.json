@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 277,
+  "nextId": 284,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -8571,6 +8571,177 @@
         "description": "npx playwright test e2e/journeys/touch-pen-measure.spec.ts --project=journey: rows TP-2/3/4 (drag) 'nothing' for touch, TP-9 (cell tap/drag/long-press) 'nothing', TP-8 long-press = tap."
       },
       "notes": "Owner recommendation Q29: start with pan and tap-to-select on the grid, no pinch; give objects touch-action: none on their frame so drags reach Core; 44 px touch targets for handles/grip (floatingGripAt takes its hit size as a parameter, M7 T4). A milestone of its own (plan_M8 records the bridge sketch)."
+    },
+    {
+      "id": "BUG-0277",
+      "status": "fixed",
+      "discovered": "2026-10-02",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Excel Merge menu build (owner request 2026-10-02, D1 Excel parity): code map of the old merge path before the redesign"
+      },
+      "violation": {
+        "oracleId": "merge-refusal-visibility",
+        "severity": "medium",
+        "message": "A REFUSED MERGE OR UNMERGE FROM THE RIBBON OR CTRL+M SAID NOTHING. Spreadsheet.tsx handleMergeCells / handleUnmergeCells caught every backend error and only console.error'd it, before useHomeTabState's alert could see it -- so a merge refused by sheet protection, a writeback claim, a dynamic array or an overlapping merge looked like a dead button.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The ribbon handler had a try/catch that alerts, which reads as handled; the swallow sat one layer below it, in Core's grid-command handler.",
+      "repro": {
+        "description": "Protect the sheet (Format Cells not allowed), select A1:C1, press Ctrl+M or the Merge button: nothing happens and nothing is shown; the reason is only in the devtools console."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-02",
+        "description": "Both handlers now delegate to the one gesture runner app/src/core/lib/merge/mergeGestures.ts (runMergeGesture), which shows every refusal with alertAsync and checks protection up front with its own message. Pinned by app/src-tauri/src/commands/merge_commands_tests.rs, app/src/core/lib/merge/__tests__/mergeGestures.test.ts and app/e2e/journeys/merge-excel.spec.ts (fix not yet committed; git was unavailable to the session that made it)."
+      }
+    },
+    {
+      "id": "BUG-0278",
+      "status": "fixed",
+      "discovered": "2026-10-02",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Excel Merge menu build (owner request 2026-10-02, D1 Excel parity): code map of the old merge path before the redesign"
+      },
+      "violation": {
+        "oracleId": "document-effect-order",
+        "severity": "low",
+        "message": "A MERGE THAT CHANGED NOTHING STILL DIRTIED THE DOCUMENT. merge_cells (active sheet) constructed DocumentEffect::mutates after the protection/claim/spill gates but BEFORE its 1x1 no-op and its overlap refusal, so a refused or no-op merge set the dirty flag (close prompt, AutoRecover) -- against CLAUDE.md's 'construct it AFTER every gate that can still refuse'. A second, redundant mutates followed the write.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The dirty flag is invisible until close; a refused merge is rare and its only symptom was a 'Save changes?' prompt on an untouched workbook.",
+      "repro": {
+        "description": "Open a saved workbook, merge A1:B1, save, then call merge_cells over A1:C3 (overlaps): Err, and file_state.is_dirty() is true."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-02",
+        "description": "merge_cells_core (app/src-tauri/src/merge_commands.rs) takes PENDING guards and constructs mutates only on the branch that writes, after every refusal and no-op; the probe never constructs one. Test a_refused_or_empty_merge_leaves_the_document_clean; sabotage proved the probe test bites. Pinned by app/src-tauri/src/commands/merge_commands_tests.rs, app/src/core/lib/merge/__tests__/mergeGestures.test.ts and app/e2e/journeys/merge-excel.spec.ts (fix not yet committed; git was unavailable to the session that made it)."
+      }
+    },
+    {
+      "id": "BUG-0279",
+      "status": "fixed",
+      "discovered": "2026-10-02",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Excel Merge menu build (owner request 2026-10-02, D1 Excel parity): code map of the old merge path before the redesign"
+      },
+      "violation": {
+        "oracleId": "merge-unmerge-scope",
+        "severity": "medium",
+        "message": "UNMERGE REACHED ONLY THE MERGE UNDER THE SELECTION'S TOP-LEFT CELL. handleUnmergeCells called unmerge_cells(row, col) with the selection's top-left corner, so selecting a block holding two merges (or one away from the top-left) and choosing Unmerge left them merged. Excel unmerges every merged area in the selection.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Nothing on the Home tab offered Unmerge at all before the Merge menu; only scripts and a raw invoke reached it, one cell at a time.",
+      "repro": {
+        "description": "Merge A1:B1 and A3:B3, select A1:D4, run core.grid.unmerge: A3:B3 stays merged (and nothing happens at all when A1 is not merged)."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-02",
+        "description": "unmerge_cells takes an optional end corner and dissolves EVERY region intersecting the rectangle in one undo step (unmerge_cells_core), re-checking the found regions under the pending lock; the gesture unmerges each block of the selection. Pinned by app/src-tauri/src/commands/merge_commands_tests.rs, app/src/core/lib/merge/__tests__/mergeGestures.test.ts and app/e2e/journeys/merge-excel.spec.ts (fix not yet committed; git was unavailable to the session that made it)."
+      }
+    },
+    {
+      "id": "BUG-0280",
+      "status": "fixed",
+      "discovered": "2026-10-02",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Excel Merge menu build (owner request 2026-10-02, D1 Excel parity): code map of the old merge path before the redesign"
+      },
+      "violation": {
+        "oracleId": "ribbon-state-refresh",
+        "severity": "low",
+        "message": "NOTHING ANNOUNCED A MERGE, SO RIBBON STATE DERIVED FROM THE DOCUMENT NEVER RE-READ. handleMergeCells refreshed the canvas but dispatched no grid:refresh, the event the Home tab's coalesced document re-read listens for -- with an unmoved selection, any merge-dependent ribbon state stayed stale.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "No ribbon state depended on merges until Merge & Center became a pressed toggle.",
+      "repro": {
+        "description": "Select A1:C1 and merge it: a listener on window 'grid:refresh' never fires."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-02",
+        "description": "The gesture host's refresh dispatches grid:refresh after every merge command (Spreadsheet.tsx mergeHost); the split button re-reads its pressed state on it. Pinned by app/src-tauri/src/commands/merge_commands_tests.rs, app/src/core/lib/merge/__tests__/mergeGestures.test.ts and app/e2e/journeys/merge-excel.spec.ts (fix not yet committed; git was unavailable to the session that made it)."
+      }
+    },
+    {
+      "id": "BUG-0281",
+      "status": "fixed",
+      "discovered": "2026-10-02",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Excel Merge menu build (owner request 2026-10-02, D1 Excel parity): code map of the old merge path before the redesign"
+      },
+      "violation": {
+        "oracleId": "merge-contained-refused",
+        "severity": "medium",
+        "message": "MERGING A BLOCK THAT ALREADY CONTAINED A MERGE WAS ALWAYS REFUSED. merge_cells refused ANY intersection with an existing merge, including one wholly inside the range, and Calcula's selection grows to take in whole merges (useSelection) -- so selecting across a merge and pressing Merge always failed (silently, see the swallowed-refusal entry). Excel absorbs the inner merge into the bigger one.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The refusal text was reasonable for a PARTIAL overlap, which is the case people imagine; the swallow hid the rest.",
+      "repro": {
+        "description": "Merge B2:C2, select A1:D3, merge: refused with 'Cannot merge: selection overlaps with existing merged region'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-02",
+        "description": "MergeOptions.absorb (the ribbon gestures pass it) dissolves merges wholly inside the range and re-merges them into the new region in the same undo step; a partial overlap is still refused with the old text, and a plain call (api.mergeCells) keeps the old behaviour. Pinned by app/src-tauri/src/commands/merge_commands_tests.rs, app/src/core/lib/merge/__tests__/mergeGestures.test.ts and app/e2e/journeys/merge-excel.spec.ts (fix not yet committed; git was unavailable to the session that made it)."
+      }
+    },
+    {
+      "id": "BUG-0282",
+      "status": "fixed",
+      "discovered": "2026-10-02",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Excel Merge menu build (owner request 2026-10-02, D1 Excel parity): code map of the old merge path before the redesign"
+      },
+      "violation": {
+        "oracleId": "merge-dense-scan",
+        "severity": "high",
+        "message": "MERGING A HUGE RANGE WALKED EVERY COORDINATE. merge_cells recorded and cleared slaves with a nested row x column loop, calling clear_cell (and lookup_cache::notify_write) on every coordinate whether or not a cell existed. Select All + Ctrl+M is 1,048,576 x 16,384 = 17.2 billion iterations -- the app froze; a whole column is a million per column.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Merges are usually a few cells; nothing merged a whole column in a test.",
+      "repro": {
+        "description": "Select All (Ctrl+A), press Ctrl+M: the app stops responding."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-02",
+        "description": "stored_cells_in (merge_commands.rs) works on the cells the grid actually stores when the rectangle is bigger than the grid's cell count (sorted to reading order), for the plan, the value move, the record-and-clear loop and the mirror; the off-sheet twin too. Test a_whole_sheet_merge_is_sparse_and_finishes_at_once. Pinned by app/src-tauri/src/commands/merge_commands_tests.rs, app/src/core/lib/merge/__tests__/mergeGestures.test.ts and app/e2e/journeys/merge-excel.spec.ts (fix not yet committed; git was unavailable to the session that made it)."
+      }
+    },
+    {
+      "id": "BUG-0283",
+      "status": "open",
+      "discovered": "2026-10-02",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Excel Merge menu build (owner request 2026-10-02, D1 Excel parity): code map of the old merge path before the redesign"
+      },
+      "violation": {
+        "oracleId": "script-error-text",
+        "severity": "low",
+        "message": "A SCRIPT'S MERGE OF ONE CELL IS REPORTED AS AN OVERLAP. executeMergeCells (app/src/api/scriptHost/host.ts) throws 'mergeCells was refused (the range overlaps an existing merge)' whenever merge_cells answers success:false -- but success:false means a 1x1 range; a real overlap arrives as a thrown error with its own text.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Scripts rarely merge a single cell, and the message is plausible.",
+      "repro": {
+        "description": "In an object script, await api.mergeCells('A1') (or the same cell twice): the error blames an overlap that does not exist."
+      },
+      "notes": "Open. Fix direction: say 'a single cell cannot be merged' for success:false; keep the backend's text for a thrown refusal. Recorded in docs/design/open-items.md 2.ag."
     }
   ]
 }

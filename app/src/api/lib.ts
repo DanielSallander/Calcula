@@ -15,6 +15,17 @@ export type { ClipboardData } from "../core/hooks/useClipboard";
 export { clipboardSourceRow, pasteRowDeltas } from "../core/lib/clipboardVisibility";
 
 // ============================================================================
+// Merge -- Excel's Merge menu (2026-10-02)
+// ============================================================================
+// "Does any merged cell lie in this selection?" -- the question the Home
+// tab's Merge & Center button asks to draw itself pressed (Excel's toggle).
+// One backend read, filtered to the selection's bounding box.
+
+export { readSelectionMergeState } from "../core/lib/merge";
+export type { SelectionMergeState } from "../core/lib/merge";
+export type { MergeOptions, MovedCell } from "../core/types";
+
+// ============================================================================
 // Tauri API - Core spreadsheet operations
 // ============================================================================
 

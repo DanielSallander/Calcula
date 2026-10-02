@@ -8,8 +8,15 @@ import type { Selection, DimensionOverrides } from "../types";
 import { alertAsync } from "./dialogs";
 import { refuseIfSelectionOwned } from "./selectionOwner";
 
+/** Names a word split would get wrong ("Merge Center" is Excel's "Merge & Center"). */
+const GRID_COMMAND_LABELS: Partial<Record<GridCommand, string>> = {
+  mergeCenter: "Merge & Center",
+};
+
 /** "clearContents" -> "Clear Contents": what a refusal calls a grid command. */
 function gridCommandLabel(command: GridCommand): string {
+  const named = GRID_COMMAND_LABELS[command];
+  if (named) return named;
   const words = command.replace(/([a-z])([A-Z])/g, "$1 $2");
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
@@ -70,6 +77,9 @@ export const GRID_COMMANDS = [
   "deleteColumn",
   "mergeCells",
   "unmergeCells",
+  // Excel's Merge menu (2026-10-02): Merge & Center (a toggle) and Merge Across.
+  "mergeCenter",
+  "mergeAcross",
   "fillDown",
   "fillRight",
   "fillUp",

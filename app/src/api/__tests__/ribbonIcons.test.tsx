@@ -97,6 +97,8 @@ const CONTRACT_KEYS = [
   "Controls", "Database", "Folder", "Save",
   // home extras
   "Superscript", "Subscript", "FontColor", "Replace",
+  // Excel's Merge menu (2026-10-02; the plain merge is the frozen MergeCells)
+  "MergeCenter", "MergeAcross", "UnmergeCells",
   // data / BI / page layout
   "Table", "Pivot", "PivotFields", "CalcField", "FilterPages", "Fx",
   "ChangeSource", "Slicer", "Timeline", "Sparkline", "SparkLine", "SparkColumn",
@@ -186,6 +188,28 @@ describe("RibbonIcon namespace", () => {
     expect(RibbonIcon.Find).toBe(RibbonIcon.Search);
     expect(RibbonIcon.EditChart).toBe(RibbonIcon.Pencil);
     expect(RibbonIcon.SaveImage).toBe(RibbonIcon.Download);
+  });
+
+  it("Excel's four Merge commands are four drawings, never aliases of each other", () => {
+    // Excel's Merge & Center menu shows four different pictures (tall row with
+    // a double arrow, tall row with a right arrow, thin row, thin row cut into
+    // cells). An alias here would show the same picture for two different
+    // commands in that menu, which is the "one icon used twice" failure.
+    const merge = [
+      RibbonIcon.MergeCenter,
+      RibbonIcon.MergeAcross,
+      RibbonIcon.MergeCells,
+      RibbonIcon.UnmergeCells,
+    ];
+    for (let i = 0; i < merge.length; i++) {
+      for (let j = i + 1; j < merge.length; j++) {
+        expect(merge[i]).not.toBe(merge[j]);
+      }
+    }
+    const markup = (["MergeCenter", "MergeAcross", "MergeCells", "UnmergeCells"] as const).map(
+      (key) => renderIcon(key, { size: 20 }).innerHTML,
+    );
+    expect(new Set(markup).size).toBe(4);
   });
 });
 

@@ -14,11 +14,12 @@ pass that fixes a defect writes its own section and does not go back and strike 
 paragraphs that called it open. Read it for the WHY. Read this file for the WHAT.
 
 **Scope of this list.** Product and test-infrastructure items only. Individual defects with a
-reproduction live in `tests/regression/bug-ledger.json` (**276 entries, 273 fixed, 3 open** as of
+reproduction live in `tests/regression/bug-ledger.json` (**283 entries, 279 fixed, 4 open** as of
 2026-10-02 — recounted from the file with node, not carried forward: BUG-0098 and BUG-0108 below,
-and BUG-0276 (touch cannot drag a slicer, a handle, the grip or a timeline range, and cannot select a
+BUG-0276 (touch cannot drag a slicer, a handle, the grip or a timeline range, and cannot select a
 cell -- the browser takes the gesture for panning; filed beside BUG-0258, which is fixed; §2.af's
-touch-and-pen row). Fixed 2026-10-02, both filed by M8's docs pass: BUG-0274 (the version diff never
+touch-and-pen row), and BUG-0283 (a script's 1x1 merge is reported as an overlap; §2.ag). The Merge
+menu build (§2.ag) filed and fixed BUG-0277..0282 the same day. Fixed 2026-10-02, both filed by M8's docs pass: BUG-0274 (the version diff never
 said that a script GAINS or LOSES a capability -- it read a key the published artifact never writes;
 it now reads both versions' signed manifests through the helper the Promote dialog's code summary
 uses, `PublishedObjectScript::capability_ceiling`, `core/calp/src/manifest.rs`) and BUG-0275 (on
@@ -2650,6 +2651,53 @@ followed the same day; `canvas.spec.ts` #7 proves arrange live (16/16 with float
 | **Lock-order watch item:** `restore_pivot_definitions` and `restore_pulled_pivots` hold `pivot_tables` while taking `sheet_names` (after `grids`), and `calp_get_application_objects` takes `sheet_names` then `pivot_tables` with no grid lock; all three are synchronous main-thread commands today, so they cannot meet, but making any of them async creates the cycle. | `app/src-tauri/src/persistence.rs`, `app/src-tauri/src/calp_commands.rs` |
 | **The pivot listing has no sheet**, so the slicer dialog labels a pivot without its sheet. Needs a `sheet_index` on `PivotTableInfo` from `get_all_pivot_tables`. | `app/extensions/Slicer/lib/insertSlicerPlan.ts` |
 | **A chart parameter bound to a cell reads the active sheet**, so on a canvas it keeps its literal default; a write-back on a canvas is refused with a message. | `app/extensions/Charts/lib/chartParamWriteBack.ts` |
+
+### 2.ag Excel's Merge menu — built 2026-10-02; what is open
+
+**Built.** The owner asked for Merge "as in Excel" (D1, Excel parity first). The Home tab item
+`mergeCells` (id unchanged: it is persisted in customised layouts) is now Excel's Merge & Center SPLIT
+BUTTON (`app/extensions/BuiltIn/HomeTab/components/MergeSplitButton.tsx`, on the new `@api/layout`
+`SplitMenuButton`, `app/src/api/layout/primitives/Menu.tsx`): the icon half is Merge & Center, a toggle
+that shows pressed whenever ANY merge lies in the selection and then unmerges with General alignment over
+the former merges; the chevron opens Excel's menu in Excel's order — Merge & Center, Merge Across, Merge
+Cells (with the Ctrl+M chip), Unmerge Cells. Greyed, with the reason as its tooltip, on a protected
+sheet, during a cell edit and when the selection touches a table. The four commands are ONE gesture
+runner (`app/src/core/lib/merge/mergeGestures.ts`) behind `core.grid.mergeCenter` /
+`core.grid.mergeAcross` / `core.grid.merge` / `core.grid.unmerge`: every Ctrl+click block on its own,
+overlapping blocks merge nothing, Excel's data-loss warning ("Merging cells only keeps the upper-left
+value and discards other values.", OK/Cancel, Cancel changes nothing) asked once BEFORE anything is
+written, Excel's value rule (an empty top-left takes the first value in reading order, value + formula +
+style, and same-sheet references to it are re-pointed), merges inside the selection absorbed, every
+command ONE undo step, every refusal shown to the user. No new Tauri command: `merge_cells` takes
+`MergeOptions` (across / absorb / keepFirstValue / probe), `unmerge_cells` an end corner,
+`get_merged_regions` a rectangle — all optional, so `api.mergeCells`, the fill engine, the walker and the
+TestRunner suites keep a plain Range.Merge (`app/src-tauri/src/merge_commands.rs:367`). Pinned by
+`commands/merge_commands_tests.rs` (21), `mergeGestures.test.ts` (21), `mergeSplitButton.test.tsx`,
+`menu.test.tsx` (SplitMenuButton), `mergeRecording.test.ts`, the Table/Pivot guard tests, and the live
+journey `app/e2e/journeys/merge-excel.spec.ts` (6/6 live 2026-10-02; with Cancel ignored, M1 fails).
+
+**Fixed on the way** (BUG-0277..0282): ribbon and Ctrl+M merge refusals were swallowed into
+`console.error`; a REFUSED merge (1x1, overlap) still dirtied the document (`DocumentEffect::mutates`
+ran before both checks); Unmerge reached only the region under the selection's top-left cell; nothing
+dispatched `grid:refresh` after a merge, so ribbon state never re-read; a merge wholly inside the
+selection was always refused; a whole-sheet merge walked 17 billion coordinates (now sparse,
+`stored_cells_in`). Open: BUG-0283 (last row of the table below).
+
+| Open | Where |
+|---|---|
+| **Format Cells > Alignment has no "Merge cells" checkbox** (Excel's is three-state: ticking runs Merge Cells with the same warning, unticking runs Unmerge Cells), and no Center Across Selection / Fill / Justify / Distributed horizontal options. | `app/extensions/BuiltIn/FormatCellsDialog/tabs/AlignmentTab.tsx:118` |
+| **The mini toolbar has no Merge & Center** (Excel's does: a pressed toggle running `core.grid.mergeCenter`). | `app/src/shell/Overlays/MiniFormatToolbar/MiniFormatToolbar.tsx:135` |
+| **No KeyTips.** Excel reaches the menu with Alt, H, M, then C / A / M / U; Calcula has no KeyTip system at all. The split button is reachable with Tab, ArrowDown opens its menu. | app-wide; `app/src/api/layout/primitives/Menu.tsx` (SplitMenuButton) |
+| **Format spread is partial.** Excel spreads the source cell's whole format over the merged area (and keeps it on every cell after an unmerge), and keeps an outer border only where it is uniform along that edge. Calcula keeps the top-left cell's style only; Merge & Center spreads the alignment alone. | `app/src-tauri/src/merge_commands.rs:655` |
+| **Re-pointing a moved value is same-sheet only.** `relocate_cell_references` rewrites references on the active sheet; a formula on ANOTHER sheet that read the moved cell keeps reading the now-empty cell. Comments, notes and hyperlinks on the moved cell stay on its old address. | `app/src/core/lib/merge/mergeGestures.ts:253`, `app/src-tauri/src/commands/structure.rs:4557` |
+| **Macro replay of the value move DELETES the value.** The recorder replays each region as `api.mergeCells`, a plain Range.Merge that keeps the (empty) top-left and clears the rest, so a recorded Merge & Center on A1:C1 with only B1 = "Title" replays by ERASING the title instead of moving it. Fix: record `movedCells` as an explicit move, or let `api.mergeCells` take `keepFirstValue`. | `app/extensions/MacroRecorder/lib/actionCodegen.ts:804`, `app/src/core/lib/tauri-api.ts:2321` (`recordMergeResult`) |
+| **Re-pointing uses cut/paste corner semantics, unverified against Excel's merge.** A range whose CORNER is the moved cell is widened: B1 moves to A1 and `=COUNTA(B1:B10)` becomes `=COUNTA(A1:B10)`, which now also counts A2:A10. That is what Excel's cut/paste does; the live probes confirmed only that a single reference is re-pointed (`=B1` became `=A1`). Check a range reference in Excel at the next probe run. Also low-risk and open: the gesture keeps the block coordinates but not the sheet between its probe and its write, so a script that switches the active sheet inside that gap would merge the same coordinates on the new sheet (the confirm dialog is modal, so the user cannot). Found by the code review 2026-10-02. | `app/src-tauri/src/commands/structure.rs:4492`, `app/src/core/lib/merge/mergeGestures.ts:129` |
+| **Calcula-only bounds.** Merge Across refuses more than 10,000 rows at once (every later selection gesture fetches the merge set whole), and above 10,000 cells the alignment is written to the top-left cell only (`apply_formatting` materialises a cell per coordinate). Excel has neither limit. | `app/src-tauri/src/merge_commands.rs:38`, `app/src/core/lib/merge/mergeText.ts:34` |
+| **Deliberate departures, recorded:** ONE warning per command (Excel asks once per block, once per ROW for Merge Across — the outcomes are the same two); the toggle-unmerge does not move the active cell to the selection's top-left as Excel does (Calcula's active cell is the moving end of the selection); a PivotTable refuses all four commands with Excel's structural PivotTable message — Excel's own behaviour inside a pivot was NOT researched; Excel DISABLES the commands over a table, Calcula greys the Home button and refuses Ctrl+M / scripts through the guard. | `app/src/core/lib/merge/mergeGestures.ts:230`, `app/extensions/Pivot/index.ts:1350` |
+| **Grouped sheets get half a Merge & Center.** With sheets grouped (Ctrl+click on tabs), the centring goes through `applyFormatting`, which copies formatting to every grouped sheet, but the merge itself runs on the active sheet only — so the other sheets come out centred and NOT merged. Excel merges and centres on every grouped sheet. Merging never honoured grouping (pre-existing); the centring that now rides along makes the gap visible. Found by the Excel-fidelity review 2026-10-02. | `app/src/core/lib/merge/mergeGestures.ts:104` (`alignArea`), `app/src/core/lib/tauri-api.ts:1104` |
+| **Re-pointing is one full-sheet scan per moved value.** `relocate_cell_references` walks `0..=max_row x 0..=max_col` densely, and the gesture calls it once per moved cell; a Merge Across over many rows whose first cell is empty (labels one column in) on a large sheet does N whole-sheet scans plus N IPC round trips. Batch the moves into one call (or one per run of equal column shift) when this bites. Found by the Excel-fidelity review 2026-10-02. | `app/src/core/lib/merge/mergeGestures.ts:252`, `app/src-tauri/src/commands/structure.rs:4616` |
+| **`useSelection` fetches every merged region on each Shift-extend**; the new rectangle form of `get_merged_regions` would bound it. | `app/src/core/hooks/useSelection.ts:164` |
+| **`executeMergeCells` blames an overlap for `success:false`**, which actually means a 1x1 range (an overlap arrives as a thrown error). | `app/src/api/scriptHost/host.ts:11502` |
 
 ## 3. How to keep this file honest
 

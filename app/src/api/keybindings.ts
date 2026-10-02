@@ -779,6 +779,12 @@ const GRID_SCOPED_COMMANDS = new Set([
   "core.edit.fillLeft",
   "core.format.cells",
   "core.grid.merge",
+  // The rest of Excel's Merge menu: unbound by default, but a user's own
+  // binding for them must stand down during a cell edit or a dialog exactly
+  // as Ctrl+M does.
+  "core.grid.mergeCenter",
+  "core.grid.mergeAcross",
+  "core.grid.unmerge",
 ]);
 
 // ============================================================================

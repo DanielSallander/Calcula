@@ -1,7 +1,8 @@
 //! FILENAME: app/src/api/icons/home.tsx
 // PURPOSE: The Home tab's glyphs: the 34 FROZEN keys redrawn in place on the
 //          24-unit duotone grid, plus the Home extras (Superscript, Subscript,
-//          FontColor, Replace).
+//          FontColor, Replace, and Excel's Merge menu: MergeCenter, MergeAcross,
+//          UnmergeCells beside the frozen MergeCells).
 // CONTEXT: The 34 keys (Cut ... ClearAll) are frozen because they are a
 //          contract, not a style: homeTabIcons.tsx maps persisted Home-tab item
 //          ids onto them, GROUP_ICON_IDS lists them in the customize dialog,
@@ -350,48 +351,159 @@ function IndentDecrease({ size }: RibbonIconProps): React.ReactElement {
   );
 }
 
-/** The row of cells Merge Cells stands on: column origins on the 20px pixel
- *  grid (every value a multiple of 1.2 units). */
-const MERGE_COLUMNS = [2.4, 7.2, 12, 16.8] as const;
+// Merge: Excel's Merge & Center split button and its menu (2026-10-02).
+//
+// The owner asked for "Merge Cells as in Excel", so the four drawings follow
+// Excel's own metaphor, which every Excel since 2007 shares and the current
+// Microsoft 365 "monoline" set (2018 onward, kept by the 2023 Fluent refresh)
+// draws most clearly: a grid two cells wide and three rows tall whose MIDDLE
+// row is the merged cell, with any arrow INSIDE that row pointing OUTWARD. The
+// four differ by SHAPE, as Excel's do: a TALL merged row with a double arrow
+// (Merge & Center) or a right arrow (Merge Across), a THIN merged row with
+// nothing in it (Merge Cells), and the thin row cut back into cells (Unmerge
+// Cells). Microsoft's artwork is not copied; only what is shown, where, and
+// which way the arrows point.
+//
+// Translated into the duotone language rather than traced:
+// - Excel OUTLINES the merged row and draws the arrow inside it. In a filled set
+//   at 20px an outline leaves the arrow about 2 px, so the row is a solid ACCENT
+//   bar (the one coloured object, as Excel's blue row is) and the arrow is a
+//   HOLE in it: a reverse-wound subpath, the Search lens / Lock keyhole
+//   technique (never a <mask>).
+// - The cells above and below are SOFT, each row two cells split by the 2.4
+//   centred gap that stands in for Excel's column divider.
+// - Every SOFT cell stands exactly 1.2 units (one clean pixel at 20px) clear of
+//   the green, so ACCENT borders only the background (ICONS.md 2.2,
+//   `npm run check:icon-contact` measures 0).
+// - Every straight edge is a multiple of 1.2 (whole pixels at 20px) and the
+//   ink spans 2.4..21.6 on both axes: centred, long side 19.2 (the fill rule).
+// The 2026-09-24 drawing (icons/merge-cells.svg: green wedges pointing INWARD at
+// a merged cell over a row of dark cells) was Google Sheets' metaphor (Material
+// cell_merge), not Excel's; it is retired.
+
+/** One row of the two-column grid every Merge glyph stands on: two SOFT cells
+ *  8.4 wide at 2.4 and 13.2, split by the 2.4 centred gap (Excel's column
+ *  divider). */
+function mergeGridRow(y: number, height: number, rx: number): React.ReactElement {
+  return (
+    <>
+      <rect x="2.4" y={y} width="8.4" height={height} rx={rx} fill={SOFT} />
+      <rect x="13.2" y={y} width="8.4" height={height} rx={rx} fill={SOFT} />
+    </>
+  );
+}
+
+/** The TALL merged row (Merge & Center, Merge Across): 19.2 x 9.6 at
+ *  2.4..21.6 x 7.2..16.8 (16 x 8 px at 20px), corners 1.8, drawn CLOCKWISE so
+ *  that a counter-clockwise subpath after it is cut out as a hole under the
+ *  default nonzero fill rule. The SOFT rows above (2.4..6) and below (18..21.6)
+ *  are 3.6 tall (3 px), so they take rx 0.9 (ICONS.md 2.3: at 1.4 a 3 px cell
+ *  paints as a plus sign). */
+const MERGED_ROW_TALL =
+  "M4.2 7.2H19.8A1.8 1.8 0 0 1 21.6 9V15A1.8 1.8 0 0 1 19.8 16.8H4.2A1.8 1.8 0 0 1 2.4 15V9A1.8 1.8 0 0 1 4.2 7.2Z";
 
 /**
- * Merge Cells: two arrows pushing in on a merged cell above a row of cells.
+ * Merge & Center (the Home split button's face and the first menu item):
+ * Excel's tall merged row with a double arrow pointing OUT to both edges -- the
+ * cells become one and the content goes to the middle.
  *
- * The owner's drawing (icons/merge-cells.svg and .png, 2026-09-24): the green
- * merged cell spans columns 2-3 of the top row, green arrows in columns 1 and 4
- * point INWARD at it, and dark cells sit below. Channels follow the owner:
- * arrows and merged cell ACCENT (one concept, the merge), the cells STRONG.
+ * The arrow is a counter-clockwise hole in the green row: shaft a 2.4 band on
+ * the pixel rows 10.8..13.2 (a PIXEL_STROKE-equivalent run, two whole pixels),
+ * heads 4.8 long x 7.2 tall (4 x 6 px) with tips at 4.8 and 19.2, 2.4 inside
+ * the row's ends, and head bases on the pixel columns 9.6 and 14.4.
  *
- * Second pass, the owner's request the same day: the bottom row of cells is
- * gone and everything else grew into the room it left ("the arrows are barely
- * visible and the cells look very small"). The arrows are 4 x 8 px (were 3 x 4),
- * the merged cell 7 x 8 px (was 7 x 4), the cells 3 x 5 px (were 3 x 4). The
- * cells cannot get WIDER: four columns with one-pixel gaps are 15 px, the whole
- * box. Taller than 5 px they read as pillars, not cells (tried: 7 px).
+ * Deliberate exception to ICONS.md 2.2's rule that a part left beside a cut
+ * stays 2.4 wide (and frame.tsx's 3.6-unit part minimum): the 1.2 of green
+ * above and below each head (8.4 - 7.2 and 16.8 - 15.6) is the merged cell's
+ * OUTLINE -- Excel's own merged row is a 1 px outline round its arrow. Heads
+ * 4.8 tall leave 2.4 but paint as "a bar with fat ends" at 100%, not as a
+ * double arrow (both rendered at 20px, 2026-10-02). Do not shrink them to
+ * satisfy the rule.
+ */
+function MergeCenter({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      {mergeGridRow(2.4, 3.6, 0.9)}
+      <path
+        d={`${MERGED_ROW_TALL}M4.8 12L9.6 15.6V13.2H14.4V15.6L19.2 12L14.4 8.4V10.8H9.6V8.4Z`}
+        fill={ACCENT}
+      />
+      {mergeGridRow(18, 3.6, 0.9)}
+    </IconFrame>
+  );
+}
+
+/**
+ * Merge Across: Excel's Merge Across -- the same tall merged row with ONE arrow
+ * pointing right: each ROW of the selection becomes its own merged cell.
  *
- * Drawn on the 20px pixel grid: every straight edge is a multiple of 1.2 units,
- * so every gap is a clean pixel (the arrow-to-cell-row gap is two, which keeps
- * green 2.4 units off the dark cells, docs/design/ICONS.md 2.2). Do not "fix"
- * either of these:
- * - rx 0.75 (the owner's 2/64) is below frame.tsx's 1.4 on purpose: at 1.4 a
- *   3px cell renders as a plus sign;
- * - the ink sits 0.6 units left of centre and 0.6 below it: 17 x 15 px cannot
- *   be centred on whole pixels, and centring it puts every edge on a half pixel
- *   and smears every gap.
- * The arrows overhang the cell row by one pixel each side: inside a 3px column
- * a wedge is too small to read (the first pass). The owner's shafted arrows
- * (0.68-unit lines) became solid wedges: a plain triangle is the arrow the
- * Indent icons beside it already use.
+ * Same grid and same hole technique as MergeCenter: the shaft runs on the pixel
+ * rows 10.8..13.2 from 4.8 (2.4 inside the row's left end) to the head base on
+ * the pixel column 14.4, and the head is MergeCenter's right head (4.8 long x
+ * 7.2 tall, tip at 19.2). The same deliberate exception applies: the 1.2 of
+ * green above and below the head is the merged cell's outline (see
+ * MergeCenter); heads 4.8 tall read as a bar with a fat end at 100%.
+ */
+function MergeAcross({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      {mergeGridRow(2.4, 3.6, 0.9)}
+      <path d={`${MERGED_ROW_TALL}M4.8 13.2H14.4V15.6L19.2 12L14.4 8.4V10.8H4.8Z`} fill={ACCENT} />
+      {mergeGridRow(18, 3.6, 0.9)}
+    </IconFrame>
+  );
+}
+
+/**
+ * Merge Cells: Excel's plain Merge Cells -- a THIN merged row with no arrow
+ * between rows of cells: the cells become one and nothing moves (no centring).
+ *
+ * On whole pixels at 20px: SOFT rows 6 tall (5 px) at 2.4..8.4 and
+ * 15.6..21.6, the ACCENT row 19.2 x 4.8 (16 x 4 px) at 9.6..14.4, 1.2 clear of
+ * both. Excel's proportions (the merged row roughly a third of the height,
+ * thinner than Merge & Center's) are kept so the two read apart by shape.
+ *
+ * Redrawn 2026-10-02 when the owner asked for Excel's approach. The KEY is
+ * frozen (the Home "merge" launcher glyph and add-in tokens name it) and now
+ * draws exactly what Excel's "Merge Cells" draws; the Home button's face is
+ * MergeCenter. The owner's 2026-09-24 drawing (icons/merge-cells.svg: inward
+ * wedges at a merged cell over a row of cells) is retired with it.
  */
 function MergeCells({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <path d="M1.2 3.6L6 8.4L1.2 13.2Z" fill={ACCENT} />
-      <rect x="7.2" y="3.6" width="8.4" height="9.6" rx="0.75" fill={ACCENT} />
-      <path d="M21.6 3.6L16.8 8.4L21.6 13.2Z" fill={ACCENT} />
-      {MERGE_COLUMNS.map((x) => (
-        <rect key={x} x={x} y="15.6" width="3.6" height="6" rx="0.75" fill={STRONG} />
+      {mergeGridRow(2.4, 6, 1.4)}
+      <rect x="2.4" y="9.6" width="19.2" height="4.8" rx="1.4" fill={ACCENT} />
+      {mergeGridRow(15.6, 6, 1.4)}
+    </IconFrame>
+  );
+}
+
+/** The thin merged row cut back into cells: four 3.6 (3 px) cells whose
+ *  origins are on the pixel grid. The gaps are 1.2, 2.4 and 1.2: the middle
+ *  one is the grid's own 2.4 column gap, so each column splits in two (Excel
+ *  continues its column line through the unmerged row the same way). */
+const UNMERGED_CELL_X = [2.4, 7.2, 13.2, 18] as const;
+
+/**
+ * Unmerge Cells: Excel's Unmerge Cells -- Merge Cells' thin row cut back into
+ * four separate cells (Excel's tooltip: "Split the current cell into multiple
+ * cells").
+ *
+ * The SOFT rows are Merge Cells' (6 tall at 2.4 and 15.6); the four ACCENT
+ * cells are 3.6 x 4.8 (3 x 4 px) at 9.6..14.4, rx 0.9 because at 1.4 a 3 px
+ * cell paints as a plus sign (ICONS.md 2.3). The four green rects are ONE
+ * accent concept, the cut row, not four accents: the "exactly one thing per
+ * icon" rule names the row, and a single path would draw the same pixels.
+ */
+function UnmergeCells({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      {mergeGridRow(2.4, 6, 1.4)}
+      {UNMERGED_CELL_X.map((x) => (
+        <rect key={x} x={x} y="9.6" width="3.6" height="4.8" rx="0.9" fill={ACCENT} />
       ))}
+      {mergeGridRow(15.6, 6, 1.4)}
     </IconFrame>
   );
 }
@@ -731,6 +843,11 @@ export const HOME_ICONS = {
   Subscript,
   FontColor,
   Replace,
+  // ---- Merge menu (2026-10-02): Excel's four Merge commands, with the frozen
+  // MergeCells above as the plain merge ----------------------------------------
+  MergeCenter,
+  MergeAcross,
+  UnmergeCells,
 } as const;
 /* eslint-enable @typescript-eslint/naming-convention */
 

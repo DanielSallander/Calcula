@@ -1076,7 +1076,7 @@ fn every_command_that_cannot_carry_an_array_refuses_one() {
         (DATA_RS, "sort_range"),
         (DATA_RS, "sort_range_off_sheet"),
         (DATA_RS, "fill_range"),
-        (MERGE_RS, "merge_cells"),
+        (MERGE_RS, "merge_cells_core"),
         (MERGE_RS, "merge_cells_off_sheet"),
     ] {
         let body = body_of(source, command);

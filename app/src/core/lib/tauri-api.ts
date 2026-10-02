@@ -20,6 +20,9 @@ import type {
   UsedRangeResult,
   ClearApplyTo,
   SplitConfig,
+  MergedRegion,
+  MergeResult,
+  MergeOptions,
 } from "../types";
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../state/sheetGrouping";
 import { AppEvents, emitAppEvent } from "./events";
@@ -2306,17 +2309,29 @@ export async function goToSpecial(
 // MERGE CELLS API
 // ============================================================================
 
-export interface MergedRegion {
-  startRow: number;
-  startCol: number;
-  endRow: number;
-  endCol: number;
-}
+// The types live in ../types (mirrors of api_types.rs); re-exported here for
+// the importers that have always taken them from this module.
+export type { MergedRegion, MergeResult, MergeOptions, MovedCell } from "../types";
 
-export interface MergeResult {
-  success: boolean;
-  mergedRegions: MergedRegion[];
-  updatedCells: CellData[];
+/** Record what a merge call actually did, region by region, so a macro
+ *  replays it with explicit coordinates: absorbed or rebuilt merges are taken
+ *  apart first (an unmerge at each master), then every created region is
+ *  merged. A Merge Across over N rows therefore records N merges, and the
+ *  recorder's codegen needs no new event kind. */
+function recordMergeResult(result: MergeResult | null | undefined): void {
+  if (!result || !result.success) return;
+  for (const r of result.removedRegions ?? []) {
+    recordGridEvent({ kind: "unmergeCells", row: r.startRow, col: r.startCol });
+  }
+  for (const r of result.createdRegions ?? []) {
+    recordGridEvent({
+      kind: "mergeCells",
+      startRow: r.startRow,
+      startCol: r.startCol,
+      endRow: r.endRow,
+      endCol: r.endCol,
+    });
+  }
 }
 
 /**
@@ -2326,24 +2341,28 @@ export interface MergeResult {
  * `sheetIndex` (Wave 3): merge on a NON-ACTIVE sheet — `mergedRegions` in the
  * result then describes the TARGET sheet's merge set and `updatedCells` is
  * empty (no active-canvas repaint).
+ *
+ * `options` (the ribbon's Merge menu): across / absorb / keepFirstValue /
+ * probe -- see `MergeOptions`. Left out, this is a plain Range.Merge, exactly
+ * as before. A probe changes nothing and records nothing.
  */
 export async function mergeCells(
   startRow: number,
   startCol: number,
   endRow: number,
   endCol: number,
-  sheetIndex?: number
+  sheetIndex?: number,
+  options?: MergeOptions,
 ): Promise<MergeResult> {
-  console.log(`[tauri-api] mergeCells(${startRow}, ${startCol}, ${endRow}, ${endCol})`);
   const result = await invoke<MergeResult>("merge_cells", {
     startRow,
     startCol,
     endRow,
     endCol,
     sheetIndex: sheetIndex ?? null,
+    options: options ?? null,
   });
-  console.log(`[tauri-api] mergeCells result:`, result);
-  recordGridEvent({ kind: "mergeCells", startRow, startCol, endRow, endCol });
+  if (!options?.probe) recordMergeResult(result);
   return result;
 }
 
@@ -2351,24 +2370,49 @@ export async function mergeCells(
  * Unmerge cells at the specified position.
  *
  * `sheetIndex` (Wave 3): unmerge on a NON-ACTIVE sheet (see mergeCells).
+ *
+ * `end` (the ribbon's Unmerge Cells): unmerge EVERY merged region that
+ * intersects the rectangle from (row, col) to `end`, in one undo step. Active
+ * sheet only. Left out, only the region containing (row, col) is dissolved.
  */
-export async function unmergeCells(row: number, col: number, sheetIndex?: number): Promise<MergeResult> {
-  console.log(`[tauri-api] unmergeCells(${row}, ${col})`);
+export async function unmergeCells(
+  row: number,
+  col: number,
+  sheetIndex?: number,
+  end?: { endRow: number; endCol: number },
+): Promise<MergeResult> {
   const result = await invoke<MergeResult>("unmerge_cells", {
     row,
     col,
     sheetIndex: sheetIndex ?? null,
+    endRow: end?.endRow ?? null,
+    endCol: end?.endCol ?? null,
   });
-  console.log(`[tauri-api] unmergeCells result:`, result);
-  recordGridEvent({ kind: "unmergeCells", row, col });
+  if (result?.success) {
+    for (const r of result.removedRegions ?? []) {
+      recordGridEvent({ kind: "unmergeCells", row: r.startRow, col: r.startCol });
+    }
+  }
   return result;
 }
 
 /**
- * Get all merged regions for the current sheet.
+ * Get the merged regions of the current sheet: all of them, or only those
+ * that intersect `range` when one is given.
  */
-export async function getMergedRegions(): Promise<MergedRegion[]> {
-  return invoke<MergedRegion[]>("get_merged_regions");
+export async function getMergedRegions(range?: {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}): Promise<MergedRegion[]> {
+  if (!range) return invoke<MergedRegion[]>("get_merged_regions");
+  return invoke<MergedRegion[]>("get_merged_regions", {
+    startRow: Math.min(range.startRow, range.endRow),
+    startCol: Math.min(range.startCol, range.endCol),
+    endRow: Math.max(range.startRow, range.endRow),
+    endCol: Math.max(range.startCol, range.endCol),
+  });
 }
 
 /**
@@ -2379,6 +2423,15 @@ export async function getMergeInfo(
   col: number
 ): Promise<MergedRegion | null> {
   return invoke<MergedRegion | null>("get_merge_info", { row, col });
+}
+
+/**
+ * Whether the ACTIVE sheet is protected. Core's own door to the question the
+ * merge gestures ask before they do anything (Excel disables merging on a
+ * protected sheet); the facade's `isSheetProtected` lives above Core.
+ */
+export async function isActiveSheetProtected(): Promise<boolean> {
+  return invoke<boolean>("is_sheet_protected");
 }
 
 export async function shiftFormulaForFill(
