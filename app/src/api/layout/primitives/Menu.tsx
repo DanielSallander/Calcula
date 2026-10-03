@@ -62,6 +62,7 @@ import {
 import { Popover, type PopoverPlacement } from "./Popover";
 import { IconButton, type IconButtonProps } from "./Button";
 import { resolveShortcutLabel } from "./Tooltip";
+import { DISABLED_LOOK } from "./disabled";
 import {
   focusWhenVisible,
   isTypeaheadKey,
@@ -498,15 +499,15 @@ export function MenuButton({
 // SplitMenuButton
 // ============================================================================
 
-/** The disabled idiom (Button.tsx: opacity .5, cursor default, no hover or
- *  press tint) for a half that is aria-disabled rather than natively disabled.
- *  The doubled class out-ranks the base recipe's `:hover:not(:disabled)`; a
- *  PRESSED half keeps its pressed fill (Excel shows Merge & Center pressed but
- *  disabled on a protected sheet). */
+/** The disabled idiom (DISABLED_LOOK, plus no hover or press tint) for a half
+ *  that is aria-disabled rather than natively disabled, so Button's
+ *  `:disabled` rule never reaches it. The doubled class out-ranks the base
+ *  recipe's `:hover:not(:disabled)`; a PRESSED half keeps its pressed fill
+ *  (Excel shows Merge & Center pressed but disabled on a protected sheet),
+ *  which DISABLED_LOOK leaves alone because it greys only the icon. */
 const softDisabled = css`
   &&[aria-disabled="true"] {
-    opacity: 0.5;
-    cursor: default;
+    ${DISABLED_LOOK}
   }
   &&[aria-disabled="true"]:hover,
   &&[aria-disabled="true"]:active {
@@ -553,9 +554,9 @@ export interface SplitMenuButtonProps
  * button never shows its tooltip -- React drops onMouseEnter on a disabled
  * control, and it cannot take keyboard focus -- so a control greyed out FOR A
  * REASON ("isn't available on a protected sheet") could never say why. Both
- * halves stay hoverable and focusable, look disabled (the one disabled idiom:
- * opacity .5, no hover tint), announce aria-disabled, and do nothing when
- * pressed.
+ * halves stay hoverable and focusable, look disabled (the one disabled idiom,
+ * DISABLED_LOOK, and no hover tint), announce aria-disabled, and do nothing
+ * when pressed.
  */
 export function SplitMenuButton({
   children,

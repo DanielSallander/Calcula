@@ -9,6 +9,7 @@ import React, { act } from "react";
 import { bandLayout, panelLayout } from "../context";
 import { TOOLTIP_DELAY_MS } from "../tokens";
 import { Checkbox, Switch } from "../primitives/toggles";
+import { DISABLED_OPACITY } from "../primitives/disabled";
 import {
   LAYOUTS,
   click,
@@ -162,7 +163,7 @@ describe("Checkbox", () => {
     const label = input.closest("label")!;
     expect(input.disabled).toBe(true);
     expect(label.getAttribute("data-disabled")).toBe("true");
-    expect(getComputedStyle(label).opacity).toBe("0.5");
+    expect(getComputedStyle(label).opacity).toBe(String(DISABLED_OPACITY));
     expect(getComputedStyle(label).cursor).toBe("default");
     click(label);
     expect(onChange).not.toHaveBeenCalled();
@@ -322,7 +323,7 @@ describe("Switch", () => {
     m.render(<Switch testId="sw" label="On" checked={false} disabled onChange={onChange} />);
     const input = q<HTMLInputElement>(m.container, "[data-testid='sw']");
     const label = input.closest("label")!;
-    expect(getComputedStyle(label).opacity).toBe("0.5");
+    expect(getComputedStyle(label).opacity).toBe(String(DISABLED_OPACITY));
     click(label);
     expect(onChange).not.toHaveBeenCalled();
   });

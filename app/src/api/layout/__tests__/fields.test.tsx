@@ -18,6 +18,7 @@ import {
 } from "../primitives/fields";
 import { Input } from "../primitives/Input";
 import { Select } from "../primitives/Select";
+import { DISABLED_OPACITY } from "../primitives/disabled";
 import {
   LAYOUTS,
   blur,
@@ -176,7 +177,7 @@ describe("Input", () => {
     expect(input.style.width).toBe("50px");
     expect(input.style.textAlign).toBe("right");
     expect(input.placeholder).toBe("B1");
-    expect(getComputedStyle(input).opacity).toBe("0.5");
+    expect(getComputedStyle(input).opacity).toBe(String(DISABLED_OPACITY));
   });
 });
 
@@ -296,8 +297,8 @@ describe("Select", () => {
     );
     const select = q<HTMLSelectElement>(m.container, "[data-testid='s']");
     expect(select.disabled).toBe(true);
-    expect(getComputedStyle(select.parentElement!).opacity).toBe("0.5");
-    expect(getComputedStyle(select).opacity).not.toBe("0.5");
+    expect(getComputedStyle(select.parentElement!).opacity).toBe(String(DISABLED_OPACITY));
+    expect(getComputedStyle(select).opacity).toBe("1");
   });
 
   it("draws no chevron on a multi-row list", () => {

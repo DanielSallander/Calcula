@@ -47,6 +47,7 @@ import { Popover, firstFocusable, type PopoverPlacement } from "./Popover";
 import { Tooltip } from "./Tooltip";
 import type { TooltipPlacement } from "./Tooltip";
 import { focusWhenShown, gridKeyTarget, gridRows } from "./Tile";
+import { DISABLED_LOOK } from "./disabled";
 
 // ============================================================================
 // Geometry
@@ -147,8 +148,11 @@ const nativeWrap = css`
     box-shadow: ${LT.focusRing};
   }
 
+  /* The colour bar/chip is a <span> with a background, so it fades with the
+     face but keeps its hue: it is the colour that WOULD be applied. Only the
+     icon above it loses its colour (DISABLED_LOOK greys svg/img). */
   &[data-disabled] {
-    opacity: 0.5;
+    ${DISABLED_LOOK}
   }
 `;
 

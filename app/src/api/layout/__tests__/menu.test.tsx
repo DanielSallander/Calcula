@@ -11,6 +11,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { SurfaceLayoutProvider, bandLayout, panelLayout, type SurfaceLayout } from "../context";
 import { Button, IconButton } from "../primitives/Button";
 import { Popover } from "../primitives/Popover";
+import { DISABLED_OPACITY } from "../primitives/disabled";
 import {
   Menu,
   MenuButton,
@@ -553,7 +554,7 @@ describe("MenuItem", () => {
     );
     const row = byTestId<HTMLButtonElement>("row");
     expect(row.disabled).toBe(true);
-    expect(getComputedStyle(row).opacity).toBe("0.5");
+    expect(getComputedStyle(row).opacity).toBe(String(DISABLED_OPACITY));
   });
 });
 

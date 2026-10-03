@@ -27,6 +27,7 @@ import { css, cx } from "@emotion/css";
 import { useSurfaceLayout } from "../context";
 import { LT } from "../theme";
 import { FIELD_HEIGHT, FONT_FAMILY, GAP_SM, GAP_XS, LABEL_FONT_SIZE, ROW_GAP } from "../tokens";
+import { DISABLED_LOOK } from "./disabled";
 
 // ============================================================================
 // Shared styles
@@ -78,8 +79,7 @@ export const fieldChrome = css`
   }
 
   &:disabled {
-    opacity: 0.5;
-    cursor: default;
+    ${DISABLED_LOOK}
   }
 `;
 

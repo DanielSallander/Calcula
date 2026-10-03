@@ -11,6 +11,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { SurfaceLayoutProvider, bandLayout, panelLayout, type SurfaceLayout } from "../context";
 import { Popover } from "../primitives/Popover";
 import { Dropdown, type DropdownOption, type DropdownProps } from "../primitives/Dropdown";
+import { DISABLED_OPACITY } from "../primitives/disabled";
 import { declared, hardcodedColours } from "./colourScan";
 
 let container: HTMLDivElement;
@@ -190,7 +191,7 @@ describe("Dropdown trigger", () => {
     render(<Legend disabled />);
     const t = byTestId<HTMLButtonElement>("dd");
     expect(t.disabled).toBe(true);
-    expect(getComputedStyle(t).opacity).toBe("0.5");
+    expect(getComputedStyle(t).opacity).toBe(String(DISABLED_OPACITY));
     click(t);
     expect(listbox()).toBeNull();
   });

@@ -15,6 +15,7 @@ import {
   columnToLetter,
 } from "@api";
 import type { ActivityViewProps } from "@api/uiTypes";
+import { DISABLED_OPACITY } from "@api/layout";
 import { useFindStore } from "../_shared/lib/useFindStore";
 
 // SVG micro-icons for the search panel
@@ -213,8 +214,8 @@ export function SearchView(_props: ActivityViewProps): React.ReactElement {
             onKeyDown={handleKeyDown}
           />
           <div style={styles.navButtons}>
-            <button style={styles.navButton} onClick={handlePrev} disabled={matches.length === 0} title="Previous (Shift+Enter)"><ChevronUp /></button>
-            <button style={styles.navButton} onClick={handleNext} disabled={matches.length === 0} title="Next (Enter)"><ChevronDown /></button>
+            <button style={matches.length === 0 ? styles.navButtonDisabled : styles.navButton} onClick={handlePrev} disabled={matches.length === 0} title="Previous (Shift+Enter)"><ChevronUp /></button>
+            <button style={matches.length === 0 ? styles.navButtonDisabled : styles.navButton} onClick={handleNext} disabled={matches.length === 0} title="Next (Enter)"><ChevronDown /></button>
           </div>
         </div>
 
@@ -249,14 +250,14 @@ export function SearchView(_props: ActivityViewProps): React.ReactElement {
             </div>
             <div style={styles.replaceActions}>
               <button
-                style={styles.actionButton}
+                style={currentIndex < 0 ? styles.actionButtonDisabled : styles.actionButton}
                 onClick={handleReplaceCurrent}
                 disabled={currentIndex < 0}
               >
                 Replace
               </button>
               <button
-                style={styles.actionButton}
+                style={matches.length === 0 ? styles.actionButtonDisabled : styles.actionButton}
                 onClick={handleReplaceAll}
                 disabled={matches.length === 0}
               >
@@ -322,6 +323,32 @@ export function SearchView(_props: ActivityViewProps): React.ReactElement {
   );
 }
 
+const ACTION_BUTTON: React.CSSProperties = {
+  padding: "4px 12px",
+  border: "1px solid #d0d0d0",
+  borderRadius: 3,
+  background: "#fafafa",
+  fontSize: 11,
+  cursor: "pointer",
+  color: "#333",
+  fontFamily: "inherit",
+};
+
+const NAV_BUTTON: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: 24,
+  height: 26,
+  padding: 0,
+  border: "1px solid transparent",
+  borderRadius: 3,
+  background: "transparent",
+  cursor: "pointer",
+  fontSize: 10,
+  color: "#555",
+};
+
 const styles: Record<string, React.CSSProperties> = {
   container: {
     display: "flex",
@@ -355,20 +382,11 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     gap: 2,
   },
-  navButton: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    width: 24,
-    height: 26,
-    padding: 0,
-    border: "1px solid transparent",
-    borderRadius: 3,
-    background: "transparent",
-    cursor: "pointer",
-    fontSize: 10,
-    color: "#555",
-  },
+  navButton: NAV_BUTTON,
+  // The inline colour above overrides the browser's own disabled grey, so
+  // with no matches the chevrons looked exactly like live ones. Same fade as
+  // a disabled ribbon control (@api/layout DISABLED_OPACITY).
+  navButtonDisabled: { ...NAV_BUTTON, opacity: DISABLED_OPACITY, cursor: "default" },
   matchCount: {
     fontSize: 11,
     color: "#666",
@@ -391,16 +409,9 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 4,
     marginTop: 2,
   },
-  actionButton: {
-    padding: "4px 12px",
-    border: "1px solid #d0d0d0",
-    borderRadius: 3,
-    background: "#fafafa",
-    fontSize: 11,
-    cursor: "pointer",
-    color: "#333",
-    fontFamily: "inherit",
-  },
+  actionButton: ACTION_BUTTON,
+  // Same defect as the chevrons: the inline colour hid the disabled state.
+  actionButtonDisabled: { ...ACTION_BUTTON, opacity: DISABLED_OPACITY, cursor: "default" },
   optionsSection: {
     display: "flex",
     flexDirection: "column",

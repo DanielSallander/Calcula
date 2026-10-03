@@ -84,6 +84,12 @@ const menuStyles = {
       color: #8b949e;
       cursor: default;
 
+      /* The icon span paints its own colour, so without this a disabled
+         Move Up/Down kept a live-looking arrow beside a greyed label. */
+      & span {
+        color: inherit;
+      }
+
       &:hover {
         background: none;
       }

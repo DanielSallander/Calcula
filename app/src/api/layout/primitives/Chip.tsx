@@ -35,6 +35,7 @@ import { LT } from "../theme";
 import { CONTROL_HEIGHT_SM, FONT_FAMILY, LABEL_FONT_SIZE } from "../tokens";
 import { DropdownChevron } from "./Button";
 import { Tooltip } from "./Tooltip";
+import { DISABLED_LOOK } from "./disabled";
 
 // ============================================================================
 // Types
@@ -102,8 +103,7 @@ const pill = css`
   }
 
   &[data-disabled="true"] {
-    opacity: 0.5;
-    cursor: default;
+    ${DISABLED_LOOK}
   }
 `;
 
@@ -184,8 +184,8 @@ const clickable = css`
   }
 
   /* Never dimmed here: the PILL carries the one disabled idiom
-     (data-disabled -> opacity .5), and dimming the half inside it as well
-     would compound to .25. */
+     (data-disabled -> DISABLED_LOOK), and dimming the half inside it as well
+     would compound the opacity (.4 x .4 = .16). */
   &:disabled {
     cursor: default;
   }

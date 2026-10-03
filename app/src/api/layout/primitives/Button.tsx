@@ -13,7 +13,8 @@
 //            pressed aria-pressed="true" OR aria-checked="true" -> LT.pressed
 //                    background + 1px LT.pressedBorder border
 //            focus   :focus-visible -> LT.focusRing (never on a mouse click)
-//            disabled opacity .5, cursor default — the ONLY disabled idiom
+//            disabled DISABLED_LOOK (./disabled.ts): opacity .4, icons drawn
+//                    without colour, cursor default — the ONLY disabled idiom
 //
 //          Pressed is driven by the ARIA attribute, not by a class, so the
 //          state a screen reader announces and the state the user sees cannot
@@ -50,6 +51,7 @@ import {
 import { Tooltip } from "./Tooltip";
 import type { TooltipPlacement } from "./Tooltip";
 import { Badge } from "./Badge";
+import { DISABLED_LOOK } from "./disabled";
 
 // ============================================================================
 // Shared styles
@@ -107,8 +109,7 @@ const control = css`
   }
 
   &:disabled {
-    opacity: 0.5;
-    cursor: default;
+    ${DISABLED_LOOK}
   }
 `;
 

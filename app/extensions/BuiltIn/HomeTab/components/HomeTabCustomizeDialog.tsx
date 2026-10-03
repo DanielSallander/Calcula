@@ -29,7 +29,7 @@ import type { DialogProps } from "@api/uiTypes";
 import { useDialogWindow } from "@api/dialogWindow";
 import { DialogBody, DialogPane, dialogWidth, dialogHeight } from "@api/dialogLayout";
 import { alertAsync } from "@api/dialogs";
-import { Button, IconButton, Input, LT, Select, FONT_FAMILY } from "@api/layout";
+import { Button, DISABLED_LOOK, IconButton, Input, LT, Select, FONT_FAMILY } from "@api/layout";
 import {
   loadLayout,
   saveLayout,
@@ -202,8 +202,7 @@ const chipControl = css`
   }
 
   &:disabled {
-    opacity: 0.5;
-    cursor: default;
+    ${DISABLED_LOOK}
   }
 `;
 
@@ -275,8 +274,7 @@ const addableItem = css`
   }
 
   &:disabled {
-    opacity: 0.5;
-    cursor: default;
+    ${DISABLED_LOOK}
   }
 `;
 

@@ -69,6 +69,14 @@ by default because the control that hosts them already carries the name.
   rest, full strength when active, inverted in Dark — with no rule per state. This is the Model
   Editor's reasoning, promoted: *an icon that inherits is correct in states nobody thought about,
   and it keeps the whole set outside the hex ban by construction rather than by exemption.*
+- **Disabled is the one state with a rule (2026-10-02)**, and the HOST owns it, not the drawing: the
+  disabled idiom (`DISABLED_LOOK`, `app/src/api/layout/primitives/disabled.ts`) draws every icon
+  inside a disabled control with `grayscale(1)` and fades the control to .4, because opacity alone
+  left ACCENT green and a disabled Redo read as the same state as the enabled Undo beside it. A
+  drawing needs nothing for this. The cost is accepted: with the colour gone, an ACCENT shape laid on
+  a SOFT ground separates from it by lightness alone, so a disabled Gridlines or ClearAll loses its
+  inner detail (most in High contrast over Dark, about 1.1:1), much as Excel's flat-grey disabled
+  icons do.
 - **ACCENT is `--icon-accent`**: `color-mix(in oklab, var(--state-accent) 88%, black)` in
   Light (#047857 paints #036448), `var(--state-accent)` in Dark (#34d399). Repointed from
   `--accent-primary` (2.5:1 on the cluster card, the accent collapsed to a thin mark). Light is one

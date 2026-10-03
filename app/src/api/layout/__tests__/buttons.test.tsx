@@ -18,6 +18,7 @@ import {
   DropdownChevron,
 } from "../primitives/Button";
 import { Badge } from "../primitives/Badge";
+import { DISABLED_OPACITY } from "../primitives/disabled";
 
 /**
  * findHardcodedColours with its one known false positive neutralised. The
@@ -217,7 +218,7 @@ describe("Button", () => {
     expect(declared(b, "background")).toContain("--bg-surface");
   });
 
-  it("disabled uses the one disabled idiom (opacity .5)", () => {
+  it("disabled uses the one disabled idiom (DISABLED_OPACITY)", () => {
     render(
       <Button data-testid="b" disabled>
         Redo
@@ -225,7 +226,7 @@ describe("Button", () => {
     );
     const b = q<HTMLButtonElement>("[data-testid='b']");
     expect(b.disabled).toBe(true);
-    expect(getComputedStyle(b).opacity).toBe("0.5");
+    expect(getComputedStyle(b).opacity).toBe(String(DISABLED_OPACITY));
   });
 
   it.each(LAYOUTS)("paints no hardcoded colour in the %s", (_name, layout) => {

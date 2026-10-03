@@ -259,6 +259,9 @@ const STYLE_ELEMENT_ID = "calcula-model-editor-base";
 // ONE definition, in _shared, because both command panels need it too.
 export { surfaceIsDark } from "../../_shared/lib/surfaceTheme";
 import { surfaceIsDark as isDark } from "../../_shared/lib/surfaceTheme";
+// The one disabled fade, shared with the ribbon so this window's Undo/Redo
+// look disabled the same way the grid's do (a value, not a component).
+import { DISABLED_OPACITY } from "@api/layout";
 
 /**
  * Native controls — checkboxes, radios, `<select>` popups, spinners, the
@@ -300,7 +303,10 @@ body {
 
 button:not(:disabled), [role="tab"]:not([aria-disabled="true"]) { transition: background ${MOTION.hover}, border-color ${MOTION.hover}; }
 button:not(:disabled):hover { background: ${ME.btnHover}; }
-button:disabled { opacity: 0.55; cursor: default; }
+/* The ribbon's disabled idiom (@api/layout DISABLED_LOOK): fade, and draw the
+   icons without colour. A plain stylesheet cannot nest, so it is spelled out. */
+button:disabled { opacity: ${DISABLED_OPACITY}; cursor: default; }
+button:disabled svg:not([data-colour-data]), button:disabled img:not([data-colour-data]) { filter: grayscale(1); }
 
 input::placeholder, textarea::placeholder { color: ${ME.textOff}; }
 input:focus, select:focus, textarea:focus { border-color: ${ME.ctlBorderFocus}; }

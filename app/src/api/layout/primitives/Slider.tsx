@@ -36,6 +36,7 @@ import { css } from "@emotion/css";
 import { useSurfaceLayout } from "../context";
 import { LT } from "../theme";
 import { CONTROL_HEIGHT_MD, FONT_FAMILY, FONT_MONO, GAP_MD } from "../tokens";
+import { DISABLED_LOOK } from "./disabled";
 
 // ============================================================================
 // Pure helpers (exported for tests)
@@ -102,8 +103,7 @@ const rowBase = css`
   font-family: ${FONT_FAMILY};
 
   &[data-disabled="true"] {
-    opacity: 0.5;
-    cursor: default;
+    ${DISABLED_LOOK}
   }
 `;
 

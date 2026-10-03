@@ -29,7 +29,7 @@
 //
 //          Disabled dims the WRAPPER, not the select: dimming the select would
 //          leave the chevron at full strength beside a faded box, and dimming
-//          both would compound to .25. A multi-row list (`multiple`, or
+//          both would compound the opacity (.4 x .4 = .16). A multi-row list (`multiple`, or
 //          `size` > 1) has no trigger to decorate, so it gets no chevron and
 //          sizes to its rows.
 
@@ -39,6 +39,7 @@ import { useSurfaceLayout } from "../context";
 import { LT } from "../theme";
 import { DropdownChevron } from "./Button";
 import { fieldChrome } from "./fields";
+import { DISABLED_LOOK } from "./disabled";
 
 /** Band default width when the caller sets none. */
 const BAND_SELECT_WIDTH = 96;
@@ -57,7 +58,7 @@ const wrapper = css`
   vertical-align: middle;
 
   &[data-disabled="true"] {
-    opacity: 0.5;
+    ${DISABLED_LOOK}
   }
 `;
 
@@ -69,7 +70,7 @@ const selectBox = css`
   cursor: pointer;
   text-overflow: ellipsis;
 
-  /* The wrapper carries the disabled opacity; see the header. */
+  /* The wrapper carries the disabled look; see the header. */
   &:disabled {
     opacity: 1;
   }

@@ -318,7 +318,19 @@ Tiles, split halves, menu triggers):
 | press | `--button-active-bg` | `:active` |
 | **pressed / checked / selected** | `--button-pressed-bg` + 1px `--button-pressed-border` | the **ARIA attribute**: `aria-pressed`, `aria-checked` (or `aria-selected` in a pill) |
 | focus | `--focus-ring` box-shadow, no outline | `:focus-visible` only (never on a mouse click) |
-| disabled | opacity .5, default cursor | the ONLY disabled idiom |
+| disabled | `DISABLED_LOOK`: opacity .4, every `svg`/`img` inside drawn with `grayscale(1)`, default cursor | the ONLY disabled idiom (`primitives/disabled.ts`, shared by all ten disabled rules) |
+
+Disabled was opacity .5 until 2026-10-02, when the owner found a disabled Redo beside an enabled
+Undo only "slightly lighter": opacity alone left the duotone accent GREEN, and green beside green
+reads as one state. The icons now lose their colour and the control fades to .4, a value set by the
+disabled LABEL (2.53:1 on the Light cluster, above Excel's ~2.3; .35 falls under it). The filter
+sits on the icons, never on the control, because a filter cannot be undone by a descendant and a
+disabled control still carries colour that is not decoration: the ColorSwatch bar (the colour that
+would be applied), a pressed fill, a checked box; an svg marked `data-colour-data` is exempt for the
+same reason. An extension that hand-rolls a disabled control interpolates the same `DISABLED_LOOK`
+from `@api/layout` into a class rule. An inline style cannot reach the icons, so `DISABLED_OPACITY`
+alone is correct only for a control whose icons are already monochrome (`currentColor`): a duotone
+RibbonIcon would keep its green accent, which is the defect this fixed.
 
 Pressed keys off the ARIA attribute, not a class, so what a screen reader announces and what the
 user sees cannot disagree: a control that forgets `aria-pressed` also looks unpressed. Transitions

@@ -15,13 +15,14 @@
 //
 //          Disabled is either the native attribute (a <button> menu item) or
 //          aria-disabled (a <div role="option">); both get the one disabled
-//          idiom, opacity .5 and a default cursor.
+//          idiom, DISABLED_LOOK (./disabled.ts).
 //
 //          Colours come only from LT (../theme).
 
 import { css } from "@emotion/css";
 import { LT } from "../theme";
 import { FONT_FAMILY, FONT_MONO, MENU_ROW_HEIGHT } from "../tokens";
+import { DISABLED_LOOK } from "./disabled";
 
 /** One list row: menu item or listbox option. */
 export const listRowClass = css`
@@ -63,8 +64,7 @@ export const listRowClass = css`
 
   &:disabled,
   &[aria-disabled="true"] {
-    opacity: 0.5;
-    cursor: default;
+    ${DISABLED_LOOK}
   }
 `;
 

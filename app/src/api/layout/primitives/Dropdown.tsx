@@ -48,6 +48,7 @@ import { MenuCheck } from "./Menu";
 import { Popover } from "./Popover";
 import { Tooltip } from "./Tooltip";
 import type { TooltipPlacement } from "./Tooltip";
+import { DISABLED_LOOK } from "./disabled";
 import {
   focusWhenVisible,
   isTypeaheadKey,
@@ -155,8 +156,7 @@ const triggerClass = css`
   }
 
   &:disabled {
-    opacity: 0.5;
-    cursor: default;
+    ${DISABLED_LOOK}
   }
 `;
 

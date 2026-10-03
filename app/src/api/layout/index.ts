@@ -78,6 +78,9 @@ export type {
   CommandButtonProps,
 } from "./primitives/Button";
 
+/** The one disabled look, for an extension that hand-rolls a disabled control. */
+export { DISABLED_LOOK, DISABLED_OPACITY } from "./primitives/disabled";
+
 export { Tooltip } from "./primitives/Tooltip";
 export type { TooltipProps, TooltipPlacement } from "./primitives/Tooltip";
 

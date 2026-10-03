@@ -16,6 +16,7 @@ import {
   promoteCellToObjectScript,
 } from "../lib/promoteToObjectScript";
 import { confirmAsync, promptAsync } from "@api/dialogs";
+import { DISABLED_OPACITY } from "@api/layout";
 
 interface NotebookCellProps {
   cell: NotebookCellType;
@@ -237,7 +238,7 @@ export function NotebookCell({
           )}
           {!isMarkdown && (
             <button
-              style={styles.iconButton}
+              style={isExecuting ? styles.iconButtonDisabled : styles.iconButton}
               onClick={() => runCell(cell.id)}
               disabled={isExecuting}
               title="Run cell (Shift+Enter)"
@@ -247,7 +248,7 @@ export function NotebookCell({
           )}
           {!isMarkdown && hasRun && (
             <button
-              style={styles.iconButton}
+              style={isExecuting ? styles.iconButtonDisabled : styles.iconButton}
               onClick={() => rewindToCell(cell.id)}
               disabled={isExecuting}
               title="Rewind to before this cell"
@@ -257,7 +258,7 @@ export function NotebookCell({
           )}
           {!isMarkdown && hasRun && (
             <button
-              style={styles.iconButton}
+              style={isExecuting ? styles.iconButtonDisabled : styles.iconButton}
               onClick={() => runFromCell(cell.id)}
               disabled={isExecuting}
               title="Run from this cell onwards"
@@ -350,6 +351,20 @@ export function NotebookCell({
   );
 }
 
+const ICON_BUTTON: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "22px",
+  height: "22px",
+  border: "none",
+  background: "transparent",
+  borderRadius: "3px",
+  cursor: "pointer",
+  color: "var(--text-secondary, #666)",
+  padding: 0,
+};
+
 const styles: Record<string, React.CSSProperties> = {
   cell: {
     border: "1px solid var(--border-color, #e0e0e0)",
@@ -436,19 +451,11 @@ const styles: Record<string, React.CSSProperties> = {
     background: "var(--editor-bg, #fff)",
     color: "var(--text-primary, #333)",
   },
-  iconButton: {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    width: "22px",
-    height: "22px",
-    border: "none",
-    background: "transparent",
-    borderRadius: "3px",
-    cursor: "pointer",
-    color: "var(--text-secondary, #666)",
-    padding: 0,
-  },
+  iconButton: ICON_BUTTON,
+  // The inline colour and cursor override the browser's disabled look, so
+  // Run/Rewind/Run-from-here looked live during a run. Same fade as a
+  // disabled ribbon control (@api/layout DISABLED_OPACITY).
+  iconButtonDisabled: { ...ICON_BUTTON, opacity: DISABLED_OPACITY, cursor: "default" },
   separator: {
     width: "1px",
     height: "14px",

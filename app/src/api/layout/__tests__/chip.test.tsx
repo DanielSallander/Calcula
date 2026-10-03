@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import React from "react";
 import { bandLayout } from "../context";
 import { Chip, type ChipTone } from "../primitives/Chip";
+import { DISABLED_OPACITY } from "../primitives/disabled";
 import { LAYOUTS, click, declared, hardcodedColours, mount, q, ruleBodies, type Mount } from "./formControlsKit";
 
 let m: Mount;
@@ -191,7 +192,7 @@ describe("Chip: clickable", () => {
     );
     const chip = q<HTMLButtonElement>(m.container, "[data-testid='c']");
     expect(chip.disabled).toBe(true);
-    expect(getComputedStyle(chip).opacity).toBe("0.5");
+    expect(getComputedStyle(chip).opacity).toBe(String(DISABLED_OPACITY));
     click(chip);
     expect(onClick).not.toHaveBeenCalled();
   });
@@ -268,12 +269,13 @@ describe("Chip: removable", () => {
       </Chip>,
     );
     const chip = q(m.container, "[data-testid='c']");
-    expect(getComputedStyle(chip).opacity).toBe("0.5");
+    expect(getComputedStyle(chip).opacity).toBe(String(DISABLED_OPACITY));
     const buttons = Array.from(chip.querySelectorAll("button"));
     for (const b of buttons) {
       expect(b.disabled).toBe(true);
-      // Never compounded to .25.
-      expect(getComputedStyle(b).opacity).not.toBe("0.5");
+      // Never compounded: the halves leave the dimming to the pill, so each
+      // is undimmed ("" = no rule sets it in jsdom), not merely "not .4".
+      expect(["", "1"]).toContain(getComputedStyle(b).opacity);
       click(b);
     }
     expect(onClick).not.toHaveBeenCalled();

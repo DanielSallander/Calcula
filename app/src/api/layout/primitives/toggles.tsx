@@ -40,6 +40,7 @@ import { useSurfaceLayout } from "../context";
 import { LT } from "../theme";
 import { CONTROL_HEIGHT_MD, FONT_FAMILY, LABEL_FONT_SIZE } from "../tokens";
 import { Tooltip } from "./Tooltip";
+import { DISABLED_LOOK } from "./disabled";
 
 // ============================================================================
 // Shared helpers
@@ -86,8 +87,7 @@ const row = css`
   vertical-align: middle;
 
   &[data-disabled="true"] {
-    opacity: 0.5;
-    cursor: default;
+    ${DISABLED_LOOK}
   }
 `;
 

@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import React from "react";
 import { bandLayout, panelLayout } from "../context";
+import { DISABLED_OPACITY } from "../primitives/disabled";
 import {
   SLIDER_BAND_WIDTH,
   Slider,
@@ -275,7 +276,7 @@ describe("Slider", () => {
     expect(range().disabled).toBe(true);
     const row = range().parentElement!;
     expect(row.getAttribute("data-disabled")).toBe("true");
-    expect(getComputedStyle(row).opacity).toBe("0.5");
+    expect(getComputedStyle(row).opacity).toBe(String(DISABLED_OPACITY));
   });
 
   it("routes the ref and HTML props to the input, className/style to the row", () => {
