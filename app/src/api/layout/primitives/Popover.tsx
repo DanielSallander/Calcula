@@ -36,8 +36,10 @@ import { css, keyframes } from "@emotion/css";
 import { LT } from "../theme";
 import { FONT_FAMILY } from "../tokens";
 
-/** Where the popover sits relative to its anchor. */
-export type PopoverPlacement = "bottom-start" | "bottom-end" | "right-start";
+/** Where the popover sits relative to its anchor. The two `top-*` placements
+ *  open UPWARD -- for an anchor at the bottom of the window (the status bar),
+ *  where a downward popover would start below the screen's edge. */
+export type PopoverPlacement = "bottom-start" | "bottom-end" | "right-start" | "top-start" | "top-end";
 
 export interface PopoverProps {
   /** Anchor the popover attaches to (usually the trigger or its wrapper). */
@@ -79,10 +81,26 @@ export interface PopoverProps {
 const VIEWPORT_MARGIN = 4;
 
 /**
+ * Where a popover sits: by its TOP edge (every downward and sideways
+ * placement), or by its BOTTOM edge (the upward `top-*` placements).
+ */
+export type PopoverPosition =
+  | { left: number; top: number }
+  | { left: number; bottom: number; maxHeight: number };
+
+/**
  * Viewport position for a popover of `width` x `height` at `placement`.
  * "bottom-start" is the historical computation, unchanged: left edge on the
  * anchor's left, clamped into the viewport; top = anchor bottom + offset,
  * unclamped (taller content scrolls inside maxHeight instead).
+ *
+ * The upward placements are anchored by their BOTTOM edge (`bottom` is the
+ * distance from the viewport's bottom), `offset` above the anchor's top, and
+ * capped at the room above the anchor. A popover measured once and then
+ * placed by its top would grow DOWNWARD when its content changes after it
+ * opened -- over its own anchor and, from a status-bar anchor, off the bottom
+ * of the window, taking its last rows (its commands) with it. Anchored by the
+ * bottom it grows upward, and anything taller than the room scrolls.
  */
 export function computePopoverPosition(
   anchor: Pick<DOMRect, "left" | "top" | "right" | "bottom">,
@@ -92,12 +110,22 @@ export function computePopoverPosition(
   offset: number,
   viewportWidth: number,
   viewportHeight: number,
-): { left: number; top: number } {
+): PopoverPosition {
   const clampLeft = (x: number) =>
     Math.max(VIEWPORT_MARGIN, Math.min(x, viewportWidth - width - VIEWPORT_MARGIN));
 
   if (placement === "bottom-end") {
     return { left: clampLeft(anchor.right - width), top: anchor.bottom + offset };
+  }
+
+  if (placement === "top-start" || placement === "top-end") {
+    void height; // the bottom edge does not depend on the content's height
+    const left = placement === "top-end" ? anchor.right - width : anchor.left;
+    return {
+      left: clampLeft(left),
+      bottom: viewportHeight - (anchor.top - offset),
+      maxHeight: Math.max(0, anchor.top - offset - VIEWPORT_MARGIN),
+    };
   }
 
   if (placement === "right-start") {
@@ -148,6 +176,18 @@ const cardEnter = keyframes`
   }
 `;
 
+/** The same entrance for a card that opened UPWARD: it rises out of its anchor. */
+const cardEnterUp = keyframes`
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+`;
+
 const cardChrome = css`
   box-sizing: border-box;
   padding: 8px;
@@ -160,6 +200,10 @@ const cardChrome = css`
   /* backwards: nothing of the enter animation outlives it, so the card is not
      left on a compositor layer with grayscale text (see the ribbon BandContent). */
   animation: ${cardEnter} ${LT.motionPopover} backwards;
+
+  &[data-opens="up"] {
+    animation-name: ${cardEnterUp};
+  }
 `;
 
 const headingStyle = css`
@@ -196,7 +240,8 @@ export function Popover({
   zIndex = 1100,
 }: PopoverProps): React.ReactElement | null {
   const popRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const [pos, setPos] = useState<PopoverPosition | null>(null);
+  const opensUp = placement === "top-start" || placement === "top-end";
 
   // Position after first paint so the content's real size is measurable.
   useLayoutEffect(() => {
@@ -263,23 +308,43 @@ export function Popover({
 
   if (!open) return null;
 
+  // Upward placements are held by their BOTTOM edge (computePopoverPosition),
+  // so content that changes after opening grows the card upward. Every other
+  // placement keeps the historical style object -- same keys, same order --
+  // because the plain-mode style string is pinned byte for byte.
+  const style: React.CSSProperties =
+    pos && "bottom" in pos
+      ? {
+          position: "fixed",
+          left: pos.left,
+          bottom: pos.bottom,
+          zIndex,
+          maxHeight: `min(80vh, ${pos.maxHeight}px)`,
+          maxWidth: "calc(100vw - 8px)",
+          overflow: "auto",
+          visibility: "visible",
+          ...(width !== undefined ? { width } : {}),
+        }
+      : {
+          position: "fixed",
+          left: pos?.left ?? 4,
+          top: pos && "top" in pos ? pos.top : 0,
+          zIndex,
+          maxHeight: "80vh",
+          maxWidth: "calc(100vw - 8px)",
+          overflow: "auto",
+          visibility: pos ? "visible" : "hidden",
+          ...(width !== undefined ? { width } : {}),
+        };
+
   return ReactDOM.createPortal(
     <div
       ref={popRef}
       className={card ? cardChrome : undefined}
-      style={{
-        position: "fixed",
-        left: pos?.left ?? 4,
-        top: pos?.top ?? 0,
-        zIndex,
-        maxHeight: "80vh",
-        maxWidth: "calc(100vw - 8px)",
-        overflow: "auto",
-        visibility: pos ? "visible" : "hidden",
-        ...(width !== undefined ? { width } : {}),
-      }}
+      style={style}
       data-ribbon-content=""
       data-section-flyout=""
+      data-opens={opensUp ? "up" : undefined}
       role={role}
       aria-label={ariaLabel ?? heading}
     >

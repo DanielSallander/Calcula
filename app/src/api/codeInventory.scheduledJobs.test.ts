@@ -120,6 +120,14 @@ beforeEach(() => {
 });
 
 describe("getWorkbookScheduledJobs", () => {
+  it("a schedule that could not be listed is REPORTED to a listener (it still reads as [] without one)", async () => {
+    (listAllScheduledJobs as any).mockRejectedValue(new Error("scheduler down"));
+    const failures: string[] = [];
+    await expect(getWorkbookScheduledJobs([], { onFailure: (what) => failures.push(what) })).resolves.toEqual([]);
+    expect(failures).toEqual(["scheduled jobs"]);
+    await expect(getWorkbookScheduledJobs([])).resolves.toEqual([]);
+  });
+
   it("lists every job joined with the code unit that owns it", async () => {
     (loadAllObjectScripts as any).mockResolvedValue([objectScript()]);
     (listAllScheduledJobs as any).mockResolvedValue([job()]);

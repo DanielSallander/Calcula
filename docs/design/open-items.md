@@ -2699,6 +2699,39 @@ selection was always refused; a whole-sheet merge walked 17 billion coordinates 
 | **`useSelection` fetches every merged region on each Shift-extend**; the new rectangle form of `get_merged_regions` would bound it. | `app/src/core/hooks/useSelection.ts:164` |
 | **`executeMergeCells` blames an overlap for `success:false`**, which actually means a 1x1 range (an overlap arrives as a thrown error). | `app/src/api/scriptHost/host.ts:11502` |
 
+### 2.ah The status bar's code-and-scripts indicator — built 2026-10-03; what is open
+
+**Built.** The owner moved "Code in This File" and "Script Permissions" off the activity rail: two icons that
+looked the same whether the file held no code or an application's code that reaches the network. Both panels
+are now `hidden: true, movable: false` and reached from ONE status-bar item straight after the selection
+readout (`app/extensions/ScriptableObjects/components/CodeStatusItem.tsx`, logic in `lib/codeStatus.ts`,
+reads in `lib/codeStatusWiring.ts`): a shield that is quiet on a file with no code, carries the panel's own
+count when there is code, gains an "!" and an amber dot when something is worth a look, and shows "?" when the
+code could not be fully read (never "no code"). It opens upward onto the facts and both panels; Developer ▸
+Code in This File / Script Permissions and View ▸ Sidebar open them too. Full description:
+`docs/design/script-sandbox-architecture.md` §8 ("Where the two transparency panels are reached").
+
+**Fixed on the way** (found by the adversarial review of the first version): the inventory reads swallowed
+every backend failure into an empty list, so a summary of them said "No code in this file" (now `onFailure`
+listeners, and the panel says "Could not read ..." too); Rust's `"PermissionDenied: ..."` gate refusals were
+audited as `HostError`, invisible to every refusal count (`auditCodeForError`, census-tested); "worth a look"
+was two hand-written copies of the panel's chip rule (now `codeInventoryWarnings`, one list); a hidden panel
+the user had moved to the ribbon was reachable from nowhere, and a `movable: false` panel obeyed a stale
+ribbon placement (`panelRegistry.getPlacement`); an upward popover grew DOWNWARD off the window when its
+content changed (now held by its bottom edge); a script's 512-character `Application.StatusBar` text could
+wrap over the bar or push items aside (now truncated, script text giving way first, the host's mode word
+never). Pre-existing, filed: BUG-0284 (first row below).
+
+| Open | Where |
+|---|---|
+| **A panel script can close a transparency panel** (BUG-0284): a consented script bound to `scriptable-objects.codeInThisFile` or `.permissions` can call `panel.close()` on activate, so every door opens it and it shuts. Fix: refuse `panel.*` aspects and the activate forwarders for a host-owned panel id. | `app/src/api/scriptHost/host.ts:8052` |
+| **Notebook and custom-function edits announce nothing**, so the indicator catches them on its 60 s full read, on a return to the window, or when it is opened (which always reads fresh) -- not at once. Give those two write doors a change event like `OBJECT_SCRIPTS_CHANGED_EVENT`. | `app/extensions/ScriptNotebook/lib/notebookApi.ts:30`, `app/src/api/customFunctions.ts:819` |
+| **An unreadable or tampered library lockfile reads as "no libraries"** (`loadLockfile` catches everything, including a parse failure), so neither the panel nor the indicator can say "could not read" for script libraries. Distinguish "missing" from "unreadable" there. | `app/src/api/scriptLibraries/lockfile.ts:38` |
+| **The indicator moves sideways as the selection text changes width** -- the owner's chosen spot sits after two text slots of changing width; tabular digits stop single-cell moves from nudging it, a range selection still does. | `app/src/shell/StatusBar.tsx` (`SELECTION_STYLE`) |
+| **No keyboard route from the grid to the status bar** (Tab moves cells; there is no F6 landmark cycle). Keyboard users reach both panels from Developer; the indicator's own summary is not on that route. | app-wide |
+| **`objectScriptBadge` listens for `scriptable-objects:script-saved`, which nothing emits** (pre-existing dead listener). `OBJECT_SCRIPTS_CHANGED_EVENT` is the working signal now. | `app/src/api/objectScriptBadge.ts:171` |
+| **Goldens.** The rail (`sidebar-chrome.spec.ts`) and status-bar (`core-visual.spec.ts`) goldens change with this; they are already stale pending the owner's re-record (2026-10-02). | `app/e2e/tests/__screenshots__/` |
+
 ## 3. How to keep this file honest
 
 1. **Close items here, in place**, when they are fixed — do not rely on a later section of the

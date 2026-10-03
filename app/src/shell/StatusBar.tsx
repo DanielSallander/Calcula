@@ -42,6 +42,61 @@ function modeLabel(mode: string): string {
 /** The mode assumed before the grid has announced one (or without a grid). */
 const IDLE_STATUS: GridModeDetail = { mode: "[Ready]", selectionText: null };
 
+/**
+ * The left zone may SHRINK below its content (minWidth 0), and only the two
+ * TEXT slots give way inside it: each truncates to an ellipsis on one line.
+ * Registered items keep their natural width (a flex item's default min-width
+ * is its content), so no text can squeeze one, wrap it, or push it past the
+ * bar's clipped right edge.
+ *
+ * That matters because the mode slot is not host text alone. Application.
+ * StatusBar puts a SCRIPT's message there -- up to 512 characters, at the
+ * unlocked tier, no capability needed (scriptHost/allowlist.ts) -- and the
+ * bar has no overflow handling. A script could otherwise write a long enough
+ * message to push the item beside it out of view, and that item is the
+ * host-drawn code-and-scripts indicator (ScriptableObjects' CodeStatusItem).
+ */
+const LEFT_ZONE_STYLE: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: "12px",
+  minWidth: 0,
+};
+
+const TRUNCATED_TEXT_STYLE: React.CSSProperties = {
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  minWidth: 0,
+};
+
+/**
+ * WHICH text gives way first. Equal flex-shrink would split a shortfall in
+ * proportion to width, so a busy narrow window cut the five-letter mode word
+ * to "Rea…" while the long selection readout kept its full width -- and Excel
+ * never truncates its mode indicator. So:
+ * - the host's own MODE word never shrinks;
+ * - a SCRIPT's message (Application.StatusBar) gives way first and hardest;
+ * - the selection readout gives way only after that.
+ */
+const HOST_MODE_STYLE: React.CSSProperties = { ...TRUNCATED_TEXT_STYLE, flexShrink: 0 };
+const SCRIPT_MESSAGE_STYLE: React.CSSProperties = { ...TRUNCATED_TEXT_STYLE, flexShrink: 1 };
+const SELECTION_STYLE: React.CSSProperties = {
+  ...TRUNCATED_TEXT_STYLE,
+  flexShrink: 1,
+  // Digits of one width: moving from B4 to B8 does not nudge what follows.
+  fontVariantNumeric: "tabular-nums",
+};
+/**
+ * While a script's message shows, the selection readout does not shrink AT
+ * ALL. Flexbox shares a shortfall in proportion, never in sequence, so even a
+ * heavily weighted message left the readout a fraction of a pixel short -- and
+ * a fraction is enough to draw its ellipsis ("Col:…", measured live
+ * 2026-10-03). With the readout fixed, the message alone gives way, down to
+ * nothing; at the 800px minimum window the readout and the items still fit.
+ */
+const SELECTION_BESIDE_MESSAGE_STYLE: React.CSSProperties = { ...SELECTION_STYLE, flexShrink: 0 };
+
 export function StatusBar(_props: StatusBarProps): React.ReactElement {
   const [items, setItems] = useState<StatusBarItemDefinition[]>(() => getStatusBarItems());
   const [customText, setCustomText] = useState<string | null>(null);
@@ -101,7 +156,7 @@ export function StatusBar(_props: StatusBarProps): React.ReactElement {
       }}
     >
       {/* Left zone */}
-      <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+      <div data-testid="status-bar-left" style={LEFT_ZONE_STYLE}>
         {/* The MODE slot. `customText` is Application.StatusBar's message and
             REPLACES the mode while it is set, exactly as it does in Excel.
 
@@ -111,10 +166,25 @@ export function StatusBar(_props: StatusBarProps): React.ReactElement {
             printed a second time next to a "Ready" that no longer means
             anything. The registry is also the wrong owner -- an item is
             registered by an extension, while the mode is grid state that Core
-            computes and announces. */}
-        <span data-testid="status-bar-mode">{customText ?? modeLabel(gridStatus.mode)}</span>
+            computes and announces.
+
+            Truncated rather than wrapped (LEFT_ZONE_STYLE); a truncated
+            message keeps its whole text on hover. */}
+        <span
+          data-testid="status-bar-mode"
+          style={customText !== null ? SCRIPT_MESSAGE_STYLE : HOST_MODE_STYLE}
+          title={customText ?? undefined}
+        >
+          {customText ?? modeLabel(gridStatus.mode)}
+        </span>
         {gridStatus.selectionText && (
-          <span data-testid="status-bar-selection">{gridStatus.selectionText}</span>
+          <span
+            data-testid="status-bar-selection"
+            style={customText !== null ? SELECTION_BESIDE_MESSAGE_STYLE : SELECTION_STYLE}
+            title={gridStatus.selectionText}
+          >
+            {gridStatus.selectionText}
+          </span>
         )}
         {leftItems.map((item) => (
           <item.component key={item.id} />

@@ -121,12 +121,21 @@ async function load(loader: Loader, companionLoaders: Loader[] = []): Promise<Ha
       walk(menu.id, menu.items);
     }
     for (const id of contextItems.keys()) out.push(`grid-context/${id}`);
+    // Status-bar items: an item left behind keeps painting (and, for one with
+    // a source behind it, keeps reading) after its extension is gone.
+    for (const item of ui.getStatusBarItems()) out.push(`status-bar/${item.id}`);
     for (const id of xCommands.keys()) out.push(`extension-registry/${id}`);
     for (const id of registered) if (CommandRegistry.has(id)) out.push(`command/${id}`);
     return out.sort();
   };
 
-  // Every door of the context inert, except the menus and the commands, which are REAL.
+  const statusBar = {
+    register: ui.registerStatusBarItem,
+    unregister: ui.unregisterStatusBarItem,
+  };
+
+  // Every door of the context inert, except the menus, the status bar and the
+  // commands, which are REAL.
   const inert = (): unknown =>
     new Proxy(() => () => {}, {
       get: (_t, prop) => (prop === "then" ? undefined : inert()),
@@ -157,7 +166,12 @@ async function load(loader: Loader, companionLoaders: Loader[] = []): Promise<Ha
       }
       if (prop === "ui") {
         return new Proxy(inert() as Record<string, unknown>, {
-          get: (u, p) => (p === "menus" ? menus : (u as Record<string | symbol, unknown>)[p as string]),
+          get: (u, p) =>
+            p === "menus"
+              ? menus
+              : p === "statusBar"
+                ? statusBar
+                : (u as Record<string | symbol, unknown>)[p as string],
         });
       }
       if (prop === "invokeBackend") return vi.fn(async () => null);

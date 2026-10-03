@@ -29,6 +29,7 @@ import {
   IconTemplate,
   IconMarketplace,
   PanelExtensions,
+  openPanel,
 } from "@api";
 import type {
   CapabilityRequestPayload,
@@ -98,6 +99,13 @@ import { registerEmbeddedFormUx } from "./lib/embeddedFormUx";
 import { closeEmbeddedScriptForm, openEmbeddedScriptForm } from "@api/scriptHost/host";
 import { getActiveSheet } from "@api/lib";
 import { registerCellBehaviorUx } from "./lib/cellBehaviorUx";
+import { ShieldIcon } from "./components/shieldGlyph";
+import { createCodeStatusItem } from "./components/CodeStatusItem";
+import { CodeStatusSource } from "./lib/codeStatus";
+import {
+  productionCodeStatusReaders,
+  productionCodeStatusSignals,
+} from "./lib/codeStatusWiring";
 import { createFormScript } from "./lib/createForm";
 import {
   onSaveAndApply,
@@ -141,27 +149,15 @@ const cleanupFunctions: Array<() => void> = [];
 
 const PERMISSIONS_PANEL_ID = "scriptable-objects.permissions";
 const CODE_IN_FILE_PANEL_ID = "scriptable-objects.codeInThisFile";
-
-/** SVG shield icon for the Script Permissions panel */
-const ShieldIcon = React.createElement(
-  "svg",
-  {
-    width: 24,
-    height: 24,
-    viewBox: "0 0 24 24",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: 1.5,
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
-  },
-  // Shield outline
-  React.createElement("path", {
-    d: "M12 3 L19 6 V11 C19 15.5 16 19.5 12 21 C8 19.5 5 15.5 5 11 V6 Z",
-  }),
-  // Checkmark
-  React.createElement("path", { d: "M9 11.5 L11.2 13.7 L15 9.5" }),
-);
+/** The status bar's code-and-scripts indicator (components/CodeStatusItem.tsx). */
+const CODE_STATUS_ITEM_ID = "scriptable-objects.codeStatus";
+/**
+ * Where the indicator sits among the LEFT status-bar items: first, straight
+ * after the selection readout. Higher than every other left item (calculation
+ * progress is 100, the animation transport 30), so one that appears for a
+ * while never shifts the indicator sideways.
+ */
+const CODE_STATUS_ITEM_PRIORITY = 200;
 
 // ============================================================================
 // Custom Events
@@ -1233,6 +1229,31 @@ async function activate(context: ExtensionContext): Promise<void> {
   // remembered refusal untrue (lib/scriptEmbedHost.ts).
   cleanupFunctions.push(registerEmbeddedFormUx((placementId) => embeddedFormWiring.retry(placementId)));
 
+  // ---- The status bar's code-and-scripts indicator ----
+  // Says, without being opened, whether this file holds code and whether
+  // anything is worth a look (lib/codeStatus.ts), and opens either panel.
+  // Started BEFORE the startup load below, for two reasons: a script the
+  // launch workbook mounts may be refused while it loads, and that refusal
+  // must be counted (refusals are counted live); and the indicator must be on
+  // the bar while the user decides whether to let that workbook's code run.
+  const codeStatus = new CodeStatusSource(
+    productionCodeStatusReaders,
+    productionCodeStatusSignals({ scriptsLoaded: ScriptableObjectEvents.SCRIPTS_LOADED }),
+  );
+  context.ui.statusBar.register({
+    id: CODE_STATUS_ITEM_ID,
+    alignment: "left",
+    priority: CODE_STATUS_ITEM_PRIORITY,
+    component: createCodeStatusItem(codeStatus, (door) =>
+      openPanel(door === "permissions" ? PERMISSIONS_PANEL_ID : CODE_IN_FILE_PANEL_ID),
+    ),
+  });
+  codeStatus.start();
+  cleanupFunctions.push(() => {
+    codeStatus.stop();
+    context.ui.statusBar.unregister(CODE_STATUS_ITEM_ID);
+  });
+
   // ---- Load object scripts from backend on startup ----
   // The startup load IS a workbook open (the app just loaded whatever workbook
   // it starts with — including a .cala launched by double-click), so it carries
@@ -1647,6 +1668,17 @@ async function activate(context: ExtensionContext): Promise<void> {
   });
   cleanupFunctions.push(() => context.ui.taskPanes.unregister("scriptable-objects.manager"));
 
+  // ---- The two transparency panels: off the rail, reached from the status bar ----
+  // Both used to be activity-bar icons that looked the same whether the file
+  // held no code or code from an application that reaches the network. The
+  // status bar's indicator below SAYS which, and opens either panel; each is
+  // also on the Developer menu and under View > Sidebar (which lists hidden
+  // views). `hidden` takes the icon off the rail; `movable: false` keeps the
+  // panel in the sidebar for good -- a transparency panel moved to the ribbon
+  // would leave the indicator's buttons opening nothing (openPanel only opens
+  // sidebar panels), and the registry ignores a ribbon placement a user stored
+  // back when these were still movable.
+
   // ---- Register the Script Permissions transparency panel ----
   // Sections-based panel API (design §8): mounted scripts, the tier/method
   // policy table rendered directly from ALLOWLIST, and the broker audit tail.
@@ -1654,6 +1686,8 @@ async function activate(context: ExtensionContext): Promise<void> {
     id: PERMISSIONS_PANEL_ID,
     title: "Script Permissions",
     icon: ShieldIcon,
+    hidden: true,
+    movable: false,
     sections: [
       {
         id: `${PERMISSIONS_PANEL_ID}.mounted`,
@@ -1688,6 +1722,8 @@ async function activate(context: ExtensionContext): Promise<void> {
     // code-inventory panel is visually distinct from the runtime Script
     // Permissions panel, which keeps the shield-with-checkmark security icon.
     icon: IconScript,
+    hidden: true,
+    movable: false,
     sections: [
       {
         id: `${CODE_IN_FILE_PANEL_ID}.inventory`,
@@ -1699,6 +1735,25 @@ async function activate(context: ExtensionContext): Promise<void> {
     priority: 9,
   });
   cleanupFunctions.push(() => context.ui.panels.unregister(CODE_IN_FILE_PANEL_ID));
+
+  // ---- Developer > Code in This File / Script Permissions ----
+  // The keyboard's way to both panels (the menu bar is reachable without a
+  // pointer), and a door that does not depend on the status bar.
+  for (const itemId of [CODE_IN_FILE_PANEL_ID, PERMISSIONS_PANEL_ID]) {
+    cleanupFunctions.push(() => context.ui.menus.unregisterItem("developer", itemId));
+  }
+  context.ui.menus.registerItem("developer", {
+    id: CODE_IN_FILE_PANEL_ID,
+    label: "Code in This File",
+    icon: IconScript,
+    action: () => openPanel(CODE_IN_FILE_PANEL_ID),
+  });
+  context.ui.menus.registerItem("developer", {
+    id: PERMISSIONS_PANEL_ID,
+    label: "Script Permissions",
+    icon: ShieldIcon,
+    action: () => openPanel(PERMISSIONS_PANEL_ID),
+  });
 
   // ---- Cross-window event bridge: Object Script Editor separate window ----
 

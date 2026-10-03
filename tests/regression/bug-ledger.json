@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 284,
+  "nextId": 285,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -8742,6 +8742,27 @@
         "description": "In an object script, await api.mergeCells('A1') (or the same cell twice): the error blames an overlap that does not exist."
       },
       "notes": "Open. Fix direction: say 'a single cell cannot be merged' for success:false; keep the backend's text for a thrown refusal. Recorded in docs/design/open-items.md 2.ag."
+    },
+    {
+      "id": "BUG-0284",
+      "status": "open",
+      "discovered": "2026-10-03",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Status-bar code-and-scripts indicator review (owner request 2026-10-03): adversarial review of the move of Code in This File / Script Permissions off the activity rail"
+      },
+      "violation": {
+        "oracleId": "transparency-surface-control",
+        "severity": "low",
+        "message": "A PANEL SCRIPT CAN CLOSE A TRANSPARENCY PANEL. Panel scripts may be attached to ANY panel id (PanelContextMenu \"Edit Script...\" emits edit-script with instanceId = panelId; nothing ties a panel script to a panel it owns), and object.setState panel.close / panel.open / panel.setBadge (host.ts executeSetState, ~8050) have no vSetState rule. A consented script bound to scriptable-objects.codeInThisFile or scriptable-objects.permissions can subscribe onActivate (fired for any panelId === instanceId) and call panel.close(), so every door that opens the panel -- the status-bar indicator, Developer, View > Sidebar -- opens it and it shuts at once. movable:false (2026-10-03) already refuses panel.moveTo for both.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Pre-existing: the rail icons opened the same panels by the same route. Nobody attaches a script to a host transparency panel by accident, and the panels are rarely opened.",
+      "repro": {
+        "description": "Attach an object script to panel instance scriptable-objects.codeInThisFile whose onActivate calls panel.close(); open Code in This File from the status-bar indicator: it closes immediately."
+      },
+      "notes": "Open. Fix direction: refuse (PermissionDenied, audited) panel.open/close/setBadge/moveTo and the onActivate/onDeactivate forwarders when instanceId names a HOST transparency panel (a panel flagged host-owned), with a test that a script bound to scriptable-objects.codeInThisFile cannot close it."
     }
   ]
 }

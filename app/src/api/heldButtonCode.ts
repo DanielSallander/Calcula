@@ -523,6 +523,63 @@ interface ControlEntryLike {
   metadata: { controlType: string; properties: Record<string, StoredProperty> };
 }
 
+/**
+ * The workbook's controls and cell types, sheet by sheet, from ONE walk. The
+ * three button listings below each walk every sheet on their own; a caller that
+ * needs more than one (the status bar's code-and-scripts indicator needs all
+ * three on every read) reads this once and hands it to each, instead of
+ * repeating `get_all_controls` / `get_all_cell_types` per sheet per listing.
+ * Only the kinds a listing needs are read: `cellTypes` stays null when not asked
+ * for, and a listing given a walk without them reads them itself.
+ */
+export interface ButtonListing {
+  sheets: Array<{
+    index: number;
+    name: string;
+    controls: ControlEntryLike[] | null;
+    cellTypes: CellTypeEntryLike[] | null;
+  }>;
+}
+
+/** Walk every sheet once (see {@link ButtonListing}). Rejects when the workbook cannot be listed. */
+export async function readButtonListing(
+  what: { controls: boolean; cellTypes: boolean } = { controls: true, cellTypes: true },
+): Promise<ButtonListing> {
+  const sheets = await invokeBackend<SheetsResultLike>("get_sheets");
+  const out: ButtonListing = { sheets: [] };
+  for (const sheet of sheets.sheets) {
+    out.sheets.push({
+      index: sheet.index,
+      name: sheet.name,
+      controls: what.controls
+        ? await invokeBackend<ControlEntryLike[]>("get_all_controls", { sheetIndex: sheet.index })
+        : null,
+      cellTypes: what.cellTypes
+        ? await invokeBackend<CellTypeEntryLike[]>("get_all_cell_types", { sheetIndex: sheet.index })
+        : null,
+    });
+  }
+  return out;
+}
+
+/** The walk to list from: the caller's, else a fresh one of just what is needed. */
+async function listingFor(
+  given: ButtonListing | undefined,
+  what: { controls: boolean; cellTypes: boolean },
+): Promise<ButtonListing> {
+  return given ?? readButtonListing(what);
+}
+
+/** A sheet's controls from the walk, read now when the walk did not include them. */
+async function controlsOf(sheet: ButtonListing["sheets"][number]): Promise<ControlEntryLike[]> {
+  return sheet.controls ?? invokeBackend<ControlEntryLike[]>("get_all_controls", { sheetIndex: sheet.index });
+}
+
+/** A sheet's cell types from the walk, read now when the walk did not include them. */
+async function cellTypesOf(sheet: ButtonListing["sheets"][number]): Promise<CellTypeEntryLike[]> {
+  return sheet.cellTypes ?? invokeBackend<CellTypeEntryLike[]>("get_all_cell_types", { sheetIndex: sheet.index });
+}
+
 /** A control's caption (`text`), or "" when it has none. */
 function controlCaption(properties: Record<string, StoredProperty> | undefined | null): string {
   const text = properties?.text?.value;
@@ -545,13 +602,11 @@ function cellCaption(params: Record<string, unknown> | null | undefined): string
  * ({@link HeldInlineCode}): the id and hash the Rust door asks the approval of,
  * and whether a click can ever run it.
  */
-export async function listHeldButtonCode(): Promise<HeldButtonCodeEntry[]> {
-  const sheets = await invokeBackend<SheetsResultLike>("get_sheets");
+export async function listHeldButtonCode(listing?: ButtonListing): Promise<HeldButtonCodeEntry[]> {
+  const walk = await listingFor(listing, { controls: true, cellTypes: true });
   const out: HeldButtonCodeEntry[] = [];
-  for (const sheet of sheets.sheets) {
-    const controls = await invokeBackend<ControlEntryLike[]>("get_all_controls", {
-      sheetIndex: sheet.index,
-    });
+  for (const sheet of walk.sheets) {
+    const controls = await controlsOf(sheet);
     for (const entry of controls) {
       const properties = entry.metadata.properties;
       const held = readHeldButtonCode(properties);
@@ -579,9 +634,7 @@ export async function listHeldButtonCode(): Promise<HeldButtonCodeEntry[]> {
         inline,
       });
     }
-    const cells = await invokeBackend<CellTypeEntryLike[]>("get_all_cell_types", {
-      sheetIndex: sheet.index,
-    });
+    const cells = await cellTypesOf(sheet);
     for (const entry of cells) {
       if (entry.typeId !== BUTTON_CELL_TYPE_ID) continue;
       const held = readHeldCellButtonAction(entry.params);
@@ -736,8 +789,8 @@ export interface ButtonInlineAction {
  * application's. REJECTS when a listing fails -- per-workbook trust must read
  * a failure as "could not look", never as "no button code".
  */
-export async function listButtonInlineActions(): Promise<ButtonInlineAction[]> {
-  const sheets = await invokeBackend<SheetsResultLike>("get_sheets");
+export async function listButtonInlineActions(listing?: ButtonListing): Promise<ButtonInlineAction[]> {
+  const walk = await listingFor(listing, { controls: true, cellTypes: false });
   const groups = new Map<string, ButtonInlineAction>();
   const add = async (
     provenance: "local" | "distributed",
@@ -751,10 +804,8 @@ export async function listButtonInlineActions(): Promise<ButtonInlineAction[]> {
     groups.set(key, group);
     group.locations.push(location);
   };
-  for (const sheet of sheets.sheets) {
-    const controls = await invokeBackend<ControlEntryLike[]>("get_all_controls", {
-      sheetIndex: sheet.index,
-    });
+  for (const sheet of walk.sheets) {
+    const controls = await controlsOf(sheet);
     for (const entry of controls) {
       const properties = entry.metadata.properties ?? {};
       const location: ButtonInlineLocation = {
@@ -915,13 +966,11 @@ export interface ApplicationCellCommand {
  * neither is the user's own button (its command needs no approval). Rejects
  * when the workbook cannot be listed.
  */
-export async function listApplicationCellCommands(): Promise<ApplicationCellCommand[]> {
-  const sheets = await invokeBackend<SheetsResultLike>("get_sheets");
+export async function listApplicationCellCommands(listing?: ButtonListing): Promise<ApplicationCellCommand[]> {
+  const walk = await listingFor(listing, { controls: false, cellTypes: true });
   const out: ApplicationCellCommand[] = [];
-  for (const sheet of sheets.sheets) {
-    const cells = await invokeBackend<CellTypeEntryLike[]>("get_all_cell_types", {
-      sheetIndex: sheet.index,
-    });
+  for (const sheet of walk.sheets) {
+    const cells = await cellTypesOf(sheet);
     for (const entry of cells) {
       if (entry.typeId !== BUTTON_CELL_TYPE_ID) continue;
       const application = cellButtonApplication(entry.params);

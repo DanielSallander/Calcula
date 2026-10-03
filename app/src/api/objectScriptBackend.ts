@@ -3,6 +3,8 @@
 // CONTEXT: Used by the ScriptableObjects extension to persist scripts in the backend.
 
 import { invoke } from "@tauri-apps/api/core";
+import { emitTauriEvent, listenTauriEvent } from "./backend";
+import type { UnlistenFn } from "./backend";
 import type {
   ObjectScriptDefinition,
   ScriptableObjectType,
@@ -10,6 +12,45 @@ import type {
   ScriptProvenance,
 } from "./scriptableObjects";
 import type { AuthoringRun } from "./scriptHost/authoringRun";
+
+// ============================================================================
+// Change announcement
+// ============================================================================
+
+/**
+ * Cross-window event fired after an object script is saved or deleted through
+ * this module -- the twin of WORKBOOK_SCRIPTS_CHANGED_EVENT for module scripts.
+ *
+ * A TAURI event for the same reason: the standalone Object Script Editor is its
+ * own webview and saves from there, while what must react (the status bar's
+ * code-and-scripts indicator) lives in the main window. It is emitted AFTER the
+ * backend write resolves, so a listener that re-reads the backend sees the new
+ * state; registering the script in the manager (onScriptChange) happens before
+ * a fire-and-forget save and cannot promise that.
+ */
+export const OBJECT_SCRIPTS_CHANGED_EVENT = "workbook:object-scripts-changed";
+
+export interface ObjectScriptsChangedDetail {
+  /** The script, or the component instance whose scripts were all deleted. */
+  id: string;
+  change: "saved" | "deleted" | "deletedForInstance";
+}
+
+function announceObjectScriptsChanged(detail: ObjectScriptsChangedDetail): void {
+  // Fire and forget: the write already succeeded, and an environment with no
+  // Tauri event bus (tests, the browser smoke harness) must not turn a
+  // successful save into a thrown error.
+  void emitTauriEvent(OBJECT_SCRIPTS_CHANGED_EVENT, detail).catch(() => {
+    /* no event bus here; listeners refresh on their next natural trigger */
+  });
+}
+
+/** Subscribe to object-script saves and deletions (any window). */
+export function onObjectScriptsChanged(
+  callback: (detail: ObjectScriptsChangedDetail) => void,
+): Promise<UnlistenFn> {
+  return listenTauriEvent<ObjectScriptsChangedDetail>(OBJECT_SCRIPTS_CHANGED_EVENT, callback);
+}
 
 // ============================================================================
 // Backend API Types (match Rust serialization)
@@ -84,21 +125,37 @@ export async function saveObjectScript(script: ObjectScriptDefinition): Promise<
     packageName: script.packageName ?? null,
     packageVersion: script.packageVersion ?? null,
   };
-  return invoke<void>("save_object_script", { script: data });
+  await invoke<void>("save_object_script", { script: data });
+  announceObjectScriptsChanged({ id: script.id, change: "saved" });
 }
 
 /** Delete an object script by ID. */
 export async function deleteObjectScript(id: string): Promise<void> {
-  return invoke<void>("delete_object_script", { id });
+  await invoke<void>("delete_object_script", { id });
+  announceObjectScriptsChanged({ id, change: "deleted" });
 }
 
 /** Delete all object scripts for a component instance (when the component is deleted). */
 export async function deleteObjectScriptsForInstance(instanceId: string): Promise<void> {
-  return invoke<void>("delete_object_scripts_for_instance", { instanceId });
+  await invoke<void>("delete_object_scripts_for_instance", { instanceId });
+  announceObjectScriptsChanged({ id: instanceId, change: "deletedForInstance" });
+}
+
+/** Options for {@link loadAllObjectScripts}. */
+export interface LoadAllObjectScriptsOptions {
+  /**
+   * Told about every script that is listed but could not be read. The load
+   * still skips it (a caller that MOUNTS scripts must not stop at one bad
+   * record), but a caller that COUNTS them -- the code inventory -- must not
+   * report one fewer script than the file holds as if nothing went wrong.
+   */
+  onFailure?: (what: string, error: unknown) => void;
 }
 
 /** Load all object scripts from backend and convert to ObjectScriptDefinition format. */
-export async function loadAllObjectScripts(): Promise<ObjectScriptDefinition[]> {
+export async function loadAllObjectScripts(
+  options: LoadAllObjectScriptsOptions = {},
+): Promise<ObjectScriptDefinition[]> {
   const summaries = await listObjectScripts();
   const scripts: ObjectScriptDefinition[] = [];
 
@@ -124,6 +181,7 @@ export async function loadAllObjectScripts(): Promise<ObjectScriptDefinition[]> 
       });
     } catch (e) {
       console.warn(`[ObjectScripts] Failed to load script "${summary.name}":`, e);
+      options.onFailure?.(`object script "${summary.name}"`, e);
     }
   }
 

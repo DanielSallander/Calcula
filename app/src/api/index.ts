@@ -2415,7 +2415,16 @@ export type { MethodPolicy, Tier as ScriptTierName, CapabilityId, MethodClass } 
 // id from an untrusted source (a backend error string, a package manifest, a
 // pragma) can narrow it against the one canonical set instead of casting.
 export { ALL_CAPABILITY_IDS, CAPABILITY_ID_SET, isCapabilityId } from "./scriptHost/capabilityIds";
-export { getAuditTail, getAuditTotal, onAudit, clearAudit } from "./scriptHost/auditRing";
+export {
+  getAuditTail,
+  getAuditTotal,
+  onAudit,
+  clearAudit,
+  isAuditRefusal,
+  countAuditRefusals,
+  AUDIT_REFUSAL_CODES,
+  AUDIT_FAILURE_CODES,
+} from "./scriptHost/auditRing";
 export type { AuditEntry } from "./scriptHost/auditRing";
 export { listMountedHandles, listExposed, BrokerError } from "./scriptHost/broker";
 export type { ScriptHandle, RpcErrorCode } from "./scriptHost/broker";
@@ -3173,11 +3182,14 @@ export {
   deleteObjectScript,
   deleteObjectScriptsForInstance,
   loadAllObjectScripts,
+  onObjectScriptsChanged,
+  OBJECT_SCRIPTS_CHANGED_EVENT,
   getScriptAuthoringRuns,
   appendScriptAuthoringRun,
   adoptScriptAuthoringRuns,
   clearScriptAuthoringRuns,
 } from "./objectScriptBackend";
+export type { ObjectScriptsChangedDetail, LoadAllObjectScriptsOptions } from "./objectScriptBackend";
 
 // ---- Code inventory (T1: "Code in This File" transparency inspector) ----
 // Read-path @api bindings for the notebook and module-script populations

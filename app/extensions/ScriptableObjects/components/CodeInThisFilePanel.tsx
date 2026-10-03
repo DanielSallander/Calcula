@@ -65,6 +65,7 @@ import {
   setScheduledJobEnabled,
   getScriptHeldState,
   summarizeScriptHeldState,
+  codeInventoryWarnings,
   revokeScriptKeybinding,
   clearScriptClipboard,
   getExtensionAuditTrail,
@@ -1320,6 +1321,9 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
   const [now, setNow] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /** What the last inventory read could NOT read (the list above is then
+   *  short of the truth, and says so). */
+  const [gaps, setGaps] = useState<string[]>([]);
   /** Last inventory read, so a schedule refresh can reuse the owner join
    *  instead of rescanning every script on every poll. */
   const unitsRef = useRef<CodeUnit[] | null>(null);
@@ -1339,10 +1343,15 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
 
   const reloadJobs = useCallback(async () => {
     try {
-      const next = await getWorkbookScheduledJobs(unitsRef.current ?? undefined);
+      // A schedule that could not be listed reads as "nothing scheduled" unless
+      // the failure is listened for: it is then SAID, never shown as empty.
+      const failures: string[] = [];
+      const next = await getWorkbookScheduledJobs(unitsRef.current ?? undefined, {
+        onFailure: (what) => failures.push(what),
+      });
       setJobs(next);
       setNow(Date.now());
-      setJobsError(null);
+      setJobsError(failures.length > 0 ? `Could not read ${failures.join(", ")}` : null);
     } catch (e) {
       setJobsError(e instanceof Error ? e.message : String(e));
     }
@@ -1353,9 +1362,11 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
     setLoading(true);
     setError(null);
     try {
-      const units = await getWorkbookCodeUnits();
+      const failures: string[] = [];
+      const units = await getWorkbookCodeUnits({ onFailure: (what) => failures.push(what) });
       unitsRef.current = units;
       setSummary(summarizeCodeInventory(units));
+      setGaps([...new Set(failures)]);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1443,42 +1454,27 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
           <div style={summaryRowStyle}>
             <span style={chipStyle}>{summary.total} code units</span>
             <span style={chipStyle}>{summary.local} local</span>
-            <span style={chipStyle}>{summary.distributed} from packages</span>
+            <span style={chipStyle}>{summary.distributed - summary.libraries} from applications</span>
+            {summary.libraries > 0 && (
+              <span style={chipStyle}>{summary.libraries} from script libraries</span>
+            )}
             {summary.mounted > 0 && <span style={chipStyle}>{summary.mounted} active</span>}
-            {summary.beyondGrid > 0 && (
-              <span style={warnChipStyle}>{summary.beyondGrid} reach beyond the grid</span>
-            )}
-            {jobSummary.total > 0 && (
-              <span style={warnChipStyle}>
-                {jobSummary.total} scheduled
-                {jobSummary.disabled > 0 ? ` (${jobSummary.disabled} paused)` : ""}
+            {/* The warning chips are codeInventoryWarnings -- the ONE list the
+                status bar's code-and-scripts indicator lights its dot from, so
+                the two can never disagree about what is worth a look. */}
+            {codeInventoryWarnings(summary, jobSummary, heldSummary).map((w) => (
+              <span key={w.id} style={warnChipStyle} data-code-warning={w.id}>
+                {w.text}
+                {w.note ? ` (${w.note})` : ""}
               </span>
-            )}
-            {heldSummary.shortcuts > 0 && (
-              <span style={warnChipStyle}>
-                {heldSummary.shortcuts} keyboard shortcut
-                {heldSummary.shortcuts === 1 ? "" : "s"} held
-              </span>
-            )}
-            {heldSummary.clipboardCells > 0 && (
-              <span style={warnChipStyle}>
-                {heldSummary.clipboardCells} cell
-                {heldSummary.clipboardCells === 1 ? "" : "s"} in script clipboards
-              </span>
-            )}
-            {heldSummary.runningWatches > 0 && (
-              <span style={warnChipStyle}>
-                {heldSummary.runningWatches} background check
-                {heldSummary.runningWatches === 1 ? "" : "s"}
-              </span>
-            )}
-            {heldSummary.panes > 0 && (
-              <span style={warnChipStyle}>
-                {heldSummary.panes} task pane{heldSummary.panes === 1 ? "" : "s"} docked
-              </span>
-            )}
-            {heldSummary.forms > 0 && <span style={warnChipStyle}>a dialog is up</span>}
+            ))}
           </div>
+          {gaps.length > 0 && (
+            <div style={{ ...emptyStyle, color: "#B00020" }} data-testid="code-inventory-gaps">
+              Could not read {gaps.join(", ")}. The list below is what could be read, so this file
+              may hold more code than it shows.
+            </div>
+          )}
           {summary.beyondGrid > 0 && (
             <div style={reachCalloutStyle}>
               {summary.beyondGrid} script{summary.beyondGrid === 1 ? "" : "s"} may reach

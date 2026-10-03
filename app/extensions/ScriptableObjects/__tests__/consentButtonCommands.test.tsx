@@ -250,6 +250,51 @@ vi.mock("../components/PermissionsPanel", () => ({
   ActivitySection: () => null,
 }));
 vi.mock("../components/CodeInThisFilePanel", () => ({ CodeInThisFileSection: () => null }));
+// The status bar's code-and-scripts indicator: a surface, like the panels
+// above. Its source still starts (activate builds it), against reads that
+// find nothing and signals that never fire.
+vi.mock("../components/CodeStatusItem", () => ({ createCodeStatusItem: () => () => null }));
+// The indicator's source reads the real code inventory, whose module graph
+// reaches scriptHost modules this file doubles; an inert source keeps the
+// load path, which is what is under test, the only thing that runs.
+vi.mock("../lib/codeStatus", () => ({
+  CodeStatusSource: class {
+    start(): void {}
+    stop(): void {}
+    subscribe = (): (() => void) => () => undefined;
+    getSnapshot = (): Record<string, never> => ({});
+    refreshNow = async (): Promise<void> => undefined;
+  },
+}));
+vi.mock("../lib/codeStatusWiring", () => ({
+  productionCodeStatusReaders: {
+    readFile: async () => ({
+      units: [],
+      inventory: { total: 0, local: 0, distributed: 0, libraries: 0, beyondGrid: 0, mounted: 0 },
+      gaps: [],
+      heldButtons: 0,
+      commandButtons: 0,
+    }),
+    readJobs: async () => ({ total: 0, enabled: 0, disabled: 0, running: 0, orphaned: 0, nextRunMs: null }),
+    readHeld: async () => ({
+      shortcuts: 0,
+      clipboards: 0,
+      clipboardCells: 0,
+      runningWatches: 0,
+      panes: 0,
+      embeddedForms: 0,
+      forms: 0,
+      any: false,
+    }),
+    refusalsSoFar: () => 0,
+  },
+  productionCodeStatusSignals: () => ({
+    onDocumentReplaced: () => () => undefined,
+    onCodeMayHaveChanged: () => () => undefined,
+    onUserReturned: () => () => undefined,
+    onAudit: () => () => undefined,
+  }),
+}));
 vi.mock("../components/ScriptConsentDialog", () => ({ default: () => null }));
 vi.mock("../components/CapabilityRequestDialog", () => ({ default: () => null }));
 vi.mock("../components/ScriptDialogPrompt", () => ({
@@ -338,9 +383,10 @@ function makeContext(): ExtensionContext {
   return {
     ui: {
       dialogs: { register: noop, unregister: noop, show: noop, hide: noop },
-      menus: { registerItem: noop },
+      menus: { registerItem: noop, unregisterItem: noop },
       taskPanes: { register: noop, unregister: noop },
       panels: { register: noop, unregister: noop },
+      statusBar: { register: noop, unregister: noop },
     },
   } as unknown as ExtensionContext;
 }

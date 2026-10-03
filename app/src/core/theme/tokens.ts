@@ -254,6 +254,18 @@ export const THEME_TOKENS = {
   SIDE_PANEL_HEADER_BG: '--side-panel-header-bg',
   STATUS_BAR_BG: '--status-bar-bg',
   STATUS_BAR_FG: '--status-bar-fg',
+  /** A clickable item's well on the status bar: a darker shade OF the bar
+   *  (derived, so a skin that repaints the bar repaints its items), and the
+   *  same well one step darker under the pointer. Text on both is held to
+   *  4.5:1 in tokens.test.ts. */
+  STATUS_BAR_ITEM_BG: '--status-bar-item-bg',
+  STATUS_BAR_ITEM_HOVER_BG: '--status-bar-item-hover-bg',
+  /** The bar's foreground, receded -- "nothing to report" (the code-and-scripts
+   *  indicator on a file with no code). Still a 3:1 mark on the item's well. */
+  STATUS_BAR_FG_QUIET: '--status-bar-fg-quiet',
+  /** "Worth a look" mark ON the status bar (the code-and-scripts indicator's
+   *  dot): a non-text mark held to 3:1 on the bar and on an item's well. */
+  STATUS_BAR_ATTENTION: '--status-bar-attention',
   BORDER_SUBTLE: '--border-subtle',
 
   // --- Aliases for names that were already in use ---

@@ -21,6 +21,7 @@ vi.mock("@api", () => ({
     total: units.length,
     local: units.length,
     distributed: 0,
+    libraries: 0,
     beyondGrid: 0,
     mounted: 0,
     bySurface:
@@ -59,7 +60,11 @@ const getExtensionAuditTrail = vi.fn(async () => ({
   missing: true,
   lastWriteError: "",
 }));
-vi.mock("@api/codeInventory", () => ({
+vi.mock("@api/codeInventory", async () => ({
+  // REAL: the warning chips are this one rule, shared with the status bar's
+  // code-and-scripts indicator; a stub would test a copy.
+  codeInventoryWarnings: (await vi.importActual<typeof import("@api/codeWarnings")>("@api/codeWarnings"))
+    .codeInventoryWarnings,
   // The panel derives the "what can it touch?" badge from the interpreter reach
   // mirror, so the mock has to carry those two helpers as well. Real behaviour
   // (not a stub): a unit with no declared ceiling and no interpreter capability

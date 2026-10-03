@@ -90,6 +90,7 @@ import {
   buttonActionConsentId,
   type ButtonInlineAction,
   type ButtonInlineLocation,
+  type ButtonListing,
 } from "./heldButtonCode";
 
 // The trusted-UI half of the scheduler is re-exported through the inventory so
@@ -293,6 +294,20 @@ export interface CodeUnit {
   module?: { readonly runtime: "objectScript" | "workbookScript"; readonly cellAccessWhenYouRunIt: boolean };
 }
 
+/**
+ * Told about a read that failed in a way that makes the answer SMALLER than the
+ * truth: a whole population that could not be listed, a listed script that
+ * could not be read (and so is missing), or a notebook's grants that could not
+ * be read (so its reach looks narrower than it is). `what` names it for a
+ * person ("notebooks", 'object script "Refresh"').
+ *
+ * The tolerant reads stay tolerant -- a panel still shows everything that DID
+ * load -- but a caller that SUMMARISES the file (a count, a "nothing worth a
+ * look") must be able to say "could not read" instead of reporting the smaller
+ * answer as if it were the whole one.
+ */
+export type InventoryFailureListener = (what: string, error: unknown) => void;
+
 /** Options for {@link getWorkbookCodeUnits}. */
 export interface WorkbookCodeUnitOptions {
   /**
@@ -302,6 +317,15 @@ export interface WorkbookCodeUnitOptions {
    * rather than compare an empty population against its record.
    */
   strictButtonActions?: boolean;
+  /** See {@link InventoryFailureListener}. */
+  onFailure?: InventoryFailureListener;
+  /**
+   * The workbook's controls and cell types, already walked once
+   * ({@link readButtonListing}). A caller that also lists held button code and
+   * application commands passes one walk to all three instead of walking every
+   * sheet three times.
+   */
+  buttonListing?: ButtonListing;
 }
 
 /** A roll-up of an inventory for the panel header. */
@@ -309,6 +333,12 @@ export interface CodeInventorySummary {
   total: number;
   local: number;
   distributed: number;
+  /**
+   * How many of `distributed` are SCRIPT-LIBRARY modules (imported with
+   * `// @uses`): third-party code from a library package, not from an
+   * application. The rest of `distributed` came with an application.
+   */
+  libraries: number;
   /** Units whose declared ceiling lets them reach beyond grid state. */
   beyondGrid: number;
   /** Units that COULD reach beyond grid state — including a Rust-QuickJS unit
@@ -356,12 +386,18 @@ const titleCase = (s: string): string =>
 
 /** Tolerantly run a population fetch; an empty/missing population (or a backend
  *  that is not wired in a given window) yields [] rather than failing the whole
- *  inventory. */
-async function safely<T>(label: string, run: () => Promise<T[]>): Promise<T[]> {
+ *  inventory -- and, when the caller listens, is REPORTED as a failure, so a
+ *  summary never mistakes "could not list" for "there is none". */
+async function safely<T>(
+  label: string,
+  run: () => Promise<T[]>,
+  onFailure?: InventoryFailureListener,
+): Promise<T[]> {
   try {
     return await run();
   } catch (e) {
     console.warn(`[codeInventory] ${label} unavailable:`, e);
+    onFailure?.(label, e);
     return [];
   }
 }
@@ -448,12 +484,16 @@ function buttonActionUnit(action: ButtonInlineAction): CodeUnit {
  * (object scripts, then the grid-only Rust-QuickJS surfaces) then by name.
  */
 export async function getWorkbookCodeUnits(options: WorkbookCodeUnitOptions = {}): Promise<CodeUnit[]> {
+  const { onFailure } = options;
   const [objectScripts, moduleSummaries, notebookSummaries, lockedLibraries, mounted] =
     await Promise.all([
-      safely("object scripts", loadAllObjectScripts),
-      safely("module scripts", listModuleScripts),
-      safely("notebooks", listNotebooks),
-      safely("script libraries", listInstalledLibraries),
+      // A listed script that cannot be read is skipped (as the mount path
+      // does) and reported: it is in the file, and the count must not shrink
+      // silently.
+      safely("object scripts", () => loadAllObjectScripts({ onFailure }), onFailure),
+      safely("module scripts", listModuleScripts, onFailure),
+      safely("notebooks", listNotebooks, onFailure),
+      safely("script libraries", listInstalledLibraries, onFailure),
       Promise.resolve(listMountedHandles()),
     ]);
 
@@ -598,9 +638,10 @@ export async function getWorkbookCodeUnits(options: WorkbookCodeUnitOptions = {}
   // buttons with the same code are one unit naming both cells, and moving a
   // button changes where it sits, never which unit it is -- per-workbook trust
   // would otherwise read every move as an added script.
+  const listButtons = (): Promise<ButtonInlineAction[]> => listButtonInlineActions(options.buttonListing);
   const buttonActions = options.strictButtonActions
-    ? await listButtonInlineActions()
-    : await safely("button actions", listButtonInlineActions);
+    ? await listButtons()
+    : await safely("button code", listButtons, onFailure);
   for (const action of buttonActions) {
     units.push(buttonActionUnit(action));
   }
@@ -618,12 +659,14 @@ export async function getWorkbookCodeUnits(options: WorkbookCodeUnitOptions = {}
   );
   // A notebook's consent grants live ONLY in the Rust CapabilityStore, keyed by
   // the surface id the provider checks ("notebook:<id>"). Best-effort: a window
-  // without the backend wired reports "nothing granted" rather than failing.
+  // without the backend wired reports "nothing granted" rather than failing --
+  // and a listener is told, because "nothing granted" is the NARROWER reach.
   const notebookGrants = await Promise.all(
     notebookSummaries.map(async (n) => {
       try {
         return await listBackendCapabilityGrants(`notebook:${n.id}`);
-      } catch {
+      } catch (e) {
+        onFailure?.(`what notebook "${n.name}" may touch`, e);
         return [] as CapabilityId[];
       }
     }),
@@ -668,10 +711,14 @@ export async function getWorkbookCodeUnits(options: WorkbookCodeUnitOptions = {}
   // Each user-authored UDF body runs in the same hardened worker realm under the
   // library's declared capabilities (e.g. bi.query for cube.*). The whole library
   // shares ONE mount, so the live tier/grant join uses that single handle.
-  const customLib = await safely("custom functions", async () => {
-    const lib = await loadPersistedLibrary();
-    return lib ? [lib] : [];
-  });
+  const customLib = await safely(
+    "custom functions",
+    async () => {
+      const lib = await loadPersistedLibrary();
+      return lib ? [lib] : [];
+    },
+    onFailure,
+  );
   const libHandle = handleById.get(CUSTOM_FUNCTIONS_SCRIPT_ID);
   for (const lib of customLib) {
     const declared = (lib.capabilities ?? []) as CapabilityId[];
@@ -716,10 +763,14 @@ export async function getWorkbookCodeUnits(options: WorkbookCodeUnitOptions = {}
   // The whole library shares ONE mount under CHART_TRANSFORMS_SCRIPT_ID; each
   // user-authored transform body runs in that worker under the library's declared
   // capabilities (e.g. bi.query for cube.*). Provenance is the .calp it came from.
-  const transformLib = await safely("chart transforms", async () => {
-    const res = await loadPersistedTransformLibraryWithProvenance();
-    return res ? [res] : [];
-  });
+  const transformLib = await safely(
+    "chart transforms",
+    async () => {
+      const res = await loadPersistedTransformLibraryWithProvenance();
+      return res ? [res] : [];
+    },
+    onFailure,
+  );
   const transformHandle = handleById.get(CHART_TRANSFORMS_SCRIPT_ID);
   for (const { lib, sourcePackage } of transformLib) {
     const declared = (lib.capabilities ?? []) as CapabilityId[];
@@ -749,10 +800,14 @@ export async function getWorkbookCodeUnits(options: WorkbookCodeUnitOptions = {}
   // ---- Sandboxed chart marks (worker-realm; paint-only, no capabilities) ------
   // Each mark mounts as its OWN worker (instanceId = markScriptId), so the live
   // mount/grant join is per-mark. Marks declare nothing (clipped paint surface).
-  const markLib = await safely("chart marks", async () => {
-    const res = await loadPersistedMarkLibraryWithProvenance();
-    return res ? [res] : [];
-  });
+  const markLib = await safely(
+    "chart marks",
+    async () => {
+      const res = await loadPersistedMarkLibraryWithProvenance();
+      return res ? [res] : [];
+    },
+    onFailure,
+  );
   for (const { lib, sourcePackage } of markLib) {
     for (const m of lib.marks) {
       const markId = m.markId.trim();
@@ -893,6 +948,7 @@ export function summarizeCodeInventory(units: CodeUnit[]): CodeInventorySummary 
     total: units.length,
     local: units.filter((u) => u.provenance === "local").length,
     distributed: units.filter((u) => u.provenance === "distributed").length,
+    libraries: units.filter((u) => u.surfaceId === "script-library").length,
     beyondGrid: units.filter(codeUnitReachesBeyondGrid).length,
     beyondGridCapable: units.filter(codeUnitMayReachBeyondGrid).length,
     mounted: units.filter((u) => u.mounted).length,
@@ -1030,14 +1086,15 @@ export function describeJobTime(ms: number, now: number = Date.now()): string {
  */
 export async function getWorkbookScheduledJobs(
   units?: CodeUnit[],
+  options: { onFailure?: InventoryFailureListener } = {},
 ): Promise<ScheduledJobEntry[]> {
-  const jobs = await safely("scheduled jobs", listAllScheduledJobs);
+  const jobs = await safely("scheduled jobs", listAllScheduledJobs, options.onFailure);
   // Array.isArray, not just length: a window whose backend is stubbed hands
   // back undefined, and a transparency surface must degrade to "nothing known"
   // rather than throw and render as "nothing scheduled".
   if (!Array.isArray(jobs) || jobs.length === 0) return [];
 
-  const owners = units ?? (await getWorkbookCodeUnits());
+  const owners = units ?? (await getWorkbookCodeUnits({ onFailure: options.onFailure }));
   const ownerById = new Map(owners.map((u) => [u.id, u]));
   // Second-chance owner lookup for a job whose owner is deliberately NOT a code
   // unit: a sandboxed distributed EXTENSION worker is a script surface, but its
@@ -1356,7 +1413,11 @@ function joinOwner(
  * extension worker holds a buffer of the user's cells exactly like a local
  * object script does.
  */
-export async function getScriptHeldState(units?: CodeUnit[]): Promise<ScriptHeldState> {
+export async function getScriptHeldState(
+  units?: CodeUnit[],
+  options: { onFailure?: InventoryFailureListener } = {},
+): Promise<ScriptHeldState> {
+  const { onFailure } = options;
   const mounted = listMountedHandles();
   const handleById = new Map(mounted.map((h) => [h.scriptId, h]));
 
@@ -1368,6 +1429,7 @@ export async function getScriptHeldState(units?: CodeUnit[]): Promise<ScriptHeld
     held = listScriptKeybindings();
   } catch (e) {
     console.warn("[codeInventory] script shortcuts unavailable:", e);
+    onFailure?.("keyboard shortcuts held by scripts", e);
   }
 
   // Clipboards: ask the host for the SIZE of each mounted script's buffer. The
@@ -1385,6 +1447,7 @@ export async function getScriptHeldState(units?: CodeUnit[]): Promise<ScriptHeld
     }
   } catch (e) {
     console.warn("[codeInventory] script clipboards unavailable:", e);
+    onFailure?.("script clipboards", e);
     clipboardSizes = [];
   }
 
@@ -1396,19 +1459,21 @@ export async function getScriptHeldState(units?: CodeUnit[]): Promise<ScriptHeld
     panesUp = listScriptPanes();
   } catch (e) {
     console.warn("[codeInventory] script panes unavailable:", e);
+    onFailure?.("script panes", e);
   }
   let formUp: ReturnType<typeof getActiveScriptForm> = null;
   try {
     formUp = getActiveScriptForm();
   } catch (e) {
     console.warn("[codeInventory] script form unavailable:", e);
+    onFailure?.("a script's dialog", e);
   }
 
   // Only fetch the inventory when something is actually held, so a workbook
   // where no script holds anything pays nothing for this section.
   const needsOwners =
     held.length > 0 || clipboardSizes.length > 0 || panesUp.length > 0 || formUp !== null;
-  const owners = needsOwners ? (units ?? (await getWorkbookCodeUnits())) : [];
+  const owners = needsOwners ? (units ?? (await getWorkbookCodeUnits({ onFailure }))) : [];
   const ownerById = new Map(owners.map((u) => [u.id, u]));
 
   const shortcuts: ScriptShortcutEntry[] = held.map((b) => ({
@@ -1452,6 +1517,7 @@ export async function getScriptHeldState(units?: CodeUnit[]): Promise<ScriptHeld
     }
   } catch (e) {
     console.warn("[codeInventory] submission watch status unavailable:", e);
+    onFailure?.("background checks", e);
   }
 
   // Panes stay in DOCK order (the order the user saw them appear), not sorted:
@@ -1508,6 +1574,12 @@ export function summarizeScriptHeldState(state: ScriptHeldState): ScriptHeldStat
       state.forms.length > 0,
   };
 }
+
+// Warnings -- "what is worth a look", decided ONCE -- live in ./codeWarnings
+// (a module with no runtime imports, so a surface that doubles this one can
+// still use the real rule) and are re-exported here.
+export { codeInventoryWarnings } from "./codeWarnings";
+export type { CodeInventoryWarning, CodeInventoryWarningId } from "./codeWarnings";
 
 /**
  * Drop one script's private clipboard. The control half of the promise: a buffer

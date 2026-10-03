@@ -399,6 +399,13 @@ export interface MenuButtonProps {
   width?: number;
   /** Accessible name of the menu; defaults to the trigger (aria-labelledby). */
   ariaLabel?: string;
+  /**
+   * The id of an element (inside the menu's own content) whose text DESCRIBES
+   * the menu: read by a screen reader as the menu opens, before its first item.
+   * For a menu that shows facts above its commands -- presentation rows that
+   * arrow keys, which move between items only, never reach.
+   */
+  ariaDescribedBy?: string;
 }
 
 /**
@@ -412,6 +419,7 @@ export function MenuButton({
   closeOnSelect = true,
   width,
   ariaLabel,
+  ariaDescribedBy,
 }: MenuButtonProps): React.ReactElement {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const [open, setOpen] = useState(false);
@@ -486,6 +494,7 @@ export function MenuButton({
             id={menuId}
             ariaLabel={ariaLabel}
             aria-labelledby={ariaLabel ? undefined : triggerId}
+            aria-describedby={ariaDescribedBy}
           >
             {children}
           </Menu>

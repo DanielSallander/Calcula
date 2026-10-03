@@ -135,6 +135,9 @@ describe("shared surfaces do not invent token names", () => {
     "src/shell/Toast/Toast.tsx",
     "src/shell/StatusBar.tsx",
     "extensions/_shared/components/jsonToggle/JsonToggleEditor.tsx",
+    // The status bar's code-and-scripts indicator (2026-10-03): a well, a
+    // quiet foreground and an attention dot, all on declared status-bar tokens.
+    "extensions/ScriptableObjects/components/CodeStatusItem.tsx",
   ];
 
   for (const rel of FILES) {

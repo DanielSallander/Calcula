@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 283 | Open: 4 | Triaged: 0 | Fixed: 279 | Other: 0
+Total: 284 | Open: 5 | Triaged: 0 | Fixed: 279 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -3133,3 +3133,12 @@ MERGING A HUGE RANGE WALKED EVERY COORDINATE. merge_cells recorded and cleared s
 A SCRIPT'S MERGE OF ONE CELL IS REPORTED AS AN OVERLAP. executeMergeCells (app/src/api/scriptHost/host.ts) throws 'mergeCells was refused (the range overlaps an existing merge)' whenever merge_cells answers success:false -- but success:false means a 1x1 range; a real overlap arrives as a thrown error with its own text.
 
 **Repro:** In an object script, await api.mergeCells('A1') (or the same cell twice): the error blames an overlap that does not exist.
+
+## BUG-0284 `[open]`
+
+**Found:** 2026-10-03 (manual)
+**Oracle:** transparency-surface-control
+
+A PANEL SCRIPT CAN CLOSE A TRANSPARENCY PANEL. Panel scripts may be attached to ANY panel id (PanelContextMenu "Edit Script..." emits edit-script with instanceId = panelId; nothing ties a panel script to a panel it owns), and object.setState panel.close / panel.open / panel.setBadge (host.ts executeSetState, ~8050) have no vSetState rule. A consented script bound to scriptable-objects.codeInThisFile or scriptable-objects.permissions can subscribe onActivate (fired for any panelId === instanceId) and call panel.close(), so every door that opens the panel -- the status-bar indicator, Developer, View > Sidebar -- opens it and it shuts at once. movable:false (2026-10-03) already refuses panel.moveTo for both.
+
+**Repro:** Attach an object script to panel instance scriptable-objects.codeInThisFile whose onActivate calls panel.close(); open Code in This File from the status-bar indicator: it closes immediately.

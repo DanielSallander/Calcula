@@ -22,6 +22,7 @@ vi.mock("@api", () => ({
     total: units.length,
     local: units.length,
     distributed: 0,
+    libraries: 0,
     beyondGrid: 0,
     mounted: 0,
     bySurface: [],
@@ -30,7 +31,11 @@ vi.mock("@api", () => ({
 }));
 
 const getScriptHeldState = vi.fn();
-vi.mock("@api/codeInventory", () => ({
+vi.mock("@api/codeInventory", async () => ({
+  // REAL: the warning chips are this one rule, shared with the status bar's
+  // code-and-scripts indicator; a stub would test a copy.
+  codeInventoryWarnings: (await vi.importActual<typeof import("@api/codeWarnings")>("@api/codeWarnings"))
+    .codeInventoryWarnings,
   codeUnitMayReachBeyondGrid: () => false,
   describeInterpreterReach: () => "Nothing.",
   getWorkbookScheduledJobs: vi.fn(async () => []),
@@ -165,7 +170,7 @@ describe("CodeInThisFilePanel — held surfaces", () => {
     expect(row.textContent).toContain("5 updates from the script in the last minute.");
     // The header counts it, and the summary chip says so before the user scrolls.
     expect(container.textContent).toContain("Held by scripts right now (1)");
-    expect(container.textContent).toContain("1 task pane docked");
+    expect(container.textContent).toContain("1 script pane open");
   });
 
   it("says a hidden pane is not watching its cells, and shows the badge and package", async () => {
@@ -223,7 +228,7 @@ describe("CodeInThisFilePanel — held surfaces", () => {
     expect(row!.textContent).toContain("Dialog form");
     expect(row!.textContent).toContain("Blocking");
     expect(row!.textContent).toContain("Shown by Status board.");
-    expect(container.textContent).toContain("a dialog is up");
+    expect(container.textContent).toContain("A script's dialog is open");
     expect(container.textContent).toContain("Held by scripts right now (1)");
   });
 

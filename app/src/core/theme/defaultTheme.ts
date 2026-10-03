@@ -251,6 +251,10 @@ export const defaultTheme: Record<string, string> = {
   [THEME_TOKENS.SIDE_PANEL_HEADER_BG]: 'var(--panel-bg)',
   [THEME_TOKENS.STATUS_BAR_BG]: '#217346',
   [THEME_TOKENS.STATUS_BAR_FG]: '#ffffff',
+  [THEME_TOKENS.STATUS_BAR_ITEM_BG]: 'color-mix(in oklab, var(--status-bar-bg) 85%, black)',
+  [THEME_TOKENS.STATUS_BAR_ITEM_HOVER_BG]: 'color-mix(in oklab, var(--status-bar-bg) 72%, black)',
+  [THEME_TOKENS.STATUS_BAR_FG_QUIET]: 'color-mix(in srgb, var(--status-bar-fg) 72%, transparent)',
+  [THEME_TOKENS.STATUS_BAR_ATTENTION]: '#ffc83d',
   [THEME_TOKENS.BORDER_SUBTLE]: '#eef0f3',
 
   // --- Aliases for names callers already spelled (see tokens.ts) ---

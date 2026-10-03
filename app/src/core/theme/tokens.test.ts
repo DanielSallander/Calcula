@@ -173,6 +173,67 @@ describe("Calcula Clusters tokens are legible in both baselines", () => {
     expect(darkTheme[THEME_TOKENS.ICON_ACCENT]).toBe("var(--state-accent)");
   });
 
+  describe("status-bar items (the code-and-scripts indicator)", () => {
+    // The item paints a WELL (a darker shade of the bar), its count as text
+    // on that well, its "nothing to report" shield in the quiet foreground,
+    // and an attention dot. Each well is DERIVED from --status-bar-bg so a skin
+    // that repaints the bar repaints its items; the percentages are read back
+    // out of the token values so the measurement and the paint cannot drift.
+    const wellPercent = (value: string): number => {
+      const m = /^color-mix\(in oklab, var\(--status-bar-bg\) (\d+)%, black\)$/.exec(value);
+      expect(m, `${value} must stay a shade of --status-bar-bg`).not.toBeNull();
+      return Number(m![1]) / 100;
+    };
+    const quietAlpha = (value: string): number => {
+      const m = /^color-mix\(in srgb, var\(--status-bar-fg\) (\d+)%, transparent\)$/.exec(value);
+      expect(m, `${value} must stay a tint of --status-bar-fg`).not.toBeNull();
+      return Number(m![1]) / 100;
+    };
+
+    for (const [name, theme] of BASELINES) {
+      const bar = theme[THEME_TOKENS.STATUS_BAR_BG];
+      const fg = theme[THEME_TOKENS.STATUS_BAR_FG];
+      const wells = [
+        ["well", mixWithBlackOklab(bar, wellPercent(theme[THEME_TOKENS.STATUS_BAR_ITEM_BG]))],
+        ["hovered well", mixWithBlackOklab(bar, wellPercent(theme[THEME_TOKENS.STATUS_BAR_ITEM_HOVER_BG]))],
+      ] as const;
+
+      for (const [state, well] of wells) {
+        it(`${name}: the count reads as text on the ${state}`, () => {
+          expect(contrast(fg, well)).toBeGreaterThanOrEqual(4.5);
+        });
+
+        it(`${name}: the QUIET shield is still a 3:1 mark on the ${state}`, () => {
+          const quiet = compositeOver(fg, quietAlpha(theme[THEME_TOKENS.STATUS_BAR_FG_QUIET]), well);
+          expect(contrast(quiet, well)).toBeGreaterThanOrEqual(3);
+        });
+
+        it(`${name}: the attention dot is a 3:1 mark on the ${state}`, () => {
+          expect(contrast(theme[THEME_TOKENS.STATUS_BAR_ATTENTION], well)).toBeGreaterThanOrEqual(3);
+        });
+      }
+
+      it(`${name}: the well is visibly darker than the bar it sits on`, () => {
+        // Not a contrast requirement (the well is decoration, and deliberately
+        // discreet: 1.39 light / 1.32 dark today); the floor only stops a
+        // future tweak from making the item indistinguishable from the bar.
+        const [, well] = wells[0];
+        expect(contrast(bar, well)).toBeGreaterThanOrEqual(1.25);
+      });
+
+      it(`${name}: the attention dot is a 3:1 mark on the bare bar`, () => {
+        expect(contrast(theme[THEME_TOKENS.STATUS_BAR_ATTENTION], bar)).toBeGreaterThanOrEqual(3);
+      });
+
+      it(`${name}: the quiet shield is visibly QUIETER than the full foreground`, () => {
+        // "Nothing to report" and "code present" must not look the same.
+        const [, well] = wells[0];
+        const quiet = compositeOver(fg, quietAlpha(theme[THEME_TOKENS.STATUS_BAR_FG_QUIET]), well);
+        expect(contrast(fg, well) - contrast(quiet, well)).toBeGreaterThanOrEqual(1.5);
+      });
+    }
+  });
+
   it("light: the icon green sits BETWEEN the 50% grey and near-black", () => {
     // No single green clears 3:1 from both the SOFT grey and STRONG (the best
     // any luminance can do is 2.2:1 each), so the icon green is placed

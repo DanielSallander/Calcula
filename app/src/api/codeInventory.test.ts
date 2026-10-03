@@ -547,6 +547,41 @@ describe("getWorkbookCodeUnits — resilience", () => {
     const units = await getWorkbookCodeUnits();
     expect(units.map((u) => u.id)).toEqual(["n1"]);
   });
+
+  // The tolerance above is right for a panel that lists what it CAN; a caller
+  // that SUMMARISES (the status bar's code-and-scripts indicator) must be told,
+  // or a backend failure reads as "No code in this file".
+  it("a failing population is REPORTED to a listener, by name, while the rest still loads", async () => {
+    (loadAllObjectScripts as any).mockRejectedValue(new Error("backend down"));
+    (listModuleScripts as any).mockRejectedValue(new Error("lock poisoned"));
+    const failures: Array<[string, unknown]> = [];
+    // An empty walk of the sheets: the button listing reads nothing (and so
+    // cannot fail here); the populations under test are the two that do.
+    const units = await getWorkbookCodeUnits({
+      onFailure: (what, e) => failures.push([what, e]),
+      buttonListing: { sheets: [] },
+    });
+    expect(units).toEqual([]);
+    expect(failures.map(([what]) => what).sort()).toEqual(["module scripts", "object scripts"]);
+    expect((failures[0][1] as Error).message).toMatch(/backend down|lock poisoned/);
+  });
+
+  it("a listed object script that could not be read is reported (the listener reaches loadAllObjectScripts)", async () => {
+    (loadAllObjectScripts as any).mockImplementation(
+      async (options?: { onFailure?: (what: string, e: unknown) => void }) => {
+        options?.onFailure?.('object script "Refresh"', new Error("bad record"));
+        return [];
+      },
+    );
+    const failures: string[] = [];
+    await getWorkbookCodeUnits({ onFailure: (what) => failures.push(what), buttonListing: { sheets: [] } });
+    expect(failures).toEqual(['object script "Refresh"']);
+  });
+
+  it("with no listener nothing changes: the same tolerant read as before", async () => {
+    (loadAllObjectScripts as any).mockRejectedValue(new Error("backend down"));
+    await expect(getWorkbookCodeUnits()).resolves.toEqual([]);
+  });
 });
 
 describe("summarizeCodeInventory", () => {
@@ -582,6 +617,8 @@ describe("summarizeCodeInventory", () => {
     expect(summary.distributed).toBe(1);
     expect(summary.beyondGrid).toBe(1); // only the net.fetch object script
     expect(summary.mounted).toBe(0);
+    // The module came with an application, not from a script library.
+    expect(summary.libraries).toBe(0);
     // object-script group precedes one-off-script in the canonical order
     expect(summary.bySurface.map((g) => g.surfaceId)).toEqual([
       "object-script",

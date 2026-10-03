@@ -469,6 +469,22 @@ function audit(
   persistCapabilityAudit(handle, method, ok, error);
 }
 
+/**
+ * The code an audit row records for an executor that threw. A BrokerError says
+ * its own code. Rust's capability gates refuse with a STRING spelled
+ * `"PermissionDenied: ..."` or `"RateLimited: ..."` (net.fetch to an origin
+ * nobody approved, the fetch rate limit, bi.query/bi.sql/bi.model/schedule not
+ * granted, a writeback or publish gate) -- those are refusals by the sandbox,
+ * and recording them as "HostError" hid them from every summary of refusals
+ * while the Activity list showed them red. Anything else is a host failure.
+ */
+export function auditCodeForError(e: unknown): string {
+  if (e instanceof BrokerError) return e.code;
+  const text = typeof e === "string" ? e : e instanceof Error ? e.message : "";
+  const m = /^(PermissionDenied|RateLimited):/.exec(text);
+  return m ? m[1] : "HostError";
+}
+
 // ============================================================================
 // Dispatch
 // ============================================================================
@@ -490,7 +506,7 @@ export function brokerCallSync<T>(
     audit(handle, method, policy.class, true);
     return result;
   } catch (e) {
-    audit(handle, method, policy.class, false, e instanceof BrokerError ? e.code : "HostError");
+    audit(handle, method, policy.class, false, auditCodeForError(e));
     throw e;
   }
 }
@@ -522,7 +538,7 @@ export async function brokerCall<T>(
     audit(handle, method, policy.class, true);
     return result;
   } catch (e) {
-    audit(handle, method, policy.class, false, e instanceof BrokerError ? e.code : "HostError");
+    audit(handle, method, policy.class, false, auditCodeForError(e));
     throw e;
   }
 }

@@ -148,20 +148,40 @@ class PanelRegistryImpl implements PanelService {
   // PLACEMENT
   // =========================================================================
 
+  /**
+   * Where a panel renders. Two kinds of panel are NOT free to be wherever a
+   * stored preference says, because the stored preference could strand them:
+   *
+   * - A HIDDEN panel lives in the sidebar, whatever was stored or declared. The
+   *   ribbon has no notion of a registered-but-invisible tab (projectToRibbon
+   *   draws nothing for one) and `openPanel` only opens sidebar panels, so a
+   *   hidden panel placed on the ribbon could be reached from NOWHERE -- no tab,
+   *   no rail icon, no programmatic open, no View > Sidebar entry.
+   * - A panel declared `movable: false` is at its declared default. A preference
+   *   stored while it was still movable (an earlier build, before its owner
+   *   pinned it) is stale: the user can no longer move it back, so honouring
+   *   the old choice would leave it somewhere its owner has ruled out.
+   *
+   * The stored preference is left untouched in both cases (it is the user's
+   * record, not the registry's), just not obeyed.
+   */
   getPlacement(panelId: string): PanelPlacement {
     const panel = this.panels.get(panelId);
+    if (panel?.hidden) return "sidebar";
     const defaultPlacement = panel?.defaultPlacement ?? "sidebar";
+    if (panel?.movable === false) return defaultPlacement;
     return usePanelPlacementStore.getState().getPlacement(panelId, defaultPlacement);
   }
 
   /** Whether the user is allowed to move this panel to `placement`. Placement
-   *  is TOTAL freedom: only `movable: false` refuses. A panel whose content
-   *  cannot fit the target surface is handled by the section renderers
-   *  (launcher demotion), not by refusing the move. */
+   *  is TOTAL freedom for a visible panel: only `movable: false` refuses. A
+   *  panel whose content cannot fit the target surface is handled by the
+   *  section renderers (launcher demotion), not by refusing the move. A HIDDEN
+   *  panel can never go to the ribbon (see getPlacement): it would vanish. */
   canMoveTo(panelId: string, placement: PanelPlacement): boolean {
-    void placement;
     const panel = this.panels.get(panelId);
-    return !!panel && panel.movable !== false;
+    if (!panel || panel.movable === false) return false;
+    return !(panel.hidden && placement === "ribbon");
   }
 
   /** Soft product-intent hint for the move affordance: when the target surface
@@ -180,7 +200,9 @@ class PanelRegistryImpl implements PanelService {
   setPlacement(panelId: string, placement: PanelPlacement): void {
     const panel = this.panels.get(panelId);
     if (!panel) return;
-    if (panel.movable === false) return;
+    // The same rule the move affordance reads, so no caller -- a menu, a
+    // panel script's "panel:moveTo" -- can do what the menu would not offer.
+    if (!this.canMoveTo(panelId, placement)) return;
 
     const currentPlacement = this.getPlacement(panelId);
     if (currentPlacement === placement) return;

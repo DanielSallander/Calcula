@@ -342,6 +342,78 @@ describe("Popover — placement", () => {
     expect(computePopoverPosition(anchor, 240, 300, "bottom-start", 8, 1200, 800).top).toBe(86);
   });
 
+  it("top-start opens ABOVE the anchor (a status-bar anchor): held by its BOTTOM edge, offset above the anchor's top", () => {
+    const statusBar = { left: 180, top: 776, right: 220, bottom: 800 };
+    expect(computePopoverPosition(statusBar, 240, 300, "top-start", 2, 1200, 800)).toEqual({
+      left: 180,
+      // 800 - (776 - 2): the card's bottom sits 2px above the anchor's top...
+      bottom: 26,
+      // ...and it may be at most as tall as the room above the anchor.
+      maxHeight: 776 - 2 - 4,
+    });
+  });
+
+  it("top-* does not depend on the content's height: content that changes after opening grows the card UPWARD", () => {
+    const statusBar = { left: 180, top: 776, right: 220, bottom: 800 };
+    expect(computePopoverPosition(statusBar, 240, 40, "top-start", 2, 1200, 800)).toEqual(
+      computePopoverPosition(statusBar, 240, 400, "top-start", 2, 1200, 800),
+    );
+  });
+
+  it("top-end aligns right edges above the anchor", () => {
+    const statusBar = { left: 900, top: 776, right: 1000, bottom: 800 };
+    expect(computePopoverPosition(statusBar, 240, 300, "top-end", 2, 1200, 800)).toEqual({
+      left: 760,
+      bottom: 26,
+      maxHeight: 770,
+    });
+  });
+
+  it("top-* clamps into the viewport: left at both edges; a high anchor caps the height at the room above", () => {
+    const nearRight = { left: 1150, top: 776, right: 1190, bottom: 800 };
+    expect(computePopoverPosition(nearRight, 240, 300, "top-start", 2, 1200, 800).left).toBe(1200 - 240 - 4);
+    const nearLeft = { left: 10, top: 776, right: 50, bottom: 800 };
+    expect(computePopoverPosition(nearLeft, 240, 300, "top-end", 2, 1200, 800).left).toBe(4);
+    const high = { left: 100, top: 120, right: 140, bottom: 144 };
+    expect(computePopoverPosition(high, 240, 300, "top-start", 2, 1200, 800)).toMatchObject({
+      bottom: 800 - 118,
+      maxHeight: 114,
+    });
+  });
+
+  it("a rendered top-start card is placed by `bottom` (never `top`), and keeps it when its content GROWS", () => {
+    // The status-bar case: the indicator opens its card, then the fresh read it
+    // asked for lands and adds rows. Placed by `top` the card would grow down
+    // past the window's edge with its commands; placed by `bottom` it rises.
+    const anchor = document.createElement("div");
+    anchor.getBoundingClientRect = () =>
+      ({ left: 180, top: window.innerHeight - 22, right: 220, bottom: window.innerHeight - 4 }) as DOMRect;
+    document.body.appendChild(anchor);
+    function Grows({ rows }: { rows: number }): React.ReactElement {
+      return (
+        <Popover anchorEl={anchor} open onClose={() => undefined} card placement="top-start" width={300}>
+          {Array.from({ length: rows }, (_, i) => (
+            <div key={i}>row {i}</div>
+          ))}
+        </Popover>
+      );
+    }
+    render(<Grows rows={1} />);
+    const card = flyout()!;
+    const expectedBottom = `${window.innerHeight - (window.innerHeight - 22 - 2)}px`;
+    expect(card.style.bottom).toBe(expectedBottom);
+    expect(card.style.top).toBe("");
+    expect(card.getAttribute("data-opens")).toBe("up");
+    render(<Grows rows={12} />);
+    expect(flyout()!.style.bottom).toBe(expectedBottom);
+    expect(flyout()!.style.top).toBe("");
+  });
+
+  it("a downward placement carries no data-opens attribute (the plain DOM stays as it was)", () => {
+    render(<Harness placement="bottom-start" />);
+    expect(flyout()!.hasAttribute("data-opens")).toBe(false);
+  });
+
   it("firstFocusable prefers the anchor, then its first enabled focusable", () => {
     const wrap = document.createElement("div");
     wrap.innerHTML = '<button disabled>a</button><button id="b">b</button>';

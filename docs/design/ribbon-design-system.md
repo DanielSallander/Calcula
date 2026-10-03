@@ -240,6 +240,9 @@ fallback equals the light value), `layoutThemeParity.test.ts` (reads `theme.ts`)
 | `--activity-bar-indicator` | var(--state-accent) | same | 3px bar |
 | `--side-panel-header-bg` | var(--panel-bg) | same | |
 | `--status-bar-bg` / `-fg` | #217346 / #ffffff | #1b5e3a / #ffffff | |
+| `--status-bar-item-bg` / `-item-hover-bg` | color-mix(in oklab, var(--status-bar-bg) 85% / 72%, black) | same | a clickable item's well: a shade OF the bar, so a skin that repaints the bar repaints its items; text on it >= 4.5:1 (tokens.test.ts) |
+| `--status-bar-fg-quiet` | color-mix(in srgb, var(--status-bar-fg) 72%, transparent) | same | "nothing to report" (the code-and-scripts indicator on a file with no code); still 3:1 on the well |
+| `--status-bar-attention` | #ffc83d | #ffc83d | "worth a look" dot on the bar; 3:1 on the bar and the well |
 | **Aliases** (fix phantom usages) ||||
 | `--border-subtle` | #eef0f3 | #303033 | |
 | `--border-color` | var(--border-default) | same | was read in 20 files and declared nowhere |

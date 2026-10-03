@@ -122,6 +122,52 @@ describe("hidden panels", () => {
     panelRegistry.registerPanel(makePanel({ hidden: true, defaultPlacement: "ribbon" }));
     expect(registeredTabs).toHaveLength(0);
   });
+
+  it("a hidden panel declared for the ribbon is still REACHABLE: it lives in the sidebar", () => {
+    // Before, it was projected nowhere -- no tab, no rail icon -- and
+    // openPanel, which only opens sidebar panels, did nothing for it.
+    panelRegistry.registerPanel(makePanel({ hidden: true, defaultPlacement: "ribbon" }));
+    expect(panelRegistry.getPlacement("test.panel")).toBe("sidebar");
+    expect(registeredViews.map((v) => v.id)).toEqual(["test.panel"]);
+  });
+
+  it("a hidden panel ignores a stored RIBBON placement and stays openable", () => {
+    // The stranding case: the user moved the panel to the ribbon while it was
+    // visible, and a later build hid it from the rail.
+    usePanelPlacementStore.setState({ placements: { ["test.panel"]: "ribbon" } });
+    const opened: string[] = [];
+    initPanelRegistry({
+      activityBar: { registerView: (def) => registeredViews.push(def), unregisterView: noop },
+      extensionRegistry: { registerRibbonTab: (tab) => registeredTabs.push(tab.id), unregisterRibbonTab: noop },
+      getActivityBarStore: () => ({ openView: (id) => opened.push(id), close: noop, activeViewId: null }),
+    });
+    panelRegistry.registerPanel(makePanel({ hidden: true }));
+    expect(panelRegistry.getPlacement("test.panel")).toBe("sidebar");
+    expect(registeredTabs).toEqual([]);
+    panelRegistry.openPanel("test.panel");
+    expect(opened).toEqual(["test.panel"]);
+    // The user's record is theirs: read past, never rewritten.
+    expect(usePanelPlacementStore.getState().placements["test.panel"]).toBe("ribbon");
+  });
+
+  it("a hidden (movable) panel cannot be MOVED to the ribbon, by the menu or by a panel script", () => {
+    panelRegistry.registerPanel(makePanel({ hidden: true }));
+    expect(panelRegistry.canMoveTo("test.panel", "ribbon")).toBe(false);
+    panelRegistry.setPlacement("test.panel", "ribbon");
+    expect(panelRegistry.getPlacement("test.panel")).toBe("sidebar");
+    expect(registeredTabs).toEqual([]);
+    expect(usePanelPlacementStore.getState().placements).toEqual({});
+  });
+});
+
+describe("non-movable panels", () => {
+  it("ignore a placement stored while they were still movable", () => {
+    usePanelPlacementStore.setState({ placements: { ["test.panel"]: "ribbon" } });
+    panelRegistry.registerPanel(makePanel({ movable: false }));
+    expect(panelRegistry.getPlacement("test.panel")).toBe("sidebar");
+    expect(registeredTabs).toEqual([]);
+    expect(registeredViews.map((v) => v.id)).toEqual(["test.panel"]);
+  });
 });
 
 describe("resetPlacement", () => {
