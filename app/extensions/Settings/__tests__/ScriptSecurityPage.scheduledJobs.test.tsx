@@ -33,9 +33,9 @@ vi.mock("@api/codeInventory", () => ({
   describeJobTime: (ms: number) => (ms <= 0 ? "never" : `ts:${ms}`),
 }));
 
-const openPanel = vi.fn();
+const showDialog = vi.fn();
 vi.mock("@api/ui", () => ({
-  openPanel: (...args: unknown[]) => openPanel(...args),
+  showDialog: (...args: unknown[]) => showDialog(...args),
 }));
 
 import { ScriptSecurityPage } from "../components/ScriptSecurityPage";
@@ -142,7 +142,7 @@ describe("ScriptSecurityPage — scheduled jobs", () => {
     await act(async () => {
       btn!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    expect(openPanel).toHaveBeenCalledWith("scriptable-objects.codeInThisFile");
+    expect(showDialog).toHaveBeenCalledWith("scriptable-objects.codeInThisFile");
   });
 
   it("keeps the rest of the page working when the schedule cannot be read", async () => {

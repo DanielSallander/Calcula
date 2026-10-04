@@ -60,7 +60,7 @@ import {
   describeJobTime,
   type ScheduledJobEntry,
 } from "@api/codeInventory";
-import { openPanel } from "@api/ui";
+import { showDialog } from "@api/ui";
 import type { CapabilityId } from "@api";
 import { confirmAsync } from "@api/dialogs";
 
@@ -253,10 +253,10 @@ const styles: Record<string, React.CSSProperties> = {
 // Page
 // ============================================================================
 
-/** The "Code in This File" panel registered by the ScriptableObjects extension.
+/** The "Code in This File" DIALOG registered by the ScriptableObjects extension.
  *  Referenced by id, never imported: extensions must not reach into a sibling's
- *  internals (Facade Rule), and openPanel takes a plain id. */
-const CODE_IN_THIS_FILE_PANEL_ID = "scriptable-objects.codeInThisFile";
+ *  internals (Facade Rule), and showDialog takes a plain id. */
+const CODE_IN_THIS_FILE_DIALOG_ID = "scriptable-objects.codeInThisFile";
 
 /** How often the open page re-reads the schedule, so a count that says "2 jobs"
  *  is still true a minute later. */
@@ -412,7 +412,7 @@ export function ScriptSecurityPage(): React.ReactElement {
           variant="outlined"
           size="sm"
           style={{ marginTop: 10 }}
-          onClick={() => openPanel(CODE_IN_THIS_FILE_PANEL_ID)}
+          onClick={() => showDialog(CODE_IN_THIS_FILE_DIALOG_ID)}
         >
           Review scheduled jobs
         </Button>

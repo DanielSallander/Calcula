@@ -217,7 +217,7 @@ const DESIGN_MODE = "/src/api/designMode.ts";
 const FLOATING_STORE = "/extensions/Controls/lib/floatingStore.ts";
 /** The cell-type registry (`setCellType`, `refreshCellTypeAssignments`): button CELLS. */
 const CELL_TYPES = "/src/api/cellTypes.ts";
-/** `CODE_IN_FILE_PANEL_ID`, app/extensions/ScriptableObjects/index.ts. */
+/** `CODE_IN_FILE_DIALOG_ID`, app/extensions/ScriptableObjects/index.ts: a DIALOG since 2026-10-04. */
 const CODE_IN_FILE_PANEL = "scriptable-objects.codeInThisFile";
 
 /** A stored macro with no runtime marker runs in the MODULE runtime (`run_script`). */
@@ -893,13 +893,13 @@ function anchorOf(anchors: DeveloperAnchorRow[], app: string): DeveloperAnchorRo
 
 /**
  * The rows of Code in This File's "Applications you develop" section, read off
- * the DOM. The panel is closed and opened again first so it reloads (it reads
+ * the DOM. The dialog is closed and shown again first so it reloads (it reads
  * the machine store on mount), and closed again after.
  */
 async function codeInThisFileAnchorRows(page: Page): Promise<string[]> {
-  await callModule(page, API, "closePanel", [CODE_IN_FILE_PANEL]).catch(() => undefined);
+  await callModule(page, API, "hideDialog", [CODE_IN_FILE_PANEL]).catch(() => undefined);
   await page.waitForTimeout(300);
-  await callModule(page, API, "openPanel", [CODE_IN_FILE_PANEL]);
+  await callModule(page, API, "showDialog", [CODE_IN_FILE_PANEL]);
   try {
     // The section carries its test id only once the report has loaded.
     const section = page.locator('[data-testid="developer-anchors"]').first();
@@ -907,7 +907,7 @@ async function codeInThisFileAnchorRows(page: Page): Promise<string[]> {
     await page.waitForTimeout(400);
     return (await section.locator('[data-testid="developer-anchor-row"]').allInnerTexts()).map((t) => t.replace(/\s+/g, " ").trim());
   } finally {
-    await callModule(page, API, "closePanel", [CODE_IN_FILE_PANEL]).catch(() => undefined);
+    await callModule(page, API, "hideDialog", [CODE_IN_FILE_PANEL]).catch(() => undefined);
   }
 }
 
@@ -2013,7 +2013,7 @@ test.describe("calp macro buttons, live (M4: held links, consent, private sheets
     } finally {
       if (dialog) await closeCheckoutDialog(dialog).catch(() => undefined);
       answerNativeDialogRaw(FORGET_TITLE, "cancel", 1200);
-      await callModule(page, API, "closePanel", [CODE_IN_FILE_PANEL]).catch(() => undefined);
+      await callModule(page, API, "hideDialog", [CODE_IN_FILE_PANEL]).catch(() => undefined);
       await page.keyboard.press("Escape").catch(() => undefined);
       await newFile(page).catch(() => undefined);
     }
@@ -2108,7 +2108,7 @@ test.describe("calp macro buttons, live (M4: held links, consent, private sheets
       dialog = null;
     } finally {
       if (dialog) await closeCheckoutDialog(dialog).catch(() => undefined);
-      await callModule(page, API, "closePanel", [CODE_IN_FILE_PANEL]).catch(() => undefined);
+      await callModule(page, API, "hideDialog", [CODE_IN_FILE_PANEL]).catch(() => undefined);
       await page.keyboard.press("Escape").catch(() => undefined);
       await newFile(page).catch(() => undefined);
     }

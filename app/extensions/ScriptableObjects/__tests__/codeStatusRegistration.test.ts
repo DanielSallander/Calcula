@@ -1,13 +1,12 @@
 //! FILENAME: app/extensions/ScriptableObjects/__tests__/codeStatusRegistration.test.ts
 // PURPOSE: What the REAL extension registers for the code-and-scripts move:
-//          both transparency panels OFF the activity rail but still openable,
-//          pinned to the sidebar, reachable from Developer, and the status-bar
-//          indicator at the front of the left zone.
-// CONTEXT: The two panels used to be rail icons. Taking an icon off the rail
-//          is only safe if every other door still opens the panel: a hidden
-//          panel the user once moved to the ribbon was reachable from NOWHERE
-//          (the registry fix in panelRegistry.ts), and `openPanel` only opens a
-//          sidebar panel -- hence `movable: false`.
+//          "Code in This File" and "Script Permissions" as DIALOG WINDOWS (no
+//          panel, no rail icon), reachable from Developer and from the
+//          status-bar indicator, which sits at the front of the left zone.
+// CONTEXT: The two used to be activity-bar icons, then hidden sidebar panels;
+//          since 2026-10-04 (owner decision) they are dialogs, like Insert
+//          Chart. Every door shows them BY ID -- Settings > Script Security
+//          does too, from another extension -- so the ids are pinned here.
 
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 
@@ -29,7 +28,7 @@ vi.mock("@tauri-apps/api/event", async (importOriginal) => ({
 
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import type { PanelDefinition, StatusBarItemDefinition } from "@api/uiTypes";
+import type { DialogDefinition, PanelDefinition, StatusBarItemDefinition } from "@api/uiTypes";
 import type { ExtensionModule } from "@api/contract";
 import type { CodeUnit } from "@api";
 import * as ui from "@api/ui";
@@ -37,10 +36,11 @@ import { summarizeCodeInventory } from "@api/codeInventory";
 import { summarizeForStatus } from "../lib/codeStatusWiring";
 
 const panels = new Map<string, PanelDefinition>();
-const openedPanels: string[] = [];
+const dialogs = new Map<string, DialogDefinition>();
+const shown: Array<[string, Record<string, unknown> | undefined]> = [];
 let ext: ExtensionModule;
 
-/** A context whose doors are inert except panels (recorded), menus and the status bar (REAL). */
+/** A context whose doors are inert except panels + dialogs (recorded), menus and the status bar (REAL). */
 function context(): never {
   const inert = (): unknown =>
     new Proxy(() => () => {}, {
@@ -51,6 +51,12 @@ function context(): never {
     panels: {
       register: (def: PanelDefinition) => void panels.set(def.id, def),
       unregister: (id: string) => void panels.delete(id),
+    },
+    dialogs: {
+      register: (def: DialogDefinition) => void dialogs.set(def.id, def),
+      unregister: (id: string) => void dialogs.delete(id),
+      show: (id: string, data?: Record<string, unknown>) => void shown.push([id, data]),
+      hide: () => undefined,
     },
     menus: {
       register: ui.registerMenu,
@@ -78,21 +84,6 @@ function context(): never {
 }
 
 beforeAll(async () => {
-  // The facade's openPanel routes through the shell's PanelService; record it.
-  ui.registerPanelService({
-    registerPanel: () => undefined,
-    unregisterPanel: () => undefined,
-    openPanel: (id: string) => void openedPanels.push(id),
-    closePanel: () => undefined,
-    getPlacement: () => "sidebar",
-    setPlacement: () => undefined,
-    canMoveTo: () => false,
-    setBadge: () => undefined,
-    getBadge: () => "",
-    getPanel: () => undefined,
-    getAllPanels: () => [],
-    onRegistryChange: () => () => undefined,
-  } as unknown as Parameters<typeof ui.registerPanelService>[0]);
   for (const id of ["developer", "insert"]) ui.registerMenu({ id, label: id, order: 1, items: [] });
   ext = (await import("../index")).default;
   await ext.activate(context());
@@ -102,34 +93,29 @@ afterAll(async () => {
   await ext.deactivate?.();
 });
 
-const PANEL_IDS = {
+/** The ids every door shows the dialogs by (Settings > Script Security uses the first). */
+const DIALOG_IDS = {
   code: "scriptable-objects.codeInThisFile",
   permissions: "scriptable-objects.permissions",
 } as const;
 
-describe("the transparency panels leave the rail but stay reachable", () => {
-  for (const [name, id] of Object.entries(PANEL_IDS)) {
-    it(`${name}: hidden from the rail, pinned to the sidebar`, () => {
-      const panel = panels.get(id);
-      expect(panel, `${id} was not registered`).toBeDefined();
-      expect(panel!.hidden).toBe(true);
-      expect(panel!.movable).toBe(false);
-      expect(panel!.defaultPlacement).toBe("sidebar");
+describe("the transparency surfaces are DIALOGS", () => {
+  for (const [name, id] of Object.entries(DIALOG_IDS)) {
+    it(`${name}: registered as a dialog under ${id}, and as no panel at all`, () => {
+      expect(dialogs.get(id), `${id} is not a registered dialog`).toBeDefined();
+      expect(panels.has(id), `${id} is still a panel (it would fold out of the sidebar)`).toBe(false);
     });
   }
 
-  it("Developer lists both, by the panels' own titles, and each opens its panel", () => {
+  it("Developer lists both, and each shows its dialog", () => {
     const developer = ui.getMenus().find((m) => m.id === "developer")!;
     const byId = new Map(developer.items.map((i) => [i.id, i]));
-    for (const id of Object.values(PANEL_IDS)) {
-      const item = byId.get(id);
-      expect(item, `Developer has no item for ${id}`).toBeDefined();
-      expect(item!.label).toBe(panels.get(id)!.title);
-    }
-    openedPanels.length = 0;
-    byId.get(PANEL_IDS.code)!.action!();
-    byId.get(PANEL_IDS.permissions)!.action!();
-    expect(openedPanels).toEqual([PANEL_IDS.code, PANEL_IDS.permissions]);
+    expect(byId.get(DIALOG_IDS.code)?.label).toBe("Code in This File...");
+    expect(byId.get(DIALOG_IDS.permissions)?.label).toBe("Script Permissions...");
+    shown.length = 0;
+    byId.get(DIALOG_IDS.code)!.action!();
+    byId.get(DIALOG_IDS.permissions)!.action!();
+    expect(shown.map(([id]) => id)).toEqual([DIALOG_IDS.code, DIALOG_IDS.permissions]);
   });
 });
 
@@ -146,7 +132,7 @@ describe("the status-bar indicator", () => {
     expect(def!.priority).toBeGreaterThan(100);
   });
 
-  it("its two doors open THE two panels: 'Code in This File' -> Code in This File, 'Script Permissions' -> Script Permissions", () => {
+  it("its two doors show THE two dialogs: 'Code in This File' -> Code in This File, 'Script Permissions' -> Script Permissions", () => {
     Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -154,12 +140,12 @@ describe("the status-bar indicator", () => {
     try {
       act(() => root.render(React.createElement(item()!.component)));
       const trigger = (): HTMLButtonElement => container.querySelector<HTMLButtonElement>("[data-testid='code-status']")!;
-      openedPanels.length = 0;
+      shown.length = 0;
       for (const door of ["code-status-open-code", "code-status-open-permissions"]) {
         act(() => trigger().click());
         act(() => document.querySelector<HTMLButtonElement>(`[data-testid='${door}']`)!.click());
       }
-      expect(openedPanels).toEqual([PANEL_IDS.code, PANEL_IDS.permissions]);
+      expect(shown.map(([id]) => id)).toEqual([DIALOG_IDS.code, DIALOG_IDS.permissions]);
     } finally {
       act(() => root.unmount());
       container.remove();

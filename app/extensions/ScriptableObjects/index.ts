@@ -29,7 +29,6 @@ import {
   IconTemplate,
   IconMarketplace,
   PanelExtensions,
-  openPanel,
 } from "@api";
 import type {
   CapabilityRequestPayload,
@@ -71,12 +70,7 @@ import { hostStopTransientDebugSessions } from "@api/scriptHost/host";
 import type { ObjectScriptDefinition, ScriptableObjectType } from "@api/scriptableObjects";
 import React, { Suspense } from "react";
 import ObjectScriptManagerPane from "./components/ObjectScriptManagerPane";
-import {
-  MountedScriptsSection,
-  PolicyTableSection,
-  ActivitySection,
-} from "./components/PermissionsPanel";
-import { CodeInThisFileSection } from "./components/CodeInThisFilePanel";
+import { createCodeInThisFileDialog, createScriptPermissionsDialog } from "./components/TransparencyDialogs";
 import ScriptConsentDialog from "./components/ScriptConsentDialog";
 import CapabilityRequestDialog from "./components/CapabilityRequestDialog";
 import ScriptDialogPrompt, {
@@ -144,11 +138,12 @@ const manifest = {
 const cleanupFunctions: Array<() => void> = [];
 
 // ============================================================================
-// Script Permissions panel (transparency surface)
+// The two transparency dialogs + the status-bar indicator that opens them
 // ============================================================================
 
-const PERMISSIONS_PANEL_ID = "scriptable-objects.permissions";
-const CODE_IN_FILE_PANEL_ID = "scriptable-objects.codeInThisFile";
+/** Dialog ids: the contract every door shows them by (Settings uses the first). */
+const PERMISSIONS_DIALOG_ID = "scriptable-objects.permissions";
+const CODE_IN_FILE_DIALOG_ID = "scriptable-objects.codeInThisFile";
 /** The status bar's code-and-scripts indicator (components/CodeStatusItem.tsx). */
 const CODE_STATUS_ITEM_ID = "scriptable-objects.codeStatus";
 /**
@@ -1231,7 +1226,7 @@ async function activate(context: ExtensionContext): Promise<void> {
 
   // ---- The status bar's code-and-scripts indicator ----
   // Says, without being opened, whether this file holds code and whether
-  // anything is worth a look (lib/codeStatus.ts), and opens either panel.
+  // anything is worth a look (lib/codeStatus.ts), and opens either dialog.
   // Started BEFORE the startup load below, for two reasons: a script the
   // launch workbook mounts may be refused while it loads, and that refusal
   // must be counted (refusals are counted live); and the indicator must be on
@@ -1244,8 +1239,8 @@ async function activate(context: ExtensionContext): Promise<void> {
     id: CODE_STATUS_ITEM_ID,
     alignment: "left",
     priority: CODE_STATUS_ITEM_PRIORITY,
-    component: createCodeStatusItem(codeStatus, (door) =>
-      openPanel(door === "permissions" ? PERMISSIONS_PANEL_ID : CODE_IN_FILE_PANEL_ID),
+    component: createCodeStatusItem(codeStatus, (door, data) =>
+      context.ui.dialogs.show(door === "permissions" ? PERMISSIONS_DIALOG_ID : CODE_IN_FILE_DIALOG_ID, data),
     ),
   });
   codeStatus.start();
@@ -1668,91 +1663,38 @@ async function activate(context: ExtensionContext): Promise<void> {
   });
   cleanupFunctions.push(() => context.ui.taskPanes.unregister("scriptable-objects.manager"));
 
-  // ---- The two transparency panels: off the rail, reached from the status bar ----
-  // Both used to be activity-bar icons that looked the same whether the file
-  // held no code or code from an application that reaches the network. The
-  // status bar's indicator below SAYS which, and opens either panel; each is
-  // also on the Developer menu and under View > Sidebar (which lists hidden
-  // views). `hidden` takes the icon off the rail; `movable: false` keeps the
-  // panel in the sidebar for good -- a transparency panel moved to the ribbon
-  // would leave the indicator's buttons opening nothing (openPanel only opens
-  // sidebar panels), and the registry ignores a ribbon placement a user stored
-  // back when these were still movable.
-
-  // ---- Register the Script Permissions transparency panel ----
-  // Sections-based panel API (design §8): mounted scripts, the tier/method
-  // policy table rendered directly from ALLOWLIST, and the broker audit tail.
-  context.ui.panels.register({
-    id: PERMISSIONS_PANEL_ID,
-    title: "Script Permissions",
-    icon: ShieldIcon,
-    hidden: true,
-    movable: false,
-    sections: [
-      {
-        id: `${PERMISSIONS_PANEL_ID}.mounted`,
-        label: "Mounted scripts",
-        component: MountedScriptsSection,
-      },
-      {
-        id: `${PERMISSIONS_PANEL_ID}.policy`,
-        label: "What scripts can do",
-        component: PolicyTableSection,
-      },
-      {
-        id: `${PERMISSIONS_PANEL_ID}.activity`,
-        label: "Activity",
-        component: ActivitySection,
-      },
-    ],
-    defaultPlacement: "sidebar",
-    priority: 8,
-  });
-  cleanupFunctions.push(() => context.ui.panels.unregister(PERMISSIONS_PANEL_ID));
-
-  // ---- Register the "Code in This File" transparency inspector (T1) ----
-  // A per-workbook inventory of EVERY code unit (object scripts, module scripts,
-  // notebooks): where it resides, where it came from, what it can touch, and its
-  // source inline. Complements the (runtime-focused) Script Permissions panel by
-  // answering the vision's question about the FILE rather than the live session.
-  context.ui.panels.register({
-    id: CODE_IN_FILE_PANEL_ID,
-    title: "Code in This File",
-    // Use the "script/code" icon here (a page with code brackets) so the file
-    // code-inventory panel is visually distinct from the runtime Script
-    // Permissions panel, which keeps the shield-with-checkmark security icon.
-    icon: IconScript,
-    hidden: true,
-    movable: false,
-    sections: [
-      {
-        id: `${CODE_IN_FILE_PANEL_ID}.inventory`,
-        label: "Code in This File",
-        component: CodeInThisFileSection,
-      },
-    ],
-    defaultPlacement: "sidebar",
-    priority: 9,
-  });
-  cleanupFunctions.push(() => context.ui.panels.unregister(CODE_IN_FILE_PANEL_ID));
+  // ---- The two transparency DIALOGS: Code in This File, Script Permissions ----
+  // Owner decision 2026-10-04: dialog windows (movable, resizable, modeless --
+  // like Insert Chart), not side panels. They were activity-bar icons, then
+  // hidden sidebar panels behind the status bar's code-and-scripts indicator;
+  // a panel squeezed a long inventory and a 250-row policy table into the
+  // sidebar's width. Every door shows them BY ID: the indicator's popover,
+  // Developer below, and Settings > Script Security (another extension, so the
+  // id is the contract -- never an import).
+  const codeInFileDialog = createCodeInThisFileDialog({ code: IconScript, permissions: ShieldIcon });
+  const permissionsDialog = createScriptPermissionsDialog({ code: IconScript, permissions: ShieldIcon });
+  context.ui.dialogs.register({ id: CODE_IN_FILE_DIALOG_ID, component: codeInFileDialog, priority: 100 });
+  context.ui.dialogs.register({ id: PERMISSIONS_DIALOG_ID, component: permissionsDialog, priority: 100 });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister(CODE_IN_FILE_DIALOG_ID));
+  cleanupFunctions.push(() => context.ui.dialogs.unregister(PERMISSIONS_DIALOG_ID));
 
   // ---- Developer > Code in This File / Script Permissions ----
-  // The keyboard's way to both panels (the menu bar is reachable without a
+  // The keyboard's way to both dialogs (the menu bar is reachable without a
   // pointer), and a door that does not depend on the status bar.
-  for (const itemId of [CODE_IN_FILE_PANEL_ID, PERMISSIONS_PANEL_ID]) {
+  for (const itemId of [CODE_IN_FILE_DIALOG_ID, PERMISSIONS_DIALOG_ID]) {
     cleanupFunctions.push(() => context.ui.menus.unregisterItem("developer", itemId));
   }
   context.ui.menus.registerItem("developer", {
-    id: CODE_IN_FILE_PANEL_ID,
-    label: "Code in This File",
+    id: CODE_IN_FILE_DIALOG_ID,
+    label: "Code in This File...",
     icon: IconScript,
-    action: () => openPanel(CODE_IN_FILE_PANEL_ID),
+    action: () => context.ui.dialogs.show(CODE_IN_FILE_DIALOG_ID),
   });
   context.ui.menus.registerItem("developer", {
-    id: PERMISSIONS_PANEL_ID,
-    label: "Script Permissions",
+    id: PERMISSIONS_DIALOG_ID,
+    label: "Script Permissions...",
     icon: ShieldIcon,
-    action: () => openPanel(PERMISSIONS_PANEL_ID),
+    action: () => context.ui.dialogs.show(PERMISSIONS_DIALOG_ID),
   });
 
   // ---- Cross-window event bridge: Object Script Editor separate window ----

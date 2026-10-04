@@ -64,6 +64,9 @@ async function newFile(page: Page): Promise<void> {
 const indicator = (page: Page): Locator => page.locator('[data-testid="code-status"]');
 const popoverMenu = (page: Page): Locator => page.locator('[role="menu"][aria-label="Code and scripts"]');
 const sidePanel = (page: Page): Locator => page.locator("[data-side-panel]");
+/** The two DIALOG windows (owner decision 2026-10-04: dialogs like Insert Chart, not side panels). */
+const codeDialog = (page: Page): Locator => page.getByTestId("code-in-this-file-dialog");
+const permsDialog = (page: Page): Locator => page.getByTestId("script-permissions-dialog");
 
 /** The indicator's state, polled until it reads `level` (reads land within the debounce). */
 async function expectLevel(page: Page, level: string, label: string, timeout = 8_000): Promise<void> {
@@ -78,10 +81,29 @@ async function expectCount(page: Page, count: string, label: string, timeout = 8
     .toBe(count);
 }
 
-async function closeSidePanel(page: Page): Promise<void> {
-  const close = sidePanel(page).getByRole("button", { name: "Close panel" });
-  if (await close.isVisible().catch(() => false)) await close.click();
-  await expect(sidePanel(page)).toHaveCount(0);
+/**
+ * A box once it has STOPPED moving. The card enters with a short slide
+ * (translateY 4px -> 0, Popover.tsx cardEnterUp), so a box read during it is
+ * a few pixels off where the card settles -- which read as "the bottom edge
+ * moved" in a live run (3.07px) when nothing but the entrance had.
+ */
+async function settledBox(locator: Locator): Promise<{ x: number; y: number; width: number; height: number }> {
+  let last = await locator.boundingBox();
+  for (let i = 0; i < 20; i++) {
+    await locator.page().waitForTimeout(80);
+    const next = await locator.boundingBox();
+    if (last && next && Math.abs(next.y - last.y) < 0.01 && Math.abs(next.height - last.height) < 0.01) return next;
+    last = next;
+  }
+  throw new Error("the box never settled");
+}
+
+async function closeDialogs(page: Page): Promise<void> {
+  for (const dialog of [codeDialog(page), permsDialog(page)]) {
+    const close = dialog.getByRole("button", { name: "Close" });
+    if (await close.isVisible().catch(() => false)) await close.click();
+    await expect(dialog).toHaveCount(0);
+  }
 }
 
 async function closePopover(page: Page): Promise<void> {
@@ -106,7 +128,7 @@ test.describe("the status bar's code-and-scripts indicator", () => {
     const page = grid.page;
     await callModule(page, "/src/api/grid.ts", "clearStatusBarText").catch(() => undefined);
     await closePopover(page).catch(() => undefined);
-    await closeSidePanel(page).catch(() => undefined);
+    await closeDialogs(page).catch(() => undefined);
     await removeTestCode(page);
   });
 
@@ -138,7 +160,7 @@ test.describe("the status bar's code-and-scripts indicator", () => {
     expect(item!.y + item!.height).toBeLessThanOrEqual(bar!.y + bar!.height);
   });
 
-  test("C2: it opens UPWARD inside the window onto its facts, and each item opens its panel", async ({ grid }) => {
+  test("C2: it opens UPWARD inside the window onto its facts, and each item opens its DIALOG (never a side panel)", async ({ grid }) => {
     const page = grid.page;
     await newFile(page);
     await expectLevel(page, "none", "a new file has no code");
@@ -153,13 +175,46 @@ test.describe("the status bar's code-and-scripts indicator", () => {
 
     await page.getByTestId("code-status-open-code").click();
     await expect(popoverMenu(page)).toHaveCount(0);
-    await expect(sidePanel(page)).toContainText("Code in This File");
-    await expect(sidePanel(page)).toContainText("This workbook contains no code.");
+    await expect(codeDialog(page)).toBeVisible();
+    await expect(codeDialog(page)).toHaveAttribute("role", "dialog");
+    await expect(codeDialog(page)).toContainText("Code in This File");
+    await expect(codeDialog(page)).toContainText("This workbook contains no code.");
+    // A dialog, not the old fold-out: no side panel opened.
+    await expect(sidePanel(page)).toHaveCount(0);
+    // A window inside the window, that the user can MOVE by its title bar.
+    const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+    const at = (await codeDialog(page).boundingBox())!;
+    expect(at.x).toBeGreaterThanOrEqual(0);
+    expect(at.y).toBeGreaterThanOrEqual(0);
+    expect(at.x + at.width).toBeLessThanOrEqual(viewport.width);
+    expect(at.y + at.height).toBeLessThanOrEqual(viewport.height);
+    const title = codeDialog(page).getByText("Code in This File", { exact: true }).first();
+    const t = (await title.boundingBox())!;
+    await page.mouse.move(t.x + t.width / 2, t.y + t.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(t.x + t.width / 2 - 120, t.y + t.height / 2 + 60, { steps: 8 });
+    await page.mouse.up();
+    const moved = (await codeDialog(page).boundingBox())!;
+    expect(Math.round(moved.x - at.x), "dragged left by its title bar").toBeLessThan(-100);
+    expect(Math.round(moved.y - at.y), "dragged down by its title bar").toBeGreaterThan(40);
+    // Escape closes it (DialogContainer), as it does Insert Chart.
+    await page.keyboard.press("Escape");
+    await expect(codeDialog(page)).toHaveCount(0);
 
     await indicator(page).click();
     await page.getByTestId("code-status-open-permissions").click();
-    await expect(sidePanel(page)).toContainText("Script Permissions");
-    await expect(sidePanel(page)).toContainText("What scripts can do");
+    await expect(permsDialog(page)).toBeVisible();
+    await expect(permsDialog(page)).toContainText("Script Permissions");
+    await expect(permsDialog(page)).toContainText("No scripts are currently mounted.");
+    await expect(sidePanel(page)).toHaveCount(0);
+    // One view at a time: the tabs switch it.
+    const policyTab = page.getByTestId("script-permissions-tab-policy");
+    await policyTab.click();
+    await expect(policyTab).toHaveAttribute("aria-selected", "true");
+    await expect(permsDialog(page)).not.toContainText("No scripts are currently mounted.");
+    // Its own Close button closes it.
+    await permsDialog(page).getByRole("button", { name: "Close" }).click();
+    await expect(permsDialog(page)).toHaveCount(0);
   });
 
   test("C3: a macro written to the file shows up WITHOUT opening anything; deleting it puts the quiet shield back", async ({ grid }) => {
@@ -211,9 +266,9 @@ test.describe("the status bar's code-and-scripts indicator", () => {
     await indicator(page).click();
     await expect(page.locator('[data-code-status-fact="beyond-grid"]')).toContainText("1 can reach beyond the grid");
     await page.getByTestId("code-status-open-code").click();
-    await expect(sidePanel(page)).toContainText("1 code units");
-    // The panel paints the SAME words from the same list.
-    await expect(sidePanel(page)).toContainText("1 can reach beyond the grid");
+    await expect(codeDialog(page)).toContainText("1 code units");
+    // The dialog paints the SAME words from the same list.
+    await expect(codeDialog(page)).toContainText("1 can reach beyond the grid");
   });
 
   test("C5: a script's 512-character status message truncates on one line and never pushes the indicator off the bar", async ({ grid }) => {
@@ -276,7 +331,8 @@ test.describe("the status bar's code-and-scripts indicator", () => {
     await page.keyboard.press("ArrowDown");
     await expect(page.getByTestId("code-status-open-permissions")).toBeFocused();
     await page.keyboard.press("Enter");
-    await expect(sidePanel(page)).toContainText("Script Permissions");
+    await expect(permsDialog(page)).toBeVisible();
+    await expect(permsDialog(page)).toContainText("Script Permissions");
   });
 
   test("C9: facts arriving while the popover is OPEN grow it UPWARD -- its two doors never leave the window", async ({ grid }) => {
@@ -287,7 +343,7 @@ test.describe("the status bar's code-and-scripts indicator", () => {
     await indicator(page).click();
     await expect(popoverMenu(page)).toBeVisible();
     const card = popoverMenu(page).locator("xpath=..");
-    const before = await card.boundingBox();
+    const before = await settledBox(card);
 
     // Code lands while it is open: a macro and a script that reaches beyond
     // the grid -- the card gains rows.
@@ -307,7 +363,7 @@ test.describe("the status bar's code-and-scripts indicator", () => {
     await expect(page.locator('[data-code-status-fact="beyond-grid"]')).toBeVisible({ timeout: 8_000 });
     await expect(popoverMenu(page)).toBeVisible();
 
-    const after = await card.boundingBox();
+    const after = await settledBox(card);
     const item = await indicator(page).boundingBox();
     const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
     expect(after!.height, "the card grew").toBeGreaterThan(before!.height);
@@ -321,24 +377,24 @@ test.describe("the status bar's code-and-scripts indicator", () => {
       expect(box!.y).toBeGreaterThanOrEqual(0);
     }
     await page.getByTestId("code-status-open-code").click();
-    await expect(sidePanel(page)).toContainText("Code in This File");
+    await expect(codeDialog(page)).toContainText("Code in This File");
   });
 
-  test("C8: Developer carries both panels too (a door that does not depend on the status bar)", async ({ grid }) => {
+  test("C8: Developer carries both dialogs too (a door that does not depend on the status bar)", async ({ grid }) => {
     const page = grid.page;
     await newFile(page);
 
-    for (const [label, proof] of [
-      ["Code in This File", "This workbook contains no code."],
-      ["Script Permissions", "What scripts can do"],
+    for (const [label, proof, dialog] of [
+      ["Code in This File", "This workbook contains no code.", codeDialog(page)],
+      ["Script Permissions", "No scripts are currently mounted.", permsDialog(page)],
     ] as const) {
       await grid.openMenu("Developer");
       const item = page.locator("button").filter({ hasText: new RegExp(`^${label}`) }).first();
       await item.waitFor({ state: "visible", timeout: 5_000 });
       await item.click();
-      await expect(sidePanel(page)).toContainText(label);
-      await expect(sidePanel(page)).toContainText(proof);
-      await closeSidePanel(page);
+      await expect(dialog).toContainText(label);
+      await expect(dialog).toContainText(proof);
+      await closeDialogs(page);
     }
   });
 });

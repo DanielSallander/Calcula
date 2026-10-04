@@ -298,6 +298,26 @@ describe("the indicator opens onto its facts and the two panels", () => {
     expect(opened).toEqual(["code", "permissions"]);
   });
 
+  it("with refusals counted, Script Permissions opens on its Activity tab -- where they are listed", () => {
+    const calls: Array<[CodeStatusDoor, Record<string, unknown> | undefined]> = [];
+    const Item = createCodeStatusItem(fakeSource(ready({ refusals: 2 })) as unknown as CodeStatusSource, (door, data) =>
+      calls.push([door, data]),
+    );
+    act(() => root.render(<Item />));
+    act(() => trigger().click());
+    act(() => document.querySelector<HTMLButtonElement>("[data-testid='code-status-open-permissions']")!.click());
+    expect(calls).toEqual([["permissions", { tab: "activity" }]]);
+    // Without refusals it opens where it always does.
+    calls.length = 0;
+    const Quiet = createCodeStatusItem(fakeSource(ready()) as unknown as CodeStatusSource, (door, data) =>
+      calls.push([door, data]),
+    );
+    act(() => root.render(<Quiet />));
+    act(() => trigger().click());
+    act(() => document.querySelector<HTMLButtonElement>("[data-testid='code-status-open-permissions']")!.click());
+    expect(calls).toEqual([["permissions", undefined]]);
+  });
+
   it("focus lands on the first item, and Escape returns it to the indicator", () => {
     openWithClick(fakeSource(ready()));
     const first = document.querySelector<HTMLButtonElement>("[data-testid='code-status-open-code']")!;

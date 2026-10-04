@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 284 | Open: 5 | Triaged: 0 | Fixed: 279 | Other: 0
+Total: 284 | Open: 4 | Triaged: 0 | Fixed: 280 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -3134,7 +3134,7 @@ A SCRIPT'S MERGE OF ONE CELL IS REPORTED AS AN OVERLAP. executeMergeCells (app/s
 
 **Repro:** In an object script, await api.mergeCells('A1') (or the same cell twice): the error blames an overlap that does not exist.
 
-## BUG-0284 `[open]`
+## BUG-0284 `[fixed]`
 
 **Found:** 2026-10-03 (manual)
 **Oracle:** transparency-surface-control

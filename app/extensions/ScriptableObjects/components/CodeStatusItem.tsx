@@ -2,11 +2,11 @@
 // PURPOSE: The status bar's code-and-scripts indicator: one shield beside the
 //          selection readout that says, without being opened, whether this file
 //          holds code, how much, and whether anything is worth a look -- and
-//          opens onto a short account of it with the two panels behind it.
+//          opens onto a short account of it with the two dialogs behind it.
 // CONTEXT: Replaces the two always-identical activity-bar icons ("Code in This
-//          File" and "Script Permissions"); both panels are still registered
-//          (hidden from the rail) and open from here, from Developer, and from
-//          View > Sidebar. Every word it shows comes from deriveCodeStatus
+//          File" and "Script Permissions"); both are now DIALOG WINDOWS
+//          (TransparencyDialogs.tsx, owner decision 2026-10-04) and open from
+//          here and from Developer. Every word it shows comes from deriveCodeStatus
 //          (../lib/codeStatus.ts); this file only draws it.
 //
 //          THE STATES, at a glance:
@@ -228,11 +228,12 @@ const swallowContextMenu = (e: React.MouseEvent): void => {
 // Component
 // ============================================================================
 
-/** Which of the two panels behind the indicator to open. */
+/** Which of the two dialogs behind the indicator to open. */
 export type CodeStatusDoor = "code" | "permissions";
 
-/** Opens one of the two panels behind the indicator. */
-export type OpenCodePanel = (door: CodeStatusDoor) => void;
+/** Opens one of the two dialogs; `data` is handed to it (Script Permissions
+ *  reads `{ tab }`). */
+export type OpenCodeDialog = (door: CodeStatusDoor, data?: Record<string, unknown>) => void;
 
 function Fact({ fact }: { fact: CodeStatusFact }): React.ReactElement {
   return (
@@ -253,12 +254,12 @@ function Fact({ fact }: { fact: CodeStatusFact }): React.ReactElement {
 
 /**
  * The indicator, bound to the source that feeds it and to the function that
- * opens a panel. A factory, so the extension registers one component for its
+ * opens a dialog. A factory, so the extension registers one component for its
  * own source and a test can hand it a source of its own.
  */
 export function createCodeStatusItem(
   source: CodeStatusSource,
-  openPanel: OpenCodePanel,
+  openDialog: OpenCodeDialog,
 ): React.ComponentType {
   function CodeStatusItem(): React.ReactElement {
     const snapshot = useSyncExternalStore(source.subscribe, source.getSnapshot);
@@ -328,7 +329,7 @@ export function createCodeStatusItem(
             testId="code-status-open-code"
             icon={IconScript}
             hint={view.count !== null && view.count > 0 ? String(view.count) : undefined}
-            onSelect={() => openPanel("code")}
+            onSelect={() => openDialog("code")}
           >
             Code in This File
           </MenuItem>
@@ -338,7 +339,8 @@ export function createCodeStatusItem(
             // it; a 16px shield sat visibly smaller beside it.
             icon={shieldGlyph(20)}
             hint={refused > 0 ? `${refused} refused` : undefined}
-            onSelect={() => openPanel("permissions")}
+            // With refusals counted, open where they are listed.
+            onSelect={() => openDialog("permissions", refused > 0 ? { tab: "activity" } : undefined)}
           >
             Script Permissions
           </MenuItem>

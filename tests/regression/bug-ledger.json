@@ -8745,7 +8745,7 @@
     },
     {
       "id": "BUG-0284",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-03",
       "source": {
         "kind": "manual",
@@ -8762,7 +8762,8 @@
       "repro": {
         "description": "Attach an object script to panel instance scriptable-objects.codeInThisFile whose onActivate calls panel.close(); open Code in This File from the status-bar indicator: it closes immediately."
       },
-      "notes": "Open. Fix direction: refuse (PermissionDenied, audited) panel.open/close/setBadge/moveTo and the onActivate/onDeactivate forwarders when instanceId names a HOST transparency panel (a panel flagged host-owned), with a test that a script bound to scriptable-objects.codeInThisFile cannot close it."
+      "notes": "Overtaken by the owner decision of 2026-10-04: Code in This File and Script Permissions are DIALOG windows now (ScriptableObjects/components/TransparencyDialogs.tsx), not panels. panel.close / panel.open / panel.setBadge reach sidebar panels only (panelRegistry), so a panel script bound to scriptable-objects.codeInThisFile or .permissions addresses nothing. The general rule (a panel script may attach to any panel id) is unchanged and has no other host-owned transparency panel to reach.",
+      "fixedAt": "2026-10-04"
     }
   ]
 }
